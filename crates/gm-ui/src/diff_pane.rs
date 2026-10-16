@@ -26,7 +26,7 @@ const CONTEXT: &str = "DiffPane";
 /// Height of every list row; `uniform_list` needs equal heights.
 const ROW_HEIGHT: f32 = 22.;
 
-const PAIR_WARNING: &str = "Par −/+ staged pela metade: o index ficaria sem a linha antiga e sem a nova, e pode não compilar.";
+const PAIR_WARNING: &str = "Half-staged −/+ pair: the index would lose both the old and the new line, and may not compile.";
 
 actions!(
     diff_pane,
@@ -413,7 +413,7 @@ impl DiffPane {
             .child(
                 div()
                     .text_color(theme::muted())
-                    .child(format!("{selected} de {total} linhas")),
+                    .child(format!("{selected} of {total} lines")),
             )
             .child(
                 div()

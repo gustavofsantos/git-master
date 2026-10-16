@@ -12,7 +12,7 @@ Slice 0 skeleton exists (`crates/`: `gm-schema`, `gm-core`, `gm-ui`, `gm-mcp`, `
 
 ## Rules
 
-- Design docs are in Portuguese; code, comments and commit messages in English.
+- Design docs are in Portuguese; code, comments, commit messages and all UI strings in English (the canvas mockups use Portuguese labels: translate them).
 - A decision marked **Proposto** in `01` is not a commitment: confirm with the author before building something that depends on it, and record the outcome in `01`.
 - Principles in `00` bind the code: determinism, human approves and agent proposes, Git is the source of truth, the UI never blocks, nothing is written into the repository working tree.
 - Conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `build:`, `refactor:`, `ci:`, `chore:`).
