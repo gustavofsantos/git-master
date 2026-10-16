@@ -4,7 +4,11 @@
 
 mod changes;
 mod composer;
+mod editor;
 mod model;
+mod text_area;
+mod text_area_element;
+mod text_area_math;
 mod theme;
 mod view;
 

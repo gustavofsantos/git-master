@@ -34,8 +34,8 @@
 | D20 | MCP em tiers Read, Propose, Aprovação, Apply; apply só aceita `plan_id` | Proposto | 04 |
 | D21 | IDs de hunk determinísticos (hash do conteúdo) | Proposto | 04 |
 | D22 | Resolvedor de conflitos em três painéis, lados rotulados por papel (não ours/theirs) | Proposto | 05 |
-| D23 | Working Copy: "staged" e "lido" como eixos ortogonais; lista única com checkbox tri-state | Proposto | 05 |
-| D24 | Stage por linha sobre modelo de diff exato, escrevendo o blob do index direto | Proposto | 05 |
+| D23 | Working Copy: "staged" e "lido" como eixos ortogonais; lista única com checkbox tri-state | Decidido (2026-10-16) | 05 |
+| D24 | Stage por linha sobre modelo de diff exato, escrevendo o blob do index direto | Decidido (2026-10-16) | 05 |
 | D25 | Histórico: defasagem de stack como aresta tracejada; dono do commit pela metadata do stack | Proposto | 05 |
 | D26 | Backend Git híbrido: libgit2 para objetos/index/merge/rebase em memória; subprocess `git` para status em escala | Proposto | 06 |
 | D27 | Começar com quatro crates (schema, core, ui, mcp) e extrair o resto sob demanda | Proposto | 06 |
