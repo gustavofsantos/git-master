@@ -1,1 +1,1 @@
-//! Parses unified diff output into gm-schema's FileDiff.
+//! Parses unified diff output into `FileDiff`.
