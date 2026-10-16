@@ -1,0 +1,18 @@
+[package]
+name = "gitmaster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "gitmaster"
+path = "src/main.rs"
+
+[dependencies]
+gm-core.workspace = true
+gm-schema.workspace = true
+gm-ui.workspace = true

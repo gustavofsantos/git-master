@@ -1,0 +1,19 @@
+[package]
+name = "gm-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gm-schema.workspace = true
+gm-core.workspace = true
+gpui = "0.2"
+
+# gpui compiles its Metal shaders at build time with `xcrun metal`, which only
+# a full Xcode has. Compiled at startup instead, the Command Line Tools suffice.
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { version = "0.2", features = ["runtime_shaders"] }
