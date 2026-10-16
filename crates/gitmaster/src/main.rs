@@ -5,6 +5,7 @@ mod shell_env;
 
 use std::time::Duration;
 
+use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
 
 fn main() {
@@ -29,7 +30,11 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let git = SubprocessGit::default();
+    let command_log = CommandLog::default();
+    let git = SubprocessGit {
+        log: Some(command_log.clone()),
+        ..SubprocessGit::default()
+    };
     if let Ok(shell) = std::env::var("SHELL") {
         // The window does not wait for the shell; a failure only means git
         // keeps the PATH this process was started with.
@@ -41,7 +46,7 @@ fn main() {
         });
     }
     let engine = gm_core::spawn(Box::new(git));
-    gm_ui::run(engine, path.to_string_lossy().into_owned());
+    gm_ui::run(engine, command_log, path.to_string_lossy().into_owned());
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@
 
 mod assets;
 mod changes;
+mod command_panel;
 mod composer;
 mod diff_pane;
 mod diff_rows;
@@ -22,6 +23,7 @@ mod view;
 mod window_chrome;
 
 use gm_core::EngineHandle;
+use gm_core::command_log::CommandLog;
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBounds, WindowDecorations, WindowOptions, actions, px, size,
@@ -45,7 +47,7 @@ actions!(
 );
 
 /// Opens the window on the repository at `path` and runs until it closes.
-pub fn run(engine: EngineHandle, path: String) {
+pub fn run(engine: EngineHandle, command_log: CommandLog, path: String) {
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
@@ -82,7 +84,7 @@ pub fn run(engine: EngineHandle, path: String) {
                 ..WindowOptions::default()
             };
             let opened = cx.open_window(options, move |window, cx| {
-                cx.new(|cx| StatusView::new(engine, path, window, cx))
+                cx.new(|cx| StatusView::new(engine, command_log, path, window, cx))
             });
             if let Err(error) = opened {
                 eprintln!("gitmaster: {error}");

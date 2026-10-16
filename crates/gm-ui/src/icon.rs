@@ -33,6 +33,7 @@ pub enum Icon {
     Maximize,
     Restore,
     Close,
+    Terminal,
 }
 
 impl Icon {
@@ -60,6 +61,7 @@ impl Icon {
         Self::Maximize,
         Self::Restore,
         Self::Close,
+        Self::Terminal,
     ];
 
     fn name(self) -> &'static str {
@@ -84,6 +86,7 @@ impl Icon {
             Self::Minimize => "minus",
             Self::Restore => "copy",
             Self::Close => "x",
+            Self::Terminal => "terminal",
         }
     }
 

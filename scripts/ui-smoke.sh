@@ -18,7 +18,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -35,6 +35,7 @@ DIFF_CHECK_X=601                            # gutter checkbox in the diff pane
 DIFF_LINE_A_Y=224                           # first pure-insertion row in total.rs
 DIFF_LINE_B_Y=312                           # second pure-insertion row in total.rs
 COMPOSER_X=300; COMPOSER_Y=255              # commit message box
+LOG_BUTTON_X=1300; LOG_BUTTON_Y=837         # "Git log" button, right end of the status bar
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -246,6 +247,22 @@ scenario_d() {
   [ "$differing" -gt 0 ] || fail "screenshot did not change after refresh"
 }
 
+# --- 3e. Open the command log panel after a stage ------------------------------
+scenario_e() {
+  local theme="$1" differing
+  xdotool mousemove "$FILE_CHECK_X" "$ROW_MOD_Y" click 1; sleep 1.5
+  grep -qxF -- 'src/ledger/mod.rs' <<<"$(staged_names)" || fail "mod.rs not staged"
+  shoot "$RUN_DIR/closed.png"
+
+  xdotool mousemove "$LOG_BUTTON_X" "$LOG_BUTTON_Y" click 1; sleep 1
+  shoot "$SMOKE_OUT/e-command-log-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/closed.png" "$SMOKE_OUT/e-command-log-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  # The panel covers a large area; a sliver of change would be only the button tint.
+  [ "$differing" -gt 20000 ] || fail "the log panel did not open (only $differing pixels changed)"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -260,6 +277,7 @@ run_scenario() {
     b-stage-file)  scenario_b "$theme" ;;
     c-commit)      scenario_c "$theme" ;;
     d-refresh)     scenario_d "$theme" ;;
+    e-command-log) scenario_e "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app

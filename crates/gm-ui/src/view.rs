@@ -5,10 +5,11 @@
 use std::time::Duration;
 
 use gm_core::EngineHandle;
+use gm_core::command_log::CommandLog;
 use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff, StageTarget};
 use gpui::{
     Context, Div, Entity, FocusHandle, Focusable, FontWeight, MouseButton, MouseDownEvent, Render,
-    Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
+    ScrollHandle, Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
 };
 
 use crate::changes::ToggleAction;
@@ -31,6 +32,10 @@ const NOTICE_TIME: Duration = Duration::from_secs(4);
 
 pub struct StatusView {
     pub(crate) engine: EngineHandle,
+    /// Every git command that changed the repository, for the log panel.
+    pub(crate) command_log: CommandLog,
+    pub(crate) log_open: bool,
+    pub(crate) log_scroll: ScrollHandle,
     pub(crate) model: Model,
     pub(crate) list_focus: FocusHandle,
     pub(crate) scroll: UniformListScrollHandle,
@@ -50,6 +55,7 @@ impl StatusView {
     /// no event is missed.
     pub fn new(
         engine: EngineHandle,
+        command_log: CommandLog,
         path: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -66,6 +72,7 @@ impl StatusView {
             }
         })
         .detach();
+        Self::follow_command_log(&command_log, cx);
         engine.dispatch(Actor::Human, CommandKind::OpenRepo { path });
         theme::follow(window.appearance());
         let list_focus = cx.focus_handle();
@@ -99,6 +106,9 @@ impl StatusView {
         model.begin_refresh();
         Self {
             engine,
+            command_log,
+            log_open: false,
+            log_scroll: ScrollHandle::new(),
             model,
             list_focus,
             scroll: UniformListScrollHandle::new(),
@@ -109,6 +119,20 @@ impl StatusView {
             commit_height: resize::COMMIT_DEFAULT,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Repaints when the adapter records a command, and keeps an open panel
+    /// scrolled to the newest one.
+    fn follow_command_log(log: &CommandLog, cx: &mut Context<Self>) {
+        let changes = log.changes();
+        cx.spawn(async move |this, cx| {
+            while changes.recv().await.is_ok() {
+                if this.update(cx, Self::on_command_logged).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn on_event(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -405,7 +429,7 @@ impl StatusView {
             .child(refresh)
     }
 
-    fn status_bar(&self) -> Div {
+    fn status_bar(&self, cx: &Context<Self>) -> Div {
         let muted = theme::muted();
         let root = self
             .model
@@ -457,6 +481,7 @@ impl StatusView {
                     .children(notice_icon.map(|icon| icon::view(icon, icon::SMALL, colour)))
                     .child(message),
             )
+            .child(self.command_log_button(cx))
     }
 }
 
@@ -503,7 +528,8 @@ impl Render for StatusView {
                             .child(self.diff_pane.clone()),
                     ),
             )
-            .child(self.status_bar())
+            .child(self.status_bar(cx))
+            .children(self.log_open.then(|| self.command_log_panel(cx)))
             .children(window_chrome::resize_layer(window))
     }
 }

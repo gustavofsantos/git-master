@@ -36,7 +36,7 @@ Revisão de 2026-10-16: com a Working Copy pronta, faltam três coisas sem as qu
 
 Ordem: log de comandos, depois trocar de branch, depois trocar de projeto. O log vem primeiro porque as duas outras operações passam a aparecer nele, o que ajuda a validá-las.
 
-1. **Log de comandos Git** (modelo: `rvw-gui/src/git_log.rs`).
+1. **Log de comandos Git** (feito; modelo: `rvw-gui/src/git_log.rs`).
    - Só operações com efeito colateral entram (D28): stage, unstage, commit, checkout. Status, diff e leituras em massa não aparecem.
    - Cada processo `git` dessas operações vira uma entrada estruturada: programa, diretório, argumentos, código de saída, duração, stdout, stderr. Buffer em memória, últimas 1000 entradas, na UI nunca no repositório.
    - Ponto único de registro no `SubprocessGit`: `run` ganha uma variante que registra, usada só pelas escritas. A saída do hook de commit entra junto, pois é o stderr do `git commit`.

@@ -56,6 +56,8 @@ const ICONS: &[(&str, &[u8])] = icons![
     "copy-fill",
     "x",
     "x-fill",
+    "terminal",
+    "terminal-fill",
 ];
 
 pub struct Assets;
