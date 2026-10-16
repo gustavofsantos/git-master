@@ -54,7 +54,7 @@ fn assert_no_lock(dir: &Path) {
 }
 
 /// A repository with one commit holding `files`. Identity is set locally so
-/// libgit2 finds it when committing.
+/// `git commit` finds it.
 fn repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
@@ -488,6 +488,57 @@ fn refuses_to_commit_an_empty_index_on_an_unborn_branch() {
         .commit(dir.path(), "nothing")
         .unwrap_err();
     assert_eq!(error.0, "nothing staged to commit");
+}
+
+#[cfg(unix)]
+fn install_hook(dir: &Path, name: &str, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(".git/hooks").join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failing_pre_commit_hook_blocks_the_commit_and_its_report_is_the_error() {
+    let dir = repo_with(&[("a.txt", "one\n")]);
+    let head = git(dir.path(), &["rev-parse", "HEAD"]);
+    install_hook(
+        dir.path(),
+        "pre-commit",
+        "#!/bin/sh\necho 'lint failed: a.txt:1' >&2\nexit 1\n",
+    );
+    write(dir.path(), "a.txt", "two\n");
+    let port = SubprocessGit::default();
+    port.stage(dir.path(), &file_target("a.txt")).unwrap();
+
+    let error = port.commit(dir.path(), "msg").unwrap_err();
+
+    assert!(error.0.contains("lint failed: a.txt:1"), "{error}");
+    assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head);
+    assert_no_lock(dir.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_commit_msg_hook_can_rewrite_the_message() {
+    let dir = repo_with(&[("a.txt", "one\n")]);
+    install_hook(
+        dir.path(),
+        "commit-msg",
+        "#!/bin/sh\nprintf 'hooked: ' | cat - \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\n",
+    );
+    write(dir.path(), "a.txt", "two\n");
+    let port = SubprocessGit::default();
+    port.stage(dir.path(), &file_target("a.txt")).unwrap();
+
+    port.commit(dir.path(), "subject").unwrap();
+
+    assert_eq!(
+        git(dir.path(), &["log", "-1", "--format=%s"]).trim_end(),
+        "hooked: subject"
+    );
 }
 
 #[test]

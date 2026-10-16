@@ -81,6 +81,23 @@ impl SubprocessGit {
         }
     }
 
+    /// Whether the index differs from HEAD (from the empty tree on an unborn branch).
+    fn has_staged(&self, root: &Path) -> Result<bool, GitError> {
+        let mut command = self.git(root);
+        command.args(["diff", "--cached", "--quiet"]);
+        // `--quiet` exits with 1 when there is a difference.
+        let output = command
+            .output()
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        match output.status.code() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(GitError(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            )),
+        }
+    }
+
     /// Writes `content` as a blob and returns its id.
     fn write_blob(&self, root: &Path, content: &[u8]) -> Result<String, GitError> {
         let mut command = self.git(root);
@@ -278,36 +295,18 @@ impl GitPort for SubprocessGit {
         if message.trim().is_empty() {
             return Err(GitError("commit message is empty".into()));
         }
-        let signature = repo
-            .signature()
-            .map_err(|_| GitError("set user.name and user.email before committing".into()))?;
-        let mut index = repo.index().map_err(|e| git_err(&e))?;
-        let tree_id = index.write_tree_to(&repo).map_err(|e| git_err(&e))?;
-        let tree = repo.find_tree(tree_id).map_err(|e| git_err(&e))?;
-        let parent = match repo.head() {
-            Ok(head) => Some(head.peel_to_commit().map_err(|e| git_err(&e))?),
-            Err(e) if e.code() == ErrorCode::UnbornBranch => None,
-            Err(e) => return Err(git_err(&e)),
-        };
-        let parent_tree = match &parent {
-            Some(commit) => commit.tree_id(),
-            None => repo
-                .treebuilder(None)
-                .and_then(|builder| builder.write())
-                .map_err(|e| git_err(&e))?,
-        };
-        if tree_id == parent_tree {
+        if !self.has_staged(root)? {
             return Err(GitError("nothing staged to commit".into()));
         }
-        let mut text = message.to_owned();
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
-        let id = repo
-            .commit(Some("HEAD"), &signature, &signature, &text, &tree, &parents)
-            .map_err(|e| git_err(&e))?;
-        Ok(id.to_string())
+        // Native hooks run here (D18): the message goes in on stdin, so nothing
+        // is written to the working tree, and a failing hook's report is the error.
+        let mut command = self.git(root);
+        command.args(["commit", "-F", "-"]);
+        Self::run_with_input(command, message.as_bytes())?;
+        let mut command = self.git(root);
+        command.args(["rev-parse", "HEAD"]);
+        let out = Self::run(command)?;
+        Ok(String::from_utf8_lossy(&out).trim().to_owned())
     }
 }
 
