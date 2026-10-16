@@ -452,7 +452,7 @@ impl DiffPane {
         let (tint, text_colour, sign) = match line.kind {
             LineKind::Added => (theme::added_bg(), theme::added_fg(), "+"),
             LineKind::Removed => (theme::removed_bg(), theme::removed_fg(), "−"),
-            LineKind::Context => (theme::ground(), theme::text(), " "),
+            LineKind::Context => (theme::editor(), theme::text(), " "),
         };
         let changed = line.kind != LineKind::Context;
         let selected = self.selection.contains((side, hunk_index, line_index));
@@ -524,7 +524,7 @@ impl DiffPane {
                 .flex()
                 .items_center()
                 .px_3()
-                .bg(theme::ground())
+                .bg(theme::editor())
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::muted())
                 .child(title)
@@ -615,7 +615,7 @@ impl Render for DiffPane {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme::ground())
+            .bg(theme::editor())
             .text_color(theme::text())
             .font_family(theme::ui_font())
             .text_sm()

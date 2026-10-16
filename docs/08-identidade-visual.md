@@ -43,6 +43,10 @@ Regras do tema: tinta primeiro (código é quase todo `fg`), oito acentos com a 
 - Tintas de fundo: acento misturado sobre `bg` (9 a 13%), texto sobre a tinta = acento escurecido 20 a 45% em direção a `fg_emph`.
 - Bolinhas da janela usam os acentos da variante escura.
 
+### Papéis em `crates/gm-ui/src/theme.rs`
+
+`ground` = `bg_hl` (fundo da janela e barra lateral); `editor` e `panel` = `bg` (diff, barras, cabeçalhos, painéis flutuantes); `hairline` = `border`; `muted`, `faint`, `placeholder` e `gutter` = `fg_comment` (`fg_faint` não passa 4,5:1 como texto, fica só para elementos sem texto); `caret` = assinatura. Tintas de fundo seguem a regra acima (9 a 13% do acento sobre `bg`); texto sobre tinta = acento misturado a `fg_emph` (30% no claro, 20% no escuro). Os testes de contraste de `theme.rs` (4,5:1 para texto, 3:1 para marcas) cobrem todos os pares.
+
 ### Ponto de atenção
 
 `#f54e00` é a cor do Cursor (editor). Como acento pequeno (nó, cursor de texto) é aceitável. Como fundo do ícone evoca a marca deles, por isso não é usada assim.
