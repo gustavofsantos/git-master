@@ -4,6 +4,7 @@
 
 mod changes;
 mod composer;
+mod diff_pane;
 mod editor;
 mod model;
 mod text_area;
