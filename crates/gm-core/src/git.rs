@@ -1,11 +1,12 @@
 //! `GitPort` over the `git` executable. Status uses porcelain v2 with `-z`:
 //! stable, machine-readable, and it honors fsmonitor and the untracked cache.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 
-use git2::{ErrorCode, IndexEntry, IndexTime, ObjectType, Oid, Repository};
+use git2::{ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchInfo, Change, DiffSide, FileDiff, Hunk, HunkId, RepoStatus, StageTarget, StatusEntry,
 };
@@ -46,12 +47,125 @@ impl SubprocessGit {
         let output = command
             .output()
             .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        Self::checked(output, ok_codes)
+    }
+
+    /// Runs `command` with `input` on its stdin.
+    fn run_with_input(mut command: Command, input: &[u8]) -> Result<Vec<u8>, GitError> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        let output = std::thread::scope(|scope| {
+            // A write error means git exited early; its stderr says why.
+            scope.spawn(move || {
+                let _ = stdin.write_all(input);
+            });
+            child.wait_with_output()
+        })
+        .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        Self::checked(output, &[0])
+    }
+
+    fn checked(output: Output, ok_codes: &[i32]) -> Result<Vec<u8>, GitError> {
         if output.status.code().is_some_and(|c| ok_codes.contains(&c)) {
             Ok(output.stdout)
         } else {
             Err(GitError(
                 String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             ))
+        }
+    }
+
+    /// Writes `content` as a blob and returns its id.
+    fn write_blob(&self, root: &Path, content: &[u8]) -> Result<String, GitError> {
+        let mut command = self.git(root);
+        command.args(["hash-object", "-w", "--stdin"]);
+        let out = Self::run_with_input(command, content)?;
+        Ok(String::from_utf8_lossy(&out).trim().to_owned())
+    }
+
+    /// Points the index entry of `path` at blob `id`. The entry carries no stat
+    /// data, so git re-reads the working tree file to decide whether it is
+    /// modified and a partial stage never looks clean.
+    fn put_entry(&self, root: &Path, mode: u32, id: &str, path: &str) -> Result<(), GitError> {
+        let mut command = self.git(root);
+        command
+            .args(["update-index", "--add", "--cacheinfo"])
+            .arg(format!("{mode:o}"))
+            .args([id, path]);
+        Self::run(command).map(drop)
+    }
+
+    fn remove_entry(&self, root: &Path, path: &str) -> Result<(), GitError> {
+        let mut command = self.git(root);
+        command.args(["update-index", "--force-remove", "--", path]);
+        Self::run(command).map(drop)
+    }
+
+    fn put_content(
+        &self,
+        root: &Path,
+        mode: u32,
+        path: &str,
+        content: &[u8],
+    ) -> Result<(), GitError> {
+        let id = self.write_blob(root, content)?;
+        self.put_entry(root, mode, &id, path)
+    }
+
+    /// Stores the staged content of a file. Empty content of a file that is gone
+    /// from the working tree means the deletion is staged, so the entry goes.
+    fn store_staged(
+        &self,
+        root: &Path,
+        index: &git2::Index,
+        path: &str,
+        mode: u32,
+        content: &[u8],
+    ) -> Result<(), GitError> {
+        if content.is_empty() && root.join(path).symlink_metadata().is_err() {
+            if index.get_path(Path::new(path), 0).is_some() {
+                self.remove_entry(root, path)?;
+            }
+            return Ok(());
+        }
+        self.put_content(root, mode, path, content)
+    }
+
+    /// Stages the whole working tree state of `path`, or its deletion.
+    fn stage_file(&self, root: &Path, index: &git2::Index, path: &str) -> Result<(), GitError> {
+        let p = Path::new(path);
+        if root.join(p).symlink_metadata().is_err() && index.get_path(p, 0).is_none() {
+            return Err(GitError(format!("pathspec did not match any file: {path}")));
+        }
+        let mut command = self.git(root);
+        command.args(["--literal-pathspecs", "add", "--", path]);
+        Self::run(command).map(drop)
+    }
+
+    /// Removes the `selected` changes of a staged `hunk` from the index entry.
+    /// A path that is not in HEAD and ends up empty leaves the index entirely.
+    fn unstage_hunk(
+        &self,
+        root: &Path,
+        repo: &Repository,
+        index: &git2::Index,
+        path: &str,
+        hunk: &Hunk,
+        selected: &[u32],
+    ) -> Result<(), GitError> {
+        let (mode, current) = index_content(repo, index, path)?
+            .ok_or_else(|| GitError(format!("{path} is not in the index")))?;
+        let next = stage_math::unstage_selection(&current, hunk, selected).map_err(GitError)?;
+        if next.is_empty() && head_entry(repo, path)?.is_none() {
+            self.remove_entry(root, path)
+        } else {
+            self.put_content(root, mode, path, &next)
         }
     }
 }
@@ -112,61 +226,50 @@ impl GitPort for SubprocessGit {
     fn stage(&self, root: &Path, target: &StageTarget) -> Result<(), GitError> {
         let repo = open(root)?;
         check_index_lock(&repo)?;
-        let mut index = repo.index().map_err(|e| git_err(&e))?;
+        let index = repo.index().map_err(|e| git_err(&e))?;
         match target {
-            StageTarget::File { path } => {
-                stage_file(root, &mut index, path)?;
-            }
+            StageTarget::File { path } => self.stage_file(root, &index, path),
             StageTarget::Hunk { path, hunk } => {
                 let diff = self.diff(root, path, DiffSide::Unstaged)?;
                 let hunk = find_hunk(&diff, hunk)?;
                 let (mode, base) = index_base(&repo, &index, root, path)?;
                 let next = stage_math::stage_whole_hunk(&base, hunk).map_err(GitError)?;
-                store_staged(root, &repo, &mut index, path, mode, &next)?;
+                self.store_staged(root, &index, path, mode, &next)
             }
             StageTarget::Lines { path, hunk, lines } => {
                 let diff = self.diff(root, path, DiffSide::Unstaged)?;
                 let hunk = find_hunk(&diff, hunk)?;
                 let (mode, base) = index_base(&repo, &index, root, path)?;
                 let next = stage_math::stage_selection(&base, hunk, lines).map_err(GitError)?;
-                store_staged(root, &repo, &mut index, path, mode, &next)?;
+                self.store_staged(root, &index, path, mode, &next)
             }
         }
-        index.write().map_err(|e| git_err(&e))
     }
 
     fn unstage(&self, root: &Path, target: &StageTarget) -> Result<(), GitError> {
         let repo = open(root)?;
         check_index_lock(&repo)?;
-        let mut index = repo.index().map_err(|e| git_err(&e))?;
+        let index = repo.index().map_err(|e| git_err(&e))?;
         match target {
             StageTarget::File { path } => match head_entry(&repo, path)? {
-                Some((mode, id, size)) => {
-                    index
-                        .add(&zeroed_entry(path, mode, id, size)?)
-                        .map_err(|e| git_err(&e))?;
+                Some((mode, id)) => self.put_entry(root, mode, &id.to_string(), path),
+                None if index.get_path(Path::new(path), 0).is_some() => {
+                    self.remove_entry(root, path)
                 }
-                None => {
-                    if index.get_path(Path::new(path), 0).is_some() {
-                        index
-                            .remove_path(Path::new(path))
-                            .map_err(|e| git_err(&e))?;
-                    }
-                }
+                None => Ok(()),
             },
             StageTarget::Hunk { path, hunk } => {
                 let diff = self.diff(root, path, DiffSide::Staged)?;
                 let hunk = find_hunk(&diff, hunk)?;
                 let selected = change_indices(hunk);
-                unstage_hunk(&repo, &mut index, path, hunk, &selected)?;
+                self.unstage_hunk(root, &repo, &index, path, hunk, &selected)
             }
             StageTarget::Lines { path, hunk, lines } => {
                 let diff = self.diff(root, path, DiffSide::Staged)?;
                 let hunk = find_hunk(&diff, hunk)?;
-                unstage_hunk(&repo, &mut index, path, hunk, lines)?;
+                self.unstage_hunk(root, &repo, &index, path, hunk, lines)
             }
         }
-        index.write().map_err(|e| git_err(&e))
     }
 
     fn commit(&self, root: &Path, message: &str) -> Result<String, GitError> {
@@ -251,26 +354,6 @@ fn change_indices(hunk: &Hunk) -> Vec<u32> {
         .collect()
 }
 
-/// An index entry with zeroed stat data. Git then re-reads the working tree
-/// file to decide whether it is modified, so a partial stage never looks clean.
-fn zeroed_entry(path: &str, mode: u32, id: Oid, size: usize) -> Result<IndexEntry, GitError> {
-    Ok(IndexEntry {
-        ctime: IndexTime::new(0, 0),
-        mtime: IndexTime::new(0, 0),
-        dev: 0,
-        ino: 0,
-        mode,
-        uid: 0,
-        gid: 0,
-        file_size: u32::try_from(size)
-            .map_err(|_| GitError(format!("file too large for the index: {path}")))?,
-        id,
-        flags: 0,
-        flags_extended: 0,
-        path: path.as_bytes().to_vec(),
-    })
-}
-
 /// Mode and content of the index entry for `path`. `None` when the path is not
 /// in the index. A conflicted path is an error.
 fn index_content(
@@ -303,75 +386,9 @@ fn index_base(
     }
 }
 
-/// Stores the staged content of a file. Empty content of a file that is gone
-/// from the working tree means the deletion is staged, so the entry goes.
-fn store_staged(
-    root: &Path,
-    repo: &Repository,
-    index: &mut git2::Index,
-    path: &str,
-    mode: u32,
-    content: &[u8],
-) -> Result<(), GitError> {
-    if content.is_empty() && root.join(path).symlink_metadata().is_err() {
-        if index.get_path(Path::new(path), 0).is_some() {
-            index
-                .remove_path(Path::new(path))
-                .map_err(|e| git_err(&e))?;
-        }
-        return Ok(());
-    }
-    write_index_content(repo, index, path, mode, content)
-}
-
-fn write_index_content(
-    repo: &Repository,
-    index: &mut git2::Index,
-    path: &str,
-    mode: u32,
-    content: &[u8],
-) -> Result<(), GitError> {
-    let id = repo.blob(content).map_err(|e| git_err(&e))?;
-    index
-        .add(&zeroed_entry(path, mode, id, content.len())?)
-        .map_err(|e| git_err(&e))
-}
-
-/// Stages the whole working tree state of `path`, or its deletion.
-fn stage_file(root: &Path, index: &mut git2::Index, path: &str) -> Result<(), GitError> {
-    let p = Path::new(path);
-    if root.join(p).symlink_metadata().is_ok() {
-        index.add_path(p).map_err(|e| git_err(&e))
-    } else if index.get_path(p, 0).is_some() {
-        index.remove_path(p).map_err(|e| git_err(&e))
-    } else {
-        Err(GitError(format!("pathspec did not match any file: {path}")))
-    }
-}
-
-/// Removes the `selected` changes of a staged `hunk` from the index entry.
-/// A path that is not in HEAD and ends up empty leaves the index entirely.
-fn unstage_hunk(
-    repo: &Repository,
-    index: &mut git2::Index,
-    path: &str,
-    hunk: &Hunk,
-    selected: &[u32],
-) -> Result<(), GitError> {
-    let (mode, current) = index_content(repo, index, path)?
-        .ok_or_else(|| GitError(format!("{path} is not in the index")))?;
-    let next = stage_math::unstage_selection(&current, hunk, selected).map_err(GitError)?;
-    let in_head = head_entry(repo, path)?.is_some();
-    if next.is_empty() && !in_head {
-        index.remove_path(Path::new(path)).map_err(|e| git_err(&e))
-    } else {
-        write_index_content(repo, index, path, mode, &next)
-    }
-}
-
-/// Mode, blob id and size of `path` in HEAD. `None` when HEAD is unborn or the
-/// path is not a file in HEAD.
-fn head_entry(repo: &Repository, path: &str) -> Result<Option<(u32, Oid, usize)>, GitError> {
+/// Mode and blob id of `path` in HEAD. `None` when HEAD is unborn or the path
+/// is not a file in HEAD.
+fn head_entry(repo: &Repository, path: &str) -> Result<Option<(u32, Oid)>, GitError> {
     let head = match repo.head() {
         Ok(head) => head,
         Err(e) if e.code() == ErrorCode::UnbornBranch => return Ok(None),
@@ -384,10 +401,9 @@ fn head_entry(repo: &Repository, path: &str) -> Result<Option<(u32, Oid, usize)>
     if entry.kind() != Some(ObjectType::Blob) {
         return Ok(None);
     }
-    let size = repo.find_blob(entry.id()).map_err(|e| git_err(&e))?.size();
     let mode = u32::try_from(entry.filemode())
         .map_err(|_| GitError(format!("unexpected file mode in HEAD: {path}")))?;
-    Ok(Some((mode, entry.id(), size)))
+    Ok(Some((mode, entry.id())))
 }
 
 /// Mode of a working tree file, as git would record it when adding it.
