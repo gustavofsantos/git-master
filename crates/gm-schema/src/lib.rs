@@ -9,4 +9,4 @@ pub use diff::{DiffLine, DiffSide, FileDiff, Hunk, HunkId, LineKind, StageTarget
 pub use operation::{
     Actor, Command, CommandKind, Event, IllegalTransition, OperationId, OperationState,
 };
-pub use status::{BranchInfo, Change, RepoStatus, StatusEntry};
+pub use status::{BranchEntry, BranchInfo, Change, RepoStatus, StatusEntry};

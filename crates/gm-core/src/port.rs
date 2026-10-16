@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gm_schema::{DiffSide, FileDiff, RepoStatus, StageTarget};
+use gm_schema::{BranchEntry, DiffSide, FileDiff, RepoStatus, StageTarget};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitError(pub String);
@@ -40,5 +40,17 @@ pub trait GitPort: Send {
     /// Commits the index; returns the new commit id.
     fn commit(&self, _root: &Path, _message: &str) -> Result<String, GitError> {
         Err(GitError("commit is not supported by this adapter".into()))
+    }
+
+    /// Local branches first, then remote ones, each alphabetically. Never
+    /// records anything.
+    fn branches(&self, _root: &Path) -> Result<Vec<BranchEntry>, GitError> {
+        Err(GitError("branches is not supported by this adapter".into()))
+    }
+
+    /// Switches HEAD to `branch`. A remote-only branch gets a local tracking
+    /// branch of the same short name. Git's own refusal is the error.
+    fn checkout(&self, _root: &Path, _branch: &str) -> Result<(), GitError> {
+        Err(GitError("checkout is not supported by this adapter".into()))
     }
 }

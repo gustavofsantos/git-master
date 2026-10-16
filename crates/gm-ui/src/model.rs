@@ -109,7 +109,8 @@ impl Model {
                 self.notice_icon = Some(Icon::CheckCircle);
                 None
             }
-            Event::OperationChanged { .. } => None,
+            // The branch picker will consume `BranchesLoaded`; nothing shows it yet.
+            Event::BranchesLoaded { .. } | Event::OperationChanged { .. } => None,
         }
     }
 

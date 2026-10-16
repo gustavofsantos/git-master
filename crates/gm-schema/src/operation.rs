@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::{DiffSide, FileDiff, StageTarget};
-use crate::status::RepoStatus;
+use crate::status::{BranchEntry, RepoStatus};
 
 /// Sequential, so the operation log is deterministic.
 #[derive(
@@ -22,12 +22,29 @@ pub enum Actor {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandKind {
-    OpenRepo { path: String },
+    OpenRepo {
+        path: String,
+    },
     RefreshStatus,
-    LoadDiff { path: String, side: DiffSide },
-    Stage { target: StageTarget },
-    Unstage { target: StageTarget },
-    Commit { message: String },
+    LoadDiff {
+        path: String,
+        side: DiffSide,
+    },
+    Stage {
+        target: StageTarget,
+    },
+    Unstage {
+        target: StageTarget,
+    },
+    Commit {
+        message: String,
+    },
+    ListBranches,
+    /// A local branch, or a remote branch such as `origin/feature` (a local
+    /// tracking branch is created for it when none exists).
+    Checkout {
+        branch: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -125,12 +142,45 @@ pub enum Event {
         id: OperationId,
         oid: String,
     },
+    BranchesLoaded {
+        id: OperationId,
+        branches: Vec<BranchEntry>,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn checkout_command_wire_format_is_tagged() {
+        let command = CommandKind::Checkout {
+            branch: "origin/feature".into(),
+        };
+        let json = serde_json::to_value(&command).unwrap();
+        assert_eq!(json["type"], "checkout");
+        assert_eq!(json["branch"], "origin/feature");
+        let list = serde_json::to_value(CommandKind::ListBranches).unwrap();
+        assert_eq!(list["type"], "list_branches");
+    }
+
+    #[test]
+    fn branches_loaded_wire_format_is_tagged() {
+        let event = Event::BranchesLoaded {
+            id: OperationId(2),
+            branches: vec![BranchEntry {
+                name: "main".into(),
+                is_remote: false,
+                is_current: true,
+                upstream: Some("origin/main".into()),
+            }],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "branches_loaded");
+        assert_eq!(json["branches"][0]["is_current"], true);
+        assert_eq!(json["branches"][0]["upstream"], "origin/main");
+    }
 
     fn any_state() -> impl Strategy<Value = OperationState> {
         proptest::sample::select(OperationState::ALL.to_vec())

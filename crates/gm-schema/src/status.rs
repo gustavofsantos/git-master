@@ -24,6 +24,18 @@ pub struct BranchInfo {
     pub behind: u32,
 }
 
+/// A branch as the branch list shows it. Remote branches are named as Git
+/// names them, `origin/feature`; `origin/HEAD` is not listed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BranchEntry {
+    pub name: String,
+    pub is_remote: bool,
+    /// The branch HEAD is on. Never set for a remote branch.
+    pub is_current: bool,
+    /// Full name of the upstream of a local branch, e.g. `origin/main`.
+    pub upstream: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct StatusEntry {
     pub path: String,

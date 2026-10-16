@@ -108,6 +108,16 @@ impl Engine {
                 events.extend(self.reload_status(id, &root)?);
                 Ok(events)
             }
+            CommandKind::ListBranches => {
+                let root = self.open_root()?;
+                let branches = self.git.branches(&root).map_err(|e| e.0)?;
+                Ok(vec![Event::BranchesLoaded { id, branches }])
+            }
+            CommandKind::Checkout { branch } => {
+                let root = self.open_root()?;
+                self.git.checkout(&root, branch).map_err(|e| e.0)?;
+                self.reload_status(id, &root)
+            }
         }
     }
 
@@ -160,6 +170,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GitError;
     use crate::fake::FakeGit;
     use gm_schema::RepoStatus;
     use proptest::prelude::*;
@@ -220,6 +231,85 @@ mod tests {
         };
         assert_eq!(*state, OperationState::Failed);
         assert_eq!(detail.as_deref(), Some("no repository is open"));
+    }
+
+    #[test]
+    fn list_branches_emits_the_branches_it_read() {
+        let branches = vec![gm_schema::BranchEntry {
+            name: "main".into(),
+            is_remote: false,
+            is_current: true,
+            upstream: None,
+        }];
+        let git = FakeGit::new(
+            "/r",
+            RepoStatus {
+                root: "/r".into(),
+                ..RepoStatus::default()
+            },
+        );
+        git.set_branches(Ok(branches.clone()));
+        let mut engine = Engine::new(Box::new(git));
+        engine.handle(OperationId(1), &open());
+
+        let events = engine.handle(OperationId(2), &command(CommandKind::ListBranches));
+
+        assert_eq!(states(&events).last(), Some(&OperationState::Done));
+        assert!(events.contains(&Event::BranchesLoaded {
+            id: OperationId(2),
+            branches,
+        }));
+    }
+
+    #[test]
+    fn checkout_reloads_status_so_the_ui_repaints() {
+        let mut engine = engine();
+        engine.handle(OperationId(1), &open());
+        let kind = CommandKind::Checkout {
+            branch: "feature".into(),
+        };
+
+        let events = engine.handle(OperationId(2), &command(kind));
+
+        assert_eq!(states(&events).last(), Some(&OperationState::Done));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::StatusLoaded { id, .. } if *id == OperationId(2)))
+        );
+    }
+
+    #[test]
+    fn a_refused_checkout_fails_with_the_git_message() {
+        let git = FakeGit::new(
+            "/r",
+            RepoStatus {
+                root: "/r".into(),
+                ..RepoStatus::default()
+            },
+        );
+        git.set_checkout(Err(GitError("local changes would be overwritten".into())));
+        let mut engine = Engine::new(Box::new(git));
+        engine.handle(OperationId(1), &open());
+
+        let kind = CommandKind::Checkout {
+            branch: "feature".into(),
+        };
+        let events = engine.handle(OperationId(2), &command(kind));
+
+        let Some(Event::OperationChanged { state, detail, .. }) = events.last() else {
+            panic!("no events");
+        };
+        assert_eq!(*state, OperationState::Failed);
+        assert_eq!(
+            detail.as_deref(),
+            Some("local changes would be overwritten")
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::StatusLoaded { .. }))
+        );
     }
 
     #[test]

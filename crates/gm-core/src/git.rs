@@ -7,9 +7,10 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use git2::{ErrorCode, ObjectType, Oid, Repository};
+use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
-    BranchInfo, Change, DiffSide, FileDiff, Hunk, HunkId, RepoStatus, StageTarget, StatusEntry,
+    BranchEntry, BranchInfo, Change, DiffSide, FileDiff, Hunk, HunkId, RepoStatus, StageTarget,
+    StatusEntry,
 };
 
 use crate::command_log::{CommandLog, CommandRecord, bounded_text};
@@ -338,10 +339,106 @@ impl GitPort for SubprocessGit {
         let out = Self::run(command)?;
         Ok(String::from_utf8_lossy(&out).trim().to_owned())
     }
+
+    fn branches(&self, root: &Path) -> Result<Vec<BranchEntry>, GitError> {
+        let repo = open(root)?;
+        let current = current_branch(&repo)?;
+        let mut local = Vec::new();
+        for item in repo
+            .branches(Some(BranchType::Local))
+            .map_err(|e| git_err(&e))?
+        {
+            let (branch, _) = item.map_err(|e| git_err(&e))?;
+            let name = branch_name(&branch)?;
+            let upstream = branch
+                .upstream()
+                .ok()
+                .map(|up| branch_name(&up))
+                .transpose()?;
+            local.push(BranchEntry {
+                is_current: current.as_deref() == Some(name.as_str()),
+                name,
+                is_remote: false,
+                upstream,
+            });
+        }
+        let mut remote = Vec::new();
+        for item in repo
+            .branches(Some(BranchType::Remote))
+            .map_err(|e| git_err(&e))?
+        {
+            let (branch, _) = item.map_err(|e| git_err(&e))?;
+            let name = branch_name(&branch)?;
+            // `origin/HEAD` is a symbolic alias of the default branch, not a branch.
+            if name.ends_with("/HEAD") {
+                continue;
+            }
+            remote.push(BranchEntry {
+                name,
+                is_remote: true,
+                is_current: false,
+                upstream: None,
+            });
+        }
+        local.sort_by(|a, b| a.name.cmp(&b.name));
+        remote.sort_by(|a, b| a.name.cmp(&b.name));
+        local.extend(remote);
+        Ok(local)
+    }
+
+    fn checkout(&self, root: &Path, branch: &str) -> Result<(), GitError> {
+        // A leading dash would be read as an option by `git switch`.
+        if branch.is_empty() || branch.starts_with('-') {
+            return Err(GitError(format!("invalid branch name: {branch}")));
+        }
+        let repo = open(root)?;
+        check_index_lock(&repo)?;
+        let mut command = self.git(root);
+        if has_ref(&repo, &format!("refs/heads/{branch}")) {
+            command.args(["switch", "--", branch]);
+        } else if has_ref(&repo, &format!("refs/remotes/{branch}")) {
+            // A remote-only branch: reuse the local branch of the same short
+            // name when there is one, otherwise create it tracking the remote.
+            let local = branch.split_once('/').map(|(_, rest)| rest);
+            match local {
+                Some(local) if has_ref(&repo, &format!("refs/heads/{local}")) => {
+                    command.args(["switch", "--", local]);
+                }
+                _ => {
+                    command.args(["switch", "--track", "--", branch]);
+                }
+            }
+        } else {
+            // Unknown name: git reports it.
+            command.args(["switch", "--", branch]);
+        }
+        self.logged(command, None).map(drop)
+    }
 }
 
 fn git_err(error: &git2::Error) -> GitError {
     GitError(error.message().to_owned())
+}
+
+fn branch_name(branch: &git2::Branch<'_>) -> Result<String, GitError> {
+    branch
+        .name()
+        .map_err(|e| git_err(&e))?
+        .map(str::to_owned)
+        .ok_or_else(|| GitError("branch name is not valid UTF-8".into()))
+}
+
+/// The branch HEAD points at, also on an unborn branch. `None` when detached.
+fn current_branch(repo: &Repository) -> Result<Option<String>, GitError> {
+    let head = repo.find_reference("HEAD").map_err(|e| git_err(&e))?;
+    Ok(head
+        .symbolic_target()
+        .and_then(|target| target.strip_prefix("refs/heads/"))
+        .map(str::to_owned))
+}
+
+fn has_ref(repo: &Repository, name: &str) -> bool {
+    repo.find_reference(name).is_ok()
 }
 
 fn open(root: &Path) -> Result<Repository, GitError> {
