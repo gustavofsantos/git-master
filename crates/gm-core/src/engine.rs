@@ -75,11 +75,52 @@ impl Engine {
                 Ok(vec![Event::StatusLoaded { id, status }])
             }
             CommandKind::RefreshStatus => {
-                let root = self.root.as_ref().ok_or("no repository is open")?;
-                let status = self.git.status(root).map_err(|e| e.0)?;
+                let root = self.open_root()?;
+                let status = self.git.status(&root).map_err(|e| e.0)?;
                 Ok(vec![Event::StatusLoaded { id, status }])
             }
+            CommandKind::LoadDiff { path, side } => {
+                let root = self.open_root()?;
+                let diff = self.git.diff(&root, path, *side).map_err(|e| e.0)?;
+                Ok(vec![Event::DiffLoaded {
+                    id,
+                    side: *side,
+                    diff,
+                }])
+            }
+            CommandKind::Stage { target } => {
+                let root = self.open_root()?;
+                self.git.stage(&root, target).map_err(|e| e.0)?;
+                self.reload_status(id, &root)
+            }
+            CommandKind::Unstage { target } => {
+                let root = self.open_root()?;
+                self.git.unstage(&root, target).map_err(|e| e.0)?;
+                self.reload_status(id, &root)
+            }
+            CommandKind::Commit { message } => {
+                if message.trim().is_empty() {
+                    return Err("the commit message is empty".to_owned());
+                }
+                let root = self.open_root()?;
+                let oid = self.git.commit(&root, message).map_err(|e| e.0)?;
+                let mut events = vec![Event::Committed { id, oid }];
+                events.extend(self.reload_status(id, &root)?);
+                Ok(events)
+            }
         }
+    }
+
+    fn open_root(&self) -> Result<PathBuf, String> {
+        self.root
+            .clone()
+            .ok_or_else(|| "no repository is open".to_owned())
+    }
+
+    /// A mutation ends by showing the new state, so no front-end has to ask.
+    fn reload_status(&self, id: OperationId, root: &std::path::Path) -> Result<Vec<Event>, String> {
+        let status = self.git.status(root).map_err(|e| e.0)?;
+        Ok(vec![Event::StatusLoaded { id, status }])
     }
 
     fn advance(&mut self, op: &mut Op, to: OperationState, events: &mut Vec<Event>) {
@@ -147,7 +188,7 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 Event::OperationChanged { state, .. } => Some(*state),
-                Event::StatusLoaded { .. } => None,
+                _ => None,
             })
             .collect()
     }

@@ -30,7 +30,8 @@ impl Model {
                 self.error = Some(detail.unwrap_or_else(|| "the operation failed".to_owned()));
                 self.loading = false;
             }
-            Event::OperationChanged { .. } => {}
+            Event::OperationChanged { .. } | Event::DiffLoaded { .. } | Event::Committed { .. } => {
+            }
         }
     }
 

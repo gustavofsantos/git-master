@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gm_schema::RepoStatus;
+use gm_schema::{DiffSide, FileDiff, RepoStatus, StageTarget};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitError(pub String);
@@ -20,4 +20,25 @@ pub trait GitPort: Send {
 
     /// Never takes `index.lock`: an agent may be running `git` in the same repo.
     fn status(&self, root: &Path) -> Result<RepoStatus, GitError>;
+
+    /// Diff of one path. An untracked path diffs as all-added.
+    fn diff(&self, _root: &Path, _path: &str, _side: DiffSide) -> Result<FileDiff, GitError> {
+        Err(GitError("diff is not supported by this adapter".into()))
+    }
+
+    /// Moves `target` into the index. A stale hunk id is an error, never a
+    /// guess.
+    fn stage(&self, _root: &Path, _target: &StageTarget) -> Result<(), GitError> {
+        Err(GitError("stage is not supported by this adapter".into()))
+    }
+
+    /// Moves `target` out of the index (staged diff, HEAD against index).
+    fn unstage(&self, _root: &Path, _target: &StageTarget) -> Result<(), GitError> {
+        Err(GitError("unstage is not supported by this adapter".into()))
+    }
+
+    /// Commits the index; returns the new commit id.
+    fn commit(&self, _root: &Path, _message: &str) -> Result<String, GitError> {
+        Err(GitError("commit is not supported by this adapter".into()))
+    }
 }

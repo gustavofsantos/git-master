@@ -2,6 +2,8 @@
 //! the engine. The engine runs on its own thread; this crate only renders what
 //! the engine reports.
 
+mod changes;
+mod composer;
 mod model;
 mod theme;
 mod view;

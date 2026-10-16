@@ -1,6 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::diff::{DiffSide, FileDiff, StageTarget};
 use crate::status::RepoStatus;
 
 /// Sequential, so the operation log is deterministic.
@@ -23,6 +24,10 @@ pub enum Actor {
 pub enum CommandKind {
     OpenRepo { path: String },
     RefreshStatus,
+    LoadDiff { path: String, side: DiffSide },
+    Stage { target: StageTarget },
+    Unstage { target: StageTarget },
+    Commit { message: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -110,6 +115,15 @@ pub enum Event {
     StatusLoaded {
         id: OperationId,
         status: RepoStatus,
+    },
+    DiffLoaded {
+        id: OperationId,
+        side: DiffSide,
+        diff: FileDiff,
+    },
+    Committed {
+        id: OperationId,
+        oid: String,
     },
 }
 
