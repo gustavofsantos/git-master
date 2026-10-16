@@ -5,12 +5,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use git2::{ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchInfo, Change, DiffSide, FileDiff, Hunk, HunkId, RepoStatus, StageTarget, StatusEntry,
 };
 
+use crate::command_log::{CommandLog, CommandRecord, bounded_text};
 use crate::diff::parse_unified;
 use crate::stage_math;
 use crate::{GitError, GitPort};
@@ -22,6 +24,8 @@ use crate::{GitError, GitPort};
 #[derive(Clone, Default)]
 pub struct SubprocessGit {
     pub login_path: Arc<OnceLock<String>>,
+    /// Receives every command that changes the repository. Reads are not logged.
+    pub log: Option<CommandLog>,
 }
 
 impl SubprocessGit {
@@ -50,24 +54,50 @@ impl SubprocessGit {
         Self::checked(output, ok_codes)
     }
 
-    /// Runs `command` with `input` on its stdin.
-    fn run_with_input(mut command: Command, input: &[u8]) -> Result<Vec<u8>, GitError> {
+    /// Runs `command`, with `input` on its stdin when given.
+    fn execute(command: &mut Command, input: Option<&[u8]>) -> std::io::Result<Output> {
+        let Some(input) = input else {
+            return command.output();
+        };
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        let mut child = command.spawn()?;
         let mut stdin = child.stdin.take().expect("stdin was piped");
-        let output = std::thread::scope(|scope| {
+        std::thread::scope(|scope| {
             // A write error means git exited early; its stderr says why.
             scope.spawn(move || {
                 let _ = stdin.write_all(input);
             });
             child.wait_with_output()
         })
-        .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+    }
+
+    /// Runs a command that changes the repository and records it in the log.
+    fn logged(&self, mut command: Command, input: Option<&[u8]>) -> Result<Vec<u8>, GitError> {
+        let started = Instant::now();
+        let output = Self::execute(&mut command, input)
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        if let Some(log) = &self.log {
+            log.record(CommandRecord {
+                program: "git".to_owned(),
+                dir: command
+                    .get_current_dir()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default(),
+                args: command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .filter(|arg| arg != "--no-optional-locks")
+                    .collect(),
+                code: output.status.code(),
+                stdout_bytes: output.stdout.len(),
+                stdout: bounded_text(&output.stdout),
+                stderr: bounded_text(&output.stderr),
+                took: started.elapsed(),
+            });
+        }
         Self::checked(output, &[0])
     }
 
@@ -102,7 +132,7 @@ impl SubprocessGit {
     fn write_blob(&self, root: &Path, content: &[u8]) -> Result<String, GitError> {
         let mut command = self.git(root);
         command.args(["hash-object", "-w", "--stdin"]);
-        let out = Self::run_with_input(command, content)?;
+        let out = self.logged(command, Some(content))?;
         Ok(String::from_utf8_lossy(&out).trim().to_owned())
     }
 
@@ -115,13 +145,13 @@ impl SubprocessGit {
             .args(["update-index", "--add", "--cacheinfo"])
             .arg(format!("{mode:o}"))
             .args([id, path]);
-        Self::run(command).map(drop)
+        self.logged(command, None).map(drop)
     }
 
     fn remove_entry(&self, root: &Path, path: &str) -> Result<(), GitError> {
         let mut command = self.git(root);
         command.args(["update-index", "--force-remove", "--", path]);
-        Self::run(command).map(drop)
+        self.logged(command, None).map(drop)
     }
 
     fn put_content(
@@ -162,7 +192,7 @@ impl SubprocessGit {
         }
         let mut command = self.git(root);
         command.args(["--literal-pathspecs", "add", "--", path]);
-        Self::run(command).map(drop)
+        self.logged(command, None).map(drop)
     }
 
     /// Removes the `selected` changes of a staged `hunk` from the index entry.
@@ -302,7 +332,7 @@ impl GitPort for SubprocessGit {
         // is written to the working tree, and a failing hook's report is the error.
         let mut command = self.git(root);
         command.args(["commit", "-F", "-"]);
-        Self::run_with_input(command, message.as_bytes())?;
+        self.logged(command, Some(message.as_bytes()))?;
         let mut command = self.git(root);
         command.args(["rev-parse", "HEAD"]);
         let out = Self::run(command)?;

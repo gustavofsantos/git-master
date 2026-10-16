@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 use gm_core::GitPort;
+use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
 use gm_schema::{DiffSide, FileDiff, HunkId, LineKind, StageTarget};
 
@@ -580,4 +581,81 @@ fn every_operation_refuses_while_index_lock_exists() {
 /// `count` lines of the form "<prefix> <n>\n".
 fn numbered(prefix: &str, count: u32) -> String {
     (1..=count).fold(String::new(), |text, i| format!("{text}{prefix} {i}\n"))
+}
+
+fn logged_port() -> (SubprocessGit, CommandLog) {
+    let log = CommandLog::default();
+    let port = SubprocessGit {
+        log: Some(log.clone()),
+        ..SubprocessGit::default()
+    };
+    (port, log)
+}
+
+#[test]
+fn writes_are_logged_and_reads_are_not() {
+    let dir = repo_with(&[("a.txt", "one\n")]);
+    write(dir.path(), "a.txt", "two\n");
+    let (port, log) = logged_port();
+
+    port.status(dir.path()).unwrap();
+    unstaged(dir.path(), "a.txt");
+    assert!(log.entries().is_empty());
+
+    port.stage(dir.path(), &file_target("a.txt")).unwrap();
+    port.commit(dir.path(), "two").unwrap();
+
+    let lines: Vec<String> = log.entries().iter().map(|r| r.args.join(" ")).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with("--literal-pathspecs add"), "{lines:?}");
+    assert_eq!(lines[1], "commit -F -");
+    assert!(
+        log.entries()
+            .iter()
+            .all(gm_core::command_log::CommandRecord::succeeded)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_commit_is_logged_with_the_hooks_report() {
+    let dir = repo_with(&[("a.txt", "one\n")]);
+    install_hook(
+        dir.path(),
+        "pre-commit",
+        "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n",
+    );
+    write(dir.path(), "a.txt", "two\n");
+    let (port, log) = logged_port();
+    port.stage(dir.path(), &file_target("a.txt")).unwrap();
+
+    port.commit(dir.path(), "msg").unwrap_err();
+
+    let entries = log.entries();
+    let last = entries.last().unwrap();
+    assert!(!last.succeeded());
+    assert_eq!(last.code, Some(1));
+    assert!(last.stderr.contains("lint failed"), "{}", last.stderr);
+    assert!(!last.args.contains(&"--no-optional-locks".to_owned()));
+}
+
+#[test]
+fn a_line_stage_logs_the_blob_write_and_the_index_update() {
+    let dir = repo_with(&[("a.txt", &numbered("row", 10))]);
+    write(
+        dir.path(),
+        "a.txt",
+        &numbered("row", 10).replace("row 2\n", "two\n"),
+    );
+    let (port, log) = logged_port();
+    let diff = unstaged(dir.path(), "a.txt");
+    let target = StageTarget::Hunk {
+        path: "a.txt".into(),
+        hunk: diff.hunks[0].id.clone(),
+    };
+
+    port.stage(dir.path(), &target).unwrap();
+
+    let verbs: Vec<String> = log.entries().iter().map(|r| r.args[0].clone()).collect();
+    assert_eq!(verbs, ["hash-object", "update-index"]);
 }
