@@ -37,7 +37,8 @@
 | D23 | Working Copy: "staged" e "lido" como eixos ortogonais; lista única com checkbox tri-state | Decidido (2026-10-16) | 05 |
 | D24 | Stage por linha sobre modelo de diff exato, escrevendo o blob do index direto | Decidido (2026-10-16) | 05 |
 | D25 | Histórico: defasagem de stack como aresta tracejada; dono do commit pela metadata do stack | Proposto | 05 |
-| D26 | Backend Git híbrido: libgit2 para objetos/index/merge/rebase em memória; subprocess `git` para status em escala | Proposto | 06 |
+| D26 | Backend Git híbrido: subprocess `git` para toda operação com efeito colateral nativa do Git (stage, unstage, commit, checkout) e para status em escala; libgit2 para leituras em massa e para o restack (que não existe no Git). Revisado em 2026-10-16 | Decidido (2026-10-16) | 06 |
+| D28 | O log de comandos Git registra só operações com efeito colateral; leituras (status, diff, histórico) não aparecem | Decidido (2026-10-16) | 07 |
 | D27 | Começar com quatro crates (schema, core, ui, mcp) e extrair o resto sob demanda | Proposto | 06 |
 
 ## Questões abertas
@@ -51,4 +52,5 @@
 - **Q7. Texto editável no GPUI:** o painel de resultado do resolvedor e a visualização de diff exigem texto editável e virtualizado. Avaliar bibliotecas de terceiros (ex.: gpui-component) e licenças (verificar a licença dos crates do Zed além do `gpui`). **Spike B (2026-10-16, `spikes/b-text`):** portar o text area do rvw (do mesmo autor, MIT; 55 testes passam, janela abre; mouse, IME, clipboard e wrap só lidos do código, falta teste manual). O editor do Zed é GPL-3.0-or-later; `gpui-component` é Apache-2.0 mas depende de outra versão do gpui. O texto inteiro é shaped a cada frame: serve ao composer, não ao painel de conflitos. Decisão do autor (2026-10-16): o GitMaster será todo open source e o código do rvw pode ser usado.
 - **Q8. Escopo de Tower não discutido:** pull requests, worktrees, submódulos, LFS.
 - **Q9. Layout alternativo do resolvedor** (unificado/empilhado) para telas pequenas.
+- **Q11. Fatia 1b (resolvida em 2026-10-16):** (a) checkout com working copy sujo: repassa o erro do Git, sem autostash nem "levar as mudanças". (b) Um repositório por janela na v1. (c) O log de comandos fica só em memória na v1.
 - **Q10. Licença e modelo de produto:** como combinar open source com "produto premium" (open core, binário pago com fonte aberta, etc.).

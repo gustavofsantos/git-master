@@ -30,6 +30,31 @@ Pronto quando: abre um repositório grande e lista as mudanças sem travar; os s
 
 Pronto quando: substitui `git add -p` mais `git commit` no uso diário.
 
+## Fatia 1b: o básico que falta (antes dos diferenciais)
+
+Revisão de 2026-10-16: com a Working Copy pronta, faltam três coisas sem as quais o app não substitui um cliente Git no dia a dia. Entram antes da fatia 2.
+
+Ordem: log de comandos, depois trocar de branch, depois trocar de projeto. O log vem primeiro porque as duas outras operações passam a aparecer nele, o que ajuda a validá-las.
+
+1. **Log de comandos Git** (modelo: `rvw-gui/src/git_log.rs`).
+   - Só operações com efeito colateral entram (D28): stage, unstage, commit, checkout. Status, diff e leituras em massa não aparecem.
+   - Cada processo `git` dessas operações vira uma entrada estruturada: programa, diretório, argumentos, código de saída, duração, stdout, stderr. Buffer em memória, últimas 1000 entradas, na UI nunca no repositório.
+   - Ponto único de registro no `SubprocessGit`: `run` ganha uma variante que registra, usada só pelas escritas. A saída do hook de commit entra junto, pois é o stderr do `git commit`.
+   - Botão na status bar abre um painel flutuante, somente leitura, com a lista (mais recente embaixo), falhas destacadas e saída expansível.
+   - Pré-requisito: migrar `stage` e `unstage` do libgit2 para subprocess (D26 revisada). O stage por linha (D24) passa a escrever o blob com `git hash-object -w` e o index com `git update-index --cacheinfo`, reaproveitando `stage_math`.
+   - O restack (libgit2) altera refs; como registrá-lo no log é decisão da fatia 5.
+   - É diferente do operation log do motor (D14/docs 06): este mostra o que o Git executou; aquele, o que foi pedido e por quem.
+2. **Trocar de branch.**
+   - Comandos `ListBranches` e `Checkout { branch }` em `gm-schema`; `GitPort` ganha os métodos correspondentes.
+   - Seletor na status bar ou no cabeçalho: lista local e remota com filtro; remota sem local cria a local de rastreio.
+   - Com working copy sujo, o checkout que o Git recusar mostra o erro do Git no painel e uma notificação; nada de autostash escondido (mesma linha de Q2). Ver Q11.
+3. **Trocar de projeto.**
+   - Seletor de pasta nativo e lista de recentes, persistida no diretório de dados do app (nunca dentro do repositório; princípio de 00).
+   - `OpenRepo` já existe: a troca descarta o estado do repo atual (seleção, diff, rascunho do commit) de forma explícita e abre o novo.
+   - Um repositório por janela na v1; abas ou várias janelas ficam para depois.
+
+Pronto quando: troca de projeto e de branch sem sair do app, e todo comando Git executado é inspecionável no painel.
+
 ## Fatia 2: hooks
 
 - Contrato JSON versionado em `gm-schema`; configuração por `.gitconfig`.
