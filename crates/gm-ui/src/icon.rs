@@ -29,6 +29,10 @@ pub enum Icon {
     MagnifyingGlass,
     Warning,
     CheckCircle,
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
 }
 
 impl Icon {
@@ -52,12 +56,16 @@ impl Icon {
         Self::MagnifyingGlass,
         Self::Warning,
         Self::CheckCircle,
+        Self::Minimize,
+        Self::Maximize,
+        Self::Restore,
+        Self::Close,
     ];
 
     fn name(self) -> &'static str {
         match self {
             Self::CheckSquare => "check-square",
-            Self::Square => "square",
+            Self::Square | Self::Maximize => "square",
             Self::MinusSquare => "minus-square",
             Self::CaretRight => "caret-right",
             Self::CaretDown => "caret-down",
@@ -73,6 +81,9 @@ impl Icon {
             Self::MagnifyingGlass => "magnifying-glass",
             Self::Warning => "warning",
             Self::CheckCircle => "check-circle",
+            Self::Minimize => "minus",
+            Self::Restore => "copy",
+            Self::Close => "x",
         }
     }
 

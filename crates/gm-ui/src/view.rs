@@ -18,6 +18,7 @@ use crate::icon::{self, Icon};
 use crate::model::Model;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
+use crate::window_chrome;
 use crate::{FocusNext, FocusPrev};
 
 /// The key context of the change list. Its keys work only while the list has
@@ -82,10 +83,11 @@ impl StatusView {
                 this.on_composer_event(*event, cx);
             }),
             cx.subscribe(&diff_pane, Self::on_diff_pane_event),
+            // Also fires when the compositor answers the decoration request, so
+            // the title bar appears or goes as soon as the grant is known.
             cx.observe_window_appearance(window, |_, window, cx| {
-                if theme::follow(window.appearance()) {
-                    cx.notify();
-                }
+                theme::follow(window.appearance());
+                cx.notify();
             }),
         ];
         let mut model = Model::default();
@@ -452,9 +454,14 @@ impl StatusView {
 }
 
 impl Render for StatusView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Drawn only when the compositor left the frame to the app; under
+        // server decorations the title bar is the compositor's.
+        let title_bar =
+            window_chrome::draws_frame(window).then(|| window_chrome::title_bar(window));
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(theme::ground())
@@ -467,6 +474,7 @@ impl Render for StatusView {
             .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
                 this.cycle_focus(false, window, cx);
             }))
+            .children(title_bar)
             .child(self.top_bar(cx))
             .child(
                 div()
@@ -484,5 +492,6 @@ impl Render for StatusView {
                     ),
             )
             .child(self.status_bar())
+            .children(window_chrome::resize_layer(window))
     }
 }

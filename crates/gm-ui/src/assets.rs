@@ -50,6 +50,12 @@ const ICONS: &[(&str, &[u8])] = icons![
     "warning-fill",
     "check-circle",
     "check-circle-fill",
+    "minus",
+    "minus-fill",
+    "copy",
+    "copy-fill",
+    "x",
+    "x-fill",
 ];
 
 pub struct Assets;

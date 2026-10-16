@@ -17,6 +17,7 @@ mod text_area_element;
 mod text_area_math;
 mod theme;
 mod view;
+mod window_chrome;
 
 use gm_core::EngineHandle;
 use gpui::{
@@ -63,8 +64,17 @@ pub fn run(engine: EngineHandle, path: String) {
                     title: Some("GitMaster".into()),
                     ..TitlebarOptions::default()
                 }),
-                // Where the compositor draws no frame, the app draws its own controls.
-                window_decorations: Some(WindowDecorations::Client),
+                // The compositor draws the frame when it can. Where it cannot, the
+                // app draws its own title bar and controls (see `window_chrome`).
+                // On Linux, ask for Client: GPUI then negotiates with the compositor
+                // (Server is reported as granted even where nothing draws a frame,
+                // as on GNOME/Wayland) and the app draws its own title bar when it
+                // is not given one. macOS keeps its native bar.
+                window_decorations: Some(if cfg!(target_os = "linux") {
+                    WindowDecorations::Client
+                } else {
+                    WindowDecorations::Server
+                }),
                 // Matches the window class a desktop entry would use.
                 app_id: Some("gitmaster".into()),
                 ..WindowOptions::default()
