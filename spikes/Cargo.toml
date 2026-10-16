@@ -1,0 +1,11 @@
+# Throwaway spikes (docs/07, slice 0). Not part of the product workspace; each
+# one leaves a FINDINGS.md with numbers and a verdict. Share one target dir:
+# CARGO_TARGET_DIR=$HOME/.cache/gm-spikes/target
+[workspace]
+resolver = "2"
+members = ["b-text", "c-rebase", "d-status"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+publish = false

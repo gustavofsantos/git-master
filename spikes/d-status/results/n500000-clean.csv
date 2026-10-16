@@ -1,0 +1,11 @@
+proc_app,base,/home/gsantos/.cache/gm-spikes/repos/n500000,first_s=0.657,runs=7,median_s=0.610,p95_s=0.724,entries=2
+proc_plain,base-plain,/home/gsantos/.cache/gm-spikes/repos/n500000,first_s=2.039,runs=7,median_s=0.601,p95_s=0.670,entries=2
+proc_app,uc,/home/gsantos/.cache/gm-spikes/repos/n500000,first_s=0.238,runs=7,median_s=0.223,p95_s=0.238,entries=2
+proc_plain,uc-plain,/home/gsantos/.cache/gm-spikes/repos/n500000,first_s=0.224,runs=7,median_s=0.241,p95_s=0.262,entries=2
+proc_app,cg,/home/gsantos/.cache/gm-spikes/repos/n500000,first_s=0.583,runs=7,median_s=0.576,p95_s=0.600,entries=2
+proc_app,mf,/home/gsantos/.cache/gm-spikes/repos/n500000,first_s=0.631,runs=7,median_s=0.608,p95_s=0.680,entries=2
+proc_app,mfuc,/home/gsantos/.cache/gm-spikes/repos/n500000,first_s=0.240,runs=7,median_s=0.242,p95_s=0.254,entries=2
+git2_tracked,base,/home/gsantos/.cache/gm-spikes/repos/n500000,first_s=1.812,runs=7,median_s=1.729,p95_s=1.843,entries=0
+git2_untracked_flat,base,/home/gsantos/.cache/gm-spikes/repos/n500000,first_s=1.487,runs=7,median_s=1.619,p95_s=1.708,entries=0
+git2_untracked_recurse,base,/home/gsantos/.cache/gm-spikes/repos/n500000,first_s=1.869,runs=7,median_s=1.453,p95_s=1.766,entries=0
+count,/home/gsantos/.cache/gm-spikes/repos/n500000,proc_plain_records=2,git2_flat_entries=0,git2_recurse_entries=0

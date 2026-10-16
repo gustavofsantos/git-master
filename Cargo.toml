@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["spikes"]
 members = ["crates/gm-schema", "crates/gm-core", "crates/gm-ui", "crates/gm-mcp", "crates/gitmaster"]
 
 [workspace.package]

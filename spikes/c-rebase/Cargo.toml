@@ -1,0 +1,9 @@
+[package]
+name = "spike-c-rebase"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+git2 = "0.20"
+tempfile = "3"
