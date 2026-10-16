@@ -17,7 +17,7 @@ use gpui::{
 use crate::editor::Editor;
 use crate::text_area_element::{Shaped, TextAreaElement};
 use crate::text_area_math::{offset_from_utf16, offset_to_utf16, row_at_y, target_row};
-use crate::theme::{self, color};
+use crate::theme;
 
 mod input;
 mod keys;
@@ -347,14 +347,14 @@ impl Render for TextArea {
             .font_family(theme::ui_font())
             .text_size(px(BASE_FONT_SIZE))
             .line_height(px(LINE_HEIGHT))
-            .text_color(color(theme::TEXT))
+            .text_color(theme::text())
             // The border is always 1px; only its colour changes, so focus
             // never moves the layout.
             .border_b_1()
             .border_color(if focused {
-                color(theme::TEXT)
+                theme::text()
             } else {
-                color(theme::MUTED)
+                theme::muted()
             });
         let el = Self::motion::<Left>(el, cx, |e| e.move_left(false));
         let el = Self::motion::<Right>(el, cx, |e| e.move_right(false));

@@ -21,30 +21,41 @@ const CODE_FALLBACK: &str = "Noto Sans Mono";
 static UI_FAMILY: OnceLock<String> = OnceLock::new();
 static CODE_FAMILY: OnceLock<String> = OnceLock::new();
 
-/// The light palette's values under their old names; other modules still
-/// refer to them, so they are the light palette and `Palette::LIGHT` uses them.
-pub const BACKGROUND: u32 = 0xfa_faf8;
-pub const PANEL: u32 = 0xf5_f5f3;
-pub const TEXT: u32 = 0x1b_1c1e;
-pub const MUTED: u32 = 0x5e_6065;
-pub const SELECTED: u32 = 0xe0_e7fb;
-pub const ERROR: u32 = 0xa3_3a32;
-pub const STAGED: u32 = 0x1e_6b3a;
-pub const UNSTAGED: u32 = 0x7a_4e0b;
-pub const UNTRACKED: u32 = 0x2f_5bea;
-
-/// One full set of colors.
+/// One full set of colors. Every view reads a role through an accessor below,
+/// so a new role is added here for both palettes, never as a literal in a view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
+    /// The window background.
     pub ground: u32,
+    /// Bars and headers that sit above the ground.
     pub panel: u32,
     pub hairline: u32,
     pub hairline_strong: u32,
+    /// Primary text.
     pub text: u32,
+    /// Secondary text: labels, counts, hints.
     pub muted: u32,
+    /// Decorative text, such as the repository root in the status bar.
     pub faint: u32,
+    /// Placeholder text in an empty field.
+    pub placeholder: u32,
+    /// The text caret.
+    pub caret: u32,
+    /// Background of a selected text range.
+    pub selection: u32,
+    /// Line numbers in the diff gutter.
+    pub gutter: u32,
+    /// Text drawn on a solid accent background.
+    pub on_accent: u32,
     pub accent: u32,
+    /// Outline of a button drawn on the diff pane.
+    pub button_border: u32,
+    /// Background of a selected file row.
     pub selected_row: u32,
+    /// Background of the row under the diff cursor.
+    pub cursor_row: u32,
+    /// Background of a hunk header row in the diff pane.
+    pub hunk_header_bg: u32,
     pub added_fg: u32,
     pub added_bg: u32,
     pub removed_fg: u32,
@@ -58,25 +69,33 @@ pub struct Palette {
 }
 
 pub const LIGHT: Palette = Palette {
-    ground: BACKGROUND,
-    panel: PANEL,
+    ground: 0xfa_faf8,
+    panel: 0xf5_f5f3,
     hairline: 0xe6_e6e2,
     hairline_strong: 0xde_deda,
-    text: TEXT,
-    muted: MUTED,
-    faint: 0x8a_8c91,
-    accent: UNTRACKED,
-    selected_row: SELECTED,
-    added_fg: STAGED,
+    text: 0x1b_1c1e,
+    muted: 0x5e_6065,
+    faint: 0x68_6b71,
+    placeholder: 0x5e_6065,
+    caret: 0x1b_1c1e,
+    selection: 0xe0_e7fb,
+    gutter: 0x5e_6065,
+    on_accent: 0xf5_f5f3,
+    accent: 0x2f_5bea,
+    button_border: 0x2f_5bea,
+    selected_row: 0xe0_e7fb,
+    cursor_row: 0xe0_e7fb,
+    hunk_header_bg: 0xf5_f5f3,
+    added_fg: 0x1e_6b3a,
     added_bg: 0xe3_f3e8,
-    removed_fg: ERROR,
+    removed_fg: 0xa3_3a32,
     removed_bg: 0xfb_e8e6,
-    warn_fg: UNSTAGED,
+    warn_fg: 0x7a_4e0b,
     warn_bg: 0xfb_f0d9,
-    staged: STAGED,
-    unstaged: UNSTAGED,
-    untracked: UNTRACKED,
-    error: ERROR,
+    staged: 0x1e_6b3a,
+    unstaged: 0x7a_4e0b,
+    untracked: 0x2f_5bea,
+    error: 0xa3_3a32,
 };
 
 pub const DARK: Palette = Palette {
@@ -85,13 +104,21 @@ pub const DARK: Palette = Palette {
     hairline: 0x2e_3238,
     hairline_strong: 0x3a_3f47,
     text: 0xd7_dae0,
-    muted: 0x8a_919c,
-    faint: 0x6b_7280,
+    muted: 0xa3_abb6,
+    faint: 0x8a_919c,
+    placeholder: 0xa3_abb6,
+    caret: 0xd7_dae0,
+    selection: 0x3b_5b8c,
+    gutter: 0xa3_abb6,
+    on_accent: 0x1b_1d21,
     accent: 0x6c_8cff,
+    button_border: 0x6c_8cff,
     selected_row: 0x2f_3d56,
+    cursor_row: 0x28_3347,
+    hunk_header_bg: 0x23_262b,
     added_fg: 0x98_c379,
     added_bg: 0x1f_3326,
-    removed_fg: 0xe0_6c75,
+    removed_fg: 0xe8_8a92,
     removed_bg: 0x3a_2326,
     warn_fg: 0xe5_c07b,
     warn_bg: 0x3a_311c,
@@ -196,8 +223,16 @@ accessors!(
     text,
     muted,
     faint,
+    placeholder,
+    caret,
+    selection,
+    gutter,
+    on_accent,
     accent,
+    button_border,
     selected_row,
+    cursor_row,
+    hunk_header_bg,
     added_fg,
     added_bg,
     removed_fg,
@@ -281,19 +316,78 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
+    /// The text-on-background pairs the views draw, as (name, text, background).
+    fn text_pairs(p: &Palette) -> Vec<(&'static str, u32, u32)> {
+        vec![
+            ("text on ground", p.text, p.ground),
+            ("text on panel", p.text, p.panel),
+            ("text on selection", p.text, p.selection),
+            ("text on selected row", p.text, p.selected_row),
+            ("text on cursor row", p.text, p.cursor_row),
+            ("text on added line", p.text, p.added_bg),
+            ("text on removed line", p.text, p.removed_bg),
+            ("muted on ground", p.muted, p.ground),
+            ("muted on panel", p.muted, p.panel),
+            ("muted on hunk header", p.muted, p.hunk_header_bg),
+            ("muted on selected row", p.muted, p.selected_row),
+            ("muted on cursor row", p.muted, p.cursor_row),
+            ("muted on added line", p.muted, p.added_bg),
+            ("muted on removed line", p.muted, p.removed_bg),
+            ("muted on warning", p.muted, p.warn_bg),
+            ("placeholder on ground", p.placeholder, p.ground),
+            ("gutter on ground", p.gutter, p.ground),
+            ("gutter on cursor row", p.gutter, p.cursor_row),
+            ("gutter on added line", p.gutter, p.added_bg),
+            ("gutter on removed line", p.gutter, p.removed_bg),
+            ("faint on panel", p.faint, p.panel),
+            ("added text on added line", p.added_fg, p.added_bg),
+            ("added text on cursor row", p.added_fg, p.cursor_row),
+            ("removed text on removed line", p.removed_fg, p.removed_bg),
+            ("removed text on cursor row", p.removed_fg, p.cursor_row),
+            ("removed text on panel", p.removed_fg, p.panel),
+            ("error on panel", p.error, p.panel),
+            ("warning text on warning", p.warn_fg, p.warn_bg),
+            ("warning text on ground", p.warn_fg, p.ground),
+            ("text on accent", p.on_accent, p.accent),
+        ]
+    }
+
     #[test]
-    fn both_palettes_keep_text_and_muted_readable() {
-        for palette in [LIGHT, DARK] {
-            assert!(contrast(palette.text, palette.ground) >= 4.5);
-            assert!(contrast(palette.muted, palette.ground) >= 3.0);
+    fn both_palettes_keep_every_text_pair_at_least_4_5_to_1() {
+        for (name, palette) in [("light", LIGHT), ("dark", DARK)] {
+            for (pair, fg, bg) in text_pairs(&palette) {
+                let ratio = contrast(fg, bg);
+                assert!(ratio >= 4.5, "{name}: {pair} is {ratio:.2}:1");
+            }
         }
     }
 
     #[test]
-    fn the_legacy_names_are_the_light_palette() {
-        assert_eq!(LIGHT.ground, BACKGROUND);
-        assert_eq!(LIGHT.text, TEXT);
-        assert_eq!(LIGHT.error, ERROR);
+    fn non_text_marks_keep_3_to_1() {
+        for (name, p) in [("light", LIGHT), ("dark", DARK)] {
+            for (mark, bg) in [
+                (p.button_border, p.panel),
+                (p.button_border, p.cursor_row),
+                (p.accent, p.panel),
+                (p.caret, p.ground),
+            ] {
+                let ratio = contrast(mark, bg);
+                assert!(
+                    ratio >= 3.0,
+                    "{name}: {mark:06x} on {bg:06x} is {ratio:.2}:1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_dark_diff_ground_is_dark_and_tints_are_the_dark_backgrounds() {
+        assert!(luminance(DARK.ground) < 0.05);
+        assert!(luminance(DARK.panel) < 0.05);
+        assert!(luminance(DARK.added_bg) < 0.05);
+        assert!(luminance(DARK.removed_bg) < 0.05);
+        assert_ne!(DARK.added_bg, LIGHT.added_bg);
+        assert_ne!(DARK.removed_bg, LIGHT.removed_bg);
     }
 
     #[test]

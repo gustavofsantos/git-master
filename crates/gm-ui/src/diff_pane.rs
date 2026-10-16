@@ -7,7 +7,7 @@ use std::ops::Range;
 
 use gm_schema::{FileDiff, LineKind, StageTarget};
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, EventEmitter, FocusHandle, FontWeight, Hsla, IntoElement,
+    AnyElement, ClickEvent, Context, Div, EventEmitter, FocusHandle, FontWeight, IntoElement,
     KeyBinding, Render, ScrollStrategy, UniformListScrollHandle, Window, actions, div, prelude::*,
     px, uniform_list,
 };
@@ -27,58 +27,6 @@ const CONTEXT: &str = "DiffPane";
 const ROW_HEIGHT: f32 = 22.;
 
 const PAIR_WARNING: &str = "Par −/+ staged pela metade: o index ficaria sem a linha antiga e sem a nova, e pode não compilar.";
-
-// Interim colours. theme.rs does not expose the runtime palette yet, so each
-// role is a thin wrapper over an existing token; swap a wrapper's body for the
-// matching `theme::` accessor once it lands.
-
-fn ground() -> Hsla {
-    theme::color(theme::BACKGROUND)
-}
-
-fn panel() -> Hsla {
-    theme::color(theme::PANEL)
-}
-
-fn text() -> Hsla {
-    theme::color(theme::TEXT)
-}
-
-fn muted() -> Hsla {
-    theme::color(theme::MUTED)
-}
-
-fn accent() -> Hsla {
-    theme::color(theme::UNTRACKED)
-}
-
-fn selected_row() -> Hsla {
-    theme::color(theme::SELECTED)
-}
-
-fn added_fg() -> Hsla {
-    theme::color(theme::STAGED)
-}
-
-fn added_bg() -> Hsla {
-    theme::color(theme::STAGED).opacity(0.18)
-}
-
-fn removed_fg() -> Hsla {
-    theme::color(theme::ERROR)
-}
-
-fn removed_bg() -> Hsla {
-    theme::color(theme::ERROR).opacity(0.18)
-}
-
-fn warn_fg() -> Hsla {
-    theme::color(theme::UNSTAGED)
-}
-
-fn warn_bg() -> Hsla {
-    theme::color(theme::UNSTAGED).opacity(0.18)
-}
 
 actions!(
     diff_pane,
@@ -385,9 +333,9 @@ impl DiffPane {
                 .gap_3()
                 .px_3()
                 .py_2()
-                .bg(panel())
+                .bg(theme::panel())
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(path))
-                .child(div().text_color(muted()).child(parts.join(" · "))),
+                .child(div().text_color(theme::muted()).child(parts.join(" · "))),
         )
     }
 
@@ -409,15 +357,15 @@ impl DiffPane {
                 .gap_1()
                 .px_3()
                 .py_2()
-                .bg(warn_bg())
-                .text_color(warn_fg())
+                .bg(theme::warn_bg())
+                .text_color(theme::warn_fg())
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap_2()
-                        .child(icon::view(Icon::Warning, icon::SMALL, warn_fg()))
+                        .child(icon::view(Icon::Warning, icon::SMALL, theme::warn_fg()))
                         .child(PAIR_WARNING),
                 )
                 .children(hint.map(|text| div().child(text))),
@@ -441,9 +389,9 @@ impl DiffPane {
             Side::Staged => "Unstage hunk",
         };
         let background = if ix == self.cursor {
-            selected_row()
+            theme::cursor_row()
         } else {
-            panel()
+            theme::hunk_header_bg()
         };
         div()
             .h(px(ROW_HEIGHT))
@@ -459,12 +407,12 @@ impl DiffPane {
                     .min_w(px(0.))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_color(muted())
+                    .text_color(theme::muted())
                     .child(hunk_header_text(hunk)),
             )
             .child(
                 div()
-                    .text_color(muted())
+                    .text_color(theme::muted())
                     .child(format!("{selected} de {total} linhas")),
             )
             .child(
@@ -475,8 +423,8 @@ impl DiffPane {
                     .items_center()
                     .rounded_sm()
                     .border_1()
-                    .border_color(accent())
-                    .text_color(accent())
+                    .border_color(theme::button_border())
+                    .text_color(theme::text())
                     .cursor_pointer()
                     .child(button)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -502,14 +450,14 @@ impl DiffPane {
             return div().into_any_element();
         };
         let (tint, text_colour, sign) = match line.kind {
-            LineKind::Added => (added_bg(), added_fg(), "+"),
-            LineKind::Removed => (removed_bg(), removed_fg(), "−"),
-            LineKind::Context => (ground(), text(), " "),
+            LineKind::Added => (theme::added_bg(), theme::added_fg(), "+"),
+            LineKind::Removed => (theme::removed_bg(), theme::removed_fg(), "−"),
+            LineKind::Context => (theme::ground(), theme::text(), " "),
         };
         let changed = line.kind != LineKind::Context;
         let selected = self.selection.contains((side, hunk_index, line_index));
         let background = if ix == self.cursor {
-            selected_row()
+            theme::cursor_row()
         } else {
             tint
         };
@@ -518,14 +466,14 @@ impl DiffPane {
                 .w(px(44.))
                 .flex_none()
                 .text_right()
-                .text_color(muted())
+                .text_color(theme::gutter())
                 .child(n.map_or_else(String::new, |n| n.to_string()))
         };
         let checkbox = if changed {
             let mark = if selected {
-                icon::filled(Icon::CheckSquare, icon::SMALL, accent())
+                icon::filled(Icon::CheckSquare, icon::SMALL, theme::accent())
             } else {
-                icon::view(Icon::Square, icon::SMALL, muted())
+                icon::view(Icon::Square, icon::SMALL, theme::muted())
             };
             div()
                 .id(("diff-check", ix))
@@ -576,9 +524,9 @@ impl DiffPane {
                 .flex()
                 .items_center()
                 .px_3()
-                .bg(ground())
+                .bg(theme::ground())
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(muted())
+                .text_color(theme::muted())
                 .child(title)
                 .into_any_element(),
             Some(Row::HunkHeader { side, hunk_index }) => self.hunk_row(ix, side, hunk_index, cx),
@@ -640,7 +588,7 @@ impl Render for DiffPane {
                 .flex_1()
                 .px_3()
                 .py_2()
-                .text_color(muted())
+                .text_color(theme::muted())
                 .child(message)
                 .into_any_element(),
             None => self.list(cx),
@@ -667,8 +615,8 @@ impl Render for DiffPane {
             .size_full()
             .flex()
             .flex_col()
-            .bg(ground())
-            .text_color(text())
+            .bg(theme::ground())
+            .text_color(theme::text())
             .font_family(theme::ui_font())
             .text_sm()
             .children(self.file_header())

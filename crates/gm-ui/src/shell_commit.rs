@@ -23,10 +23,12 @@ impl StatusView {
             muted
         };
         let enabled = staged > 0 && !text.trim().is_empty();
-        let button_colour = if enabled {
-            theme::accent()
+        // Enabled: solid accent with its own text colour. Disabled: the panel
+        // with muted text and an outline, so the label stays readable.
+        let (button_fill, button_text, button_edge) = if enabled {
+            (theme::accent(), theme::on_accent(), theme::accent())
         } else {
-            theme::hairline_strong()
+            (theme::panel(), muted, theme::hairline_strong())
         };
         let button = div()
             .flex()
@@ -36,15 +38,17 @@ impl StatusView {
             .px_3()
             .h(px(26.))
             .rounded_md()
-            .bg(button_colour)
-            .text_color(theme::panel())
+            .border_1()
+            .border_color(button_edge)
+            .bg(button_fill)
+            .text_color(button_text)
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _, cx| this.commit(cx)),
             )
             .child(format!("Commit ({staged})"))
-            .child(div().text_color(theme::panel()).child("⌘↵"));
+            .child(div().child("⌘↵"));
         div()
             .flex()
             .flex_col()

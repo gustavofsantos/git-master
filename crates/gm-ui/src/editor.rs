@@ -69,6 +69,7 @@ impl Editor {
     }
 
     /// An editor holding `text`, with the cursor at the end and no history.
+    #[cfg(test)]
     pub fn from_text(text: &str) -> Editor {
         let text = normalize_newlines(text);
         let end = text.len();
@@ -85,6 +86,7 @@ impl Editor {
     }
 
     /// True when the text holds only whitespace, or nothing at all.
+    #[cfg(test)]
     pub fn is_blank(&self) -> bool {
         self.text.chars().all(char::is_whitespace)
     }
@@ -93,6 +95,7 @@ impl Editor {
         self.text.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }

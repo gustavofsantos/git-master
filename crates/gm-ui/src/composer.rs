@@ -37,15 +37,6 @@ impl Composer {
         self.area.read(cx).text().to_owned()
     }
 
-    pub fn is_empty(&self, cx: &App) -> bool {
-        self.area.read(cx).text().is_empty()
-    }
-
-    /// Replaces the whole message and puts the caret at its end.
-    pub fn set_text(&self, text: &str, cx: &mut Context<Self>) {
-        self.area.update(cx, |area, cx| area.set_text(text, cx));
-    }
-
     pub fn clear(&self, cx: &mut Context<Self>) {
         self.area.update(cx, TextArea::clear);
     }

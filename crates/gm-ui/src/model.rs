@@ -9,6 +9,7 @@ use gm_schema::{
 };
 
 use crate::changes::{ChangeTree, Row, Summary, ToggleAction};
+use crate::icon::Icon;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Model {
@@ -27,6 +28,8 @@ pub struct Model {
     pub error: Option<String>,
     /// A transient line: a commit made, or a reason a commit did not start.
     pub notice: Option<String>,
+    /// The icon drawn before the notice, if it has one.
+    pub notice_icon: Option<Icon>,
     notice_generation: u64,
     pub loading: bool,
 }
@@ -103,6 +106,7 @@ impl Model {
             Event::Committed { oid, .. } => {
                 let short: String = oid.chars().take(7).collect();
                 self.set_notice(format!("Committed {short}"));
+                self.notice_icon = Some(Icon::CheckCircle);
                 None
             }
             Event::OperationChanged { .. } => None,
@@ -157,6 +161,7 @@ impl Model {
     /// Shows `text` on the notice line. Returns a generation for `expire_notice`.
     pub fn set_notice(&mut self, text: String) -> u64 {
         self.notice = Some(text);
+        self.notice_icon = None;
         self.notice_generation += 1;
         self.notice_generation
     }
@@ -165,6 +170,7 @@ impl Model {
     pub fn expire_notice(&mut self, generation: u64) {
         if self.notice_generation == generation {
             self.notice = None;
+            self.notice_icon = None;
         }
     }
 

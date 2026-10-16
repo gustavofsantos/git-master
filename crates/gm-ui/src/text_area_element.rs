@@ -8,9 +8,9 @@ use std::rc::Rc;
 
 use gpui::{
     App, AvailableSpace, Bounds, Corners, Element, ElementId, ElementInputHandler, Entity,
-    Focusable, Font, GlobalElementId, Hsla, IntoElement, LayoutId, PaintQuad, Pixels, Rgba,
-    SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle, Window, WrappedLine, fill,
-    point, px, relative, rgb, size,
+    Focusable, Font, GlobalElementId, Hsla, IntoElement, LayoutId, PaintQuad, Pixels, SharedString,
+    Size, Style, TextAlign, TextRun, UnderlineStyle, Window, WrappedLine, fill, point, px,
+    relative, size,
 };
 
 use crate::text_area::{LINE_HEIGHT, TextArea};
@@ -18,7 +18,7 @@ use crate::text_area_math::{
     LogicalSpan, VisualLine, build_visual_lines, clamp_scroll, row_for_offset, rows_height,
     scroll_to_caret, selection_segments, visible_rows,
 };
-use crate::theme::{self, color};
+use crate::theme;
 
 /// Room kept at the right edge so a caret after the last glyph of a full row
 /// is not clipped.
@@ -26,8 +26,8 @@ const CARET_WIDTH: f32 = 2.;
 /// Extra highlight past the end of a selected row, for its newline.
 const NEWLINE_WIDTH: f32 = 6.;
 
-fn selection_color() -> Rgba {
-    rgb(theme::SELECTED)
+fn selection_color() -> Hsla {
+    theme::selection()
 }
 
 /// The font the text is shaped with, read from the inherited text style.
@@ -290,12 +290,12 @@ impl Element for TextAreaElement {
         let face = Face::current(window);
         let wrap = Some(wrap_width(bounds.size.width));
         let lines = face
-            .shape(window, &text, wrap, color(theme::TEXT), marked.as_ref())
+            .shape(window, &text, wrap, theme::text(), marked.as_ref())
             .unwrap_or_default();
         let shaped = Rc::new(Shaped::new(text.clone(), lines));
 
         let placeholder_lines = if text.is_empty() {
-            face.shape(window, &placeholder, wrap, color(theme::MUTED), None)
+            face.shape(window, &placeholder, wrap, theme::placeholder(), None)
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -342,7 +342,7 @@ impl Element for TextAreaElement {
                     point(origin.x + px(x), row_top(cursor_row) + px(2.)),
                     size(px(CARET_WIDTH), px(LINE_HEIGHT - 4.)),
                 ),
-                color(theme::TEXT),
+                theme::caret(),
             )
         });
 

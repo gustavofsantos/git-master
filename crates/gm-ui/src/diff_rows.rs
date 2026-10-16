@@ -216,10 +216,12 @@ impl Selection {
         self.keys.contains(&key)
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.keys.len()
     }
@@ -239,7 +241,8 @@ impl Selection {
     }
 
     /// Selects every changed line of the hunk, or deselects them all when
-    /// they are all selected already.
+    /// they are all selected already. Only the tests drive it for now.
+    #[cfg(test)]
     pub fn toggle_hunk(&mut self, diffs: Diffs<'_>, side: Side, hunk_index: usize) {
         let keys = changed_keys_of_hunk(diffs, side, hunk_index);
         if keys.is_empty() {

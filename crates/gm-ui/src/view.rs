@@ -7,8 +7,8 @@ use std::time::Duration;
 use gm_core::EngineHandle;
 use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff, StageTarget};
 use gpui::{
-    Context, Div, Entity, FocusHandle, Focusable, FontWeight, Render, Subscription,
-    UniformListScrollHandle, Window, div, prelude::*, px,
+    Context, Div, Entity, FocusHandle, Focusable, FontWeight, MouseButton, MouseDownEvent, Render,
+    Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
 };
 
 use crate::changes::ToggleAction;
@@ -330,7 +330,7 @@ impl StatusView {
         cx.notify();
     }
 
-    fn top_bar(&self) -> Div {
+    fn top_bar(&self, cx: &Context<Self>) -> Div {
         let muted = theme::muted();
         let (branch, upstream, ahead, behind) = match self.model.status() {
             Some(status) => (
@@ -346,6 +346,22 @@ impl StatusView {
             None => (String::new(), String::new(), 0, 0),
         };
         let loading = if self.model.loading { "Loading…" } else { "" };
+        // Same action as the `r` key: the refresh command, through `refresh`.
+        let refresh = div()
+            .id("top-refresh")
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(26.))
+            .rounded_sm()
+            .cursor_pointer()
+            .text_color(muted)
+            .hover(|style| style.bg(theme::selected_row()))
+            .child(icon::view(Icon::ArrowClockwise, icon::SIZE, muted))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.refresh(cx)),
+            );
         div()
             .h(px(36.))
             .px_4()
@@ -377,6 +393,7 @@ impl StatusView {
             .child(div().text_color(muted).child(upstream))
             .child(div().flex_1())
             .child(div().text_color(muted).child(loading))
+            .child(refresh)
     }
 
     fn status_bar(&self) -> Div {
@@ -395,6 +412,10 @@ impl StatusView {
             (Some(error), _) => (error.clone(), theme::removed_fg(), theme::removed_bg()),
             (None, Some(notice)) => (notice.clone(), theme::warn_fg(), theme::warn_bg()),
             (None, None) => (String::new(), muted, theme::panel()),
+        };
+        let notice_icon = match &self.model.error {
+            None => self.model.notice_icon,
+            Some(_) => None,
         };
         div()
             .h(px(26.))
@@ -420,6 +441,11 @@ impl StatusView {
                     .rounded_sm()
                     .bg(tint)
                     .text_color(colour)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .children(notice_icon.map(|icon| icon::view(icon, icon::SMALL, colour)))
                     .child(message),
             )
     }
@@ -441,7 +467,7 @@ impl Render for StatusView {
             .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
                 this.cycle_focus(false, window, cx);
             }))
-            .child(self.top_bar())
+            .child(self.top_bar(cx))
             .child(
                 div()
                     .flex_1()
