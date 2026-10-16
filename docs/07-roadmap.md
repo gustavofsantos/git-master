@@ -13,7 +13,7 @@
 
 Objetivo: validar o que pode invalidar o desenho.
 
-- Spike A: lista virtualizada do GPUI com 100 mil linhas e renderização de texto de diff.
+- Spike A: descartado pelo autor em 2026-10-16 (lista virtualizada do GPUI com 100 mil linhas).
 - Spike B: texto editável no GPUI (painel de resultado do resolvedor); avaliar bibliotecas e licenças (Q7).
 - Spike C: rebase in-memory do libgit2 (cobertura) e `git merge-tree --write-tree`; comparar com gitoxide (Q6).
 - Spike D: status em repositório massivo via subprocess com fsmonitor.
