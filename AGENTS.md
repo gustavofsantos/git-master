@@ -4,7 +4,7 @@ Native desktop Git client in Rust + GPUI, open source, sold as a premium product
 
 ## State
 
-Design phase done, code not started. The repository holds the design documents only.
+Slice 0 skeleton exists (`crates/`: `gm-schema`, `gm-core`, `gm-ui`, `gm-mcp`, `gitmaster`). Spikes A-D not done. `make check` is the gate; `make run ARGS=<repo>` opens the window.
 
 - Read `docs/README.md`, then `docs/00-visao-e-principios.md` and `docs/01-decisoes-e-questoes-abertas.md`.
 - `docs/06-arquitetura.md` and `docs/07-roadmap.md` say what to build first (slice 0).

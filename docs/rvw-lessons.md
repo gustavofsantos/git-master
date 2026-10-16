@@ -44,7 +44,7 @@ Source: `~/Projects/rvw` (Rust + GPUI review hub by the same author). Read on 20
 - Build outside `/tmp` (per-user quota filled and tests failed with `Disk quota exceeded`).
 - With no display, say plainly that nothing was seen in a window.
 
-## Slice 0 bootstrap plan (not started)
+## Slice 0 bootstrap plan (skeleton built 2026-10-16; spikes A-D and the choices below still to confirm)
 
 State: this repository has no commits besides these docs. Nothing in `crates/` exists yet.
 
