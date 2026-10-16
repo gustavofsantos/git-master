@@ -1,0 +1,6 @@
+# rustup reads this: every cargo/rustc/clippy/rustfmt call in the repo uses the
+# latest stable, whatever the distro rustc on PATH is.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

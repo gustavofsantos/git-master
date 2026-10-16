@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/gm-schema", "crates/gm-core", "crates/gm-ui", "crates/gm-mcp", "crates/gitmaster"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+# Checked in CI for the non-GUI crates (see .github/workflows/ci.yml).
+rust-version = "1.99"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+async-channel = "2"
+proptest = "1"
+tempfile = "3"
+gm-schema = { path = "crates/gm-schema" }
+gm-core = { path = "crates/gm-core" }
+gm-ui = { path = "crates/gm-ui" }
+gm-mcp = { path = "crates/gm-mcp" }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"   # fallible fns return the crate's one documented error type
+must_use_candidate = "allow"   # noisy on query helpers
+assert_is_empty = "allow"      # assert!(x.is_empty()) reads fine in tests
