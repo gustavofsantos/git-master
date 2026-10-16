@@ -16,6 +16,7 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::icon::{self, Icon};
 use crate::model::Model;
+use crate::resize;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
 use crate::window_chrome;
@@ -36,6 +37,10 @@ pub struct StatusView {
     pub(crate) filter: Entity<TextArea>,
     pub(crate) composer: Entity<Composer>,
     pub(crate) diff_pane: Entity<DiffPane>,
+    /// The left column's width, in logical pixels, as the user dragged it.
+    pub(crate) left_width: f32,
+    /// The commit message box's height, in logical pixels, as dragged.
+    pub(crate) commit_height: f32,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -100,6 +105,8 @@ impl StatusView {
             filter,
             composer,
             diff_pane,
+            left_width: resize::LEFT_DEFAULT,
+            commit_height: resize::COMMIT_DEFAULT,
             _subscriptions: subscriptions,
         }
     }
@@ -459,6 +466,11 @@ impl Render for StatusView {
         // server decorations the title bar is the compositor's.
         let title_bar =
             window_chrome::draws_frame(window).then(|| window_chrome::title_bar(window));
+        // The stored sizes are clamped again here, because a window resized
+        // after a drag may have moved the limits.
+        let viewport = window.viewport_size();
+        let left_width = resize::LEFT.clamp(self.left_width, f32::from(viewport.width));
+        let commit_height = resize::COMMIT.clamp(self.commit_height, f32::from(viewport.height));
         div()
             .size_full()
             .relative()
@@ -482,7 +494,7 @@ impl Render for StatusView {
                     .min_h(px(0.))
                     .flex()
                     .flex_row()
-                    .child(self.left_column(cx))
+                    .child(self.left_column(left_width, commit_height, cx))
                     .child(
                         div()
                             .flex_1()

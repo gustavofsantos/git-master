@@ -10,6 +10,8 @@ mod diff_rows;
 mod editor;
 mod icon;
 mod model;
+mod resize;
+mod resize_handle;
 mod shell_commit;
 mod shell_list;
 mod text_area;

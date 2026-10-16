@@ -31,7 +31,7 @@ ROW_HANDLERS_Y=407                          # api/handlers.rs (untracked)
 ROW_MOD_Y=455                               # src/ledger/mod.rs
 ROW_TOTAL_Y=479                             # src/ledger/total.rs
 LIST_EMPTY_X=300; LIST_EMPTY_Y=650          # empty list area, takes list focus
-DIFF_CHECK_X=667                            # gutter checkbox in the diff pane
+DIFF_CHECK_X=601                            # gutter checkbox in the diff pane
 DIFF_LINE_A_Y=224                           # first pure-insertion row in total.rs
 DIFF_LINE_B_Y=312                           # second pure-insertion row in total.rs
 COMPOSER_X=300; COMPOSER_Y=255              # commit message box

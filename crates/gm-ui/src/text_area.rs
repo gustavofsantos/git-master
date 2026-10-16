@@ -339,6 +339,7 @@ impl Render for TextArea {
             .flex()
             .flex_col()
             .w_full()
+            .h_full()
             .px(px(10.))
             .py(px(8.))
             .key_context(KEY_CONTEXT)
@@ -406,6 +407,7 @@ impl Render for TextArea {
             .child(
                 div()
                     .w_full()
+                    .h_full()
                     .overflow_hidden()
                     .child(TextAreaElement { area: cx.entity() }),
             )

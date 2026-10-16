@@ -249,8 +249,11 @@ impl Element for TextAreaElement {
         let (min, max) = area.line_limits();
         let face = Face::current(window);
 
+        // Full width and full height of the owner. A filter line has no
+        // definite height, so there the height is the measured one.
         let mut style = Style::default();
         style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
         let layout = window.request_measured_layout(
             style,
             move |known, available, window, _cx| -> Size<Pixels> {

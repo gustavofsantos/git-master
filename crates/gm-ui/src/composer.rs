@@ -21,14 +21,15 @@ pub enum ComposerEvent {
     CommitRequested,
 }
 
-/// The commit message box: a text area with 3 to 12 rows.
+/// The commit message box. It fills the height its owner gives it and
+/// scrolls its text inside that height.
 pub struct Composer {
     area: Entity<TextArea>,
 }
 
 impl Composer {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let area = cx.new(|cx| TextArea::new("Commit message", cx).with_lines(3, 12));
+        let area = cx.new(|cx| TextArea::new("Commit message", cx));
         Self { area }
     }
 

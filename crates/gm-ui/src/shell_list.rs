@@ -12,6 +12,8 @@ use gpui::{
 use crate::changes::{Check, Row};
 use crate::icon::{self, Icon};
 use crate::model::entry_label;
+use crate::resize::{self, LEFT};
+use crate::resize_handle::{self, Edge};
 use crate::theme;
 use crate::view::{KEY_CONTEXT, StatusView};
 use crate::{FocusFilter, Refresh, SelectNext, SelectPrev, ToggleStage};
@@ -19,10 +21,27 @@ use crate::{FocusFilter, Refresh, SelectNext, SelectPrev, ToggleStage};
 const ROW_HEIGHT: f32 = 24.;
 
 impl StatusView {
-    pub(crate) fn left_column(&self, cx: &Context<Self>) -> Div {
+    /// The left column at `width`, with its commit box `commit_height` tall.
+    /// Its right edge and the commit box's bottom edge are the two strips.
+    pub(crate) fn left_column(
+        &self,
+        width: f32,
+        commit_height: f32,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let width_strip = resize_handle::handle(
+            "left-column-resize",
+            Edge::Right,
+            width,
+            LEFT,
+            |this: &mut StatusView, width, _| this.left_width = width,
+            |this: &mut StatusView, _| this.left_width = resize::LEFT_DEFAULT,
+            cx,
+        );
         div()
-            .w(gpui::relative(0.38))
-            .flex_shrink_0()
+            .relative()
+            .w(px(width))
+            .flex_none()
             .h_full()
             .min_h(px(0.))
             .flex()
@@ -31,8 +50,9 @@ impl StatusView {
             .border_color(theme::hairline())
             .child(self.heading())
             .child(self.filter_line())
-            .child(self.commit_block(cx))
+            .child(self.commit_block(commit_height, cx))
             .child(self.change_list(cx))
+            .child(width_strip)
     }
 
     fn heading(&self) -> Div {

@@ -4,6 +4,8 @@
 use gpui::{Context, Div, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*, px};
 
 use crate::composer;
+use crate::resize::{self, COMMIT};
+use crate::resize_handle::{self, Edge};
 use crate::theme;
 use crate::view::StatusView;
 
@@ -11,7 +13,9 @@ use crate::view::StatusView;
 const SUBJECT_LIMIT: usize = 72;
 
 impl StatusView {
-    pub(crate) fn commit_block(&self, cx: &Context<Self>) -> Div {
+    /// The commit box, with its message box `height` tall. Its bottom edge is
+    /// the strip that resizes the message box.
+    pub(crate) fn commit_block(&self, height: f32, cx: &mut Context<Self>) -> Div {
         let muted = theme::muted();
         let text = self.composer.read(cx).text(cx);
         let subject = composer::subject_len(&text);
@@ -49,7 +53,17 @@ impl StatusView {
             )
             .child(format!("Commit ({staged})"))
             .child(div().child("⌘↵"));
+        let height_strip = resize_handle::handle(
+            "commit-height-resize",
+            Edge::Bottom,
+            height,
+            COMMIT,
+            |this: &mut StatusView, height, _| this.commit_height = height,
+            |this: &mut StatusView, _| this.commit_height = resize::COMMIT_DEFAULT,
+            cx,
+        );
         div()
+            .relative()
             .flex()
             .flex_col()
             .gap_2()
@@ -75,6 +89,7 @@ impl StatusView {
             // in which the counter and hint are read again.
             .child(
                 div()
+                    .h(px(height))
                     .capture_key_down(cx.listener(|_, _: &KeyDownEvent, _, cx| cx.notify()))
                     .child(self.composer.clone()),
             )
@@ -100,5 +115,6 @@ impl StatusView {
                     )
                     .child(button),
             )
+            .child(height_strip)
     }
 }
