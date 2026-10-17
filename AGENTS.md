@@ -4,7 +4,7 @@ Native desktop Git client in Rust + GPUI, open source, sold as a premium product
 
 ## State
 
-Slices 0, 1, 1b and 2 are done. Slice 1c is done except the commit and stash context menus, which wait on slice 3 (History) and the Stashes page (Working Copy, action registry, branch and file context menus, command palette, automatic refresh, title bar and Worktrees done; W7 deferred to slice 7). Slice 2 is fully done: the `prepare-commit` hook runs from the composer (chip, cancel, suggestion with Replace and Discard, approval of repository hooks) and its runs show in the command log.
+Slices 0, 1, 1b and 2 are done. Slice 3 (history) is in progress: H1 (the commit list of HEAD) and H2 (paging, refresh on repository change, selection by id) are done; H3 to H8 are open. Slice 1c is done except the commit and stash context menus, which wait on slice 3 (History) and the Stashes page (Working Copy, action registry, branch and file context menus, command palette, automatic refresh, title bar and Worktrees done; W7 deferred to slice 7). Slice 2 is fully done: the `prepare-commit` hook runs from the composer (chip, cancel, suggestion with Replace and Discard, approval of repository hooks) and its runs show in the command log.
 
 - The design canvas (mockups, identity boards) is linked in `docs/README.md`.
 - Read `docs/README.md`, then `docs/00-visao-e-principios.md` and `docs/01-decisoes-e-questoes-abertas.md`.

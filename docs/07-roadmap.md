@@ -141,7 +141,7 @@ Lacunas:
 
 Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem travar a UI, e o `pre-commit` nativo segue rodando como antes.
 
-## Fatia 3: histórico e branches (visão por nome) (em andamento: H1 feita)
+## Fatia 3: histórico e branches (visão por nome) (em andamento: H1 e H2 feitas)
 
 Ordem definida pelo autor em 2026-10-16: esta fatia, junto com a visão de diff (abaixo), é o próximo trabalho depois de terminar a 1c (incluindo a atualização automática) e a interface da fatia 2. Decisões do autor de 2026-10-17 em D32 a D37 (`01`); a fatia é dividida em sub-fatias H1 a H8, cada uma com o próprio "pronto quando". A leitura do histórico é `git log` como subprocess, sem escrever commit-graph (D32).
 
@@ -152,7 +152,13 @@ Ordem definida pelo autor em 2026-10-16: esta fatia, junto com a visão de diff 
   - Comando de leitura, sem registro no log de comandos (D28, D33).
   - Pronto quando: a página lista os commits reais de HEAD em repositório linear, com merge, root, HEAD sem commits, HEAD destacado e assunto em Unicode (testes com Git real), e o cenário `h-history` do smoke passa nos dois temas.
   - Lacunas: o chip não distingue ref local de remota (o `%D` do Git não diz); a lista não atualiza sozinha quando o repositório muda, só ao abrir a página (H2); sem paginação além dos 200; a saída de `git log` é lida de uma vez, sem streaming (D32, H2); sem seleção; "Show History" não tem atalho de teclado; a leitura de HEAD destacado e sem commits tem teste com Git real, mas o smoke só cobre o caso com commits; a lista usa a ordem padrão do Git (por data), não `--topo-order` (H5); o tempo relativo usa a data do autor e é calculado na hora de desenhar.
-- **H2, paginação e atualização.** `git log` como processo filho que faz streaming, paginação por chave (keyset), atualização em `RepoChanged`, seleção por oid.
+- **H2, paginação e atualização** (feita).
+  - Páginas de 200 commits. Ao rolar perto do fim, a página seguinte é pedida a partir do último commit listado (cursor por oid). O `git log --topo-order` lido em streaming segue de onde parou, sem `--skip`; se o cursor não bate com a leitura em andamento, o processo recomeça e lê até o cursor.
+  - Atualização: cada atualização de status do watcher (que segue HEAD e refs) relê o topo enquanto a página está aberta; um commit feito fora do app entra no topo.
+  - Seleção por oid: um clique seleciona e destaca a linha; a seleção sobrevive às atualizações da lista.
+  - Leitura em thread própria, sem bloquear a UI. A resposta de um pedido superado é descartada pelo `OperationId`; o processo git é parado quando o pedido é superado ou o repositório é trocado. Nada é escrito no commit-graph nem registrado no log de comandos (D28).
+  - Pronto quando: um repositório de 5 mil commits, com merges e gerado com `git fast-import`, lista página a página exatamente o que `git rev-list --topo-order HEAD` lista, sem repetição nem buraco; um commit externo entra no topo com a seleção mantida; a resposta de um pedido superado é descartada (teste de engine); o cenário `h-history` do smoke passa nos dois temas, junto com `g-switch-branch`.
+  - Lacunas: a atualização relê só a primeira página (200), então as linhas além dela voltam ao rolar; cada atualização de status relê o topo, inclusive quando só o working tree mudou, porque o status não diz o que mudou; a seleção não tem detalhe (H3); "Show History" segue sem atalho de teclado (nenhuma tecla livre e sensata no registro); a paginação ao rolar tem teste de modelo e de engine, mas não tem teste de interface nem de smoke com 5 mil commits (o gate de desempenho é H8).
 - **H3, detalhe do commit.** Somente leitura; em merge, compara com o primeiro pai.
 - **H4, diff somente leitura de um commit.** Espelha a visão de diff da Working Copy, sem botões de stage nem de chunk. O autor pode trazer a prancha depois. Não reaproveitar o `diff_pane` por enquanto.
 - **H5, grafo com lanes.** Layout puro e determinístico, com `--topo-order`; cor da lane pelo hash do nome da branch (D36, D25).
