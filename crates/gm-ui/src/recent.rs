@@ -174,12 +174,6 @@ mod tests {
         PathBuf::from(format!("/repos/{name}"))
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("gm-recent-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        dir
-    }
-
     #[test]
     fn push_puts_the_newest_first() {
         let mut recents = Recents::default();
@@ -282,25 +276,25 @@ mod tests {
 
     #[test]
     fn a_missing_file_loads_as_empty() {
-        let store = Store::new(scratch("missing").join("recent.json"));
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("recent.json"));
         assert_eq!(store.load(), Recents::default());
     }
 
     #[test]
     fn a_corrupt_file_on_disk_loads_as_empty() {
-        let dir = scratch("corrupt");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("recent.json"), "[[[").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("recent.json"), "[[[").unwrap();
         assert_eq!(
-            Store::new(dir.join("recent.json")).load(),
+            Store::new(dir.path().join("recent.json")).load(),
             Recents::default()
         );
     }
 
     #[test]
     fn save_creates_the_directory_and_loads_back() {
-        let dir = scratch("save");
-        let store = Store::new(dir.join("nested").join("recent.json"));
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("nested").join("recent.json"));
         let mut recents = Recents::default();
         recents.push(p("a"));
         store.save(&recents, 1).unwrap();
@@ -310,8 +304,8 @@ mod tests {
 
     #[test]
     fn an_older_save_does_not_replace_a_newer_one() {
-        let dir = scratch("order");
-        let store = Store::new(dir.join("recent.json"));
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("recent.json"));
         let mut newer = Recents::default();
         newer.push(p("new"));
         let mut older = Recents::default();

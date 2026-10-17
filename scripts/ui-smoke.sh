@@ -69,6 +69,12 @@ cleanup() {
     wait "$XPID" 2>/dev/null || true
     XPID=""
   fi
+  # The per-run fixture repos are scratch. Screenshots live in $SMOKE_OUT and
+  # stay; the rest of ~/.cache/gm-spikes is not touched.
+  case "$SMOKE_OUT/" in
+    "$RUN_ROOT"/*) ;;
+    *) rm -rf "$RUN_ROOT" ;;
+  esac
 }
 trap cleanup EXIT
 

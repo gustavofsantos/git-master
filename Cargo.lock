@@ -2157,6 +2157,7 @@ dependencies = [
  "gm-schema",
  "gpui",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

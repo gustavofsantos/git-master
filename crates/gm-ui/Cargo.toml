@@ -18,3 +18,6 @@ gpui = "0.2"
 # a full Xcode has. Compiled at startup instead, the Command Line Tools suffice.
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui = { version = "0.2", features = ["runtime_shaders"] }
+
+[dev-dependencies]
+tempfile.workspace = true
