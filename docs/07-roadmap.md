@@ -141,17 +141,17 @@ Lacunas:
 
 Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem travar a UI, e o `pre-commit` nativo segue rodando como antes.
 
-## Fatia 3: histórico e branches (visão por nome) (a fazer; H1 em curso)
+## Fatia 3: histórico e branches (visão por nome) (em andamento: H1 feita)
 
 Ordem definida pelo autor em 2026-10-16: esta fatia, junto com a visão de diff (abaixo), é o próximo trabalho depois de terminar a 1c (incluindo a atualização automática) e a interface da fatia 2. Decisões do autor de 2026-10-17 em D32 a D37 (`01`); a fatia é dividida em sub-fatias H1 a H8, cada uma com o próprio "pronto quando". A leitura do histórico é `git log` como subprocess, sem escrever commit-graph (D32).
 
-- **H1, lista real de commits** (a fazer).
+- **H1, lista real de commits** (feita).
   - Lista plana do histórico de HEAD, os primeiros 200 commits, linhas de 48 px: chips de ref (HEAD, branches, tags), assunto, hash curto e tempo relativo.
   - HEAD sem commits mostra uma mensagem na página, em vez de lista vazia.
   - Ação de navegação "Show History" no registro; a sidebar abre a página.
   - Comando de leitura, sem registro no log de comandos (D28, D33).
   - Pronto quando: a página lista os commits reais de HEAD em repositório linear, com merge, root, HEAD sem commits, HEAD destacado e assunto em Unicode (testes com Git real), e o cenário `h-history` do smoke passa nos dois temas.
-  - Lacunas: o chip não distingue ref local de remota (o `%D` do Git não diz); a lista não atualiza sozinha quando o repositório muda (H2); sem paginação além dos 200; sem seleção.
+  - Lacunas: o chip não distingue ref local de remota (o `%D` do Git não diz); a lista não atualiza sozinha quando o repositório muda, só ao abrir a página (H2); sem paginação além dos 200; a saída de `git log` é lida de uma vez, sem streaming (D32, H2); sem seleção; "Show History" não tem atalho de teclado; a leitura de HEAD destacado e sem commits tem teste com Git real, mas o smoke só cobre o caso com commits; a lista usa a ordem padrão do Git (por data), não `--topo-order` (H5); o tempo relativo usa a data do autor e é calculado na hora de desenhar.
 - **H2, paginação e atualização.** `git log` como processo filho que faz streaming, paginação por chave (keyset), atualização em `RepoChanged`, seleção por oid.
 - **H3, detalhe do commit.** Somente leitura; em merge, compara com o primeiro pai.
 - **H4, diff somente leitura de um commit.** Espelha a visão de diff da Working Copy, sem botões de stage nem de chunk. O autor pode trazer a prancha depois. Não reaproveitar o `diff_pane` por enquanto.
