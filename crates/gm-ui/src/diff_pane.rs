@@ -834,7 +834,8 @@ impl DiffPane {
                         .items_center()
                         .gap_2()
                         .child(icon::view(Icon::Warning, icon::SMALL, theme::warn_fg()))
-                        .child(PAIR_WARNING),
+                        // A flexible box lets the text wrap inside the pane's width.
+                        .child(div().flex_1().min_w(px(0.)).child(PAIR_WARNING)),
                 )
                 .children(hint.map(|text| div().child(text))),
         )
