@@ -67,7 +67,7 @@ Ordem: log de comandos, depois trocar de branch, depois trocar de projeto. O log
 
 Pronto quando: troca de projeto e de branch sem sair do app, todo comando Git executado é inspecionável no painel, e abrir o app sem projeto leva a uma tela que explica o que fazer em vez de uma janela vazia.
 
-## Fatia 1c: Working Copy simples, menus contextuais e paleta de comandos (em andamento)
+## Fatia 1c: Working Copy simples, menus contextuais e paleta de comandos (feita, exceto os menus de commit e stash)
 
 Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu de contexto de branch; paleta de comandos). Vem antes de a fatia 2 ganhar interface, porque o composer e os chips dela moram na tela simplificada.
 
