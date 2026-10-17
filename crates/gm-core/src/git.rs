@@ -13,7 +13,7 @@ use gm_schema::{
     RepoStatus, StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
 };
 
-use crate::command_log::{CommandLog, CommandRecord, bounded_text};
+use crate::command_log::{CommandLog, CommandRecord, Source, bounded_text};
 use crate::diff::{hunk_patch, parse_unified};
 use crate::hook::ConfigValue;
 use crate::stage_math;
@@ -87,6 +87,7 @@ impl SubprocessGit {
             .map_err(|e| GitError(format!("cannot run git: {e}")))?;
         if let Some(log) = &self.log {
             log.record(CommandRecord {
+                source: Source::Git,
                 program: "git".to_owned(),
                 dir: command
                     .get_current_dir()
@@ -226,6 +227,10 @@ impl SubprocessGit {
 impl GitPort for SubprocessGit {
     fn login_path(&self) -> Arc<OnceLock<String>> {
         Arc::clone(&self.login_path)
+    }
+
+    fn command_log(&self) -> Option<CommandLog> {
+        self.log.clone()
     }
 
     fn resolve_root(&self, path: &Path) -> Result<PathBuf, GitError> {

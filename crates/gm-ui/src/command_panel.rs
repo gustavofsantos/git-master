@@ -2,7 +2,7 @@
 //! the git commands that changed the repository, each with its result and
 //! git's own output. Failures are red; a hook's report shows in full.
 
-use gm_core::command_log::CommandRecord;
+use gm_core::command_log::{CommandRecord, Source};
 use gpui::{Context, Div, FontWeight, MouseButton, MouseDownEvent, Stateful, div, prelude::*, px};
 
 use crate::icon::{self, Icon};
@@ -17,6 +17,9 @@ const STATUS_BAR_HEIGHT: f32 = 26.;
 
 /// How a record ended, then git's own words.
 fn detail(record: &CommandRecord) -> Vec<String> {
+    if let Source::Hook { outcome, .. } = &record.source {
+        return vec![format!("{outcome}, {} ms", record.took.as_millis())];
+    }
     let ended = match record.code {
         Some(0) => "ok".to_owned(),
         Some(code) => format!("exit {code}"),
@@ -128,10 +131,9 @@ impl StatusView {
                 .children(lines)
         });
         let body = if skipped == 0 && self.command_log.entries().is_empty() {
-            div()
-                .p_3()
-                .text_color(theme::muted())
-                .child("No commands yet. Staging, unstaging and committing show up here.")
+            div().p_3().text_color(theme::muted()).child(
+                "No commands yet. Staging, unstaging, committing and hook runs show up here.",
+            )
         } else {
             div().size_full().min_h(px(0.)).child(
                 div()
@@ -191,5 +193,40 @@ impl StatusView {
                     .child(close),
             )
             .child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use super::*;
+
+    fn hook(outcome: &str, code: Option<i32>) -> CommandRecord {
+        CommandRecord {
+            source: Source::Hook {
+                name: "llm".into(),
+                outcome: outcome.into(),
+            },
+            program: "sh".into(),
+            dir: PathBuf::from("/w"),
+            args: vec!["suggest".into()],
+            code,
+            stdout_bytes: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            took: Duration::from_millis(42),
+        }
+    }
+
+    #[test]
+    fn a_hook_step_says_how_it_ended_and_how_long_it_took() {
+        assert_eq!(detail(&hook("ok", Some(0))), ["ok, 42 ms"]);
+        assert_eq!(detail(&hook("exit 2", Some(2))), ["exit 2, 42 ms"]);
+        assert_eq!(
+            detail(&hook("timed out after 30000 ms", None)),
+            ["timed out after 30000 ms, 42 ms"]
+        );
     }
 }

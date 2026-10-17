@@ -6,6 +6,7 @@ use gm_schema::{
     WorktreeEntry, WorktreeMode,
 };
 
+use crate::command_log::CommandLog;
 use crate::hook::ConfigValue;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,5 +155,11 @@ pub trait GitPort: Send {
     /// until it is read; an adapter without one keeps the process's PATH.
     fn login_path(&self) -> Arc<OnceLock<String>> {
         Arc::default()
+    }
+
+    /// The log that hook steps and git writes are recorded in, when the
+    /// adapter keeps one. Reads are never recorded.
+    fn command_log(&self) -> Option<CommandLog> {
+        None
     }
 }

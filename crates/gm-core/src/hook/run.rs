@@ -16,6 +16,8 @@ use gm_schema::{
     PREPARE_COMMIT,
 };
 
+use crate::command_log::{CommandLog, CommandRecord, Source};
+
 /// Staged diffs above this size go to a temporary file (docs/03).
 pub const INLINE_DIFF_LIMIT: usize = 64 * 1024;
 
@@ -48,6 +50,8 @@ pub struct Plan {
     pub login_path: Arc<OnceLock<String>>,
     /// Set by `CancelHook`; the running step is killed and the run ends cancelled.
     pub cancel: Arc<AtomicBool>,
+    /// Where each step that ends is recorded, when the adapter keeps a log.
+    pub log: Option<CommandLog>,
 }
 
 /// What a run tells the engine, in order.
@@ -141,6 +145,12 @@ impl Plan {
         self.execute_steps(&mut reporter);
     }
 
+    fn record(&self, step: &Step, started: Instant, result: &Result<String, StepError>) {
+        if let Some(log) = &self.log {
+            log.record(step_record(&self.root, step, started.elapsed(), result));
+        }
+    }
+
     fn execute_steps<F: FnMut(Report)>(self, reporter: &mut Reporter<F>) {
         let of = u32::try_from(self.steps.len()).unwrap_or(u32::MAX);
         // Held until the chain ends, then deleted.
@@ -203,14 +213,17 @@ impl Plan {
                 input: payload,
             };
             let json = serde_json::to_vec(&input).unwrap_or_default();
-            match run_step(
+            let started = Instant::now();
+            let result = run_step(
                 step,
                 &invocation_id,
                 &json,
                 &self.root,
                 &self.login_path,
                 &self.cancel,
-            ) {
+            );
+            self.record(step, started, &result);
+            match result {
                 Ok(next) => {
                     message = next;
                     reporter.send(Report::StepDone {
@@ -239,6 +252,52 @@ impl Plan {
             run: self.run,
             message,
         });
+    }
+}
+
+/// The log's entry for one step: its command, exit code, duration and a
+/// one-line outcome. Neither the input (the staged diff) nor the output is kept.
+fn step_record(
+    root: &std::path::Path,
+    step: &Step,
+    took: Duration,
+    result: &Result<String, StepError>,
+) -> CommandRecord {
+    let (code, outcome) = match result {
+        Ok(_) => (Some(0), "ok".to_owned()),
+        Err(StepError::Cancelled) => (None, "cancelled".to_owned()),
+        Err(StepError::Failed(failure)) => match failure {
+            HookFailure::Exited { code, .. } => (
+                *code,
+                code.map_or_else(
+                    || "killed by a signal".to_owned(),
+                    |code| format!("exit {code}"),
+                ),
+            ),
+            HookFailure::Timeout { timeout_ms } => {
+                (None, format!("timed out after {timeout_ms} ms"))
+            }
+            // These come only after the step exited 0.
+            HookFailure::InvalidOutput { .. } => (Some(0), "invalid output".to_owned()),
+            HookFailure::InvocationMismatch { .. } => {
+                (Some(0), "answered another invocation".to_owned())
+            }
+            HookFailure::CannotStart { .. } => (None, "cannot start".to_owned()),
+        },
+    };
+    CommandRecord {
+        source: Source::Hook {
+            name: step.name.clone(),
+            outcome,
+        },
+        program: "sh".to_owned(),
+        dir: root.to_path_buf(),
+        args: vec![step.command.clone()],
+        code,
+        stdout_bytes: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+        took,
     }
 }
 
@@ -442,6 +501,7 @@ mod tests {
             }],
             login_path: Arc::default(),
             cancel: Arc::new(AtomicBool::new(false)),
+            log: None,
         };
 
         // Panic on the first report, which is sent after the diff file is written.
@@ -497,6 +557,7 @@ mod tests {
             }],
             login_path,
             cancel: Arc::new(AtomicBool::new(false)),
+            log: None,
         };
         let mut reports = Vec::new();
         plan.execute(|report| reports.push(report));

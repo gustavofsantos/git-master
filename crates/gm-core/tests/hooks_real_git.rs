@@ -771,3 +771,90 @@ fn a_hook_included_by_includeif_for_this_repository_is_listed_and_runs() {
     let events = h.until_done(id);
     assert_eq!(finished(&events).0, "from-include");
 }
+
+#[test]
+fn a_hook_run_is_in_the_command_log_with_its_command_and_exit_code_but_not_its_diff() {
+    use gm_core::Engine;
+    use gm_core::command_log::{CommandLog, Source};
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    repo(repo_dir.path());
+    // The staged diff arrives on stdin; the first hook echoes it to stderr, so
+    // a log that kept input or output would show "+two" or "boom".
+    let ok = script(
+        dir.path(),
+        "ok",
+        &answer("printf '%s' \"$IN\" >&2\nMSG=fine"),
+    );
+    let broken = script(
+        dir.path(),
+        "broken",
+        "cat >/dev/null\necho boom >&2\nexit 2",
+    );
+    let global = user_config(dir.path(), &[("ok", &ok, ""), ("broken", &broken, "")]);
+    let log = CommandLog::default();
+    let git = SubprocessGit {
+        global_config: Some(global),
+        log: Some(log.clone()),
+        ..SubprocessGit::default()
+    };
+    let mut engine = Engine::with_approvals(
+        Box::new(git),
+        ApprovalStore::at(dir.path().join("approvals.json")),
+    );
+    let command = |kind| gm_schema::Command {
+        actor: Actor::Human,
+        kind,
+    };
+    engine.handle(
+        OperationId(1),
+        &command(CommandKind::OpenRepo {
+            path: repo_dir.path().display().to_string(),
+        }),
+    );
+    engine.handle(
+        OperationId(2),
+        &command(CommandKind::RunPrepareCommit {
+            message: String::new(),
+        }),
+    );
+    for plan in engine.take_jobs() {
+        let mut reports = Vec::new();
+        plan.execute(|report| reports.push(report));
+        for report in reports {
+            engine.hook_report(report);
+        }
+    }
+
+    let entries = log.entries();
+    assert_eq!(entries.len(), 2, "one entry per step: {entries:?}");
+    assert_eq!(
+        entries[0].source,
+        Source::Hook {
+            name: "ok".into(),
+            outcome: "ok".into()
+        }
+    );
+    assert_eq!(entries[0].line(), format!("hook ok: {ok}"));
+    assert_eq!(entries[0].code, Some(0));
+    assert_eq!(
+        entries[1].source,
+        Source::Hook {
+            name: "broken".into(),
+            outcome: "exit 2".into()
+        }
+    );
+    assert_eq!(entries[1].code, Some(2));
+    for entry in &entries {
+        let text = format!("{entry:?}");
+        assert!(
+            !text.contains("+two"),
+            "the staged diff reached the log: {text}"
+        );
+        assert!(
+            !text.contains("boom"),
+            "the hook's stderr reached the log: {text}"
+        );
+    }
+}

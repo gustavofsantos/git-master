@@ -399,6 +399,7 @@ impl Engine {
             steps,
             login_path: self.git.login_path(),
             cancel: Arc::clone(&cancel),
+            log: self.git.command_log(),
         };
         let active = ActiveRun {
             command: command.clone(),

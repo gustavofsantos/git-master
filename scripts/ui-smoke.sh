@@ -685,6 +685,15 @@ scenario_p() {
     -format '%[fx:mean]' info:)"
   awk -v m="$red" 'BEGIN { exit !(m > 0.01) }' \
     || fail "no failure-coloured text in the hook chip (mean=$red): $shot"
+
+  # The failed step is in the command log: the panel opens over the window.
+  xdotool mousemove "$LOG_BUTTON_X" "$LOG_BUTTON_Y" click 1; sleep 1
+  local logged="$SMOKE_OUT/p-hook-log-$theme.png" differing
+  shoot "$logged"
+  differing="$(compare -metric AE "$shot" "$logged" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the command log did not open after the hook run (only $differing pixels changed): $logged"
 }
 
 # --- 3q. A repository hook waits for approval; approval is stored outside the repo
