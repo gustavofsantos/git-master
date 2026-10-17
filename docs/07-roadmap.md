@@ -52,8 +52,14 @@ Ordem: log de comandos, depois trocar de branch, depois trocar de projeto. O log
    - Seletor de pasta nativo e lista de recentes, persistida no diretório de dados do app (nunca dentro do repositório; princípio de 00).
    - `OpenRepo` já existe: a troca descarta o estado do repo atual (seleção, diff, rascunho do commit) de forma explícita e abre o novo.
    - Um repositório por janela na v1; abas ou várias janelas ficam para depois.
+4. **Tela de boas-vindas** (a fazer).
+   - Aparece quando o app abre sem projeto: primeira execução, sem argumento de linha de comando, diretório atual fora de um repositório e nenhum recente que ainda exista. Hoje essa abertura não tem um estado próprio.
+   - Conteúdo: marca, uma frase sobre o app, ação "Open a repository" (o mesmo seletor de pasta de 3), lista de recentes quando houver (as que sumiram do disco saem da lista) e a dica do atalho de teclado.
+   - Reaproveita os recentes e o `OpenRepo` de 3; abrir um repositório troca a tela sem reiniciar. Pasta que não é repositório mostra o erro na própria tela, sem diálogo bloqueante.
+   - Sem projeto, as ações que dependem de repo (commit, checkout, log de comandos) ficam ausentes da tela, não desabilitadas e vazias.
+   - Strings em inglês; arte do ícone de `assets/icons/`, nas cores do tema ativo (08).
 
-Pronto quando: troca de projeto e de branch sem sair do app, e todo comando Git executado é inspecionável no painel.
+Pronto quando: troca de projeto e de branch sem sair do app, todo comando Git executado é inspecionável no painel, e abrir o app sem projeto leva a uma tela que explica o que fazer em vez de uma janela vazia.
 
 ## Fatia 2: hooks
 
