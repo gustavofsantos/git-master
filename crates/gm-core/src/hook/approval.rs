@@ -1,6 +1,8 @@
 //! Approvals of repository hooks (D17). A file in the app's data directory,
-//! outside any repository, lists `(name, sha256 of command)` pairs. A hook
-//! runs only while its command still hashes to an approved value.
+//! outside any repository, lists `(repository root, name, sha256 of command)`
+//! triples. A hook runs only while its command still hashes to an approved
+//! value, in the repository it was approved for: the same section and text in
+//! another repository is a different hook.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,8 +14,13 @@ const VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Approval {
+    repo: String,
     name: String,
     sha256: String,
+}
+
+fn same(approval: &Approval, repo: &str, name: &str, sha256: &str) -> bool {
+    approval.repo == repo && approval.name == name && approval.sha256 == sha256
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -58,27 +65,24 @@ impl ApprovalStore {
     /// Reads the file on every call: approvals are few, and another window may
     /// have changed them.
     #[must_use]
-    pub fn is_approved(&self, name: &str, sha256: &str) -> bool {
+    pub fn is_approved(&self, repo: &str, name: &str, sha256: &str) -> bool {
         self.load()
             .approved
             .iter()
-            .any(|a| a.name == name && a.sha256 == sha256)
+            .any(|a| same(a, repo, name, sha256))
     }
 
     /// Records the approval. Writing goes through a temporary file, so a crash
     /// leaves the old file whole.
-    pub fn approve(&self, name: &str, sha256: &str) -> Result<(), String> {
+    pub fn approve(&self, repo: &str, name: &str, sha256: &str) -> Result<(), String> {
         let path = self
             .path
             .as_deref()
             .ok_or_else(|| "no data directory: approvals cannot be saved".to_owned())?;
         let mut stored = self.load();
-        if !stored
-            .approved
-            .iter()
-            .any(|a| a.name == name && a.sha256 == sha256)
-        {
+        if !stored.approved.iter().any(|a| same(a, repo, name, sha256)) {
             stored.approved.push(Approval {
+                repo: repo.to_owned(),
                 name: name.to_owned(),
                 sha256: sha256.to_owned(),
             });
@@ -173,12 +177,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sub/approvals.json");
         ApprovalStore::at(path.clone())
-            .approve("llm", "abc")
+            .approve("/r", "llm", "abc")
             .unwrap();
         let reopened = ApprovalStore::at(path);
-        assert!(reopened.is_approved("llm", "abc"));
-        assert!(!reopened.is_approved("llm", "abd"));
-        assert!(!reopened.is_approved("other", "abc"));
+        assert!(reopened.is_approved("/r", "llm", "abc"));
+        assert!(!reopened.is_approved("/r", "llm", "abd"));
+        assert!(!reopened.is_approved("/r", "other", "abc"));
+        assert!(
+            !reopened.is_approved("/elsewhere", "llm", "abc"),
+            "the same hook in another repository needs its own approval"
+        );
     }
 
     #[test]
@@ -186,8 +194,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.json");
         let store = ApprovalStore::at(path.clone());
-        store.approve("llm", "abc").unwrap();
-        store.approve("llm", "abc").unwrap();
+        store.approve("/r", "llm", "abc").unwrap();
+        store.approve("/r", "llm", "abc").unwrap();
         let text = std::fs::read_to_string(path).unwrap();
         assert_eq!(text.matches("abc").count(), 1);
     }
@@ -197,15 +205,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.json");
         let store = ApprovalStore::at(path.clone());
-        assert!(!store.is_approved("llm", "abc"));
+        assert!(!store.is_approved("/r", "llm", "abc"));
         std::fs::write(&path, "{not json").unwrap();
-        assert!(!store.is_approved("llm", "abc"));
+        assert!(!store.is_approved("/r", "llm", "abc"));
     }
 
     #[test]
     fn an_unavailable_store_refuses_to_approve() {
         let store = ApprovalStore::unavailable();
-        assert!(!store.is_approved("llm", "abc"));
-        assert!(store.approve("llm", "abc").is_err());
+        assert!(!store.is_approved("/r", "llm", "abc"));
+        assert!(store.approve("/r", "llm", "abc").is_err());
     }
 }

@@ -681,10 +681,37 @@ fn the_engine_log_records_each_step_with_its_command_hash_and_exit_code() {
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].run, OperationId(2));
     assert_eq!(log[0].hook, "ok");
+    assert_eq!(log[0].command, ok);
     assert_eq!(log[0].command_hash, sha256_hex(ok.as_bytes()));
     assert_eq!(log[0].exit_code, Some(0));
     assert_eq!(log[0].outcome, HookOutcome::Ok);
     assert_eq!(log[1].hook, "broken");
     assert_eq!(log[1].exit_code, Some(2));
     assert!(matches!(log[1].outcome, HookOutcome::Failed(_)));
+}
+
+#[test]
+fn a_user_hook_still_runs_while_a_repo_hook_awaits_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = script(dir.path(), "user", &answer("MSG=from-user"));
+    let h = start(&[("llm", &user, "")]);
+    let team = script(dir.path(), "team", "exit 7");
+    git(
+        &h.repo,
+        &[
+            "config",
+            "--local",
+            "gitmaster.prepare-commit.team.command",
+            team.as_str(),
+        ],
+    );
+
+    let id = h.run();
+    let events = h.until_done(id);
+
+    assert_eq!(started_hooks(&events), ["llm"]);
+    assert_eq!(finished(&events).0, "from-user");
+    let listed = h.list();
+    let team_hook = listed.iter().find(|h| h.name == "team").unwrap();
+    assert_eq!(team_hook.state, HookState::NeedsApproval);
 }

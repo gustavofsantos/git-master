@@ -11,11 +11,13 @@
 //!   `enabled`, `needs_approval` (a repository hook not yet approved),
 //!   `disabled`, or `invalid { reason }`. `applies_to_branch` says whether its
 //!   `match` fits the current branch.
-//! - `ApproveHook { name, command_hash }` → `HooksListed` again. The hash must
-//!   be the one from the last listing; a command changed since then is refused.
+//! - `ApproveHook { name, command_hash }` → `HooksListed` again. Only a human
+//!   may approve. The hash must be the one from the last listing; a command
+//!   changed since then is refused.
 //! - `RunPrepareCommit { message }` → returns the run's id `R`. The run
-//!   refuses to start (`OperationChanged` failed, with the reason) when a
-//!   matching hook needs approval or is invalid, or when none applies.
+//!   refuses to start (`OperationChanged` failed, with the reason) when no
+//!   hook applies, or when the only applicable hook is a repository hook still
+//!   awaiting approval.
 //! - `CancelHook { run: R }` → kills the running step's process group.
 //!
 //! Events for a run `R`, in this order:
@@ -33,9 +35,12 @@
 //!      whose `detail` is one line for the user.
 //!    - `HookCancelled { R, hook }`, then `OperationChanged { R, cancelled }`.
 //!
-//! Chains run in config order, each step receiving the previous output. Repo
-//! hooks run only after `ApproveHook`; approval is stored outside the repo,
-//! keyed by hook name and the sha256 of its command.
+//! Chains run in config order, each step receiving the previous output. User
+//! hooks run when enabled and matching; an invalid user hook stops the run.
+//! Repository hooks run only after `ApproveHook`: until then they are skipped
+//! and listed as `needs_approval`, so a repository cannot switch off the
+//! user's own hooks. Approval is stored outside the repository, keyed by the
+//! repository root, the hook name and the sha256 of its command.
 
 pub mod approval;
 pub mod config;
@@ -50,12 +55,15 @@ pub use approval::ApprovalStore;
 pub use config::ConfigValue;
 pub use run::{Plan, Report, Step};
 
-/// One line of the engine's hook log: a step that ran, with the hash of its
-/// command and its exit code. Kept in memory with the operation log.
+use crate::{GitError, GitPort};
+
+/// One line of the engine's hook log: a step that ended, with its command and
+/// the hash of it, and its exit code. Kept in memory with the operation log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HookRecord {
     pub run: OperationId,
     pub hook: String,
+    pub command: String,
     pub command_hash: String,
     /// `None` when the step never exited (cancelled, timed out, not started).
     pub exit_code: Option<i32>,
@@ -69,8 +77,6 @@ pub enum HookOutcome {
     Failed(String),
     Cancelled,
 }
-
-use crate::{GitError, GitPort};
 
 /// What the repository looked like when a run started. Compared again when
 /// the run answers: the `repo_changed` flag.
@@ -107,13 +113,19 @@ pub fn list(
 ) -> Result<Vec<HookInfo>, GitError> {
     let user = config::parse(&git.hook_config(root, HookScope::User)?, HookScope::User);
     let repo = config::parse(&git.hook_config(root, HookScope::Repo)?, HookScope::Repo);
+    let repo_key = root.to_string_lossy();
     Ok(config::merge(user, repo)
         .iter()
-        .map(|section| info(section, branch, approvals))
+        .map(|section| info(section, branch, approvals, &repo_key))
         .collect())
 }
 
-fn info(section: &config::Section, branch: Option<&str>, approvals: &ApprovalStore) -> HookInfo {
+fn info(
+    section: &config::Section,
+    branch: Option<&str>,
+    approvals: &ApprovalStore,
+    repo: &str,
+) -> HookInfo {
     let command_hash = if section.command.is_empty() {
         String::new()
     } else {
@@ -130,7 +142,7 @@ fn info(section: &config::Section, branch: Option<&str>, approvals: &ApprovalSto
     } else if !section.enabled {
         HookState::Disabled
     } else if section.scope == HookScope::Repo
-        && !approvals.is_approved(&section.name, &command_hash)
+        && !approvals.is_approved(repo, &section.name, &command_hash)
     {
         HookState::NeedsApproval
     } else {
@@ -148,28 +160,36 @@ fn info(section: &config::Section, branch: Option<&str>, approvals: &ApprovalSto
     }
 }
 
-/// The hooks a `prepare-commit` run executes, in order. A hook that applies to
-/// the branch but is not runnable (needs approval, invalid) stops the run:
-/// skipping it would change the message without saying so. Disabled hooks and
-/// hooks whose `match` does not fit are skipped.
-pub fn chain(hooks: &[HookInfo]) -> Result<Vec<&HookInfo>, String> {
+/// What a run executes, and the repository hooks it leaves out.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Chain<'a> {
+    /// Enabled hooks that apply to the branch, in config order.
+    pub steps: Vec<&'a HookInfo>,
+    /// Names of applicable repository hooks skipped until approved.
+    pub awaiting_approval: Vec<&'a str>,
+}
+
+/// The chain for a run. Repository hooks that are not enabled are skipped, so
+/// an unapproved or broken repository section cannot change the message. An
+/// invalid user section stops the run: it is the user's own config, and a
+/// silent skip would hide a typo.
+pub fn chain(hooks: &[HookInfo]) -> Result<Chain<'_>, String> {
     let mut steps = Vec::new();
+    let mut awaiting_approval = Vec::new();
     for hook in hooks.iter().filter(|hook| hook.applies_to_branch) {
         match &hook.state {
             HookState::Enabled => steps.push(hook),
-            HookState::NeedsApproval => {
-                return Err(format!(
-                    "hook {} needs approval: list the hooks and approve it",
-                    hook.name
-                ));
-            }
-            HookState::Invalid { reason } => {
+            HookState::NeedsApproval => awaiting_approval.push(hook.name.as_str()),
+            HookState::Invalid { reason } if hook.scope == HookScope::User => {
                 return Err(format!("hook {} is invalid: {reason}", hook.name));
             }
-            HookState::Disabled => {}
+            HookState::Invalid { .. } | HookState::Disabled => {}
         }
     }
-    Ok(steps)
+    Ok(Chain {
+        steps,
+        awaiting_approval,
+    })
 }
 
 #[cfg(test)]
@@ -193,10 +213,10 @@ mod tests {
         );
     }
 
-    fn hook(name: &str, state: HookState, applies: bool) -> HookInfo {
+    fn hook(name: &str, scope: HookScope, state: HookState, applies: bool) -> HookInfo {
         HookInfo {
             name: name.into(),
-            scope: HookScope::User,
+            scope,
             command: "x".into(),
             command_hash: String::new(),
             match_rule: None,
@@ -206,39 +226,58 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_chain_skips_disabled_and_non_matching_hooks() {
-        let hooks = [
-            hook("a", HookState::Enabled, true),
-            hook("b", HookState::Disabled, true),
-            hook("c", HookState::Enabled, false),
-            hook("d", HookState::Enabled, true),
-        ];
-        let names: Vec<_> = chain(&hooks)
-            .unwrap()
-            .iter()
-            .map(|h| h.name.as_str())
-            .collect();
-        assert_eq!(names, ["a", "d"]);
+    fn names(chain: &Chain<'_>) -> Vec<String> {
+        chain.steps.iter().map(|h| h.name.clone()).collect()
     }
 
     #[test]
-    fn an_applicable_unapproved_or_invalid_hook_stops_the_chain() {
-        let approval = [hook("a", HookState::NeedsApproval, true)];
-        assert!(chain(&approval).unwrap_err().contains("needs approval"));
-        let invalid = [hook(
+    fn the_chain_skips_disabled_and_non_matching_hooks() {
+        let hooks = [
+            hook("a", HookScope::User, HookState::Enabled, true),
+            hook("b", HookScope::User, HookState::Disabled, true),
+            hook("c", HookScope::User, HookState::Enabled, false),
+            hook("d", HookScope::User, HookState::Enabled, true),
+        ];
+        assert_eq!(names(&chain(&hooks).unwrap()), ["a", "d"]);
+    }
+
+    #[test]
+    fn an_unapproved_repo_hook_is_skipped_and_reported() {
+        let hooks = [
+            hook("user", HookScope::User, HookState::Enabled, true),
+            hook("team", HookScope::Repo, HookState::NeedsApproval, true),
+        ];
+        let chain = chain(&hooks).unwrap();
+        assert_eq!(names(&chain), ["user"]);
+        assert_eq!(chain.awaiting_approval, ["team"]);
+    }
+
+    #[test]
+    fn an_invalid_repo_hook_cannot_stop_the_user_chain() {
+        let hooks = [
+            hook("user", HookScope::User, HookState::Enabled, true),
+            hook(
+                "team",
+                HookScope::Repo,
+                HookState::Invalid {
+                    reason: "name clash".into(),
+                },
+                true,
+            ),
+        ];
+        assert_eq!(names(&chain(&hooks).unwrap()), ["user"]);
+    }
+
+    #[test]
+    fn an_invalid_user_hook_stops_the_run() {
+        let hooks = [hook(
             "b",
+            HookScope::User,
             HookState::Invalid {
                 reason: "no command".into(),
             },
             true,
         )];
-        assert_eq!(
-            chain(&invalid).unwrap_err(),
-            "hook b is invalid: no command"
-        );
-        // Not applicable, so it cannot stop anything.
-        let elsewhere = [hook("c", HookState::NeedsApproval, false)];
-        assert!(chain(&elsewhere).unwrap().is_empty());
+        assert_eq!(chain(&hooks).unwrap_err(), "hook b is invalid: no command");
     }
 }

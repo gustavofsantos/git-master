@@ -41,8 +41,15 @@ struct ActiveRun {
     root: PathBuf,
     fingerprint: Fingerprint,
     cancel: Arc<AtomicBool>,
-    /// Command hash of each step, by hook name.
-    hashes: BTreeMap<String, String>,
+    /// Command and command hash of each step, by hook name.
+    scripts: BTreeMap<String, (String, String)>,
+}
+
+impl ActiveRun {
+    /// The command and its hash of the step `hook`; empty when unknown.
+    fn script(&self, hook: &str) -> (String, String) {
+        self.scripts.get(hook).cloned().unwrap_or_default()
+    }
 }
 
 /// A run the engine accepted: its record, and the plan for its thread.
@@ -113,10 +120,11 @@ impl Engine {
             }
             Report::StepDone { run, hook } => {
                 if let Some(active) = self.runs.get(&run) {
-                    let command_hash = active.hashes.get(&hook).cloned().unwrap_or_default();
+                    let (command, command_hash) = active.script(&hook);
                     self.hook_log.push(HookRecord {
                         run,
                         hook,
+                        command,
                         command_hash,
                         exit_code: Some(0),
                         outcome: HookOutcome::Ok,
@@ -147,7 +155,8 @@ impl Engine {
                 let summary = hook::run::failure_summary(&hook, &failure);
                 self.hook_log.push(HookRecord {
                     run,
-                    command_hash: active.hashes.get(&hook).cloned().unwrap_or_default(),
+                    command: active.script(&hook).0,
+                    command_hash: active.script(&hook).1,
                     hook: hook.clone(),
                     exit_code: match &failure {
                         HookFailure::Exited { code, .. } => *code,
@@ -173,7 +182,8 @@ impl Engine {
                 };
                 self.hook_log.push(HookRecord {
                     run,
-                    command_hash: active.hashes.get(&hook).cloned().unwrap_or_default(),
+                    command: active.script(&hook).0,
+                    command_hash: active.script(&hook).1,
                     hook: hook.clone(),
                     exit_code: None,
                     outcome: HookOutcome::Cancelled,
@@ -217,7 +227,7 @@ impl Engine {
         // Gating has nothing to check for the other commands; the states are walked
         // so that every operation has the same shape in the log.
         self.advance(&mut op, OperationState::Executing, &mut events);
-        match self.execute(id, &command.kind) {
+        match self.execute(id, &command.actor, &command.kind) {
             Ok(produced) => {
                 events.extend(produced);
                 self.advance(&mut op, OperationState::Done, &mut events);
@@ -229,7 +239,12 @@ impl Engine {
         events
     }
 
-    fn execute(&mut self, id: OperationId, kind: &CommandKind) -> Result<Vec<Event>, String> {
+    fn execute(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
         match kind {
             CommandKind::OpenRepo { path } => {
                 let root = self.git.resolve_root(path.as_ref()).map_err(|e| e.0)?;
@@ -288,6 +303,10 @@ impl Engine {
                 Ok(vec![Event::HooksListed { id, hooks }])
             }
             CommandKind::ApproveHook { name, command_hash } => {
+                // Approval is the human's decision (docs/00); an agent may only propose.
+                if !matches!(actor, Actor::Human) {
+                    return Err("only a human can approve a hook".to_owned());
+                }
                 let root = self.open_root()?;
                 let (branch, _) = self.current(&root)?;
                 let hooks = self.list_hooks(&root, branch.as_deref())?;
@@ -300,7 +319,8 @@ impl Engine {
                         "the command of {name} changed since the hooks were listed; list them again"
                     ));
                 }
-                self.approvals.approve(name, command_hash)?;
+                self.approvals
+                    .approve(&root.to_string_lossy(), name, command_hash)?;
                 let hooks = self.list_hooks(&root, branch.as_deref())?;
                 Ok(vec![Event::HooksListed { id, hooks }])
             }
@@ -329,14 +349,24 @@ impl Engine {
         let (branch, head) = self.current(&root)?;
         let hooks = self.list_hooks(&root, branch.as_deref())?;
         let chain = hook::chain(&hooks)?;
-        if chain.is_empty() {
-            return Err("no prepare-commit hook applies to this repository".to_owned());
+        if chain.steps.is_empty() {
+            return Err(match chain.awaiting_approval.first() {
+                Some(name) => format!("hook {name} needs approval: list the hooks and approve it"),
+                None => "no prepare-commit hook applies to this repository".to_owned(),
+            });
         }
-        let hashes = chain
+        let scripts = chain
+            .steps
             .iter()
-            .map(|hook| (hook.name.clone(), hook.command_hash.clone()))
+            .map(|hook| {
+                (
+                    hook.name.clone(),
+                    (hook.command.clone(), hook.command_hash.clone()),
+                )
+            })
             .collect();
         let steps: Vec<Step> = chain
+            .steps
             .into_iter()
             .map(|hook| Step {
                 name: hook.name.clone(),
@@ -362,7 +392,7 @@ impl Engine {
             root,
             fingerprint,
             cancel,
-            hashes,
+            scripts,
         };
         Ok(Accepted { active, plan })
     }
@@ -591,6 +621,28 @@ mod tests {
         });
         let events = engine().handle(OperationId(1), &bad);
         assert_eq!(states(&events).last(), Some(&OperationState::Failed));
+    }
+
+    #[test]
+    fn an_agent_cannot_approve_a_hook() {
+        let mut engine = engine();
+        let command = Command {
+            actor: Actor::Agent {
+                name: "claude".into(),
+            },
+            kind: CommandKind::ApproveHook {
+                name: "team".into(),
+                command_hash: "0".repeat(64),
+            },
+        };
+
+        let events = engine.handle(OperationId(1), &command);
+
+        let Some(Event::OperationChanged { state, detail, .. }) = events.last() else {
+            panic!("no events");
+        };
+        assert_eq!(*state, OperationState::Failed);
+        assert_eq!(detail.as_deref(), Some("only a human can approve a hook"));
     }
 
     fn any_kind() -> impl Strategy<Value = CommandKind> {
