@@ -82,27 +82,63 @@ pub fn unstage_selection(index: &[u8], hunk: &Hunk, selected: &[u32]) -> Result<
 /// where exactly one of the two is selected. The i-th removed line pairs with
 /// the i-th added line of the block. The result is ordered by removed index.
 pub fn pair_warning(hunk: &Hunk, selected: &[u32]) -> Vec<(u32, u32)> {
-    let is_selected = |i: usize| u32::try_from(i).is_ok_and(|i| selected.contains(&i));
+    let is_selected = |i: u32| selected.contains(&i);
+    pair_hunk(hunk)
+        .into_iter()
+        .filter_map(|pair| match (pair.old, pair.new) {
+            (Some(old), Some(new)) if is_selected(old) != is_selected(new) => Some((old, new)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// One row of a side-by-side view of a hunk: the line on the old side and the
+/// line on the new side, each an index into `Hunk::lines`. A context line is
+/// on both sides. A side with no line of its own is `None`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinePair {
+    pub old: Option<u32>,
+    pub new: Option<u32>,
+}
+
+/// Pairs the lines of `hunk` for a side-by-side view, in hunk order. A run of
+/// removed lines followed by a run of added lines pairs the k-th removed with
+/// the k-th added; the longer run's surplus lines pair with `None`. An added
+/// run that no removed run precedes is all `new`, and a removed run no added
+/// run follows is all `old`. Every line of the hunk appears once on its side,
+/// and a context line appears on both.
+pub fn pair_hunk(hunk: &Hunk) -> Vec<LinePair> {
     let lines = &hunk.lines;
-    let mut pairs = Vec::new();
+    let mut pairs = Vec::with_capacity(lines.len());
     let mut i = 0;
     while i < lines.len() {
-        if lines[i].kind != LineKind::Removed {
-            i += 1;
-            continue;
-        }
-        let removed_start = i;
-        let added_start = run_end(lines, removed_start, LineKind::Removed);
-        let added_end = run_end(lines, added_start, LineKind::Added);
-        let pairable = (added_start - removed_start).min(added_end - added_start);
-        for k in 0..pairable {
-            let removed = removed_start + k;
-            let added = added_start + k;
-            if is_selected(removed) != is_selected(added) {
-                pairs.push((index_u32(removed), index_u32(added)));
+        match lines[i].kind {
+            LineKind::Context => {
+                let at = Some(index_u32(i));
+                pairs.push(LinePair { old: at, new: at });
+                i += 1;
+            }
+            LineKind::Added => {
+                pairs.push(LinePair {
+                    old: None,
+                    new: Some(index_u32(i)),
+                });
+                i += 1;
+            }
+            LineKind::Removed => {
+                let removed_end = run_end(lines, i, LineKind::Removed);
+                let added_end = run_end(lines, removed_end, LineKind::Added);
+                let removed: Vec<u32> = (i..removed_end).map(index_u32).collect();
+                let added: Vec<u32> = (removed_end..added_end).map(index_u32).collect();
+                for k in 0..removed.len().max(added.len()) {
+                    pairs.push(LinePair {
+                        old: removed.get(k).copied(),
+                        new: added.get(k).copied(),
+                    });
+                }
+                i = added_end;
             }
         }
-        i = added_end;
     }
     pairs
 }
@@ -564,6 +600,162 @@ mod tests {
         assert!(pair_warning(&hunk, &[0, 2]).is_empty());
         assert_eq!(pair_warning(&hunk, &[7]), vec![(6, 7)]);
         assert!(pair_warning(&hunk, &[0, 1, 2, 3, 4, 5, 6, 7]).is_empty());
+    }
+
+    /// The old `pair_warning` loop, kept as the oracle the new one is checked
+    /// against: adjacent `-` then `+` runs, k-th with k-th, pairs with exactly
+    /// one side selected.
+    fn reference_pair_warning(hunk: &Hunk, selected: &[u32]) -> Vec<(u32, u32)> {
+        let is_selected = |i: usize| u32::try_from(i).is_ok_and(|i| selected.contains(&i));
+        let lines = &hunk.lines;
+        let mut pairs = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].kind != LineKind::Removed {
+                i += 1;
+                continue;
+            }
+            let removed_start = i;
+            let added_start = run_end(lines, removed_start, LineKind::Removed);
+            let added_end = run_end(lines, added_start, LineKind::Added);
+            let pairable = (added_start - removed_start).min(added_end - added_start);
+            for k in 0..pairable {
+                let removed = removed_start + k;
+                let added = added_start + k;
+                if is_selected(removed) != is_selected(added) {
+                    pairs.push((index_u32(removed), index_u32(added)));
+                }
+            }
+            i = added_end;
+        }
+        pairs
+    }
+
+    /// `(old, new)` of each pair of `hunk`, for readable assertions.
+    fn pairs_of(hunk: &Hunk) -> Vec<(Option<u32>, Option<u32>)> {
+        pair_hunk(hunk)
+            .into_iter()
+            .map(|pair| (pair.old, pair.new))
+            .collect()
+    }
+
+    #[test]
+    fn pair_hunk_pairs_a_two_by_three_replacement_in_order() {
+        let hunk = hunk_of(vec![rem("a"), rem("b"), add("A"), add("B"), add("C")]);
+        assert_eq!(
+            pairs_of(&hunk),
+            vec![(Some(0), Some(2)), (Some(1), Some(3)), (None, Some(4))]
+        );
+    }
+
+    #[test]
+    fn pair_hunk_pairs_a_three_by_two_replacement_with_a_removed_surplus() {
+        let hunk = hunk_of(vec![rem("a"), rem("b"), rem("c"), add("A"), add("B")]);
+        assert_eq!(
+            pairs_of(&hunk),
+            vec![(Some(0), Some(3)), (Some(1), Some(4)), (Some(2), None)]
+        );
+    }
+
+    #[test]
+    fn pair_hunk_of_a_pure_addition_has_no_old_side() {
+        let hunk = hunk_of(vec![ctx("c"), add("x"), add("y"), ctx("d")]);
+        assert_eq!(
+            pairs_of(&hunk),
+            vec![
+                (Some(0), Some(0)),
+                (None, Some(1)),
+                (None, Some(2)),
+                (Some(3), Some(3))
+            ]
+        );
+    }
+
+    #[test]
+    fn pair_hunk_of_a_pure_deletion_has_no_new_side() {
+        let hunk = hunk_of(vec![rem("x"), rem("y"), ctx("c")]);
+        assert_eq!(
+            pairs_of(&hunk),
+            vec![(Some(0), None), (Some(1), None), (Some(2), Some(2))]
+        );
+    }
+
+    #[test]
+    fn pair_hunk_does_not_pair_runs_separated_by_context() {
+        let hunk = hunk_of(vec![rem("a"), add("A"), ctx("c"), rem("b"), add("B")]);
+        assert_eq!(
+            pairs_of(&hunk),
+            vec![(Some(0), Some(1)), (Some(2), Some(2)), (Some(3), Some(4))]
+        );
+    }
+
+    #[test]
+    fn pair_hunk_of_context_only_pairs_each_line_with_itself() {
+        let hunk = hunk_of(vec![ctx("a"), ctx("b")]);
+        assert_eq!(
+            pairs_of(&hunk),
+            vec![(Some(0), Some(0)), (Some(1), Some(1))]
+        );
+    }
+
+    fn kind_strategy() -> impl Strategy<Value = LineKind> {
+        prop::sample::select(vec![LineKind::Context, LineKind::Added, LineKind::Removed])
+    }
+
+    proptest! {
+        #[test]
+        fn pair_warning_agrees_with_the_reference_loop(
+            kinds in prop::collection::vec(kind_strategy(), 0..14),
+            mask in prop::collection::vec(any::<bool>(), 0..14),
+        ) {
+            let lines: Vec<DiffLine> = kinds
+                .iter()
+                .enumerate()
+                .map(|(i, kind)| dl(*kind, &format!("l{i}"), false))
+                .collect();
+            let hunk = hunk_of(lines);
+            let selected: Vec<u32> = mask
+                .iter()
+                .enumerate()
+                .filter(|(i, on)| **on && *i < kinds.len())
+                .map(|(i, _)| index_u32(i))
+                .collect();
+            prop_assert_eq!(
+                pair_warning(&hunk, &selected),
+                reference_pair_warning(&hunk, &selected)
+            );
+        }
+
+        #[test]
+        fn every_changed_line_appears_exactly_once_in_pair_hunk(
+            kinds in prop::collection::vec(kind_strategy(), 0..14),
+        ) {
+            let lines: Vec<DiffLine> = kinds
+                .iter()
+                .enumerate()
+                .map(|(i, kind)| dl(*kind, &format!("l{i}"), false))
+                .collect();
+            let hunk = hunk_of(lines);
+            let mut seen_old = vec![0u32; kinds.len()];
+            let mut seen_new = vec![0u32; kinds.len()];
+            for pair in pair_hunk(&hunk) {
+                if let Some(old) = pair.old {
+                    seen_old[usize::try_from(old).unwrap_or(0)] += 1;
+                }
+                if let Some(new) = pair.new {
+                    seen_new[usize::try_from(new).unwrap_or(0)] += 1;
+                }
+            }
+            for (i, kind) in kinds.iter().enumerate() {
+                let (want_old, want_new) = match kind {
+                    LineKind::Context => (1, 1),
+                    LineKind::Removed => (1, 0),
+                    LineKind::Added => (0, 1),
+                };
+                prop_assert_eq!(seen_old[i], want_old);
+                prop_assert_eq!(seen_new[i], want_new);
+            }
+        }
     }
 
     fn line_strategy() -> impl Strategy<Value = Vec<u8>> {
