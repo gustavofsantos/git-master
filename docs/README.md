@@ -13,6 +13,6 @@ Design documents (Portuguese), exported verbatim on 2026-10-16 from the claude.a
 | `06-arquitetura.md` | Hexagonal architecture, rules, persistence, crates, risks |
 | `07-roadmap.md` | Slices 0-9 |
 | `08-identidade-visual.md` | Visual identity: cursorized palette, Divisa icon decisions and geometry, files in `assets/icons/` |
-| `rvw-lessons.md` | Lessons from `~/Projects/rvw` (English) and the bootstrap plan for slice 0 |
+| `rvw-lessons.md` | Lessons from `~/Projects/rvw` (English) and the slice 0 bootstrap plan (done) |
 
 The Project copy and this copy can drift. Edit them here from now on if the repository becomes the source of truth, and say so in this file.
