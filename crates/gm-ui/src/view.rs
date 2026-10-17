@@ -19,6 +19,7 @@ use gpui::{
 use crate::action_registry::{self, Action, Args, Context as ActionContext, Effect, Reason};
 use crate::branch_menu::BranchMenu;
 use crate::composer::{Composer, ComposerEvent};
+use crate::context_menu::ContextMenu;
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::icon::{self, Icon};
 use crate::model::{Model, Switched};
@@ -64,6 +65,8 @@ pub struct StatusView {
     pub(crate) project_menu: ProjectMenu,
     /// The branch button's list: filter, scroll and the button's place.
     pub(crate) branch_menu: BranchMenu,
+    /// The right-click menu of a branch or a file row, when one is open.
+    pub(crate) context_menu: ContextMenu,
     /// The recent repositories, newest first, as last saved or loaded.
     pub(crate) recents: Recents,
     /// Where the list is kept; `None` when there is no home directory.
@@ -176,6 +179,7 @@ impl StatusView {
             sidebar_grouping: Grouping::default(),
             project_menu,
             branch_menu,
+            context_menu: ContextMenu::default(),
             recents,
             recent_store,
             recent_generation: 0,
@@ -481,13 +485,14 @@ impl StatusView {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.notify_user(&notice, cx);
             }
+            Ok(Effect::Reveal(path)) => cx.reveal_path(&path),
             Ok(Effect::FocusCommitMessage) => self.focus_commit_message(window, cx),
         }
         cx.notify();
     }
 
     /// What the registry's rules read, for a run made now.
-    fn action_context<'a>(&'a self, message: &'a str) -> ActionContext<'a> {
+    pub(crate) fn action_context<'a>(&'a self, message: &'a str) -> ActionContext<'a> {
         ActionContext {
             repo_open: self.model.status().is_some(),
             busy: self.busy_reason(),
@@ -498,6 +503,7 @@ impl StatusView {
                 .model
                 .status()
                 .and_then(|status| status.branch.head.as_deref()),
+            root: self.model.status().map(|status| status.root.as_str()),
         }
     }
 
@@ -719,6 +725,12 @@ impl Render for StatusView {
             .children(self.log_open.then(|| self.command_log_panel(cx)))
             .children(self.project_menu.open.then(|| self.project_menu_layer(cx)))
             .children(self.branch_menu.open.then(|| self.branch_menu_layer(cx)))
+            .children(
+                self.context_menu
+                    .open
+                    .is_some()
+                    .then(|| self.context_menu_layer(window, cx)),
+            )
             .children(window_chrome::resize_layer(window))
     }
 }

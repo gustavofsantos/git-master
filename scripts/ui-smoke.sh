@@ -18,7 +18,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -43,6 +43,9 @@ LOG_BUTTON_X=1300; LOG_BUTTON_Y=837         # "Git log" button, right end of the
 PROJECT_X=139; PROJECT_Y=67                 # project button at the left of the top bar
 RECENT_OTHER_X=150; RECENT_OTHER_Y=185      # second row of the open list: billing-api
 BRANCH_X=242; BRANCH_Y=67                   # branch button, right of the project button
+SIDEBAR_FEATURE_X=160; SIDEBAR_FEATURE_Y=415  # feature/x row in the sidebar (non-current)
+MENU_STAGE_X=470; MENU_STAGE_Y=155          # "Stage File" in the file row's menu, opened at NAME_X, ROW_MOD_Y
+MENU_CHECKOUT_X=190; MENU_CHECKOUT_Y=431    # "Checkout Branch" in the branch menu, opened at SIDEBAR_FEATURE_X/Y
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -506,6 +509,43 @@ scenario_j() {
   shoot "$SMOKE_OUT/j-discard-chunk-$theme.png"
 }
 
+# --- 3k. Right-click a file row, then Stage File in its menu -----------------
+scenario_k() {
+  local repo="$RUN_DIR/repo" theme="$1" staged differing
+  shoot "$RUN_DIR/closed.png"
+
+  xdotool mousemove "$NAME_X" "$ROW_MOD_Y" click 3; sleep 1
+  shoot "$SMOKE_OUT/k-file-menu-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/closed.png" "$SMOKE_OUT/k-file-menu-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 5000 ] || fail "the file menu did not open ($differing pixels changed)"
+  grep -qxF -- 'src/ledger/mod.rs' <<<"$(staged_names)" && fail "mod.rs was staged before the menu was used"
+
+  xdotool mousemove "$MENU_STAGE_X" "$MENU_STAGE_Y" click 1; sleep 1.5
+  staged="$(staged_names)"
+  grep -qxF -- 'src/ledger/mod.rs' <<<"$staged" || fail "mod.rs not staged by Stage File in the menu"
+  shoot "$SMOKE_OUT/k-file-menu-staged-$theme.png"
+}
+
+# --- 3l. Right-click a branch in the sidebar, then Checkout Branch in its menu -
+scenario_l() {
+  local repo="$RUN_DIR/repo" theme="$1" head differing
+  shoot "$RUN_DIR/closed.png"
+
+  xdotool mousemove "$SIDEBAR_FEATURE_X" "$SIDEBAR_FEATURE_Y" click 3; sleep 1
+  shoot "$SMOKE_OUT/l-branch-menu-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/closed.png" "$SMOKE_OUT/l-branch-menu-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 5000 ] || fail "the branch menu did not open ($differing pixels changed)"
+
+  xdotool mousemove "$MENU_CHECKOUT_X" "$MENU_CHECKOUT_Y" click 1; sleep 1.5
+  head="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
+  [ "$head" = "feature/x" ] || fail "HEAD is '$head' after Checkout Branch in the menu, expected 'feature/x'"
+  shoot "$SMOKE_OUT/l-branch-menu-checked-out-$theme.png"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -516,6 +556,7 @@ run_scenario() {
   make_repo "$RUN_DIR/repo"
   make_other_repo "$RUN_DIR/billing-api"
   if [ "$name" = g-switch-branch ]; then prepare_branches "$RUN_DIR/repo"; fi
+  if [ "$name" = l-branch-menu ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
   if [ "$name" = h-welcome ]; then
     # Starts with no recent list at all; scenario_h makes its own launches.
     scenario_h "$theme"
@@ -536,6 +577,8 @@ run_scenario() {
     h-welcome) ;;
     i-stage-chunk) scenario_i "$theme" ;;
     j-discard-chunk) scenario_j "$theme" ;;
+    k-file-menu) scenario_k "$theme" ;;
+    l-branch-menu) scenario_l "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app

@@ -266,8 +266,17 @@ fn tree_row(
                 }))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        this.checkout_from_sidebar(&name, window, cx);
+                    cx.listener({
+                        let name = name.clone();
+                        move |this, _: &MouseDownEvent, window, cx| {
+                            this.checkout_from_sidebar(&name, window, cx);
+                        }
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.open_branch_menu(&name, event.position, cx);
                     }),
                 );
             // A `uniform_list` item takes no margin, so the inset is padding here.

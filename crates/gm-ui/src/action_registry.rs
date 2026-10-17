@@ -4,9 +4,11 @@
 //! run to the engine commands it sends. Nothing here touches GPUI, so the rules
 //! are unit-tested on their own.
 
-// The menus and the palette (slice 1c, items 3 and 4) are the readers of the
-// whole registry; until they land, only keys and buttons run it.
+// The palette (slice 1c, item 4) will read the whole registry; until it lands,
+// some helpers (`from_id`, `spec`) have no caller outside the tests.
 #![allow(dead_code)]
+
+use std::path::PathBuf;
 
 use gm_schema::{CommandKind, DiffSide, HunkId, StageTarget, StatusEntry};
 
@@ -80,6 +82,8 @@ pub enum Effect {
     Send(Vec<CommandKind>),
     /// Text for the clipboard.
     Copy(String),
+    /// A path on disk, for the system file manager.
+    Reveal(PathBuf),
     FocusCommitMessage,
 }
 
@@ -97,10 +101,12 @@ pub struct Context<'a> {
     pub message: &'a str,
     /// The checked-out branch; `None` when HEAD is detached or unborn.
     pub current_branch: Option<&'a str>,
+    /// The repository's working tree root; `None` when no repository is open.
+    pub root: Option<&'a str>,
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 17] = [
+const SPECS: [Spec; 19] = [
     spec(
         "file.stage",
         "Stage File",
@@ -196,7 +202,7 @@ const SPECS: [Spec; 17] = [
         "remote.push_with_lease",
         "Push With Lease",
         None,
-        ArgKind::None,
+        ArgKind::Branch,
         Category::Remote,
     ),
     spec(
@@ -217,8 +223,22 @@ const SPECS: [Spec; 17] = [
         "worktree.create",
         "Create Worktree",
         None,
-        ArgKind::None,
+        ArgKind::Branch,
         Category::Worktrees,
+    ),
+    spec(
+        "file.discard",
+        "Discard Changes",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "file.reveal",
+        "Reveal in File Manager",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
     ),
 ];
 
@@ -259,12 +279,14 @@ pub enum Action {
     RenameBranch,
     DeleteBranch,
     CreateWorktree,
+    DiscardFile,
+    RevealFile,
 }
 
 const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 17] = [
+    pub const ALL: [Action; 19] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -282,6 +304,8 @@ impl Action {
         Action::RenameBranch,
         Action::DeleteBranch,
         Action::CreateWorktree,
+        Action::DiscardFile,
+        Action::RevealFile,
     ];
 
     #[must_use]
@@ -292,6 +316,15 @@ impl Action {
     #[must_use]
     pub fn id(self) -> &'static str {
         self.spec().id
+    }
+
+    /// Whether the action throws away work. Menus show it in red and ask first.
+    #[must_use]
+    pub fn destructive(self) -> bool {
+        matches!(
+            self,
+            Action::DiscardChunk | Action::DiscardFile | Action::DeleteBranch
+        )
     }
 
     /// The action with this id, if any.
@@ -380,13 +413,20 @@ impl Action {
                     _ => Ok(()),
                 }
             }
+            Action::RevealFile => {
+                if ctx.root.is_none() {
+                    return Err("No repository is open.");
+                }
+                file_entry(args, ctx).map(|_| ())
+            }
             Action::CopyBranchName | Action::CopyFilePath | Action::FocusCommitMessage => Ok(()),
             Action::NewChildBranch
             | Action::Restack
             | Action::PushWithLease
             | Action::RenameBranch
             | Action::DeleteBranch
-            | Action::CreateWorktree => Err(NOT_AVAILABLE),
+            | Action::CreateWorktree
+            | Action::DiscardFile => Err(NOT_AVAILABLE),
         }
     }
 
@@ -433,6 +473,10 @@ impl Action {
             }
             (Action::CopyBranchName, Args::Branch(name)) => Effect::Copy(name.clone()),
             (Action::CopyFilePath, Args::File(path)) => Effect::Copy(path.clone()),
+            (Action::RevealFile, Args::File(path)) => {
+                // `enabled` has checked that the root is there.
+                Effect::Reveal(PathBuf::from(ctx.root.unwrap_or_default()).join(path))
+            }
             (Action::FocusCommitMessage, _) => Effect::FocusCommitMessage,
             // Only reached when `enabled` said Ok, which no placeholder does.
             _ => return Err(NOT_AVAILABLE),
@@ -521,6 +565,7 @@ mod tests {
             staged_count: entries.iter().filter(|e| e.staged.is_some()).count(),
             message,
             current_branch: Some("main"),
+            root: Some("/repo"),
         }
     }
 
@@ -570,10 +615,12 @@ mod tests {
             Action::RenameBranch,
             Action::DeleteBranch,
             Action::CreateWorktree,
+            Action::DiscardFile,
         ];
         for action in placeholders {
             let args = match action.spec().args {
                 ArgKind::Branch => Args::Branch("main".into()),
+                ArgKind::File => Args::File("a.txt".into()),
                 _ => Args::None,
             };
             assert_eq!(action.enabled(&args, &context), Err("Not available yet"));
@@ -771,6 +818,45 @@ mod tests {
                 path: "a.txt".into(),
                 hunk: HunkId("h1".into()),
             }]))
+        );
+    }
+
+    #[test]
+    fn reveal_needs_a_repository_and_a_listed_file() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let file = Args::File("a.txt".into());
+        assert_eq!(
+            Action::RevealFile.plan(&file, &ctx(&entries, "")),
+            Ok(Effect::Reveal(PathBuf::from("/repo/a.txt")))
+        );
+        let closed = Context {
+            repo_open: false,
+            root: None,
+            ..ctx(&entries, "")
+        };
+        assert_eq!(
+            Action::RevealFile.enabled(&file, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::RevealFile.enabled(&Args::File("gone.txt".into()), &ctx(&entries, "")),
+            Err("That file is not in the working copy")
+        );
+    }
+
+    #[test]
+    fn only_throwing_work_away_is_destructive() {
+        let destructive: Vec<Action> = Action::ALL
+            .into_iter()
+            .filter(|action| action.destructive())
+            .collect();
+        assert_eq!(
+            destructive,
+            [
+                Action::DiscardChunk,
+                Action::DeleteBranch,
+                Action::DiscardFile
+            ]
         );
     }
 

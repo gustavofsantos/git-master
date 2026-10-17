@@ -13,7 +13,7 @@ use crate::resize::{self, LEFT};
 use crate::resize_handle::{self, Edge};
 use crate::theme;
 use crate::view::{KEY_CONTEXT, StatusView};
-use crate::{Refresh, SelectNext, SelectPrev, ToggleStage};
+use crate::{CloseContextMenu, OpenContextMenu, Refresh, SelectNext, SelectPrev, ToggleStage};
 
 const ROW_HEIGHT: f32 = 24.;
 
@@ -93,6 +93,12 @@ impl StatusView {
             }))
             .on_action(cx.listener(|this, _: &ToggleStage, window, cx| {
                 this.toggle_selected(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenContextMenu, window, cx| {
+                this.open_selected_file_menu(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseContextMenu, _, cx| {
+                this.close_context_menu(cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -177,6 +183,12 @@ fn file_row(entry: &StatusEntry, selected: bool, index: usize, cx: &Context<Stat
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 this.select_row(index, cx);
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.open_file_menu(index, event.position, window, cx);
             }),
         )
         .child(

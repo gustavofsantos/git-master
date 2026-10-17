@@ -9,6 +9,7 @@ mod branches;
 mod changes;
 mod command_panel;
 mod composer;
+mod context_menu;
 mod diff_pane;
 mod diff_rows;
 mod editor;
@@ -48,6 +49,8 @@ actions!(
         SelectPrev,
         Refresh,
         ToggleStage,
+        OpenContextMenu,
+        CloseContextMenu,
         FocusNext,
         FocusPrev,
     ]
@@ -125,6 +128,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("k", SelectPrev, Some(KEY_CONTEXT)),
         KeyBinding::new("up", SelectPrev, Some(KEY_CONTEXT)),
         KeyBinding::new("space", ToggleStage, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-f10", OpenContextMenu, Some(KEY_CONTEXT)),
+        KeyBinding::new("escape", CloseContextMenu, Some(KEY_CONTEXT)),
         KeyBinding::new("r", Refresh, Some(KEY_CONTEXT)),
         KeyBinding::new("tab", FocusNext, None),
         KeyBinding::new("shift-tab", FocusPrev, None),
@@ -162,6 +167,8 @@ mod tests {
             "k",
             "up",
             "space",
+            "shift-f10",
+            "escape",
             "r",
             "tab",
             "shift-tab",
