@@ -65,6 +65,30 @@ Ordem: log de comandos, depois trocar de branch, depois trocar de projeto. O log
 
 Pronto quando: troca de projeto e de branch sem sair do app, todo comando Git executado é inspecionável no painel, e abrir o app sem projeto leva a uma tela que explica o que fazer em vez de uma janela vazia.
 
+## Fatia 1c: Working Copy simples, menus contextuais e paleta de comandos (a fazer)
+
+Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu de contexto de branch; paleta de comandos). Vem antes de a fatia 2 ganhar interface, porque o composer e os chips dela moram na tela simplificada.
+
+1. **Simplificar a Working Copy** (a fazer).
+   - Cabeçalho "Working Copy" com a contagem ("6 changed"); lista plana, uma linha por arquivo: letra de estado (M, A, D, ?) e caminho completo, sem filtro, sem campo de contagem e sem checkbox por linha.
+   - Composer na base da coluna: caixa da mensagem e botão "Commit on <branch>".
+   - Diff com o caminho e o resumo `+5 −1` no cabeçalho, sem barra de botões extra.
+   - Em aberto (confirmar com o autor antes de construir, pois mexe em D23): onde ficam stage e unstage sem o checkbox (stage por hunk e por linha no diff; stage do arquivo por tecla e pelo menu de contexto do arquivo; marca discreta de "staged" na letra de estado). O "lido" segue como eixo ortogonal.
+2. **Registro único de ações** (a fazer; pré-requisito de 3 e 4).
+   - Cada ação tem id estável, título, atalho, argumentos tipados (branch, arquivo) e um predicado "habilitada agora?" que devolve o motivo quando não está. Teclado, menus e paleta leem do mesmo registro, para nunca divergirem; o que o motor ainda não faz entra como ação desabilitada com o motivo "not available yet".
+   - Rodar uma ação despacha o mesmo `CommandKind` de hoje, com `Actor::Human`. Nada de caminho paralelo.
+3. **Menus contextuais** (a fazer).
+   - Clique direito (e tecla de menu) em branch da sidebar, arquivo da lista, e depois commit e stash. Itens vêm do registro; atalho à direita; separadores por grupo; item destrutivo em vermelho e com confirmação.
+   - Menu de branch do desenho: Checkout, New child branch, Create worktree, Restack this stack, Push with lease, Copy branch name, Rename, Delete. Só Checkout e Copy branch name existem hoje; os demais aparecem desabilitados até a sua fatia.
+   - Menu de arquivo: Stage/Unstage, Discard changes (com confirmação), Copy path, Reveal in file manager.
+4. **Paleta de comandos** (a fazer).
+   - Abre com `⌘K` (`Ctrl+K` no Linux), campo único com busca difusa; seções "Actions", "Worktrees" e "Branches" conforme o resultado; trecho casado em destaque; contagem de resultados.
+   - Teclado: setas navegam, Enter executa, Tab escolhe o argumento da ação (ex.: qual branch), Esc fecha; rodapé com as dicas.
+   - Lista virtualizada e filtragem fora da thread de UI; ações desabilitadas aparecem com o motivo.
+5. **Worktrees** (a decidir, Q8). O desenho traz a seção "Worktrees" na sidebar (aqui, agente, sem repo) e as ações de criar e remover. Não entram na v1 sem decisão do autor; até lá as ações ficam desabilitadas no registro.
+
+Pronto quando: a Working Copy fica no desenho simplificado, toda ação da tela existe no registro e é alcançável por tecla, menu de contexto e paleta, e uma ação desabilitada explica por quê.
+
 ## Fatia 2: hook `prepare-commit`
 
 Revisada em 2026-10-16 (D29, D30): só o que o Git não tem vira hook do GitMaster. O `pre-commit` e os demais hooks nativos ficam com o Git; Q1 decidida (JSON puro).
