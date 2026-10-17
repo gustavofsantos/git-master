@@ -142,6 +142,7 @@ impl StatusView {
                     .text_color(theme::warn_fg())
                     .child(hint.unwrap_or("")),
             )
+            .children(self.suggestion_row(cx))
             .child(button)
             .child(height_strip)
     }
@@ -186,6 +187,41 @@ impl StatusView {
             ));
         }
         row
+    }
+
+    /// The message a hook run offered, with Replace and Discard. Replace fills
+    /// the composer with it, which the user asked for; Discard keeps the text.
+    fn suggestion_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let suggestion = self.model.hooks.suggestion.as_deref()?;
+        let first_line = suggestion.lines().next().unwrap_or("");
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_color(theme::muted())
+                        .child(format!("Suggested: {first_line}")),
+                )
+                .child(chip_button(
+                    "hook-replace",
+                    "Replace",
+                    Action::UseSuggestion,
+                    cx,
+                ))
+                .child(chip_button(
+                    "hook-discard",
+                    "Discard",
+                    Action::DiscardSuggestion,
+                    cx,
+                )),
+        )
     }
 
     /// Whether the Commit button is drawn enabled: something staged and a message.
