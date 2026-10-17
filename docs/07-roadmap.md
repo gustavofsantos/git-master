@@ -66,11 +66,11 @@ Ordem: log de comandos, depois trocar de branch, depois trocar de projeto. O log
 
 Pronto quando: troca de projeto e de branch sem sair do app, todo comando Git executado é inspecionável no painel, e abrir o app sem projeto leva a uma tela que explica o que fazer em vez de uma janela vazia.
 
-## Fatia 1c: Working Copy simples, menus contextuais e paleta de comandos (a fazer)
+## Fatia 1c: Working Copy simples, menus contextuais e paleta de comandos (em andamento)
 
 Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu de contexto de branch; paleta de comandos). Vem antes de a fatia 2 ganhar interface, porque o composer e os chips dela moram na tela simplificada.
 
-1. **Simplificar a Working Copy** (a fazer).
+1. **Simplificar a Working Copy** (feito; descartar hunk entrou como `DiscardHunk`, no stage lado Staged o descarte é recusado).
    - Cabeçalho "Working Copy" com a contagem ("6 changed"); lista plana, uma linha por arquivo: letra de estado (M, A, D, ?) e caminho completo, sem filtro, sem campo de contagem e sem checkbox por linha.
    - Composer na base da coluna: caixa da mensagem e botão "Commit on <branch>".
    - Diff com o caminho e o resumo `+5 −1` no cabeçalho, sem barra de botões extra.
@@ -79,7 +79,7 @@ Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu 
      - Abaixo do cabeçalho, um resumo ("2 chunks, 3 insertions, 4 deletions").
      - Cada hunk tem na linha do seu cabeçalho `@@` os botões "Discard Chunk" (pede confirmação) e "Stage Chunk" ("Unstage Chunk" no lado staged). O stage por linha (D24) continua, pelo gutter.
      - O arquivo inteiro faz stage e unstage por tecla (espaço) e pelo menu de contexto do arquivo; a letra de estado na lista ganha uma marca discreta quando o arquivo tem algo staged. O "lido" segue como eixo ortogonal (D23).
-2. **Registro único de ações** (a fazer; pré-requisito de 3 e 4).
+2. **Registro único de ações** (feito, em `gm-ui/src/action_registry.rs`; pré-requisito de 3 e 4; o stage por linha do D24 ficou fora dele).
    - Cada ação tem id estável, título, atalho, argumentos tipados (branch, arquivo) e um predicado "habilitada agora?" que devolve o motivo quando não está. Teclado, menus e paleta leem do mesmo registro, para nunca divergirem; o que o motor ainda não faz entra como ação desabilitada com o motivo "not available yet".
    - Rodar uma ação despacha o mesmo `CommandKind` de hoje, com `Actor::Human`. Nada de caminho paralelo.
 3. **Menus contextuais** (a fazer).
@@ -102,9 +102,9 @@ Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu 
 
 Pronto quando: a Working Copy fica no desenho simplificado, toda ação da tela existe no registro e é alcançável por tecla, menu de contexto e paleta, e uma ação desabilitada explica por quê.
 
-## Fatia 2: hook `prepare-commit`
+## Fatia 2: hook `prepare-commit` (backend feito; interface a fazer)
 
-Revisada em 2026-10-16 (D29, D30): só o que o Git não tem vira hook do GitMaster. O `pre-commit` e os demais hooks nativos ficam com o Git; Q1 decidida (JSON puro).
+Backend entregue (`gm-core/src/hook`, `gm-schema/src/hook.rs`; comandos `ListHooks`, `ApproveHook`, `RunPrepareCommit`, `CancelHook`; aprovações em `~/.local/share/gitmaster/hook-approvals.json`, por repositório). Falta a interface (chip e sugestão no composer, aprovação de hook de repo) e fazer os hooks usarem o PATH do shell de login, como o `git` já usa. Revisada em 2026-10-16 (D29, D30): só o que o Git não tem vira hook do GitMaster. O `pre-commit` e os demais hooks nativos ficam com o Git; Q1 decidida (JSON puro).
 
 - Contrato JSON versionado em `gm-schema` (entrada: mensagem atual, diff staged, repo; saída: mensagem), sempre JSON.
 - Configuração em `[gitmaster "prepare-commit.<nome>"]` (`command`, `match`, `timeout`), lida do config global e de usuário; hook de repo só roda após aprovação guardada fora do repo, amarrada ao hash do comando (D17).
