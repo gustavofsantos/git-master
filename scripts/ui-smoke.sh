@@ -18,7 +18,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -38,6 +38,7 @@ COMPOSER_X=300; COMPOSER_Y=255              # commit message box
 LOG_BUTTON_X=1300; LOG_BUTTON_Y=837         # "Git log" button, right end of the status bar
 PROJECT_X=139; PROJECT_Y=67                 # project button at the left of the top bar
 RECENT_OTHER_X=150; RECENT_OTHER_Y=185      # second row of the open list: billing-api
+BRANCH_X=242; BRANCH_Y=67                   # branch button, right of the project button
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -336,6 +337,85 @@ $(diff <(printf '%s\n' "$before_repo") <(printf '%s\n' "$after_repo") || true)"
 $(diff <(printf '%s\n' "$before_other") <(printf '%s\n' "$after_other") || true)"
 }
 
+# Branches for g-switch-branch, made before the app opens the repository. Only
+# this scenario gets them, so the fixture of the others is unchanged.
+prepare_branches() {
+  local repo="$1" tmp="$RUN_DIR/conflict-clone"
+  # Same tree as main: the checkout goes through with the work in progress.
+  git -C "$repo" branch feature/x
+  # A branch that changes api/routes.rs. Below, that file is dirty, so git
+  # refuses the checkout and leaves the work alone.
+  rm -rf "$tmp"
+  git clone -q "$repo" "$tmp"
+  printf 'changed on conflict\n' > "$tmp/api/routes.rs"
+  git -C "$tmp" add api/routes.rs
+  git -C "$tmp" -c user.name="gm smoke" -c user.email="smoke@example.invalid" \
+    -c commit.gpgsign=false commit -q -m "conflict: routes"
+  git -C "$tmp" push -q "$repo" HEAD:refs/heads/conflict
+  rm -rf "$tmp"
+  printf '// dirty\n' >> "$repo/api/routes.rs"
+}
+
+# --- 3g. Switch branches from the top bar's branch list ------------------------
+scenario_g() {
+  local repo="$RUN_DIR/repo" theme="$1" head differing
+  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y"; sleep 0.5
+  shoot "$RUN_DIR/closed.png"
+
+  # Opening lists the branches; main is current, so the list opens on it.
+  xdotool mousemove "$BRANCH_X" "$BRANCH_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/g-switch-branch-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/closed.png" "$SMOKE_OUT/g-switch-branch-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the branch list did not open ($differing pixels changed)"
+
+  # Typing filters the list: only feature/x contains "feat".
+  xdotool type --delay 20 -- feat; sleep 0.7
+  shoot "$SMOKE_OUT/g-switch-branch-filter-$theme.png"
+
+  # Escape clears the filter and keeps the list open.
+  xdotool key Escape; sleep 0.7
+  shoot "$RUN_DIR/g-cleared.png"
+  differing="$(compare -metric AE "$RUN_DIR/closed.png" "$RUN_DIR/g-cleared.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "Escape closed the list instead of clearing the filter"
+
+  # The list is conflict, feature/x, main, and Escape leaves the highlight on
+  # the first row. Down, Up, Down ends on feature/x; Enter checks it out.
+  xdotool key Down; sleep 0.4
+  xdotool key Up; sleep 0.4
+  xdotool key Down; sleep 0.4
+  xdotool key Return; sleep 1.5
+  head="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
+  [ "$head" = "feature/x" ] || fail "HEAD is '$head' after picking feature/x, expected 'feature/x'"
+
+  # The list is gone; only the branch name in the top bar changed.
+  shoot "$SMOKE_OUT/g-switch-branch-done-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/g-switch-branch-$theme.png" "$SMOKE_OUT/g-switch-branch-done-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the view did not change after the checkout ($differing pixels)"
+  differing="$(compare -metric AE "$RUN_DIR/closed.png" "$SMOKE_OUT/g-switch-branch-done-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 100 ] || fail "the top bar did not show the new branch ($differing pixels changed)"
+
+  # A refused checkout: conflict changes the dirty file, so git says no.
+  xdotool mousemove "$BRANCH_X" "$BRANCH_Y" click 1; sleep 1.5
+  xdotool type --delay 20 -- conf; sleep 0.5
+  xdotool key Return; sleep 1.5
+  head="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
+  [ "$head" = "feature/x" ] || fail "HEAD moved to '$head' by a checkout git refused"
+  grep -qxF '// dirty' "$repo/api/routes.rs" || fail "the uncommitted change in api/routes.rs was touched"
+  shoot "$SMOKE_OUT/g-switch-branch-refused-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/g-switch-branch-done-$theme.png" "$SMOKE_OUT/g-switch-branch-refused-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 500 ] || fail "the refused checkout showed no notice ($differing pixels changed)"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -345,6 +425,7 @@ run_scenario() {
   mkdir -p "$RUN_DIR" "$RUN_DIR/xdg/gitmaster"
   make_repo "$RUN_DIR/repo"
   make_other_repo "$RUN_DIR/billing-api"
+  if [ "$name" = g-switch-branch ]; then prepare_branches "$RUN_DIR/repo"; fi
   # Most recent first: the app opens repo, which moves it to the top.
   printf '[\n  "%s",\n  "%s"\n]\n' "$RUN_DIR/billing-api" "$RUN_DIR/repo" > "$RUN_DIR/xdg/gitmaster/recent.json"
   launch_app "$theme" "$RUN_DIR/repo"
@@ -355,6 +436,7 @@ run_scenario() {
     d-refresh)     scenario_d "$theme" ;;
     e-command-log) scenario_e "$theme" ;;
     f-open-project) scenario_f "$theme" ;;
+    g-switch-branch) scenario_g "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app
