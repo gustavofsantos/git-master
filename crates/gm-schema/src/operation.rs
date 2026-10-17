@@ -2,6 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::{DiffSide, FileDiff, StageTarget};
+use crate::hook::{HookFailure, HookInfo};
 use crate::status::{BranchEntry, RepoStatus};
 
 /// Sequential, so the operation log is deterministic.
@@ -44,6 +45,23 @@ pub enum CommandKind {
     /// tracking branch is created for it when none exists).
     Checkout {
         branch: String,
+    },
+    /// Lists the hooks read from config, with their state (docs/03).
+    ListHooks,
+    /// Approves the repository hook `name` whose command still hashes to
+    /// `command_hash`, as the last `HooksListed` showed it.
+    ApproveHook {
+        name: String,
+        command_hash: String,
+    },
+    /// Runs the `prepare-commit` chain on `message`. Asynchronous: the hook
+    /// events for the run carry the run's own operation id.
+    RunPrepareCommit {
+        message: String,
+    },
+    /// Stops the `RunPrepareCommit` operation `run`, if it is still running.
+    CancelHook {
+        run: OperationId,
     },
 }
 
@@ -145,6 +163,35 @@ pub enum Event {
     BranchesLoaded {
         id: OperationId,
         branches: Vec<BranchEntry>,
+    },
+    HooksListed {
+        id: OperationId,
+        hooks: Vec<HookInfo>,
+    },
+    /// A chain step is about to run; `step` counts from 1 of `of`.
+    HookStarted {
+        id: OperationId,
+        hook: String,
+        step: u32,
+        of: u32,
+    },
+    /// The whole chain answered; `message` is the last hook's output.
+    /// `repo_changed` is true when HEAD or the staged diff differs from the
+    /// fingerprint taken when the run started: the message is then a
+    /// suggestion for the new state, not for the state the user saw.
+    HookFinished {
+        id: OperationId,
+        message: String,
+        repo_changed: bool,
+    },
+    HookFailed {
+        id: OperationId,
+        hook: String,
+        failure: HookFailure,
+    },
+    HookCancelled {
+        id: OperationId,
+        hook: String,
     },
 }
 
