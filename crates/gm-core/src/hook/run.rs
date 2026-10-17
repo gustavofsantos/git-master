@@ -82,10 +82,64 @@ enum StepError {
     Failed(HookFailure),
 }
 
+/// Delivers the reports of one run. A run that ends without a terminal report,
+/// by a panic or an early return, delivers `Failed` on drop, so the engine
+/// never waits for a run that is gone.
+struct Reporter<F: FnMut(Report)> {
+    deliver: F,
+    run: OperationId,
+    /// The step the run was in, for the failure report.
+    hook: String,
+    terminal: bool,
+}
+
+impl<F: FnMut(Report)> Reporter<F> {
+    fn send(&mut self, report: Report) {
+        match &report {
+            Report::Started { hook, .. } => self.hook.clone_from(hook),
+            Report::Finished { .. } | Report::Failed { .. } | Report::Cancelled { .. } => {
+                self.terminal = true;
+            }
+            Report::StepDone { .. } => {}
+        }
+        (self.deliver)(report);
+    }
+}
+
+impl<F: FnMut(Report)> Drop for Reporter<F> {
+    fn drop(&mut self) {
+        if !self.terminal {
+            (self.deliver)(Report::Failed {
+                run: self.run,
+                hook: self.hook.clone(),
+                failure: HookFailure::CannotStart {
+                    detail: "the hook run stopped without an answer".to_owned(),
+                },
+            });
+        }
+    }
+}
+
 impl Plan {
-    /// Runs the steps in order, calling `report` for each event. Stops at the
-    /// first step that fails or is cancelled; the last report is then terminal.
-    pub fn execute(self, mut report: impl FnMut(Report)) {
+    /// Runs the steps in order, delivering each report. Stops at the first
+    /// step that fails or is cancelled. However the run ends, its last report
+    /// is terminal, and the staged-diff file is deleted.
+    pub fn execute(self, deliver: impl FnMut(Report)) {
+        let hook = self
+            .steps
+            .first()
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let mut reporter = Reporter {
+            deliver,
+            run: self.run,
+            hook,
+            terminal: false,
+        };
+        self.execute_steps(&mut reporter);
+    }
+
+    fn execute_steps<F: FnMut(Report)>(self, reporter: &mut Reporter<F>) {
         let of = u32::try_from(self.steps.len()).unwrap_or(u32::MAX);
         // Held until the chain ends, then deleted.
         let mut diff_file = None;
@@ -99,7 +153,7 @@ impl Plan {
                         .first()
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
-                    report(Report::Failed {
+                    reporter.send(Report::Failed {
                         run: self.run,
                         hook,
                         failure: HookFailure::CannotStart {
@@ -115,13 +169,13 @@ impl Plan {
         for (index, step) in self.steps.iter().enumerate() {
             let number = u32::try_from(index + 1).unwrap_or(u32::MAX);
             if self.cancel.load(Ordering::SeqCst) {
-                report(Report::Cancelled {
+                reporter.send(Report::Cancelled {
                     run: self.run,
                     hook: step.name.clone(),
                 });
                 return;
             }
-            report(Report::Started {
+            reporter.send(Report::Started {
                 run: self.run,
                 hook: step.name.clone(),
                 step: number,
@@ -150,20 +204,20 @@ impl Plan {
             match run_step(step, &invocation_id, &json, &self.root, &self.cancel) {
                 Ok(next) => {
                     message = next;
-                    report(Report::StepDone {
+                    reporter.send(Report::StepDone {
                         run: self.run,
                         hook: step.name.clone(),
                     });
                 }
                 Err(StepError::Cancelled) => {
-                    report(Report::Cancelled {
+                    reporter.send(Report::Cancelled {
                         run: self.run,
                         hook: step.name.clone(),
                     });
                     return;
                 }
                 Err(StepError::Failed(failure)) => {
-                    report(Report::Failed {
+                    reporter.send(Report::Failed {
                         run: self.run,
                         hook: step.name.clone(),
                         failure,
@@ -172,7 +226,7 @@ impl Plan {
                 }
             }
         }
-        report(Report::Finished {
+        reporter.send(Report::Finished {
             run: self.run,
             message,
         });
@@ -347,6 +401,57 @@ pub fn failure_summary(hook: &str, failure: &HookFailure) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn staged_files() -> usize {
+        std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("gm-staged-"))
+            .count()
+    }
+
+    #[test]
+    fn a_panicking_run_still_ends_with_a_failed_report_and_no_temp_file() {
+        let before = staged_files();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let plan = Plan {
+            run: OperationId(9),
+            root: std::env::temp_dir(),
+            branch: None,
+            head: None,
+            // Over the inline limit, so a temporary file exists while the run is in flight.
+            staged_diff: "x".repeat(INLINE_DIFF_LIMIT + 1),
+            message: String::new(),
+            steps: vec![Step {
+                name: "llm".into(),
+                command: "cat >/dev/null".into(),
+                timeout: Duration::from_secs(5),
+            }],
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+
+        // Panic on the first report, which is sent after the diff file is written.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            plan.execute(move |report| {
+                assert!(!matches!(report, Report::Started { .. }), "forced panic");
+                let _ = tx.send(report);
+            });
+        }));
+
+        assert!(result.is_err());
+        let reports: Vec<Report> = rx.try_iter().collect();
+        assert_eq!(
+            reports,
+            [Report::Failed {
+                run: OperationId(9),
+                hook: "llm".into(),
+                failure: HookFailure::CannotStart {
+                    detail: "the hook run stopped without an answer".into(),
+                },
+            }]
+        );
+        assert_eq!(staged_files(), before, "the staged diff file is deleted");
+    }
 
     #[test]
     fn first_lines_keeps_only_the_head_of_stderr() {
