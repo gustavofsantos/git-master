@@ -98,10 +98,9 @@ for tool in Xvfb xdotool scrot git convert compare; do
   command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 1; }
 done
 
-if [ ! -x "$BIN" ]; then
-  echo "building $BIN ..."
-  (cd "$ROOT" && cargo build --release -p gitmaster)
-fi
+# Always build: cargo is a no-op when current, and a stale binary would pass or fail for the wrong code.
+echo "building $BIN ..."
+(cd "$ROOT" && cargo build --release -p gitmaster)
 [ -x "$BIN" ] || { echo "binary not found after build: $BIN" >&2; exit 1; }
 
 mkdir -p "$SMOKE_OUT" "$RUN_ROOT"
