@@ -1,6 +1,6 @@
 # Roadmap
 
-Última atualização: 2026-10-16. **Proposta inicial**, para iterar. A ordem prioriza chegar cedo a algo que o autor use no dia a dia e que já mostre um diferencial.
+Última atualização: 2026-10-16. **Proposta inicial**, para iterar. Marcas: **(feito)** no código e verificado; **(a fazer)** ainda não começado; sem marca, fatia futura. A ordem prioriza chegar cedo a algo que o autor use no dia a dia e que já mostre um diferencial.
 
 ## Critério de ordem
 
@@ -9,28 +9,28 @@
 3. O primeiro diferencial (hooks) aparece cedo; stacks e MCP depois da base de Working Copy e histórico.
 4. Se o diferencial mais urgente for o stacking, antecipar a fatia 5 (a ordem é uma decisão do autor).
 
-## Fatia 0: spikes e esqueleto
+## Fatia 0: spikes e esqueleto (feito)
 
 Objetivo: validar o que pode invalidar o desenho.
 
-- Spike A: descartado pelo autor em 2026-10-16 (lista virtualizada do GPUI com 100 mil linhas).
-- Spike B: texto editável no GPUI (painel de resultado do resolvedor); avaliar bibliotecas e licenças (Q7).
-- Spike C: rebase in-memory do libgit2 (cobertura) e `git merge-tree --write-tree`; comparar com gitoxide (Q6).
-- Spike D: status em repositório massivo via subprocess com fsmonitor.
-- Esqueleto: workspace Cargo com `gm-schema`, `gm-core`, `gm-ui`, `gm-mcp`; janela GPUI; abrir um repo; operation log mínimo; testes de propriedade de base.
+- Spike A (descartado): descartado pelo autor em 2026-10-16 (lista virtualizada do GPUI com 100 mil linhas).
+- Spike B (feito): texto editável no GPUI (painel de resultado do resolvedor); avaliar bibliotecas e licenças (Q7). Veredito em Q7.
+- Spike C (feito): rebase in-memory do libgit2 (cobertura) e `git merge-tree --write-tree`; comparar com gitoxide (Q6). Veredito em Q6.
+- Spike D (feito, fsmonitor sem veredito): status em repositório massivo via subprocess com fsmonitor. Em `spikes/d-status/FINDINGS.md`; o fsmonitor não pôde ser medido neste build do Git.
+- Esqueleto (feito): workspace Cargo com `gm-schema`, `gm-core`, `gm-ui`, `gm-mcp`; janela GPUI; abrir um repo; operation log mínimo; testes de propriedade de base.
 
 Pronto quando: abre um repositório grande e lista as mudanças sem travar; os spikes têm veredito registrado em `01` (Q6, Q7).
 
-## Fatia 1: Working Copy e commit
+## Fatia 1: Working Copy e commit (feito)
 
-- Lista de arquivos com checkbox tri-state, filtro e agrupamento.
-- Diff unificado (histogram), stage por arquivo, hunk e linha (aviso de par −/+).
-- Composer de commit; commit.
-- Atalhos de teclado.
+- Lista de arquivos com checkbox tri-state, filtro e agrupamento por diretório (feito).
+- Diff unificado (histogram), stage por arquivo, hunk e linha (aviso de par −/+) (feito).
+- Composer de commit; commit (feito).
+- Atalhos de teclado (feito: navegação, stage, filtro, atualizar, foco).
 
-Pronto quando: substitui `git add -p` mais `git commit` no uso diário.
+Pronto quando: substitui `git add -p` mais `git commit` no uso diário. Código completo; o uso diário é o teste do autor.
 
-## Fatia 1b: o básico que falta (antes dos diferenciais)
+## Fatia 1b: o básico que falta (antes dos diferenciais) (em andamento)
 
 Revisão de 2026-10-16: com a Working Copy pronta, faltam três coisas sem as quais o app não substitui um cliente Git no dia a dia. Entram antes da fatia 2.
 
