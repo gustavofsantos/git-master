@@ -2143,6 +2143,7 @@ dependencies = [
  "gm-core",
  "gm-schema",
  "gpui",
+ "serde_json",
 ]
 
 [[package]]

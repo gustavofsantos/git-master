@@ -32,6 +32,22 @@ pub struct Model {
     pub notice_icon: Option<Icon>,
     notice_generation: u64,
     pub loading: bool,
+    /// The `OpenRepo` the window waits for. Its `StatusLoaded` replaces the
+    /// repository and resets the view state that belonged to the old one.
+    pending_open: Option<OperationId>,
+    /// Events older than this belong to the repository being left and are dropped.
+    floor: Option<OperationId>,
+    /// Set by the open that just succeeded, until the view takes it.
+    switched: Option<Switched>,
+}
+
+/// A repository replaced by a successful open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Switched {
+    /// The root git resolved for the opened folder.
+    pub root: String,
+    /// Whether the previous repository had the same root.
+    pub same_root: bool,
 }
 
 /// The two sides of the selected file, ready to show. `None` means the side
@@ -84,8 +100,24 @@ impl Model {
     /// selected file's two loads have both finished (succeeded or failed).
     #[must_use]
     pub fn apply(&mut self, event: Event) -> Option<Diffs> {
+        if self.floor.is_some_and(|floor| event_id(&event) < floor) {
+            return None;
+        }
         match event {
-            Event::StatusLoaded { status, .. } => {
+            Event::StatusLoaded { id, status } => {
+                if self.pending_open == Some(id) {
+                    self.pending_open = None;
+                    self.floor = Some(id);
+                    let same_root = self
+                        .status
+                        .as_ref()
+                        .is_some_and(|old| old.root == status.root);
+                    self.switched = Some(Switched {
+                        root: status.root.clone(),
+                        same_root,
+                    });
+                    self.reset_for_repo();
+                }
                 self.status = Some(status);
                 self.rebuild();
                 self.error = None;
@@ -98,6 +130,9 @@ impl Model {
                 detail,
                 ..
             } => {
+                if self.pending_open == Some(id) {
+                    self.pending_open = None;
+                }
                 self.error = Some(detail.unwrap_or_else(|| "the operation failed".to_owned()));
                 self.loading = false;
                 self.settle(id, None, None)
@@ -112,6 +147,37 @@ impl Model {
             // The branch picker will consume `BranchesLoaded`; nothing shows it yet.
             Event::BranchesLoaded { .. } | Event::OperationChanged { .. } => None,
         }
+    }
+
+    /// Waits for the `OpenRepo` `id`. Until it succeeds or fails, the current
+    /// repository stays on screen.
+    pub fn request_open(&mut self, id: OperationId) {
+        self.pending_open = Some(id);
+        self.loading = true;
+    }
+
+    /// Whether an open is in flight. Nothing may change the repository meanwhile.
+    #[must_use]
+    pub fn is_opening(&self) -> bool {
+        self.pending_open.is_some()
+    }
+
+    /// The repository a successful open replaced, once. It is taken, so the
+    /// caller acts on it only once.
+    pub fn take_switched(&mut self) -> Option<Switched> {
+        self.switched.take()
+    }
+
+    /// Clears what belonged to the repository being left. The status stays
+    /// until the new one replaces it.
+    fn reset_for_repo(&mut self) {
+        self.filter.clear();
+        self.collapsed.clear();
+        self.selected = None;
+        self.selected_row = None;
+        self.diffs = None;
+        self.notice = None;
+        self.notice_icon = None;
     }
 
     /// Resolves the diff side waiting for `id`. A `DiffLoaded` must name the
@@ -334,6 +400,15 @@ impl Model {
         (0..before.min(self.tree.row_count()))
             .rev()
             .find(|&row| self.tree.file_at(row).is_some())
+    }
+}
+
+fn event_id(event: &Event) -> OperationId {
+    match event {
+        Event::StatusLoaded { id, .. }
+        | Event::OperationChanged { id, .. }
+        | Event::DiffLoaded { id, .. }
+        | Event::Committed { id, .. } => *id,
     }
 }
 
@@ -666,5 +741,104 @@ mod tests {
         let mut conflicted = entry("both");
         conflicted.conflicted = true;
         assert_eq!(entry_label(&conflicted), ('U', 'U'));
+    }
+
+    fn status_at(root: &str, paths: &[&str]) -> RepoStatus {
+        RepoStatus {
+            root: root.to_owned(),
+            branch: BranchInfo::default(),
+            entries: paths.iter().map(|p| entry(p)).collect(),
+        }
+    }
+
+    /// A model showing repository `/r` with `a` selected, a folder collapsed,
+    /// a filter typed and a notice up, with `a`'s diffs pending as ids 10 and 11.
+    fn busy() -> Model {
+        let mut model = Model::default();
+        let _ = model.apply(loaded(&["a", "dir/b"]));
+        let _ = model.set_filter("a");
+        let _ = model.set_filter("");
+        let _ = model.toggle_collapsed("dir");
+        let _ = model.set_notice("nothing staged".into());
+        let row = model.row_of("a").expect("a is listed");
+        let _ = model.select_row(row);
+        model.expect_diffs("a".to_owned(), OperationId(10), OperationId(11));
+        model
+    }
+
+    #[test]
+    fn a_successful_open_resets_what_belonged_to_the_old_repo() {
+        let mut model = busy();
+        model.request_open(OperationId(20));
+        assert!(model.is_opening());
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(20),
+            status: status_at("/b", &["x"]),
+        });
+        assert!(!model.is_opening());
+        assert_eq!(model.selected_path(), None);
+        assert_eq!(model.filter(), "");
+        assert!(!model.diffs_are_for("a"));
+        assert_eq!(model.notice, None);
+        assert!(model.collapsed.is_empty());
+        assert_eq!(model.entries().len(), 1);
+        assert_eq!(
+            model.take_switched(),
+            Some(Switched {
+                root: "/b".into(),
+                same_root: false,
+            })
+        );
+        assert_eq!(model.take_switched(), None);
+    }
+
+    #[test]
+    fn reopening_the_same_root_says_so() {
+        let mut model = busy();
+        model.request_open(OperationId(20));
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(20),
+            status: status_at("/r", &["a"]),
+        });
+        assert_eq!(model.take_switched().map(|s| s.same_root), Some(true));
+    }
+
+    #[test]
+    fn a_failed_open_keeps_the_current_repo_and_its_state() {
+        let mut model = busy();
+        model.request_open(OperationId(20));
+        let _ = model.apply(failed(20, Some("not a git repository")));
+        assert!(!model.is_opening());
+        assert_eq!(model.error.as_deref(), Some("not a git repository"));
+        assert_eq!(model.status().map(|s| s.root.as_str()), Some("/r"));
+        assert_eq!(model.selected_path(), Some("a"));
+        assert!(model.diffs_are_for("a"));
+        assert_eq!(model.take_switched(), None);
+    }
+
+    #[test]
+    fn a_diff_requested_for_the_old_repo_is_dropped_after_the_switch() {
+        let mut model = busy();
+        model.request_open(OperationId(20));
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(20),
+            status: status_at("/b", &["a"]),
+        });
+        // Both replies to the old repo's diff requests arrive late.
+        assert_eq!(model.apply(diff_loaded(10, DiffSide::Unstaged, "a")), None);
+        assert_eq!(model.apply(diff_loaded(11, DiffSide::Staged, "a")), None);
+        assert!(!model.diffs_are_for("a"));
+    }
+
+    #[test]
+    fn an_event_older_than_the_switch_changes_nothing() {
+        let mut model = busy();
+        model.request_open(OperationId(20));
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(20),
+            status: status_at("/b", &["x"]),
+        });
+        let _ = model.apply(failed(5, Some("stale failure")));
+        assert_eq!(model.error, None);
     }
 }

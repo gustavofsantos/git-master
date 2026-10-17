@@ -11,6 +11,8 @@ mod diff_rows;
 mod editor;
 mod icon;
 mod model;
+mod project_menu;
+mod recent;
 mod resize;
 mod resize_handle;
 mod shell_commit;

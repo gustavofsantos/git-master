@@ -2,6 +2,8 @@
 //! file list), the diff pane on the right and the status bar. It sends
 //! commands to the engine and renders the model; it never waits for git.
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gm_core::EngineHandle;
@@ -16,7 +18,9 @@ use crate::changes::ToggleAction;
 use crate::composer::{Composer, ComposerEvent};
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::icon::{self, Icon};
-use crate::model::Model;
+use crate::model::{Model, Switched};
+use crate::project_menu::ProjectMenu;
+use crate::recent::{self, Recents};
 use crate::resize;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
@@ -46,6 +50,13 @@ pub struct StatusView {
     pub(crate) left_width: f32,
     /// The commit message box's height, in logical pixels, as dragged.
     pub(crate) commit_height: f32,
+    pub(crate) project_menu: ProjectMenu,
+    /// The recent repositories, newest first, as last saved or loaded.
+    pub(crate) recents: Recents,
+    /// Where the list is kept; `None` when there is no home directory.
+    recent_store: Option<Arc<recent::Store>>,
+    /// Numbers the saves so an older one never lands after a newer one.
+    recent_generation: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -73,10 +84,16 @@ impl StatusView {
         })
         .detach();
         Self::follow_command_log(&command_log, cx);
-        engine.dispatch(Actor::Human, CommandKind::OpenRepo { path });
+        let open = engine.dispatch(Actor::Human, CommandKind::OpenRepo { path });
         theme::follow(window.appearance());
         let list_focus = cx.focus_handle();
         list_focus.focus(window);
+        let recent_store = recent::default_file().map(|file| Arc::new(recent::Store::new(file)));
+        let recents = recent_store
+            .as_ref()
+            .map(|store| store.load())
+            .unwrap_or_default();
+        let project_menu = ProjectMenu::new(cx.focus_handle());
         let filter = cx.new(|cx| TextArea::new("Filter", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
@@ -103,7 +120,7 @@ impl StatusView {
             }),
         ];
         let mut model = Model::default();
-        model.begin_refresh();
+        model.request_open(open);
         Self {
             engine,
             command_log,
@@ -117,6 +134,10 @@ impl StatusView {
             diff_pane,
             left_width: resize::LEFT_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
+            project_menu,
+            recents,
+            recent_store,
+            recent_generation: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -143,6 +164,9 @@ impl StatusView {
             self.composer.update(cx, |composer, cx| composer.clear(cx));
             Self::expire_notice_later(self.model.notice_generation(), cx);
         }
+        if let Some(switched) = self.model.take_switched() {
+            self.on_switched(switched, cx);
+        }
         if let Some(diffs) = shown {
             self.show_diffs(diffs.unstaged, diffs.staged, cx);
         }
@@ -150,6 +174,35 @@ impl StatusView {
             self.load_selected(cx);
         }
         cx.notify();
+    }
+
+    /// A successful open replaced the repository: the view state of the old
+    /// one goes, and the new root joins the recent list.
+    fn on_switched(&mut self, switched: Switched, cx: &mut Context<Self>) {
+        self.filter.update(cx, |area, cx| area.set_text("", cx));
+        if !switched.same_root {
+            self.composer.update(cx, |composer, cx| composer.clear(cx));
+        }
+        self.show_diffs(None, None, cx);
+        self.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+        self.remember(PathBuf::from(switched.root), cx);
+    }
+
+    /// Puts `root` first in the recent list and saves the list in the background.
+    fn remember(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.recents.push(root);
+        let Some(store) = self.recent_store.clone() else {
+            return;
+        };
+        self.recent_generation += 1;
+        let generation = self.recent_generation;
+        let recents = self.recents.clone();
+        cx.background_spawn(async move {
+            if let Err(error) = store.save(&recents, generation) {
+                eprintln!("gitmaster: could not save the recent repositories: {error}");
+            }
+        })
+        .detach();
     }
 
     fn on_filter_changed(&mut self, filter: &Entity<TextArea>, cx: &mut Context<Self>) {
@@ -194,6 +247,9 @@ impl StatusView {
         event: &DiffPaneEvent,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_while_opening(cx) {
+            return;
+        }
         let kind = match event {
             DiffPaneEvent::Stage(target) => CommandKind::Stage {
                 target: target.clone(),
@@ -209,6 +265,9 @@ impl StatusView {
     /// Reloads the staged and unstaged diffs of the selected file. The pane is
     /// cleared first only when the file changed.
     fn load_selected(&mut self, cx: &mut Context<Self>) {
+        if self.model.is_opening() {
+            return;
+        }
         let Some(path) = self.model.selected_path().map(str::to_owned) else {
             self.model.forget_diffs();
             self.show_diffs(None, None, cx);
@@ -269,6 +328,9 @@ impl StatusView {
 
     /// Stages or unstages the rows a checkbox covers, one command per file.
     pub(crate) fn toggle_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        if self.refuse_while_opening(cx) {
+            return;
+        }
         let kinds: Vec<CommandKind> = match self.model.toggle_action(row) {
             ToggleAction::Stage(paths) => paths
                 .into_iter()
@@ -302,6 +364,9 @@ impl StatusView {
     /// Commits the message when there is one and something is staged; otherwise
     /// says why nothing happened.
     pub(crate) fn commit(&mut self, cx: &mut Context<Self>) {
+        if self.refuse_while_opening(cx) {
+            return;
+        }
         let message = self.composer.read(cx).text(cx);
         if message.trim().is_empty() {
             self.notify_user("Nothing to commit: the message is empty.", cx);
@@ -316,10 +381,20 @@ impl StatusView {
         cx.notify();
     }
 
-    fn notify_user(&mut self, text: &str, cx: &mut Context<Self>) {
+    pub(crate) fn notify_user(&mut self, text: &str, cx: &mut Context<Self>) {
         let generation = self.model.set_notice(text.to_owned());
         Self::expire_notice_later(generation, cx);
         cx.notify();
+    }
+
+    /// Changes to the repository wait for an open in flight: they would run
+    /// against the repository being left or the one being opened.
+    fn refuse_while_opening(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.model.is_opening() {
+            return false;
+        }
+        self.notify_user("Wait for the repository to open.", cx);
+        true
     }
 
     fn expire_notice_later(generation: u64, cx: &mut Context<Self>) {
@@ -405,6 +480,7 @@ impl StatusView {
             .bg(theme::panel())
             .border_b_1()
             .border_color(theme::hairline())
+            .child(self.project_button(cx))
             .child(icon::labelled(
                 Icon::GitBranch,
                 icon::SIZE,
@@ -530,6 +606,11 @@ impl Render for StatusView {
             )
             .child(self.status_bar(cx))
             .children(self.log_open.then(|| self.command_log_panel(cx)))
+            .children(
+                self.project_menu
+                    .open
+                    .then(|| self.project_menu_layer(window, cx)),
+            )
             .children(window_chrome::resize_layer(window))
     }
 }

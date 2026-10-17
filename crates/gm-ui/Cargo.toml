@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 gm-schema.workspace = true
 gm-core.workspace = true
+serde_json.workspace = true
 gpui = "0.2"
 
 # gpui compiles its Metal shaders at build time with `xcrun metal`, which only
