@@ -68,6 +68,9 @@ impl Item {
 /// build on the branch, pushing, copying the name, then renaming and deleting.
 /// Actions the engine cannot run yet are listed disabled.
 pub(crate) fn branch_items(name: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
+    if let Some(worktree) = checked_out_in_worktree(name, ctx) {
+        return worktree_branch_items(&worktree.path, name, ctx);
+    }
     let target = Args::Branch(name.to_owned());
     let item = |action, group| Item::new(action, target.clone(), group, ctx);
     vec![
@@ -93,6 +96,33 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         item(Action::DiscardFile, 1),
         item(Action::CopyFilePath, 2),
         item(Action::RevealFile, 2),
+    ]
+}
+
+/// The linked worktree, not the main checkout, that has `name` checked out.
+fn checked_out_in_worktree<'a>(
+    name: &str,
+    ctx: &ActionContext<'a>,
+) -> Option<&'a gm_schema::WorktreeEntry> {
+    ctx.worktrees
+        .iter()
+        .find(|entry| !entry.is_main && entry.branch.as_deref() == Some(name))
+}
+
+/// The branch menu of a branch checked out in the linked worktree at `path`
+/// (W8): the worktree's own actions take the place of checkout, rename and
+/// delete, which Git would refuse here anyway. Create Worktree is not offered
+/// for a branch that already has one.
+fn worktree_branch_items(path: &str, name: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
+    let worktree = Args::Worktree(path.to_owned());
+    let branch = Args::Branch(name.to_owned());
+    vec![
+        Item::new(Action::OpenWorktree, worktree.clone(), 0, ctx),
+        Item::new(Action::RevealWorktree, worktree.clone(), 1, ctx),
+        Item::new(Action::CopyWorktreePath, worktree.clone(), 1, ctx),
+        Item::new(Action::NewChildBranch, branch.clone(), 2, ctx),
+        Item::new(Action::Restack, branch, 2, ctx),
+        Item::new(Action::RemoveWorktree, worktree, 3, ctx),
     ]
 }
 
@@ -499,6 +529,50 @@ mod tests {
         let items = branch_items("feature", &ctx(&[]));
         let sizes: Vec<usize> = sections(&items).iter().map(|s| s.len()).collect();
         assert_eq!(sizes, [1, 3, 1, 1, 2]);
+    }
+
+    #[test]
+    fn a_branch_in_a_linked_worktree_gets_the_worktree_menu_and_main_keeps_the_branch_menu() {
+        let entry = |path: &str, branch: &str, is_main: bool| WorktreeEntry {
+            path: path.to_owned(),
+            head: None,
+            branch: Some(branch.to_owned()),
+            detached: false,
+            bare: false,
+            is_main,
+            locked: None,
+            prunable: None,
+        };
+        let listed = [
+            entry("/r", "main", true),
+            entry("/r-feature", "feature", false),
+        ];
+        let context = ActionContext {
+            root: Some("/r"),
+            worktrees: &listed,
+            ..ctx(&[])
+        };
+        let titles = |items: &[Item]| items.iter().map(Item::label).collect::<Vec<_>>();
+        assert_eq!(
+            titles(&branch_items("feature", &context)),
+            vec![
+                "Open Worktree",
+                "Reveal Worktree in File Manager",
+                "Copy Worktree Path",
+                "New Child Branch",
+                "Restack This Stack",
+                "Remove Worktree",
+            ]
+        );
+        let main = branch_items("main", &context);
+        assert!(
+            main.iter()
+                .any(|item| item.action == Action::CheckoutBranch)
+        );
+        assert!(
+            main.iter()
+                .any(|item| item.action == Action::CreateWorktree)
+        );
     }
 
     #[test]
