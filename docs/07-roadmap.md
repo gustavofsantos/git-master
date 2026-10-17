@@ -141,7 +141,7 @@ Lacunas:
 
 Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem travar a UI, e o `pre-commit` nativo segue rodando como antes.
 
-## Fatia 3: histórico e branches (visão por nome) (em andamento: H1 e H2 feitas)
+## Fatia 3: histórico e branches (visão por nome) (em andamento: H1, H2 e H3 feitas)
 
 Ordem definida pelo autor em 2026-10-16: esta fatia, junto com a visão de diff (abaixo), é o próximo trabalho depois de terminar a 1c (incluindo a atualização automática) e a interface da fatia 2. Decisões do autor de 2026-10-17 em D32 a D37 (`01`); a fatia é dividida em sub-fatias H1 a H8, cada uma com o próprio "pronto quando". A leitura do histórico é `git log` como subprocess, sem escrever commit-graph (D32).
 
@@ -159,7 +159,12 @@ Ordem definida pelo autor em 2026-10-16: esta fatia, junto com a visão de diff 
   - Leitura em thread própria, sem bloquear a UI. A resposta de um pedido superado é descartada pelo `OperationId`; o processo git é parado quando o pedido é superado ou o repositório é trocado. Nada é escrito no commit-graph nem registrado no log de comandos (D28).
   - Pronto quando: um repositório de 5 mil commits, com merges e gerado com `git fast-import`, lista página a página exatamente o que `git rev-list --topo-order HEAD` lista, sem repetição nem buraco; um commit externo entra no topo com a seleção mantida; a resposta de um pedido superado é descartada (teste de engine); o cenário `h-history` do smoke passa nos dois temas, junto com `g-switch-branch`.
   - Lacunas: a atualização relê só a primeira página (200), então as linhas além dela voltam ao rolar; cada atualização de status relê o topo, inclusive quando só o working tree mudou, porque o status não diz o que mudou; a seleção não tem detalhe (H3); "Show History" segue sem atalho de teclado (nenhuma tecla livre e sensata no registro); a paginação ao rolar tem teste de modelo e de engine, mas não tem teste de interface nem de smoke com 5 mil commits (o gate de desempenho é H8).
-- **H3, detalhe do commit.** Somente leitura; em merge, compara com o primeiro pai.
+- **H3, detalhe do commit** (feita).
+  - Painel à direita da página de histórico, com 360 px: assunto, corpo completo (parágrafos preservados), hash completo, autor com nome e e-mail, data do autor, pais (curtos) e a lista de arquivos com a letra de status (A, M, D, R; renomeado mostra `antigo → novo`) e as contagens de + e −. Binário mostra `bin`. Lista acima de 200 arquivos mostra "and N more". Sem seleção, mostra "Select a commit to see its details."; falha mostra a mensagem do próprio Git.
+  - Em merge, a lista compara com o primeiro pai (`--diff-merges=first-parent`); o commit raiz lista tudo como A.
+  - Leitura em thread própria, pelo mesmo modelo de pedido e `OperationId` do H2: uma seleção nova para a leitura em curso, que é parada (o processo git é morto), e a resposta antiga é descartada. Trocar de repositório também encerra a leitura. Leitura de comando, sem registro no log de comandos (D28).
+  - Pronto quando: os testes com Git real cobrem adição, modificação, remoção, renomeação, binário, commit raiz, merge (primeiro pai), corpo com vários parágrafos, Unicode e o limite de arquivos; o motor descarta a resposta de um pedido superado e para a leitura; e o cenário `h-commit-detail` do smoke passa nos dois temas, junto com `h-history`.
+  - Lacunas: a saída de `git show` é lida inteira na memória antes de o limite de 200 arquivos ser aplicado (sem streaming; um commit com dezenas de milhares de arquivos ainda custa essa leitura); o hash e os pais quebram em duas linhas no painel de 360 px; a data aparece no fuso do autor, sem tempo relativo; as linhas de arquivo não são clicáveis (H4); o painel não tem teste de interface, e o smoke confere pixels, não texto (o texto foi lido nas capturas); o cancelamento que mata um `git show` em curso não tem teste com Git real (há o teste de leitura já parada e o do motor); nomes que não são UTF-8 aparecem com caracteres de substituição; clicar de novo na linha relê o commit; "Intervalo" do desenho não entra, por estar fora do que o H3 pede.
 - **H4, diff somente leitura de um commit.** Espelha a visão de diff da Working Copy, sem botões de stage nem de chunk. O autor pode trazer a prancha depois. Não reaproveitar o `diff_pane` por enquanto.
 - **H5, grafo com lanes.** Layout puro e determinístico, com `--topo-order`; cor da lane pelo hash do nome da branch (D36, D25).
 - **H6, escopo.** Pílula com branch atual, todas as refs ou uma ref. Clique esquerdo numa branch da sidebar, na página de histórico, define o escopo; o checkout fica no duplo clique ou no menu de contexto. "Stack atual" aparece desabilitado com "Not available yet" (D34).
@@ -210,7 +215,34 @@ Pronto quando: um agente consegue ler o stack, propor um restack e aplicá-lo me
 
 ## Fatia 9: acabamento premium
 
-- Performance em monorepo, layouts alternativos, empacotamento, documentação, licença e modelo de produto (Q10).
+Decidido pelo autor em 2026-10-17 (D38): a tela de configurações entra nesta fatia, consolidando tudo o que o aplicativo permitir configurar até este momento.
+
+1. **Tela de configurações (Settings modal, D38)**
+   - Diálogo modal centralizado no GPUI com backdrop semitransparente escurecido (`black/50`), fechável com tecla `Esc`, clique no backdrop ou botão de fechar.
+   - Navegação em duas colunas: barra lateral de categorias à esquerda (largura fixa ~200 px) e painel de formulário à direita com rolagem independente.
+   - Acesso: atalho `⌘,` (macOS) / `Ctrl+,` (Linux/Windows), ação tipada `open_settings` no registro (`action_registry.rs`), paleta de comandos (`Open Settings`) e botão de engrenagem no rodapé.
+   - Persistência reativa imediata (sem botão "Salvar"), respeitando a regra estrita de ficar fora do working tree (Princípio 5):
+     - `git config`: alterações de identidade, branch padrão, worktree root e hooks vão para `~/.gitconfig` (global) ou `.git/config` (local) via `git config`.
+     - `settings.json`: preferências de tema, fontes, recentes e MCP vão para o diretório de configuração do usuário (`~/.config/gitmaster/`).
+     - `hook-approvals.json`: lista de autorizações de scripts por hash no diretório de dados (`~/.local/share/gitmaster/`).
+   - Seções abrangentes cobrindo as fatias 1 a 8:
+     - *General:* aparência (`System`, `Dark`, `Light`), fontes de UI e código, limpeza de projetos recentes, limite de arquivos do observador de status.
+     - *Git & Identity:* seletor de escopo (Global vs Este Repositório), `user.name`, `user.email`, `init.defaultBranch`, `core.editor`, assinatura de commits.
+     - *Worktrees:* diretório raiz padrão (`gitmaster.worktree.root`, D31) e opções de proteção na remoção segura.
+     - *Diff & Files:* algoritmo de diff (`histogram`, `myers`, `patience`), linhas de contexto (`diff.context`), ignorar espaços por padrão.
+     - *Hooks & Security:* catálogo de hooks ativos e tabela de autorizações em `hook-approvals.json` com botão "Revoke".
+     - *Stacks & Restack:* estratégia padrão de push com lease e política para restack com working copy sujo (Q2).
+     - *Conflict Resolver:* estilo padrão (`merge.conflictStyle = zdiff3`) e reutilização com rerere.
+     - *MCP & Agents:* controle do servidor interno, socket, gestão de tokens e matriz de autorização para ações de `Actor::Agent` (D20).
+     - *Local Review:* localização de armazenamento de comentários e snapshots.
+   - Cenário de smoke no `ui-smoke.sh` cobrindo a abertura pelo atalho, troca de tema e fechamento por `Esc`.
+
+2. **Performance em monorepo**: profiling e otimizações de diff, status e revwalk em repositórios massivos.
+3. **Layouts alternativos**: layout unificado/empilhado para telas menores (Q9).
+4. **Empacotamento e distribuição**: empacotamento nativo (macOS, Linux), metadados de desktop, ícones de `08`.
+5. **Documentação e modelo de produto**: documentação de usuário final, termos de licença e modelo de produto premium (Q10).
+
+Pronto quando: todas as opções do aplicativo e do ambiente Git podem ser inspecionadas e ajustadas visualmente no modal de configurações sem necessidade de editar arquivos de configuração manualmente, e o binário é empacotado para instalação nativa.
 
 ## Riscos transversais
 
