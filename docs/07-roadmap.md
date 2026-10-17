@@ -92,6 +92,14 @@ Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu 
    - Lista virtualizada e filtragem fora da thread de UI; ações desabilitadas aparecem com o motivo.
 5. **Worktrees** (a decidir, Q8). O desenho traz a seção "Worktrees" na sidebar (aqui, agente, sem repo) e as ações de criar e remover. Não entram na v1 sem decisão do autor; até lá as ações ficam desabilitadas no registro.
 
+6. **Atualização automática, sem botão de refresh** (a fazer; proposto, confirmar o desenho com o autor).
+   - Premissa: a tela nunca fica velha e o usuário nunca precisa pedir atualização. O botão sai da barra superior só quando isto estiver pronto; a ação "Refresh" continua no registro (tecla `r` e paleta) como saída de emergência.
+   - Gatilhos: a janela volta ao foco; mudança em `.git` (HEAD, index, refs, `packed-refs`, `MERGE_HEAD` e similares), com observação não recursiva do diretório Git; mudança na árvore de trabalho, com observador recursivo que ignora o que o `.gitignore` ignora (`target/`, `node_modules/`) e o próprio `.git`.
+   - Coalescência: debounce curto (algo como 150 ms), nunca dois status em voo, e as escritas do próprio app (stage, commit, checkout) não disparam um segundo refresh além do que o motor já faz.
+   - Escala: o observador tem teto de diretórios; se o sistema recusar (limite do inotify) ou a árvore for grande demais, cai para atualizar só no foco e a barra de status diz isso uma vez. Relação com o Spike D: não ligar `core.fsmonitor` nem `untrackedCache` sem consentimento.
+   - Nunca escreve no repositório; o status roda fora da thread de UI, com indicador discreto só se passar de ~300 ms.
+   - Testes: integração com repositório temporário (editar arquivo, mudar de branch por fora com `git`, commit por fora) esperando o evento de status; o debounce e o filtro de ignorados como funções puras.
+
 Pronto quando: a Working Copy fica no desenho simplificado, toda ação da tela existe no registro e é alcançável por tecla, menu de contexto e paleta, e uma ação desabilitada explica por quê.
 
 ## Fatia 2: hook `prepare-commit`
