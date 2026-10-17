@@ -46,10 +46,10 @@
 
 ## D31: worktrees na v1
 
-O autor decidiu em 2026-10-17 que worktrees entram na v1, por serem parte central do fluxo dele. Os padrões abaixo ficam registrados como decididos; mudam só por nova decisão do autor.
+O autor decidiu em 2026-10-17 que worktrees entram na v1, por serem parte central do fluxo dele. Os padrões abaixo ficam registrados como decididos; mudam só por nova decisão do autor. Alteração decidida pelo autor em 2026-10-17: a confirmação da remoção forçada passou de digitar o nome para marcar uma caixa de confirmação (ver o item "Remoção segura").
 
 - **Destino:** um novo worktree vai para um diretório base configurável, cujo padrão é irmão do repositório: `../<repo>-<branch>`.
-- **Remoção segura:** remover worktree sujo ou com commits não enviados é bloqueado por padrão. A remoção forçada só roda depois de digitar o nome da branch.
+- **Remoção segura:** remover worktree sujo, com commits não enviados ou travado é bloqueado por padrão. A remoção forçada só roda depois de marcar a caixa de confirmação do diálogo (rótulo em inglês, que nomeia o que será descartado), que fica desmarcada até o usuário marcar; o botão Remover fica desabilitado até lá. Checkout principal, janela atual e pasta sumida continuam recusados, com ou sem a caixa. Alterado em 2026-10-17 (antes: digitar o nome do worktree). O motor refaz a checagem e recusa a remoção forçada sem a confirmação.
 - **Uma janela por worktree:** cada worktree abre na própria janela, em linha com um repositório por janela (Q11).
 - **Checkout principal primeiro:** a checkout principal aparece como a primeira linha da seção "Worktrees" da sidebar.
 - **Branch já em uso:** fazer checkout de uma branch que já está em outro worktree mostra o erro do Git e a ação "Ir para esse worktree".

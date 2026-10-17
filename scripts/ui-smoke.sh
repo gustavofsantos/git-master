@@ -835,12 +835,14 @@ scenario_t() {
 
 # --- 3u. Remove a dirty worktree from its menu (W5) ---------------------------
 # The worktree's row menu opens the remove dialog, which lists the uncommitted
-# change. A removal without the typed name is refused and nothing goes. With the
-# name typed, the removal runs: git no longer lists the worktree and its folder
-# is gone. The row positions are the WORKTREES rows at the sidebar's foot.
+# change. Without the confirmation checkbox ticked, Remove is disabled and
+# nothing goes. Ticking it enables Remove; the removal runs: git no longer lists
+# the worktree and its folder is gone. The row positions are the WORKTREES rows
+# at the sidebar's foot.
 WT_ROW_X=182; WT_ROW_Y=731                  # the feature/x worktree row, right-clicked
 MENU_REMOVE_X=252; MENU_REMOVE_Y=831        # "Remove Worktree" in that row's menu
-REMOVE_BUTTON_X=894; REMOVE_BUTTON_Y=331    # "Remove worktree" in the dialog, with the field typed
+CONFIRM_CHECK_X=486; CONFIRM_CHECK_Y=243  # the confirmation checkbox in the dialog
+REMOVE_BUTTON_X=894; REMOVE_BUTTON_Y=280  # "Remove worktree" in the dialog
 scenario_u() {
   local theme="$1" wt="$RUN_DIR/repo-feature" differing
   shoot "$RUN_DIR/u-before.png"
@@ -858,13 +860,21 @@ scenario_u() {
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -gt 20000 ] || fail "the remove dialog did not open ($differing pixels changed)"
 
-  # Blocked: the button is disabled without the name, so git keeps the worktree.
+  # Blocked: the button is disabled until the checkbox is ticked, so git keeps the worktree.
   xdotool mousemove "$REMOVE_BUTTON_X" "$REMOVE_BUTTON_Y" click 1; sleep 1.5
-  [ -d "$wt" ] || fail "a removal without the typed name deleted $wt"
+  [ -d "$wt" ] || fail "a removal without the confirmation deleted $wt"
   git -C "$RUN_DIR/repo" worktree list --porcelain | grep -qxF "worktree $wt" \
-    || fail "git worktree list lost $wt without the typed name"
+    || fail "git worktree list lost $wt without the confirmation"
 
-  xdotool type --delay 20 -- "feature/x"; sleep 1
+  # Ticking the checkbox changes the dialog, and only then does Remove go.
+  xdotool mousemove "$CONFIRM_CHECK_X" "$CONFIRM_CHECK_Y" click 1; sleep 1
+  shoot "$SMOKE_OUT/u-remove-confirmed-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/u-remove-dialog-$theme.png" "$SMOKE_OUT/u-remove-confirmed-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 50 ] || fail "ticking the confirmation changed nothing in the dialog ($differing pixels changed)"
+  [ -d "$wt" ] || fail "ticking the confirmation alone removed $wt"
+
   xdotool mousemove "$REMOVE_BUTTON_X" "$REMOVE_BUTTON_Y" click 1; sleep 2.5
   [ ! -e "$wt" ] || fail "the removed worktree folder $wt is still there"
   if git -C "$RUN_DIR/repo" worktree list --porcelain | grep -qxF "worktree $wt"; then
@@ -965,7 +975,7 @@ run_scenario() {
     rm -rf "$RUN_DIR/repo-gone"
   fi
   if [ "$name" = u-remove-worktree ]; then
-    # A dirty worktree: the removal is blocked until the name is typed.
+    # A dirty worktree: the removal is blocked until the confirmation is ticked.
     git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"
     printf 'scratch\n' > "$RUN_DIR/repo-feature/scratch.txt"
   fi

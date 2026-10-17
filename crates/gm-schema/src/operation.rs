@@ -81,12 +81,11 @@ pub enum CommandKind {
     /// Removes the linked worktree at `path` with `git worktree remove`; the
     /// folder is deleted, never by hand. Human only (D31). Refused while a hard
     /// blocker applies (main, the window's own worktree, a missing folder). A
-    /// dirty, unpushed or locked worktree is refused unless `force` is set and
-    /// `typed_name` is the inspected name exactly.
+    /// dirty, unpushed or locked worktree is refused unless `force` is set: the
+    /// human ticked the confirmation that the listed changes go.
     RemoveWorktree {
         path: String,
         force: bool,
-        typed_name: String,
     },
     /// Locks the worktree at `path` with `git worktree lock`; an empty `reason`
     /// locks it without one. Human only.

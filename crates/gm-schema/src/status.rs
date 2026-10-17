@@ -94,7 +94,7 @@ pub struct WorktreeInspection {
     pub path: String,
     /// The short branch name; `None` when detached.
     pub branch: Option<String>,
-    /// The name typed to force a removal: the branch, or the folder's name
+    /// The name shown for the worktree: the branch, or the folder's name
     /// when detached.
     pub name: String,
     /// Why it is locked; `Some("")` when no reason was given.
@@ -135,18 +135,18 @@ impl Blocker {
 
 impl WorktreeInspection {
     /// Whether the removal may go ahead (D31). A hard blocker always refuses.
-    /// A soft one (locked, dirty, unpushed) refuses unless `force` is set and
-    /// `typed` is the worktree's name exactly. The message says why.
-    pub fn check_removal(&self, force: bool, typed: &str) -> Result<(), String> {
+    /// A soft one (locked, dirty, unpushed) refuses unless `force` is set, which
+    /// is the user's confirmation. The message says why.
+    pub fn check_removal(&self, force: bool) -> Result<(), String> {
         if let Some(hard) = self.blockers.iter().copied().find(|b| b.is_hard()) {
             return Err(hard.refusal().to_owned());
         }
-        if self.blockers.is_empty() || (force && typed == self.name) {
+        if self.blockers.is_empty() || force {
             return Ok(());
         }
         let reasons: Vec<String> = self.blockers.iter().map(|b| self.describe(*b)).collect();
         Err(format!(
-            "{} cannot be removed. {} Type its name to remove it anyway.",
+            "{} cannot be removed. {} Confirm the removal to remove it anyway.",
             self.name,
             reasons.join(" ")
         ))

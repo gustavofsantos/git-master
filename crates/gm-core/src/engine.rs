@@ -478,11 +478,9 @@ impl Engine {
                 let inspection = self.inspect(&root, path)?;
                 Ok(vec![Event::WorktreeInspected { id, inspection }])
             }
-            CommandKind::RemoveWorktree {
-                path,
-                force,
-                typed_name,
-            } => self.remove_worktree(id, actor, path, *force, typed_name),
+            CommandKind::RemoveWorktree { path, force } => {
+                self.remove_worktree(id, actor, path, *force)
+            }
             CommandKind::LockWorktree { path, reason } => {
                 only_a_human(actor, "lock a worktree")?;
                 let root = self.open_root()?;
@@ -573,12 +571,11 @@ impl Engine {
         actor: &Actor,
         path: &str,
         force: bool,
-        typed_name: &str,
     ) -> Result<Vec<Event>, String> {
         only_a_human(actor, "remove a worktree")?;
         let root = self.open_root()?;
         let inspection = self.inspect(&root, path)?;
-        inspection.check_removal(force, typed_name)?;
+        inspection.check_removal(force)?;
         // A locked worktree needs Git's second `--force`.
         let level = if inspection.blockers.is_empty() {
             0

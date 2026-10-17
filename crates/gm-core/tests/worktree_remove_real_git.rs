@@ -122,7 +122,7 @@ fn inspect(engine: &mut Engine, id: u64, path: &Path) -> gm_schema::WorktreeInsp
     found.unwrap_or_else(|| panic!("no inspection: {events:?}"))
 }
 
-fn remove(engine: &mut Engine, id: u64, path: &Path, force: bool, typed: &str) -> Vec<Event> {
+fn remove(engine: &mut Engine, id: u64, path: &Path, force: bool) -> Vec<Event> {
     engine.handle(
         OperationId(id),
         &command(
@@ -130,7 +130,6 @@ fn remove(engine: &mut Engine, id: u64, path: &Path, force: bool, typed: &str) -
             CommandKind::RemoveWorktree {
                 path: text(path),
                 force,
-                typed_name: typed.to_owned(),
             },
         ),
     )
@@ -153,7 +152,7 @@ fn a_clean_worktree_is_removed_without_force() {
     assert!(inspection.blockers.is_empty(), "{inspection:?}");
     assert_eq!(inspection.name, "feature");
 
-    let events = remove(&mut engine, 3, &fx.feature, false, "");
+    let events = remove(&mut engine, 3, &fx.feature, false);
     assert!(done(&events), "{events:?}");
     assert!(!fx.feature.exists());
     let paths = listed_paths(&events).unwrap();
@@ -180,7 +179,7 @@ fn a_commit_only_in_the_worktree_is_unpushed_and_refused_without_force() {
     assert_eq!(inspection.unpushed, 1);
     assert_eq!(inspection.blockers, vec![Blocker::Unpushed]);
 
-    let events = remove(&mut engine, 3, &fx.feature, false, "");
+    let events = remove(&mut engine, 3, &fx.feature, false);
     let reason = refusal(&events).expect("refused");
     assert!(reason.contains("feature cannot be removed"), "{reason}");
     assert!(fx.feature.exists());
@@ -197,25 +196,24 @@ fn a_dirty_worktree_is_refused_without_force() {
     assert_eq!(inspection.blockers, vec![Blocker::Dirty]);
     assert_eq!((inspection.unstaged, inspection.untracked), (1, 1));
 
-    let events = remove(&mut engine, 3, &fx.feature, false, "");
+    let events = remove(&mut engine, 3, &fx.feature, false);
     assert!(refusal(&events).is_some(), "{events:?}");
     assert!(fx.feature.join("a.txt").exists());
     assert!(fx.feature.join("new.txt").exists());
 }
 
 #[test]
-fn a_dirty_worktree_needs_the_typed_name_to_be_forced() {
+fn a_dirty_worktree_needs_the_confirmation_to_be_forced() {
     let fx = fixture();
     std::fs::write(fx.feature.join("new.txt"), "x\n").unwrap();
     let mut engine = open(&fx.main);
 
-    for typed in ["", "Feature", "feature "] {
-        let events = remove(&mut engine, 2, &fx.feature, true, typed);
-        assert!(refusal(&events).is_some(), "typed {typed:?} removed it");
-        assert!(fx.feature.exists());
-    }
+    // Without the confirmation the engine refuses, whatever the UI showed.
+    let events = remove(&mut engine, 2, &fx.feature, false);
+    assert!(refusal(&events).is_some(), "{events:?}");
+    assert!(fx.feature.join("new.txt").exists());
 
-    let events = remove(&mut engine, 3, &fx.feature, true, "feature");
+    let events = remove(&mut engine, 3, &fx.feature, true);
     assert!(done(&events), "{events:?}");
     assert!(!fx.feature.exists());
 }
@@ -238,11 +236,11 @@ fn a_locked_worktree_is_refused_without_force_and_removed_with_it() {
     assert_eq!(inspection.blockers, vec![Blocker::Locked]);
     assert_eq!(inspection.locked.as_deref(), Some("on the USB stick"));
 
-    let refused = remove(&mut engine, 3, &fx.feature, false, "");
+    let refused = remove(&mut engine, 3, &fx.feature, false);
     assert!(refusal(&refused).is_some());
     assert!(fx.feature.exists());
 
-    let events = remove(&mut engine, 4, &fx.feature, true, "feature");
+    let events = remove(&mut engine, 4, &fx.feature, true);
     assert!(done(&events), "{events:?}");
     assert!(!fx.feature.exists());
 }
@@ -255,7 +253,7 @@ fn the_main_checkout_is_refused_even_with_force_and_its_name() {
     assert!(inspection.blockers.contains(&Blocker::Main));
     assert_eq!(inspection.name, "main");
 
-    let events = remove(&mut engine, 3, &fx.main, true, "main");
+    let events = remove(&mut engine, 3, &fx.main, true);
     assert_eq!(
         refusal(&events).as_deref(),
         Some("The main checkout cannot be removed.")
@@ -270,7 +268,7 @@ fn the_window_own_worktree_is_refused_even_with_force() {
     let inspection = inspect(&mut engine, 2, &fx.feature);
     assert!(inspection.blockers.contains(&Blocker::Current));
 
-    let events = remove(&mut engine, 3, &fx.feature, true, "feature");
+    let events = remove(&mut engine, 3, &fx.feature, true);
     assert!(refusal(&events).unwrap().contains("Open the main checkout"));
     assert!(fx.feature.exists());
 }
@@ -284,7 +282,7 @@ fn a_missing_folder_is_inspected_as_missing_and_refused() {
     assert!(inspection.missing);
     assert_eq!(inspection.blockers, vec![Blocker::Missing]);
 
-    let events = remove(&mut engine, 3, &fx.feature, true, "feature");
+    let events = remove(&mut engine, 3, &fx.feature, true);
     assert!(refusal(&events).unwrap().contains("Prune"));
 }
 
@@ -335,8 +333,7 @@ fn an_agent_cannot_remove_a_worktree() {
             },
             CommandKind::RemoveWorktree {
                 path: text(&fx.feature),
-                force: false,
-                typed_name: String::new(),
+                force: true,
             },
         ),
     );
@@ -351,7 +348,7 @@ fn an_agent_cannot_remove_a_worktree() {
 fn a_path_that_is_not_a_worktree_is_refused_before_git_runs() {
     let fx = fixture();
     let mut engine = open(&fx.main);
-    let events = remove(&mut engine, 2, &fx.main.join("nope"), false, "");
+    let events = remove(&mut engine, 2, &fx.main.join("nope"), false);
     assert!(
         refusal(&events)
             .unwrap()

@@ -5,13 +5,15 @@
 //! lists, when Remove is enabled, and what an outcome means. The window side
 //! is the `impl StatusView` at the bottom.
 
-use gm_schema::{Actor, CommandKind, OperationId, OperationState, WorktreeInspection};
+use gm_schema::{Actor, Blocker, CommandKind, OperationId, OperationState, WorktreeInspection};
 use gpui::{
-    Context, Div, Entity, FontWeight, MouseButton, MouseDownEvent, Stateful, Subscription, Window,
-    div, prelude::*, px,
+    ClickEvent, Context, Div, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
+    Stateful, Window, div, prelude::*, px,
 };
 
-use crate::text_area::{Newline, TextArea, TextAreaEvent};
+use crate::FocusNext;
+use crate::FocusPrev;
+use crate::icon::{self, Icon};
 use crate::theme;
 use crate::view::StatusView;
 
@@ -21,13 +23,35 @@ const TOP: f32 = 96.;
 /// Shown while the engine has not answered the inspection yet.
 const CHECKING: &str = "Checking the worktree…";
 
-/// Whether the removal may be sent with the text typed so far. A worktree
-/// with no blockers goes at once; one with blockers needs the typed name to
-/// be exactly its name, and a hard blocker (main, the window's own, a missing
-/// folder) never goes.
+/// Whether the removal may be sent with the confirmation `confirmed` (the
+/// ticked checkbox). A worktree with no blockers goes at once; one with soft
+/// blockers needs the confirmation, and a hard blocker (main, the window's own,
+/// a missing folder) never goes.
 #[must_use]
-pub(crate) fn may_remove(inspection: &WorktreeInspection, typed: &str) -> bool {
-    inspection.check_removal(true, typed).is_ok()
+pub(crate) fn may_remove(inspection: &WorktreeInspection, confirmed: bool) -> bool {
+    inspection.check_removal(confirmed).is_ok()
+}
+
+/// Whether the dialog asks for the confirmation: a soft blocker applies and no
+/// hard one does, since a hard blocker refuses whatever is ticked.
+#[must_use]
+pub(crate) fn asks_confirmation(inspection: &WorktreeInspection) -> bool {
+    !inspection.blockers.is_empty() && !inspection.blockers.iter().any(|b| b.is_hard())
+}
+
+/// The checkbox label for the soft blockers the removal would discard.
+#[must_use]
+pub(crate) fn confirmation_label(inspection: &WorktreeInspection) -> &'static str {
+    let dirty = inspection.blockers.contains(&Blocker::Dirty);
+    let unpushed = inspection.blockers.contains(&Blocker::Unpushed);
+    match (dirty, unpushed) {
+        (true, true) => {
+            "I understand this discards the uncommitted changes and unpushed commits listed above"
+        }
+        (true, false) => "I understand this discards the uncommitted changes listed above",
+        (false, true) => "I understand this discards the unpushed commits listed above",
+        (false, false) => "I understand the lock is overridden and the folder is deleted",
+    }
 }
 
 /// The lines the dialog shows under its title: one per blocker, or, when there
@@ -134,12 +158,13 @@ impl Removal {
     }
 }
 
-/// The dialog while it is open: the worktree, its typed name and the error it shows.
+/// The dialog while it is open: the worktree, whether its confirmation is
+/// ticked, the focus that carries the keys, and the error it shows.
 pub(crate) struct RemoveDialog {
     pub(crate) path: String,
-    pub(crate) typed: Entity<TextArea>,
+    pub(crate) confirmed: bool,
+    pub(crate) focus: FocusHandle,
     pub(crate) error: Option<String>,
-    _subscriptions: Vec<Subscription>,
 }
 
 impl StatusView {
@@ -158,22 +183,13 @@ impl StatusView {
             },
         );
         self.model.removal.begin_inspect(id, path.to_owned());
-        let typed = cx.new(|cx| TextArea::new("Type the worktree's name", cx).with_lines(1, 1));
-        let subscriptions = vec![cx.subscribe_in(
-            &typed,
-            window,
-            |this, _, event: &TextAreaEvent, window, cx| {
-                if *event == TextAreaEvent::Cancel {
-                    this.close_remove_dialog(window, cx);
-                }
-            },
-        )];
-        typed.update(cx, |area, cx| area.focus(window, cx));
+        let focus = cx.focus_handle();
+        focus.focus(window);
         self.removal_dialog = Some(RemoveDialog {
             path: path.to_owned(),
-            typed,
+            confirmed: false,
+            focus,
             error: None,
-            _subscriptions: subscriptions,
         });
         cx.notify();
     }
@@ -185,7 +201,24 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Enter and the remove button: checks the typed name against the
+    /// Space and a click on the checkbox: ticks or unticks the confirmation,
+    /// when the dialog asks for one and no removal is in flight.
+    pub(crate) fn toggle_removal_confirmation(&mut self, cx: &mut Context<Self>) {
+        if self.model.removal.is_removing() {
+            return;
+        }
+        let asks = self
+            .removal_dialog
+            .as_ref()
+            .and_then(|dialog| self.model.removal.inspection(&dialog.path))
+            .is_some_and(asks_confirmation);
+        if let Some(dialog) = self.removal_dialog.as_mut().filter(|_| asks) {
+            dialog.confirmed = !dialog.confirmed;
+            cx.notify();
+        }
+    }
+
+    /// Enter and the remove button: checks the confirmation against the
     /// inspection, then sends the removal. Forced only when there are blockers.
     pub(crate) fn submit_removal(&mut self, cx: &mut Context<Self>) {
         if self.model.removal.is_removing() {
@@ -194,7 +227,7 @@ impl StatusView {
         let Some(dialog) = self.removal_dialog.as_mut() else {
             return;
         };
-        let typed = dialog.typed.read(cx).text().to_owned();
+        let confirmed = dialog.confirmed;
         let path = dialog.path.clone();
         let Some(inspection) = self.model.removal.inspection(&path) else {
             dialog.error = Some(CHECKING.to_owned());
@@ -202,21 +235,16 @@ impl StatusView {
             return;
         };
         dialog.error = None;
-        // A refusal is not an error text: the dialog already says what to type
+        // A refusal is not an error text: the dialog already says what to tick
         // (and a hard blocker is shown above the buttons), so the layout stays put.
-        if inspection.check_removal(true, &typed).is_err() {
+        if inspection.check_removal(confirmed).is_err() {
             cx.notify();
             return;
         }
         let force = !inspection.blockers.is_empty();
-        let id = self.engine.dispatch(
-            Actor::Human,
-            CommandKind::RemoveWorktree {
-                path,
-                force,
-                typed_name: typed,
-            },
-        );
+        let id = self
+            .engine
+            .dispatch(Actor::Human, CommandKind::RemoveWorktree { path, force });
         self.model.removal.begin_remove(id);
         cx.notify();
     }
@@ -255,13 +283,11 @@ impl StatusView {
         );
         let viewport = window.viewport_size();
         let left = ((f32::from(viewport.width) - WIDTH) / 2.).max(0.);
-        let enter = cx.entity().downgrade();
         div().absolute().inset_0().child(outside).child(
             self.removal_panel(dialog, left, cx)
-                .capture_action(move |_: &Newline, _, cx| {
-                    let _ = enter.update(cx, StatusView::submit_removal);
-                    cx.stop_propagation();
-                }),
+                // Tab has nothing else to reach while the dialog is open.
+                .capture_action(|_: &FocusNext, _, cx| cx.stop_propagation())
+                .capture_action(|_: &FocusPrev, _, cx| cx.stop_propagation()),
         )
     }
 
@@ -279,15 +305,13 @@ impl StatusView {
             },
             |found| found.name.clone(),
         );
-        let allowed = inspection.is_some_and(|found| {
-            let typed = dialog.typed.read(cx).text();
-            may_remove(found, typed)
-        });
+        let allowed = inspection.is_some_and(|found| may_remove(found, dialog.confirmed));
         let hard = inspection.is_some_and(|found| found.blockers.iter().any(|b| b.is_hard()));
-        let forced = inspection.is_some_and(|found| !found.blockers.is_empty());
+        let forced = inspection.is_some_and(asks_confirmation);
+        let label = inspection.map_or("", confirmation_label);
         let refusal = inspection
             .filter(|_| hard)
-            .and_then(|found| found.check_removal(true, "").err());
+            .and_then(|found| found.check_removal(true).err());
         let body = inspection.map_or_else(|| vec![CHECKING.to_owned()], body_lines);
         div()
             .absolute()
@@ -304,6 +328,15 @@ impl StatusView {
             .rounded_md()
             .shadow_lg()
             .occlude()
+            .track_focus(&dialog.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "escape" => this.close_remove_dialog(window, cx),
+                    "enter" => this.submit_removal(cx),
+                    "space" => this.toggle_removal_confirmation(cx),
+                    _ => {}
+                }
+            }))
             .child(
                 div()
                     .text_color(theme::text())
@@ -314,19 +347,7 @@ impl StatusView {
                 body.into_iter()
                     .map(|line| div().text_sm().text_color(theme::text()).child(line)),
             )
-            .children(forced.then(|| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::muted())
-                            .child(format!("To remove it anyway, type {name} below.")),
-                    )
-                    .child(field_row(dialog.typed.clone()))
-            }))
+            .children(forced.then(|| confirm_row(dialog.confirmed, label, cx)))
             .children(
                 refusal
                     .or_else(|| dialog.error.clone())
@@ -336,14 +357,25 @@ impl StatusView {
     }
 }
 
-fn field_row(field: Entity<TextArea>) -> Div {
+/// The checkbox that confirms a forced removal. Space and a click tick it.
+fn confirm_row(confirmed: bool, label: &'static str, cx: &Context<StatusView>) -> Stateful<Div> {
+    let mark = if confirmed {
+        icon::filled(Icon::CheckSquare, icon::SMALL, theme::accent())
+    } else {
+        icon::view(Icon::Square, icon::SMALL, theme::muted())
+    };
     div()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(theme::hairline())
-        .child(field)
+        .id("worktree-remove-confirm-check")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .child(mark)
+        .child(div().text_sm().text_color(theme::text()).child(label))
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.toggle_removal_confirmation(cx);
+        }))
 }
 
 /// Cancel, and the destructive remove button, enabled only when the rules allow.
@@ -419,9 +451,10 @@ mod tests {
     }
 
     #[test]
-    fn a_clean_worktree_may_be_removed_with_nothing_typed() {
+    fn a_clean_worktree_may_be_removed_without_a_confirmation() {
         let clean = inspection("/r-feature", "feature", Vec::new());
-        assert!(may_remove(&clean, ""));
+        assert!(may_remove(&clean, false));
+        assert!(!asks_confirmation(&clean));
         assert_eq!(
             body_lines(&clean),
             vec!["The folder /r-feature is deleted, with any ignored files in it.".to_owned()]
@@ -429,32 +462,57 @@ mod tests {
     }
 
     #[test]
-    fn blockers_need_the_exact_name_typed() {
+    fn blockers_need_the_confirmation_ticked() {
         let dirty = inspection(
             "/r-feature",
             "feature",
             vec![Blocker::Dirty, Blocker::Unpushed],
         );
-        assert!(!may_remove(&dirty, ""));
-        assert!(!may_remove(&dirty, "Feature"));
-        assert!(!may_remove(&dirty, "feature "));
-        assert!(!may_remove(&dirty, "feat"));
-        assert!(may_remove(&dirty, "feature"));
+        assert!(asks_confirmation(&dirty));
+        assert!(!may_remove(&dirty, false));
+        assert!(may_remove(&dirty, true));
     }
 
     #[test]
     fn a_locked_worktree_is_forced_the_same_way() {
         let locked = inspection("/r-feature", "feature", vec![Blocker::Locked]);
-        assert!(!may_remove(&locked, ""));
-        assert!(may_remove(&locked, "feature"));
+        assert!(asks_confirmation(&locked));
+        assert!(!may_remove(&locked, false));
+        assert!(may_remove(&locked, true));
     }
 
     #[test]
-    fn hard_blockers_are_never_removable_even_with_the_name() {
+    fn hard_blockers_are_never_removable_even_when_confirmed() {
         for blocker in [Blocker::Main, Blocker::Current, Blocker::Missing] {
             let hard = inspection("/r", "main", vec![blocker, Blocker::Dirty]);
-            assert!(!may_remove(&hard, "main"), "{blocker:?}");
+            assert!(!asks_confirmation(&hard), "{blocker:?}");
+            assert!(!may_remove(&hard, false), "{blocker:?}");
+            assert!(!may_remove(&hard, true), "{blocker:?}");
         }
+    }
+
+    #[test]
+    fn the_checkbox_label_names_what_is_discarded() {
+        let dirty = inspection("/r", "f", vec![Blocker::Dirty]);
+        let unpushed = inspection("/r", "f", vec![Blocker::Unpushed]);
+        let both = inspection("/r", "f", vec![Blocker::Dirty, Blocker::Unpushed]);
+        let locked = inspection("/r", "f", vec![Blocker::Locked]);
+        assert_eq!(
+            confirmation_label(&dirty),
+            "I understand this discards the uncommitted changes listed above"
+        );
+        assert_eq!(
+            confirmation_label(&unpushed),
+            "I understand this discards the unpushed commits listed above"
+        );
+        assert_eq!(
+            confirmation_label(&both),
+            "I understand this discards the uncommitted changes and unpushed commits listed above"
+        );
+        assert_eq!(
+            confirmation_label(&locked),
+            "I understand the lock is overridden and the folder is deleted"
+        );
     }
 
     #[test]
