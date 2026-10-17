@@ -107,6 +107,8 @@ pub enum Effect {
     OpenRemoveDialog(String),
     /// Opens the prune dialog, which lists the stale records before anything is removed.
     OpenPruneDialog,
+    /// Opens the history page and asks the engine for the commits of HEAD.
+    ShowHistory,
 }
 
 /// What the window knows of the prepare-commit hooks, for the rules.
@@ -144,7 +146,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 34] = [
+const SPECS: [Spec; 35] = [
     spec(
         "file.stage",
         "Stage File",
@@ -377,6 +379,13 @@ const SPECS: [Spec; 34] = [
         ArgKind::None,
         Category::Worktrees,
     ),
+    spec(
+        "history.show",
+        "Show History",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
 ];
 
 const fn spec(
@@ -433,6 +442,7 @@ pub enum Action {
     LockWorktree,
     UnlockWorktree,
     PruneWorktrees,
+    ShowHistory,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -500,7 +510,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 34] = [
+    pub const ALL: [Action; 35] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -535,6 +545,7 @@ impl Action {
         Action::LockWorktree,
         Action::UnlockWorktree,
         Action::PruneWorktrees,
+        Action::ShowHistory,
     ];
 
     #[must_use]
@@ -679,7 +690,10 @@ impl Action {
                 }
             }
             _ if self.is_worktree_rule() => worktree_rule(self, args, ctx),
-            Action::Refresh | Action::CreateWorktree | Action::PruneWorktrees => {
+            Action::Refresh
+            | Action::CreateWorktree
+            | Action::PruneWorktrees
+            | Action::ShowHistory => {
                 if ctx.repo_open {
                     Ok(())
                 } else {
@@ -781,6 +795,7 @@ impl Action {
                 Effect::Send(vec![CommandKind::UnlockWorktree { path: path.clone() }])
             }
             (Action::PruneWorktrees, _) => Effect::OpenPruneDialog,
+            (Action::ShowHistory, _) => Effect::ShowHistory,
             (Action::SuggestMessage, _) => Effect::Send(vec![CommandKind::RunPrepareCommit {
                 message: ctx.message.to_owned(),
             }]),
@@ -1442,6 +1457,23 @@ mod tests {
                 path: "/r-feature".to_owned(),
             }]))
         );
+    }
+
+    #[test]
+    fn show_history_needs_an_open_repository_and_plans_the_page() {
+        assert_eq!(
+            Action::ShowHistory.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::ShowHistory)
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowHistory.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(Action::ShowHistory.id(), "history.show");
     }
 
     #[test]

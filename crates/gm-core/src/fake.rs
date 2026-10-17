@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use gm_schema::{BranchEntry, RepoStatus, WorktreeEntry, WorktreeMode};
+use gm_schema::{BranchEntry, History, RepoStatus, WorktreeEntry, WorktreeMode};
 
 use crate::{GitError, GitPort};
 
@@ -19,6 +19,7 @@ pub struct FakeGit {
     worktrees: Arc<Mutex<Result<Vec<WorktreeEntry>, GitError>>>,
     create: Arc<Mutex<Result<(), GitError>>>,
     created: Arc<Mutex<Vec<(String, WorktreeMode)>>>,
+    history: Arc<Mutex<Result<History, GitError>>>,
 }
 
 impl FakeGit {
@@ -31,6 +32,7 @@ impl FakeGit {
             worktrees: Arc::new(Mutex::new(Ok(Vec::new()))),
             create: Arc::new(Mutex::new(Ok(()))),
             created: Arc::new(Mutex::new(Vec::new())),
+            history: Arc::new(Mutex::new(Ok(History::default()))),
         }
     }
 
@@ -53,6 +55,13 @@ impl FakeGit {
     /// If another thread panicked while holding the worktrees lock.
     pub fn set_worktrees(&self, worktrees: Result<Vec<WorktreeEntry>, GitError>) {
         *self.worktrees.lock().unwrap() = worktrees;
+    }
+
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the history lock.
+    pub fn set_history(&self, history: Result<History, GitError>) {
+        *self.history.lock().unwrap() = history;
     }
 
     /// The result of the next `create_worktree`.
@@ -120,5 +129,9 @@ impl GitPort for FakeGit {
 
     fn checkout(&self, _root: &Path, _branch: &str) -> Result<(), GitError> {
         self.checkout.lock().unwrap().clone()
+    }
+
+    fn history(&self, _root: &Path) -> Result<History, GitError> {
+        self.history.lock().unwrap().clone()
     }
 }

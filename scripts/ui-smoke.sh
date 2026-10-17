@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -51,6 +51,8 @@ CHIP_X=316; CHIP_Y=590; CHIP_W=142; CHIP_H=28   # the hook chip's text in the me
 TITLE_BAR_H=44                              # the title bar: name row over the branch and path row
 TOOLBAR_Y=72; TOOLBAR_FETCH_X=1082; TOOLBAR_RESTACK_X=1322   # Fetch and Restack buttons, right of the title bar
 SECTION_CROP="240x84+0+612"                  # the WORKTREES rows at the sidebar's foot, window-relative
+HISTORY_X=120; HISTORY_Y=175                 # "History" row under Workspace in the sidebar
+WORKING_COPY_X=120; WORKING_COPY_Y=147       # "Working Copy" row, back from the history page
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -480,6 +482,45 @@ scenario_h() {
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -gt 20000 ] || fail "no fallback to the newest recent repository ($differing pixels changed)"
   [ "$(find "$plain" | sort)" = "$before_plain" ] || fail "the folder the app started in changed"
+}
+
+# --- 3h. The history page from the sidebar -------------------------------------
+# Clicking History replaces the Working Copy with the commits of HEAD, newest
+# first, and changes nothing in the repository. Going back to the Working Copy
+# restores the screen it had before.
+scenario_history() {
+  local repo="$RUN_DIR/repo" theme="$1" status_before differing
+  # Focus the file list first: a space there stages, so a leaked key would show.
+  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y" click 1; sleep 1
+  shoot "$RUN_DIR/history-working-$theme.png"
+  status_before="$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)"
+
+  xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-history-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/history-working-$theme.png" "$SMOKE_OUT/h-history-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the history page did not replace the Working Copy ($differing pixels changed)"
+  # The rows are text on the page background: the share of dark pixels in the
+  # list area is zero on a blank page.
+  convert "$SMOKE_OUT/h-history-$theme.png" -crop "1020x300+330+140" +repage "$RUN_DIR/history-list.png"
+  local dark
+  dark="$(convert "$RUN_DIR/history-list.png" -colorspace gray -threshold 50% -negate -format '%[fx:mean]' info:)"
+  awk -v d="$dark" 'BEGIN { exit !(d > 0.0003) }' || fail "the history list is blank (dark share $dark)"
+
+  [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
+    || fail "opening the history changed the repository"
+  # The list is gone from the page, so a space must not reach it.
+  xdotool key space; sleep 1
+  [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
+    || fail "a key pressed on the history page changed the repository"
+
+  xdotool mousemove "$WORKING_COPY_X" "$WORKING_COPY_Y" click 1; sleep 1.5
+  shoot "$RUN_DIR/history-back-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/history-working-$theme.png" "$RUN_DIR/history-back-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -lt 2000 ] || fail "the Working Copy did not come back ($differing pixels differ)"
 }
 
 # --- 3i. Stage one hunk with its header button ---------------------------------
@@ -988,6 +1029,12 @@ run_scenario() {
     git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"
     printf 'scratch\n' > "$RUN_DIR/repo-feature/scratch.txt"
   fi
+  if [ "$name" = h-history ]; then
+    # Two commits beyond the first, so the list has rows to show. Only the index
+    # is committed, so the working changes stay as make_repo left them.
+    git -C "$RUN_DIR/repo" commit -q --allow-empty -m "smoke: history one"
+    git -C "$RUN_DIR/repo" commit -q --allow-empty -m "smoke: history two"
+  fi
   if [ "$name" = h-welcome ]; then
     # Starts with no recent list at all; scenario_h makes its own launches.
     scenario_h "$theme"
@@ -1020,6 +1067,7 @@ run_scenario() {
     t-create-worktree) scenario_t "$theme" ;;
     u-remove-worktree) scenario_u "$theme" ;;
     v-lock-prune-worktree) scenario_v "$theme" ;;
+    h-history) scenario_history "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app

@@ -25,6 +25,7 @@ mod recent;
 mod resize;
 mod resize_handle;
 mod shell_commit;
+mod shell_history;
 mod shell_list;
 mod shell_sidebar;
 mod sidebar;

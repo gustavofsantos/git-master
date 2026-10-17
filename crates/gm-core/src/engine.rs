@@ -300,6 +300,7 @@ impl Engine {
                 let branches = self.git.branches(&root).map_err(|e| e.0)?;
                 Ok(vec![Event::BranchesLoaded { id, branches }])
             }
+            CommandKind::LoadHistory => self.load_history(id),
             CommandKind::CreateWorktree { .. } => self.add_worktree(id, actor, kind),
             CommandKind::Checkout { branch } => {
                 let root = self.open_root()?;
@@ -435,6 +436,12 @@ impl Engine {
             return true;
         };
         hook::fingerprint(head.as_deref(), &staged) != active.fingerprint
+    }
+
+    fn load_history(&self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let history = self.git.history(&root).map_err(|e| e.0)?;
+        Ok(vec![Event::HistoryLoaded { id, history }])
     }
 
     fn list_worktrees(&self, id: OperationId) -> Result<Vec<Event>, String> {
@@ -795,6 +802,41 @@ mod tests {
         assert!(events.contains(&Event::BranchesLoaded {
             id: OperationId(2),
             branches,
+        }));
+    }
+
+    #[test]
+    fn load_history_emits_the_history_it_read() {
+        let history = gm_schema::History {
+            commits: vec![gm_schema::CommitSummary {
+                oid: "a".repeat(40),
+                short: "aaaaaaa".into(),
+                subject: "first".into(),
+                refs: vec![gm_schema::RefLabel {
+                    name: "main".into(),
+                    kind: gm_schema::RefKind::Branch,
+                }],
+                author_time: 1_700_000_000,
+            }],
+            unborn: false,
+        };
+        let git = FakeGit::new(
+            "/r",
+            RepoStatus {
+                root: "/r".into(),
+                ..RepoStatus::default()
+            },
+        );
+        git.set_history(Ok(history.clone()));
+        let mut engine = Engine::new(Box::new(git));
+        engine.handle(OperationId(1), &open());
+
+        let events = engine.handle(OperationId(2), &command(CommandKind::LoadHistory));
+
+        assert_eq!(states(&events).last(), Some(&OperationState::Done));
+        assert!(events.contains(&Event::HistoryLoaded {
+            id: OperationId(2),
+            history,
         }));
     }
 

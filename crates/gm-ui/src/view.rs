@@ -54,6 +54,14 @@ const UPDATING_DELAY: Duration = Duration::from_millis(300);
 
 const WATCH_LIMITED: &str = "Watching is limited; refreshing when the window gains focus.";
 
+/// What the main area shows: the Working Copy, or the history page (H1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Screen {
+    #[default]
+    WorkingCopy,
+    History,
+}
+
 pub struct StatusView {
     pub(crate) engine: EngineHandle,
     /// Every git command that changed the repository, for the log panel.
@@ -71,6 +79,8 @@ pub struct StatusView {
     pub(crate) commit_height: f32,
     /// How the sidebar's branch tree is grouped.
     pub(crate) sidebar_grouping: Grouping,
+    /// The main area's screen; the Working Copy unless the history is open.
+    pub(crate) screen: Screen,
     pub(crate) project_menu: ProjectMenu,
     /// The branch button's list: filter, scroll and the button's place.
     pub(crate) branch_menu: BranchMenu,
@@ -200,6 +210,7 @@ impl StatusView {
             left_width: resize::LEFT_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
             sidebar_grouping: Grouping::default(),
+            screen: Screen::default(),
             project_menu,
             branch_menu,
             context_menu: ContextMenu::default(),
@@ -374,7 +385,28 @@ impl StatusView {
         self.model.hooks.reset();
         self.request_branch_list();
         self.request_hook_list();
+        if self.screen == Screen::History {
+            self.load_history();
+        }
         self.remember(PathBuf::from(switched.root), cx);
+    }
+
+    /// Opens the history page and asks for the commits of HEAD.
+    pub(crate) fn show_history(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::History;
+        self.load_history();
+        cx.notify();
+    }
+
+    /// Shows the Working Copy again; the history listing is kept for the next visit.
+    pub(crate) fn show_working_copy(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::WorkingCopy;
+        cx.notify();
+    }
+
+    fn load_history(&mut self) {
+        let id = self.engine.dispatch(Actor::Human, CommandKind::LoadHistory);
+        self.model.history.request(id);
     }
 
     /// Puts `root` first in the recent list and saves the list in the background.
@@ -571,6 +603,7 @@ impl StatusView {
             Ok(Effect::OpenWorktree(path)) => self.open_worktree(&path, cx),
             Ok(Effect::OpenRemoveDialog(path)) => self.open_remove_dialog(&path, window, cx),
             Ok(Effect::OpenPruneDialog) => self.open_prune_dialog(cx),
+            Ok(Effect::ShowHistory) => self.show_history(cx),
         }
         cx.notify();
     }
@@ -825,14 +858,18 @@ impl Render for StatusView {
                     .flex()
                     .flex_row()
                     .child(self.sidebar(cx))
-                    .child(self.left_column(left_width, commit_height, cx))
-                    .child(
+                    .children(
+                        (self.screen == Screen::WorkingCopy)
+                            .then(|| self.left_column(left_width, commit_height, cx)),
+                    )
+                    .children((self.screen == Screen::WorkingCopy).then(|| {
                         div()
                             .flex_1()
                             .min_w(px(0.))
                             .min_h(px(0.))
-                            .child(self.diff_pane.clone()),
-                    )
+                            .child(self.diff_pane.clone())
+                    }))
+                    .children((self.screen == Screen::History).then(|| self.history_page(cx)))
             }))
             .children(self.welcome.is_none().then(|| self.status_bar(window, cx)))
             .children(

@@ -12,9 +12,10 @@ use gpui::{
     prelude::*, px, uniform_list,
 };
 
+use crate::action_registry::{Action, Args};
 use crate::sidebar::{self, Grouping, Row};
 use crate::theme;
-use crate::view::StatusView;
+use crate::view::{Screen, StatusView};
 use crate::worktree_list;
 
 pub(crate) const SIDEBAR_WIDTH: f32 = 240.;
@@ -23,13 +24,12 @@ const ROW_HEIGHT: f32 = 28.;
 /// so the rest are cut off.
 const WORKTREE_ROWS_SHOWN: f32 = 6.;
 
-/// The destinations under "Workspace", and the slice that brings each one.
-const WORKSPACE: [(&str, Option<&str>); 5] = [
-    ("Working Copy", None),
-    ("History", Some("History")),
-    ("Stashes", Some("Stashes")),
-    ("Local review", Some("Local review")),
-    ("Reflog", Some("Reflog")),
+/// The destinations under "Workspace" that do not exist yet, and the slice
+/// that brings each one. Working Copy and History are rows of their own.
+const PLACEHOLDERS: [(&str, &str); 3] = [
+    ("Stashes", "Stashes"),
+    ("Local review", "Local review"),
+    ("Reflog", "Reflog"),
 ];
 
 impl StatusView {
@@ -72,14 +72,20 @@ impl StatusView {
 
     fn workspace_items(&self, cx: &mut Context<Self>) -> Div {
         let count = self.model.entry_count();
+        let working = self.screen == Screen::WorkingCopy;
         div()
             .px_2()
             .flex()
             .flex_col()
-            .children(WORKSPACE.iter().map(|&(label, placeholder)| {
-                let row = item_row(label, placeholder.is_none());
-                match placeholder {
-                    None => row.child(
+            .child(
+                item_row("Working Copy", working)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            this.show_working_copy(cx);
+                        }),
+                    )
+                    .child(
                         div()
                             .px_2()
                             .rounded_full()
@@ -88,13 +94,22 @@ impl StatusView {
                             .text_xs()
                             .child(count.to_string()),
                     ),
-                    Some(name) => row.on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            this.notify_user(&format!("{name} is not available yet."), cx);
-                        }),
-                    ),
-                }
+            )
+            .child(
+                item_row("History", self.screen == Screen::History).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        this.run_action(Action::ShowHistory, &Args::None, window, cx);
+                    }),
+                ),
+            )
+            .children(PLACEHOLDERS.iter().map(|&(label, name)| {
+                item_row(label, false).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.notify_user(&format!("{name} is not available yet."), cx);
+                    }),
+                )
             }))
     }
 

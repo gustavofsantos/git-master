@@ -2,6 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
+use crate::history::History;
 use crate::hook::{HookFailure, HookInfo};
 use crate::status::{BranchEntry, PruneCandidate, RepoStatus, WorktreeEntry, WorktreeInspection};
 
@@ -59,6 +60,9 @@ pub enum CommandKind {
         message: String,
     },
     ListBranches,
+    /// Reads the history of HEAD: the first `HISTORY_LIMIT` commits. Never
+    /// recorded in the command log (D28).
+    LoadHistory,
     /// A local branch, or a remote branch such as `origin/feature` (a local
     /// tracking branch is created for it when none exists).
     Checkout {
@@ -223,6 +227,11 @@ pub enum Event {
     BranchesLoaded {
         id: OperationId,
         branches: Vec<BranchEntry>,
+    },
+    /// Answers `LoadHistory`.
+    HistoryLoaded {
+        id: OperationId,
+        history: History,
     },
     /// Answers `ListWorktrees`, and follows each `RefreshStatus` and
     /// `OpenRepo`, so the worktree list is as fresh as the status.

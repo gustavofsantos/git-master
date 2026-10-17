@@ -3,7 +3,8 @@
 //! renders it and forwards keys to it.
 
 use gm_schema::{
-    DiffSide, Event, FileDiff, OperationId, OperationState, RepoStatus, StatusEntry, WorktreeEntry,
+    DiffSide, Event, FileDiff, History, OperationId, OperationState, RepoStatus, StatusEntry,
+    WorktreeEntry,
 };
 
 use crate::branches::Branches;
@@ -49,12 +50,44 @@ pub struct Model {
     pub hooks: Hooks,
     /// The worktrees of the open repository, main checkout first.
     pub worktrees: Vec<WorktreeEntry>,
+    /// The history page's listing: the request in flight, or what answered it.
+    pub history: HistoryList,
     /// The create-worktree dialog's operation in flight, and its outcome.
     pub creating: Creating,
     /// The remove-worktree dialog's inspection, removal in flight and outcome.
     pub removal: Removal,
     /// The prune dialog's listing, prune in flight and outcome.
     pub pruning: Pruning,
+}
+
+/// The history page's listing. A reply that answers an older request is dropped.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum HistoryList {
+    /// Nothing requested yet, or the page was closed by a repository switch.
+    #[default]
+    Idle,
+    Loading(OperationId),
+    Ready(History),
+    /// The read failed; the reason is in the status bar.
+    Failed,
+}
+
+impl HistoryList {
+    pub fn request(&mut self, id: OperationId) {
+        *self = Self::Loading(id);
+    }
+
+    pub fn received(&mut self, id: OperationId, history: History) {
+        if *self == Self::Loading(id) {
+            *self = Self::Ready(history);
+        }
+    }
+
+    pub fn failed(&mut self, id: OperationId) {
+        if *self == Self::Loading(id) {
+            *self = Self::Failed;
+        }
+    }
 }
 
 /// A repository replaced by a successful open.
@@ -218,6 +251,10 @@ impl Model {
                 self.worktrees = worktrees;
                 None
             }
+            Event::HistoryLoaded { id, history } => {
+                self.history.received(id, history);
+                None
+            }
             // An operation that ends without a status (vetoed, cancelled) ends its checkout too.
             Event::OperationChanged { id, state, .. } => {
                 if matches!(
@@ -225,6 +262,12 @@ impl Model {
                     OperationState::Done | OperationState::Vetoed | OperationState::Cancelled
                 ) {
                     let _ = self.branches.finish_checkout(id);
+                }
+                if matches!(
+                    state,
+                    OperationState::Failed | OperationState::Vetoed | OperationState::Cancelled
+                ) {
+                    self.history.failed(id);
                 }
                 None
             }
@@ -280,6 +323,7 @@ impl Model {
         self.diffs = None;
         self.notice = None;
         self.notice_icon = None;
+        self.history = HistoryList::default();
     }
 
     /// Resolves the diff side waiting for `id`. A `DiffLoaded` must name the
@@ -469,6 +513,7 @@ fn event_id(event: &Event) -> OperationId {
         | Event::DiffLoaded { id, .. }
         | Event::Committed { id, .. }
         | Event::BranchesLoaded { id, .. }
+        | Event::HistoryLoaded { id, .. }
         | Event::WorktreesLoaded { id, .. }
         | Event::WorktreeInspected { id, .. }
         | Event::PrunableListed { id, .. }
@@ -979,5 +1024,56 @@ mod tests {
         assert!(!model.begin_refresh(OperationId(9)));
         assert!(!model.begin_refresh(OperationId(8)));
         assert!(model.begin_refresh(OperationId(10)));
+    }
+}
+
+#[cfg(test)]
+mod history_list_tests {
+    use super::*;
+
+    fn history(subject: &str) -> History {
+        History {
+            commits: vec![gm_schema::CommitSummary {
+                oid: "a".repeat(40),
+                short: "aaaaaaa".into(),
+                subject: subject.into(),
+                refs: Vec::new(),
+                author_time: 0,
+            }],
+            unborn: false,
+        }
+    }
+
+    #[test]
+    fn the_reply_to_the_request_is_shown() {
+        let mut list = HistoryList::default();
+        list.request(OperationId(4));
+        list.received(OperationId(4), history("first"));
+        assert_eq!(list, HistoryList::Ready(history("first")));
+    }
+
+    #[test]
+    fn a_reply_to_an_older_request_is_dropped() {
+        let mut list = HistoryList::default();
+        list.request(OperationId(4));
+        list.request(OperationId(9));
+        list.received(OperationId(4), history("old"));
+        assert_eq!(list, HistoryList::Loading(OperationId(9)));
+    }
+
+    #[test]
+    fn a_failed_read_ends_the_loading() {
+        let mut list = HistoryList::default();
+        list.request(OperationId(4));
+        list.failed(OperationId(4));
+        assert_eq!(list, HistoryList::Failed);
+    }
+
+    #[test]
+    fn a_failure_of_another_operation_changes_nothing() {
+        let mut list = HistoryList::default();
+        list.request(OperationId(4));
+        list.failed(OperationId(3));
+        assert_eq!(list, HistoryList::Loading(OperationId(4)));
     }
 }

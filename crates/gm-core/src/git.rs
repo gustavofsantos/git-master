@@ -9,12 +9,13 @@ use std::time::Instant;
 
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
-    BranchEntry, BranchInfo, Change, DiffSide, FileDiff, HookScope, Hunk, HunkId, PruneCandidate,
-    RepoStatus, StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
+    BranchEntry, BranchInfo, Change, DiffSide, FileDiff, HISTORY_LIMIT, History, HookScope, Hunk,
+    HunkId, PruneCandidate, RepoStatus, StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::{CommandLog, CommandRecord, Source, bounded_text};
 use crate::diff::{hunk_patch, parse_unified};
+use crate::history as log_parse;
 use crate::hook::ConfigValue;
 use crate::stage_math;
 use crate::worktree;
@@ -414,6 +415,35 @@ impl GitPort for SubprocessGit {
         remote.sort_by(|a, b| a.name.cmp(&b.name));
         local.extend(remote);
         Ok(local)
+    }
+
+    /// Runs `git log` for HEAD and reads its capped output in one go; streaming
+    /// comes with H2 (D32). Git reads a commit-graph when one exists, and this
+    /// never writes one. Runs with `run`, so nothing is logged (D28).
+    fn history(&self, root: &Path) -> Result<History, GitError> {
+        // An unborn HEAD makes `git log` fail; asking first keeps Git's wording out.
+        let mut head = self.git(root);
+        head.args(["rev-parse", "--verify", "-q", "HEAD"]);
+        if Self::run_allowing(head, &[0, 1])?.is_empty() {
+            return Ok(History {
+                commits: Vec::new(),
+                unborn: true,
+            });
+        }
+        let mut log = self.git(root);
+        log.args([
+            "log",
+            "--no-color",
+            "--no-show-signature",
+            "--decorate=short",
+            &format!("-n{HISTORY_LIMIT}"),
+            log_parse::FORMAT,
+        ]);
+        let commits = log_parse::parse_log(&Self::run(log)?)?;
+        Ok(History {
+            commits,
+            unborn: false,
+        })
     }
 
     fn worktrees(&self, root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {

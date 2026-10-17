@@ -6,6 +6,7 @@ pub mod diff;
 mod engine;
 pub mod fake;
 pub mod git;
+mod history;
 pub mod hook;
 mod port;
 mod runner;

@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
-    BranchEntry, DiffSide, FileDiff, HookScope, HunkId, PruneCandidate, RepoStatus, StageTarget,
-    WorktreeEntry, WorktreeMode,
+    BranchEntry, DiffSide, FileDiff, History, HookScope, HunkId, PruneCandidate, RepoStatus,
+    StageTarget, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::CommandLog;
@@ -67,6 +67,12 @@ pub trait GitPort: Send {
         Err(GitError(
             "worktrees is not supported by this adapter".into(),
         ))
+    }
+
+    /// The first `HISTORY_LIMIT` commits of HEAD, newest first. Never records
+    /// anything (D28).
+    fn history(&self, _root: &Path) -> Result<History, GitError> {
+        Err(GitError("history is not supported by this adapter".into()))
     }
 
     /// Creates a linked worktree at `path` (relative paths are taken from
