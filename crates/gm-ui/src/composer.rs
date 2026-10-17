@@ -42,6 +42,11 @@ impl Composer {
         self.area.update(cx, TextArea::clear);
     }
 
+    /// Replaces the whole message with `text`.
+    pub fn set_text(&self, text: &str, cx: &mut Context<Self>) {
+        self.area.update(cx, |area, cx| area.set_text(text, cx));
+    }
+
     /// Gives the keyboard to the message box.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.area.update(cx, |area, cx| area.focus(window, cx));

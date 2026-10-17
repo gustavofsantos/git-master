@@ -14,6 +14,7 @@ mod diff_pane;
 mod diff_rows;
 mod editor;
 mod fuzzy;
+mod hook_run;
 mod icon;
 mod model;
 mod palette;

@@ -6,6 +6,7 @@ use gm_schema::{DiffSide, Event, FileDiff, OperationId, OperationState, RepoStat
 
 use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
+use crate::hook_run::Hooks;
 use crate::icon::Icon;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -39,6 +40,8 @@ pub struct Model {
     switched: Option<Switched>,
     /// The branch picker's listing, filter and checkout in flight.
     pub branches: Branches,
+    /// The prepare-commit hooks: what is listed, the run and its suggestion.
+    pub hooks: Hooks,
 }
 
 /// A repository replaced by a successful open.
@@ -132,6 +135,13 @@ impl Model {
                 self.loading = false;
                 None
             }
+            // A hook run's failure belongs to the composer's chip, not to the status bar.
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.hooks.owns(id) => {
+                self.hooks.ended(id, state, detail);
+                None
+            }
             Event::OperationChanged {
                 id,
                 state: OperationState::Failed,
@@ -172,12 +182,24 @@ impl Model {
                 }
                 None
             }
-            // The composer's hook chip (slice 2) reads these; nothing shows them yet.
-            Event::HooksListed { .. }
-            | Event::HookStarted { .. }
-            | Event::HookFinished { .. }
-            | Event::HookFailed { .. }
-            | Event::HookCancelled { .. } => None,
+            Event::HooksListed { hooks, .. } => {
+                self.hooks.listed(hooks);
+                None
+            }
+            Event::HookStarted { id, hook, step, of } => {
+                self.hooks.step_started(id, hook, step, of);
+                None
+            }
+            Event::HookFinished {
+                id,
+                message,
+                repo_changed,
+            } => {
+                self.hooks.answered(id, message, repo_changed);
+                None
+            }
+            // The failure reason arrives on the operation's own event; a cancel has no text.
+            Event::HookFailed { .. } | Event::HookCancelled { .. } => None,
         }
     }
 
@@ -486,6 +508,20 @@ mod tests {
         assert_eq!(model.entry_count(), 3);
         assert!(!model.loading);
         assert_eq!(model.error, None);
+    }
+
+    #[test]
+    fn a_failed_hook_run_shows_on_the_chip_and_not_in_the_status_bar() {
+        use crate::hook_run::Phase;
+
+        let mut model = Model::default();
+        model.hooks.start(OperationId(9), String::new());
+        let _ = model.apply(failed(9, Some("hook llm exited with code 2")));
+        assert_eq!(model.error, None);
+        assert_eq!(
+            model.hooks.run.as_ref().map(|run| run.phase.clone()),
+            Some(Phase::Failed("hook llm exited with code 2".into()))
+        );
     }
 
     #[test]

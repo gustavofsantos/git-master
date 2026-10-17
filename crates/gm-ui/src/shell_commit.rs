@@ -1,10 +1,13 @@
 //! The commit box at the bottom of the left column: the message, its subject
 //! counter and hint, and the Commit button under it.
 
-use gpui::{Context, Div, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*, px};
+use gpui::{
+    Context, Div, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*, px,
+};
 
 use crate::action_registry::{Action, Args};
 use crate::composer;
+use crate::hook_run::Phase;
 use crate::resize::{self, COMMIT};
 use crate::resize_handle::{self, Edge};
 use crate::theme;
@@ -12,6 +15,34 @@ use crate::view::StatusView;
 
 /// The subject length a commit should not pass.
 const SUBJECT_LIMIT: usize = 72;
+
+/// A small outlined button in the commit box that runs `action` with no target.
+fn chip_button(
+    id: &'static str,
+    label: &'static str,
+    action: Action,
+    cx: &mut Context<StatusView>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex_none()
+        .px_2()
+        .h(px(18.))
+        .flex()
+        .items_center()
+        .rounded_md()
+        .border_1()
+        .border_color(theme::hairline_strong())
+        .text_color(theme::text())
+        .cursor_pointer()
+        .child(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.run_action(action, &Args::None, window, cx);
+            }),
+        )
+}
 
 impl StatusView {
     /// The commit box, with its message box `height` tall. Its top edge is the
@@ -83,11 +114,15 @@ impl StatusView {
                 div()
                     .flex()
                     .flex_row()
+                    .items_center()
                     .justify_between()
+                    .gap_2()
                     .text_color(muted)
                     .child("Message")
+                    .child(self.hook_chip(cx))
                     .child(
                         div()
+                            .flex_none()
                             .font_family(theme::code_font())
                             .text_color(counter_colour)
                             .child(format!("{subject}/{SUBJECT_LIMIT}")),
@@ -109,6 +144,48 @@ impl StatusView {
             )
             .child(button)
             .child(height_strip)
+    }
+
+    /// The prepare-commit state in the message header: what the run is doing,
+    /// with Cancel while it runs, or the Suggest button when a hook applies.
+    /// It shares the header row, so nothing below it moves.
+    fn hook_chip(&self, cx: &mut Context<Self>) -> Div {
+        let hooks = &self.model.hooks;
+        let in_flight = hooks.in_flight().is_some();
+        let mut row = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .overflow_hidden();
+        if let Some(run) = &hooks.run {
+            let colour = match run.phase {
+                Phase::Failed(_) => theme::error(),
+                Phase::Ready { .. } => theme::text(),
+                _ => theme::muted(),
+            };
+            row = row.child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_color(colour)
+                    .child(run.phase.label()),
+            );
+        }
+        if in_flight {
+            row = row.child(chip_button("hook-cancel", "Cancel", Action::CancelHook, cx));
+        } else if hooks.applicable().is_some_and(|count| count > 0) {
+            row = row.child(chip_button(
+                "hook-suggest",
+                "Suggest message",
+                Action::SuggestMessage,
+                cx,
+            ));
+        }
+        row
     }
 
     /// Whether the Commit button is drawn enabled: something staged and a message.

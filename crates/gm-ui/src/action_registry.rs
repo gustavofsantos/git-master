@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use gm_schema::{CommandKind, DiffSide, HunkId, StageTarget, StatusEntry};
+use gm_schema::{CommandKind, DiffSide, HunkId, OperationId, StageTarget, StatusEntry};
 
 /// Why an action is not enabled, as a short English sentence for the user.
 pub type Reason = &'static str;
@@ -81,9 +81,28 @@ pub enum Effect {
     Send(Vec<CommandKind>),
     /// Text for the clipboard.
     Copy(String),
+    /// Replaces the composer text with the suggestion.
+    UseSuggestion(String),
+    /// Drops the suggestion; the composer keeps its text.
+    DiscardSuggestion,
+    /// Hides the approval prompt of the repository hook with this command hash.
+    DenyHook(String),
     /// A path on disk, for the system file manager.
     Reveal(PathBuf),
     FocusCommitMessage,
+}
+
+/// What the window knows of the prepare-commit hooks, for the rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HookCtx<'a> {
+    /// The run that is starting or running, if one is.
+    pub running: Option<OperationId>,
+    /// How many hooks apply to this branch and are not disabled; `None` until listed.
+    pub applicable: Option<usize>,
+    /// The message the last run offered and the user has not used or dropped.
+    pub suggestion: Option<&'a str>,
+    /// The first repository hook awaiting approval: its name and command hash.
+    pub pending_approval: Option<(&'a str, &'a str)>,
 }
 
 /// The window state an action's rule reads. Built by the window for each run.
@@ -102,10 +121,11 @@ pub struct Context<'a> {
     pub current_branch: Option<&'a str>,
     /// The repository's working tree root; `None` when no repository is open.
     pub root: Option<&'a str>,
+    pub hooks: HookCtx<'a>,
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 19] = [
+const SPECS: [Spec; 25] = [
     spec(
         "file.stage",
         "Stage File",
@@ -239,6 +259,48 @@ const SPECS: [Spec; 19] = [
         ArgKind::File,
         Category::WorkingCopy,
     ),
+    spec(
+        "commit.suggest_message",
+        "Suggest Commit Message",
+        None,
+        ArgKind::None,
+        Category::Commit,
+    ),
+    spec(
+        "commit.use_suggestion",
+        "Replace Message With Suggestion",
+        None,
+        ArgKind::None,
+        Category::Commit,
+    ),
+    spec(
+        "commit.discard_suggestion",
+        "Discard Suggestion",
+        None,
+        ArgKind::None,
+        Category::Commit,
+    ),
+    spec(
+        "hook.cancel",
+        "Cancel Hook Run",
+        None,
+        ArgKind::None,
+        Category::Commit,
+    ),
+    spec(
+        "hook.approve",
+        "Approve Repository Hook",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "hook.deny",
+        "Deny Repository Hook",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
 ];
 
 const fn spec(
@@ -280,13 +342,19 @@ pub enum Action {
     CreateWorktree,
     DiscardFile,
     RevealFile,
+    SuggestMessage,
+    UseSuggestion,
+    DiscardSuggestion,
+    CancelHook,
+    ApproveHook,
+    DenyHook,
 }
 
 /// The reason of an action the engine cannot run yet, whatever its target.
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 19] = [
+    pub const ALL: [Action; 25] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -306,6 +374,12 @@ impl Action {
         Action::CreateWorktree,
         Action::DiscardFile,
         Action::RevealFile,
+        Action::SuggestMessage,
+        Action::UseSuggestion,
+        Action::DiscardSuggestion,
+        Action::CancelHook,
+        Action::ApproveHook,
+        Action::DenyHook,
     ];
 
     #[must_use]
@@ -436,6 +510,12 @@ impl Action {
                 file_entry(args, ctx).map(|_| ())
             }
             Action::CopyBranchName | Action::CopyFilePath | Action::FocusCommitMessage => Ok(()),
+            Action::SuggestMessage
+            | Action::CancelHook
+            | Action::UseSuggestion
+            | Action::DiscardSuggestion
+            | Action::ApproveHook
+            | Action::DenyHook => hook_rule(self, ctx),
             Action::NewChildBranch
             | Action::Restack
             | Action::PushWithLease
@@ -494,6 +574,29 @@ impl Action {
                 Effect::Reveal(PathBuf::from(ctx.root.unwrap_or_default()).join(path))
             }
             (Action::FocusCommitMessage, _) => Effect::FocusCommitMessage,
+            (Action::SuggestMessage, _) => Effect::Send(vec![CommandKind::RunPrepareCommit {
+                message: ctx.message.to_owned(),
+            }]),
+            (Action::CancelHook, _) => match ctx.hooks.running {
+                Some(run) => Effect::Send(vec![CommandKind::CancelHook { run }]),
+                None => return Err("No hook is running."),
+            },
+            (Action::UseSuggestion, _) => match ctx.hooks.suggestion {
+                Some(text) => Effect::UseSuggestion(text.to_owned()),
+                None => return Err("There is no suggestion."),
+            },
+            (Action::DiscardSuggestion, _) => Effect::DiscardSuggestion,
+            (Action::ApproveHook, _) => match ctx.hooks.pending_approval {
+                Some((name, hash)) => Effect::Send(vec![CommandKind::ApproveHook {
+                    name: name.to_owned(),
+                    command_hash: hash.to_owned(),
+                }]),
+                None => return Err("No repository hook waits for approval."),
+            },
+            (Action::DenyHook, _) => match ctx.hooks.pending_approval {
+                Some((_, hash)) => Effect::DenyHook(hash.to_owned()),
+                None => return Err("No repository hook waits for approval."),
+            },
             // Only reached when `enabled` said Ok, which no placeholder does.
             _ => return Err(NOT_AVAILABLE),
         })
@@ -508,6 +611,35 @@ impl Action {
                 | (ArgKind::File, Args::File(_))
                 | (ArgKind::Chunk, Args::Chunk { .. })
         )
+    }
+}
+
+/// The rules of the prepare-commit actions: what the window's hook state allows.
+fn hook_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
+    match action {
+        Action::SuggestMessage => {
+            idle(ctx)?;
+            if ctx.hooks.running.is_some() {
+                return Err("A hook is already running.");
+            }
+            match ctx.hooks.applicable {
+                None => Err("Hooks are still being read."),
+                Some(0) => Err("No prepare-commit hook applies to this repository."),
+                Some(_) => Ok(()),
+            }
+        }
+        Action::CancelHook => ctx.hooks.running.map(|_| ()).ok_or("No hook is running."),
+        Action::UseSuggestion | Action::DiscardSuggestion => ctx
+            .hooks
+            .suggestion
+            .map(|_| ())
+            .ok_or("There is no suggestion."),
+        Action::ApproveHook | Action::DenyHook => ctx
+            .hooks
+            .pending_approval
+            .map(|_| ())
+            .ok_or("No repository hook waits for approval."),
+        _ => Err(NOT_AVAILABLE),
     }
 }
 
@@ -582,6 +714,7 @@ mod tests {
             message,
             current_branch: Some("main"),
             root: Some("/repo"),
+            hooks: crate::action_registry::HookCtx::default(),
         }
     }
 
@@ -908,6 +1041,106 @@ mod tests {
         assert_eq!(
             Action::CopyBranchName.plan(&branch("feature"), &context),
             Ok(Effect::Copy("feature".into()))
+        );
+    }
+
+    fn with_hooks(hooks: HookCtx<'_>) -> Context<'_> {
+        Context {
+            hooks,
+            ..ctx(&[], "draft")
+        }
+    }
+
+    #[test]
+    fn suggesting_waits_for_the_listing_and_needs_a_hook_that_applies() {
+        let none = HookCtx::default();
+        assert_eq!(
+            Action::SuggestMessage.enabled(&Args::None, &with_hooks(none)),
+            Err("Hooks are still being read.")
+        );
+        let nothing = HookCtx {
+            applicable: Some(0),
+            ..HookCtx::default()
+        };
+        assert_eq!(
+            Action::SuggestMessage.enabled(&Args::None, &with_hooks(nothing)),
+            Err("No prepare-commit hook applies to this repository.")
+        );
+        let one = HookCtx {
+            applicable: Some(1),
+            ..HookCtx::default()
+        };
+        assert_eq!(
+            Action::SuggestMessage.plan(&Args::None, &with_hooks(one)),
+            Ok(Effect::Send(vec![CommandKind::RunPrepareCommit {
+                message: "draft".into(),
+            }]))
+        );
+    }
+
+    #[test]
+    fn a_second_run_is_refused_and_cancel_names_the_running_one() {
+        let running = HookCtx {
+            running: Some(OperationId(5)),
+            applicable: Some(1),
+            ..HookCtx::default()
+        };
+        assert_eq!(
+            Action::SuggestMessage.enabled(&Args::None, &with_hooks(running)),
+            Err("A hook is already running.")
+        );
+        assert_eq!(
+            Action::CancelHook.plan(&Args::None, &with_hooks(running)),
+            Ok(Effect::Send(vec![CommandKind::CancelHook {
+                run: OperationId(5),
+            }]))
+        );
+        assert_eq!(
+            Action::CancelHook.enabled(&Args::None, &with_hooks(HookCtx::default())),
+            Err("No hook is running.")
+        );
+    }
+
+    #[test]
+    fn a_suggestion_is_used_or_dropped_and_needs_to_exist() {
+        let offered = HookCtx {
+            suggestion: Some("feat: x"),
+            ..HookCtx::default()
+        };
+        assert_eq!(
+            Action::UseSuggestion.plan(&Args::None, &with_hooks(offered)),
+            Ok(Effect::UseSuggestion("feat: x".into()))
+        );
+        assert_eq!(
+            Action::DiscardSuggestion.plan(&Args::None, &with_hooks(offered)),
+            Ok(Effect::DiscardSuggestion)
+        );
+        assert_eq!(
+            Action::UseSuggestion.enabled(&Args::None, &with_hooks(HookCtx::default())),
+            Err("There is no suggestion.")
+        );
+    }
+
+    #[test]
+    fn approval_sends_the_listed_hash_and_deny_stays_local() {
+        let waiting = HookCtx {
+            pending_approval: Some(("team", "abc")),
+            ..HookCtx::default()
+        };
+        assert_eq!(
+            Action::ApproveHook.plan(&Args::None, &with_hooks(waiting)),
+            Ok(Effect::Send(vec![CommandKind::ApproveHook {
+                name: "team".into(),
+                command_hash: "abc".into(),
+            }]))
+        );
+        assert_eq!(
+            Action::DenyHook.plan(&Args::None, &with_hooks(waiting)),
+            Ok(Effect::DenyHook("abc".into()))
+        );
+        assert_eq!(
+            Action::ApproveHook.enabled(&Args::None, &with_hooks(HookCtx::default())),
+            Err("No repository hook waits for approval.")
         );
     }
 }

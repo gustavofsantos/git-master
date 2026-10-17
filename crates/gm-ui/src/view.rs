@@ -16,11 +16,14 @@ use gpui::{
     UniformListScrollHandle, Window, div, prelude::*, px,
 };
 
-use crate::action_registry::{self, Action, Args, Context as ActionContext, Effect, Reason};
+use crate::action_registry::{
+    self, Action, Args, Context as ActionContext, Effect, HookCtx, Reason,
+};
 use crate::branch_menu::BranchMenu;
 use crate::composer::{Composer, ComposerEvent};
 use crate::context_menu::ContextMenu;
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
+use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
 use crate::model::{Model, Switched};
 use crate::palette::Palette;
@@ -160,6 +163,7 @@ impl StatusView {
             cx.observe_window_activation(window, |this, window, _cx| {
                 if window.is_window_active() {
                     this.watch.request();
+                    this.request_hook_list();
                 }
             }),
             // Also fires when the compositor answers the decoration request, so
@@ -261,9 +265,19 @@ impl StatusView {
         let reload = matches!(event, Event::StatusLoaded { .. });
         let listed = matches!(event, Event::BranchesLoaded { .. });
         let committed = matches!(event, Event::Committed { .. });
+        let finished = matches!(event, Event::HookFinished { .. });
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
+        // A finished hook run fills the composer only while it still holds what the run was
+        // started from; otherwise the answer waits as a suggestion (see hook_run).
+        if finished {
+            let typed = self.composer.read(cx).text(cx);
+            if let Some(Fill::Apply(message)) = self.model.hooks.take_fill(&typed) {
+                self.composer
+                    .update(cx, |composer, cx| composer.set_text(&message, cx));
+            }
+        }
         // On the welcome screen the error belongs to the screen, not the status bar.
         if let Some(welcome) = self.welcome.as_mut()
             && let Some(error) = self.model.error.take()
@@ -292,6 +306,7 @@ impl StatusView {
             // A checkout moves HEAD; the tree marks the new branch.
             if self.head_name() != head_before {
                 self.request_branch_list();
+                self.request_hook_list();
             }
             self.load_selected(cx);
         }
@@ -316,6 +331,14 @@ impl StatusView {
         self.model.branches.request(id);
     }
 
+    /// Asks the engine for the prepare-commit hooks of the open repository. Nothing
+    /// is asked before one is open.
+    pub(crate) fn request_hook_list(&mut self) {
+        if self.model.status().is_some() {
+            self.engine.dispatch(Actor::Human, CommandKind::ListHooks);
+        }
+    }
+
     /// A successful open replaced the repository: the view state of the old
     /// one goes, and the new root joins the recent list.
     fn on_switched(&mut self, switched: Switched, cx: &mut Context<Self>) {
@@ -325,7 +348,9 @@ impl StatusView {
         self.show_diffs(None, None, cx);
         self.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
         self.model.branches.clear();
+        self.model.hooks.reset();
         self.request_branch_list();
+        self.request_hook_list();
         self.remember(PathBuf::from(switched.root), cx);
     }
 
@@ -482,13 +507,21 @@ impl StatusView {
             Ok(Effect::Send(kinds)) => {
                 if action == Action::Refresh {
                     self.request_branch_list();
+                    self.request_hook_list();
                 }
                 for kind in kinds {
                     let checkout = matches!(kind, CommandKind::Checkout { .. });
                     let refresh = matches!(kind, CommandKind::RefreshStatus);
+                    let prepare = match &kind {
+                        CommandKind::RunPrepareCommit { message } => Some(message.clone()),
+                        _ => None,
+                    };
                     let id = self.engine.dispatch(Actor::Human, kind);
                     if checkout {
                         self.model.branches.begin_checkout(id);
+                    }
+                    if let Some(sent) = prepare {
+                        self.model.hooks.start(id, sent);
                     }
                     if refresh {
                         self.start_refresh_indicator(id, cx);
@@ -502,6 +535,13 @@ impl StatusView {
             }
             Ok(Effect::Reveal(path)) => cx.reveal_path(&path),
             Ok(Effect::FocusCommitMessage) => self.focus_commit_message(window, cx),
+            Ok(Effect::UseSuggestion(text)) => {
+                self.composer
+                    .update(cx, |composer, cx| composer.set_text(&text, cx));
+                self.model.hooks.drop_suggestion();
+            }
+            Ok(Effect::DiscardSuggestion) => self.model.hooks.drop_suggestion(),
+            Ok(Effect::DenyHook(hash)) => self.model.hooks.deny(&hash),
         }
         cx.notify();
     }
@@ -519,6 +559,16 @@ impl StatusView {
                 .status()
                 .and_then(|status| status.branch.head.as_deref()),
             root: self.model.status().map(|status| status.root.as_str()),
+            hooks: HookCtx {
+                running: self.model.hooks.in_flight(),
+                applicable: self.model.hooks.applicable(),
+                suggestion: self.model.hooks.suggestion.as_deref(),
+                pending_approval: self
+                    .model
+                    .hooks
+                    .pending_approval()
+                    .map(|hook| (hook.name.as_str(), hook.command_hash.as_str())),
+            },
         }
     }
 

@@ -476,6 +476,7 @@ mod tests {
             message,
             current_branch: Some("main"),
             root: Some("/repo"),
+            hooks: crate::action_registry::HookCtx::default(),
         }
     }
 
