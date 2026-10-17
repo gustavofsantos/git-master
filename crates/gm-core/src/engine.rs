@@ -390,6 +390,7 @@ impl Engine {
             staged_diff,
             message: message.to_owned(),
             steps,
+            login_path: self.git.login_path(),
             cancel: Arc::clone(&cancel),
         };
         let active = ActiveRun {

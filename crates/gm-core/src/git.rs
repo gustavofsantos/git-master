@@ -223,6 +223,10 @@ impl SubprocessGit {
 }
 
 impl GitPort for SubprocessGit {
+    fn login_path(&self) -> Arc<OnceLock<String>> {
+        Arc::clone(&self.login_path)
+    }
+
     fn resolve_root(&self, path: &Path) -> Result<PathBuf, GitError> {
         let mut command = self.git(path);
         command.args(["rev-parse", "--show-toplevel"]);

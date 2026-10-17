@@ -6,8 +6,8 @@ use std::io::{Read, Write};
 use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,8 @@ pub struct Plan {
     pub staged_diff: String,
     pub message: String,
     pub steps: Vec<Step>,
+    /// The login-shell PATH, read when each step starts; the steps run with it.
+    pub login_path: Arc<OnceLock<String>>,
     /// Set by `CancelHook`; the running step is killed and the run ends cancelled.
     pub cancel: Arc<AtomicBool>,
 }
@@ -201,7 +203,14 @@ impl Plan {
                 input: payload,
             };
             let json = serde_json::to_vec(&input).unwrap_or_default();
-            match run_step(step, &invocation_id, &json, &self.root, &self.cancel) {
+            match run_step(
+                step,
+                &invocation_id,
+                &json,
+                &self.root,
+                &self.login_path,
+                &self.cancel,
+            ) {
                 Ok(next) => {
                     message = next;
                     reporter.send(Report::StepDone {
@@ -243,17 +252,21 @@ fn write_temp_diff(diff: &str) -> std::io::Result<tempfile::NamedTempFile> {
     Ok(file)
 }
 
-/// Runs one step: `sh -c` in the repository root, the input on stdin, the
-/// answer read from stdout. The step gets a process group of its own, so a
+/// Runs one step: `sh -c` in the repository root with the login-shell PATH
+/// when it is known, the input on stdin, the answer read from stdout. The step gets a process group of its own, so a
 /// timeout or cancel takes its children with it.
 fn run_step(
     step: &Step,
     invocation_id: &str,
     input: &[u8],
     root: &std::path::Path,
+    login_path: &OnceLock<String>,
     cancel: &AtomicBool,
 ) -> Result<String, StepError> {
     let mut command = Command::new("sh");
+    if let Some(path) = login_path.get() {
+        command.env("PATH", path);
+    }
     command
         .arg("-c")
         .arg(&step.command)
@@ -427,6 +440,7 @@ mod tests {
                 command: "cat >/dev/null".into(),
                 timeout: Duration::from_secs(5),
             }],
+            login_path: Arc::default(),
             cancel: Arc::new(AtomicBool::new(false)),
         };
 
@@ -451,6 +465,48 @@ mod tests {
             }]
         );
         assert_eq!(staged_files(), before, "the staged diff file is deleted");
+    }
+
+    #[test]
+    fn a_step_finds_its_program_on_the_login_path() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("gm-login-only-tool");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nprintf '%s' '{\"invocation_id\":\"prep-11-1\",\"output\":{\"message\":\"from login path\"}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let login_path = Arc::new(OnceLock::new());
+        login_path
+            .set(format!("{}:/usr/bin:/bin", dir.path().display()))
+            .unwrap();
+        let plan = Plan {
+            run: OperationId(11),
+            root: std::env::temp_dir(),
+            branch: None,
+            head: None,
+            staged_diff: String::new(),
+            message: String::new(),
+            steps: vec![Step {
+                name: "llm".into(),
+                command: "gm-login-only-tool".into(),
+                timeout: Duration::from_secs(5),
+            }],
+            login_path,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        let mut reports = Vec::new();
+        plan.execute(|report| reports.push(report));
+        assert_eq!(
+            reports.last(),
+            Some(&Report::Finished {
+                run: OperationId(11),
+                message: "from login path".into(),
+            })
+        );
     }
 
     #[test]

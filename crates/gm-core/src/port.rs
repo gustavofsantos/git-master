@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use gm_schema::{BranchEntry, DiffSide, FileDiff, HookScope, HunkId, RepoStatus, StageTarget};
 
@@ -76,5 +77,11 @@ pub trait GitPort: Send {
         Err(GitError(
             "staged diff is not supported by this adapter".into(),
         ))
+    }
+
+    /// The login-shell PATH, which git and the hook scripts run with. Empty
+    /// until it is read; an adapter without one keeps the process's PATH.
+    fn login_path(&self) -> Arc<OnceLock<String>> {
+        Arc::default()
     }
 }
