@@ -45,6 +45,29 @@ pub fn rows<'a>(entries: &'a [WorktreeEntry], here: Option<&str>, lanes: usize) 
     rows
 }
 
+/// What a double-click on a row does.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Open<'a> {
+    /// The window's own worktree: nothing to open.
+    Nothing,
+    /// The folder is gone, so there is nothing to open until it is pruned.
+    Missing,
+    /// The folder to open in a window of its own.
+    Path(&'a str),
+}
+
+/// What a double-click on `row` does.
+#[must_use]
+pub fn open_target<'a>(row: &Row<'a>) -> Open<'a> {
+    if row.here {
+        Open::Nothing
+    } else if row.missing {
+        Open::Missing
+    } else {
+        Open::Path(&row.entry.path)
+    }
+}
+
 /// The branch the worktree has, or else its folder name.
 fn display_name(entry: &WorktreeEntry) -> String {
     if let Some(branch) = &entry.branch {
@@ -166,6 +189,23 @@ mod tests {
         let entries = [main("/w/ledger", "main"), entry("/w/scratch-review", None)];
         let rows = rows(&entries, None, 6);
         assert_eq!(rows[1].name, "scratch-review");
+    }
+
+    #[test]
+    fn a_double_click_opens_the_other_worktrees_folder() {
+        let entries = [main("/r", "main"), entry("/r-feature", Some("feature"))];
+        let rows = rows(&entries, Some("/r"), 4);
+        assert_eq!(open_target(&rows[0]), Open::Nothing);
+        assert_eq!(open_target(&rows[1]), Open::Path("/r-feature"));
+    }
+
+    #[test]
+    fn a_missing_worktree_is_not_opened() {
+        let mut gone = entry("/r-gone", Some("gone"));
+        gone.prunable = Some(String::new());
+        let entries = [main("/r", "main"), gone];
+        let rows = rows(&entries, Some("/r"), 4);
+        assert_eq!(open_target(&rows[1]), Open::Missing);
     }
 
     #[test]

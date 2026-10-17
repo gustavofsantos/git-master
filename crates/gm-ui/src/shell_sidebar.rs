@@ -2,7 +2,8 @@
 //! between the two ways of grouping branches, the branch tree and the
 //! worktrees. Only the Working Copy exists; the other destinations and the
 //! stack tree are placeholders until their slices land (docs/07). The
-//! worktrees are read-only for now: a click does nothing yet (docs/07, W2).
+//! worktrees show their state; a double-click opens one in its own window
+//! (docs/07, W4).
 
 use std::ops::Range;
 
@@ -48,13 +49,13 @@ impl StatusView {
             .child(self.workspace_items(cx))
             .child(self.grouping_switch(cx))
             .child(self.branch_tree(cx))
-            .child(self.worktrees_section())
+            .child(self.worktrees_section(cx))
             .children((self.sidebar_grouping == Grouping::ByStack).then(footer_hint))
     }
 
     /// The WORKTREES section: the main checkout, then the linked worktrees.
     /// Empty until a listing has arrived.
-    fn worktrees_section(&self) -> Div {
+    fn worktrees_section(&self, cx: &Context<Self>) -> Div {
         let root = self.model.status().map(|status| status.root.clone());
         let rows = worktree_list::rows(&self.model.worktrees, root.as_deref(), theme::LANE_COUNT);
         if rows.is_empty() {
@@ -67,7 +68,7 @@ impl StatusView {
             .px_2()
             .pb_2()
             .child(section_title("Worktrees"))
-            .children(rows.iter().map(worktree_row))
+            .children(rows.iter().map(|row| worktree_row(row, cx)))
     }
 
     fn workspace_items(&self, cx: &mut Context<Self>) -> Div {
@@ -315,8 +316,14 @@ fn tree_row(
 }
 
 /// One worktree: its colour mark, its name, and the tags that say it is the
-/// window's own or that its folder is gone.
-fn worktree_row(row: &worktree_list::Row<'_>) -> Div {
+/// window's own or that its folder is gone. A double-click opens the others in
+/// a window of their own.
+fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> Div {
+    let action = match worktree_list::open_target(row) {
+        worktree_list::Open::Nothing => None,
+        worktree_list::Open::Missing => Some(Err("This worktree's folder is missing.")),
+        worktree_list::Open::Path(path) => Some(Ok(path.to_owned())),
+    };
     div()
         .h(px(ROW_HEIGHT))
         .px_2()
@@ -348,6 +355,20 @@ fn worktree_row(row: &worktree_list::Row<'_>) -> Div {
             row.missing
                 .then(|| tag("missing", theme::warn_fg(), theme::warn_bg())),
         )
+        .when_some(action, |this, action| {
+            this.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    if event.click_count != 2 {
+                        return;
+                    }
+                    match &action {
+                        Ok(path) => this.open_worktree(path, cx),
+                        Err(reason) => this.notify_user(reason, cx),
+                    }
+                }),
+            )
+        })
 }
 
 /// A small window glyph in the worktree's colour: an outline with a title bar.

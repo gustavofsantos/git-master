@@ -57,7 +57,7 @@ O autor decidiu em 2026-10-17 que worktrees entram na v1, por serem parte centra
 - **Fora da v1:** submódulos, sparse checkout e repositórios bare.
 - **Sem agente:** esta decisão não inclui integração de worktrees com agentes. Não há tag de agente na lista, nem caminho `Actor::Agent` para worktrees; ver Q12.
 
-As ações de worktree no registro seguem desabilitadas com "Not available yet" até a sub-fatia correspondente da fatia 1c (item 5 de `07`) entrar.
+As ações de worktree no registro seguem desabilitadas com "Not available yet" até a sub-fatia correspondente da fatia 1c (item 5 de `07`) entrar. Criar (W3) e abrir (W4) já estão; travar, limpar e a variante do menu (W6, W8) não.
 
 ## Questões abertas
 

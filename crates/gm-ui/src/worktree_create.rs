@@ -8,14 +8,15 @@ use std::path::Path;
 
 use gm_schema::{Actor, CommandKind, OperationId, OperationState, WorktreeMode};
 use gpui::{
-    Context, Div, Entity, FontWeight, MouseButton, MouseDownEvent, Subscription, Window, div,
-    prelude::*, px,
+    Context, Div, Entity, FontWeight, MouseButton, MouseDownEvent, Stateful, Subscription, Window,
+    div, prelude::*, px,
 };
 
 use crate::FocusNext;
 use crate::text_area::{Newline, TextArea, TextAreaEvent};
 use crate::theme;
 use crate::view::StatusView;
+use crate::worktree_list;
 
 const WIDTH: f32 = 560.;
 /// The dialog hangs this far below the top of the window.
@@ -500,6 +501,10 @@ impl StatusView {
     fn worktree_panel(&self, dialog: &WorktreeDialog, left: f32, cx: &Context<Self>) -> Div {
         let pending = self.model.creating.is_pending();
         let form = dialog.form(cx);
+        let elsewhere = match (dialog.error.is_some(), dialog.mode) {
+            (true, Mode::Existing) => self.checked_out_elsewhere(form.branch.trim()),
+            _ => None,
+        };
         div()
             .absolute()
             .top(px(TOP))
@@ -538,8 +543,50 @@ impl StatusView {
                     .text_color(theme::error())
                     .child(error.clone())
             }))
+            .children(elsewhere.map(|path| {
+                // A row keeps the button at its own width, not the panel's.
+                div().flex().flex_row().child(open_button(path, cx))
+            }))
             .child(buttons(pending, cx))
     }
+
+    /// The folder of the worktree that has `branch`, when it is not this
+    /// window's own: Git refused the branch because that worktree has it.
+    fn checked_out_elsewhere(&self, branch: &str) -> Option<String> {
+        let root = self.model.status().map(|status| status.root.clone());
+        worktree_list::rows(&self.model.worktrees, root.as_deref(), theme::LANE_COUNT)
+            .into_iter()
+            .find(|row| !row.here && row.entry.branch.as_deref() == Some(branch))
+            .map(|row| row.entry.path.clone())
+    }
+
+    /// Closes the dialog and opens `path` in its own window.
+    fn open_from_dialog(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_worktree_dialog(window, cx);
+        self.open_worktree(path, cx);
+    }
+}
+
+/// The button that goes to the worktree which has the branch.
+fn open_button(path: String, cx: &Context<StatusView>) -> Stateful<Div> {
+    div()
+        .id("worktree-open-elsewhere")
+        .px_3()
+        .h(px(26.))
+        .flex()
+        .items_center()
+        .rounded_md()
+        .cursor_pointer()
+        .border_1()
+        .border_color(theme::hairline_strong())
+        .text_color(theme::text())
+        .child("Open that worktree")
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.open_from_dialog(&path, window, cx);
+            }),
+        )
 }
 
 /// The three modes as a segmented control.

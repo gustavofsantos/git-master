@@ -17,6 +17,7 @@ mod fuzzy;
 mod hook_run;
 mod icon;
 mod model;
+mod open_window;
 mod palette;
 mod palette_view;
 mod project_menu;
