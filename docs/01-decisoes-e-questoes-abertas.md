@@ -50,6 +50,10 @@
 | D36 | Cor das lanes do grafo (H5, D25) deriva de um hash do nome da branch, estável entre sessões. O layout é determinístico e usa `--topo-order`. D25 segue Proposto no restante (aresta tracejada, dono do commit) | Decidido (2026-10-17) | 05, 07 |
 | D37 | Gate de performance do histórico (H8): benchmarks ignorados em repositórios de 50 mil e 200 mil commits, gerados com `git fast-import` | Decidido (2026-10-17) | 06, 07 |
 | D38 | Tela de configurações como diálogo modal na Fatia 9; configura tudo o que o app permitir até lá, persistindo fora do working tree (Princípio 5) | Decidido (2026-10-17) | 05, 07 |
+| D39 | Diff com layout Unificado | Dividido (H4b): o seletor vale para o diff do commit e, na sub-fatia H4b-B, para o diff da Working Copy, com um só modelo de linhas. Este passo entrega o do commit primeiro | Decidido (2026-10-17) | 05, 07 |
+| D40 | Preferência de layout do diff guardada por usuário em `settings.json` no diretório de configuração do usuário (`~/.config/gitmaster/` no Linux, `Library/Application Support/gitmaster/` no macOS), fora do repositório (Princípio 5). Padrão: Unificado. Arquivo ausente ou inválido vale como Unificado. A tela de configurações (D38) passa a expor a opção | Decidido (2026-10-17) | 05, 07 |
+| D41 | Modo Dividido: a calha de cada lado marca só a linha desse lado (o par não é unidade); o aviso de par do D24 segue valendo para meio par; um conjunto de botões de chunk, na linha de cabeçalho do hunk na largura toda; sem quebra de linha e com deslocamento horizontal compartilhado; lado vazio é painel simples, sem número nem marcador; sem troca automática para Unificado em janela estreita | Decidido (2026-10-17) | 05, 07 |
+| D42 | Destaque de diferença dentro da linha (intraline) fica adiado para depois da Fatia 3 | Decidido (2026-10-17) | 07 |
 
 ## D31: worktrees na v1
 
