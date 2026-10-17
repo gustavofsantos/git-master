@@ -234,6 +234,13 @@ pub fn split_rows(diffs: Diffs<'_>, side: Side) -> SplitRows {
     out
 }
 
+/// Whether a split cell holds the cursor's line. A context line is one line on
+/// both sides, so both of its cells hold the cursor; a changed line is one cell.
+#[must_use]
+pub fn split_cell_on_cursor(cell: Option<Cell>, cursor: Option<LineKey>) -> bool {
+    matches!((cell, cursor), (Some(cell), Some(key)) if cell.key == key)
+}
+
 /// Columns a tab takes up, counted from the column it starts at. Used for the
 /// width of a line, which bounds the horizontal scroll of the split view.
 pub const TAB_STOP: usize = 4;
@@ -608,6 +615,50 @@ mod tests {
                 layout_selector: true,
             }
         );
+    }
+
+    #[test]
+    fn a_split_cell_is_on_the_cursor_only_when_its_line_is() {
+        // ctx, -a, +b, ctx: the removed and added lines share one split row.
+        let unstaged = vec![simple("h0")];
+        let diffs = Diffs {
+            unstaged: &unstaged,
+            staged: &[],
+        };
+        let split = split_rows(diffs, Side::Unstaged);
+        let removed = (Side::Unstaged, 0, 1);
+        let added = (Side::Unstaged, 0, 2);
+        let (old, new) = split
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                SplitRow::Pair { old, new } if old.map(|c| c.key) == Some(removed) => {
+                    Some((*old, *new))
+                }
+                _ => None,
+            })
+            .expect("the row of the removed line");
+        assert_eq!(new.map(|c| c.key), Some(added));
+        assert!(split_cell_on_cursor(old, Some(removed)));
+        assert!(!split_cell_on_cursor(new, Some(removed)));
+        assert!(split_cell_on_cursor(new, Some(added)));
+        assert!(!split_cell_on_cursor(old, Some(added)));
+        // A context line is one line on both sides, so both cells are on the cursor.
+        let context = (Side::Unstaged, 0, 0);
+        let (old, new) = split
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                SplitRow::Pair { old, new } if old.map(|c| c.key) == Some(context) => {
+                    Some((*old, *new))
+                }
+                _ => None,
+            })
+            .expect("the context row");
+        assert!(split_cell_on_cursor(old, Some(context)));
+        assert!(split_cell_on_cursor(new, Some(context)));
+        assert!(!split_cell_on_cursor(None, Some(removed)));
+        assert!(!split_cell_on_cursor(old, None));
     }
 
     /// `ctx, -a, +b, ctx`: lines 1 and 2 are changes.

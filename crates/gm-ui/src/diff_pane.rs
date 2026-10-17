@@ -17,7 +17,8 @@ use crate::diff_rows::{
     Apply, Cell, Diffs, Layout, LineKey, Mode, Press, Row, Selection, Side, SplitRow, SplitRows,
     build_rows, change_counts, changed_keys_between, controls, default_side, hunk_header_text,
     hunk_selection_count, hunks_of, max_scroll_columns, next_changed_line, next_hunk_header, press,
-    prev_changed_line, prev_hunk_header, skip_columns, split_pairs, split_rows,
+    prev_changed_line, prev_hunk_header, skip_columns, split_cell_on_cursor, split_pairs,
+    split_rows,
 };
 use crate::icon::{self, Icon};
 use crate::theme;
@@ -247,6 +248,18 @@ impl DiffPane {
         }
     }
 
+    /// The line the cursor is on, or `None` on a hunk header.
+    fn cursor_line(&self) -> Option<LineKey> {
+        match self.rows.get(self.cursor).copied() {
+            Some(Row::Line {
+                side,
+                hunk_index,
+                line_index,
+            }) => Some((side, hunk_index, line_index)),
+            _ => None,
+        }
+    }
+
     fn row_count(&self) -> usize {
         match self.layout {
             Layout::Unified => self.rows.len(),
@@ -353,14 +366,15 @@ impl DiffPane {
         new: Option<Cell>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let on_cursor = ix == self.cursor_ix();
+        // Only the cell of the cursor's own line is on the cursor (a −/+ pair has two).
+        let cursor = self.cursor_line();
         div()
             .h(px(ROW_HEIGHT))
             .w_full()
             .flex()
             .flex_row()
-            .child(self.split_cell(ix, 0, old, on_cursor, cx))
-            .child(self.split_cell(ix, 1, new, on_cursor, cx))
+            .child(self.split_cell(ix, 0, old, split_cell_on_cursor(old, cursor), cx))
+            .child(self.split_cell(ix, 1, new, split_cell_on_cursor(new, cursor), cx))
             .into_any_element()
     }
 
