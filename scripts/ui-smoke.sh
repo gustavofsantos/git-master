@@ -1336,7 +1336,9 @@ scenario_commit_diff_split() {
   read -r differing _ <<<"$differing"
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -gt 2000 ] || fail "src/added.rs did not open in the split view ($differing pixels changed)"
-  xdotool key Down Down; sleep 1.5
+  # Two Down presses, spaced: back to back, the second was once lost (see the report).
+  xdotool key Down; sleep 1
+  xdotool key Down; sleep 1.5
   shoot "$SMOKE_OUT/h-commit-diff-split-gone-$theme.png"
   differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-added-$theme.png" "$SMOKE_OUT/h-commit-diff-split-gone-$theme.png" null: 2>&1 || true)"
   read -r differing _ <<<"$differing"
