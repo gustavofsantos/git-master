@@ -1,6 +1,6 @@
 # Roadmap
 
-Última atualização: 2026-10-16. **Proposta inicial**, para iterar. Marcas: **(feito)** no código e verificado; **(a fazer)** ainda não começado; sem marca, fatia futura. A ordem prioriza chegar cedo a algo que o autor use no dia a dia e que já mostre um diferencial.
+Última atualização: 2026-10-17. **Proposta inicial**, para iterar. Marcas: **(feito)** no código e verificado; **(a fazer)** ainda não começado; sem marca, fatia futura. A ordem prioriza chegar cedo a algo que o autor use no dia a dia e que já mostre um diferencial.
 
 ## Critério de ordem
 
@@ -91,7 +91,15 @@ Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu 
    - Feito: `Ctrl+K` abre a paleta; campo único com busca difusa (`fuzzy.rs`, função pura com testes de ordem e de trechos casados); seções "Actions", "Worktrees" e "Branches", cada uma só quando tem resultado (branches só depois de digitar); trecho casado em destaque; contagem de resultados; setas navegam, Enter executa, Tab escolhe o argumento da ação (branch ou arquivo), Esc sai do passo do argumento ou fecha; rodapé com as dicas; lista virtualizada; ações desabilitadas aparecem com o motivo.
    - Roda pelo mesmo caminho da tecla e do menu (`run_action`, `Actor::Human`), com as ações do registro. A ordenação roda fora da thread de UI; `palette.rs` monta as opções e controla o destaque, e só o que chega da ordenação mais recente é mostrado.
    - Lacunas: Worktrees mostra só "Create Worktree" desabilitado (Q8 em aberto); ações de chunk aparecem desabilitadas com "Pick a chunk in the diff first.", porque rodam do painel de diff; commit e stash continuam sem menu de contexto; a lista de arquivos só se atualiza com o próximo evento de status; o smoke cobre só o teclado (não o clique numa linha, nem Esc no passo do argumento, nem a paleta sem repositório); o destaque é guloso, então em termos com letras repetidas ele pode marcar letras menos óbvias.
-5. **Worktrees** (a decidir, Q8). O desenho traz a seção "Worktrees" na sidebar (aqui, agente, sem repo) e as ações de criar e remover. Não entram na v1 sem decisão do autor; até lá as ações ficam desabilitadas no registro.
+5. **Worktrees** (decidido em 2026-10-17, D31; em sub-fatias). Padrões e fora de escopo em D31 (`01`). Cada sub-fatia só habilita as ações dela no registro; as demais seguem desabilitadas com "Not available yet".
+   - **W1, listagem** (a fazer): `git worktree list --porcelain` no core, com caminho, branch ou HEAD solto, checkout principal, travado e removível; testes com Git real.
+   - **W2, seção na sidebar** (a fazer): "Worktrees" com a checkout principal primeiro, selo "aqui" no atual, "agente" fora da v1 (Q12), cor pelo hash do nome.
+   - **W3, criar** (a fazer): diálogo com branch e caminho; destino `../<repo>-<branch>` dentro do diretório base configurável; `git worktree add`.
+   - **W4, abrir** (a fazer): abre o worktree na própria janela (um repositório por janela).
+   - **W5, remover com checagens** (a fazer): bloqueia se estiver sujo ou com commits não enviados; forçar só depois de digitar o nome da branch.
+   - **W6, travar e limpar** (a fazer): `git worktree lock`, `unlock` e `prune`, com a confirmação do que será removido.
+   - **W8, variante do menu de branch** (a fazer): para a branch com worktree, o menu troca para "Abrir worktree", "Revelar no gerenciador de arquivos", "Abrir no terminal", "Copiar caminho" (⇧⌘C) e "Remover worktree…" (⌘⌫), sobre o mesmo registro.
+   - W7 (caminho do agente, `Actor::Agent`) não entra agora: fica para a fatia 7 (MCP), conforme Q12.
 
 6. **Atualização automática, sem botão de refresh** (feito; desenho confirmado pelo autor em 2026-10-16). O botão saiu da barra superior; a ação "Refresh" segue no registro e na tecla `r`. Lacunas conhecidas: edição externa dentro dos 150 ms após uma escrita do app pode passar; um refresh extra ao abrir; macOS (FSEvents) e árvores perto do teto de 5.000 diretórios sem teste.
    - Premissa: a tela nunca fica velha e o usuário nunca precisa pedir atualização. O botão sai da barra superior só quando isto estiver pronto; a ação "Refresh" continua no registro (tecla `r` e paleta) como saída de emergência.
