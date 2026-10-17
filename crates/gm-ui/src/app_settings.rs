@@ -10,7 +10,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::diff_rows::Layout;
 
@@ -36,15 +36,23 @@ impl AppSettings {
         Self { diff_layout }
     }
 
+    /// The file's text once this app's settings are written into `existing`.
+    /// The keys this app owns are replaced; every other key of the object is
+    /// kept as it is. Text that is not a JSON object (or no text) starts from an
+    /// empty object, so a corrupt file is replaced by a valid one.
     #[must_use]
-    pub fn to_json(self) -> String {
+    pub fn merge_into(self, existing: &str) -> String {
+        let mut fields = match serde_json::from_str::<Value>(existing) {
+            Ok(Value::Object(fields)) => fields,
+            _ => Map::new(),
+        };
         let diff_layout = match self.diff_layout {
             Layout::Unified => "unified",
             Layout::Split => "split",
         };
-        // An object of strings always serializes.
-        serde_json::to_string_pretty(&json!({ "diff_layout": diff_layout }))
-            .unwrap_or_else(|_| "{}".to_owned())
+        fields.insert("diff_layout".to_owned(), json!(diff_layout));
+        // An object of JSON values always serializes.
+        serde_json::to_string_pretty(&Value::Object(fields)).unwrap_or_else(|_| "{}".to_owned())
     }
 }
 
@@ -122,10 +130,13 @@ impl Store {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
+        // Read and write under the lock, so two saves cannot merge the same base.
+        let existing = fs::read_to_string(&self.path).unwrap_or_default();
+        let text = settings.merge_into(&existing);
         let temp = temp_path(&self.path);
         {
             let mut file = fs::File::create(&temp)?;
-            file.write_all(settings.to_json().as_bytes())?;
+            file.write_all(text.as_bytes())?;
             file.sync_all()?;
         }
         fs::rename(&temp, &self.path)?;
@@ -158,8 +169,8 @@ mod tests {
     #[test]
     fn settings_round_trip_through_json() {
         let unified = AppSettings::default();
-        assert_eq!(AppSettings::parse(&unified.to_json()), unified);
-        assert_eq!(AppSettings::parse(&split().to_json()), split());
+        assert_eq!(AppSettings::parse(&unified.merge_into("")), unified);
+        assert_eq!(AppSettings::parse(&split().merge_into("")), split());
     }
 
     #[test]
@@ -249,6 +260,28 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{ not json").unwrap();
         assert_eq!(Store::new(path).load(), AppSettings::default());
+    }
+
+    #[test]
+    fn a_save_keeps_the_keys_it_does_not_own() {
+        let path = scratch("unknown-key");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"theme":"dark","window":{"width":900}}"#).unwrap();
+        Store::new(path.clone()).save(split(), 1).unwrap();
+        let text: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(text["theme"], "dark");
+        assert_eq!(text["window"]["width"], 900);
+        assert_eq!(text["diff_layout"], "split");
+        assert_eq!(Store::new(path).load(), split());
+    }
+
+    #[test]
+    fn a_save_over_a_corrupt_file_writes_a_valid_one() {
+        let path = scratch("save-corrupt");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{ not json").unwrap();
+        Store::new(path.clone()).save(split(), 1).unwrap();
+        assert_eq!(Store::new(path).load(), split());
     }
 
     #[test]
