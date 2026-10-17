@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use gm_schema::{BranchEntry, DiffSide, FileDiff, HunkId, RepoStatus, StageTarget};
+use gm_schema::{BranchEntry, DiffSide, FileDiff, HookScope, HunkId, RepoStatus, StageTarget};
+
+use crate::hook::ConfigValue;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitError(pub String);
@@ -58,5 +60,21 @@ pub trait GitPort: Send {
     /// branch of the same short name. Git's own refusal is the error.
     fn checkout(&self, _root: &Path, _branch: &str) -> Result<(), GitError> {
         Err(GitError("checkout is not supported by this adapter".into()))
+    }
+
+    /// The `gitmaster.prepare-commit.*` keys of one scope, in config order.
+    /// `User` is global config only; `Repo` is the repository's own config.
+    /// Never records anything.
+    fn hook_config(&self, _root: &Path, _scope: HookScope) -> Result<Vec<ConfigValue>, GitError> {
+        Err(GitError(
+            "hook config is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The staged diff, as `git diff --cached` prints it. Never records anything.
+    fn staged_diff(&self, _root: &Path) -> Result<String, GitError> {
+        Err(GitError(
+            "staged diff is not supported by this adapter".into(),
+        ))
     }
 }

@@ -1,6 +1,7 @@
 //! One thread owns the engine (one writer per repository, docs/06 rule 3) and
-//! talks to the front-ends over channels, so the UI never waits for it.
-//! Tokio enters with the first async hook (slice 2).
+//! talks to the front-ends over channels, so the UI never waits for it. Hook
+//! runs are slow, so each gets its own thread; it reports back over the same
+//! channel and the engine thread records the result.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,11 +9,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_channel::{Receiver, Sender};
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId};
 
+use crate::hook::{ApprovalStore, Report};
 use crate::{Engine, GitPort};
 
 enum Message {
-    Dispatch(OperationId, Command),
+    /// The sender lets the engine start a hook thread that reports back. It is
+    /// dropped with the message, so the engine thread stops once every handle
+    /// is gone and no hook is running.
+    Dispatch(OperationId, Command, Sender<Message>),
     Subscribe(Sender<Event>),
+    Hook(Report),
 }
 
 /// Cloneable front door to the engine thread. The thread stops when every
@@ -30,9 +36,11 @@ impl EngineHandle {
         let id = OperationId(self.next_id.fetch_add(1, Ordering::SeqCst));
         // Sends are serialized by the channel; a closed channel means the engine
         // thread is gone and there is nobody to tell.
-        let _ = self
-            .tx
-            .send_blocking(Message::Dispatch(id, Command { actor, kind }));
+        let _ = self.tx.send_blocking(Message::Dispatch(
+            id,
+            Command { actor, kind },
+            self.tx.clone(),
+        ));
         id
     }
 
@@ -44,14 +52,26 @@ impl EngineHandle {
     }
 }
 
+/// Starts the engine with approvals kept in the app's data directory.
+///
 /// # Panics
 ///
 /// If the OS cannot start the engine thread.
 pub fn spawn(git: Box<dyn GitPort>) -> EngineHandle {
+    spawn_with(git, ApprovalStore::default_location())
+}
+
+/// Like `spawn`, with the approvals file given by the caller (tests use a
+/// temporary one).
+///
+/// # Panics
+///
+/// If the OS cannot start the engine thread.
+pub fn spawn_with(git: Box<dyn GitPort>, approvals: ApprovalStore) -> EngineHandle {
     let (tx, rx) = async_channel::unbounded::<Message>();
     std::thread::Builder::new()
         .name("gm-engine".into())
-        .spawn(move || run(Engine::new(git), &rx))
+        .spawn(move || run(Engine::with_approvals(git, approvals), &rx))
         .expect("spawn the engine thread");
     EngineHandle {
         tx,
@@ -61,13 +81,32 @@ pub fn spawn(git: Box<dyn GitPort>) -> EngineHandle {
 
 fn run(mut engine: Engine, rx: &Receiver<Message>) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
+    let broadcast = |events: Vec<Event>, subscribers: &mut Vec<Sender<Event>>| {
+        for event in events {
+            subscribers.retain(|s| s.send_blocking(event.clone()).is_ok());
+        }
+    };
     while let Ok(message) = rx.recv_blocking() {
         match message {
             Message::Subscribe(tx) => subscribers.push(tx),
-            Message::Dispatch(id, command) => {
-                for event in engine.handle(id, &command) {
-                    subscribers.retain(|s| s.send_blocking(event.clone()).is_ok());
+            Message::Dispatch(id, command, reports) => {
+                let events = engine.handle(id, &command);
+                broadcast(events, &mut subscribers);
+                for plan in engine.take_jobs() {
+                    let reports = reports.clone();
+                    std::thread::Builder::new()
+                        .name("gm-hook".into())
+                        .spawn(move || {
+                            plan.execute(|report| {
+                                let _ = reports.send_blocking(Message::Hook(report));
+                            });
+                        })
+                        .expect("spawn a hook thread");
                 }
+            }
+            Message::Hook(report) => {
+                let events = engine.hook_report(report);
+                broadcast(events, &mut subscribers);
             }
         }
     }

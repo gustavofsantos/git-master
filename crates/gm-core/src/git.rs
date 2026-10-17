@@ -9,12 +9,13 @@ use std::time::Instant;
 
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
-    BranchEntry, BranchInfo, Change, DiffSide, FileDiff, Hunk, HunkId, RepoStatus, StageTarget,
-    StatusEntry,
+    BranchEntry, BranchInfo, Change, DiffSide, FileDiff, HookScope, Hunk, HunkId, RepoStatus,
+    StageTarget, StatusEntry,
 };
 
 use crate::command_log::{CommandLog, CommandRecord, bounded_text};
 use crate::diff::{hunk_patch, parse_unified};
+use crate::hook::ConfigValue;
 use crate::stage_math;
 use crate::{GitError, GitPort};
 
@@ -27,6 +28,9 @@ pub struct SubprocessGit {
     pub login_path: Arc<OnceLock<String>>,
     /// Receives every command that changes the repository. Reads are not logged.
     pub log: Option<CommandLog>,
+    /// Reads the user-scope hook config from this file instead of the real
+    /// global config (`GIT_CONFIG_GLOBAL`, for the tests).
+    pub global_config: Option<PathBuf>,
 }
 
 impl SubprocessGit {
@@ -430,6 +434,69 @@ impl GitPort for SubprocessGit {
         }
         self.logged(command, None).map(drop)
     }
+
+    fn hook_config(&self, root: &Path, scope: HookScope) -> Result<Vec<ConfigValue>, GitError> {
+        // `--includes` follows `includeIf` and `include`: for the user scope
+        // that is the point (D17), and for the repo scope it is why such hooks
+        // still need approval.
+        let flag = match scope {
+            HookScope::User => "--global",
+            HookScope::Repo => "--local",
+        };
+        let mut command = self.git(root);
+        command.args([
+            "config",
+            flag,
+            "--includes",
+            "--null",
+            "--get-regexp",
+            HOOK_KEYS,
+        ]);
+        if let (HookScope::User, Some(path)) = (scope, &self.global_config) {
+            command.env("GIT_CONFIG_GLOBAL", path);
+        }
+        // Exit 1 means no key matches.
+        let bytes = Self::run_allowing(command, &[0, 1])?;
+        Ok(parse_null_config(&bytes))
+    }
+
+    fn staged_diff(&self, root: &Path) -> Result<String, GitError> {
+        let mut command = self.git(root);
+        command.args([
+            "diff",
+            "--cached",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+        ]);
+        Ok(String::from_utf8_lossy(&Self::run(command)?).into_owned())
+    }
+}
+
+/// Keys of every prepare-commit hook section, as a regular expression.
+const HOOK_KEYS: &str = r"^gitmaster\.prepare-commit\.";
+
+/// `git config --null --get-regexp` output: each record is `key\nvalue`, or
+/// just `key` for a bare key.
+#[must_use]
+pub fn parse_null_config(bytes: &[u8]) -> Vec<ConfigValue> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let text = String::from_utf8_lossy(record);
+            match text.split_once('\n') {
+                Some((key, value)) => ConfigValue {
+                    key: key.to_owned(),
+                    value: Some(value.to_owned()),
+                },
+                None => ConfigValue {
+                    key: text.into_owned(),
+                    value: None,
+                },
+            }
+        })
+        .collect()
 }
 
 fn git_err(error: &git2::Error) -> GitError {

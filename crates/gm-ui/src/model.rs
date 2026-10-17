@@ -160,6 +160,12 @@ impl Model {
                 }
                 None
             }
+            // The composer's hook chip (slice 2) reads these; nothing shows them yet.
+            Event::HooksListed { .. }
+            | Event::HookStarted { .. }
+            | Event::HookFinished { .. }
+            | Event::HookFailed { .. }
+            | Event::HookCancelled { .. } => None,
         }
     }
 
@@ -346,7 +352,12 @@ fn event_id(event: &Event) -> OperationId {
         | Event::OperationChanged { id, .. }
         | Event::DiffLoaded { id, .. }
         | Event::Committed { id, .. }
-        | Event::BranchesLoaded { id, .. } => *id,
+        | Event::BranchesLoaded { id, .. }
+        | Event::HooksListed { id, .. }
+        | Event::HookStarted { id, .. }
+        | Event::HookFinished { id, .. }
+        | Event::HookFailed { id, .. }
+        | Event::HookCancelled { id, .. } => *id,
     }
 }
 
