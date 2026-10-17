@@ -18,7 +18,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -137,11 +137,15 @@ EOF
 }
 
 launch_app() {
-  # $1: theme, $2: repo. The recent list is private to this run.
-  env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_NUM" \
+  # $1: theme, $2: repo argument (empty for none), $3: working directory
+  # (default: the run's directory). The recent list is private to this run.
+  # The subshell execs the app, so APP_PID is the app itself.
+  local args=()
+  if [ -n "$2" ]; then args=("$2"); fi
+  (cd "${3:-$RUN_DIR}" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_NUM" \
     VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
     XDG_DATA_HOME="$RUN_DIR/xdg" \
-    GITMASTER_THEME="$1" "$BIN" "$2" >"$RUN_DIR/app.log" 2>&1 &
+    GITMASTER_THEME="$1" "$BIN" "${args[@]}") >"$RUN_DIR/app.log" 2>&1 &
   APP_PID=$!
   sleep 4
   kill -0 "$APP_PID" 2>/dev/null || fail "app exited at startup (see $RUN_DIR/app.log)"
@@ -416,6 +420,44 @@ scenario_g() {
   [ "$differing" -gt 500 ] || fail "the refused checkout showed no notice ($differing pixels changed)"
 }
 
+# --- 3h. First run: a folder that is not a repository, no recent repositories --
+# The welcome screen replaces the window. Then the same folder with recents that
+# still exist: the screen lists them under git's reason. Then no argument, so the
+# app falls back to the newest recent repository and shows its working copy.
+scenario_h() {
+  local plain="$RUN_DIR/plain" theme="$1" recents="$RUN_DIR/xdg/gitmaster/recent.json"
+  local before_plain recents_before differing
+  mkdir -p "$plain"
+  before_plain="$(find "$plain" | sort)"
+
+  launch_app "$theme" "" "$plain"
+  shoot "$SMOKE_OUT/h-welcome-$theme.png"
+  stop_app
+  [ -e "$plain/.git" ] && fail "a .git was created in the folder the app started in"
+  [ "$(find "$plain" | sort)" = "$before_plain" ] || fail "the folder the app started in changed"
+  [ -e "$recents" ] && fail "a recent list was written although no repository opened"
+
+  printf '[\n  "%s",\n  "%s"\n]\n' "$RUN_DIR/billing-api" "$RUN_DIR/repo" > "$recents"
+  recents_before="$(cat "$recents")"
+  launch_app "$theme" "$plain" "$plain"
+  shoot "$SMOKE_OUT/h-welcome-recents-$theme.png"
+  stop_app
+  differing="$(compare -metric AE "$SMOKE_OUT/h-welcome-$theme.png" "$SMOKE_OUT/h-welcome-recents-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the recent list and the reason did not show ($differing pixels changed)"
+  [ "$(cat "$recents")" = "$recents_before" ] || fail "recent.json changed although no repository opened"
+
+  launch_app "$theme" "" "$plain"
+  shoot "$SMOKE_OUT/h-welcome-fallback-$theme.png"
+  stop_app
+  differing="$(compare -metric AE "$SMOKE_OUT/h-welcome-recents-$theme.png" "$SMOKE_OUT/h-welcome-fallback-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "no fallback to the newest recent repository ($differing pixels changed)"
+  [ "$(find "$plain" | sort)" = "$before_plain" ] || fail "the folder the app started in changed"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -426,6 +468,12 @@ run_scenario() {
   make_repo "$RUN_DIR/repo"
   make_other_repo "$RUN_DIR/billing-api"
   if [ "$name" = g-switch-branch ]; then prepare_branches "$RUN_DIR/repo"; fi
+  if [ "$name" = h-welcome ]; then
+    # Starts with no recent list at all; scenario_h makes its own launches.
+    scenario_h "$theme"
+    echo "PASS  $LABEL"
+    return
+  fi
   # Most recent first: the app opens repo, which moves it to the top.
   printf '[\n  "%s",\n  "%s"\n]\n' "$RUN_DIR/billing-api" "$RUN_DIR/repo" > "$RUN_DIR/xdg/gitmaster/recent.json"
   launch_app "$theme" "$RUN_DIR/repo"
@@ -437,6 +485,7 @@ run_scenario() {
     e-command-log) scenario_e "$theme" ;;
     f-open-project) scenario_f "$theme" ;;
     g-switch-branch) scenario_g "$theme" ;;
+    h-welcome) ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app
