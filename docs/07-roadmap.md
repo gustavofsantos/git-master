@@ -1,6 +1,6 @@
 # Roadmap
 
-Última atualização: 2026-10-17. **Proposta inicial**, para iterar. Marcas: **(feito)** no código e verificado; **(a fazer)** ainda não começado; sem marca, fatia futura. A ordem prioriza chegar cedo a algo que o autor use no dia a dia e que já mostre um diferencial.
+Última atualização: 2026-10-17 (fatia 3 dividida em H1 a H8). **Proposta inicial**, para iterar. Marcas: **(feito)** no código e verificado; **(a fazer)** ainda não começado; sem marca, fatia futura. A ordem prioriza chegar cedo a algo que o autor use no dia a dia e que já mostre um diferencial.
 
 ## Critério de ordem
 
@@ -141,15 +141,26 @@ Lacunas:
 
 Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem travar a UI, e o `pre-commit` nativo segue rodando como antes.
 
-## Fatia 3: histórico e branches (visão por nome)
+## Fatia 3: histórico e branches (visão por nome) (a fazer; H1 em curso)
 
-Ordem definida pelo autor em 2026-10-16: esta fatia, junto com a visão de diff (abaixo), é o próximo trabalho depois de terminar a 1c (incluindo a atualização automática) e a interface da fatia 2. O desenho da página de histórico e da visão de diff vem do canvas; o autor traz as pranchas quando começar.
+Ordem definida pelo autor em 2026-10-16: esta fatia, junto com a visão de diff (abaixo), é o próximo trabalho depois de terminar a 1c (incluindo a atualização automática) e a interface da fatia 2. Decisões do autor de 2026-10-17 em D32 a D37 (`01`); a fatia é dividida em sub-fatias H1 a H8, cada uma com o próprio "pronto quando". A leitura do histórico é `git log` como subprocess, sem escrever commit-graph (D32).
 
-- Página de histórico (destino "History" da sidebar, hoje placeholder): lista de commits com o grafo, detalhe do commit selecionado e os arquivos dele.
-- Visão de diff de um commit: a mesma visão de diff da Working Copy (cabeçalho, resumo, hunks), somente leitura, sem botões de stage; navegação entre arquivos do commit.
-- Grafo com lanes, escopo configurável, busca por conteúdo.
-- Sidebar na visão por nome.
-- Performance com commit-graph.
+- **H1, lista real de commits** (a fazer).
+  - Lista plana do histórico de HEAD, os primeiros 200 commits, linhas de 48 px: chips de ref (HEAD, branches, tags), assunto, hash curto e tempo relativo.
+  - HEAD sem commits mostra uma mensagem na página, em vez de lista vazia.
+  - Ação de navegação "Show History" no registro; a sidebar abre a página.
+  - Comando de leitura, sem registro no log de comandos (D28, D33).
+  - Pronto quando: a página lista os commits reais de HEAD em repositório linear, com merge, root, HEAD sem commits, HEAD destacado e assunto em Unicode (testes com Git real), e o cenário `h-history` do smoke passa nos dois temas.
+  - Lacunas: o chip não distingue ref local de remota (o `%D` do Git não diz); a lista não atualiza sozinha quando o repositório muda (H2); sem paginação além dos 200; sem seleção.
+- **H2, paginação e atualização.** `git log` como processo filho que faz streaming, paginação por chave (keyset), atualização em `RepoChanged`, seleção por oid.
+- **H3, detalhe do commit.** Somente leitura; em merge, compara com o primeiro pai.
+- **H4, diff somente leitura de um commit.** Espelha a visão de diff da Working Copy, sem botões de stage nem de chunk. O autor pode trazer a prancha depois. Não reaproveitar o `diff_pane` por enquanto.
+- **H5, grafo com lanes.** Layout puro e determinístico, com `--topo-order`; cor da lane pelo hash do nome da branch (D36, D25).
+- **H6, escopo.** Pílula com branch atual, todas as refs ou uma ref. Clique esquerdo numa branch da sidebar, na página de histórico, define o escopo; o checkout fica no duplo clique ou no menu de contexto. "Stack atual" aparece desabilitado com "Not available yet" (D34).
+- **H7, busca por conteúdo.** `git log -S` de texto fixo; o campo fica no cabeçalho do histórico, não na barra superior; com atraso e cancelável (D35).
+- **H8, gate de performance.** Benchmarks ignorados em repositórios de 50 mil e 200 mil commits, gerados com `git fast-import` (D37).
+
+Fora da fatia 3 (decisão do autor em 2026-10-17): escopo de stack, dono do commit, pai de stack, aresta tracejada, aba Stacks, contador de Restack, Fetch e Pull, reflog, stashes e Review local. Os itens de stack ficam "Not available yet".
 
 Pronto quando: navega o histórico de um repositório grande com rolagem fluida.
 

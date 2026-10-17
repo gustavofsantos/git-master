@@ -37,12 +37,18 @@
 | D23 | Working Copy: "staged" e "lido" como eixos ortogonais; lista única com checkbox tri-state | Decidido (2026-10-16) | 05 |
 | D24 | Stage por linha sobre modelo de diff exato, escrevendo o blob do index direto | Decidido (2026-10-16) | 05 |
 | D25 | Histórico: defasagem de stack como aresta tracejada; dono do commit pela metadata do stack | Proposto | 05 |
-| D26 | Backend Git híbrido: subprocess `git` para toda operação com efeito colateral nativa do Git (stage, unstage, commit, checkout) e para status em escala; libgit2 para leituras em massa e para o restack (que não existe no Git). Revisado em 2026-10-16 | Decidido (2026-10-16) | 06 |
+| D26 | Backend Git híbrido: subprocess `git` para toda operação com efeito colateral nativa do Git (stage, unstage, commit, checkout), para status em escala e para a leitura do histórico (`git log`, ver D32); libgit2 para o restack (que não existe no Git) e as demais leituras. Revisado em 2026-10-16 e 2026-10-17 | Decidido (2026-10-16) | 06 |
 | D28 | O log de comandos Git registra só operações com efeito colateral; leituras (status, diff, histórico) não aparecem | Decidido (2026-10-16) | 07 |
 | D29 | O GitMaster não mexe no que é nativo do Git: `pre-commit` e os demais hooks nativos ficam com o Git (rodam via `git commit`, e a saída aparece como erro do commit). Só o que o Git não tem é hook do GitMaster; a fatia 2 entrega só o `prepare-commit` | Decidido (2026-10-16) | 03 |
 | D30 | Contrato de hooks em JSON puro (Q1, opção A): sem `mode = text`, sem codec no host | Decidido (2026-10-16) | 03 |
 | D27 | Começar com quatro crates (schema, core, ui, mcp) e extrair o resto sob demanda | Proposto | 06 |
 | D31 | Worktrees entram na v1 (núcleo do fluxo do autor); padrões e fora de escopo na seção D31 abaixo | Decidido (2026-10-17) | 05, 07 |
+| D32 | A leitura do histórico roda `git log` como subprocess: faz streaming da saída, usa o commit-graph que já existe e nunca o escreve. Corrige D26 (que dizia libgit2 para leituras em massa) | Decidido (2026-10-17) | 06, 07 |
+| D33 | Lista do histórico (H1): lista plana de commits de HEAD, os primeiros 200, linhas de 48 px com chips de ref, assunto, hash curto e tempo relativo. HEAD sem commits mostra uma mensagem. A leitura é um comando sem registro no log de comandos (D28) | Decidido (2026-10-17) | 07 |
+| D34 | Escopo do histórico (H6): pílula com três modos, branch atual, todas as refs ou uma ref. Clique esquerdo numa branch da sidebar, na página de histórico, define o escopo; o checkout fica no duplo clique ou no menu de contexto. "Stack atual" aparece desabilitado com "Not available yet" | Decidido (2026-10-17) | 05, 07 |
+| D35 | Busca por conteúdo (H7) com `git log -S` de texto fixo. O campo fica no cabeçalho do histórico, não na barra superior; a busca é com atraso (debounce) e cancelável | Decidido (2026-10-17) | 05, 07 |
+| D36 | Cor das lanes do grafo (H5, D25) deriva de um hash do nome da branch, estável entre sessões. O layout é determinístico e usa `--topo-order`. D25 segue Proposto no restante (aresta tracejada, dono do commit) | Decidido (2026-10-17) | 05, 07 |
+| D37 | Gate de performance do histórico (H8): benchmarks ignorados em repositórios de 50 mil e 200 mil commits, gerados com `git fast-import` | Decidido (2026-10-17) | 06, 07 |
 
 ## D31: worktrees na v1
 
@@ -58,6 +64,12 @@ O autor decidiu em 2026-10-17 que worktrees entram na v1, por serem parte centra
 - **Sem agente:** esta decisão não inclui integração de worktrees com agentes. Não há tag de agente na lista, nem caminho `Actor::Agent` para worktrees; ver Q12.
 
 As ações de worktree no registro seguem desabilitadas com "Not available yet" até a sub-fatia correspondente da fatia 1c (item 5 de `07`) entrar. Criar (W3), abrir (W4), remover (W5), travar, destravar e limpar (W6) e a variante do menu de branch (W8) já estão.
+
+## Decisões da fatia 3 (histórico)
+
+Detalhes de cada sub-fatia (H1 a H8) em `07`.
+
+Fora da fatia 3 (decidido pelo autor em 2026-10-17, sem ID próprio): escopo de stack, dono do commit, pai de stack, aresta tracejada, aba Stacks, contador de Restack, Fetch e Pull, reflog, stashes e Review local. Os itens de stack ficam "Not available yet".
 
 ## Questões abertas
 
