@@ -325,7 +325,14 @@ impl StatusView {
         let shown = self.model.apply(event);
         if let Some(fresh) = self.model.commit_stack.take_fresh() {
             self.commit_diff_pane.update(cx, |pane, cx| {
-                pane.show_stack(fresh.files, fresh.more, fresh.diffs, fresh.focus, cx);
+                pane.show_stack(
+                    fresh.files,
+                    fresh.more,
+                    fresh.diffs,
+                    fresh.focus,
+                    window,
+                    cx,
+                );
             });
         }
         if let Some(outcome) = self.model.creating.take() {

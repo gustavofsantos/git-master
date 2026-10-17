@@ -239,6 +239,7 @@ impl DiffPane {
         more: usize,
         diffs: Vec<FileDiff>,
         focus: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let (hunks, ranges) = concat_hunks(diffs);
@@ -275,12 +276,17 @@ impl DiffPane {
         self.pending = None;
         self.discard_armed = None;
         self.cursor = 0;
-        let start = self
-            .starts_for(self.layout)
-            .get(focus)
-            .copied()
-            .unwrap_or(0);
-        self.scroll.scroll_to_item(start, ScrollStrategy::Top);
+        self.scroll_to_file(focus);
+        // The list measures its rows on the frame after its rows change, and a
+        // scroll asked for on the first frame can be lost. Asking again on the
+        // next frame puts the file at the top.
+        let pane = cx.entity();
+        window.on_next_frame(move |_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.scroll_to_file(focus);
+                cx.notify();
+            });
+        });
         cx.notify();
     }
 
@@ -292,19 +298,25 @@ impl DiffPane {
         }
     }
 
-    /// The row at the top of the list, in the layout being drawn.
+    /// The row at the top of the list. A pending scroll counts as done: its row is
+    /// where the list will be. The offset is read, not the child bounds, which a
+    /// uniform list does not keep.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn top_row(&self) -> usize {
         let state = self.scroll.0.borrow();
-        state.deferred_scroll_to_item.as_ref().map_or_else(
-            || state.base_handle.logical_scroll_top().0,
-            |deferred| deferred.item_index,
-        )
+        if let Some(deferred) = state.deferred_scroll_to_item.as_ref() {
+            return deferred.item_index;
+        }
+        let rows = -f32::from(state.base_handle.offset().y) / ROW_HEIGHT;
+        rows.max(0.).floor() as usize
     }
 
-    /// Scrolls a stacked pane so that file `file` is at the top.
+    /// Scrolls a stacked pane so that file `file` is at the top. Strict: a header
+    /// already in view still moves to the top, which a plain scroll does not do.
     fn scroll_to_file(&self, file: usize) {
         if let Some(&start) = self.starts_for(self.layout).get(file) {
-            self.scroll.scroll_to_item(start, ScrollStrategy::Top);
+            self.scroll
+                .scroll_to_item_strict(start, ScrollStrategy::Top);
         }
     }
 
@@ -328,7 +340,8 @@ impl DiffPane {
         }
         let last = self.row_count().saturating_sub(1);
         let target = self.top_row().saturating_add_signed(rows).min(last);
-        self.scroll.scroll_to_item(target, ScrollStrategy::Top);
+        self.scroll
+            .scroll_to_item_strict(target, ScrollStrategy::Top);
         cx.notify();
     }
 
