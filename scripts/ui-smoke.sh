@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -771,6 +771,68 @@ scenario_s() {
   [ "$differing" -gt 300 ] || fail "the section did not drop the removed worktree ($differing pixels changed)"
 }
 
+# --- 3t. Create a worktree from the palette's dialog --------------------------
+# Typing in the palette picks the branch; Enter in the dialog creates the
+# worktree on the sibling folder. Git's own refusal (main is checked out in the
+# repository) stays in the dialog, and nothing is added. The check is git's
+# listing, plus pixels for the dialog's appearing and leaving.
+scenario_t() {
+  local repo="$RUN_DIR/repo" theme="$1" differing listed
+  local wt="$RUN_DIR/repo-feature-x"
+  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y" click 1; sleep 1
+  shoot "$RUN_DIR/closed.png"
+
+  # The palette's Create Worktree takes a branch: Tab opens the branch step, and
+  # Enter on feature/x opens the dialog with that branch chosen.
+  xdotool key ctrl+k; sleep 1
+  xdotool type --delay 20 -- "create worktree"; sleep 1
+  xdotool key Tab; sleep 1
+  xdotool type --delay 20 -- "feature/x"; sleep 1
+  xdotool key Return; sleep 1.5
+  shoot "$SMOKE_OUT/t-create-worktree-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/closed.png" "$SMOKE_OUT/t-create-worktree-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the create dialog did not open ($differing pixels changed)"
+
+  # Enter creates it: the existing branch on the sibling folder, then the dialog is gone.
+  xdotool key Return; sleep 2.5
+  listed="$(git -C "$repo" worktree list --porcelain)"
+  grep -qxF "worktree $wt" <<<"$listed" || fail "git worktree list does not show $wt: $listed"
+  grep -qxF "branch refs/heads/feature/x" <<<"$listed" || fail "the new worktree is not on feature/x"
+  [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD)" = "feature/x" ] || fail "$wt is not on feature/x"
+  [ -z "$(git -C "$wt" status --porcelain)" ] || fail "git status in $wt is not clean after the create"
+  shoot "$RUN_DIR/t-created.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/t-create-worktree-$theme.png" "$RUN_DIR/t-created.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the dialog stayed open after the create ($differing pixels changed)"
+
+  # A refused create: main is checked out in the repository, so git refuses and
+  # its reason stays in the dialog. Nothing is added to the list.
+  xdotool key ctrl+k; sleep 1
+  xdotool type --delay 20 -- "create worktree"; sleep 1
+  xdotool key Tab; sleep 1
+  xdotool type --delay 20 -- "main"; sleep 1
+  xdotool key Return; sleep 1.5
+  xdotool key Return; sleep 2
+  shoot "$SMOKE_OUT/t-create-refused-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/t-created.png" "$SMOKE_OUT/t-create-refused-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the refused create showed no dialog with its reason ($differing pixels changed)"
+  [ "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')" -eq 2 ] || fail "a refused create added a worktree"
+
+  # Escape closes the dialog and leaves the list as it was.
+  xdotool key Escape; sleep 1
+  shoot "$RUN_DIR/t-closed.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/t-create-refused-$theme.png" "$RUN_DIR/t-closed.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "Escape did not close the create dialog ($differing pixels changed)"
+  [ "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')" -eq 2 ] || fail "closing the dialog changed the worktrees"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -798,6 +860,7 @@ run_scenario() {
   if [ "$name" = g-switch-branch ]; then prepare_branches "$RUN_DIR/repo"; fi
   if [ "$name" = s-worktrees ]; then git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"; fi
   if [ "$name" = l-branch-menu ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
+  if [ "$name" = t-create-worktree ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
   if [ "$name" = h-welcome ]; then
     # Starts with no recent list at all; scenario_h makes its own launches.
     scenario_h "$theme"
@@ -827,6 +890,7 @@ run_scenario() {
     q-repo-hook-approval) scenario_q "$theme" ;;
     r-title-bar) scenario_r "$theme" ;;
     s-worktrees) scenario_s "$theme" ;;
+    t-create-worktree) scenario_t "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app

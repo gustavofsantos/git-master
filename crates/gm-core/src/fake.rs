@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use gm_schema::{BranchEntry, RepoStatus, WorktreeEntry};
+use gm_schema::{BranchEntry, RepoStatus, WorktreeEntry, WorktreeMode};
 
 use crate::{GitError, GitPort};
 
@@ -17,6 +17,8 @@ pub struct FakeGit {
     branches: Arc<Mutex<Result<Vec<BranchEntry>, GitError>>>,
     checkout: Arc<Mutex<Result<(), GitError>>>,
     worktrees: Arc<Mutex<Result<Vec<WorktreeEntry>, GitError>>>,
+    create: Arc<Mutex<Result<(), GitError>>>,
+    created: Arc<Mutex<Vec<(String, WorktreeMode)>>>,
 }
 
 impl FakeGit {
@@ -27,6 +29,8 @@ impl FakeGit {
             branches: Arc::new(Mutex::new(Ok(Vec::new()))),
             checkout: Arc::new(Mutex::new(Ok(()))),
             worktrees: Arc::new(Mutex::new(Ok(Vec::new()))),
+            create: Arc::new(Mutex::new(Ok(()))),
+            created: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -49,6 +53,24 @@ impl FakeGit {
     /// If another thread panicked while holding the worktrees lock.
     pub fn set_worktrees(&self, worktrees: Result<Vec<WorktreeEntry>, GitError>) {
         *self.worktrees.lock().unwrap() = worktrees;
+    }
+
+    /// The result of the next `create_worktree`.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the create lock.
+    pub fn set_create(&self, result: Result<(), GitError>) {
+        *self.create.lock().unwrap() = result;
+    }
+
+    /// The `create_worktree` calls so far, in order: the path and the mode.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the created lock.
+    pub fn created(&self) -> Vec<(String, WorktreeMode)> {
+        self.created.lock().unwrap().clone()
     }
 
     /// # Panics
@@ -81,6 +103,19 @@ impl GitPort for FakeGit {
 
     fn worktrees(&self, _root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
         self.worktrees.lock().unwrap().clone()
+    }
+
+    fn create_worktree(
+        &self,
+        _root: &Path,
+        path: &str,
+        mode: &WorktreeMode,
+    ) -> Result<(), GitError> {
+        self.created
+            .lock()
+            .unwrap()
+            .push((path.to_owned(), mode.clone()));
+        self.create.lock().unwrap().clone()
     }
 
     fn checkout(&self, _root: &Path, _branch: &str) -> Result<(), GitError> {

@@ -479,7 +479,6 @@ mod tests {
         let items = branch_items("feature", &ctx(&[]));
         for action in [
             Action::NewChildBranch,
-            Action::CreateWorktree,
             Action::Restack,
             Action::PushWithLease,
             Action::RenameBranch,

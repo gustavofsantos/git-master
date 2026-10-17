@@ -258,11 +258,7 @@ impl Engine {
                 let status = self.git.status(&root).map_err(|e| e.0)?;
                 self.loaded(id, &root, status)
             }
-            CommandKind::ListWorktrees => {
-                let root = self.open_root()?;
-                let worktrees = self.git.worktrees(&root).map_err(|e| e.0)?;
-                Ok(vec![Event::WorktreesLoaded { id, worktrees }])
-            }
+            CommandKind::ListWorktrees => self.list_worktrees(id),
             CommandKind::LoadDiff { path, side } => {
                 let root = self.open_root()?;
                 let diff = self.git.diff(&root, path, *side).map_err(|e| e.0)?;
@@ -302,6 +298,7 @@ impl Engine {
                 let branches = self.git.branches(&root).map_err(|e| e.0)?;
                 Ok(vec![Event::BranchesLoaded { id, branches }])
             }
+            CommandKind::CreateWorktree { .. } => self.add_worktree(id, actor, kind),
             CommandKind::Checkout { branch } => {
                 let root = self.open_root()?;
                 self.git.checkout(&root, branch).map_err(|e| e.0)?;
@@ -435,6 +432,34 @@ impl Engine {
         hook::fingerprint(head.as_deref(), &staged) != active.fingerprint
     }
 
+    fn list_worktrees(&self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let worktrees = self.git.worktrees(&root).map_err(|e| e.0)?;
+        Ok(vec![Event::WorktreesLoaded { id, worktrees }])
+    }
+
+    /// A new linked worktree; the list and the status follow, as after a checkout.
+    fn add_worktree(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        let CommandKind::CreateWorktree { path, mode } = kind else {
+            return Err("not a worktree command".to_owned());
+        };
+        // Worktrees have no agent path yet (D31, Q12).
+        if !matches!(actor, Actor::Human) {
+            return Err("only a human can create a worktree".to_owned());
+        }
+        let root = self.open_root()?;
+        self.git
+            .create_worktree(&root, path, mode)
+            .map_err(|e| e.0)?;
+        let status = self.git.status(&root).map_err(|e| e.0)?;
+        self.loaded(id, &root, status)
+    }
+
     fn open_root(&self) -> Result<PathBuf, String> {
         self.root
             .clone()
@@ -500,7 +525,7 @@ mod tests {
     use super::*;
     use crate::GitError;
     use crate::fake::FakeGit;
-    use gm_schema::RepoStatus;
+    use gm_schema::{RepoStatus, WorktreeMode};
     use proptest::prelude::*;
 
     fn engine() -> Engine {
@@ -734,6 +759,103 @@ mod tests {
         });
         let events = engine().handle(OperationId(1), &bad);
         assert_eq!(states(&events).last(), Some(&OperationState::Failed));
+    }
+
+    fn create(path: &str, mode: WorktreeMode) -> CommandKind {
+        CommandKind::CreateWorktree {
+            path: path.into(),
+            mode,
+        }
+    }
+
+    #[test]
+    fn create_worktree_hands_the_path_and_mode_to_git_and_reloads_the_list() {
+        let git = FakeGit::new(
+            "/r",
+            RepoStatus {
+                root: "/r".into(),
+                ..RepoStatus::default()
+            },
+        );
+        let mut engine = Engine::new(Box::new(git.clone()));
+        engine.handle(OperationId(1), &open());
+        let mode = WorktreeMode::New {
+            branch: "feature".into(),
+            base: "main".into(),
+        };
+
+        let events = engine.handle(OperationId(2), &command(create("/r-feature", mode.clone())));
+
+        assert_eq!(git.created(), vec![("/r-feature".to_owned(), mode)]);
+        assert_eq!(states(&events).last(), Some(&OperationState::Done));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::WorktreesLoaded { id, .. } if *id == OperationId(2)))
+        );
+    }
+
+    #[test]
+    fn a_refused_create_worktree_fails_with_the_git_message() {
+        let git = FakeGit::new(
+            "/r",
+            RepoStatus {
+                root: "/r".into(),
+                ..RepoStatus::default()
+            },
+        );
+        git.set_create(Err(GitError(
+            "'main' is already checked out at '/r'".into(),
+        )));
+        let mut engine = Engine::new(Box::new(git));
+        engine.handle(OperationId(1), &open());
+
+        let events = engine.handle(
+            OperationId(2),
+            &command(create(
+                "/r-main",
+                WorktreeMode::Existing {
+                    branch: "main".into(),
+                },
+            )),
+        );
+
+        let Some(Event::OperationChanged { state, detail, .. }) = events.last() else {
+            panic!("no events");
+        };
+        assert_eq!(*state, OperationState::Failed);
+        assert_eq!(
+            detail.as_deref(),
+            Some("'main' is already checked out at '/r'")
+        );
+    }
+
+    #[test]
+    fn an_agent_cannot_create_a_worktree() {
+        let mut engine = engine();
+        engine.handle(OperationId(1), &open());
+        let command = Command {
+            actor: Actor::Agent {
+                name: "claude".into(),
+            },
+            kind: create(
+                "/r-agent",
+                WorktreeMode::Detached {
+                    commit: "HEAD".into(),
+                },
+            ),
+        };
+
+        let events = engine.handle(OperationId(2), &command);
+
+        let Some(Event::OperationChanged { state, detail, .. }) = events.last() else {
+            panic!("no events");
+        };
+        assert_eq!(*state, OperationState::Failed);
+        assert_eq!(
+            detail.as_deref(),
+            Some("only a human can create a worktree")
+        );
     }
 
     #[test]

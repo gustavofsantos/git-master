@@ -35,6 +35,7 @@ mod title_bar;
 mod view;
 mod welcome;
 mod window_chrome;
+mod worktree_create;
 mod worktree_list;
 
 use gm_core::EngineHandle;

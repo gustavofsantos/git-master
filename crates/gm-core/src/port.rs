@@ -3,6 +3,7 @@ use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
     BranchEntry, DiffSide, FileDiff, HookScope, HunkId, RepoStatus, StageTarget, WorktreeEntry,
+    WorktreeMode,
 };
 
 use crate::hook::ConfigValue;
@@ -64,6 +65,20 @@ pub trait GitPort: Send {
     fn worktrees(&self, _root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
         Err(GitError(
             "worktrees is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Creates a linked worktree at `path` (relative paths are taken from
+    /// `root`) that checks out `mode`. Refuses a path that already exists.
+    /// Git's own refusal is the error.
+    fn create_worktree(
+        &self,
+        _root: &Path,
+        _path: &str,
+        _mode: &WorktreeMode,
+    ) -> Result<(), GitError> {
+        Err(GitError(
+            "create worktree is not supported by this adapter".into(),
         ))
     }
 

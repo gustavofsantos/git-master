@@ -505,7 +505,14 @@ mod tests {
         assert_eq!(actions, Action::ALL.len() - 1);
         let worktree = find(&candidates, "Create Worktree");
         assert_eq!(worktree.section, Section::Worktrees);
-        assert_eq!(worktree.state, Err("Not available yet"));
+        assert_eq!(worktree.state, Err(NO_BRANCH));
+        let with_branch = build(
+            Stage::Actions,
+            "",
+            &ctx_with(&entries, ""),
+            &[branch("main", true)],
+        );
+        assert_eq!(find(&with_branch, "Create Worktree").state, Ok(()));
         let restack = build(
             Stage::Actions,
             "",

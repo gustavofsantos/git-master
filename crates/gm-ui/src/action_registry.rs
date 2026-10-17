@@ -90,6 +90,11 @@ pub enum Effect {
     /// A path on disk, for the system file manager.
     Reveal(PathBuf),
     FocusCommitMessage,
+    /// Opens the create-worktree dialog, with `branch` chosen as the branch
+    /// to check out (the dialog's Git refusal, if any, is shown there).
+    OpenWorktreeDialog {
+        branch: String,
+    },
 }
 
 /// What the window knows of the prepare-commit hooks, for the rules.
@@ -448,7 +453,6 @@ impl Action {
                 | Action::PushWithLease
                 | Action::RenameBranch
                 | Action::DeleteBranch
-                | Action::CreateWorktree
                 | Action::DiscardFile
                 | Action::Fetch
                 | Action::Pull
@@ -537,7 +541,7 @@ impl Action {
                     Ok(())
                 }
             }
-            Action::Refresh => {
+            Action::Refresh | Action::CreateWorktree => {
                 if ctx.repo_open {
                     Ok(())
                 } else {
@@ -619,6 +623,9 @@ impl Action {
                 Effect::Reveal(PathBuf::from(ctx.root.unwrap_or_default()).join(path))
             }
             (Action::FocusCommitMessage, _) => Effect::FocusCommitMessage,
+            (Action::CreateWorktree, Args::Branch(name)) => Effect::OpenWorktreeDialog {
+                branch: name.clone(),
+            },
             (Action::SuggestMessage, _) => Effect::Send(vec![CommandKind::RunPrepareCommit {
                 message: ctx.message.to_owned(),
             }]),
@@ -836,7 +843,6 @@ mod tests {
             Action::PushWithLease,
             Action::RenameBranch,
             Action::DeleteBranch,
-            Action::CreateWorktree,
             Action::DiscardFile,
             Action::Fetch,
             Action::Pull,
@@ -865,6 +871,36 @@ mod tests {
             let refused = action.enabled(&args, &context) == Err(NOT_AVAILABLE);
             assert_eq!(action.available(), !refused, "{action:?}");
         }
+    }
+
+    #[test]
+    fn create_worktree_is_enabled_for_a_branch_and_plans_the_dialog() {
+        let context = ctx(&[], "");
+        let args = Args::Branch("feature".into());
+        assert_eq!(Action::CreateWorktree.enabled(&args, &context), Ok(()));
+        assert_eq!(
+            Action::CreateWorktree.plan(&args, &context),
+            Ok(Effect::OpenWorktreeDialog {
+                branch: "feature".into()
+            })
+        );
+        assert!(Action::CreateWorktree.available());
+    }
+
+    #[test]
+    fn create_worktree_needs_an_open_repository_and_a_branch() {
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::CreateWorktree.enabled(&Args::Branch("main".into()), &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::CreateWorktree.enabled(&Args::None, &ctx(&[], "")),
+            Err("No target for this action")
+        );
     }
 
     #[test]

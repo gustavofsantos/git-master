@@ -10,6 +10,7 @@ use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
+use crate::worktree_create::Creating;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Model {
@@ -46,6 +47,8 @@ pub struct Model {
     pub hooks: Hooks,
     /// The worktrees of the open repository, main checkout first.
     pub worktrees: Vec<WorktreeEntry>,
+    /// The create-worktree dialog's operation in flight, and its outcome.
+    pub creating: Creating,
 }
 
 /// A repository replaced by a successful open.
@@ -106,6 +109,7 @@ impl Model {
     /// Folds one engine event into the state. Returns both diffs once the
     /// selected file's two loads have both finished (succeeded or failed).
     #[must_use]
+    #[allow(clippy::too_many_lines)] // one arm per event; the create's arm adds one more
     pub fn apply(&mut self, event: Event) -> Option<Diffs> {
         if self.floor.is_some_and(|floor| event_id(&event) < floor) {
             return None;
@@ -137,6 +141,13 @@ impl Model {
                 self.reconcile_selection(old_row);
                 self.error = None;
                 self.loading = false;
+                None
+            }
+            // A worktree create's outcome belongs to its dialog, not to the status bar.
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.creating.owns(id) => {
+                self.creating.settle(state, detail);
                 None
             }
             // A hook run's failure belongs to the composer's chip, not to the status bar.

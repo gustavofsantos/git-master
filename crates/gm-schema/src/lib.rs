@@ -13,5 +13,6 @@ pub use hook::{
 };
 pub use operation::{
     Actor, Command, CommandKind, Event, IllegalTransition, OperationId, OperationState,
+    WorktreeMode,
 };
 pub use status::{BranchEntry, BranchInfo, Change, RepoStatus, StatusEntry, WorktreeEntry};

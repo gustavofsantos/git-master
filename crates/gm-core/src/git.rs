@@ -10,7 +10,7 @@ use std::time::Instant;
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, DiffSide, FileDiff, HookScope, Hunk, HunkId, RepoStatus,
-    StageTarget, StatusEntry, WorktreeEntry,
+    StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::{CommandLog, CommandRecord, bounded_text};
@@ -423,6 +423,44 @@ impl GitPort for SubprocessGit {
         command.args(["worktree", "list", "--porcelain"]);
         let out = Self::run(command)?;
         worktree::parse(&out, false)
+    }
+
+    fn create_worktree(
+        &self,
+        root: &Path,
+        path: &str,
+        mode: &WorktreeMode,
+    ) -> Result<(), GitError> {
+        // A leading dash would be read as an option by `git worktree add`.
+        let refs = match mode {
+            WorktreeMode::Existing { branch } => vec![branch],
+            WorktreeMode::New { branch, base } => vec![branch, base],
+            WorktreeMode::Detached { commit } => vec![commit],
+        };
+        if path.is_empty()
+            || path.starts_with('-')
+            || refs.iter().any(|r| r.is_empty() || r.starts_with('-'))
+        {
+            return Err(GitError("invalid worktree path or revision".into()));
+        }
+        // Git would accept an empty folder that already exists; the dialog
+        // promises a new one, so the refusal is ours, worded as Git words it.
+        if root.join(path).exists() {
+            return Err(GitError(format!("'{path}' already exists")));
+        }
+        let mut command = self.git(root);
+        match mode {
+            WorktreeMode::Existing { branch } => {
+                command.args(["worktree", "add", "--", path, branch]);
+            }
+            WorktreeMode::New { branch, base } => {
+                command.args(["worktree", "add", "-b", branch, "--", path, base]);
+            }
+            WorktreeMode::Detached { commit } => {
+                command.args(["worktree", "add", "--detach", "--", path, commit]);
+            }
+        }
+        self.logged(command, None).map(drop)
     }
 
     fn checkout(&self, root: &Path, branch: &str) -> Result<(), GitError> {

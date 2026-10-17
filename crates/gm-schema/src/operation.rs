@@ -20,6 +20,18 @@ pub enum Actor {
     Agent { name: String },
 }
 
+/// What a new worktree checks out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WorktreeMode {
+    /// An existing local branch. Git refuses one that another worktree has.
+    Existing { branch: String },
+    /// A new branch `branch`, created at `base` (any commit-ish).
+    New { branch: String, base: String },
+    /// A detached HEAD at `commit` (any commit-ish); no branch is created.
+    Detached { commit: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandKind {
@@ -55,6 +67,12 @@ pub enum CommandKind {
     /// Lists the worktrees of the repository, the main checkout first. Never
     /// records anything.
     ListWorktrees,
+    /// Creates a linked worktree at `path`, which must not exist yet. Human
+    /// only, for now (D31: no agent path for worktrees).
+    CreateWorktree {
+        path: String,
+        mode: WorktreeMode,
+    },
     /// Lists the hooks read from config, with their state (docs/03).
     ListHooks,
     /// Approves the repository hook `name` whose command still hashes to

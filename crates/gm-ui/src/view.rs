@@ -37,6 +37,7 @@ use crate::theme;
 use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
+use crate::worktree_create::WorktreeDialog;
 use crate::{CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, StartPath};
 
 /// The key context of the change list. Its keys work only while the list has
@@ -76,6 +77,8 @@ pub struct StatusView {
     /// The command palette's state: its query, its step and its ranked rows.
     pub(crate) palette: Palette,
     pub(crate) palette_view: PaletteView,
+    /// The create-worktree dialog, while it is open.
+    pub(crate) worktree_dialog: Option<WorktreeDialog>,
     /// The recent repositories, newest first, as last saved or loaded.
     pub(crate) recents: Recents,
     /// Where the list is kept; `None` when there is no home directory.
@@ -95,6 +98,7 @@ impl StatusView {
     /// Opens `path` in the engine. Events are streamed into the view from a
     /// task on the UI thread; the subscription is made before the command so
     /// no event is missed.
+    #[allow(clippy::too_many_lines)] // the window's whole initial state
     pub fn new(
         engine: EngineHandle,
         command_log: CommandLog,
@@ -105,10 +109,10 @@ impl StatusView {
     ) -> Self {
         let (watch, notices) = watch;
         let events = engine.subscribe();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = events.recv().await {
                 if this
-                    .update(cx, |view, cx| view.on_event(event, cx))
+                    .update_in(cx, |view, window, cx| view.on_event(event, window, cx))
                     .is_err()
                 {
                     break;
@@ -195,6 +199,7 @@ impl StatusView {
             context_menu: ContextMenu::default(),
             palette: Palette::default(),
             palette_view: PaletteView::new(palette_filter),
+            worktree_dialog: None,
             recents,
             recent_store,
             recent_generation: 0,
@@ -262,7 +267,7 @@ impl StatusView {
         .detach();
     }
 
-    fn on_event(&mut self, event: Event, cx: &mut Context<Self>) {
+    fn on_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         let reload = matches!(event, Event::StatusLoaded { .. });
         let listed = matches!(event, Event::BranchesLoaded { .. });
         let committed = matches!(event, Event::Committed { .. });
@@ -270,6 +275,9 @@ impl StatusView {
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
+        if let Some(outcome) = self.model.creating.take() {
+            self.on_worktree_created(outcome, window, cx);
+        }
         // A finished hook run fills the composer only while it still holds what the run was
         // started from; otherwise the answer waits as a suggestion (see hook_run).
         if finished {
@@ -543,6 +551,9 @@ impl StatusView {
             }
             Ok(Effect::DiscardSuggestion) => self.model.hooks.drop_suggestion(),
             Ok(Effect::DenyHook(hash)) => self.model.hooks.deny(&hash),
+            Ok(Effect::OpenWorktreeDialog { branch }) => {
+                self.open_worktree_dialog(Some(&branch), window, cx);
+            }
         }
         cx.notify();
     }
@@ -817,6 +828,11 @@ impl Render for StatusView {
                     .then(|| self.context_menu_layer(window, cx)),
             )
             .children(self.palette.open.then(|| self.palette_layer(window, cx)))
+            .children(
+                self.worktree_dialog
+                    .is_some()
+                    .then(|| self.worktree_layer(window, cx)),
+            )
             .children(window_chrome::resize_layer(window))
     }
 }
