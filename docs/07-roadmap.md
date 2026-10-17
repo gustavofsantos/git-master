@@ -30,7 +30,7 @@ Pronto quando: abre um repositório grande e lista as mudanças sem travar; os s
 
 Pronto quando: substitui `git add -p` mais `git commit` no uso diário. Código completo; o uso diário é o teste do autor.
 
-## Fatia 1b: o básico que falta (antes dos diferenciais) (em andamento)
+## Fatia 1b: o básico que falta (antes dos diferenciais) (feito)
 
 Revisão de 2026-10-16: com a Working Copy pronta, faltam três coisas sem as quais o app não substitui um cliente Git no dia a dia. Entram antes da fatia 2.
 
@@ -52,12 +52,13 @@ Ordem: log de comandos, depois trocar de branch, depois trocar de projeto. O log
    - Seletor de pasta nativo e lista de recentes, persistida no diretório de dados do app (nunca dentro do repositório; princípio de 00).
    - `OpenRepo` já existe: a troca descarta o estado do repo atual (seleção, diff, rascunho do commit) de forma explícita e abre o novo.
    - Um repositório por janela na v1; abas ou várias janelas ficam para depois.
-4. **Tela de boas-vindas** (a fazer).
+4. **Tela de boas-vindas** (feito).
    - Aparece quando o app abre sem projeto: primeira execução, sem argumento de linha de comando, diretório atual fora de um repositório e nenhum recente que ainda exista. Hoje essa abertura não tem um estado próprio.
    - Conteúdo: marca, uma frase sobre o app, ação "Open a repository" (o mesmo seletor de pasta de 3), lista de recentes quando houver (as que sumiram do disco saem da lista) e a dica do atalho de teclado.
    - Reaproveita os recentes e o `OpenRepo` de 3; abrir um repositório troca a tela sem reiniciar. Pasta que não é repositório mostra o erro na própria tela, sem diálogo bloqueante.
    - Sem projeto, as ações que dependem de repo (commit, checkout, log de comandos) ficam ausentes da tela, não desabilitadas e vazias.
    - Strings em inglês; arte do ícone de `assets/icons/`, nas cores do tema ativo (08).
+   - Como ficou: sem argumento e fora de um repositório, abre o recente mais novo que ainda existe; sem recentes, mostra a tela. Um caminho passado na linha de comando que não é repositório mostra o erro do Git na própria tela. Sem atalho de teclado para abrir (não existe um). O seletor nativo só foi testado até a porta (não dá para dirigir o diálogo sem tela).
 5. **Sidebar do desenho** (feito, com placeholders).
    - Coluna à esquerda, como no canvas: "Workspace" (Working Copy com a contagem de arquivos; Histórico, Stashes, Review local e Reflog são placeholders que avisam que ainda não existem), alternância "By stack" / "By name" e a árvore de branches.
    - "By name" é real: locais e remotas agrupadas pelo prefixo; clicar numa branch faz checkout, e a atual ganha o selo HEAD. "By stack" mostra "No stacks yet" e todas as locais em "No stack", até a fatia 4; a dica de arrastar para definir o pai também é placeholder.
