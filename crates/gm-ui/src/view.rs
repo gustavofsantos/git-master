@@ -555,8 +555,10 @@ impl StatusView {
             )
             .child(div().text_color(muted).child(counts))
             .child(div().flex_1())
+            // A long message is cut at the end, so the log button stays on the bar.
             .child(
                 div()
+                    .min_w(px(0.))
                     .px_2()
                     .rounded_sm()
                     .bg(tint)
@@ -566,7 +568,14 @@ impl StatusView {
                     .items_center()
                     .gap_1()
                     .children(notice_icon.map(|icon| icon::view(icon, icon::SMALL, colour)))
-                    .child(message),
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(message),
+                    ),
             )
             .child(self.command_log_button(cx))
     }
