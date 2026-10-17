@@ -583,19 +583,32 @@ impl StatusView {
                 .py_3()
                 .text_color(theme::error())
                 .child(message.to_owned())
-        } else if self.model.commit_file.is_shown() {
+        } else {
+            // The pane stays in the tree while the file loads, so it keeps the
+            // keys: a Down pressed then still reaches it (D39 gap of H4b-A). Its
+            // box is empty until the file is shown.
+            let loading = !self.model.commit_file.is_shown();
+            let pane = div()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .when(loading, |this| this.h(px(0.)))
+                .when(!loading, |this| this.flex_1())
+                .child(self.commit_diff_pane.clone());
             div()
                 .flex_1()
                 .min_h(px(0.))
                 .flex()
                 .flex_col()
-                .child(self.commit_diff_pane.clone())
-        } else {
-            div()
-                .px_4()
-                .py_3()
-                .text_color(theme::muted())
-                .child("Loading file…")
+                .children(loading.then(|| {
+                    div()
+                        .px_4()
+                        .py_3()
+                        .text_color(theme::muted())
+                        .child("Loading file…")
+                }))
+                .child(pane)
         };
         div()
             .flex_1()

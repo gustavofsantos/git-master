@@ -1336,21 +1336,16 @@ scenario_commit_diff_split() {
   read -r differing _ <<<"$differing"
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -gt 2000 ] || fail "src/added.rs did not open in the split view ($differing pixels changed)"
-  # Two Down presses, spaced. While a file loads, commit_file_view (shell_history.rs)
-  # drops the diff pane from the tree, so a key pressed then has no focused target.
-  xdotool key Down; sleep 1
-  xdotool key Down; sleep 1.5
+  # Two Down presses back to back: the second one is pressed while the first file
+  # loads, and must still step on. Up then returns to calc.rs only if both landed.
+  xdotool key Down Down; sleep 1.5
   shoot "$SMOKE_OUT/h-commit-diff-split-gone-$theme.png"
-  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-added-$theme.png" "$SMOKE_OUT/h-commit-diff-split-gone-$theme.png" null: 2>&1 || true)"
-  read -r differing _ <<<"$differing"
-  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
-  [ "$differing" -gt 2000 ] || fail "src/gone.rs did not open in the split view ($differing pixels changed)"
   xdotool key Up; sleep 1.5
   shoot "$SMOKE_OUT/h-commit-diff-split-recheck-$theme.png"
   differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-split-$theme.png" "$SMOKE_OUT/h-commit-diff-split-recheck-$theme.png" null: 2>&1 || true)"
   read -r differing _ <<<"$differing"
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
-  [ "$differing" -lt 2000 ] || fail "calc.rs did not come back in the split view ($differing pixels changed)"
+  [ "$differing" -lt 2000 ] || fail "the second Down press was lost: Up from src/gone.rs did not return to src/calc.rs ($differing pixels changed)"
 
   xdotool mousemove "$LAYOUT_UNIFIED_X" "$LAYOUT_Y" click 1; sleep 1.5
   shoot "$SMOKE_OUT/h-commit-diff-split-back-$theme.png"
