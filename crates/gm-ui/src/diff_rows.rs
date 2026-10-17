@@ -241,6 +241,17 @@ pub fn split_cell_on_cursor(cell: Option<Cell>, cursor: Option<LineKey>) -> bool
     matches!((cell, cursor), (Some(cell), Some(key)) if cell.key == key)
 }
 
+/// The mark git writes after a line that has no newline at the end of its
+/// file (`no_newline`), or nothing for a line that has one.
+#[must_use]
+pub fn no_newline_mark(no_newline: bool) -> &'static str {
+    if no_newline {
+        "\\ No newline at end of file"
+    } else {
+        ""
+    }
+}
+
 /// Columns a tab takes up, counted from the column it starts at. Used for the
 /// width of a line, which bounds the horizontal scroll of the split view.
 pub const TAB_STOP: usize = 4;
@@ -711,6 +722,12 @@ mod tests {
             by_split.selected_lines_by_hunk(Side::Unstaged),
             by_unified.selected_lines_by_hunk(Side::Unstaged)
         );
+    }
+
+    #[test]
+    fn a_line_without_its_newline_gets_git_s_marker_in_both_layouts() {
+        assert_eq!(no_newline_mark(true), "\\ No newline at end of file");
+        assert_eq!(no_newline_mark(false), "");
     }
 
     /// `ctx, -a, +b, ctx`: lines 1 and 2 are changes.

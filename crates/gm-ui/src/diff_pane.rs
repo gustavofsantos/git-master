@@ -7,7 +7,7 @@ use std::ops::Range;
 
 use gm_schema::{FileDiff, LineKind, StageTarget};
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, EventEmitter, FocusHandle, FontWeight, IntoElement,
+    AnyElement, ClickEvent, Context, Div, EventEmitter, FocusHandle, FontWeight, Hsla, IntoElement,
     KeyBinding, Render, ScrollStrategy, ScrollWheelEvent, UniformListScrollHandle, Window, actions,
     div, prelude::*, px, uniform_list,
 };
@@ -16,9 +16,9 @@ use crate::action_registry::{Action, Args};
 use crate::diff_rows::{
     Apply, Cell, Diffs, Layout, LineKey, Mode, Press, Row, Selection, Side, SplitRow, SplitRows,
     build_rows, change_counts, changed_keys_between, controls, default_side, hunk_header_text,
-    hunk_selection_count, hunks_of, max_scroll_columns, next_changed_line, next_hunk_header, press,
-    prev_changed_line, prev_hunk_header, skip_columns, split_cell_on_cursor, split_pairs,
-    split_rows,
+    hunk_selection_count, hunks_of, max_scroll_columns, next_changed_line, next_hunk_header,
+    no_newline_mark, press, prev_changed_line, prev_hunk_header, skip_columns,
+    split_cell_on_cursor, split_pairs, split_rows,
 };
 use crate::icon::{self, Icon};
 use crate::theme;
@@ -469,8 +469,11 @@ impl DiffPane {
                     .min_w(px(0.))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_color(text_colour)
-                    .child(skip_columns(&line.text, self.scroll_columns).to_owned()),
+                    .child(code_with_mark(
+                        skip_columns(&line.text, self.scroll_columns).to_owned(),
+                        text_colour,
+                        line.no_newline,
+                    )),
             )
     }
 
@@ -1025,8 +1028,11 @@ impl DiffPane {
                     .min_w(px(0.))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_color(text_colour)
-                    .child(line.text.clone()),
+                    .child(code_with_mark(
+                        line.text.clone(),
+                        text_colour,
+                        line.no_newline,
+                    )),
             )
             .into_any_element()
     }
@@ -1064,6 +1070,26 @@ impl DiffPane {
         .min_h(px(0.))
         .into_any_element()
     }
+}
+
+/// A line's text, then git's no-newline mark after it in muted colour when the
+/// line has no newline at the end of its file. The text is not cut short by the
+/// mark: both are kept on one line and the cell clips the end.
+fn code_with_mark(text: String, colour: Hsla, no_newline: bool) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .child(div().flex_none().text_color(colour).child(text))
+        .when(no_newline, |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .ml_2()
+                    .text_color(theme::muted())
+                    .child(no_newline_mark(true)),
+            )
+        })
 }
 
 /// The stage or unstage action for a chunk of `side`.
