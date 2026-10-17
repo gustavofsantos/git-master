@@ -18,7 +18,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -46,6 +46,7 @@ BRANCH_X=242; BRANCH_Y=67                   # branch button, right of the projec
 SIDEBAR_FEATURE_X=160; SIDEBAR_FEATURE_Y=415  # feature/x row in the sidebar (non-current)
 MENU_STAGE_X=470; MENU_STAGE_Y=155          # "Stage File" in the file row's menu, opened at NAME_X, ROW_MOD_Y
 MENU_CHECKOUT_X=190; MENU_CHECKOUT_Y=431    # "Checkout Branch" in the branch menu, opened at SIDEBAR_FEATURE_X/Y
+CHIP_X=316; CHIP_Y=590; CHIP_W=142; CHIP_H=28   # the hook chip's text in the message header, window-relative
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -151,7 +152,7 @@ launch_app() {
   if [ -n "$2" ]; then args=("$2"); fi
   (cd "${3:-$RUN_DIR}" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_NUM" \
     VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
-    XDG_DATA_HOME="$RUN_DIR/xdg" \
+    XDG_DATA_HOME="$RUN_DIR/xdg" GIT_CONFIG_GLOBAL="$RUN_DIR/gitconfig" \
     GITMASTER_THEME="$1" "$BIN" "${args[@]}") >"$RUN_DIR/app.log" 2>&1 &
   APP_PID=$!
   sleep 4
@@ -585,6 +586,125 @@ scenario_m() {
   [ "$differing" -lt 2000 ] || fail "Escape did not close the palette ($differing pixels changed)"
 }
 
+
+# --- Prepare-commit hooks (slice 2) -------------------------------------------
+# The hook fixture is a script outside the repository. Each run appends a line to
+# hook-runs.log, waits two seconds, then answers with the message or fails with
+# the exit code.
+write_hook() {
+  # $1: script path, $2: message to answer with, $3: exit code (0 answers)
+  cat > "$1" <<'HOOK'
+#!/bin/sh
+# smoke fixture: prepare-commit hook
+echo run >> '__MARKER__'
+id=$(sed -n 's/.*"invocation_id":"\([^"]*\)".*/\1/p')
+sleep 2
+if [ __EXIT__ -ne 0 ]; then
+  echo 'llm: no model configured' >&2
+  exit __EXIT__
+fi
+printf '{"invocation_id":"%s","output":{"message":"__MESSAGE__"}}\n' "$id"
+HOOK
+  sed -i -e "s|__MARKER__|$RUN_DIR/hook-runs.log|" -e "s|__EXIT__|$3|" -e "s|__MESSAGE__|$2|" "$1"
+  chmod +x "$1"
+}
+
+# Opens the palette, types $1 and runs the first match with Enter.
+run_from_palette() {
+  xdotool key ctrl+k; sleep 1
+  xdotool type --delay 20 -- "$1"; sleep 1
+  xdotool key Return; sleep 1
+}
+
+hook_ran() { [ -s "$RUN_DIR/hook-runs.log" ]; }
+
+# --- 3n. Text typed while the hook runs is kept; the answer is a suggestion ---
+scenario_n() {
+  local repo="$RUN_DIR/repo" theme="$1" got
+  run_from_palette "suggest commit"
+  xdotool mousemove "$COMPOSER_X" "$COMPOSER_Y" click 1; sleep 0.5
+  xdotool type --delay 20 -- "my own"; sleep 3
+  hook_ran || fail "the hook did not run"
+  shoot "$SMOKE_OUT/n-typed-text-kept-$theme.png"
+
+  # Enable Commit with a staged file, then commit whatever the composer holds.
+  git -C "$repo" add src/ledger/mod.rs; sleep 2.5
+  xdotool mousemove "$COMPOSER_X" "$COMPOSER_Y" click 1; sleep 0.5
+  xdotool key ctrl+Return; sleep 1.5
+  got="$(git -C "$repo" log -1 --format=%B)"
+  [ "$got" = "my own" ] || fail "commit message is '$got': the typed text was overwritten by the hook"
+}
+
+# --- 3o. Repository changed during the run: Replace fills the composer -------
+scenario_o() {
+  local repo="$RUN_DIR/repo" theme="$1" got
+  run_from_palette "suggest commit"
+  # Staging while the hook runs moves the repository: its answer becomes a suggestion.
+  sleep 0.5
+  git -C "$repo" add src/ledger/mod.rs
+  sleep 3
+  hook_ran || fail "the hook did not run"
+  shoot "$SMOKE_OUT/o-suggestion-replace-$theme.png"
+
+  run_from_palette "replace with suggestion"; sleep 0.5
+  xdotool mousemove "$COMPOSER_X" "$COMPOSER_Y" click 1; sleep 0.5
+  xdotool key ctrl+Return; sleep 1.5
+  got="$(git -C "$repo" log -1 --format=%B)"
+  [ "$got" = "feat: from hook" ] || fail "after Replace the commit message is '$got', expected the suggestion"
+}
+
+# --- 3p. A failed hook shows a failed chip (error colour in the header) -------
+scenario_p() {
+  local theme="$1" shot="$SMOKE_OUT/p-hook-failure-$1.png" red error_hex
+  run_from_palette "suggest commit"; sleep 3
+  hook_ran || fail "the hook did not run"
+  shoot "$shot"
+  case "$theme" in
+    light) error_hex="#89323a" ;;
+    dark) error_hex="#fea1a4" ;;
+  esac
+  red="$(convert "$shot" -crop "${CHIP_W}x${CHIP_H}+${CHIP_X}+${CHIP_Y}" +repage \
+    -fuzz 10% -fill white -opaque "$error_hex" -fuzz 0 -fill black +opaque white \
+    -format '%[fx:mean]' info:)"
+  awk -v m="$red" 'BEGIN { exit !(m > 0.01) }' \
+    || fail "no failure-coloured text in the hook chip (mean=$red): $shot"
+}
+
+# --- 3q. A repository hook waits for approval; approval is stored outside the repo
+scenario_q() {
+  local repo="$RUN_DIR/repo" theme="$1" hook="$RUN_DIR/hook.sh"
+  local approvals="$RUN_DIR/xdg/gitmaster/hook-approvals.json" want differing got status_before
+  status_before="$(git -C "$repo" status --porcelain)"
+  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y" click 1; sleep 1
+  shoot "$RUN_DIR/approval-asked.png"
+
+  run_from_palette "suggest commit"; sleep 3
+  hook_ran && fail "a repository hook ran before it was approved"
+  [ -e "$approvals" ] && fail "an approval was stored before the user approved"
+
+  run_from_palette "approve repository hook"; sleep 1.5
+  shoot "$RUN_DIR/approved.png"
+  differing="$(compare -metric AE "$RUN_DIR/approval-asked.png" "$RUN_DIR/approved.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare approval screenshots: $differing"
+  [ "$differing" -gt 2000 ] || fail "the approval prompt did not go away after Approve ($differing pixels changed)"
+
+  [ -f "$approvals" ] || fail "Approve stored nothing in $approvals"
+  want="$(printf '%s' "sh $hook" | sha256sum | cut -d' ' -f1)"
+  grep -qF "$want" "$approvals" || fail "the stored approval does not name the command hash"
+  [ "$(git -C "$repo" status --porcelain)" = "$status_before" ] \
+    || fail "the working copy changed: approval must live outside the repository"
+
+  run_from_palette "suggest commit"; sleep 3.5
+  hook_ran || fail "the approved hook did not run"
+  shoot "$SMOKE_OUT/q-repo-hook-approval-$theme.png"
+  git -C "$repo" add src/ledger/mod.rs; sleep 2.5
+  xdotool mousemove "$COMPOSER_X" "$COMPOSER_Y" click 1; sleep 0.5
+  xdotool key ctrl+Return; sleep 1.5
+  got="$(git -C "$repo" log -1 --format=%B)"
+  [ "$got" = "feat: from repo hook" ] || fail "commit message is '$got', expected the approved hook's answer"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -592,8 +712,23 @@ run_scenario() {
   RUN_DIR="$RUN_ROOT/$LABEL"
   rm -rf "$RUN_DIR"
   mkdir -p "$RUN_DIR" "$RUN_DIR/xdg/gitmaster"
+  : > "$RUN_DIR/gitconfig"
   make_repo "$RUN_DIR/repo"
   make_other_repo "$RUN_DIR/billing-api"
+  case "$name" in
+    n-typed-text-kept | o-suggestion-replace)
+      write_hook "$RUN_DIR/hook.sh" "feat: from hook" 0
+      printf '[gitmaster "prepare-commit.llm"]\n\tcommand = sh %s\n' "$RUN_DIR/hook.sh" > "$RUN_DIR/gitconfig"
+      ;;
+    p-hook-failure)
+      write_hook "$RUN_DIR/hook.sh" "unused" 3
+      printf '[gitmaster "prepare-commit.llm"]\n\tcommand = sh %s\n' "$RUN_DIR/hook.sh" > "$RUN_DIR/gitconfig"
+      ;;
+    q-repo-hook-approval)
+      write_hook "$RUN_DIR/hook.sh" "feat: from repo hook" 0
+      git -C "$RUN_DIR/repo" config gitmaster.prepare-commit.team.command "sh $RUN_DIR/hook.sh"
+      ;;
+  esac
   if [ "$name" = g-switch-branch ]; then prepare_branches "$RUN_DIR/repo"; fi
   if [ "$name" = l-branch-menu ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
   if [ "$name" = h-welcome ]; then
@@ -619,6 +754,10 @@ run_scenario() {
     k-file-menu) scenario_k "$theme" ;;
     l-branch-menu) scenario_l "$theme" ;;
     m-command-palette) scenario_m "$theme" ;;
+    n-typed-text-kept) scenario_n "$theme" ;;
+    o-suggestion-replace) scenario_o "$theme" ;;
+    p-hook-failure) scenario_p "$theme" ;;
+    q-repo-hook-approval) scenario_q "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app
