@@ -3,8 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use gm_schema::{BranchEntry, History, RepoStatus, WorktreeEntry, WorktreeMode};
+use gm_schema::{BranchEntry, CommitSummary, History, RepoStatus, WorktreeEntry, WorktreeMode};
 
+use crate::history::{Canceller, HistoryPage, HistoryStream};
 use crate::{GitError, GitPort};
 
 /// Answers `resolve_root` with its own root, and `status`, `branches`,
@@ -57,6 +58,8 @@ impl FakeGit {
         *self.worktrees.lock().unwrap() = worktrees;
     }
 
+    /// The commits the next history walk yields. `History::more` is ignored.
+    ///
     /// # Panics
     ///
     /// If another thread panicked while holding the history lock.
@@ -131,7 +134,43 @@ impl GitPort for FakeGit {
         self.checkout.lock().unwrap().clone()
     }
 
-    fn history(&self, _root: &Path) -> Result<History, GitError> {
-        self.history.lock().unwrap().clone()
+    fn history_stream(&self, _root: &Path) -> Result<Option<Box<dyn HistoryStream>>, GitError> {
+        let history = self.history.lock().unwrap().clone()?;
+        if history.unborn {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(FakeWalk {
+            commits: history.commits.into(),
+        })))
+    }
+}
+
+/// A walk over the commits a test set, yielded as the engine reads them.
+struct FakeWalk {
+    commits: std::collections::VecDeque<CommitSummary>,
+}
+
+impl HistoryStream for FakeWalk {
+    fn next_page(&mut self, limit: usize) -> Result<HistoryPage, GitError> {
+        let take = limit.min(self.commits.len());
+        let commits: Vec<CommitSummary> = self.commits.drain(..take).collect();
+        Ok(HistoryPage {
+            commits,
+            done: self.commits.is_empty(),
+            unborn: false,
+        })
+    }
+
+    fn skip_past(&mut self, oid: &str) -> Result<(), GitError> {
+        while let Some(commit) = self.commits.pop_front() {
+            if commit.oid == oid {
+                return Ok(());
+            }
+        }
+        Err(GitError(format!("commit {oid} is not in the history")))
+    }
+
+    fn canceller(&self) -> Canceller {
+        std::sync::Arc::new(|| {})
     }
 }

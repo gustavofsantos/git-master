@@ -60,32 +60,141 @@ pub struct Model {
     pub pruning: Pruning,
 }
 
-/// The history page's listing. A reply that answers an older request is dropped.
+/// The history page's listing. A reply to a request that was superseded is
+/// dropped, so a page never lands in a list it was not read for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum HistoryList {
     /// Nothing requested yet, or the page was closed by a repository switch.
     #[default]
     Idle,
-    Loading(OperationId),
-    Ready(History),
-    /// The read failed; the reason is in the status bar.
+    /// The first page could not be read; the reason is in the status bar.
     Failed,
+    Shown(Listing),
+}
+
+/// What the history page holds, and the requests in flight for it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    /// The commits read so far, newest first.
+    pub history: History,
+    /// Whether the first page has been read. A refresh keeps the list until
+    /// its answer comes.
+    pub loaded: bool,
+    /// The request for the first page, while it is in flight.
+    pub top: Option<OperationId>,
+    /// The request for the next page, while it is in flight.
+    pub page: Option<OperationId>,
+    /// A page failed, so no more pages are asked for until the list refreshes.
+    pub page_failed: bool,
+    /// The commit the user selected, by id. Kept across refreshes.
+    pub selected: Option<String>,
 }
 
 impl HistoryList {
-    pub fn request(&mut self, id: OperationId) {
-        *self = Self::Loading(id);
-    }
-
-    pub fn received(&mut self, id: OperationId, history: History) {
-        if *self == Self::Loading(id) {
-            *self = Self::Ready(history);
+    /// Asks for the first page. A list already shown stays on screen until the
+    /// answer replaces it, and any next-page request in flight is abandoned.
+    pub fn request_top(&mut self, id: OperationId) {
+        match self {
+            Self::Shown(listing) => {
+                listing.top = Some(id);
+                listing.page = None;
+                listing.page_failed = false;
+            }
+            _ => {
+                *self = Self::Shown(Listing {
+                    top: Some(id),
+                    ..Listing::default()
+                });
+            }
         }
     }
 
+    /// Whether a shown list may be refreshed now.
+    #[must_use]
+    pub fn can_refresh(&self) -> bool {
+        matches!(self, Self::Shown(listing) if listing.loaded && listing.top.is_none())
+    }
+
+    /// Whether the next page should be asked for: the list is loaded, more
+    /// commits follow, and nothing is in flight or has failed.
+    #[must_use]
+    pub fn can_page(&self) -> bool {
+        matches!(
+            self,
+            Self::Shown(listing)
+                if listing.loaded
+                    && listing.history.more
+                    && listing.top.is_none()
+                    && listing.page.is_none()
+                    && !listing.page_failed
+        )
+    }
+
+    /// The oid of the last commit listed: the cursor the next page follows.
+    #[must_use]
+    pub fn last_oid(&self) -> Option<&str> {
+        match self {
+            Self::Shown(listing) => listing.history.commits.last().map(|c| c.oid.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Records the request for the next page.
+    pub fn request_page(&mut self, id: OperationId) {
+        if let Self::Shown(listing) = self {
+            listing.page = Some(id);
+        }
+    }
+
+    /// Applies an answer. A first page replaces the list, keeping the selection;
+    /// a next page adds the commits the list does not hold yet. Anything else is dropped.
+    pub fn received(&mut self, id: OperationId, history: History) {
+        let Self::Shown(listing) = self else {
+            return;
+        };
+        if listing.top == Some(id) {
+            listing.top = None;
+            listing.loaded = true;
+            listing.history = history;
+        } else if listing.page == Some(id) {
+            listing.page = None;
+            let held: std::collections::BTreeSet<String> = listing
+                .history
+                .commits
+                .iter()
+                .map(|c| c.oid.clone())
+                .collect();
+            listing.history.more = history.more;
+            listing.history.commits.extend(
+                history
+                    .commits
+                    .into_iter()
+                    .filter(|commit| !held.contains(&commit.oid)),
+            );
+        }
+    }
+
+    /// A request ended without an answer. A refresh that fails keeps the list
+    /// it had; the first page failing shows the failure.
     pub fn failed(&mut self, id: OperationId) {
-        if *self == Self::Loading(id) {
-            *self = Self::Failed;
+        let Self::Shown(listing) = self else {
+            return;
+        };
+        if listing.top == Some(id) {
+            listing.top = None;
+            if !listing.loaded {
+                *self = Self::Failed;
+            }
+        } else if listing.page == Some(id) {
+            listing.page = None;
+            listing.page_failed = true;
+        }
+    }
+
+    /// Selects a commit by id.
+    pub fn select(&mut self, oid: &str) {
+        if let Self::Shown(listing) = self {
+            listing.selected = Some(oid.to_owned());
         }
     }
 }
@@ -1030,50 +1139,137 @@ mod tests {
 #[cfg(test)]
 mod history_list_tests {
     use super::*;
+    use gm_schema::CommitSummary;
 
-    fn history(subject: &str) -> History {
-        History {
-            commits: vec![gm_schema::CommitSummary {
-                oid: "a".repeat(40),
-                short: "aaaaaaa".into(),
-                subject: subject.into(),
-                refs: Vec::new(),
-                author_time: 0,
-            }],
-            unborn: false,
+    fn commit(oid: &str) -> CommitSummary {
+        CommitSummary {
+            oid: oid.into(),
+            short: oid.chars().take(7).collect(),
+            subject: oid.into(),
+            refs: Vec::new(),
+            author_time: 0,
         }
     }
 
+    fn page(oids: &[&str], more: bool) -> History {
+        History {
+            commits: oids.iter().map(|oid| commit(oid)).collect(),
+            unborn: false,
+            more,
+        }
+    }
+
+    fn shown(list: &HistoryList) -> &Listing {
+        match list {
+            HistoryList::Shown(listing) => listing,
+            other => panic!("expected a shown list, got {other:?}"),
+        }
+    }
+
+    fn oids(list: &HistoryList) -> Vec<String> {
+        shown(list)
+            .history
+            .commits
+            .iter()
+            .map(|c| c.oid.clone())
+            .collect()
+    }
+
     #[test]
-    fn the_reply_to_the_request_is_shown() {
+    fn the_first_page_is_shown() {
         let mut list = HistoryList::default();
-        list.request(OperationId(4));
-        list.received(OperationId(4), history("first"));
-        assert_eq!(list, HistoryList::Ready(history("first")));
+        list.request_top(OperationId(4));
+        list.received(OperationId(4), page(&["c", "b"], true));
+        assert_eq!(oids(&list), ["c", "b"]);
+        assert!(shown(&list).loaded);
+        assert!(list.can_page());
     }
 
     #[test]
     fn a_reply_to_an_older_request_is_dropped() {
         let mut list = HistoryList::default();
-        list.request(OperationId(4));
-        list.request(OperationId(9));
-        list.received(OperationId(4), history("old"));
-        assert_eq!(list, HistoryList::Loading(OperationId(9)));
+        list.request_top(OperationId(4));
+        list.request_top(OperationId(9));
+        list.received(OperationId(4), page(&["old"], false));
+        assert!(!shown(&list).loaded);
+        assert_eq!(shown(&list).top, Some(OperationId(9)));
     }
 
     #[test]
-    fn a_failed_read_ends_the_loading() {
+    fn a_failed_first_page_shows_the_failure() {
         let mut list = HistoryList::default();
-        list.request(OperationId(4));
+        list.request_top(OperationId(4));
         list.failed(OperationId(4));
         assert_eq!(list, HistoryList::Failed);
     }
 
     #[test]
-    fn a_failure_of_another_operation_changes_nothing() {
+    fn a_failed_refresh_keeps_the_list_it_had() {
         let mut list = HistoryList::default();
-        list.request(OperationId(4));
-        list.failed(OperationId(3));
-        assert_eq!(list, HistoryList::Loading(OperationId(4)));
+        list.request_top(OperationId(4));
+        list.received(OperationId(4), page(&["c"], false));
+        list.request_top(OperationId(5));
+        list.failed(OperationId(5));
+        assert_eq!(oids(&list), ["c"]);
+        assert!(shown(&list).top.is_none());
+    }
+
+    #[test]
+    fn a_next_page_adds_the_commits_after_the_last() {
+        let mut list = HistoryList::default();
+        list.request_top(OperationId(1));
+        list.received(OperationId(1), page(&["c", "b"], true));
+        assert_eq!(list.last_oid(), Some("b"));
+        list.request_page(OperationId(2));
+        list.received(OperationId(2), page(&["a"], false));
+        assert_eq!(oids(&list), ["c", "b", "a"]);
+        assert!(!list.can_page());
+    }
+
+    #[test]
+    fn a_page_never_repeats_a_commit_already_listed() {
+        let mut list = HistoryList::default();
+        list.request_top(OperationId(1));
+        list.received(OperationId(1), page(&["c", "b"], true));
+        list.request_page(OperationId(2));
+        list.received(OperationId(2), page(&["b", "a"], false));
+        assert_eq!(oids(&list), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn a_refresh_puts_the_new_top_above_and_keeps_the_selection() {
+        let mut list = HistoryList::default();
+        list.request_top(OperationId(1));
+        list.received(OperationId(1), page(&["b", "a"], false));
+        list.select("a");
+        list.request_top(OperationId(2));
+        list.received(OperationId(2), page(&["new", "b", "a"], false));
+        assert_eq!(oids(&list), ["new", "b", "a"]);
+        assert_eq!(shown(&list).selected.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_refresh_drops_a_page_still_in_flight() {
+        let mut list = HistoryList::default();
+        list.request_top(OperationId(1));
+        list.received(OperationId(1), page(&["c"], true));
+        list.request_page(OperationId(2));
+        list.request_top(OperationId(3));
+        list.received(OperationId(2), page(&["b"], false));
+        assert_eq!(oids(&list), ["c"]);
+        assert!(!list.can_page());
+    }
+
+    #[test]
+    fn a_failed_page_stops_paging_until_a_refresh() {
+        let mut list = HistoryList::default();
+        list.request_top(OperationId(1));
+        list.received(OperationId(1), page(&["c"], true));
+        list.request_page(OperationId(2));
+        list.failed(OperationId(2));
+        assert!(!list.can_page());
+        list.request_top(OperationId(3));
+        list.received(OperationId(3), page(&["c"], true));
+        assert!(list.can_page());
     }
 }

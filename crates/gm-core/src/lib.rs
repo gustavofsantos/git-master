@@ -15,5 +15,6 @@ pub mod watch;
 pub mod worktree;
 
 pub use engine::{Engine, LogEntry};
+pub use history::{HistoryJob, HistoryOutcome, HistoryPage, HistoryReport, HistoryStream};
 pub use port::{GitError, GitPort};
 pub use runner::{EngineHandle, spawn, spawn_with};

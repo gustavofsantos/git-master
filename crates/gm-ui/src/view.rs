@@ -344,6 +344,11 @@ impl StatusView {
             }
             self.load_selected(cx);
         }
+        // The watcher refreshes the status when HEAD or a ref moves; the open
+        // history re-reads its top then, so an outside commit shows up.
+        if reload && self.screen == Screen::History && self.model.history.can_refresh() {
+            self.refresh_history();
+        }
         cx.notify();
     }
 
@@ -386,7 +391,7 @@ impl StatusView {
         self.request_branch_list();
         self.request_hook_list();
         if self.screen == Screen::History {
-            self.load_history();
+            self.refresh_history();
         }
         self.remember(PathBuf::from(switched.root), cx);
     }
@@ -394,7 +399,7 @@ impl StatusView {
     /// Opens the history page and asks for the commits of HEAD.
     pub(crate) fn show_history(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::History;
-        self.load_history();
+        self.refresh_history();
         cx.notify();
     }
 
@@ -404,9 +409,24 @@ impl StatusView {
         cx.notify();
     }
 
-    fn load_history(&mut self) {
+    /// Asks for the first page. A list already shown stays until the answer comes.
+    pub(crate) fn refresh_history(&mut self) {
         let id = self.engine.dispatch(Actor::Human, CommandKind::LoadHistory);
-        self.model.history.request(id);
+        self.model.history.request_top(id);
+    }
+
+    /// Asks for the page after the last commit listed, when there is one to ask for.
+    pub(crate) fn request_history_page(&mut self) {
+        if !self.model.history.can_page() {
+            return;
+        }
+        let Some(after) = self.model.history.last_oid().map(str::to_owned) else {
+            return;
+        };
+        let id = self
+            .engine
+            .dispatch(Actor::Human, CommandKind::LoadHistoryPage { after });
+        self.model.history.request_page(id);
     }
 
     /// Puts `root` first in the recent list and saves the list in the background.

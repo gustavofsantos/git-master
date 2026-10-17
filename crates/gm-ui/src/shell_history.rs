@@ -1,12 +1,16 @@
-//! The history page (docs/07, H1): the commits of HEAD, newest first, one 48 px
-//! row each, with its ref chips, subject, short id and relative time. Scope,
-//! graph, paging and search come in later sub-slices.
+//! The history page (docs/07, H1 and H2): the commits of HEAD, newest first, one
+//! 48 px row each, with its ref chips, subject, short id and relative time. The
+//! next page loads as the list nears its end; a click selects a row by its id.
+//! Scope, graph and search come in later sub-slices.
 
 use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gm_schema::{CommitSummary, HISTORY_LIMIT, RefKind, RefLabel};
-use gpui::{Context, Div, FontWeight, Stateful, Window, div, prelude::*, px, uniform_list};
+use gm_schema::{CommitSummary, RefKind, RefLabel};
+use gpui::{
+    Context, Div, FontWeight, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*, px,
+    uniform_list,
+};
 
 use crate::model::HistoryList;
 use crate::theme;
@@ -14,26 +18,31 @@ use crate::view::StatusView;
 
 const ROW_HEIGHT: f32 = 48.;
 const TIME_WIDTH: f32 = 96.;
+/// The next page is asked for when the rows drawn reach this close to the end.
+const PAGE_PREFETCH: usize = 20;
 
 impl StatusView {
     /// The page for the main area: a header, then the list, or the one line
     /// that says why there is no list.
     pub(crate) fn history_page(&self, cx: &mut Context<Self>) -> Div {
         let body = match &self.model.history {
-            HistoryList::Idle | HistoryList::Loading(_) => message("Loading history…"),
+            HistoryList::Idle => message("Loading history…"),
             HistoryList::Failed => {
                 message("The history could not be read. The status bar says why.")
             }
-            HistoryList::Ready(history) if history.unborn => {
+            HistoryList::Shown(listing) if !listing.loaded => message("Loading history…"),
+            HistoryList::Shown(listing) if listing.history.unborn => {
                 message("HEAD points at a branch with no commits yet.")
             }
-            HistoryList::Ready(history) if history.commits.is_empty() => {
+            HistoryList::Shown(listing) if listing.history.commits.is_empty() => {
                 message("No commits to show.")
             }
-            HistoryList::Ready(history) => history_list(history.commits.len(), cx),
+            HistoryList::Shown(listing) => history_list(listing.history.commits.len(), cx),
         };
         let count = match &self.model.history {
-            HistoryList::Ready(history) => count_label(history.commits.len()),
+            HistoryList::Shown(listing) if listing.loaded => {
+                count_label(listing.history.commits.len(), listing.history.more)
+            }
             _ => String::new(),
         };
         div()
@@ -78,21 +87,29 @@ fn history_list(count: usize, cx: &mut Context<StatusView>) -> Div {
             "history-commits",
             count,
             cx.processor(
-                |this: &mut StatusView,
-                 range: Range<usize>,
-                 _window: &mut Window,
-                 _cx: &mut Context<StatusView>| {
-                    let HistoryList::Ready(history) = &this.model.history else {
+                move |this: &mut StatusView,
+                      range: Range<usize>,
+                      _window: &mut Window,
+                      cx: &mut Context<StatusView>| {
+                    if range.end + PAGE_PREFETCH >= count {
+                        this.request_history_page();
+                    }
+                    let HistoryList::Shown(listing) = &this.model.history else {
                         return Vec::new();
                     };
                     let now = now_secs();
-                    history
+                    let selected = listing.selected.as_deref();
+                    listing
+                        .history
                         .commits
                         .get(range.clone())
                         .unwrap_or_default()
                         .iter()
                         .zip(range)
-                        .map(|(commit, index)| commit_row(commit, index, now))
+                        .map(|(commit, index)| {
+                            let is_selected = selected == Some(commit.oid.as_str());
+                            commit_row(commit, index, now, is_selected, cx)
+                        })
                         .collect()
                 },
             ),
@@ -102,7 +119,14 @@ fn history_list(count: usize, cx: &mut Context<StatusView>) -> Div {
     )
 }
 
-fn commit_row(commit: &CommitSummary, index: usize, now: i64) -> Stateful<Div> {
+fn commit_row(
+    commit: &CommitSummary,
+    index: usize,
+    now: i64,
+    selected: bool,
+    cx: &mut Context<StatusView>,
+) -> Stateful<Div> {
+    let oid = commit.oid.clone();
     div()
         .id(index)
         .w_full()
@@ -114,6 +138,13 @@ fn commit_row(commit: &CommitSummary, index: usize, now: i64) -> Stateful<Div> {
         .gap_3()
         .border_b_1()
         .border_color(theme::hairline())
+        .when(selected, |row| row.bg(theme::selected_row()))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                this.select_commit(&oid, cx);
+            }),
+        )
         .child(
             div()
                 .flex_1()
@@ -171,6 +202,14 @@ fn ref_chip(label: &RefLabel) -> Div {
         .child(label.name.clone())
 }
 
+impl StatusView {
+    /// Selects the commit `oid`; the selection survives a refresh of the list.
+    pub(crate) fn select_commit(&mut self, oid: &str, cx: &mut Context<Self>) {
+        self.model.history.select(oid);
+        cx.notify();
+    }
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -179,11 +218,11 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// The count in the header: "1 commit", "12 commits", or the cap when the
-/// list is cut at `HISTORY_LIMIT`.
+/// The count in the header: "1 commit", "12 commits", or "First N commits"
+/// while more pages follow.
 #[must_use]
-pub fn count_label(count: usize) -> String {
-    if count >= HISTORY_LIMIT {
+pub fn count_label(count: usize, more: bool) -> String {
+    if more {
         format!("First {count} commits")
     } else if count == 1 {
         "1 commit".to_owned()
@@ -268,9 +307,10 @@ mod tests {
 
     #[test]
     fn the_count_says_when_the_list_is_cut() {
-        assert_eq!(count_label(0), "0 commits");
-        assert_eq!(count_label(1), "1 commit");
-        assert_eq!(count_label(42), "42 commits");
-        assert_eq!(count_label(HISTORY_LIMIT), "First 200 commits");
+        assert_eq!(count_label(0, false), "0 commits");
+        assert_eq!(count_label(1, false), "1 commit");
+        assert_eq!(count_label(42, false), "42 commits");
+        assert_eq!(count_label(200, true), "First 200 commits");
+        assert_eq!(count_label(200, false), "200 commits");
     }
 }

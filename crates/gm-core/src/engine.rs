@@ -5,11 +5,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gm_schema::{
-    Actor, Blocker, Command, CommandKind, Event, HookFailure, HookScope, OperationId,
+    Actor, Blocker, Command, CommandKind, Event, History, HookFailure, HookScope, OperationId,
     OperationState, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
+use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::worktree;
 
@@ -35,6 +36,27 @@ pub struct Engine {
     /// Runs accepted but not yet handed to a thread; see `take_jobs`.
     jobs: Vec<Plan>,
     hook_log: Vec<HookRecord>,
+    /// The walk the history list reads, while a repository is open.
+    history: Option<HistorySession>,
+    /// History pages accepted since the last call; see `take_history_jobs`.
+    history_jobs: Vec<HistoryJob>,
+}
+
+/// The walk behind the history list: the stream while no job reads it, how to
+/// stop its git process, and the page request in flight.
+struct HistorySession {
+    stream: Option<Box<dyn HistoryStream>>,
+    stop: Canceller,
+    /// The last commit the list holds. A page after it continues the walk.
+    last: Option<String>,
+    active: Option<ActiveHistory>,
+}
+
+/// A page request that has not answered yet.
+struct ActiveHistory {
+    id: OperationId,
+    actor: Actor,
+    kind: CommandKind,
 }
 
 /// What the engine keeps of a `RunPrepareCommit` until it answers.
@@ -82,6 +104,8 @@ impl Engine {
             runs: BTreeMap::new(),
             jobs: Vec::new(),
             hook_log: Vec::new(),
+            history: None,
+            history_jobs: Vec::new(),
         }
     }
 
@@ -98,6 +122,54 @@ impl Engine {
     /// `Plan` on its own thread and passes every `Report` back to `hook_report`.
     pub fn take_jobs(&mut self) -> Vec<Plan> {
         std::mem::take(&mut self.jobs)
+    }
+
+    /// The history pages accepted since the last call. The caller runs each on
+    /// a thread and passes its report to `history_report`.
+    pub fn take_history_jobs(&mut self) -> Vec<HistoryJob> {
+        std::mem::take(&mut self.history_jobs)
+    }
+
+    /// Turns the answer of a history page into events. A report for a request
+    /// that was superseded, or for a repository that was left, is dropped.
+    pub fn history_report(&mut self, report: HistoryReport) -> Vec<Event> {
+        let Some(mut session) = self.history.take() else {
+            return Vec::new();
+        };
+        let active = match session.active.take() {
+            Some(active) if active.id == report.id => active,
+            other => {
+                session.active = other;
+                self.history = Some(session);
+                return Vec::new();
+            }
+        };
+        let mut events = Vec::new();
+        match report.outcome {
+            HistoryOutcome::Page { stream, page } => {
+                if let Some(last) = page.commits.last() {
+                    session.last = Some(last.oid.clone());
+                }
+                session.stream = stream;
+                let history = History {
+                    commits: page.commits,
+                    unborn: page.unborn,
+                    more: !page.done,
+                };
+                events.push(self.finish_op(&active, OperationState::Done, None));
+                events.push(Event::HistoryLoaded {
+                    id: report.id,
+                    history,
+                });
+            }
+            HistoryOutcome::Failed(message) => {
+                // The walk is gone; the cursor stays, so a later page resumes after it.
+                session.stream = None;
+                events.push(self.finish_op(&active, OperationState::Failed, Some(message)));
+            }
+        }
+        self.history = Some(session);
+        events
     }
 
     /// Turns one report of a hook run into events, and records the run's
@@ -213,6 +285,25 @@ impl Engine {
         };
         self.record(&op, None, &mut events);
         self.advance(&mut op, OperationState::Gating, &mut events);
+        if matches!(
+            command.kind,
+            CommandKind::LoadHistory | CommandKind::LoadHistoryPage { .. }
+        ) {
+            let after = match &command.kind {
+                CommandKind::LoadHistoryPage { after } => Some(after.clone()),
+                _ => None,
+            };
+            match self.start_history(id, &command.actor, &command.kind, after) {
+                Ok(superseded) => {
+                    events.extend(superseded);
+                    self.advance(&mut op, OperationState::Executing, &mut events);
+                }
+                Err(message) => {
+                    self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
+                }
+            }
+            return events;
+        }
         if let CommandKind::RunPrepareCommit { message } = &command.kind {
             match self.prepare_run(id, command, message) {
                 Ok(accepted) => {
@@ -248,13 +339,7 @@ impl Engine {
         kind: &CommandKind,
     ) -> Result<Vec<Event>, String> {
         match kind {
-            CommandKind::OpenRepo { path } => {
-                let root = self.git.resolve_root(path.as_ref()).map_err(|e| e.0)?;
-                let status = self.git.status(&root).map_err(|e| e.0)?;
-                let events = self.loaded(id, &root, status)?;
-                self.root = Some(root);
-                Ok(events)
-            }
+            CommandKind::OpenRepo { path } => self.open_repo(id, path),
             CommandKind::RefreshStatus => {
                 let root = self.open_root()?;
                 let status = self.git.status(&root).map_err(|e| e.0)?;
@@ -300,7 +385,9 @@ impl Engine {
                 let branches = self.git.branches(&root).map_err(|e| e.0)?;
                 Ok(vec![Event::BranchesLoaded { id, branches }])
             }
-            CommandKind::LoadHistory => self.load_history(id),
+            CommandKind::LoadHistory | CommandKind::LoadHistoryPage { .. } => {
+                Err("history is started by handle".to_owned())
+            }
             CommandKind::CreateWorktree { .. } => self.add_worktree(id, actor, kind),
             CommandKind::Checkout { branch } => {
                 let root = self.open_root()?;
@@ -438,10 +525,92 @@ impl Engine {
         hook::fingerprint(head.as_deref(), &staged) != active.fingerprint
     }
 
-    fn load_history(&self, id: OperationId) -> Result<Vec<Event>, String> {
+    /// Starts a page request. It continues the walk when the walk stands right
+    /// after `after` (the list's last commit); otherwise it starts a walk from
+    /// HEAD and reads past `after`, which is keyset resume and not `--skip`.
+    /// A request in flight is superseded: its walk is stopped and it is
+    /// cancelled. Returns the events of that cancellation.
+    fn start_history(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        after: Option<String>,
+    ) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
-        let history = self.git.history(&root).map_err(|e| e.0)?;
-        Ok(vec![Event::HistoryLoaded { id, history }])
+        let continues = match (&self.history, &after) {
+            (Some(session), Some(after)) => {
+                session.active.is_none()
+                    && session.stream.is_some()
+                    && session.last.as_deref() == Some(after.as_str())
+            }
+            _ => false,
+        };
+        let active = ActiveHistory {
+            id,
+            actor: actor.clone(),
+            kind: kind.clone(),
+        };
+        if continues {
+            let session = self.history.as_mut().expect("a session continues");
+            let stream = session.stream.take();
+            session.active = Some(active);
+            self.history_jobs.push(HistoryJob {
+                id,
+                stream,
+                after: None,
+            });
+            return Ok(Vec::new());
+        }
+        // The new walk starts before the old one is stopped, so a failure keeps the old one.
+        let stream = self.git.history_stream(&root).map_err(|e| e.0)?;
+        let stop: Canceller = match &stream {
+            Some(stream) => stream.canceller(),
+            None => std::sync::Arc::new(|| {}),
+        };
+        let superseded = self.drop_history();
+        self.history = Some(HistorySession {
+            stream: None,
+            stop,
+            last: None,
+            active: Some(active),
+        });
+        self.history_jobs.push(HistoryJob { id, stream, after });
+        Ok(superseded)
+    }
+
+    /// Ends the history walk: its git process is stopped, and a page request
+    /// still in flight is cancelled.
+    fn drop_history(&mut self) -> Vec<Event> {
+        let Some(session) = self.history.take() else {
+            return Vec::new();
+        };
+        (session.stop)();
+        match session.active {
+            Some(active) => vec![self.finish_op(&active, OperationState::Cancelled, None)],
+            None => Vec::new(),
+        }
+    }
+
+    /// Records the end of a page request, as the log records every operation.
+    fn finish_op(
+        &mut self,
+        active: &ActiveHistory,
+        state: OperationState,
+        detail: Option<String>,
+    ) -> Event {
+        self.log.push(LogEntry {
+            id: active.id,
+            actor: active.actor.clone(),
+            kind: active.kind.clone(),
+            state,
+        });
+        Event::OperationChanged {
+            id: active.id,
+            actor: active.actor.clone(),
+            state,
+            detail,
+        }
     }
 
     fn list_worktrees(&self, id: OperationId) -> Result<Vec<Event>, String> {
@@ -633,6 +802,16 @@ impl Engine {
         self.loaded(id, root, status)
     }
 
+    /// Opens the repository at `path`. The history walk of the old one ends.
+    fn open_repo(&mut self, id: OperationId, path: &str) -> Result<Vec<Event>, String> {
+        let root = self.git.resolve_root(path.as_ref()).map_err(|e| e.0)?;
+        let status = self.git.status(&root).map_err(|e| e.0)?;
+        let mut events = self.loaded(id, &root, status)?;
+        events.extend(self.drop_history());
+        self.root = Some(root);
+        Ok(events)
+    }
+
     fn open_root(&self) -> Result<PathBuf, String> {
         self.root
             .clone()
@@ -805,39 +984,173 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn load_history_emits_the_history_it_read() {
-        let history = gm_schema::History {
-            commits: vec![gm_schema::CommitSummary {
-                oid: "a".repeat(40),
-                short: "aaaaaaa".into(),
-                subject: "first".into(),
-                refs: vec![gm_schema::RefLabel {
-                    name: "main".into(),
-                    kind: gm_schema::RefKind::Branch,
-                }],
-                author_time: 1_700_000_000,
-            }],
-            unborn: false,
+    fn commit_of(oid: &str) -> gm_schema::CommitSummary {
+        gm_schema::CommitSummary {
+            oid: oid.into(),
+            short: oid.chars().take(7).collect(),
+            subject: oid.into(),
+            refs: Vec::new(),
+            author_time: 0,
+        }
+    }
+
+    /// An engine over a fake repository whose HEAD has `oids`, newest first.
+    fn history_engine(oids: &[&str]) -> Engine {
+        let status = RepoStatus {
+            root: "/r".into(),
+            ..RepoStatus::default()
         };
-        let git = FakeGit::new(
-            "/r",
-            RepoStatus {
-                root: "/r".into(),
-                ..RepoStatus::default()
-            },
-        );
-        git.set_history(Ok(history.clone()));
-        let mut engine = Engine::new(Box::new(git));
-        engine.handle(OperationId(1), &open());
-
-        let events = engine.handle(OperationId(2), &command(CommandKind::LoadHistory));
-
-        assert_eq!(states(&events).last(), Some(&OperationState::Done));
-        assert!(events.contains(&Event::HistoryLoaded {
-            id: OperationId(2),
-            history,
+        let git = FakeGit::new("/r", status);
+        git.set_history(Ok(gm_schema::History {
+            commits: oids.iter().map(|oid| commit_of(oid)).collect(),
+            unborn: false,
+            more: false,
         }));
+        Engine::new(Box::new(git))
+    }
+
+    /// Runs every history job the engine accepted, as the runner's threads do.
+    fn run_jobs(engine: &mut Engine) -> Vec<Event> {
+        engine
+            .take_history_jobs()
+            .into_iter()
+            .flat_map(|job| engine.history_report(job.run()))
+            .collect()
+    }
+
+    #[test]
+    fn a_history_load_answers_once_its_page_is_read() {
+        let mut engine = history_engine(&["c", "b", "a"]);
+        engine.handle(OperationId(1), &open());
+        let started = engine.handle(OperationId(2), &command(CommandKind::LoadHistory));
+        assert_eq!(
+            states(&started),
+            [
+                OperationState::Requested,
+                OperationState::Gating,
+                OperationState::Executing
+            ]
+        );
+        assert!(
+            !started
+                .iter()
+                .any(|e| matches!(e, Event::HistoryLoaded { .. }))
+        );
+
+        let events = run_jobs(&mut engine);
+
+        let Some(Event::HistoryLoaded { id, history }) = events
+            .iter()
+            .find(|e| matches!(e, Event::HistoryLoaded { .. }))
+        else {
+            panic!("the page is not answered, got {events:?}");
+        };
+        assert_eq!(*id, OperationId(2));
+        assert_eq!(history.commits.len(), 3);
+        assert!(!history.more);
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Done,
+            detail: None,
+        }));
+    }
+
+    #[test]
+    fn a_superseded_history_load_is_dropped_and_cancelled() {
+        let mut engine = history_engine(&["c", "b", "a"]);
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(CommandKind::LoadHistory));
+        let superseding = engine.handle(OperationId(3), &command(CommandKind::LoadHistory));
+        assert!(superseding.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Cancelled,
+            detail: None,
+        }));
+
+        let jobs = engine.take_history_jobs();
+        assert_eq!(jobs.len(), 2);
+        let mut jobs = jobs.into_iter();
+        let stale = engine.history_report(jobs.next().unwrap().run());
+        assert!(
+            stale.is_empty(),
+            "the superseded page must not show: {stale:?}"
+        );
+        let current = engine.history_report(jobs.next().unwrap().run());
+        assert!(matches!(
+            current.first(),
+            Some(Event::OperationChanged {
+                id: OperationId(3),
+                state: OperationState::Done,
+                ..
+            })
+        ));
+        assert!(current.iter().any(|e| matches!(
+            e,
+            Event::HistoryLoaded {
+                id: OperationId(3),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn a_page_after_the_last_commit_continues_the_walk() {
+        let oids = ["c", "b", "a"];
+        let mut engine = history_engine(&oids);
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(CommandKind::LoadHistory));
+        run_jobs(&mut engine);
+
+        // The first page held every commit, so the next one is the walk's end.
+        let next = engine.handle(
+            OperationId(3),
+            &command(CommandKind::LoadHistoryPage { after: "a".into() }),
+        );
+        assert!(next.contains(&Event::OperationChanged {
+            id: OperationId(3),
+            actor: Actor::Human,
+            state: OperationState::Executing,
+            detail: None,
+        }));
+        let events = run_jobs(&mut engine);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::HistoryLoaded { id: OperationId(3), history } if history.commits.is_empty()
+        )));
+    }
+
+    #[test]
+    fn a_page_for_an_unknown_cursor_restarts_the_walk_past_it() {
+        let mut engine = history_engine(&["c", "b", "a"]);
+        engine.handle(OperationId(1), &open());
+        // No page was read, so the cursor "b" matches no walk: the walk restarts and reads past it.
+        engine.handle(
+            OperationId(2),
+            &command(CommandKind::LoadHistoryPage { after: "b".into() }),
+        );
+        let events = run_jobs(&mut engine);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::HistoryLoaded { id: OperationId(2), history }
+                if history.commits.len() == 1 && history.commits[0].oid == "a"
+        )));
+    }
+
+    #[test]
+    fn leaving_the_repository_cancels_the_history_load() {
+        let mut engine = history_engine(&["c"]);
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(CommandKind::LoadHistory));
+        let reopened = engine.handle(OperationId(3), &open());
+        assert!(reopened.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Cancelled,
+            detail: None,
+        }));
+        assert!(run_jobs(&mut engine).is_empty());
     }
 
     fn worktree(path: &str, branch: &str) -> gm_schema::WorktreeEntry {

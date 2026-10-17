@@ -1,8 +1,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// How many commits of HEAD the history lists (H1). Paging comes in H2.
-pub const HISTORY_LIMIT: usize = 200;
+/// How many commits one page of the history holds (H1, H2).
+pub const HISTORY_PAGE: usize = 200;
 
 /// What a commit row shows of one ref that points at it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -41,8 +41,10 @@ pub struct CommitSummary {
 /// The answer to `LoadHistory`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct History {
-    /// Newest first, at most `HISTORY_LIMIT`.
+    /// Newest first, at most `HISTORY_PAGE`.
     pub commits: Vec<CommitSummary>,
     /// HEAD points at a branch that has no commits yet; the list is empty.
     pub unborn: bool,
+    /// Commits of HEAD follow this page; ask for the next one after the last.
+    pub more: bool,
 }

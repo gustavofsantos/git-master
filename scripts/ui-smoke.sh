@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -490,6 +490,12 @@ scenario_h() {
 # restores the screen it had before.
 scenario_history() {
   local repo="$RUN_DIR/repo" theme="$1" status_before differing
+  # Positive control: a space on a file row stages it, so the check further down
+  # can tell a leaked key from a key that reached nothing. The control undoes itself.
+  space_on_mod_file; sleep 1
+  grep -qxF -- 'src/ledger/mod.rs' <<<"$(staged_names)" \
+    || fail "the control failed: space on mod.rs did not stage it"
+  space_on_mod_file; sleep 1
   # Focus the file list first: a space there stages, so a leaked key would show.
   xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y" click 1; sleep 1
   shoot "$RUN_DIR/history-working-$theme.png"
@@ -1035,6 +1041,16 @@ run_scenario() {
     git -C "$RUN_DIR/repo" commit -q --allow-empty -m "smoke: history one"
     git -C "$RUN_DIR/repo" commit -q --allow-empty -m "smoke: history two"
   fi
+  if [ "$name" = h-history-unborn ]; then
+    scenario_history_unborn "$theme"
+    echo "PASS  $LABEL"
+    return
+  fi
+  if [ "$name" = h-history-refresh ]; then
+    scenario_history_refresh "$theme"
+    echo "PASS  $LABEL"
+    return
+  fi
   if [ "$name" = h-welcome ]; then
     # Starts with no recent list at all; scenario_h makes its own launches.
     scenario_h "$theme"
@@ -1072,6 +1088,48 @@ run_scenario() {
   esac
   stop_app
   echo "PASS  $LABEL"
+}
+
+# --- 3j. An unborn HEAD says so on the history page ----------------------------
+# A repository with no commit: the history page shows one line and no list.
+scenario_history_unborn() {
+  local theme="$1" spread
+  git init -q -b main "$RUN_DIR/unborn"
+  launch_app "$theme" "$RUN_DIR/unborn"
+  xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-history-unborn-$theme.png"
+  stop_app
+  # The line is text in the middle of the page; a blank page has no spread at all.
+  spread="$(convert "$SMOKE_OUT/h-history-unborn-$theme.png" -crop "480x60+520+400" +repage \
+    -colorspace gray -format '%[fx:standard_deviation]' info:)"
+  awk -v d="$spread" 'BEGIN { exit !(d > 0.01) }' \
+    || fail "the unborn HEAD line is not on the history page (spread $spread)"
+}
+
+# --- 3k. A commit made outside the app reaches the open history page ------------
+# The watcher refreshes the status when a ref moves, and the open page re-reads its top.
+scenario_history_refresh() {
+  local theme="$1" repo="$RUN_DIR/refresh" differing
+  git init -q -b main "$repo"
+  git -C "$repo" -c user.name=smoke -c user.email=smoke@smoke commit -q --allow-empty -m "smoke: first"
+  launch_app "$theme" "$repo"
+  # The first click wakes the window: until then it paints black.
+  xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
+  shoot "$RUN_DIR/refresh-before-$theme.png"
+  git -C "$repo" -c user.name=smoke -c user.email=smoke@smoke commit -q --allow-empty \
+    -m "smoke: made outside the app"
+  sleep 3
+  shoot "$SMOKE_OUT/h-history-refresh-$theme.png"
+  stop_app
+  convert "$RUN_DIR/refresh-before-$theme.png" -crop "1040x400+240+88" +repage "$RUN_DIR/list-before.png"
+  convert "$SMOKE_OUT/h-history-refresh-$theme.png" -crop "1040x400+240+88" +repage "$RUN_DIR/list-after.png"
+  differing="$(compare -metric AE "$RUN_DIR/list-before.png" "$RUN_DIR/list-after.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  # One new row of text moves the list: about 3000 pixels here, and none when nothing changed.
+  [ "$differing" -gt 1000 ] || fail "the outside commit did not reach the open history ($differing pixels changed)"
 }
 
 # --- 2/3. Run everything -------------------------------------------------------

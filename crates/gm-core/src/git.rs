@@ -1,21 +1,21 @@
 //! `GitPort` over the `git` executable. Status uses porcelain v2 with `-z`:
 //! stable, machine-readable, and it honors fsmonitor and the untracked cache.
 
-use std::io::Write;
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::process::{Child, ChildStdout, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
-    BranchEntry, BranchInfo, Change, DiffSide, FileDiff, HISTORY_LIMIT, History, HookScope, Hunk,
-    HunkId, PruneCandidate, RepoStatus, StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
+    BranchEntry, BranchInfo, Change, DiffSide, FileDiff, HookScope, Hunk, HunkId, PruneCandidate,
+    RepoStatus, StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::{CommandLog, CommandRecord, Source, bounded_text};
 use crate::diff::{hunk_patch, parse_unified};
-use crate::history as log_parse;
+use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
 use crate::stage_math;
 use crate::worktree;
@@ -417,18 +417,15 @@ impl GitPort for SubprocessGit {
         Ok(local)
     }
 
-    /// Runs `git log` for HEAD and reads its capped output in one go; streaming
-    /// comes with H2 (D32). Git reads a commit-graph when one exists, and this
-    /// never writes one. Runs with `run`, so nothing is logged (D28).
-    fn history(&self, root: &Path) -> Result<History, GitError> {
+    /// Starts `git log --topo-order` for HEAD and returns its walk, read a page
+    /// at a time (D32). `None` when HEAD is unborn. Git reads a commit-graph
+    /// when one exists and never writes one. Runs without logging (D28).
+    fn history_stream(&self, root: &Path) -> Result<Option<Box<dyn HistoryStream>>, GitError> {
         // An unborn HEAD makes `git log` fail; asking first keeps Git's wording out.
         let mut head = self.git(root);
         head.args(["rev-parse", "--verify", "-q", "HEAD"]);
         if Self::run_allowing(head, &[0, 1])?.is_empty() {
-            return Ok(History {
-                commits: Vec::new(),
-                unborn: true,
-            });
+            return Ok(None);
         }
         let mut log = self.git(root);
         log.args([
@@ -436,14 +433,22 @@ impl GitPort for SubprocessGit {
             "--no-color",
             "--no-show-signature",
             "--decorate=short",
-            &format!("-n{HISTORY_LIMIT}"),
+            "--topo-order",
             log_parse::FORMAT,
-        ]);
-        let commits = log_parse::parse_log(&Self::run(log)?)?;
-        Ok(History {
-            commits,
-            unborn: false,
-        })
+            "HEAD",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        // Nothing reads stderr while the walk is paused, so a full pipe would stall git.
+        .stderr(Stdio::null());
+        let mut child = log
+            .spawn()
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        let stdout = child.stdout.take().expect("stdout was piped");
+        Ok(Some(Box::new(LogStream {
+            child: Arc::new(Mutex::new(child)),
+            input: BufReader::new(stdout),
+        })))
     }
 
     fn worktrees(&self, root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
@@ -929,6 +934,72 @@ fn parse_header(header: &str, branch: &mut BranchInfo) {
             .next()
             .and_then(|b| b.trim_start_matches('-').parse().ok())
             .unwrap_or(0);
+    }
+}
+
+fn lock(child: &Mutex<Child>) -> MutexGuard<'_, Child> {
+    // A poisoned lock still holds the child, which must be stopped and reaped anyway.
+    child
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The `git log` child behind a history walk. Dropping the walk stops the
+/// child and reaps it.
+struct LogStream {
+    child: Arc<Mutex<Child>>,
+    input: BufReader<ChildStdout>,
+}
+
+impl LogStream {
+    /// Waits for git once its output has ended; a failed walk is an error.
+    fn finish(&self) -> Result<(), GitError> {
+        let status = lock(&self.child)
+            .wait()
+            .map_err(|e| GitError(format!("cannot wait for git: {e}")))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(GitError(format!("git log failed ({status})")))
+        }
+    }
+}
+
+impl HistoryStream for LogStream {
+    fn next_page(&mut self, limit: usize) -> Result<HistoryPage, GitError> {
+        let (commits, done) = log_parse::read_page(&mut self.input, limit)?;
+        if done {
+            self.finish()?;
+        }
+        Ok(HistoryPage {
+            commits,
+            done,
+            unborn: false,
+        })
+    }
+
+    fn skip_past(&mut self, oid: &str) -> Result<(), GitError> {
+        if log_parse::skip_past(&mut self.input, oid)? {
+            return Ok(());
+        }
+        self.finish()?;
+        Err(GitError(format!("commit {oid} is not in the history")))
+    }
+
+    fn canceller(&self) -> Canceller {
+        let child = Arc::clone(&self.child);
+        Arc::new(move || {
+            // The child may have exited already; then there is nothing to stop.
+            let _ = lock(&child).kill();
+        })
+    }
+}
+
+impl Drop for LogStream {
+    fn drop(&mut self) {
+        let mut child = lock(&self.child);
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 

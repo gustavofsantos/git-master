@@ -2,11 +2,12 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
-    BranchEntry, DiffSide, FileDiff, History, HookScope, HunkId, PruneCandidate, RepoStatus,
-    StageTarget, WorktreeEntry, WorktreeMode,
+    BranchEntry, DiffSide, FileDiff, HookScope, HunkId, PruneCandidate, RepoStatus, StageTarget,
+    WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::CommandLog;
+use crate::history::HistoryStream;
 use crate::hook::ConfigValue;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,9 +70,10 @@ pub trait GitPort: Send {
         ))
     }
 
-    /// The first `HISTORY_LIMIT` commits of HEAD, newest first. Never records
-    /// anything (D28).
-    fn history(&self, _root: &Path) -> Result<History, GitError> {
+    /// The walk of the commits of HEAD, newest first in topological order, or
+    /// `None` when HEAD is unborn. Starts a process and reads nothing yet.
+    /// Never records anything (D28).
+    fn history_stream(&self, _root: &Path) -> Result<Option<Box<dyn HistoryStream>>, GitError> {
         Err(GitError("history is not supported by this adapter".into()))
     }
 

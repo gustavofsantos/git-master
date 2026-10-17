@@ -60,9 +60,14 @@ pub enum CommandKind {
         message: String,
     },
     ListBranches,
-    /// Reads the history of HEAD: the first `HISTORY_LIMIT` commits. Never
+    /// Reads the first `HISTORY_PAGE` commits of HEAD, newest first. Never
     /// recorded in the command log (D28).
     LoadHistory,
+    /// Reads the next `HISTORY_PAGE` commits of HEAD after `after`, the last
+    /// commit the list holds. Never recorded in the command log (D28).
+    LoadHistoryPage {
+        after: String,
+    },
     /// A local branch, or a remote branch such as `origin/feature` (a local
     /// tracking branch is created for it when none exists).
     Checkout {

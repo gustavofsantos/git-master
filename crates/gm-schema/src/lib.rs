@@ -8,7 +8,7 @@ mod operation;
 mod status;
 
 pub use diff::{DiffLine, DiffSide, FileDiff, Hunk, HunkId, LineKind, StageTarget};
-pub use history::{CommitSummary, HISTORY_LIMIT, History, RefKind, RefLabel};
+pub use history::{CommitSummary, HISTORY_PAGE, History, RefKind, RefLabel};
 pub use hook::{
     CONTRACT_VERSION, HookFailure, HookInfo, HookInput, HookOutput, HookPayload, HookRepo,
     HookResult, HookScope, HookState, PREPARE_COMMIT,

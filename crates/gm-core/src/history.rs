@@ -1,9 +1,175 @@
-//! Parses the output of `git log` for the history list. Pure: the adapter runs
-//! git and passes the bytes here.
+//! The history of HEAD: the output of `git log` parsed into commits, and the
+//! walk read page by page. The parsing is pure and reads any `BufRead`; the
+//! adapter starts git and owns the process.
 
-use gm_schema::{CommitSummary, RefKind, RefLabel};
+use std::io::BufRead;
+use std::sync::Arc;
+
+use gm_schema::{CommitSummary, HISTORY_PAGE, OperationId, RefKind, RefLabel};
 
 use crate::GitError;
+
+/// Stops a walk from another thread: kills the git process behind it, so a
+/// read in progress ends. Callable from any thread.
+pub type Canceller = Arc<dyn Fn() + Send + Sync>;
+
+/// One page of the commits of HEAD, in walk order (newest first).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HistoryPage {
+    pub commits: Vec<CommitSummary>,
+    /// No commit follows this page.
+    pub done: bool,
+    /// HEAD has no commits yet. The page is then empty and done.
+    pub unborn: bool,
+}
+
+/// The walk of HEAD, read a page at a time. Between pages git waits on a
+/// full pipe, so it does no work the list has not asked for (D32).
+pub trait HistoryStream: Send {
+    /// The next commits, at most `limit`.
+    fn next_page(&mut self, limit: usize) -> Result<HistoryPage, GitError>;
+
+    /// Reads past `oid`, which is dropped with the commits before it. Keyset
+    /// resume: no `--skip`. Fails when the walk ends without `oid`.
+    fn skip_past(&mut self, oid: &str) -> Result<(), GitError>;
+
+    /// Stops the walk from another thread; a read in progress then fails.
+    fn canceller(&self) -> Canceller;
+}
+
+/// Reads up to `limit` commits. Returns them and whether the walk ended.
+pub fn read_page<R: BufRead>(
+    input: &mut R,
+    limit: usize,
+) -> Result<(Vec<CommitSummary>, bool), GitError> {
+    let mut commits = Vec::new();
+    while commits.len() < limit {
+        match read_record(input)? {
+            Some(commit) => commits.push(commit),
+            None => return Ok((commits, true)),
+        }
+    }
+    Ok((commits, at_end(input)?))
+}
+
+/// Reads commits until `oid` has been read. Returns whether it was found.
+pub fn skip_past<R: BufRead>(input: &mut R, oid: &str) -> Result<bool, GitError> {
+    while let Some(commit) = read_record(input)? {
+        if commit.oid == oid {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The next record, or `None` at the end of the output. Git ends the output
+/// with a newline after the last record, which is not a record.
+fn read_record<R: BufRead>(input: &mut R) -> Result<Option<CommitSummary>, GitError> {
+    loop {
+        let mut raw = Vec::new();
+        let read = input
+            .read_until(RECORD_END as u8, &mut raw)
+            .map_err(|e| GitError(format!("cannot read git's output: {e}")))?;
+        if read == 0 {
+            return Ok(None);
+        }
+        if raw.last() != Some(&(RECORD_END as u8)) {
+            if raw.iter().all(u8::is_ascii_whitespace) {
+                return Ok(None);
+            }
+            return Err(GitError(
+                "history output ends in the middle of a commit".into(),
+            ));
+        }
+        raw.pop();
+        let text = String::from_utf8_lossy(&raw);
+        let record = text.trim_start_matches('\n');
+        if record.is_empty() {
+            continue;
+        }
+        return parse_record(record).map(Some);
+    }
+}
+
+/// Whether the walk has no more commits. Waits for git's next byte, and
+/// consumes the whitespace that separates records.
+fn at_end<R: BufRead>(input: &mut R) -> Result<bool, GitError> {
+    loop {
+        let buffered = input
+            .fill_buf()
+            .map_err(|e| GitError(format!("cannot read git's output: {e}")))?;
+        if buffered.is_empty() {
+            return Ok(true);
+        }
+        if buffered.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            return Ok(false);
+        }
+        let len = buffered.len();
+        input.consume(len);
+    }
+}
+
+/// One request for a page, run on a thread of its own. The walk comes back in
+/// the report, so the engine can read the next page from it.
+pub struct HistoryJob {
+    pub id: OperationId,
+    /// `None` when HEAD is unborn: there is no walk to read.
+    pub stream: Option<Box<dyn HistoryStream>>,
+    /// Read past this commit first. `None` continues where the stream stands.
+    pub after: Option<String>,
+}
+
+/// What a job answers. `stream` is `None` only for an unborn HEAD.
+pub enum HistoryOutcome {
+    Page {
+        stream: Option<Box<dyn HistoryStream>>,
+        page: HistoryPage,
+    },
+    Failed(String),
+}
+
+pub struct HistoryReport {
+    pub id: OperationId,
+    pub outcome: HistoryOutcome,
+}
+
+impl HistoryJob {
+    /// Reads one page. A walk stopped by its canceller fails here, and its
+    /// report is dropped by the engine, which asked for it to stop.
+    #[must_use]
+    pub fn run(self) -> HistoryReport {
+        let outcome = match self.stream {
+            None => HistoryOutcome::Page {
+                stream: None,
+                page: HistoryPage {
+                    commits: Vec::new(),
+                    done: true,
+                    unborn: true,
+                },
+            },
+            Some(stream) => read_job(stream, self.after.as_deref()),
+        };
+        HistoryReport {
+            id: self.id,
+            outcome,
+        }
+    }
+}
+
+fn read_job(mut stream: Box<dyn HistoryStream>, after: Option<&str>) -> HistoryOutcome {
+    let page = match after {
+        Some(oid) => stream.skip_past(oid),
+        None => Ok(()),
+    }
+    .and_then(|()| stream.next_page(HISTORY_PAGE));
+    match page {
+        Ok(page) => HistoryOutcome::Page {
+            stream: Some(stream),
+            page,
+        },
+        Err(error) => HistoryOutcome::Failed(error.0),
+    }
+}
 
 /// The format `git log` is asked for: five fields per commit, separated by
 /// the unit separator (0x1f), and each commit ended by the record separator
@@ -13,29 +179,6 @@ pub const FORMAT: &str = "--format=%H%x1f%h%x1f%at%x1f%D%x1f%s%x1e";
 const FIELD_SEP: char = '\u{1f}';
 const RECORD_END: char = '\u{1e}';
 const FIELDS: usize = 5;
-
-/// Parses the records of `FORMAT`, in the order git printed them.
-pub fn parse_log(raw: &[u8]) -> Result<Vec<CommitSummary>, GitError> {
-    let text = String::from_utf8_lossy(raw);
-    let text = text.trim_end_matches('\n');
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
-    let Some(records) = text.strip_suffix(RECORD_END) else {
-        return Err(GitError(
-            "history output ends in the middle of a commit".into(),
-        ));
-    };
-    let mut commits = Vec::new();
-    for record in records.split(RECORD_END) {
-        let record = record.trim_start_matches('\n');
-        if record.is_empty() {
-            continue;
-        }
-        commits.push(parse_record(record)?);
-    }
-    Ok(commits)
-}
 
 fn parse_record(record: &str) -> Result<CommitSummary, GitError> {
     let fields: Vec<&str> = record.splitn(FIELDS, FIELD_SEP).collect();
@@ -90,6 +233,11 @@ fn label(name: &str, kind: RefKind) -> RefLabel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every commit of `raw`, read in one page.
+    fn parse_log(raw: &[u8]) -> Result<Vec<CommitSummary>, GitError> {
+        read_page(&mut std::io::Cursor::new(raw), usize::MAX).map(|(commits, _)| commits)
+    }
 
     fn record(fields: &[&str]) -> String {
         format!("\n{}{RECORD_END}", fields.join(&FIELD_SEP.to_string()))
