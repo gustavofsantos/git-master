@@ -485,7 +485,8 @@ impl DiffPane {
             let range = changed_keys_between(&self.rows, self.diffs(), visual.anchor, row);
             self.selection = Selection::with_range(&visual.base, range);
         }
-        self.scroll.scroll_to_item(row, ScrollStrategy::Center);
+        self.scroll
+            .scroll_to_item(self.cursor_ix(), ScrollStrategy::Center);
         cx.notify();
     }
 
