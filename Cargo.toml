@@ -19,6 +19,7 @@ git2 = "0.20"
 proptest = "1"
 sha2 = "0.10"
 tempfile = "3"
+notify = "8.2"
 gm-schema = { path = "crates/gm-schema" }
 gm-core = { path = "crates/gm-core" }
 gm-ui = { path = "crates/gm-ui" }
