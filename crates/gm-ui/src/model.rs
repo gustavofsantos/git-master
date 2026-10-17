@@ -408,7 +408,8 @@ fn event_id(event: &Event) -> OperationId {
         Event::StatusLoaded { id, .. }
         | Event::OperationChanged { id, .. }
         | Event::DiffLoaded { id, .. }
-        | Event::Committed { id, .. } => *id,
+        | Event::Committed { id, .. }
+        | Event::BranchesLoaded { id, .. } => *id,
     }
 }
 
