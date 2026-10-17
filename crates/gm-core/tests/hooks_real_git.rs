@@ -715,3 +715,59 @@ fn a_user_hook_still_runs_while_a_repo_hook_awaits_approval() {
     let team_hook = listed.iter().find(|h| h.name == "team").unwrap();
     assert_eq!(team_hook.state, HookState::NeedsApproval);
 }
+
+#[test]
+fn a_hook_included_by_includeif_for_this_repository_is_listed_and_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    repo(repo_dir.path());
+    let answer_cmd = script(dir.path(), "inc", &answer("MSG=from-include"));
+    let included = dir.path().join("work.gitconfig");
+    std::fs::write(
+        &included,
+        format!("[gitmaster \"prepare-commit.x\"]\n\tcommand = {answer_cmd}\n"),
+    )
+    .unwrap();
+    // The hook lives in a file the global config includes for this repository only.
+    let global = dir.path().join("global.gitconfig");
+    std::fs::write(
+        &global,
+        format!(
+            "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
+            repo_dir.path().display(),
+            included.display()
+        ),
+    )
+    .unwrap();
+    let approvals = dir.path().join("approvals.json");
+    let git = SubprocessGit {
+        global_config: Some(global.clone()),
+        ..SubprocessGit::default()
+    };
+    let handle = spawn_with(Box::new(git), ApprovalStore::at(approvals.clone()));
+    let events = handle.subscribe();
+    let h = Harness {
+        handle,
+        events,
+        repo: repo_dir.path().to_path_buf(),
+        global,
+        approvals,
+        _dirs: vec![repo_dir, dir],
+    };
+    let open = h.handle.dispatch(
+        Actor::Human,
+        CommandKind::OpenRepo {
+            path: h.repo.display().to_string(),
+        },
+    );
+    h.until_done(open);
+
+    let listed = h.list();
+    let hook = listed.iter().find(|h| h.name == "x").unwrap();
+    assert_eq!(hook.scope, HookScope::User);
+    assert_eq!(hook.state, HookState::Enabled);
+
+    let id = h.run();
+    let events = h.until_done(id);
+    assert_eq!(finished(&events).0, "from-include");
+}
