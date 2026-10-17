@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=GitMaster
+GenericName=Git client
+Comment=Native Git client with branch stacking and hooks
+Exec=gitmaster
+Icon=gitmaster
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=git;stack;branch;commit;diff;
+StartupWMClass=gitmaster
