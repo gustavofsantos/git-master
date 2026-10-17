@@ -82,10 +82,11 @@ Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu 
 2. **Registro único de ações** (feito, em `gm-ui/src/action_registry.rs`; pré-requisito de 3 e 4; o stage por linha do D24 ficou fora dele).
    - Cada ação tem id estável, título, atalho, argumentos tipados (branch, arquivo) e um predicado "habilitada agora?" que devolve o motivo quando não está. Teclado, menus e paleta leem do mesmo registro, para nunca divergirem; o que o motor ainda não faz entra como ação desabilitada com o motivo "not available yet".
    - Rodar uma ação despacha o mesmo `CommandKind` de hoje, com `Actor::Human`. Nada de caminho paralelo.
-3. **Menus contextuais** (a fazer).
-   - Clique direito (e tecla de menu) em branch da sidebar, arquivo da lista, e depois commit e stash. Itens vêm do registro; atalho à direita; separadores por grupo; item destrutivo em vermelho e com confirmação.
-   - Menu de branch do desenho: Checkout, New child branch, Create worktree, Restack this stack, Push with lease, Copy branch name, Rename, Delete. Só Checkout e Copy branch name existem hoje; os demais aparecem desabilitados até a sua fatia.
-   - Menu de arquivo: Stage/Unstage, Discard changes (com confirmação), Copy path, Reveal in file manager.
+3. **Menus contextuais** (feito para branch e arquivo; commit e stash continuam a fazer).
+   - Feito: clique direito em branch da sidebar e em arquivo da lista; `shift-F10` abre o menu do arquivo selecionado e `Esc` fecha. Itens vêm do registro (`context_menu.rs`); atalho à direita; separadores por grupo; quando o item não roda, o motivo aparece no lugar do atalho; item destrutivo em vermelho e pede confirmação antes de rodar.
+   - Menu de branch: Checkout, New child branch, Create worktree, Restack this stack, Push with lease, Copy branch name, Rename, Delete. Só Checkout e Copy branch name rodam; os demais aparecem desabilitados com "Not available yet".
+   - Menu de arquivo: Stage file e Unstage file (cada um desabilitado quando não há o que fazer), Discard changes, Copy file path, Reveal in file manager. Discard changes fica desabilitado: o motor só descarta chunk (`DiscardHunk`), e nenhum comando novo entrou em gm-core.
+   - Lacunas: menus de commit e de stash; o menu de branch não abre pelo teclado (a sidebar não tem foco de lista) e não fecha com `Esc`; a confirmação do Discard não é exercitada enquanto o item está desabilitado; Reveal não é coberto pelo smoke (um clique abriria o gerenciador de arquivos) e oferece o caminho mesmo quando o arquivo sumiu do disco; a tecla de menu usa a posição do ponteiro, não a da linha.
 4. **Paleta de comandos** (a fazer).
    - Abre com `⌘K` (`Ctrl+K` no Linux), campo único com busca difusa; seções "Actions", "Worktrees" e "Branches" conforme o resultado; trecho casado em destaque; contagem de resultados.
    - Teclado: setas navegam, Enter executa, Tab escolhe o argumento da ação (ex.: qual branch), Esc fecha; rodapé com as dicas.
