@@ -116,6 +116,10 @@ Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem 
 
 ## Fatia 3: histórico e branches (visão por nome)
 
+Ordem definida pelo autor em 2026-10-16: esta fatia, junto com a visão de diff (abaixo), é o próximo trabalho depois de terminar a 1c (incluindo a atualização automática) e a interface da fatia 2. O desenho da página de histórico e da visão de diff vem do canvas; o autor traz as pranchas quando começar.
+
+- Página de histórico (destino "History" da sidebar, hoje placeholder): lista de commits com o grafo, detalhe do commit selecionado e os arquivos dele.
+- Visão de diff de um commit: a mesma visão de diff da Working Copy (cabeçalho, resumo, hunks), somente leitura, sem botões de stage; navegação entre arquivos do commit.
 - Grafo com lanes, escopo configurável, busca por conteúdo.
 - Sidebar na visão por nome.
 - Performance com commit-graph.
