@@ -4,7 +4,7 @@ Native desktop Git client in Rust + GPUI, open source, sold as a premium product
 
 ## State
 
-Slices 0, 1 and 1b are done; slice 1c is in progress (simpler Working Copy and action registry done; title bar, automatic refresh, context menus and command palette left) and slice 2 has its backend (`prepare-commit`, no UI yet). `crates/`: `gm-schema`, `gm-core`, `gm-ui`, `gm-mcp`, `gitmaster`. `make check` is the gate; `make run ARGS=<repo>` opens the window; `make install` installs it with its icon and desktop entry. Pushing a `v*` tag runs `.github/workflows/release.yml`, which publishes the archives `install.sh` downloads. `docs/07-roadmap.md` marks what is done.
+Slices 0, 1 and 1b are done; slice 1c is in progress (simpler Working Copy and action registry done; automatic refresh, branch and file context menus and command palette done; title bar and commit and stash menus left) and slice 2 has its backend (`prepare-commit`, no UI yet). `crates/`: `gm-schema`, `gm-core`, `gm-ui`, `gm-mcp`, `gitmaster`. `make check` is the gate; `make run ARGS=<repo>` opens the window; `make install` installs it with its icon and desktop entry. Pushing a `v*` tag runs `.github/workflows/release.yml`, which publishes the archives `install.sh` downloads. `docs/07-roadmap.md` marks what is done.
 
 - The design canvas (mockups, identity boards) is linked in `docs/README.md`.
 - Read `docs/README.md`, then `docs/00-visao-e-principios.md` and `docs/01-decisoes-e-questoes-abertas.md`.
