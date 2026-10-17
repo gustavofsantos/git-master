@@ -3,6 +3,7 @@
 //! the engine reports.
 
 mod action_registry;
+mod app_settings;
 mod assets;
 mod branch_menu;
 mod branches;

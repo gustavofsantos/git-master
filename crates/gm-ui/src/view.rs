@@ -19,10 +19,12 @@ use gpui::{
 use crate::action_registry::{
     self, Action, Args, Context as ActionContext, Effect, HookCtx, Reason,
 };
+use crate::app_settings::{self, AppSettings};
 use crate::branch_menu::BranchMenu;
 use crate::composer::{Composer, ComposerEvent};
 use crate::context_menu::ContextMenu;
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
+use crate::diff_rows::Layout;
 use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
 use crate::model::{Model, Switched};
@@ -103,6 +105,9 @@ pub struct StatusView {
     recent_store: Option<Arc<recent::Store>>,
     /// Numbers the saves so an older one never lands after a newer one.
     recent_generation: u64,
+    /// The app's preferences file (D40); `None` when there is no home directory.
+    settings_store: Option<Arc<app_settings::Store>>,
+    settings_generation: u64,
     /// The open that starts the window, until it succeeds or fails.
     pub(crate) startup: Option<Startup>,
     /// Set while the window shows the welcome screen instead of a repository.
@@ -158,6 +163,15 @@ impl StatusView {
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
         let commit_diff_pane = cx.new(DiffPane::read_only);
+        // The saved preferences are read here, before the first frame, so the
+        // commit diff opens in the layout the user last chose (D40).
+        let settings_store =
+            app_settings::default_file().map(|file| Arc::new(app_settings::Store::new(file)));
+        let settings = settings_store
+            .as_ref()
+            .map(|store| store.load())
+            .unwrap_or_default();
+        commit_diff_pane.update(cx, |pane, cx| pane.set_layout(settings.diff_layout, cx));
         let mut subscriptions = vec![
             cx.observe(&branch_filter, |this, filter, cx| {
                 this.on_branch_filter_changed(&filter, cx);
@@ -233,6 +247,8 @@ impl StatusView {
             recents,
             recent_store,
             recent_generation: 0,
+            settings_store,
+            settings_generation: 0,
             startup: Some(Startup {
                 id: open,
                 may_fall_back,
@@ -445,6 +461,25 @@ impl StatusView {
         self.model.history.request_page(id);
     }
 
+    /// Saves the commit diff's layout in the background (D40). The choice takes
+    /// effect on screen before the file is written.
+    fn save_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        let Some(store) = self.settings_store.clone() else {
+            return;
+        };
+        self.settings_generation += 1;
+        let generation = self.settings_generation;
+        let settings = AppSettings {
+            diff_layout: layout,
+        };
+        cx.background_spawn(async move {
+            if let Err(error) = store.save(settings, generation) {
+                eprintln!("gitmaster: could not save the settings: {error}");
+            }
+        })
+        .detach();
+    }
+
     /// Puts `root` first in the recent list and saves the list in the background.
     fn remember(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.recents.push(root);
@@ -500,7 +535,7 @@ impl StatusView {
             DiffPaneEvent::StepFile { forward } => self.step_commit_file(*forward, cx),
             DiffPaneEvent::LeaveCommit => self.close_commit_file(cx),
             // The choice is saved by the persistence commit (D40).
-            DiffPaneEvent::LayoutChosen(_) => {}
+            DiffPaneEvent::LayoutChosen(layout) => self.save_layout(*layout, cx),
         }
     }
 
