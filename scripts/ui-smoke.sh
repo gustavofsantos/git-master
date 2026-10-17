@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -58,6 +58,9 @@ DETAIL_PANEL_CROP="360x700+920+88"           # the commit detail panel, window-r
 COMMIT_FILE_X=1082; COMMIT_FILE_Y=505        # api/new.rs, the first file row of the feat commit
 SPLIT_FILE_X=1082; SPLIT_CALC_Y=449          # src/calc.rs, the file row of the split fixture's commit
 LAYOUT_SPLIT_X=1320; LAYOUT_UNIFIED_X=1257; LAYOUT_Y=196   # "Split" and "Unified" in the diff header
+WORK_LAYOUT_SPLIT_X=1320; WORK_LAYOUT_Y=120               # "Split" in the Working Copy diff header
+SPLIT_OLD_CHECK_X=797; SPLIT_NEW_CHECK_X=1107             # gutter checkboxes of the split cells (old, new)
+MOD_ENTRY_Y=217                                           # src/ledger/mod.rs: the -/+ pair row (entry, ledger)
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -66,6 +69,7 @@ XPID=""
 APP_PID=""
 RUN_DIR=""
 LABEL=""
+LAYOUT=unified   # the diff layout of this run: "-split" scenarios seed it to split
 
 cleanup() {
   if [ -n "$APP_PID" ]; then
@@ -187,15 +191,17 @@ stop_app() {
 # Full screen, cropped to the window, saved as <scenario>-<theme>.png.
 # Fails if the window is (almost) all black.
 shoot() {
-  # $1: output file
+  # $1: output file. An "-in-split" variant writes its own files, so both layouts keep theirs.
+  local out="$1"
+  if [ "$LAYOUT" = split ]; then out="${out%.png}-in-split.png"; fi
   # lavapipe sometimes shows an unpainted frame: a 1 px mouse nudge forces a redraw.
   xdotool mousemove_relative 1 0
   sleep 0.7
   scrot -o "$RUN_DIR/full.png"
-  convert "$RUN_DIR/full.png" -crop "${WIN_W}x${WIN_H}+${WIN_X}+${WIN_Y}" +repage "$1"
+  convert "$RUN_DIR/full.png" -crop "${WIN_W}x${WIN_H}+${WIN_X}+${WIN_Y}" +repage "$out"
   local mean
-  mean="$(convert "$1" -format '%[fx:mean]' info:)"
-  awk -v m="$mean" 'BEGIN { exit !(m > 0.03) }' || fail "screenshot is black (mean=$mean): $1"
+  mean="$(convert "$out" -format '%[fx:mean]' info:)"
+  awk -v m="$mean" 'BEGIN { exit !(m > 0.03) }' || fail "screenshot is black (mean=$mean): $out"
 }
 
 staged_names() { git -C "$RUN_DIR/repo" diff --cached --name-only; }
@@ -204,8 +210,10 @@ staged_names() { git -C "$RUN_DIR/repo" diff --cached --name-only; }
 scenario_a() {
   local repo="$RUN_DIR/repo" theme="$1" cached added expected
   xdotool mousemove "$NAME_X" "$ROW_TOTAL_Y" click 1; sleep 1
-  xdotool mousemove "$DIFF_CHECK_X" "$DIFF_LINE_A_Y" click 1; sleep 0.7
-  xdotool mousemove "$DIFF_CHECK_X" "$DIFF_LINE_B_Y" click 1; sleep 0.7
+  local check_x="$DIFF_CHECK_X"
+  if [ "$LAYOUT" = split ]; then check_x="$SPLIT_NEW_CHECK_X"; fi
+  xdotool mousemove "$check_x" "$DIFF_LINE_A_Y" click 1; sleep 0.7
+  xdotool mousemove "$check_x" "$DIFF_LINE_B_Y" click 1; sleep 0.7
   xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y"; sleep 0.5
   xdotool key s; sleep 1.5
 
@@ -546,6 +554,52 @@ scenario_i() {
     || fail "total.rs still has unstaged changes after Stage Chunk"
 
   shoot "$SMOKE_OUT/i-stage-chunk-$theme.png"
+}
+
+# --- 3g2. Stage in the split layout of the Working Copy -----------------------
+# mod.rs has a -/+ pair (entry, ledger) and a surplus + (audit): the new side of
+# the audit row has an empty old side. total.rs has two pure insertions.
+scenario_g_stage_split() {
+  local repo="$RUN_DIR/repo" theme="$1" cached
+  xdotool mousemove "$NAME_X" "$ROW_MOD_Y" click 1; sleep 1
+  xdotool mousemove "$WORK_LAYOUT_SPLIT_X" "$WORK_LAYOUT_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/g-stage-split-split-$theme.png"
+
+  # The removed line of the pair alone: the warning shows and nothing is staged yet.
+  xdotool mousemove "$SPLIT_OLD_CHECK_X" "$MOD_ENTRY_Y" click 1; sleep 0.8
+  shoot "$SMOKE_OUT/g-stage-split-half-pair-$theme.png"
+  # The warning bar at the foot of the pane is new pixels: it must differ from the split view's foot.
+  convert "$SMOKE_OUT/g-stage-split-split-$theme.png" -crop 620x40+660+735 +repage "$RUN_DIR/foot-before.png"
+  convert "$SMOKE_OUT/g-stage-split-half-pair-$theme.png" -crop 620x40+660+735 +repage "$RUN_DIR/foot-after.png"
+  differing="$(compare -metric AE "$RUN_DIR/foot-before.png" "$RUN_DIR/foot-after.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare the warning bar: $differing"
+  [ "$differing" -gt 3000 ] || fail "the half-pair warning bar did not appear ($differing pixels changed)"
+  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y"; sleep 0.5
+  xdotool key s; sleep 1
+  git -C "$repo" diff --cached --quiet || fail "the first s staged half of a pair (D24 asks twice)"
+  xdotool key s; sleep 1.5
+  cached="$(git -C "$repo" diff --cached -U0 --no-color -- src/ledger/mod.rs | sed -n '/^@@/,$p' | grep '^[-+]' || true)"
+  [ "$cached" = "-pub mod entry;" ] || fail "the second s did not stage the removed line alone. got:
+$cached"
+  shoot "$SMOKE_OUT/g-stage-split-pair-applied-$theme.png"
+
+  # One added line of total.rs from its right cell, then the rest by Stage Chunk.
+  xdotool mousemove "$NAME_X" "$ROW_TOTAL_Y" click 1; sleep 1
+  xdotool mousemove "$SPLIT_NEW_CHECK_X" "$DIFF_LINE_A_Y" click 1; sleep 0.7
+  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y"; sleep 0.5
+  xdotool key s; sleep 1.5
+  cached="$(git -C "$repo" diff --cached -U0 --no-color -- src/ledger/total.rs | sed -n '/^@@/,$p' | grep '^[-+]' || true)"
+  [ "$cached" = "+        // smoke: first" ] || fail "the split checkbox did not stage its line alone. got:
+$cached"
+
+  xdotool mousemove "$CHUNK_STAGE_X" "$CHUNK_Y" click 1; sleep 1.5
+  cached="$(git -C "$repo" diff --cached -U0 --no-color -- src/ledger/total.rs | sed -n '/^@@/,$p' | grep '^[-+]' || true)"
+  grep -qF -- '+        // smoke: first' <<<"$cached" || fail "Stage Chunk lost the first line"
+  grep -qF -- '+        // smoke: second' <<<"$cached" || fail "Stage Chunk did not stage the second line"
+  git -C "$repo" diff --quiet -- src/ledger/total.rs \
+    || fail "total.rs still has unstaged changes after Stage Chunk in the split view"
+  shoot "$SMOKE_OUT/g-stage-split-chunk-$theme.png"
 }
 
 # --- 3j. Discard one chunk: Cancel keeps it, Discard reverts it ----------------
@@ -1001,16 +1055,27 @@ scenario_v() {
 }
 
 run_scenario() {
-  # $1: scenario name, $2: theme
-  local name="$1" theme="$2"
+  # $1: scenario name, $2: theme. A name ending in -in-split runs the scenario
+  # with the split layout saved as the user's choice (D40).
+  local name="$1" theme="$2" base
+  base="${name%-in-split}"
+  LAYOUT=unified
+  if [ "$base" != "$name" ]; then LAYOUT=split; fi
   LABEL="$name-$theme"
   RUN_DIR="$RUN_ROOT/$LABEL"
   rm -rf "$RUN_DIR"
-  mkdir -p "$RUN_DIR" "$RUN_DIR/xdg/gitmaster"
+  mkdir -p "$RUN_DIR" "$RUN_DIR/xdg/gitmaster" "$RUN_DIR/xdg-config/gitmaster"
+  if [ "$LAYOUT" = split ]; then
+    printf '{"diff_layout": "split"}\n' > "$RUN_DIR/xdg-config/gitmaster/settings.json"
+  fi
   : > "$RUN_DIR/gitconfig"
   make_repo "$RUN_DIR/repo"
   make_other_repo "$RUN_DIR/billing-api"
-  case "$name" in
+  case "$base" in
+    g-stage-split)
+      # A -/+ pair (entry becomes ledger) and a surplus + (audit) in mod.rs.
+      printf 'pub mod total;\npub mod ledger;\npub mod audit;\n' > "$RUN_DIR/repo/src/ledger/mod.rs"
+      ;;
     n-typed-text-kept | o-suggestion-replace)
       write_hook "$RUN_DIR/hook.sh" "feat: from hook" 0
       printf '[gitmaster "prepare-commit.llm"]\n\tcommand = sh %s\n' "$RUN_DIR/hook.sh" > "$RUN_DIR/gitconfig"
@@ -1024,44 +1089,44 @@ run_scenario() {
       git -C "$RUN_DIR/repo" config gitmaster.prepare-commit.team.command "sh $RUN_DIR/hook.sh"
       ;;
   esac
-  if [ "$name" = g-switch-branch ]; then prepare_branches "$RUN_DIR/repo"; fi
-  if [ "$name" = s-worktrees ]; then git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"; fi
-  if [ "$name" = l-branch-menu ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
-  if [ "$name" = t-create-worktree ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
-  if [ "$name" = v-lock-prune-worktree ]; then
+  if [ "$base" = g-switch-branch ]; then prepare_branches "$RUN_DIR/repo"; fi
+  if [ "$base" = s-worktrees ]; then git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"; fi
+  if [ "$base" = l-branch-menu ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
+  if [ "$base" = t-create-worktree ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
+  if [ "$base" = v-lock-prune-worktree ]; then
     # A live worktree to lock, and one whose folder is gone: a stale record to prune.
     git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"
     git -C "$RUN_DIR/repo" worktree add -q -b gone-branch "$RUN_DIR/repo-gone"
     rm -rf "$RUN_DIR/repo-gone"
   fi
-  if [ "$name" = u-remove-worktree ]; then
+  if [ "$base" = u-remove-worktree ]; then
     # A dirty worktree: the removal is blocked until the confirmation is ticked.
     git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"
     printf 'scratch\n' > "$RUN_DIR/repo-feature/scratch.txt"
   fi
-  if [ "$name" = h-history ]; then
+  if [ "$base" = h-history ]; then
     # Two commits beyond the first, so the list has rows to show. Only the index
     # is committed, so the working changes stay as make_repo left them.
     git -C "$RUN_DIR/repo" commit -q --allow-empty -m "smoke: history one"
     git -C "$RUN_DIR/repo" commit -q --allow-empty -m "smoke: history two"
   fi
-  if [ "$name" = h-history-unborn ]; then
+  if [ "$base" = h-history-unborn ]; then
     scenario_history_unborn "$theme"
     echo "PASS  $LABEL"
     return
   fi
-  if [ "$name" = h-history-refresh ]; then
+  if [ "$base" = h-history-refresh ]; then
     scenario_history_refresh "$theme"
     echo "PASS  $LABEL"
     return
   fi
-  if [ "$name" = h-commit-detail ]; then
+  if [ "$base" = h-commit-detail ]; then
     make_detail_repo "$RUN_DIR/detail"
     scenario_commit_detail "$theme"
     echo "PASS  $LABEL"
     return
   fi
-  if [ "$name" = h-commit-diff ]; then
+  if [ "$base" = h-commit-diff ]; then
     # An unstaged change, so that a stage key leaking into the diff would show.
     make_detail_repo "$RUN_DIR/detail"
     printf 'unstaged\n' >> "$RUN_DIR/detail/src/a.rs"
@@ -1069,13 +1134,13 @@ run_scenario() {
     echo "PASS  $LABEL"
     return
   fi
-  if [ "$name" = h-commit-diff-split ]; then
+  if [ "$base" = h-commit-diff-split ]; then
     make_split_repo "$RUN_DIR/detail"
     scenario_commit_diff_split "$theme"
     echo "PASS  $LABEL"
     return
   fi
-  if [ "$name" = h-welcome ]; then
+  if [ "$base" = h-welcome ]; then
     # Starts with no recent list at all; scenario_h makes its own launches.
     scenario_h "$theme"
     echo "PASS  $LABEL"
@@ -1084,7 +1149,7 @@ run_scenario() {
   # Most recent first: the app opens repo, which moves it to the top.
   printf '[\n  "%s",\n  "%s"\n]\n' "$RUN_DIR/billing-api" "$RUN_DIR/repo" > "$RUN_DIR/xdg/gitmaster/recent.json"
   launch_app "$theme" "$RUN_DIR/repo"
-  case "$name" in
+  case "$base" in
     a-stage-lines) scenario_a "$theme" ;;
     b-stage-file)  scenario_b "$theme" ;;
     c-commit)      scenario_c "$theme" ;;
@@ -1094,6 +1159,7 @@ run_scenario() {
     g-switch-branch) scenario_g "$theme" ;;
     h-welcome) ;;
     i-stage-chunk) scenario_i "$theme" ;;
+    g-stage-split) scenario_g_stage_split "$theme" ;;
     j-discard-chunk) scenario_j "$theme" ;;
     k-file-menu) scenario_k "$theme" ;;
     l-branch-menu) scenario_l "$theme" ;;
