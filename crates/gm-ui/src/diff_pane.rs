@@ -190,6 +190,9 @@ impl DiffPane {
         self.visual = None;
         self.pending = None;
         self.discard_armed = None;
+        if !same_file {
+            self.scroll_columns = 0;
+        }
         if same_file {
             self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
         } else {
@@ -223,6 +226,7 @@ impl DiffPane {
         }
         self.side = side;
         self.rebuild_rows();
+        self.scroll_columns = 0;
         self.selection.clear();
         self.visual = None;
         self.pending = None;
