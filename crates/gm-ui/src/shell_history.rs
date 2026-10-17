@@ -1,23 +1,28 @@
-//! The history page (docs/07, H1 and H2): the commits of HEAD, newest first, one
+//! The history page (docs/07, H1 to H3): the commits of HEAD, newest first, one
 //! 48 px row each, with its ref chips, subject, short id and relative time. The
-//! next page loads as the list nears its end; a click selects a row by its id.
-//! Scope, graph and search come in later sub-slices.
+//! next page loads as the list nears its end; a click selects a row by its id
+//! and fills the detail panel on the right. Scope, graph and search come in
+//! later sub-slices.
 
 use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gm_schema::{CommitSummary, RefKind, RefLabel};
+use gm_schema::{
+    Actor, Change, CommandKind, CommitDetail, CommitFile, CommitSummary, RefKind, RefLabel,
+};
 use gpui::{
-    Context, Div, FontWeight, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*, px,
-    uniform_list,
+    Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*,
+    px, uniform_list,
 };
 
-use crate::model::HistoryList;
+use crate::model::{CommitPane, HistoryList};
+use crate::shell_list::change_letter;
 use crate::theme;
 use crate::view::StatusView;
 
 const ROW_HEIGHT: f32 = 48.;
 const TIME_WIDTH: f32 = 96.;
+const DETAIL_WIDTH: f32 = 360.;
 /// The next page is asked for when the rows drawn reach this close to the end.
 const PAGE_PREFETCH: usize = 20;
 
@@ -25,7 +30,7 @@ impl StatusView {
     /// The page for the main area: a header, then the list, or the one line
     /// that says why there is no list.
     pub(crate) fn history_page(&self, cx: &mut Context<Self>) -> Div {
-        let body = match &self.model.history {
+        let list = match &self.model.history {
             HistoryList::Idle => message("Loading history…"),
             HistoryList::Failed => {
                 message("The history could not be read. The status bar says why.")
@@ -65,7 +70,23 @@ impl StatusView {
                     .child(div().font_weight(FontWeight::MEDIUM).child("History"))
                     .child(div().text_xs().text_color(theme::muted()).child(count)),
             )
-            .child(body)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_row()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .child(list),
+                    )
+                    .child(commit_panel(&self.model.commit)),
+            )
     }
 }
 
@@ -202,10 +223,232 @@ fn ref_chip(label: &RefLabel) -> Div {
         .child(label.name.clone())
 }
 
+/// The detail panel (H3): the selected commit's subject, body, hash, author,
+/// date, parents and files. Read-only; the rows are not clickable yet.
+fn commit_panel(pane: &CommitPane) -> Stateful<Div> {
+    let content = match pane {
+        CommitPane::Empty => message_text("Select a commit to see its details.").into_any_element(),
+        CommitPane::Loading(_) => message_text("Loading commit…").into_any_element(),
+        CommitPane::Failed(text) => div()
+            .text_color(theme::error())
+            .child(text.clone())
+            .into_any_element(),
+        CommitPane::Shown(detail) => commit_detail(detail).into_any_element(),
+    };
+    div()
+        .id("commit-detail")
+        .flex_none()
+        .w(px(DETAIL_WIDTH))
+        .h_full()
+        .min_h(px(0.))
+        .overflow_y_scroll()
+        .border_l_1()
+        .border_color(theme::hairline())
+        .bg(theme::panel())
+        .p_4()
+        .flex()
+        .flex_col()
+        .gap_3p5()
+        .text_sm()
+        .child(content)
+}
+
+fn message_text(text: &'static str) -> Div {
+    div().text_color(theme::muted()).child(text)
+}
+
+fn commit_detail(detail: &CommitDetail) -> Div {
+    let mut column = div()
+        .flex()
+        .flex_col()
+        .gap_3p5()
+        .child(section_label("SELECTED COMMIT"))
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_base()
+                .child(detail.subject.clone()),
+        );
+    if !detail.body.is_empty() {
+        column = column.child(body_block(&detail.body));
+    }
+    column
+        .child(
+            div()
+                .grid()
+                .grid_cols(2)
+                .gap_y_2()
+                .text_xs()
+                .child(field_label("Hash"))
+                .child(
+                    div()
+                        .font_family(theme::code_font())
+                        .child(detail.oid.clone()),
+                )
+                .child(field_label("Author"))
+                .child(author_label(&detail.author_name, &detail.author_email))
+                .child(field_label("Date"))
+                .child(detail.author_date.clone())
+                .child(field_label("Parents"))
+                .child(
+                    div()
+                        .font_family(theme::code_font())
+                        .child(parents_label(&detail.parents)),
+                ),
+        )
+        .child(section_label(&format!(
+            "FILES ({})",
+            detail.files.len() + detail.more_files
+        )))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .text_xs()
+                .children(detail.files.iter().map(file_row))
+                .children((detail.more_files > 0).then(|| {
+                    div()
+                        .text_color(theme::muted())
+                        .child(more_files_label(detail.more_files))
+                })),
+        )
+}
+
+fn section_label(text: &str) -> Div {
+    div()
+        .text_xs()
+        .text_color(theme::muted())
+        .child(text.to_owned())
+}
+
+fn field_label(text: &'static str) -> Div {
+    div().text_color(theme::muted()).child(text)
+}
+
+/// The body, one line per row; a blank line is a paragraph break.
+fn body_block(body: &str) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .text_xs()
+        .line_height(px(17.))
+        .children(body.split('\n').map(|line| {
+            if line.is_empty() {
+                div().h(px(8.))
+            } else {
+                div().child(line.to_owned())
+            }
+        }))
+}
+
+/// One changed file: its change letter, its path (old to new for a rename) and
+/// its line counts.
+fn file_row(file: &CommitFile) -> Div {
+    let (letter, color) = (change_letter(file.change), change_color(file.change));
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .w(px(16.))
+                .flex_none()
+                .text_center()
+                .font_family(theme::code_font())
+                .text_color(color)
+                .child(letter.to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(path_label(file)),
+        )
+        .child(
+            div()
+                .flex_none()
+                .font_family(theme::code_font())
+                .text_color(theme::muted())
+                .child(file_counts(file)),
+        )
+}
+
+fn change_color(change: Change) -> Hsla {
+    match change {
+        Change::Added => theme::staged(),
+        Change::Modified | Change::TypeChanged => theme::unstaged(),
+        Change::Deleted => theme::error(),
+        Change::Renamed | Change::Copied => theme::untracked(),
+    }
+}
+
+/// The line counts of a file: `+20 −2`, `+44`, `−3`, `±0`, or `bin` for a binary file.
+#[must_use]
+pub fn file_counts(file: &CommitFile) -> String {
+    if file.binary {
+        return "bin".to_owned();
+    }
+    let mut parts = Vec::new();
+    if file.added > 0 {
+        parts.push(format!("+{}", file.added));
+    }
+    if file.deleted > 0 {
+        parts.push(format!("\u{2212}{}", file.deleted));
+    }
+    if parts.is_empty() {
+        "\u{b1}0".to_owned()
+    } else {
+        parts.join(" ")
+    }
+}
+
+/// The path a row shows: the new path, or `old → new` for a rename.
+#[must_use]
+pub fn path_label(file: &CommitFile) -> String {
+    match &file.old_path {
+        Some(old) => format!("{old} \u{2192} {}", file.path),
+        None => file.path.clone(),
+    }
+}
+
+#[must_use]
+pub fn more_files_label(count: usize) -> String {
+    format!("and {count} more")
+}
+
+/// The parents, abbreviated and comma-separated; `none` for a root commit.
+#[must_use]
+pub fn parents_label(parents: &[String]) -> String {
+    if parents.is_empty() {
+        "none".to_owned()
+    } else {
+        parents.join(", ")
+    }
+}
+
+/// The author as Git writes it: the name, then the email in angle brackets.
+#[must_use]
+pub fn author_label(name: &str, email: &str) -> String {
+    format!("{name} <{email}>")
+}
+
 impl StatusView {
-    /// Selects the commit `oid`; the selection survives a refresh of the list.
+    /// Selects the commit `oid` and asks for its detail. The selection survives a
+    /// refresh of the list. Selecting another commit supersedes the read in flight.
     pub(crate) fn select_commit(&mut self, oid: &str, cx: &mut Context<Self>) {
         self.model.history.select(oid);
+        let id = self.engine.dispatch(
+            Actor::Human,
+            CommandKind::LoadCommitDetail {
+                oid: oid.to_owned(),
+            },
+        );
+        self.model.commit.request(id);
         cx.notify();
     }
 }
@@ -273,6 +516,7 @@ fn ago(count: i64, unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gm_schema::{Change, CommitFile};
 
     #[test]
     fn recent_times_are_in_minutes_and_hours() {
@@ -303,6 +547,70 @@ mod tests {
     #[test]
     fn a_time_in_the_future_reads_as_just_now() {
         assert_eq!(relative_time(100, 500), "just now");
+    }
+
+    fn file(path: &str, added: u32, deleted: u32, binary: bool) -> CommitFile {
+        CommitFile {
+            path: path.into(),
+            old_path: None,
+            change: Change::Modified,
+            added,
+            deleted,
+            binary,
+        }
+    }
+
+    #[test]
+    fn counts_show_the_added_and_deleted_lines() {
+        assert_eq!(file_counts(&file("a", 20, 2, false)), "+20 \u{2212}2");
+        assert_eq!(file_counts(&file("a", 44, 0, false)), "+44");
+        assert_eq!(file_counts(&file("a", 0, 3, false)), "\u{2212}3");
+        assert_eq!(file_counts(&file("a", 0, 0, false)), "\u{b1}0");
+    }
+
+    #[test]
+    fn a_binary_file_says_bin_instead_of_counts() {
+        assert_eq!(file_counts(&file("logo.png", 0, 0, true)), "bin");
+    }
+
+    #[test]
+    fn a_rename_shows_the_old_path_before_the_new_one() {
+        let renamed = CommitFile {
+            path: "src/new.rs".into(),
+            old_path: Some("src/old.rs".into()),
+            change: Change::Renamed,
+            added: 0,
+            deleted: 0,
+            binary: false,
+        };
+        assert_eq!(path_label(&renamed), "src/old.rs \u{2192} src/new.rs");
+        assert_eq!(
+            path_label(&file("api/routes.rs", 1, 0, false)),
+            "api/routes.rs"
+        );
+    }
+
+    #[test]
+    fn the_list_says_how_many_files_it_leaves_out() {
+        assert_eq!(more_files_label(50), "and 50 more");
+        assert_eq!(more_files_label(1), "and 1 more");
+    }
+
+    #[test]
+    fn parents_are_listed_short_and_a_root_has_none() {
+        assert_eq!(parents_label(&[]), "none");
+        assert_eq!(
+            parents_label(&["6b0b1eb".into(), "41a9853".into()]),
+            "6b0b1eb, 41a9853"
+        );
+    }
+
+    #[test]
+    fn the_author_shows_the_name_then_the_email() {
+        assert_eq!(
+            author_label("Zo\u{eb} \u{dc}nal", "zoe@example.test"),
+            "Zo\u{eb} \u{dc}nal <zoe@example.test>"
+        );
     }
 
     #[test]

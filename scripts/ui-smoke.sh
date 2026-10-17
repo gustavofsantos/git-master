@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -53,6 +53,8 @@ TOOLBAR_Y=72; TOOLBAR_FETCH_X=1082; TOOLBAR_RESTACK_X=1322   # Fetch and Restack
 SECTION_CROP="240x84+0+612"                  # the WORKTREES rows at the sidebar's foot, window-relative
 HISTORY_X=120; HISTORY_Y=175                 # "History" row under Workspace in the sidebar
 WORKING_COPY_X=120; WORKING_COPY_Y=147       # "Working Copy" row, back from the history page
+HISTORY_ROW_X=420; HISTORY_ROW_TOP_Y=162     # the history list's first row, 48 px rows below it
+DETAIL_PANEL_CROP="360x700+920+88"           # the commit detail panel, window-relative
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -1050,6 +1052,12 @@ run_scenario() {
     echo "PASS  $LABEL"
     return
   fi
+  if [ "$name" = h-commit-detail ]; then
+    make_detail_repo "$RUN_DIR/detail"
+    scenario_commit_detail "$theme"
+    echo "PASS  $LABEL"
+    return
+  fi
   if [ "$name" = h-welcome ]; then
     # Starts with no recent list at all; scenario_h makes its own launches.
     scenario_h "$theme"
@@ -1129,6 +1137,85 @@ scenario_history_refresh() {
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   # One new row of text moves the list: about 3000 pixels here, and none when nothing changed.
   [ "$differing" -gt 1000 ] || fail "the outside commit did not reach the open history ($differing pixels changed)"
+}
+
+# --- 3l. The commit detail panel (H3) ------------------------------------------
+# A fixture with every kind of change the panel lists, and a merge. Selecting a
+# row fills the panel; the repository does not change.
+make_detail_repo() {
+  local repo="$1"
+  rm -rf "$repo"
+  mkdir -p "$repo/src" "$repo/api"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.name "gm smoke"
+  git -C "$repo" config user.email "smoke@example.invalid"
+  git -C "$repo" config commit.gpgsign false
+  printf 'fn a() {}\n' > "$repo/src/a.rs"
+  printf 'old\n' > "$repo/old.txt"
+  printf 'gone\n' > "$repo/gone.txt"
+  printf '\0\1\2\3' > "$repo/logo.bin"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m "init"
+  git -C "$repo" branch side
+  # Add, modify, delete, rename and a binary rewrite, in one commit with a three-paragraph body.
+  printf 'fn a() {}\nfn b() {}\n' > "$repo/src/a.rs"
+  printf 'new\n' > "$repo/api/new.rs"
+  git -C "$repo" rm -q gone.txt
+  git -C "$repo" mv old.txt renamed.txt
+  printf '\0\9\9\9\0' > "$repo/logo.bin"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m "feat: add, modify, delete, rename" \
+    -m "First paragraph of the body." \
+    -m "Second paragraph, with a second line." \
+    -m "Third paragraph."
+  git -C "$repo" checkout -q side
+  printf 'topic\n' > "$repo/topic.txt"
+  git -C "$repo" add topic.txt
+  git -C "$repo" commit -q -m "side: add topic"
+  git -C "$repo" checkout -q main
+  git -C "$repo" merge -q --no-ff side -m "Merge branch 'side'"
+}
+
+# Screen y of the history row whose subject is $1, in the order the app lists them.
+history_row_y() {
+  local index
+  index="$(git -C "$RUN_DIR/detail" log --topo-order --format=%s HEAD | grep -nxF -- "$1" | head -1 | cut -d: -f1)"
+  [ -n "$index" ] || fail "no commit named '$1' in the detail fixture"
+  echo $(( HISTORY_ROW_TOP_Y + 48 * (index - 1) ))
+}
+
+# How many pixels of the detail panel differ between two window screenshots.
+panel_changed() {
+  local differing
+  convert "$1" -crop "$DETAIL_PANEL_CROP" +repage "$RUN_DIR/panel-a.png"
+  convert "$2" -crop "$DETAIL_PANEL_CROP" +repage "$RUN_DIR/panel-b.png"
+  differing="$(compare -metric AE "$RUN_DIR/panel-a.png" "$RUN_DIR/panel-b.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  echo "$differing"
+}
+
+scenario_commit_detail() {
+  local repo="$RUN_DIR/detail" theme="$1" status_before differing
+  launch_app "$theme" "$repo"
+  xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-detail-empty-$theme.png"
+  status_before="$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)"
+
+  xdotool mousemove "$HISTORY_ROW_X" "$(history_row_y "Merge branch 'side'")" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-detail-merge-$theme.png"
+  differing="$(panel_changed "$SMOKE_OUT/h-commit-detail-empty-$theme.png" "$SMOKE_OUT/h-commit-detail-merge-$theme.png")"
+  [ "$differing" -gt 2000 ] || fail "selecting the merge did not fill the detail panel ($differing pixels changed)"
+
+  xdotool mousemove "$HISTORY_ROW_X" "$(history_row_y "feat: add, modify, delete, rename")" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-detail-feat-$theme.png"
+  differing="$(panel_changed "$SMOKE_OUT/h-commit-detail-merge-$theme.png" "$SMOKE_OUT/h-commit-detail-feat-$theme.png")"
+  [ "$differing" -gt 2000 ] || fail "selecting another commit did not replace the panel ($differing pixels changed)"
+  stop_app
+
+  [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
+    || fail "reading a commit detail changed the repository"
 }
 
 # --- 2/3. Run everything -------------------------------------------------------

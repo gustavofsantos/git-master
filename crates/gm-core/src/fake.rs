@@ -3,10 +3,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use gm_schema::{BranchEntry, CommitSummary, History, RepoStatus, WorktreeEntry, WorktreeMode};
+use gm_schema::{
+    BranchEntry, CommitDetail, CommitSummary, History, RepoStatus, WorktreeEntry, WorktreeMode,
+};
 
 use crate::history::{Canceller, HistoryPage, HistoryStream};
+use crate::port::DetailRead;
 use crate::{GitError, GitPort};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Answers `resolve_root` with its own root, and `status`, `branches`,
 /// `worktrees` and `checkout` with shared, replaceable results, so a test can change what the
@@ -21,6 +25,7 @@ pub struct FakeGit {
     create: Arc<Mutex<Result<(), GitError>>>,
     created: Arc<Mutex<Vec<(String, WorktreeMode)>>>,
     history: Arc<Mutex<Result<History, GitError>>>,
+    detail: Arc<Mutex<Result<CommitDetail, GitError>>>,
 }
 
 impl FakeGit {
@@ -34,6 +39,7 @@ impl FakeGit {
             create: Arc::new(Mutex::new(Ok(()))),
             created: Arc::new(Mutex::new(Vec::new())),
             history: Arc::new(Mutex::new(Ok(History::default()))),
+            detail: Arc::new(Mutex::new(Ok(CommitDetail::default()))),
         }
     }
 
@@ -56,6 +62,15 @@ impl FakeGit {
     /// If another thread panicked while holding the worktrees lock.
     pub fn set_worktrees(&self, worktrees: Result<Vec<WorktreeEntry>, GitError>) {
         *self.worktrees.lock().unwrap() = worktrees;
+    }
+
+    /// What the next commit detail read answers.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the detail lock.
+    pub fn set_detail(&self, detail: Result<CommitDetail, GitError>) {
+        *self.detail.lock().unwrap() = detail;
     }
 
     /// The commits the next history walk yields. `History::more` is ignored.
@@ -132,6 +147,16 @@ impl GitPort for FakeGit {
 
     fn checkout(&self, _root: &Path, _branch: &str) -> Result<(), GitError> {
         self.checkout.lock().unwrap().clone()
+    }
+
+    fn commit_detail(&self, _root: &Path, _oid: &str) -> Result<DetailRead, GitError> {
+        let detail = self.detail.lock().unwrap().clone();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            if stop.load(Ordering::SeqCst) {
+                return Err(GitError("the commit read was superseded".into()));
+            }
+            detail
+        }))
     }
 
     fn history_stream(&self, _root: &Path) -> Result<Option<Box<dyn HistoryStream>>, GitError> {

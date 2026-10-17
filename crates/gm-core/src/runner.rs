@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use async_channel::{Receiver, Sender};
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId};
 
+use crate::commit_detail::DetailReport;
 use crate::history::HistoryReport;
 use crate::hook::{ApprovalStore, Report};
 use crate::{Engine, GitPort};
@@ -21,6 +22,7 @@ enum Message {
     Subscribe(Sender<Event>),
     Hook(Report),
     History(HistoryReport),
+    Detail(DetailReport),
 }
 
 /// Cloneable front door to the engine thread. The thread stops when every
@@ -117,6 +119,16 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                         })
                         .expect("spawn a history thread");
                 }
+                for job in engine.take_detail_jobs() {
+                    let reports = reports.clone();
+                    std::thread::Builder::new()
+                        .name("gm-detail".into())
+                        .spawn(move || {
+                            let report = job.run();
+                            let _ = reports.send_blocking(Message::Detail(report));
+                        })
+                        .expect("spawn a detail thread");
+                }
                 for plan in engine.take_jobs() {
                     let reports = reports.clone();
                     std::thread::Builder::new()
@@ -135,6 +147,10 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
             }
             Message::History(report) => {
                 let events = engine.history_report(report);
+                broadcast(events, &mut subscribers);
+            }
+            Message::Detail(report) => {
+                let events = engine.detail_report(report);
                 broadcast(events, &mut subscribers);
             }
         }

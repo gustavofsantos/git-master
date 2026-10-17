@@ -1,11 +1,12 @@
 //! `GitPort` over the `git` executable. Status uses porcelain v2 with `-z`:
 //! stable, machine-readable, and it honors fsmonitor and the untracked cache.
 
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
@@ -14,9 +15,11 @@ use gm_schema::{
 };
 
 use crate::command_log::{CommandLog, CommandRecord, Source, bounded_text};
+use crate::commit_detail;
 use crate::diff::{hunk_patch, parse_unified};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
+use crate::port::DetailRead;
 use crate::stage_math;
 use crate::worktree;
 use crate::{GitError, GitPort};
@@ -59,6 +62,54 @@ impl SubprocessGit {
             .output()
             .map_err(|e| GitError(format!("cannot run git: {e}")))?;
         Self::checked(output, ok_codes)
+    }
+
+    /// Runs `git` in `root` with `args` and returns its stdout. Once `stop` is
+    /// set the child is killed and the run fails. Its output is read on threads,
+    /// so a large answer cannot fill the pipe and stall git.
+    fn run_stoppable(
+        &self,
+        root: &Path,
+        args: &[&str],
+        stop: &AtomicBool,
+    ) -> Result<Vec<u8>, GitError> {
+        const POLL: Duration = Duration::from_millis(5);
+        let superseded = || GitError("the commit read was superseded".into());
+        if stop.load(Ordering::SeqCst) {
+            return Err(superseded());
+        }
+        let mut command = self.git(root);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let out = std::thread::spawn(move || read_all(stdout));
+        let err = std::thread::spawn(move || read_all(stderr));
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(e) => return Err(GitError(format!("cannot wait for git: {e}"))),
+            }
+            if stop.load(Ordering::SeqCst) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(superseded());
+            }
+            std::thread::sleep(POLL);
+        };
+        let output = Output {
+            status,
+            stdout: out.join().unwrap_or_default(),
+            stderr: err.join().unwrap_or_default(),
+        };
+        Self::checked(output, &[0])
     }
 
     /// Runs `command`, with `input` on its stdin when given.
@@ -449,6 +500,52 @@ impl GitPort for SubprocessGit {
             child: Arc::new(Mutex::new(child)),
             input: BufReader::new(stdout),
         })))
+    }
+
+    /// The detail of commit `oid`: its header, then its files against the first
+    /// parent. Two `git show` runs, neither logged (D28), both stoppable.
+    fn commit_detail(&self, root: &Path, oid: &str) -> Result<DetailRead, GitError> {
+        // A full or abbreviated id is hex; anything else never reaches git's arguments.
+        if oid.is_empty() || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(GitError(format!("not a commit id: {oid:?}")));
+        }
+        let git = self.clone();
+        let root = root.to_path_buf();
+        let oid = oid.to_owned();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            let header = git.run_stoppable(
+                &root,
+                &[
+                    "show",
+                    "-s",
+                    "--no-color",
+                    "--no-show-signature",
+                    commit_detail::HEADER_FORMAT,
+                    &oid,
+                ],
+                stop,
+            )?;
+            let mut detail = commit_detail::parse_header(&header)?;
+            // `--diff-merges=first-parent` compares a merge with its first parent (Git 2.31+).
+            let files = git.run_stoppable(
+                &root,
+                &[
+                    "show",
+                    "--raw",
+                    "-z",
+                    "--numstat",
+                    "--format=",
+                    "--diff-merges=first-parent",
+                    "-M",
+                    &oid,
+                ],
+                stop,
+            )?;
+            let (files, more) = commit_detail::parse_files(&files)?;
+            detail.files = files;
+            detail.more_files = more;
+            Ok(detail)
+        }))
     }
 
     fn worktrees(&self, root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
@@ -935,6 +1032,13 @@ fn parse_header(header: &str, branch: &mut BranchInfo) {
             .and_then(|b| b.trim_start_matches('-').parse().ok())
             .unwrap_or(0);
     }
+}
+
+/// Everything the reader gives until its end. A read that fails keeps what it had.
+fn read_all(mut reader: impl Read) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    let _ = reader.read_to_end(&mut buffer);
+    buffer
 }
 
 fn lock(child: &Mutex<Child>) -> MutexGuard<'_, Child> {

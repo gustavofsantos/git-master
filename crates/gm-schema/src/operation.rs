@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
-use crate::history::History;
+use crate::history::{CommitDetail, History};
 use crate::hook::{HookFailure, HookInfo};
 use crate::status::{BranchEntry, PruneCandidate, RepoStatus, WorktreeEntry, WorktreeInspection};
 
@@ -67,6 +67,12 @@ pub enum CommandKind {
     /// commit the list holds. Never recorded in the command log (D28).
     LoadHistoryPage {
         after: String,
+    },
+    /// Reads what commit `oid` changed: its header and its files, against
+    /// the first parent. Never recorded in the command log (D28). A request
+    /// in flight is superseded by the next one.
+    LoadCommitDetail {
+        oid: String,
     },
     /// A local branch, or a remote branch such as `origin/feature` (a local
     /// tracking branch is created for it when none exists).
@@ -237,6 +243,11 @@ pub enum Event {
     HistoryLoaded {
         id: OperationId,
         history: History,
+    },
+    /// Answers `LoadCommitDetail`.
+    CommitDetailLoaded {
+        id: OperationId,
+        detail: CommitDetail,
     },
     /// Answers `ListWorktrees`, and follows each `RefreshStatus` and
     /// `OpenRepo`, so the worktree list is as fresh as the status.

@@ -2,6 +2,7 @@
 //! Git is reached through `GitPort`; `git::SubprocessGit` is the first adapter.
 
 pub mod command_log;
+pub mod commit_detail;
 pub mod diff;
 mod engine;
 pub mod fake;
@@ -16,5 +17,5 @@ pub mod worktree;
 
 pub use engine::{Engine, LogEntry};
 pub use history::{HistoryJob, HistoryOutcome, HistoryPage, HistoryReport, HistoryStream};
-pub use port::{GitError, GitPort};
+pub use port::{DetailRead, GitError, GitPort};
 pub use runner::{EngineHandle, spawn, spawn_with};

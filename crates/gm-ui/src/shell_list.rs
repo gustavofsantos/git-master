@@ -228,7 +228,7 @@ fn status_letter(entry: &StatusEntry) -> (char, Hsla) {
     }
 }
 
-fn change_letter(change: Change) -> char {
+pub(crate) fn change_letter(change: Change) -> char {
     match change {
         Change::Added => 'A',
         Change::Modified => 'M',

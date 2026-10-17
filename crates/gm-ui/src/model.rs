@@ -52,6 +52,8 @@ pub struct Model {
     pub worktrees: Vec<WorktreeEntry>,
     /// The history page's listing: the request in flight, or what answered it.
     pub history: HistoryList,
+    /// The commit detail panel: the read in flight, or what answered it.
+    pub commit: CommitPane,
     /// The create-worktree dialog's operation in flight, and its outcome.
     pub creating: Creating,
     /// The remove-worktree dialog's inspection, removal in flight and outcome.
@@ -70,6 +72,48 @@ pub enum HistoryList {
     /// The first page could not be read; the reason is in the status bar.
     Failed,
     Shown(Listing),
+}
+
+/// The commit detail panel (H3). Only the answer to the request in flight is
+/// shown; an answer to a superseded request is dropped.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CommitPane {
+    /// No commit selected.
+    #[default]
+    Empty,
+    /// The read of the selected commit, in flight.
+    Loading(OperationId),
+    Shown(gm_schema::CommitDetail),
+    /// The read failed; the text is git's own message.
+    Failed(String),
+}
+
+impl CommitPane {
+    /// Starts showing the read `id`, which replaces whatever the panel held.
+    pub fn request(&mut self, id: OperationId) {
+        *self = Self::Loading(id);
+    }
+
+    /// Shows the answer when it is the read in flight.
+    pub fn received(&mut self, id: OperationId, detail: gm_schema::CommitDetail) {
+        if *self == Self::Loading(id) {
+            *self = Self::Shown(detail);
+        }
+    }
+
+    /// Shows the failure when it is the read in flight.
+    pub fn failed(&mut self, id: OperationId, message: String) {
+        if *self == Self::Loading(id) {
+            *self = Self::Failed(message);
+        }
+    }
+
+    /// Clears the panel when the read in flight was cancelled.
+    pub fn cancelled(&mut self, id: OperationId) {
+        if *self == Self::Loading(id) {
+            *self = Self::Empty;
+        }
+    }
 }
 
 /// What the history page holds, and the requests in flight for it.
@@ -332,6 +376,12 @@ impl Model {
                 detail,
                 ..
             } => {
+                self.commit.failed(
+                    id,
+                    detail
+                        .clone()
+                        .unwrap_or_else(|| "git could not read the commit".to_owned()),
+                );
                 // A refused checkout keeps the branch; git's reason, first line only, is the notice.
                 if self.branches.finish_checkout(id) {
                     self.error = Some(checkout_message(detail.as_deref()));
@@ -364,6 +414,10 @@ impl Model {
                 self.history.received(id, history);
                 None
             }
+            Event::CommitDetailLoaded { id, detail } => {
+                self.commit.received(id, detail);
+                None
+            }
             // An operation that ends without a status (vetoed, cancelled) ends its checkout too.
             Event::OperationChanged { id, state, .. } => {
                 if matches!(
@@ -377,6 +431,9 @@ impl Model {
                     OperationState::Failed | OperationState::Vetoed | OperationState::Cancelled
                 ) {
                     self.history.failed(id);
+                }
+                if state == OperationState::Cancelled {
+                    self.commit.cancelled(id);
                 }
                 None
             }
@@ -433,6 +490,7 @@ impl Model {
         self.notice = None;
         self.notice_icon = None;
         self.history = HistoryList::default();
+        self.commit = CommitPane::Empty;
     }
 
     /// Resolves the diff side waiting for `id`. A `DiffLoaded` must name the
@@ -623,6 +681,7 @@ fn event_id(event: &Event) -> OperationId {
         | Event::Committed { id, .. }
         | Event::BranchesLoaded { id, .. }
         | Event::HistoryLoaded { id, .. }
+        | Event::CommitDetailLoaded { id, .. }
         | Event::WorktreesLoaded { id, .. }
         | Event::WorktreeInspected { id, .. }
         | Event::PrunableListed { id, .. }
@@ -1271,5 +1330,123 @@ mod history_list_tests {
         list.request_top(OperationId(3));
         list.received(OperationId(3), page(&["c"], true));
         assert!(list.can_page());
+    }
+}
+
+#[cfg(test)]
+mod commit_pane_tests {
+    use super::*;
+    use gm_schema::{Actor, CommitDetail, OperationState};
+
+    fn detail(subject: &str) -> CommitDetail {
+        CommitDetail {
+            subject: subject.into(),
+            ..CommitDetail::default()
+        }
+    }
+
+    fn shown_subject(pane: &CommitPane) -> &str {
+        match pane {
+            CommitPane::Shown(detail) => &detail.subject,
+            other => panic!("expected the detail to be shown, got {other:?}"),
+        }
+    }
+
+    fn changed(id: u64, state: OperationState, detail: Option<&str>) -> Event {
+        Event::OperationChanged {
+            id: OperationId(id),
+            actor: Actor::Human,
+            state,
+            detail: detail.map(str::to_owned),
+        }
+    }
+
+    fn answered(id: u64, subject: &str) -> Event {
+        Event::CommitDetailLoaded {
+            id: OperationId(id),
+            detail: detail(subject),
+        }
+    }
+
+    #[test]
+    fn nothing_is_shown_until_a_commit_is_selected() {
+        assert_eq!(Model::default().commit, CommitPane::Empty);
+    }
+
+    #[test]
+    fn the_answer_to_the_request_in_flight_is_shown() {
+        let mut model = Model::default();
+        model.commit.request(OperationId(4));
+
+        let _ = model.apply(answered(4, "feat: x"));
+
+        assert_eq!(shown_subject(&model.commit), "feat: x");
+    }
+
+    #[test]
+    fn an_answer_to_a_superseded_request_is_dropped() {
+        let mut model = Model::default();
+        model.commit.request(OperationId(4));
+        model.commit.request(OperationId(5));
+
+        let _ = model.apply(answered(4, "stale"));
+
+        assert_eq!(model.commit, CommitPane::Loading(OperationId(5)));
+    }
+
+    #[test]
+    fn a_failed_read_shows_gits_message() {
+        let mut model = Model::default();
+        model.commit.request(OperationId(4));
+
+        let _ = model.apply(changed(
+            4,
+            OperationState::Failed,
+            Some("fatal: bad object"),
+        ));
+
+        assert_eq!(model.commit, CommitPane::Failed("fatal: bad object".into()));
+    }
+
+    #[test]
+    fn a_failed_read_without_text_still_says_so() {
+        let mut model = Model::default();
+        model.commit.request(OperationId(4));
+
+        let _ = model.apply(changed(4, OperationState::Failed, None));
+
+        assert!(matches!(&model.commit, CommitPane::Failed(text) if !text.is_empty()));
+    }
+
+    #[test]
+    fn a_superseded_cancellation_leaves_the_current_request_alone() {
+        let mut model = Model::default();
+        model.commit.request(OperationId(4));
+        model.commit.request(OperationId(5));
+
+        let _ = model.apply(changed(4, OperationState::Cancelled, None));
+
+        assert_eq!(model.commit, CommitPane::Loading(OperationId(5)));
+    }
+
+    #[test]
+    fn a_cancelled_current_read_clears_the_pane() {
+        let mut model = Model::default();
+        model.commit.request(OperationId(4));
+
+        let _ = model.apply(changed(4, OperationState::Cancelled, None));
+
+        assert_eq!(model.commit, CommitPane::Empty);
+    }
+
+    #[test]
+    fn a_repository_switch_empties_the_pane() {
+        let mut model = Model::default();
+        model.commit.request(OperationId(4));
+        let _ = model.apply(answered(4, "feat: x"));
+
+        model.reset_for_repo();
+
+        assert_eq!(model.commit, CommitPane::Empty);
     }
 }

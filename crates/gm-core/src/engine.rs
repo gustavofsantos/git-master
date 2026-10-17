@@ -10,6 +10,7 @@ use gm_schema::{
 };
 
 use crate::GitPort;
+use crate::commit_detail::{DetailJob, DetailReport};
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::worktree;
@@ -40,6 +41,10 @@ pub struct Engine {
     history: Option<HistorySession>,
     /// History pages accepted since the last call; see `take_history_jobs`.
     history_jobs: Vec<HistoryJob>,
+    /// The commit detail read in flight, if any. A new request supersedes it.
+    detail: Option<ActiveDetail>,
+    /// Detail reads accepted since the last call; see `take_detail_jobs`.
+    detail_jobs: Vec<DetailJob>,
 }
 
 /// The walk behind the history list: the stream while no job reads it, how to
@@ -57,6 +62,13 @@ struct ActiveHistory {
     id: OperationId,
     actor: Actor,
     kind: CommandKind,
+}
+
+/// A commit detail read that has not answered yet. `stop` is shared with its
+/// job: setting it ends the read.
+struct ActiveDetail {
+    op: ActiveHistory,
+    stop: Arc<AtomicBool>,
 }
 
 /// What the engine keeps of a `RunPrepareCommit` until it answers.
@@ -106,6 +118,8 @@ impl Engine {
             hook_log: Vec::new(),
             history: None,
             history_jobs: Vec::new(),
+            detail: None,
+            detail_jobs: Vec::new(),
         }
     }
 
@@ -128,6 +142,44 @@ impl Engine {
     /// a thread and passes its report to `history_report`.
     pub fn take_history_jobs(&mut self) -> Vec<HistoryJob> {
         std::mem::take(&mut self.history_jobs)
+    }
+
+    /// The commit detail reads accepted since the last call. The caller runs
+    /// each on a thread and passes its report to `detail_report`.
+    pub fn take_detail_jobs(&mut self) -> Vec<DetailJob> {
+        std::mem::take(&mut self.detail_jobs)
+    }
+
+    /// Turns the answer of a commit detail read into events. A report for a
+    /// read that was superseded, or for a repository that was left, is dropped.
+    pub fn detail_report(&mut self, report: DetailReport) -> Vec<Event> {
+        match self.detail.take() {
+            Some(active) if active.op.id == report.id => {
+                let state = if report.outcome.is_ok() {
+                    OperationState::Done
+                } else {
+                    OperationState::Failed
+                };
+                let mut events = Vec::new();
+                match report.outcome {
+                    Ok(detail) => {
+                        events.push(self.finish_op(&active.op, state, None));
+                        events.push(Event::CommitDetailLoaded {
+                            id: report.id,
+                            detail,
+                        });
+                    }
+                    Err(message) => {
+                        events.push(self.finish_op(&active.op, state, Some(message)));
+                    }
+                }
+                events
+            }
+            other => {
+                self.detail = other;
+                Vec::new()
+            }
+        }
     }
 
     /// Turns the answer of a history page into events. A report for a request
@@ -304,6 +356,18 @@ impl Engine {
             }
             return events;
         }
+        if let CommandKind::LoadCommitDetail { oid } = &command.kind {
+            match self.start_detail(id, &command.actor, &command.kind, oid) {
+                Ok(superseded) => {
+                    events.extend(superseded);
+                    self.advance(&mut op, OperationState::Executing, &mut events);
+                }
+                Err(message) => {
+                    self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
+                }
+            }
+            return events;
+        }
         if let CommandKind::RunPrepareCommit { message } = &command.kind {
             match self.prepare_run(id, command, message) {
                 Ok(accepted) => {
@@ -387,6 +451,9 @@ impl Engine {
             }
             CommandKind::LoadHistory | CommandKind::LoadHistoryPage { .. } => {
                 Err("history is started by handle".to_owned())
+            }
+            CommandKind::LoadCommitDetail { .. } => {
+                Err("commit detail is started by handle".to_owned())
             }
             CommandKind::CreateWorktree { .. } => self.add_worktree(id, actor, kind),
             CommandKind::Checkout { branch } => {
@@ -577,6 +644,42 @@ impl Engine {
         });
         self.history_jobs.push(HistoryJob { id, stream, after });
         Ok(superseded)
+    }
+
+    /// Starts the read of commit `oid`. A read in flight is superseded: it is
+    /// stopped and cancelled. Returns the events of that cancellation.
+    fn start_detail(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        oid: &str,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let read = self.git.commit_detail(&root, oid).map_err(|e| e.0)?;
+        // The read is built before the old one is stopped, so a refusal keeps the old one.
+        let superseded = self.drop_detail();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.detail = Some(ActiveDetail {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            stop: Arc::clone(&stop),
+        });
+        self.detail_jobs.push(DetailJob { id, read, stop });
+        Ok(superseded)
+    }
+
+    /// Ends the commit detail read: it is stopped, and a request still in flight
+    /// is cancelled.
+    fn drop_detail(&mut self) -> Vec<Event> {
+        let Some(active) = self.detail.take() else {
+            return Vec::new();
+        };
+        active.stop.store(true, Ordering::SeqCst);
+        vec![self.finish_op(&active.op, OperationState::Cancelled, None)]
     }
 
     /// Ends the history walk: its git process is stopped, and a page request
@@ -808,6 +911,7 @@ impl Engine {
         let status = self.git.status(&root).map_err(|e| e.0)?;
         let mut events = self.loaded(id, &root, status)?;
         events.extend(self.drop_history());
+        events.extend(self.drop_detail());
         self.root = Some(root);
         Ok(events)
     }
@@ -1136,6 +1240,144 @@ mod tests {
             Event::HistoryLoaded { id: OperationId(2), history }
                 if history.commits.len() == 1 && history.commits[0].oid == "a"
         )));
+    }
+
+    fn detail_engine() -> Engine {
+        let status = RepoStatus {
+            root: "/r".into(),
+            ..RepoStatus::default()
+        };
+        let git = FakeGit::new("/r", status);
+        git.set_detail(Ok(gm_schema::CommitDetail {
+            oid: "a".repeat(40),
+            subject: "the subject".into(),
+            ..gm_schema::CommitDetail::default()
+        }));
+        Engine::new(Box::new(git))
+    }
+
+    fn load_detail(oid: &str) -> CommandKind {
+        CommandKind::LoadCommitDetail { oid: oid.into() }
+    }
+
+    /// Runs every detail job the engine accepted, as the runner's threads do.
+    fn run_detail_jobs(engine: &mut Engine) -> Vec<Event> {
+        engine
+            .take_detail_jobs()
+            .into_iter()
+            .flat_map(|job| engine.detail_report(job.run()))
+            .collect()
+    }
+
+    #[test]
+    fn a_commit_detail_answers_once_it_is_read() {
+        let mut engine = detail_engine();
+        engine.handle(OperationId(1), &open());
+        let started = engine.handle(OperationId(2), &command(load_detail(&"a".repeat(40))));
+        assert_eq!(
+            states(&started),
+            [
+                OperationState::Requested,
+                OperationState::Gating,
+                OperationState::Executing
+            ]
+        );
+        assert!(
+            !started
+                .iter()
+                .any(|e| matches!(e, Event::CommitDetailLoaded { .. }))
+        );
+
+        let events = run_detail_jobs(&mut engine);
+
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::CommitDetailLoaded { id: OperationId(2), detail } if detail.subject == "the subject"
+        )));
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Done,
+            detail: None,
+        }));
+    }
+
+    #[test]
+    fn a_superseded_commit_detail_is_cancelled_stopped_and_dropped() {
+        let mut engine = detail_engine();
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_detail(&"a".repeat(40))));
+        let superseding = engine.handle(OperationId(3), &command(load_detail(&"b".repeat(40))));
+        assert!(superseding.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Cancelled,
+            detail: None,
+        }));
+
+        let mut jobs = engine.take_detail_jobs().into_iter();
+        let stale = jobs.next().unwrap();
+        assert!(
+            stale.stop.load(std::sync::atomic::Ordering::SeqCst),
+            "the stale read must be stopped"
+        );
+        let stale_events = engine.detail_report(stale.run());
+        assert!(
+            stale_events.is_empty(),
+            "the superseded answer must not show: {stale_events:?}"
+        );
+
+        let current = jobs.next().unwrap();
+        assert!(!current.stop.load(std::sync::atomic::Ordering::SeqCst));
+        let events = engine.detail_report(current.run());
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::CommitDetailLoaded {
+                id: OperationId(3),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn a_failed_commit_detail_fails_with_gits_message() {
+        let git = FakeGit::new(
+            "/r",
+            RepoStatus {
+                root: "/r".into(),
+                ..RepoStatus::default()
+            },
+        );
+        git.set_detail(Err(GitError("fatal: bad object".into())));
+        let mut engine = Engine::new(Box::new(git));
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_detail(&"a".repeat(40))));
+
+        let events = run_detail_jobs(&mut engine);
+
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Failed,
+            detail: Some("fatal: bad object".into()),
+        }));
+    }
+
+    #[test]
+    fn leaving_the_repository_cancels_the_commit_detail() {
+        let mut engine = detail_engine();
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_detail(&"a".repeat(40))));
+        let job = engine.take_detail_jobs().pop().unwrap();
+        let reopened = engine.handle(OperationId(3), &open());
+        assert!(reopened.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Cancelled,
+            detail: None,
+        }));
+        assert!(job.stop.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(engine.detail_report(job.run()).is_empty());
     }
 
     #[test]

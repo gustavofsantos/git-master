@@ -1,9 +1,10 @@
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
-    BranchEntry, DiffSide, FileDiff, HookScope, HunkId, PruneCandidate, RepoStatus, StageTarget,
-    WorktreeEntry, WorktreeMode,
+    BranchEntry, CommitDetail, DiffSide, FileDiff, HookScope, HunkId, PruneCandidate, RepoStatus,
+    StageTarget, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::CommandLog;
@@ -20,6 +21,11 @@ impl std::fmt::Display for GitError {
 }
 
 impl std::error::Error for GitError {}
+
+/// The read of one commit's detail, started by `GitPort::commit_detail`. It
+/// runs on a thread of its own. Once `stop` is set the read is superseded:
+/// it ends early and its answer is not wanted.
+pub type DetailRead = Box<dyn FnOnce(&AtomicBool) -> Result<CommitDetail, GitError> + Send>;
 
 /// What the core needs from Git. Adapters implement it; the core tests with fakes.
 pub trait GitPort: Send {
@@ -75,6 +81,15 @@ pub trait GitPort: Send {
     /// Never records anything (D28).
     fn history_stream(&self, _root: &Path) -> Result<Option<Box<dyn HistoryStream>>, GitError> {
         Err(GitError("history is not supported by this adapter".into()))
+    }
+
+    /// Starts the read of commit `oid` (a full id): its header and its files
+    /// against the first parent. Validates the id and starts nothing else; the
+    /// returned read does the work. Never records anything (D28).
+    fn commit_detail(&self, _root: &Path, _oid: &str) -> Result<DetailRead, GitError> {
+        Err(GitError(
+            "commit detail is not supported by this adapter".into(),
+        ))
     }
 
     /// Creates a linked worktree at `path` (relative paths are taken from
