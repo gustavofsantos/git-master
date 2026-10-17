@@ -3,8 +3,8 @@
 //! renders it and forwards keys to it.
 
 use gm_schema::{
-    DiffSide, Event, FileDiff, History, OperationId, OperationState, RepoStatus, StatusEntry,
-    WorktreeEntry,
+    CommitFile, DiffSide, Event, FileDiff, History, OperationId, OperationState, RepoStatus,
+    StatusEntry, WorktreeEntry,
 };
 
 use crate::branches::Branches;
@@ -54,8 +54,8 @@ pub struct Model {
     pub history: HistoryList,
     /// The commit detail panel: the read in flight, or what answered it.
     pub commit: CommitPane,
-    /// The file of the open commit whose diff replaces the commit view (H4).
-    pub commit_file: OpenFile,
+    /// The stacked diff of the open commit, which replaces the commit view (H4c).
+    pub commit_stack: OpenStack,
     /// The create-worktree dialog's operation in flight, and its outcome.
     pub creating: Creating,
     /// The remove-worktree dialog's inspection, removal in flight and outcome.
@@ -64,39 +64,54 @@ pub struct Model {
     pub pruning: Pruning,
 }
 
-/// The file diff of the open commit (H4). Only the answer to the request in
-/// flight is shown; an answer to a superseded or closed request is dropped.
+/// The stacked diff of the open commit (H4c): every file's diff, shown in one
+/// list. Only the answer to the request in flight is shown; an answer to a
+/// superseded or closed request is dropped.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct OpenFile {
-    view: FileView,
-    /// The diff that arrived for the request in flight, until the view takes it.
-    fresh: Option<FileDiff>,
+pub struct OpenStack {
+    view: StackView,
+    /// The diffs that arrived for the request in flight, until the view takes them.
+    fresh: Option<Fresh>,
+}
+
+/// The answer to a stack request: the files it listed, how many more the detail
+/// did not list, one diff per listed file, and the file the view starts at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fresh {
+    pub files: Vec<CommitFile>,
+    pub more: usize,
+    pub diffs: Vec<FileDiff>,
+    pub focus: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-enum FileView {
-    /// No file is open: the commit view is shown.
+enum StackView {
+    /// No commit diff is open: the commit view is shown.
     #[default]
     Closed,
     Loading {
         id: OperationId,
-        index: usize,
+        focus: usize,
+        files: Vec<CommitFile>,
+        more: usize,
     },
-    Shown {
-        index: usize,
-    },
+    Shown,
     Failed {
-        index: usize,
         message: String,
     },
 }
 
-impl OpenFile {
-    /// Opens file `index` of the commit, as the request `id`. Whatever was open
-    /// before is replaced.
-    pub fn request(&mut self, id: OperationId, index: usize) {
+impl OpenStack {
+    /// Opens the stack of the commit's `files` (and `more` unlisted ones) as the
+    /// request `id`, starting at file `focus`. Whatever was open before is replaced.
+    pub fn request(&mut self, id: OperationId, focus: usize, files: Vec<CommitFile>, more: usize) {
         *self = Self {
-            view: FileView::Loading { id, index },
+            view: StackView::Loading {
+                id,
+                focus,
+                files,
+                more,
+            },
             fresh: None,
         };
     }
@@ -106,67 +121,62 @@ impl OpenFile {
         *self = Self::default();
     }
 
-    /// The index of the file open, or being read.
-    pub fn index(&self) -> Option<usize> {
-        match self.view {
-            FileView::Closed => None,
-            FileView::Loading { index, .. }
-            | FileView::Shown { index }
-            | FileView::Failed { index, .. } => Some(index),
-        }
+    /// Whether the stack is open, whether read or still loading.
+    pub fn is_open(&self) -> bool {
+        !matches!(self.view, StackView::Closed)
     }
 
     pub fn is_shown(&self) -> bool {
-        matches!(self.view, FileView::Shown { .. })
+        matches!(self.view, StackView::Shown)
     }
 
-    /// The index of the failed file and git's message for it.
-    pub fn failure(&self) -> Option<(usize, &str)> {
+    /// git's message when the stack could not be read.
+    pub fn failure(&self) -> Option<&str> {
         match &self.view {
-            FileView::Failed { index, message } => Some((*index, message)),
+            StackView::Failed { message } => Some(message),
             _ => None,
         }
     }
 
-    /// The diff that arrived since the last call, for the view to show once.
-    pub fn take_fresh_diff(&mut self) -> Option<FileDiff> {
+    /// The diffs that arrived since the last call, for the view to show once.
+    pub fn take_fresh(&mut self) -> Option<Fresh> {
         self.fresh.take()
     }
 
-    fn received(&mut self, id: OperationId, diff: FileDiff) {
-        if let FileView::Loading { id: wanted, index } = self.view
-            && wanted == id
+    fn received(&mut self, id: OperationId, diffs: Vec<FileDiff>) {
+        if let StackView::Loading {
+            id: wanted,
+            focus,
+            files,
+            more,
+        } = std::mem::take(&mut self.view)
         {
-            self.view = FileView::Shown { index };
-            self.fresh = Some(diff);
+            if wanted == id {
+                self.view = StackView::Shown;
+                self.fresh = Some(Fresh {
+                    files,
+                    more,
+                    diffs,
+                    focus,
+                });
+            } else {
+                self.view = StackView::Loading {
+                    id: wanted,
+                    focus,
+                    files,
+                    more,
+                };
+            }
         }
     }
 
     fn failed(&mut self, id: OperationId, message: String) {
-        if let FileView::Loading { id: wanted, index } = self.view
+        if let StackView::Loading { id: wanted, .. } = self.view
             && wanted == id
         {
-            self.view = FileView::Failed { index, message };
+            self.view = StackView::Failed { message };
         }
     }
-}
-
-/// The file a step from `current` lands on: the next one or the previous one
-/// among `count` files. `None` at either end, or when `current` is not a file.
-pub fn step_index(current: usize, count: usize, forward: bool) -> Option<usize> {
-    if current >= count {
-        return None;
-    }
-    if forward {
-        (current + 1 < count).then_some(current + 1)
-    } else {
-        current.checked_sub(1)
-    }
-}
-
-/// "File 2 of 5", counting from one.
-pub fn file_position(index: usize, count: usize) -> String {
-    format!("File {} of {count}", index + 1)
 }
 
 /// The history page's listing. A reply to a request that was superseded is
@@ -489,11 +499,11 @@ impl Model {
                         .clone()
                         .unwrap_or_else(|| "git could not read the commit".to_owned()),
                 );
-                self.commit_file.failed(
+                self.commit_stack.failed(
                     id,
                     detail
                         .clone()
-                        .unwrap_or_else(|| "git could not read the file".to_owned()),
+                        .unwrap_or_else(|| "git could not read the commit's diff".to_owned()),
                 );
                 // A refused checkout keeps the branch; git's reason, first line only, is the notice.
                 if self.branches.finish_checkout(id) {
@@ -531,8 +541,8 @@ impl Model {
                 self.commit.received(id, detail);
                 None
             }
-            Event::CommitFileDiffLoaded { id, diff } => {
-                self.commit_file.received(id, diff);
+            Event::CommitStackLoaded { id, diffs } => {
+                self.commit_stack.received(id, diffs);
                 None
             }
             // An operation that ends without a status (vetoed, cancelled) ends its checkout too.
@@ -799,7 +809,7 @@ fn event_id(event: &Event) -> OperationId {
         | Event::BranchesLoaded { id, .. }
         | Event::HistoryLoaded { id, .. }
         | Event::CommitDetailLoaded { id, .. }
-        | Event::CommitFileDiffLoaded { id, .. }
+        | Event::CommitStackLoaded { id, .. }
         | Event::WorktreesLoaded { id, .. }
         | Event::WorktreeInspected { id, .. }
         | Event::PrunableListed { id, .. }
@@ -1570,7 +1580,7 @@ mod commit_pane_tests {
 }
 
 #[cfg(test)]
-mod commit_file_tests {
+mod commit_stack_tests {
     use super::*;
     use gm_schema::{Actor, FileDiff, OperationState};
 
@@ -1583,81 +1593,87 @@ mod commit_file_tests {
         }
     }
 
+    fn listed(paths: &[&str]) -> Vec<CommitFile> {
+        paths
+            .iter()
+            .map(|path| CommitFile {
+                path: (*path).into(),
+                old_path: None,
+                change: gm_schema::Change::Modified,
+                added: 1,
+                deleted: 0,
+                binary: false,
+            })
+            .collect()
+    }
+
     #[test]
-    fn the_answer_to_the_request_in_flight_is_taken_once() {
+    fn the_answer_to_the_request_in_flight_is_taken_once_with_its_focus() {
         let mut model = Model::default();
-        model.commit_file.request(OperationId(4), 2);
-        assert_eq!(model.commit_file.index(), Some(2));
-        assert!(!model.commit_file.is_shown());
+        model
+            .commit_stack
+            .request(OperationId(4), 1, listed(&["a.txt", "b.txt"]), 0);
+        assert!(model.commit_stack.is_open());
+        assert!(!model.commit_stack.is_shown());
         assert_eq!(
-            model.apply(Event::CommitFileDiffLoaded {
+            model.apply(Event::CommitStackLoaded {
                 id: OperationId(4),
-                diff: diff("a.txt"),
+                diffs: vec![diff("a.txt"), diff("b.txt")],
             }),
             None
         );
-        assert_eq!(
-            model.commit_file.take_fresh_diff().map(|d| d.path),
-            Some("a.txt".into())
-        );
-        assert_eq!(model.commit_file.take_fresh_diff(), None);
-        assert!(model.commit_file.is_shown());
+        let fresh = model.commit_stack.take_fresh().unwrap();
+        assert_eq!(fresh.focus, 1);
+        assert_eq!(fresh.files.len(), 2);
+        assert_eq!(fresh.diffs.len(), 2);
+        assert_eq!(model.commit_stack.take_fresh(), None);
+        assert!(model.commit_stack.is_shown());
     }
 
     #[test]
     fn an_answer_to_a_superseded_request_is_dropped() {
         let mut model = Model::default();
-        model.commit_file.request(OperationId(4), 2);
-        model.commit_file.request(OperationId(5), 3);
-        let _ = model.apply(Event::CommitFileDiffLoaded {
+        model
+            .commit_stack
+            .request(OperationId(4), 2, listed(&["old.txt"]), 0);
+        model
+            .commit_stack
+            .request(OperationId(5), 0, listed(&["new.txt"]), 0);
+        let _ = model.apply(Event::CommitStackLoaded {
             id: OperationId(4),
-            diff: diff("old.txt"),
+            diffs: vec![diff("old.txt")],
         });
-        assert_eq!(model.commit_file.take_fresh_diff(), None);
-        assert_eq!(model.commit_file.index(), Some(3));
-        assert!(!model.commit_file.is_shown());
+        assert_eq!(model.commit_stack.take_fresh(), None);
+        assert!(!model.commit_stack.is_shown());
     }
 
     #[test]
-    fn closing_the_file_drops_the_answer_still_on_its_way() {
+    fn closing_the_stack_drops_the_answer_still_on_its_way() {
         let mut model = Model::default();
-        model.commit_file.request(OperationId(4), 2);
-        model.commit_file.close();
-        let _ = model.apply(Event::CommitFileDiffLoaded {
+        model
+            .commit_stack
+            .request(OperationId(4), 0, listed(&["a.txt"]), 0);
+        model.commit_stack.close();
+        let _ = model.apply(Event::CommitStackLoaded {
             id: OperationId(4),
-            diff: diff("a.txt"),
+            diffs: vec![diff("a.txt")],
         });
-        assert_eq!(model.commit_file.take_fresh_diff(), None);
-        assert_eq!(model.commit_file.index(), None);
+        assert_eq!(model.commit_stack.take_fresh(), None);
+        assert!(!model.commit_stack.is_open());
     }
 
     #[test]
-    fn a_failed_file_read_keeps_gits_message_for_its_file() {
+    fn a_failed_stack_read_keeps_gits_message() {
         let mut model = Model::default();
-        model.commit_file.request(OperationId(4), 1);
+        model
+            .commit_stack
+            .request(OperationId(4), 0, listed(&["a.txt"]), 0);
         let _ = model.apply(Event::OperationChanged {
             id: OperationId(4),
             actor: Actor::Human,
             state: OperationState::Failed,
             detail: Some("fatal: bad object".into()),
         });
-        assert_eq!(model.commit_file.failure(), Some((1, "fatal: bad object")));
-    }
-
-    #[test]
-    fn stepping_moves_one_file_and_stops_at_either_end() {
-        assert_eq!(step_index(0, 3, true), Some(1));
-        assert_eq!(step_index(1, 3, true), Some(2));
-        assert_eq!(step_index(2, 3, true), None);
-        assert_eq!(step_index(2, 3, false), Some(1));
-        assert_eq!(step_index(0, 3, false), None);
-        assert_eq!(step_index(0, 1, true), None);
-        assert_eq!(step_index(0, 0, true), None);
-    }
-
-    #[test]
-    fn the_position_says_which_file_of_how_many() {
-        assert_eq!(file_position(0, 3), "File 1 of 3");
-        assert_eq!(file_position(2, 3), "File 3 of 3");
+        assert_eq!(model.commit_stack.failure(), Some("fatal: bad object"));
     }
 }

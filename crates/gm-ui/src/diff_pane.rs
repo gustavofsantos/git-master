@@ -1,11 +1,12 @@
 //! The diff of the selected file, one side at a time (Staged or Unstaged), with
 //! chunk actions in each hunk header and stage and unstage by line (D24). The
+//! read-only pane (H4c) shows every file of a commit in one list instead. The
 //! rows and the selection rules live in `diff_rows`; this file draws them and
 //! maps keys and clicks onto them.
 
 use std::ops::Range;
 
-use gm_schema::{FileDiff, LineKind, StageTarget};
+use gm_schema::{CommitFile, FileDiff, LineKind, StageTarget};
 use gpui::{
     AnyElement, ClickEvent, Context, Div, EventEmitter, FocusHandle, FontWeight, Hsla, IntoElement,
     KeyBinding, Render, ScrollStrategy, ScrollWheelEvent, UniformListScrollHandle, Window, actions,
@@ -15,19 +16,37 @@ use gpui::{
 use crate::action_registry::{Action, Args};
 use crate::diff_rows::{
     Apply, Cell, Diffs, Layout, LineKey, Mode, Press, Row, Selection, Side, SplitRow, SplitRows,
-    build_rows, change_counts, changed_keys_between, controls, default_side, hunk_header_text,
-    hunk_selection_count, hunks_of, max_scroll_columns, next_changed_line, next_hunk_header,
-    no_newline_mark, press, prev_changed_line, prev_hunk_header, skip_columns,
-    split_cell_on_cursor, split_pairs, split_rows,
+    StackFile, build_rows, build_stack, change_counts, changed_keys_between, concat_hunks,
+    controls, default_side, file_at_row, file_notice, hunk_header_text, hunk_selection_count,
+    hunks_of, max_scroll_columns, next_changed_line, next_hunk_header, no_newline_mark,
+    notice_text, press, prev_changed_line, prev_hunk_header, skip_columns, split_cell_on_cursor,
+    split_pairs, split_rows, step_from_top,
 };
 use crate::icon::{self, Icon};
+use crate::shell_history::{change_color, file_counts, path_label};
+use crate::shell_list::change_letter;
 use crate::theme;
 
 /// The key context the pane's bindings are scoped to.
 const CONTEXT: &str = "DiffPane";
-/// The key context of a read-only pane (H4): navigation only, with Up and Down
-/// moving between the files of the commit.
+/// The key context of the read-only pane of a commit (H4, H4c). Its keys are
+/// listed in `COMMIT_KEYS`: no vim-style letters, and Up and Down scroll.
 const CONTEXT_READ_ONLY: &str = "DiffPaneReadOnly";
+
+/// The keys of the commit's stacked diff (H4c), as (keystroke, what it does).
+/// Ctrl+Shift is literal Ctrl on every platform, so the keys never clash with
+/// the app's own shortcuts (⌘K for the palette, ⌘Q for quit). The bindings are
+/// in `read_only_key_bindings`; a test checks that they match this list.
+#[cfg(test)]
+const COMMIT_KEYS: [(&str, &str); 7] = [
+    ("ctrl-shift-n", "Next file"),
+    ("ctrl-shift-p", "Previous file"),
+    ("up", "Scroll up one row"),
+    ("down", "Scroll down one row"),
+    ("pageup", "Scroll up one page"),
+    ("pagedown", "Scroll down one page"),
+    ("escape", "Back to the commit"),
+];
 
 /// Height of every list row; `uniform_list` needs equal heights.
 const ROW_HEIGHT: f32 = 22.;
@@ -53,6 +72,10 @@ actions!(
         PrevFile,
         NextFile,
         LeaveCommit,
+        ScrollLineUp,
+        ScrollLineDown,
+        ScrollPageUp,
+        ScrollPageDown,
     ]
 );
 
@@ -67,10 +90,6 @@ pub enum DiffPaneEvent {
     /// Stage or unstage of selected lines (D24), sent to the engine as is.
     Stage(StageTarget),
     Unstage(StageTarget),
-    /// Up or Down in a read-only pane: the previous or next file of the commit.
-    StepFile {
-        forward: bool,
-    },
     /// Escape in a read-only pane: back to the commit view.
     LeaveCommit,
     /// The user chose a layout in the header (D39); the shell saves it.
@@ -107,6 +126,12 @@ pub struct DiffPane {
     pending: Option<Apply>,
     /// The hunk whose discard waits for its confirmation.
     discard_armed: Option<usize>,
+    /// A read-only pane's stack (H4c): the files in order, how many more the
+    /// detail did not list, and the row each file starts at in each layout.
+    stack_files: Vec<CommitFile>,
+    stack_more: usize,
+    unified_starts: Vec<usize>,
+    split_starts: Vec<usize>,
 }
 
 impl EventEmitter<DiffPaneEvent> for DiffPane {}
@@ -146,6 +171,10 @@ impl DiffPane {
             visual: None,
             pending: None,
             discard_armed: None,
+            stack_files: Vec::new(),
+            stack_more: 0,
+            unified_starts: Vec::new(),
+            split_starts: Vec::new(),
         }
     }
 
@@ -201,21 +230,115 @@ impl DiffPane {
         cx.notify();
     }
 
-    /// Shows one file's diff of a commit (H4). Its hunks are the only side, and
-    /// nothing is selected.
-    pub fn show_read_only(&mut self, diff: FileDiff, cx: &mut Context<Self>) {
-        self.unstaged = Some(diff);
+    /// Shows every file of a commit (H4c) in one list, the first `files.len()`
+    /// of them, and scrolls it so that file `focus` is at the top. `diffs` has
+    /// one diff per file, in order. Nothing is selected and there is no cursor.
+    pub fn show_stack(
+        &mut self,
+        files: Vec<CommitFile>,
+        more: usize,
+        diffs: Vec<FileDiff>,
+        focus: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let (hunks, ranges) = concat_hunks(diffs);
+        let spec: Vec<StackFile> = files
+            .iter()
+            .zip(ranges)
+            .map(|(file, hunks)| {
+                let renamed = file.old_path.is_some();
+                let notice = file_notice(file.change, renamed, file.binary, !hunks.is_empty());
+                StackFile { hunks, notice }
+            })
+            .collect();
+        let stacked = build_stack(&hunks, &spec, more);
+        self.stack_files = files;
+        self.stack_more = more;
+        self.unified_starts = stacked.unified_starts;
+        self.split_starts = stacked.split_starts;
+        self.unstaged = Some(FileDiff {
+            path: String::new(),
+            old_path: None,
+            binary: false,
+            hunks,
+        });
         self.staged = None;
         self.side = Side::Unstaged;
-        self.rebuild_rows();
+        self.rows = stacked.rows;
+        self.split = SplitRows {
+            rows: stacked.split,
+            of_unified: Vec::new(),
+        };
         self.scroll_columns = 0;
         self.selection.clear();
         self.visual = None;
         self.pending = None;
         self.discard_armed = None;
-        self.cursor = next_changed_line(&self.rows, self.diffs(), 0).unwrap_or(0);
-        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.cursor = 0;
+        let start = self
+            .starts_for(self.layout)
+            .get(focus)
+            .copied()
+            .unwrap_or(0);
+        self.scroll.scroll_to_item(start, ScrollStrategy::Top);
         cx.notify();
+    }
+
+    /// The row each file starts at in `layout`, in a stack.
+    fn starts_for(&self, layout: Layout) -> &[usize] {
+        match layout {
+            Layout::Unified => &self.unified_starts,
+            Layout::Split => &self.split_starts,
+        }
+    }
+
+    /// The row at the top of the list, in the layout being drawn.
+    fn top_row(&self) -> usize {
+        let state = self.scroll.0.borrow();
+        state.deferred_scroll_to_item.as_ref().map_or_else(
+            || state.base_handle.logical_scroll_top().0,
+            |deferred| deferred.item_index,
+        )
+    }
+
+    /// Scrolls a stacked pane so that file `file` is at the top.
+    fn scroll_to_file(&self, file: usize) {
+        if let Some(&start) = self.starts_for(self.layout).get(file) {
+            self.scroll.scroll_to_item(start, ScrollStrategy::Top);
+        }
+    }
+
+    /// Next or previous file of a stack (ctrl-shift-n, ctrl-shift-p). Clamped at
+    /// the first and the last file; see `diff_rows::step_from_top`.
+    fn step_stack_file(&self, forward: bool, cx: &mut Context<Self>) {
+        if self.mode != Mode::ReadOnly {
+            return;
+        }
+        if let Some(file) = step_from_top(self.starts_for(self.layout), self.top_row(), forward) {
+            self.scroll_to_file(file);
+            cx.notify();
+        }
+    }
+
+    /// Scrolls a stack by `rows` rows, clamped to the list. Up and Down move one
+    /// row, `PageUp` and `PageDown` a page of visible rows.
+    fn scroll_rows(&self, rows: isize, cx: &mut Context<Self>) {
+        if self.mode != Mode::ReadOnly {
+            return;
+        }
+        let last = self.row_count().saturating_sub(1);
+        let target = self.top_row().saturating_add_signed(rows).min(last);
+        self.scroll.scroll_to_item(target, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    /// The number of rows a page of the list shows, at least one.
+    fn page_rows(&self) -> isize {
+        let height = self.scroll.0.borrow().base_handle.bounds().size.height;
+        let rows = (f32::from(height) / ROW_HEIGHT).floor();
+        #[allow(clippy::cast_possible_truncation)]
+        let rows = rows as isize;
+        rows.max(1)
     }
 
     /// Shows `side`. Selection, visual mode and a pending discard belong to the
@@ -277,9 +400,16 @@ impl DiffPane {
         if layout == self.layout {
             return;
         }
-        self.layout = layout;
-        self.scroll
-            .scroll_to_item(self.cursor_ix(), ScrollStrategy::Center);
+        if self.mode == Mode::ReadOnly {
+            // The stack keeps the file at the top: its header is where it starts in the new layout.
+            let file = file_at_row(self.starts_for(self.layout), self.top_row());
+            self.layout = layout;
+            self.scroll_to_file(file);
+        } else {
+            self.layout = layout;
+            self.scroll
+                .scroll_to_item(self.cursor_ix(), ScrollStrategy::Center);
+        }
         cx.notify();
     }
 
@@ -356,6 +486,7 @@ impl DiffPane {
                     self.hunk_row(ix, side, hunk_index, cx)
                 }
                 Some(SplitRow::Pair { old, new }) => self.pair_row(ix, old, new, cx),
+                Some(SplitRow::Banner(row)) => self.banner_row(row),
                 None => div().into_any_element(),
             },
         }
@@ -582,7 +713,7 @@ impl DiffPane {
     /// Stage (unstaged side) or unstage (staged side) the hunk under the cursor.
     fn chunk_action_at_cursor(&mut self, cx: &mut Context<Self>) {
         self.pending = None;
-        let Some((side, hunk_index)) = self.rows.get(self.cursor).map(|row| row.hunk()) else {
+        let Some((side, hunk_index)) = self.rows.get(self.cursor).and_then(|row| row.hunk()) else {
             cx.notify();
             return;
         };
@@ -632,13 +763,6 @@ impl DiffPane {
         cx.notify();
     }
 
-    /// Up or Down: asks the view for the file next to this one. Only a read-only pane asks.
-    fn step_file(&self, forward: bool, cx: &mut Context<Self>) {
-        if self.mode == Mode::ReadOnly {
-            cx.emit(DiffPaneEvent::StepFile { forward });
-        }
-    }
-
     /// Escape in a read-only pane goes back to the commit view.
     fn leave_commit(&self, cx: &mut Context<Self>) {
         if self.mode == Mode::ReadOnly {
@@ -679,15 +803,12 @@ impl DiffPane {
         if self.path().is_none() {
             return Some("Select a file to see its diff.");
         }
+        // A stack has rows whenever it lists a file, so no rows means no files.
+        if self.mode == Mode::ReadOnly {
+            return Some("This commit changes no files.");
+        }
         let binary = self.unstaged.as_ref().is_some_and(|d| d.binary)
             || self.staged.as_ref().is_some_and(|d| d.binary);
-        if self.mode == Mode::ReadOnly {
-            return Some(if binary {
-                "Binary file: its contents are not shown."
-            } else {
-                "No text changes in this file."
-            });
-        }
         Some(match (binary, self.side) {
             (true, _) => "Binary file (n/a)",
             (false, Side::Unstaged) => "No unstaged changes",
@@ -1046,8 +1167,96 @@ impl DiffPane {
                 hunk_index,
                 line_index,
             }) => self.line_row(ix, side, hunk_index, line_index, cx),
+            Some(row @ (Row::FileHeader { .. } | Row::Notice { .. } | Row::MoreFiles { .. })) => {
+                self.banner_row(row)
+            }
             None => div().into_any_element(),
         }
+    }
+
+    /// A row of a stack that is not a diff line (H4c): a file's header, a notice,
+    /// or the count of files past the limit. Each is one list row high.
+    fn banner_row(&self, row: Row) -> AnyElement {
+        match row {
+            Row::FileHeader { file } => self.file_row(file),
+            Row::Notice { notice, .. } => text_row(&notice_text(notice), theme::muted()),
+            Row::MoreFiles { count } => text_row(
+                &format!("and {count} more files, not shown."),
+                theme::muted(),
+            ),
+            Row::HunkHeader { .. } | Row::Line { .. } => div().into_any_element(),
+        }
+    }
+
+    /// A file's header in a stack: its change letter, path (old → new for a
+    /// rename) and `+ −` counts.
+    fn file_row(&self, file: usize) -> AnyElement {
+        let Some(meta) = self.stack_files.get(file) else {
+            return div().into_any_element();
+        };
+        div()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .px_3()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .min_w(px(0.))
+            .bg(theme::panel())
+            .border_b_1()
+            .border_color(theme::hairline())
+            .child(
+                div()
+                    .w(px(16.))
+                    .flex_none()
+                    .text_center()
+                    .font_family(theme::code_font())
+                    .text_color(change_color(meta.change))
+                    .child(change_letter(meta.change).to_string()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .font_family(theme::code_font())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(path_label(meta)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(theme::code_font())
+                    .text_color(theme::muted())
+                    .child(file_counts(meta)),
+            )
+            .into_any_element()
+    }
+
+    /// The header above a stack: how many files it lists, and the layout switch.
+    fn stack_header(&self, cx: &Context<Self>) -> Div {
+        let count = self.stack_files.len();
+        let label = match (count, self.stack_more > 0) {
+            (1, false) => "1 file".to_owned(),
+            (count, false) => format!("{count} files"),
+            (count, true) => format!("First {count} files"),
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .bg(theme::panel())
+            .border_b_1()
+            .border_color(theme::hairline())
+            .child(div().text_color(theme::muted()).child(label))
+            .child(self.layout_selector(cx))
     }
 
     fn list(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1071,6 +1280,21 @@ impl DiffPane {
         .min_h(px(0.))
         .into_any_element()
     }
+}
+
+/// A list row of plain text, one row high.
+fn text_row(text: &str, colour: Hsla) -> AnyElement {
+    div()
+        .h(px(ROW_HEIGHT))
+        .w_full()
+        .px_3()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_color(colour)
+        .child(text.to_owned())
+        .into_any_element()
 }
 
 /// A line's text, then git's no-newline mark after it in muted colour when the
@@ -1154,13 +1378,14 @@ pub fn bind_keys(cx: &mut gpui::App) {
 /// The keys of a read-only pane. Only navigation is bound: no key here reaches a
 /// stage, unstage or discard action, because none of them is bound in this context.
 fn read_only_key_bindings() -> Vec<KeyBinding> {
+    // The keys of `COMMIT_KEYS`, bound in the read-only context only.
     vec![
-        KeyBinding::new("j", NextChangedLine, Some(CONTEXT_READ_ONLY)),
-        KeyBinding::new("k", PrevChangedLine, Some(CONTEXT_READ_ONLY)),
-        KeyBinding::new("n", NextHunk, Some(CONTEXT_READ_ONLY)),
-        KeyBinding::new("p", PrevHunk, Some(CONTEXT_READ_ONLY)),
-        KeyBinding::new("down", NextFile, Some(CONTEXT_READ_ONLY)),
-        KeyBinding::new("up", PrevFile, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("ctrl-shift-n", NextFile, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("ctrl-shift-p", PrevFile, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("up", ScrollLineUp, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("down", ScrollLineDown, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("pageup", ScrollPageUp, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("pagedown", ScrollPageDown, Some(CONTEXT_READ_ONLY)),
         KeyBinding::new("escape", LeaveCommit, Some(CONTEXT_READ_ONLY)),
     ]
 }
@@ -1201,8 +1426,18 @@ impl Render for DiffPane {
         div()
             .key_context(context)
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &PrevFile, _, cx| this.step_file(false, cx)))
-            .on_action(cx.listener(|this, _: &NextFile, _, cx| this.step_file(true, cx)))
+            .on_action(cx.listener(|this, _: &PrevFile, _, cx| this.step_stack_file(false, cx)))
+            .on_action(cx.listener(|this, _: &NextFile, _, cx| this.step_stack_file(true, cx)))
+            .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| this.scroll_rows(-1, cx)))
+            .on_action(cx.listener(|this, _: &ScrollLineDown, _, cx| this.scroll_rows(1, cx)))
+            .on_action(cx.listener(|this, _: &ScrollPageUp, _, cx| {
+                let page = this.page_rows();
+                this.scroll_rows(-page, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ScrollPageDown, _, cx| {
+                let page = this.page_rows();
+                this.scroll_rows(page, cx);
+            }))
             .on_action(cx.listener(|this, _: &LeaveCommit, _, cx| this.leave_commit(cx)))
             .on_action(cx.listener(|this, _: &NextChangedLine, _, cx| this.step_changed(true, cx)))
             .on_action(cx.listener(|this, _: &PrevChangedLine, _, cx| this.step_changed(false, cx)))
@@ -1227,7 +1462,11 @@ impl Render for DiffPane {
             .text_color(theme::text())
             .font_family(theme::ui_font())
             .text_sm()
-            .children(self.file_header(cx))
+            .children(if self.mode == Mode::ReadOnly {
+                Some(self.stack_header(cx))
+            } else {
+                self.file_header(cx)
+            })
             .child(body)
             .children(self.warning_bar())
     }
@@ -1241,6 +1480,33 @@ mod tests {
     fn every_key_binding_parses() {
         assert_eq!(key_bindings().len(), 12);
         assert_eq!(read_only_key_bindings().len(), 7);
+    }
+
+    #[test]
+    fn the_commit_keys_are_the_listed_ones_and_no_vim_letter_is_bound() {
+        let keys: Vec<&str> = COMMIT_KEYS.iter().map(|(keys, _)| *keys).collect();
+        assert_eq!(keys.len(), read_only_key_bindings().len());
+        for listed in &keys {
+            assert!(
+                !matches!(*listed, "j" | "k" | "h" | "l" | "n" | "p"),
+                "{listed} is a vim letter"
+            );
+        }
+        // Every keystroke parses: a malformed one panics when bound at startup.
+        for listed in keys {
+            let _ = KeyBinding::new(listed, NextFile, Some(CONTEXT_READ_ONLY));
+        }
+    }
+
+    #[test]
+    fn the_scroll_keys_are_each_bound_once_in_the_read_only_pane() {
+        assert_eq!(
+            read_only_key_bindings()
+                .iter()
+                .filter(|binding| binding.action().as_any().is::<ScrollLineUp>())
+                .count(),
+            1
+        );
     }
 
     #[test]

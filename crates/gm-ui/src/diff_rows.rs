@@ -3,9 +3,10 @@
 //! Nothing here touches GPUI, so every rule is unit-tested on its own.
 
 use std::collections::BTreeSet;
+use std::ops::Range;
 
 use gm_core::stage_math::{pair_hunk, pair_warning};
-use gm_schema::{DiffSide, FileDiff, Hunk, LineKind};
+use gm_schema::{Change, DiffSide, FileDiff, Hunk, LineKind};
 
 /// Which comparison a hunk belongs to. Unstaged sorts first, as it is shown
 /// first.
@@ -81,7 +82,9 @@ pub fn default_side(unstaged: &[Hunk], staged: &[Hunk]) -> Side {
 /// line in `Hunk::lines`. Only added and removed lines are ever keys.
 pub type LineKey = (Side, usize, usize);
 
-/// One row of the virtualized list.
+/// One row of the virtualized list. The last three exist only in a stacked
+/// diff of a commit (H4c): the header of a file, a notice in place of a file's
+/// rows, and the count of files past the limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Row {
     HunkHeader {
@@ -93,16 +96,27 @@ pub enum Row {
         hunk_index: usize,
         line_index: usize,
     },
+    FileHeader {
+        file: usize,
+    },
+    Notice {
+        file: usize,
+        notice: Notice,
+    },
+    MoreFiles {
+        count: usize,
+    },
 }
 
 impl Row {
-    /// The side and hunk a row belongs to.
-    pub fn hunk(self) -> (Side, usize) {
+    /// The side and hunk a row belongs to; `None` for the stack's own rows.
+    pub fn hunk(self) -> Option<(Side, usize)> {
         match self {
             Row::HunkHeader { side, hunk_index }
             | Row::Line {
                 side, hunk_index, ..
-            } => (side, hunk_index),
+            } => Some((side, hunk_index)),
+            Row::FileHeader { .. } | Row::Notice { .. } | Row::MoreFiles { .. } => None,
         }
     }
 }
@@ -189,6 +203,8 @@ pub enum SplitRow {
         old: Option<Cell>,
         new: Option<Cell>,
     },
+    /// A stack's file header, notice or count, across both sides.
+    Banner(Row),
 }
 
 /// The split rows of one side, and for each unified row the split row that
@@ -232,6 +248,214 @@ pub fn split_rows(diffs: Diffs<'_>, side: Side) -> SplitRows {
         out.of_unified.extend(landed);
     }
     out
+}
+
+/// Changed lines of one file a stacked diff shows before it says how many are
+/// left (H4c). Keeps a huge file from making the list slow to build.
+pub const FILE_LINE_LIMIT: usize = 5_000;
+
+/// Why a file of a stack has no rows of its own, or that some of its lines
+/// are not shown. Copied into a row, so it holds no text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notice {
+    /// A binary file: git gives no text for it.
+    Binary,
+    /// A rename with no text changes (the path is the file header's).
+    Renamed,
+    /// A mode change with no text changes.
+    ModeOnly,
+    /// An added or deleted file with no lines.
+    Empty,
+    /// This many lines of the file are past `FILE_LINE_LIMIT`.
+    MoreLines(usize),
+}
+
+/// The text of a notice, shown in place of a file's rows or after its lines.
+#[must_use]
+pub fn notice_text(notice: Notice) -> String {
+    match notice {
+        Notice::Binary => "Binary file: its contents are not shown.".to_owned(),
+        Notice::Renamed => "Renamed, with no text changes.".to_owned(),
+        Notice::ModeOnly => "Mode change only: no text changes.".to_owned(),
+        Notice::Empty => "Empty file: no lines.".to_owned(),
+        Notice::MoreLines(count) => format!("and {count} more lines, not shown."),
+    }
+}
+
+/// The notice of a file that has no text rows of its own, or `None` when its
+/// hunks are shown. A binary file is a notice whatever its hunks.
+#[must_use]
+pub fn file_notice(change: Change, renamed: bool, binary: bool, has_hunks: bool) -> Option<Notice> {
+    if binary {
+        return Some(Notice::Binary);
+    }
+    if has_hunks {
+        return None;
+    }
+    Some(if renamed {
+        Notice::Renamed
+    } else if matches!(change, Change::Added | Change::Deleted) {
+        Notice::Empty
+    } else {
+        Notice::ModeOnly
+    })
+}
+
+/// One file of a stack: the range of the stack's hunks that are its own, and
+/// the notice that replaces its rows when it has no text (see `file_notice`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackFile {
+    pub hunks: Range<usize>,
+    pub notice: Option<Notice>,
+}
+
+/// The rows of a stacked diff of one commit (H4c), in both layouts, and the
+/// row where each file starts in each. `hunks` of the stack are every file's
+/// hunks in order, so a hunk key is the same as in the single-side rows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Stacked {
+    pub rows: Vec<Row>,
+    pub split: Vec<SplitRow>,
+    pub unified_starts: Vec<usize>,
+    pub split_starts: Vec<usize>,
+}
+
+/// Joins the hunks of several files into one list, and gives each file's
+/// range in it. The order of the files is kept.
+#[must_use]
+pub fn concat_hunks(diffs: Vec<FileDiff>) -> (Vec<Hunk>, Vec<Range<usize>>) {
+    let mut hunks = Vec::new();
+    let mut ranges = Vec::with_capacity(diffs.len());
+    for diff in diffs {
+        let start = hunks.len();
+        hunks.extend(diff.hunks);
+        ranges.push(start..hunks.len());
+    }
+    (hunks, ranges)
+}
+
+/// Builds the rows of a stack: per file a header, then its notice or its hunks
+/// in both layouts, with at most `FILE_LINE_LIMIT` lines a file. `more_files`
+/// past the listed files adds a last row that counts them.
+#[must_use]
+pub fn build_stack(hunks: &[Hunk], files: &[StackFile], more_files: usize) -> Stacked {
+    let mut out = Stacked::default();
+    for (file, spec) in files.iter().enumerate() {
+        out.unified_starts.push(out.rows.len());
+        out.split_starts.push(out.split.len());
+        let header = Row::FileHeader { file };
+        out.rows.push(header);
+        out.split.push(SplitRow::Banner(header));
+        if let Some(notice) = spec.notice {
+            let row = Row::Notice { file, notice };
+            out.rows.push(row);
+            out.split.push(SplitRow::Banner(row));
+        }
+        let own = &hunks[spec.hunks.clone()];
+        let total: usize = own.iter().map(|hunk| hunk.lines.len()).sum();
+        let mut shown = 0;
+        for (offset, hunk) in own.iter().enumerate() {
+            if shown >= FILE_LINE_LIMIT {
+                break;
+            }
+            let hunk_index = spec.hunks.start + offset;
+            push_unified_hunk(&mut out.rows, hunk_index, hunk, &mut shown);
+            push_split_hunk(&mut out.split, hunk_index, hunk, &mut shown);
+        }
+        if shown < total {
+            let row = Row::Notice {
+                file,
+                notice: Notice::MoreLines(total - shown),
+            };
+            out.rows.push(row);
+            out.split.push(SplitRow::Banner(row));
+        }
+    }
+    if more_files > 0 {
+        let row = Row::MoreFiles { count: more_files };
+        out.rows.push(row);
+        out.split.push(SplitRow::Banner(row));
+    }
+    out
+}
+
+/// A hunk's header and lines, as `build_rows` lists them, until the file's limit.
+fn push_unified_hunk(rows: &mut Vec<Row>, hunk_index: usize, hunk: &Hunk, shown: &mut usize) {
+    rows.push(Row::HunkHeader {
+        side: Side::Unstaged,
+        hunk_index,
+    });
+    for line_index in 0..hunk.lines.len() {
+        if *shown >= FILE_LINE_LIMIT {
+            return;
+        }
+        *shown += 1;
+        rows.push(Row::Line {
+            side: Side::Unstaged,
+            hunk_index,
+            line_index,
+        });
+    }
+}
+
+/// A hunk's header and split pairs, as `split_rows` pairs them, until the
+/// file's limit. A context line counts once, a changed pair counts each side.
+fn push_split_hunk(rows: &mut Vec<SplitRow>, hunk_index: usize, hunk: &Hunk, shown: &mut usize) {
+    rows.push(SplitRow::HunkHeader {
+        side: Side::Unstaged,
+        hunk_index,
+    });
+    let cell = |index: Option<u32>| {
+        let line_index = usize::try_from(index?).ok()?;
+        let line = hunk.lines.get(line_index)?;
+        Some(Cell {
+            key: (Side::Unstaged, hunk_index, line_index),
+            no_newline: line.no_newline,
+        })
+    };
+    for pair in pair_hunk(hunk) {
+        if *shown >= FILE_LINE_LIMIT {
+            return;
+        }
+        let context = pair.old.is_some() && pair.old == pair.new;
+        *shown += if context {
+            1
+        } else {
+            usize::from(pair.old.is_some()) + usize::from(pair.new.is_some())
+        };
+        rows.push(SplitRow::Pair {
+            old: cell(pair.old),
+            new: cell(pair.new),
+        });
+    }
+}
+
+/// The index of the file whose rows hold row `top`: the last file that starts
+/// at or before it. Zero when there are no files.
+#[must_use]
+pub fn file_at_row(starts: &[usize], top: usize) -> usize {
+    starts
+        .partition_point(|&start| start <= top)
+        .saturating_sub(1)
+}
+
+/// The file a step from the top row goes to, clamped at the ends (no wrap).
+/// Forward goes to the file after the one at the top. Backward goes to the
+/// top file's own header when the top is below it, otherwise to the file
+/// before. `None` when there is no such file.
+#[must_use]
+pub fn step_from_top(starts: &[usize], top: usize, forward: bool) -> Option<usize> {
+    if starts.is_empty() {
+        return None;
+    }
+    let current = file_at_row(starts, top);
+    if forward {
+        (current + 1 < starts.len()).then_some(current + 1)
+    } else if top > starts[current] {
+        Some(current)
+    } else {
+        current.checked_sub(1)
+    }
 }
 
 /// Whether a split cell holds the cursor's line. A context line is one line on
@@ -689,7 +913,10 @@ mod tests {
                     hunk_index,
                     line_index,
                 } => Some((side, hunk_index, line_index)),
-                Row::HunkHeader { .. } => None,
+                Row::HunkHeader { .. }
+                | Row::FileHeader { .. }
+                | Row::Notice { .. }
+                | Row::MoreFiles { .. } => None,
             })
             .filter(|key| diffs.is_changed(*key))
             .collect();
@@ -698,7 +925,7 @@ mod tests {
             .iter()
             .flat_map(|row| match row {
                 SplitRow::Pair { old, new } => [*old, *new],
-                SplitRow::HunkHeader { .. } => [None, None],
+                SplitRow::HunkHeader { .. } | SplitRow::Banner(_) => [None, None],
             })
             .flatten()
             .map(|cell| cell.key)
@@ -794,7 +1021,7 @@ mod tests {
                 line_index: 0
             }
             .hunk(),
-            (Side::Staged, 3)
+            Some((Side::Staged, 3))
         );
     }
 
@@ -1262,11 +1489,18 @@ mod real_git {
 
     /// The file diff of `path` in `oid`, as the engine reads it, and its split
     /// rows on the unstaged side (the side a commit diff shows).
-    fn read(dir: &Path, oid: &str, path: &str, old_path: Option<&str>) -> (FileDiff, SplitRows) {
-        let read = SubprocessGit::default()
-            .commit_file_diff(dir, oid, path, old_path)
+    /// The diff of `path` in `oid`, from the stack of the whole commit (H4c).
+    fn read(dir: &Path, oid: &str, path: &str) -> (FileDiff, SplitRows) {
+        let stop = AtomicBool::new(false);
+        let detail = SubprocessGit::default().commit_detail(dir, oid).unwrap()(&stop).unwrap();
+        let stack = SubprocessGit::default()
+            .commit_stack(dir, oid, &detail.files)
             .unwrap();
-        let diff = read(&AtomicBool::new(false)).unwrap();
+        let diff = stack(&stop)
+            .unwrap()
+            .into_iter()
+            .find(|diff| diff.path == path)
+            .unwrap();
         let split = split_rows(
             Diffs {
                 unstaged: &diff.hunks,
@@ -1362,7 +1596,10 @@ mod real_git {
                 hunk_index,
                 line_index,
             } => Some((side, hunk_index, line_index)),
-            Row::HunkHeader { .. } => None,
+            Row::HunkHeader { .. }
+            | Row::FileHeader { .. }
+            | Row::Notice { .. }
+            | Row::MoreFiles { .. } => None,
         })
         .collect();
         // The split cells: each cell names its own line, the same key.
@@ -1377,7 +1614,7 @@ mod real_git {
         .iter()
         .flat_map(|row| match row {
             SplitRow::Pair { old, new } => [*old, *new],
-            SplitRow::HunkHeader { .. } => [None, None],
+            SplitRow::HunkHeader { .. } | SplitRow::Banner(_) => [None, None],
         })
         .flatten()
         .map(|cell| cell.key)
@@ -1404,7 +1641,7 @@ mod real_git {
             .iter()
             .filter_map(|row| match row {
                 SplitRow::Pair { old, new } => Some((*old, *new)),
-                SplitRow::HunkHeader { .. } => None,
+                SplitRow::HunkHeader { .. } | SplitRow::Banner(_) => None,
             })
             .collect()
     }
@@ -1418,7 +1655,7 @@ mod real_git {
         std::fs::write(dir.path().join("new.txt"), "x\ny\n").unwrap();
         let oid = commit(dir.path(), "add");
 
-        let (diff, split) = read(dir.path(), &oid, "new.txt", None);
+        let (diff, split) = read(dir.path(), &oid, "new.txt");
         assert_eq!(split.rows.len(), 1 + diff.hunks[0].lines.len());
         for (old, new) in pairs(&split) {
             assert_eq!(old, None);
@@ -1435,7 +1672,7 @@ mod real_git {
         std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
         let oid = commit(dir.path(), "delete");
 
-        let (diff, split) = read(dir.path(), &oid, "gone.txt", None);
+        let (diff, split) = read(dir.path(), &oid, "gone.txt");
         assert_eq!(pairs(&split).len(), 2);
         for (old, new) in pairs(&split) {
             assert_eq!(new, None);
@@ -1461,7 +1698,7 @@ mod real_git {
         .unwrap();
         let oid = commit(dir.path(), "rename and edit");
 
-        let (diff, split) = read(dir.path(), &oid, "new.txt", Some("old.txt"));
+        let (diff, split) = read(dir.path(), &oid, "new.txt");
         assert_eq!(diff.old_path.as_deref(), Some("old.txt"));
         let both_changed: Vec<_> = pairs(&split)
             .into_iter()
@@ -1490,5 +1727,254 @@ mod real_git {
         };
         assert_eq!(changed_old, total(LineKind::Removed));
         assert_eq!(changed_new, total(LineKind::Added));
+    }
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use gm_schema::{DiffLine, HunkId};
+
+    use super::*;
+
+    fn hunk(lines: usize) -> Hunk {
+        Hunk {
+            id: HunkId(String::new()),
+            old_start: 1,
+            old_lines: 0,
+            new_start: 1,
+            new_lines: 0,
+            header: String::new(),
+            lines: (0..lines)
+                .map(|n| DiffLine {
+                    kind: LineKind::Added,
+                    old_no: None,
+                    new_no: Some(u32::try_from(n + 1).unwrap()),
+                    text: format!("line {n}"),
+                    no_newline: false,
+                })
+                .collect(),
+        }
+    }
+
+    fn file(hunks: Range<usize>) -> StackFile {
+        StackFile {
+            hunks,
+            notice: None,
+        }
+    }
+
+    #[test]
+    fn a_file_with_text_has_no_notice_and_an_empty_one_says_why() {
+        assert_eq!(file_notice(Change::Modified, false, false, true), None);
+        assert_eq!(
+            file_notice(Change::Added, false, false, false),
+            Some(Notice::Empty)
+        );
+        assert_eq!(
+            file_notice(Change::Deleted, false, false, false),
+            Some(Notice::Empty)
+        );
+        assert_eq!(
+            file_notice(Change::Modified, false, false, false),
+            Some(Notice::ModeOnly)
+        );
+        assert_eq!(
+            file_notice(Change::Renamed, true, false, false),
+            Some(Notice::Renamed)
+        );
+    }
+
+    #[test]
+    fn a_binary_file_is_a_notice_whatever_its_hunks() {
+        assert_eq!(
+            file_notice(Change::Modified, false, true, false),
+            Some(Notice::Binary)
+        );
+        assert_eq!(
+            file_notice(Change::Modified, false, true, true),
+            Some(Notice::Binary)
+        );
+    }
+
+    #[test]
+    fn the_notice_texts_name_the_case_and_the_count() {
+        assert!(notice_text(Notice::Binary).starts_with("Binary file"));
+        assert_eq!(
+            notice_text(Notice::MoreLines(3)),
+            "and 3 more lines, not shown."
+        );
+    }
+
+    #[test]
+    fn a_stack_lists_each_files_header_then_its_hunks_in_order() {
+        let hunks = [hunk(2), hunk(1)];
+        let files = [file(0..1), file(1..2)];
+        let stacked = build_stack(&hunks, &files, 0);
+        assert_eq!(
+            stacked.rows,
+            [
+                Row::FileHeader { file: 0 },
+                Row::HunkHeader {
+                    side: Side::Unstaged,
+                    hunk_index: 0
+                },
+                Row::Line {
+                    side: Side::Unstaged,
+                    hunk_index: 0,
+                    line_index: 0
+                },
+                Row::Line {
+                    side: Side::Unstaged,
+                    hunk_index: 0,
+                    line_index: 1
+                },
+                Row::FileHeader { file: 1 },
+                Row::HunkHeader {
+                    side: Side::Unstaged,
+                    hunk_index: 1
+                },
+                Row::Line {
+                    side: Side::Unstaged,
+                    hunk_index: 1,
+                    line_index: 0
+                },
+            ]
+        );
+        assert_eq!(stacked.unified_starts, [0, 4]);
+    }
+
+    #[test]
+    fn the_split_stack_starts_each_file_at_its_own_banner() {
+        let hunks = [hunk(2), hunk(3)];
+        let files = [file(0..1), file(1..2)];
+        let stacked = build_stack(&hunks, &files, 0);
+        assert_eq!(stacked.split_starts.len(), 2);
+        let start = stacked.split_starts[1];
+        assert_eq!(
+            stacked.split[start],
+            SplitRow::Banner(Row::FileHeader { file: 1 })
+        );
+        assert!(matches!(
+            stacked.split[start + 1],
+            SplitRow::HunkHeader { hunk_index: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn a_notice_file_has_its_header_and_the_notice_and_no_hunks() {
+        let hunks: [Hunk; 0] = [];
+        let files = [StackFile {
+            hunks: 0..0,
+            notice: Some(Notice::Binary),
+        }];
+        let stacked = build_stack(&hunks, &files, 0);
+        assert_eq!(
+            stacked.rows,
+            [
+                Row::FileHeader { file: 0 },
+                Row::Notice {
+                    file: 0,
+                    notice: Notice::Binary
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn files_past_the_listed_ones_are_counted_in_one_last_row() {
+        let stacked = build_stack(&[], &[], 37);
+        assert_eq!(stacked.rows, [Row::MoreFiles { count: 37 }]);
+        assert_eq!(
+            stacked.split,
+            [SplitRow::Banner(Row::MoreFiles { count: 37 })]
+        );
+    }
+
+    #[test]
+    fn a_file_past_the_line_limit_shows_its_first_lines_and_says_how_many_are_left() {
+        let hunks = [hunk(FILE_LINE_LIMIT + 1000)];
+        let files = [file(0..1)];
+        let stacked = build_stack(&hunks, &files, 0);
+        let lines = stacked
+            .rows
+            .iter()
+            .filter(|row| matches!(row, Row::Line { .. }))
+            .count();
+        assert_eq!(lines, FILE_LINE_LIMIT);
+        assert_eq!(
+            stacked.rows.last(),
+            Some(&Row::Notice {
+                file: 0,
+                notice: Notice::MoreLines(1000)
+            })
+        );
+    }
+
+    #[test]
+    fn a_split_file_past_the_line_limit_says_how_many_lines_are_left() {
+        let hunks = [hunk(FILE_LINE_LIMIT + 10)];
+        let files = [file(0..1)];
+        let stacked = build_stack(&hunks, &files, 0);
+        assert_eq!(
+            stacked.split.last(),
+            Some(&SplitRow::Banner(Row::Notice {
+                file: 0,
+                notice: Notice::MoreLines(10)
+            }))
+        );
+    }
+
+    #[test]
+    fn a_file_inside_the_limit_has_no_more_lines_notice() {
+        let stacked = build_stack(&[hunk(3)], &[file(0..1)], 0);
+        assert!(
+            !stacked
+                .rows
+                .iter()
+                .any(|row| matches!(row, Row::Notice { .. }))
+        );
+    }
+
+    #[test]
+    fn concat_keeps_the_order_and_gives_each_file_its_range() {
+        let diff = |n: usize| FileDiff {
+            path: String::new(),
+            old_path: None,
+            binary: false,
+            hunks: (0..n).map(|_| hunk(1)).collect(),
+        };
+        let (all, ranges) = concat_hunks(vec![diff(2), diff(0), diff(1)]);
+        assert_eq!(all.len(), 3);
+        assert_eq!(ranges, [0..2, 2..2, 2..3]);
+    }
+
+    #[test]
+    fn the_file_at_a_row_is_the_last_file_that_starts_at_or_before_it() {
+        let starts = [0, 4, 9];
+        assert_eq!(file_at_row(&starts, 0), 0);
+        assert_eq!(file_at_row(&starts, 3), 0);
+        assert_eq!(file_at_row(&starts, 4), 1);
+        assert_eq!(file_at_row(&starts, 100), 2);
+        assert_eq!(file_at_row(&[], 5), 0);
+    }
+
+    #[test]
+    fn forward_goes_to_the_next_file_and_stops_at_the_last() {
+        let starts = [0, 4, 9];
+        assert_eq!(step_from_top(&starts, 0, true), Some(1));
+        assert_eq!(step_from_top(&starts, 6, true), Some(2));
+        assert_eq!(step_from_top(&starts, 9, true), None);
+        assert_eq!(step_from_top(&[], 0, true), None);
+    }
+
+    #[test]
+    fn backward_goes_to_the_files_header_first_and_then_to_the_one_before() {
+        let starts = [0, 4, 9];
+        // Inside file 1, below its header: back to its header.
+        assert_eq!(step_from_top(&starts, 6, false), Some(1));
+        // At file 1's header: back to file 0.
+        assert_eq!(step_from_top(&starts, 4, false), Some(0));
+        // At the first file's header there is nothing before it.
+        assert_eq!(step_from_top(&starts, 0, false), None);
     }
 }

@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use gm_schema::{
-    BranchEntry, CommitDetail, CommitSummary, FileDiff, History, RepoStatus, WorktreeEntry,
-    WorktreeMode,
+    BranchEntry, CommitDetail, CommitFile, CommitSummary, FileDiff, History, RepoStatus,
+    WorktreeEntry, WorktreeMode,
 };
 
 use crate::history::{Canceller, HistoryPage, HistoryStream};
-use crate::port::{DetailRead, FileDiffRead};
+use crate::port::{DetailRead, StackRead};
 use crate::{GitError, GitPort};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -27,18 +27,9 @@ pub struct FakeGit {
     created: Arc<Mutex<Vec<(String, WorktreeMode)>>>,
     history: Arc<Mutex<Result<History, GitError>>>,
     detail: Arc<Mutex<Result<CommitDetail, GitError>>>,
-    file_diff: Arc<Mutex<Result<FileDiff, GitError>>>,
+    stack: Arc<Mutex<Result<Vec<FileDiff>, GitError>>>,
     /// Every write git was asked for (stage, unstage, discard, commit), by name.
     writes: Arc<Mutex<Vec<&'static str>>>,
-}
-
-fn empty_diff() -> FileDiff {
-    FileDiff {
-        path: String::new(),
-        old_path: None,
-        binary: false,
-        hunks: Vec::new(),
-    }
 }
 
 impl FakeGit {
@@ -53,7 +44,7 @@ impl FakeGit {
             created: Arc::new(Mutex::new(Vec::new())),
             history: Arc::new(Mutex::new(Ok(History::default()))),
             detail: Arc::new(Mutex::new(Ok(CommitDetail::default()))),
-            file_diff: Arc::new(Mutex::new(Ok(empty_diff()))),
+            stack: Arc::new(Mutex::new(Ok(Vec::new()))),
             writes: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -88,13 +79,13 @@ impl FakeGit {
         *self.detail.lock().unwrap() = detail;
     }
 
-    /// What the next commit file diff read answers.
+    /// What the next commit stack read answers: one diff per listed file.
     ///
     /// # Panics
     ///
-    /// If another thread panicked while holding the file diff lock.
-    pub fn set_file_diff(&self, diff: Result<FileDiff, GitError>) {
-        *self.file_diff.lock().unwrap() = diff;
+    /// If another thread panicked while holding the stack lock.
+    pub fn set_stack(&self, diffs: Result<Vec<FileDiff>, GitError>) {
+        *self.stack.lock().unwrap() = diffs;
     }
 
     /// The writes git was asked for, in order. Empty for a read-only session.
@@ -167,19 +158,18 @@ impl GitPort for FakeGit {
         Err(GitError("commit is not supported by this adapter".into()))
     }
 
-    fn commit_file_diff(
+    fn commit_stack(
         &self,
         _root: &Path,
         _oid: &str,
-        _path: &str,
-        _old_path: Option<&str>,
-    ) -> Result<FileDiffRead, GitError> {
-        let diff = self.file_diff.lock().unwrap().clone();
+        _files: &[CommitFile],
+    ) -> Result<StackRead, GitError> {
+        let diffs = self.stack.lock().unwrap().clone();
         Ok(Box::new(move |stop: &AtomicBool| {
             if stop.load(Ordering::SeqCst) {
                 return Err(GitError("the commit read was superseded".into()));
             }
-            diff
+            diffs
         }))
     }
 

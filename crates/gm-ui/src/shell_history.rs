@@ -15,7 +15,7 @@ use gpui::{
     prelude::*, px, uniform_list,
 };
 
-use crate::model::{CommitPane, HistoryList, file_position, step_index};
+use crate::model::{CommitPane, HistoryList};
 use crate::shell_list::change_letter;
 use crate::theme;
 use crate::view::StatusView;
@@ -70,9 +70,10 @@ impl StatusView {
                     .child(div().font_weight(FontWeight::MEDIUM).child("History"))
                     .child(div().text_xs().text_color(theme::muted()).child(count)),
             )
-            .child(match self.model.commit_file.index() {
-                Some(_) => self.commit_file_view(cx),
-                None => div()
+            .child(if self.model.commit_stack.is_open() {
+                self.commit_file_view(cx)
+            } else {
+                div()
                     .flex_1()
                     .min_h(px(0.))
                     .flex()
@@ -86,7 +87,7 @@ impl StatusView {
                             .flex_col()
                             .child(list),
                     )
-                    .child(commit_panel(&self.model.commit, cx)),
+                    .child(commit_panel(&self.model.commit, cx))
             })
     }
 }
@@ -390,7 +391,7 @@ fn file_row(file: &CommitFile, ix: usize, cx: &mut Context<StatusView>) -> State
         }))
 }
 
-fn change_color(change: Change) -> Hsla {
+pub(crate) fn change_color(change: Change) -> Hsla {
     match change {
         Change::Added => theme::staged(),
         Change::Modified | Change::TypeChanged => theme::unstaged(),
@@ -454,7 +455,7 @@ impl StatusView {
     /// refresh of the list. Selecting another commit supersedes the read in flight.
     pub(crate) fn select_commit(&mut self, oid: &str, cx: &mut Context<Self>) {
         self.model.history.select(oid);
-        self.model.commit_file.close();
+        self.model.commit_stack.close();
         let id = self.engine.dispatch(
             Actor::Human,
             CommandKind::LoadCommitDetail {
@@ -465,29 +466,27 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Opens file `index` of the selected commit: its diff replaces the commit view (H4).
-    /// The read is the commit's own file, against its first parent.
-    pub(crate) fn select_commit_file(&mut self, index: usize, cx: &mut Context<Self>) {
-        let (oid, path, old_path) = match &self.model.commit {
-            CommitPane::Shown(detail) => match detail.files.get(index) {
-                Some(file) => (detail.oid.clone(), file.path.clone(), file.old_path.clone()),
-                None => return,
-            },
+    /// Opens the stacked diff of the selected commit, with file `focus` at the top
+    /// (H4c). The read is the whole commit's patch, against its first parent.
+    pub(crate) fn select_commit_file(&mut self, focus: usize, cx: &mut Context<Self>) {
+        let (oid, files, more) = match &self.model.commit {
+            CommitPane::Shown(detail) if focus < detail.files.len() => {
+                (detail.oid.clone(), detail.files.clone(), detail.more_files)
+            }
             _ => return,
         };
         let id = self.engine.dispatch(
             Actor::Human,
-            CommandKind::LoadCommitFileDiff {
+            CommandKind::LoadCommitStack {
                 oid,
-                path,
-                old_path,
+                files: files.clone(),
             },
         );
-        self.model.commit_file.request(id, index);
+        self.model.commit_stack.request(id, focus, files, more);
         cx.notify();
     }
 
-    /// A click on a file row: opens it and gives the diff pane the keys.
+    /// A click on a file row: opens the stack at that file and gives the diff pane the keys.
     pub(crate) fn open_commit_file(
         &mut self,
         index: usize,
@@ -499,38 +498,19 @@ impl StatusView {
         window.focus(&handle);
     }
 
-    /// Up or Down in the diff: the previous or the next file of the commit.
-    pub(crate) fn step_commit_file(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let Some(index) = self.model.commit_file.index() else {
-            return;
-        };
-        let count = match &self.model.commit {
-            CommitPane::Shown(detail) => detail.files.len(),
-            _ => return,
-        };
-        if let Some(next) = step_index(index, count, forward) {
-            self.select_commit_file(next, cx);
-        }
-    }
-
     /// Back to the commit view, from its button or Escape.
     pub(crate) fn close_commit_file(&mut self, cx: &mut Context<Self>) {
-        self.model.commit_file.close();
+        self.model.commit_stack.close();
         cx.notify();
     }
 
-    /// The diff of the open file in place of the commit list and panel: a header
-    /// with the way back, the commit and the file's place in it, then the diff, a
+    /// The stacked diff of the commit in place of its list and panel (H4c): a
+    /// header with the way back, the commit, then the diff of every file, a
     /// loading line or git's message.
     pub(crate) fn commit_file_view(&self, cx: &mut Context<Self>) -> Div {
-        let index = self.model.commit_file.index().unwrap_or(0);
-        let (short, subject, count) = match &self.model.commit {
-            CommitPane::Shown(detail) => (
-                detail.short.clone(),
-                detail.subject.clone(),
-                detail.files.len(),
-            ),
-            _ => (String::new(), String::new(), 0),
+        let (short, subject) = match &self.model.commit {
+            CommitPane::Shown(detail) => (detail.short.clone(), detail.subject.clone()),
+            _ => (String::new(), String::new()),
         };
         let back = div()
             .id("commit-file-back")
@@ -570,24 +550,17 @@ impl StatusView {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .child(subject),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(theme::muted())
-                    .child(file_position(index, count)),
             );
-        let body = if let Some((_, message)) = self.model.commit_file.failure() {
+        let body = if let Some(message) = self.model.commit_stack.failure() {
             div()
                 .px_4()
                 .py_3()
                 .text_color(theme::error())
                 .child(message.to_owned())
         } else {
-            // The pane stays in the tree while the file loads, so it keeps the
-            // keys: a Down pressed then still reaches it (D39 gap of H4b-A). Its
-            // box is empty until the file is shown.
-            let loading = !self.model.commit_file.is_shown();
+            // The pane stays in the tree while the diffs load, so it keeps the
+            // keys. Its box is empty until the stack is shown.
+            let loading = !self.model.commit_stack.is_shown();
             let pane = div()
                 .min_h(px(0.))
                 .flex()
@@ -606,7 +579,7 @@ impl StatusView {
                         .px_4()
                         .py_3()
                         .text_color(theme::muted())
-                        .child("Loading file…")
+                        .child("Loading the commit's files…")
                 }))
                 .child(pane)
         };

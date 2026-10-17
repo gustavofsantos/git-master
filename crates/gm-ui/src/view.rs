@@ -323,9 +323,10 @@ impl StatusView {
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
-        if let Some(diff) = self.model.commit_file.take_fresh_diff() {
-            self.commit_diff_pane
-                .update(cx, |pane, cx| pane.show_read_only(diff, cx));
+        if let Some(fresh) = self.model.commit_stack.take_fresh() {
+            self.commit_diff_pane.update(cx, |pane, cx| {
+                pane.show_stack(fresh.files, fresh.more, fresh.diffs, fresh.focus, cx);
+            });
         }
         if let Some(outcome) = self.model.creating.take() {
             self.on_worktree_created(outcome, window, cx);
@@ -414,7 +415,7 @@ impl StatusView {
     /// A successful open replaced the repository: the view state of the old
     /// one goes, and the new root joins the recent list.
     fn on_switched(&mut self, switched: Switched, cx: &mut Context<Self>) {
-        self.model.commit_file.close();
+        self.model.commit_stack.close();
         if !switched.same_root {
             self.composer.update(cx, |composer, cx| composer.clear(cx));
         }
@@ -534,7 +535,6 @@ impl StatusView {
                 },
                 cx,
             ),
-            DiffPaneEvent::StepFile { forward } => self.step_commit_file(*forward, cx),
             DiffPaneEvent::LeaveCommit => self.close_commit_file(cx),
             // One layout for both diffs: the other pane follows, and the choice is saved (D40).
             DiffPaneEvent::LayoutChosen(layout) => {

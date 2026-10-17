@@ -3,8 +3,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
-    BranchEntry, CommitDetail, DiffSide, FileDiff, HookScope, HunkId, PruneCandidate, RepoStatus,
-    StageTarget, WorktreeEntry, WorktreeMode,
+    BranchEntry, CommitDetail, CommitFile, DiffSide, FileDiff, HookScope, HunkId, PruneCandidate,
+    RepoStatus, StageTarget, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::CommandLog;
@@ -27,9 +27,9 @@ impl std::error::Error for GitError {}
 /// it ends early and its answer is not wanted.
 pub type DetailRead = Box<dyn FnOnce(&AtomicBool) -> Result<CommitDetail, GitError> + Send>;
 
-/// The read of one file's diff in a commit, started by `GitPort::commit_file_diff`.
-/// It stops the same way a `DetailRead` does (H4).
-pub type FileDiffRead = Box<dyn FnOnce(&AtomicBool) -> Result<FileDiff, GitError> + Send>;
+/// The read of every file's diff in a commit, started by `GitPort::commit_stack`.
+/// It stops the same way a `DetailRead` does (H4c).
+pub type StackRead = Box<dyn FnOnce(&AtomicBool) -> Result<Vec<FileDiff>, GitError> + Send>;
 
 /// What the core needs from Git. Adapters implement it; the core tests with fakes.
 pub trait GitPort: Send {
@@ -96,19 +96,18 @@ pub trait GitPort: Send {
         ))
     }
 
-    /// Starts the read of the diff of `path` in commit `oid` against its first
-    /// parent (the root commit against nothing). `old_path` is a rename's source:
-    /// both paths are given to git so that it pairs them. Validates the id and
-    /// starts nothing else. Never records anything (D28).
-    fn commit_file_diff(
+    /// Starts the read of the diffs of the files of commit `oid` against its
+    /// first parent (the root commit against nothing), in one `git show`. The
+    /// answer has one diff per entry of `files`, in its order. Validates the id
+    /// and starts nothing else. Never records anything (D28).
+    fn commit_stack(
         &self,
         _root: &Path,
         _oid: &str,
-        _path: &str,
-        _old_path: Option<&str>,
-    ) -> Result<FileDiffRead, GitError> {
+        _files: &[CommitFile],
+    ) -> Result<StackRead, GitError> {
         Err(GitError(
-            "commit file diff is not supported by this adapter".into(),
+            "commit diffs are not supported by this adapter".into(),
         ))
     }
 

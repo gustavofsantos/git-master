@@ -1,5 +1,6 @@
-//! The diff of one file in one commit, read with real git in temporary
-//! repositories. Each case is the change type the brief names.
+//! The diffs of the files of one commit (H4c), read with real git in temporary
+//! repositories. The file list comes from the commit detail, as in the app, and
+//! each case is the change type the brief names.
 
 use std::fmt::Write as _;
 use std::os::unix::fs::PermissionsExt;
@@ -51,12 +52,23 @@ fn commit(dir: &Path, message: &str) -> String {
     head(dir)
 }
 
-/// The file diff of `path` in `oid`, read the way the engine reads it.
-fn file_diff(dir: &Path, oid: &str, path: &str, old_path: Option<&str>) -> FileDiff {
+/// The diffs of every file of `oid`, read the way the engine reads them: the
+/// file list from the commit detail, then one stack read for those files.
+fn stack(dir: &Path, oid: &str) -> Vec<FileDiff> {
+    let stop = AtomicBool::new(false);
+    let detail = SubprocessGit::default().commit_detail(dir, oid).unwrap()(&stop).unwrap();
     let read = SubprocessGit::default()
-        .commit_file_diff(dir, oid, path, old_path)
+        .commit_stack(dir, oid, &detail.files)
         .unwrap();
-    read(&AtomicBool::new(false)).unwrap()
+    read(&stop).unwrap()
+}
+
+/// The diff of `path` in `oid`, from the stack of the whole commit.
+fn file_diff(dir: &Path, oid: &str, path: &str) -> FileDiff {
+    stack(dir, oid)
+        .into_iter()
+        .find(|diff| diff.path == path)
+        .unwrap_or_else(|| panic!("{path} is not in the commit"))
 }
 
 fn kinds(diff: &FileDiff) -> Vec<LineKind> {
@@ -74,7 +86,7 @@ fn an_added_file_is_all_added_lines() {
     std::fs::write(dir.path().join("new.txt"), "x\ny\n").unwrap();
     let oid = commit(dir.path(), "add");
 
-    let diff = file_diff(dir.path(), &oid, "new.txt", None);
+    let diff = file_diff(dir.path(), &oid, "new.txt");
     assert_eq!(diff.path, "new.txt");
     assert_eq!(diff.old_path, None);
     assert!(!diff.binary);
@@ -89,7 +101,7 @@ fn a_modified_file_has_removed_then_added_lines() {
     std::fs::write(dir.path().join("a.txt"), "one\n2\nthree\n").unwrap();
     let oid = commit(dir.path(), "modify");
 
-    let diff = file_diff(dir.path(), &oid, "a.txt", None);
+    let diff = file_diff(dir.path(), &oid, "a.txt");
     assert_eq!(diff.hunks.len(), 1);
     let texts: Vec<(LineKind, &str)> = diff.hunks[0]
         .lines
@@ -108,7 +120,7 @@ fn a_deleted_file_is_all_removed_lines() {
     std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
     let oid = commit(dir.path(), "delete");
 
-    let diff = file_diff(dir.path(), &oid, "gone.txt", None);
+    let diff = file_diff(dir.path(), &oid, "gone.txt");
     assert_eq!(kinds(&diff), [LineKind::Removed, LineKind::Removed]);
 }
 
@@ -129,7 +141,7 @@ fn a_rename_with_edits_pairs_both_paths() {
     .unwrap();
     let oid = commit(dir.path(), "rename and edit");
 
-    let paired = file_diff(dir.path(), &oid, "new.txt", Some("old.txt"));
+    let paired = file_diff(dir.path(), &oid, "new.txt");
     assert_eq!(paired.path, "new.txt");
     assert_eq!(paired.old_path.as_deref(), Some("old.txt"));
     let changed: Vec<LineKind> = kinds(&paired)
@@ -137,11 +149,6 @@ fn a_rename_with_edits_pairs_both_paths() {
         .filter(|kind| *kind != LineKind::Context)
         .collect();
     assert_eq!(changed, [LineKind::Removed, LineKind::Added]);
-
-    // Without the source, git sees only the new side: the edit is lost as an add.
-    let alone = file_diff(dir.path(), &oid, "new.txt", None);
-    assert_eq!(alone.old_path, None);
-    assert!(kinds(&alone).iter().all(|kind| *kind == LineKind::Added));
 }
 
 #[test]
@@ -152,7 +159,7 @@ fn a_binary_file_has_no_hunks_and_says_so() {
     std::fs::write(dir.path().join("logo.bin"), [0u8, 9, 9, 9, 0]).unwrap();
     let oid = commit(dir.path(), "binary");
 
-    let diff = file_diff(dir.path(), &oid, "logo.bin", None);
+    let diff = file_diff(dir.path(), &oid, "logo.bin");
     assert!(diff.binary);
     assert!(diff.hunks.is_empty());
 }
@@ -163,7 +170,7 @@ fn the_root_commit_adds_its_files() {
     std::fs::write(dir.path().join("first.txt"), "hello\nworld\n").unwrap();
     let root = commit(dir.path(), "root");
 
-    let diff = file_diff(dir.path(), &root, "first.txt", None);
+    let diff = file_diff(dir.path(), &root, "first.txt");
     assert_eq!(kinds(&diff), [LineKind::Added, LineKind::Added]);
 }
 
@@ -185,11 +192,14 @@ fn a_merge_is_compared_with_its_first_parent() {
     let merge = head(dir.path());
 
     // topic.txt came in from the second parent, so against the first it is an add.
-    let diff = file_diff(dir.path(), &merge, "topic.txt", None);
+    let diff = file_diff(dir.path(), &merge, "topic.txt");
     assert_eq!(kinds(&diff), [LineKind::Added]);
     // main.txt was already in the first parent, so the merge changes nothing in it.
-    let untouched = file_diff(dir.path(), &merge, "main.txt", None);
-    assert!(untouched.hunks.is_empty());
+    assert!(
+        stack(dir.path(), &merge)
+            .iter()
+            .all(|d| d.path != "main.txt")
+    );
 }
 
 #[test]
@@ -201,7 +211,7 @@ fn a_mode_change_has_no_hunks_and_no_error() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let oid = commit(dir.path(), "mode");
 
-    let diff = file_diff(dir.path(), &oid, "run.sh", None);
+    let diff = file_diff(dir.path(), &oid, "run.sh");
     assert!(!diff.binary);
     assert!(diff.hunks.is_empty());
 }
@@ -218,7 +228,7 @@ fn a_large_file_is_read_whole_without_stalling() {
     std::fs::write(dir.path().join("big.txt"), big).unwrap();
     let oid = commit(dir.path(), "large");
 
-    let diff = file_diff(dir.path(), &oid, "big.txt", None);
+    let diff = file_diff(dir.path(), &oid, "big.txt");
     let added = kinds(&diff)
         .iter()
         .filter(|k| **k == LineKind::Added)
@@ -234,18 +244,75 @@ fn non_utf8_content_is_replaced_not_a_panic() {
     std::fs::write(dir.path().join("latin.txt"), b"caf\xe9\n").unwrap();
     let oid = commit(dir.path(), "latin1");
 
-    let diff = file_diff(dir.path(), &oid, "latin.txt", None);
+    let diff = file_diff(dir.path(), &oid, "latin.txt");
     assert_eq!(diff.hunks[0].lines[0].text, "caf\u{fffd}");
 }
 
 #[test]
-fn a_path_the_commit_does_not_touch_has_no_hunks() {
+fn a_file_the_commit_does_not_touch_is_not_in_its_stack() {
     let dir = repo();
     std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
     let oid = commit(dir.path(), "root");
 
-    let diff = file_diff(dir.path(), &oid, "missing.txt", None);
-    assert!(diff.hunks.is_empty());
+    assert!(
+        stack(dir.path(), &oid)
+            .iter()
+            .all(|d| d.path != "missing.txt")
+    );
+}
+
+#[test]
+fn a_two_file_commit_yields_both_files_in_order() {
+    let dir = repo();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+    commit(dir.path(), "root");
+    std::fs::write(dir.path().join("a.txt"), "uno\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "dos\n").unwrap();
+    let oid = commit(dir.path(), "both");
+
+    let diffs = stack(dir.path(), &oid);
+    let paths: Vec<&str> = diffs.iter().map(|d| d.path.as_str()).collect();
+    assert_eq!(paths, ["a.txt", "b.txt"]);
+    assert!(diffs.iter().all(|d| d.hunks.len() == 1));
+    assert_eq!(diffs[1].hunks[0].lines[1].text, "dos");
+}
+
+#[test]
+fn a_rename_binary_and_mode_change_are_each_their_own_file_in_one_commit() {
+    let dir = repo();
+    std::fs::write(dir.path().join("old.txt"), "same\n").unwrap();
+    std::fs::write(dir.path().join("logo.bin"), [0u8, 1, 2]).unwrap();
+    std::fs::write(dir.path().join("run.sh"), "echo\n").unwrap();
+    commit(dir.path(), "root");
+    git(dir.path(), &["mv", "old.txt", "new.txt"]);
+    std::fs::write(dir.path().join("logo.bin"), [0u8, 9, 0]).unwrap();
+    std::fs::set_permissions(
+        dir.path().join("run.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let oid = commit(dir.path(), "three");
+
+    let diffs = stack(dir.path(), &oid);
+    let paths: Vec<&str> = diffs.iter().map(|d| d.path.as_str()).collect();
+    assert_eq!(paths, ["logo.bin", "new.txt", "run.sh"]);
+    assert!(diffs[0].binary && diffs[0].hunks.is_empty());
+    assert_eq!(diffs[1].old_path.as_deref(), Some("old.txt"));
+    assert!(diffs[1].hunks.is_empty());
+    assert!(diffs[2].hunks.is_empty());
+}
+
+#[test]
+fn a_root_commit_stack_lists_every_file_as_added() {
+    let dir = repo();
+    std::fs::write(dir.path().join("a.txt"), "x\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "y\n").unwrap();
+    let root = commit(dir.path(), "root");
+
+    let diffs = stack(dir.path(), &root);
+    assert_eq!(diffs.len(), 2);
+    assert!(diffs.iter().all(|d| kinds(d) == [LineKind::Added]));
 }
 
 #[test]
@@ -254,15 +321,9 @@ fn a_value_that_is_not_a_hex_id_is_refused_before_git_runs() {
     std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
     commit(dir.path(), "root");
     let git = SubprocessGit::default();
-    assert!(git.commit_file_diff(dir.path(), "", "a.txt", None).is_err());
-    assert!(
-        git.commit_file_diff(dir.path(), "--output=x", "a.txt", None)
-            .is_err()
-    );
-    assert!(
-        git.commit_file_diff(dir.path(), "HEAD", "a.txt", None)
-            .is_err()
-    );
+    assert!(git.commit_stack(dir.path(), "", &[]).is_err());
+    assert!(git.commit_stack(dir.path(), "--output=x", &[]).is_err());
+    assert!(git.commit_stack(dir.path(), "HEAD", &[]).is_err());
 }
 
 #[test]
@@ -271,7 +332,7 @@ fn an_id_git_does_not_know_is_git_s_error() {
     std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
     commit(dir.path(), "root");
     let read = SubprocessGit::default()
-        .commit_file_diff(dir.path(), &"a".repeat(40), "a.txt", None)
+        .commit_stack(dir.path(), &"a".repeat(40), &[])
         .unwrap();
     assert!(read(&AtomicBool::new(false)).is_err());
 }

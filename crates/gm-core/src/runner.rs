@@ -10,7 +10,7 @@ use async_channel::{Receiver, Sender};
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId};
 
 use crate::commit_detail::DetailReport;
-use crate::commit_diff::FileDiffReport;
+use crate::commit_diff::StackReport;
 use crate::history::HistoryReport;
 use crate::hook::{ApprovalStore, Report};
 use crate::{Engine, GitPort};
@@ -24,7 +24,7 @@ enum Message {
     Hook(Report),
     History(HistoryReport),
     Detail(DetailReport),
-    FileDiff(FileDiffReport),
+    Stack(StackReport),
 }
 
 /// Cloneable front door to the engine thread. The thread stops when every
@@ -131,15 +131,15 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                         })
                         .expect("spawn a detail thread");
                 }
-                for job in engine.take_file_diff_jobs() {
+                for job in engine.take_stack_jobs() {
                     let reports = reports.clone();
                     std::thread::Builder::new()
-                        .name("gm-file-diff".into())
+                        .name("gm-stack".into())
                         .spawn(move || {
                             let report = job.run();
-                            let _ = reports.send_blocking(Message::FileDiff(report));
+                            let _ = reports.send_blocking(Message::Stack(report));
                         })
-                        .expect("spawn a file diff thread");
+                        .expect("spawn a stack thread");
                 }
                 for plan in engine.take_jobs() {
                     let reports = reports.clone();
@@ -165,8 +165,8 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                 let events = engine.detail_report(report);
                 broadcast(events, &mut subscribers);
             }
-            Message::FileDiff(report) => {
-                let events = engine.file_diff_report(report);
+            Message::Stack(report) => {
+                let events = engine.stack_report(report);
                 broadcast(events, &mut subscribers);
             }
         }

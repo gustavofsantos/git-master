@@ -10,16 +10,17 @@ use std::time::{Duration, Instant};
 
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
-    BranchEntry, BranchInfo, Change, DiffSide, FileDiff, HookScope, Hunk, HunkId, PruneCandidate,
-    RepoStatus, StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
+    BranchEntry, BranchInfo, Change, CommitFile, DiffSide, FileDiff, HookScope, Hunk, HunkId,
+    PruneCandidate, RepoStatus, StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::{CommandLog, CommandRecord, Source, bounded_text};
 use crate::commit_detail;
+use crate::commit_diff;
 use crate::diff::{hunk_patch, parse_unified};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
-use crate::port::{DetailRead, FileDiffRead};
+use crate::port::{DetailRead, StackRead};
 use crate::stage_math;
 use crate::worktree;
 use crate::{GitError, GitPort};
@@ -545,27 +546,24 @@ impl GitPort for SubprocessGit {
         }))
     }
 
-    /// The diff of `path` in commit `oid` against its first parent, or against
-    /// nothing for a root commit. A rename passes its source too, so git pairs
-    /// both names. Neither git call is logged (D28); both are stoppable.
-    fn commit_file_diff(
+    /// The diffs of every file of commit `oid` against its first parent, or
+    /// against nothing for a root commit, in one `git show` (H4c). The patch
+    /// lists the files in the order of the detail's `--raw` listing, so
+    /// `commit_diff::parse_stack` pairs them by position. Git is stoppable and
+    /// the call is not logged (D28).
+    fn commit_stack(
         &self,
         root: &Path,
         oid: &str,
-        path: &str,
-        old_path: Option<&str>,
-    ) -> Result<FileDiffRead, GitError> {
+        files: &[CommitFile],
+    ) -> Result<StackRead, GitError> {
         require_commit_id(oid)?;
         let git = self.clone();
         let root = root.to_path_buf();
         let oid = oid.to_owned();
-        let path = path.to_owned();
-        let old_path = old_path.map(str::to_owned);
+        let files = files.to_vec();
         Ok(Box::new(move |stop: &AtomicBool| {
-            let mut args = vec![
-                "-c",
-                "core.quotepath=off",
-                "--literal-pathspecs",
+            let args = [
                 "show",
                 "--no-color",
                 "--no-ext-diff",
@@ -578,14 +576,9 @@ impl GitPort for SubprocessGit {
                 "--root",
                 "-M",
                 oid.as_str(),
-                "--",
             ];
-            if let Some(old) = old_path.as_deref() {
-                args.push(old);
-            }
-            args.push(path.as_str());
             let raw = git.run_stoppable(&root, &args, stop)?;
-            parse_unified(&path, &raw)
+            commit_diff::parse_stack(&files, &raw)
         }))
     }
 

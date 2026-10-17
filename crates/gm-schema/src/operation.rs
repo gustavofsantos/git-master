@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
-use crate::history::{CommitDetail, History};
+use crate::history::{CommitDetail, CommitFile, History};
 use crate::hook::{HookFailure, HookInfo};
 use crate::status::{BranchEntry, PruneCandidate, RepoStatus, WorktreeEntry, WorktreeInspection};
 
@@ -74,13 +74,13 @@ pub enum CommandKind {
     LoadCommitDetail {
         oid: String,
     },
-    /// Reads the diff of `path` in commit `oid`, against its first parent. For a
-    /// rename, `old_path` is the source, so git pairs the two sides. Never recorded
-    /// in the command log (D28). A request in flight is superseded by the next one.
-    LoadCommitFileDiff {
+    /// Reads the diffs of the files of commit `oid` (H4c), against its first
+    /// parent: one patch for the whole commit, cut into the listed files in
+    /// their order. Never recorded in the command log (D28). A request in flight
+    /// is superseded by the next one.
+    LoadCommitStack {
         oid: String,
-        path: String,
-        old_path: Option<String>,
+        files: Vec<CommitFile>,
     },
     /// A local branch, or a remote branch such as `origin/feature` (a local
     /// tracking branch is created for it when none exists).
@@ -257,10 +257,10 @@ pub enum Event {
         id: OperationId,
         detail: CommitDetail,
     },
-    /// Answers `LoadCommitFileDiff`. A binary file has no hunks and says so.
-    CommitFileDiffLoaded {
+    /// Answers `LoadCommitStack`: one diff per listed file, in the same order.
+    CommitStackLoaded {
         id: OperationId,
-        diff: FileDiff,
+        diffs: Vec<FileDiff>,
     },
     /// Answers `ListWorktrees`, and follows each `RefreshStatus` and
     /// `OpenRepo`, so the worktree list is as fresh as the status.
