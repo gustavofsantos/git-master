@@ -247,23 +247,22 @@ $status"
   shoot "$SMOKE_OUT/c-commit-$theme.png"
 }
 
-# --- 3d. Refresh after an external git-visible change --------------------------
+# --- 3d. The window follows an external git-visible change by itself ---------------
 scenario_d() {
   local repo="$RUN_DIR/repo" theme="$1" before after differing
   xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y" click 1; sleep 1
   scrot -o "$RUN_DIR/before-full.png"
   convert "$RUN_DIR/before-full.png" -crop "${WIN_W}x${WIN_H}+${WIN_X}+${WIN_Y}" +repage "$RUN_DIR/before.png"
 
-  # Change the repo outside the app. The list must not change until refresh.
+  # Change the repo outside the app and touch nothing: the watcher refreshes it.
   printf '// external edit\n' >> "$repo/api/routes.rs"
-  sleep 1
-  xdotool key r; sleep 1.5
+  sleep 2.5
 
   shoot "$SMOKE_OUT/d-refresh-$theme.png"
   differing="$(compare -metric AE "$RUN_DIR/before.png" "$SMOKE_OUT/d-refresh-$theme.png" null: 2>&1 || true)"
   read -r differing _ <<<"$differing"
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare before/after screenshots: $differing"
-  [ "$differing" -gt 0 ] || fail "screenshot did not change after refresh"
+  [ "$differing" -gt 0 ] || fail "screenshot did not change after an external edit"
 }
 
 # --- 3e. Open the command log panel after a stage ------------------------------

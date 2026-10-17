@@ -30,8 +30,6 @@ const ICONS: &[(&str, &[u8])] = icons![
     "arrow-up-fill",
     "arrow-down",
     "arrow-down-fill",
-    "arrow-clockwise",
-    "arrow-clockwise-fill",
     "magnifying-glass",
     "magnifying-glass-fill",
     "warning",

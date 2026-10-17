@@ -12,8 +12,8 @@ use gm_core::command_log::CommandLog;
 use gm_core::watch::{Notice, Notices, WatchHandle};
 use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff, OperationId};
 use gpui::{
-    ClipboardItem, Context, Div, Entity, FocusHandle, MouseButton, MouseDownEvent, Render,
-    ScrollHandle, Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
+    ClipboardItem, Context, Div, Entity, FocusHandle, Render, ScrollHandle, Subscription,
+    UniformListScrollHandle, Window, div, prelude::*, px,
 };
 
 use crate::action_registry::{self, Action, Args, Context as ActionContext, Effect, Reason};
@@ -577,26 +577,6 @@ impl StatusView {
         } else {
             ""
         };
-        // Same action as the `r` key, through the registry.
-        let refresh = window_chrome::no_drag(
-            div()
-                .id("top-refresh")
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(26.))
-                .rounded_sm()
-                .cursor_pointer()
-                .text_color(muted)
-                .hover(|style| style.bg(theme::selected_row()))
-                .child(icon::view(Icon::ArrowClockwise, icon::SIZE, muted))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        this.run_action(Action::Refresh, &Args::None, window, cx);
-                    }),
-                ),
-        );
         window_chrome::header_bar(window)
             .child(window_chrome::no_drag(self.project_button(cx)))
             .child(window_chrome::no_drag(self.branch_button(cx)))
@@ -615,7 +595,6 @@ impl StatusView {
             .child(div().text_color(muted).child(upstream))
             .child(div().flex_1())
             .child(div().text_color(muted).child(loading))
-            .child(refresh)
             .children(
                 window_chrome::draws_frame(window).then(|| window_chrome::window_controls(window)),
             )
