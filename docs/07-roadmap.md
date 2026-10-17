@@ -120,7 +120,7 @@ Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu 
 
 Pronto quando: a Working Copy fica no desenho simplificado, toda ação da tela existe no registro e é alcançável por tecla, menu de contexto e paleta, e uma ação desabilitada explica por quê.
 
-## Fatia 2: hook `prepare-commit` (feita, exceto o log de operações)
+## Fatia 2: hook `prepare-commit` (feita)
 
 Backend (`gm-core/src/hook`, `gm-schema/src/hook.rs`; comandos `ListHooks`, `ApproveHook`, `RunPrepareCommit`, `CancelHook`; aprovações em `~/.local/share/gitmaster/hook-approvals.json`, por repositório) e interface prontos. Revisada em 2026-10-16 (D29, D30): só o que o Git não tem vira hook do GitMaster. O `pre-commit` e os demais hooks nativos ficam com o Git (D18, D29).
 
@@ -131,12 +131,15 @@ Feito:
 - Execução assíncrona: o cabeçalho da mensagem mostra o estado do run (etapa, pronto, falhou com a razão de uma linha, cancelado) e tem "Cancel" enquanto roda; "Suggest message" o inicia (`commit.suggest_message`).
 - Reconciliação (`gm-ui/src/hook_run.rs`): a resposta preenche a mensagem só se HEAD e o diff staged não mudaram e o texto ainda é o enviado; senão vira sugestão, com "Replace" (troca a mensagem) e "Discard" (mantém o texto). O backend não inclui o hash da mensagem no fingerprint, então essa regra fica na UI.
 - Aprovação de hook de repo: o painel mostra o comando completo, com "Approve" e "Deny". Deny só esconde o painel nesta sessão; nada é gravado.
+- Log de comandos: cada etapa que termina aparece no painel "Git commands", como `hook <nome>: <comando>`, com código de saída, duração e um resultado de uma linha (`ok`, `exit 2`, `timed out after 30000 ms`, `cancelled`). Entrada, saída e diff nunca entram no registro; um teste com Git real confere que o diff e a saída do hook não aparecem. Registrado no thread do run, no mesmo buffer que guarda os comandos Git (D28).
 - Testes: reconciliação e ciclo do run como funções puras; regras das ações no registro; cenários de smoke para texto digitado preservado, Replace, falha no chip e aprovação de hook de repo (nos dois temas).
 
-Falta:
-- Log de operações: o backend já guarda o `HookRecord` (comando, hash, exit code), mas o log de comandos ainda não mostra os hooks.
+Lacunas:
+- O registro de comandos não guarda o hash do comando (a aprovação usa o hash; o log mostra o comando completo). Uma etapa cancelada ou com timeout aparece como falha no botão "Git log".
+- O motivo de uma etapa que falhou é só o código de saída: a primeira linha da saída de erro do hook fica no chip, não no log.
+- O cenário `p-hook-failure` do smoke abre o painel depois da falha e confere que ele mudou a janela; não lê o texto da entrada.
 
-Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem travar a UI, e o `pre-commit` nativo segue rodando como antes. A primeira parte está pronta; o log de operações fica para a parte final desta fatia.
+Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem travar a UI, e o `pre-commit` nativo segue rodando como antes.
 
 ## Fatia 3: histórico e branches (visão por nome)
 
