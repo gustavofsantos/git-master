@@ -23,6 +23,7 @@ use crate::model::{Model, Switched};
 use crate::project_menu::ProjectMenu;
 use crate::recent::{self, Recents};
 use crate::resize;
+use crate::sidebar::Grouping;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
 use crate::window_chrome;
@@ -51,6 +52,8 @@ pub struct StatusView {
     pub(crate) left_width: f32,
     /// The commit message box's height, in logical pixels, as dragged.
     pub(crate) commit_height: f32,
+    /// How the sidebar's branch tree is grouped.
+    pub(crate) sidebar_grouping: Grouping,
     pub(crate) project_menu: ProjectMenu,
     /// The branch button's list: filter, scroll and the button's place.
     pub(crate) branch_menu: BranchMenu,
@@ -149,6 +152,7 @@ impl StatusView {
             diff_pane,
             left_width: resize::LEFT_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
+            sidebar_grouping: Grouping::default(),
             project_menu,
             branch_menu,
             recents,
@@ -175,6 +179,7 @@ impl StatusView {
     fn on_event(&mut self, event: Event, cx: &mut Context<Self>) {
         let reload = matches!(event, Event::StatusLoaded { .. });
         let committed = matches!(event, Event::Committed { .. });
+        let head_before = self.head_name();
         let shown = self.model.apply(event);
         if committed {
             self.composer.update(cx, |composer, cx| composer.clear(cx));
@@ -187,9 +192,31 @@ impl StatusView {
             self.show_diffs(diffs.unstaged, diffs.staged, cx);
         }
         if reload {
+            // A checkout moves HEAD; the tree marks the new branch.
+            if self.head_name() != head_before {
+                self.request_branch_list();
+            }
             self.load_selected(cx);
         }
         cx.notify();
+    }
+
+    fn head_name(&self) -> Option<String> {
+        self.model
+            .status()
+            .and_then(|status| status.branch.head.clone())
+    }
+
+    /// Asks for the branch list the sidebar draws. Not while the picker waits
+    /// for its own: a newer request would make that reply stale.
+    fn request_branch_list(&mut self) {
+        if self.branch_menu.open {
+            return;
+        }
+        let id = self
+            .engine
+            .dispatch(Actor::Human, CommandKind::ListBranches);
+        self.model.branches.request(id);
     }
 
     /// A successful open replaced the repository: the view state of the old
@@ -201,6 +228,8 @@ impl StatusView {
         }
         self.show_diffs(None, None, cx);
         self.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+        self.model.branches.clear();
+        self.request_branch_list();
         self.remember(PathBuf::from(switched.root), cx);
     }
 
@@ -313,6 +342,7 @@ impl StatusView {
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.model.begin_refresh();
+        self.request_branch_list();
         self.engine
             .dispatch(Actor::Human, CommandKind::RefreshStatus);
         cx.notify();
@@ -615,6 +645,7 @@ impl Render for StatusView {
                     .min_h(px(0.))
                     .flex()
                     .flex_row()
+                    .child(self.sidebar(cx))
                     .child(self.left_column(left_width, commit_height, cx))
                     .child(
                         div()

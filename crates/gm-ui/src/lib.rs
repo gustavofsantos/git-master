@@ -19,6 +19,8 @@ mod resize;
 mod resize_handle;
 mod shell_commit;
 mod shell_list;
+mod shell_sidebar;
+mod sidebar;
 mod text_area;
 mod text_area_element;
 mod text_area_math;

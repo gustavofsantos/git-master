@@ -58,6 +58,10 @@ Ordem: log de comandos, depois trocar de branch, depois trocar de projeto. O log
    - Reaproveita os recentes e o `OpenRepo` de 3; abrir um repositório troca a tela sem reiniciar. Pasta que não é repositório mostra o erro na própria tela, sem diálogo bloqueante.
    - Sem projeto, as ações que dependem de repo (commit, checkout, log de comandos) ficam ausentes da tela, não desabilitadas e vazias.
    - Strings em inglês; arte do ícone de `assets/icons/`, nas cores do tema ativo (08).
+5. **Sidebar do desenho** (feito, com placeholders).
+   - Coluna à esquerda, como no canvas: "Workspace" (Working Copy com a contagem de arquivos; Histórico, Stashes, Review local e Reflog são placeholders que avisam que ainda não existem), alternância "By stack" / "By name" e a árvore de branches.
+   - "By name" é real: locais e remotas agrupadas pelo prefixo; clicar numa branch faz checkout, e a atual ganha o selo HEAD. "By stack" mostra "No stacks yet" e todas as locais em "No stack", até a fatia 4; a dica de arrastar para definir o pai também é placeholder.
+   - Faltam do desenho: indicadores de stack (`restack N`, `↑N`, ponto âmbar, PR), botões Fetch/Pull/Push/Restack e a busca na barra superior, a barra de status com escopo, fsmonitor, operation log e MCP.
 
 Pronto quando: troca de projeto e de branch sem sair do app, todo comando Git executado é inspecionável no painel, e abrir o app sem projeto leva a uma tela que explica o que fazer em vez de uma janela vazia.
 

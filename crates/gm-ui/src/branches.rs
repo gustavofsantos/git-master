@@ -45,6 +45,9 @@ enum Listing {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Branches {
     listing: Listing,
+    /// The last listing that arrived, kept while a newer one is awaited, so the
+    /// sidebar does not blink when the picker asks again.
+    known: Vec<BranchEntry>,
     filter: String,
     /// Index among `matches()` of the row Enter would choose.
     highlight: usize,
@@ -77,6 +80,7 @@ impl Branches {
         if self.listing != Listing::Waiting(id) {
             return false;
         }
+        self.known.clone_from(&branches);
         self.listing = Listing::Listed(branches);
         self.highlight = self
             .matches()
@@ -84,6 +88,18 @@ impl Branches {
             .position(|branch| branch.is_current)
             .unwrap_or(0);
         true
+    }
+
+    /// Every branch of the last listing, unfiltered, in the order listed.
+    #[must_use]
+    pub fn known(&self) -> &[BranchEntry] {
+        &self.known
+    }
+
+    /// Forgets the listing: it belonged to a repository that was left.
+    pub fn clear(&mut self) {
+        self.known.clear();
+        self.listing = Listing::Idle;
     }
 
     /// Records that the request `id` failed. Returns whether it was the one waited for.

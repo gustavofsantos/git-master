@@ -25,16 +25,16 @@ SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-pr
 # with the Read tool on a screenshot before changing anything else.
 WIN_X=82; WIN_Y=50; WIN_W=1280; WIN_H=800   # window geometry, used to crop shots
 WAKE_X=400; WAKE_Y=300                      # first click: black until first input
-FILE_CHECK_X=112                            # file row checkbox (dirs are at 122)
-NAME_X=218                                  # file name column
+FILE_CHECK_X=352                            # file row checkbox (dirs are at 362)
+NAME_X=458                                  # file name column
 ROW_HANDLERS_Y=407                          # api/handlers.rs (untracked)
 ROW_MOD_Y=455                               # src/ledger/mod.rs
 ROW_TOTAL_Y=479                             # src/ledger/total.rs
-LIST_EMPTY_X=300; LIST_EMPTY_Y=650          # empty list area, takes list focus
-DIFF_CHECK_X=601                            # gutter checkbox in the diff pane
+LIST_EMPTY_X=540; LIST_EMPTY_Y=650          # empty list area, takes list focus
+DIFF_CHECK_X=841                            # gutter checkbox in the diff pane
 DIFF_LINE_A_Y=224                           # first pure-insertion row in total.rs
 DIFF_LINE_B_Y=312                           # second pure-insertion row in total.rs
-COMPOSER_X=300; COMPOSER_Y=255              # commit message box
+COMPOSER_X=540; COMPOSER_Y=255              # commit message box
 LOG_BUTTON_X=1300; LOG_BUTTON_Y=837         # "Git log" button, right end of the status bar
 PROJECT_X=139; PROJECT_Y=67                 # project button at the left of the top bar
 RECENT_OTHER_X=150; RECENT_OTHER_Y=185      # second row of the open list: billing-api
