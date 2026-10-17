@@ -12,7 +12,6 @@ use gpui::{
     prelude::*, px, uniform_list,
 };
 
-use crate::action_registry::{Action, Args};
 use crate::sidebar::{self, Grouping, Row};
 use crate::theme;
 use crate::view::StatusView;
@@ -169,16 +168,6 @@ impl StatusView {
             .min_h(px(0.)),
         )
     }
-
-    /// Checks out `name`, as the top bar's picker does.
-    fn checkout_from_sidebar(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.run_action(
-            Action::CheckoutBranch,
-            &Args::Branch(name.to_owned()),
-            window,
-            cx,
-        );
-    }
 }
 
 fn section_title(text: &'static str) -> Div {
@@ -289,15 +278,8 @@ fn tree_row(
                         .text_xs()
                         .child("HEAD")
                 }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener({
-                        let name = name.clone();
-                        move |this, _: &MouseDownEvent, window, cx| {
-                            this.checkout_from_sidebar(&name, window, cx);
-                        }
-                    }),
-                )
+                // A left click does nothing: there is no branch view yet, and
+                // switching on click is not what a click on a name should mean.
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
