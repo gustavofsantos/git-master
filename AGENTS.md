@@ -6,6 +6,7 @@ Native desktop Git client in Rust + GPUI, open source, sold as a premium product
 
 Slices 0 and 1 are done; slice 1b is in progress (the welcome screen is left). `crates/`: `gm-schema`, `gm-core`, `gm-ui`, `gm-mcp`, `gitmaster`. `make check` is the gate; `make run ARGS=<repo>` opens the window; `make install` installs it with its icon and desktop entry. Pushing a `v*` tag runs `.github/workflows/release.yml`, which publishes the archives `install.sh` downloads. `docs/07-roadmap.md` marks what is done.
 
+- The design canvas (mockups, identity boards) is linked in `docs/README.md`.
 - Read `docs/README.md`, then `docs/00-visao-e-principios.md` and `docs/01-decisoes-e-questoes-abertas.md`.
 - `docs/06-arquitetura.md` and `docs/07-roadmap.md` say what to build and in which order; the roadmap marks what is done.
 - `docs/rvw-lessons.md` has the toolchain pitfalls, GPUI practice and the slice 0 bootstrap plan (done), based on `~/Projects/rvw`.

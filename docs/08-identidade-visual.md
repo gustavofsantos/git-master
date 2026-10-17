@@ -1,6 +1,6 @@
 # 08 · Identidade visual
 
-Estado: ícone decidido, paleta decidida, tela escura e tipografia em aberto. As pranchas estão no canvas "GitMaster: o todo". Os arquivos do ícone estão em `assets/icons/`.
+Estado: ícone decidido, paleta decidida, tela escura e tipografia em aberto. As pranchas estão no canvas "GitMaster: o todo" (link em `docs/README.md`). Os arquivos do ícone estão em `assets/icons/`.
 
 ## Decisões
 
