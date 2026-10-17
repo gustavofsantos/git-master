@@ -51,7 +51,7 @@ Benchmark: JetBrains. Três painéis: esquerda, resultado (editável), direita.
 
 - **Staged e lido são eixos ortogonais.** Staged é "vai para o commit"; lido é "eu revisei". O "lido" se invalida sozinho quando o hash do hunk muda. Serve como lembrete, nunca como selo de aprovação.
 - Lista única com checkbox tri-state (indeterminado) por pasta, filtro sempre visível, agrupamento por diretório.
-- Composer sempre visível, com chips dos hooks: `prepare-commit` (sugestão não sobrescreve o que o usuário digitou; botão vira "Substituir") e `pre-commit` (gates assíncronos e canceláveis). O commit só efetiva depois dos gates; mudar o index durante um gate invalida a operação.
+- Composer sempre visível, com o chip do hook `prepare-commit` (sugestão não sobrescreve o que o usuário digitou; botão vira "Substituir"; cancelável). O `pre-commit` é nativo do Git (D29): não ganha chip, e a saída dele aparece como erro do commit.
 - Escala: status em streaming ("escaneando…"), `core.fsmonitor`, `core.untrackedCache`, sparse-checkout, lista virtualizada, arquivos gerados e lockfiles recolhidos.
 - Teclado primeiro: `j`/`k` navegam, espaço faz stage, `r` marca como lido, `a` faz stage do hunk, `⌘↵` faz commit.
 

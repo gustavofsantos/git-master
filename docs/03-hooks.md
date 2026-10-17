@@ -4,7 +4,7 @@
 
 ## Ideia central
 
-Eventos do próprio app (não os hooks nativos do Git) disparam scripts configurados no `.gitconfig`. Modelo inspirado nos hooks do Claude Code, com schema versionado de entrada e de saída por evento (D04). Execução assíncrona (D05), com id de correlação (D06) e resposta pelo stdout (D07).
+Eventos do próprio app (não os hooks nativos do Git, que continuam sendo do Git: D29) disparam scripts configurados no `.gitconfig`. Modelo inspirado nos hooks do Claude Code, com schema versionado de entrada e de saída por evento (D04). Execução assíncrona (D05), com id de correlação (D06) e resposta pelo stdout (D07).
 
 ## Classes (proposto, D16)
 
@@ -20,24 +20,22 @@ Gates e observers rodam em paralelo (o resultado de gates é um AND e a ordem n�
 
 | Evento | Classe | Efeito |
 |---|---|---|
-| `pre-commit` | gate | veta o commit; roda contra a index tree |
-| `pre-push` | gate | veta o push |
+| `pre-push` | gate | fora do v1: o nome é nativo do Git (D29) |
 | `pre-restack` | gate | recebe o plano; veta |
-| `prepare-commit` | transform | reescreve a mensagem |
+| `prepare-commit` | transform | reescreve a mensagem (fatia 2) |
 | `prepare-branch-name` | transform | reescreve o nome (ex.: chave do Jira) |
 | `resolve-conflict` | transform | propõe resolução de um hunk |
-| `post-commit` | observe | |
-| `post-push` | observe | |
+| `post-commit` | observe | fora do v1: o nome é nativo do Git (D29) |
+| `post-push` | observe | fora do v1: o nome é nativo do Git (D29) |
 | `post-restack` | observe | |
 
 ## Configuração (proposto)
 
-Um hook por subseção, para poder nomear e desligar. Valor de `mode` ainda em aberto (Q1).
+Um hook por subseção, para poder nomear e desligar. O contrato é sempre JSON (D30); não há `mode`.
 
 ```ini
 [gitmaster "prepare-commit.llm"]
-    command = claude -p "Mensagem conventional commit para este diff"
-    mode    = text
+    command = ~/bin/suggest-commit-message
     match   = branch:feat/*
     timeout = 30s
 
@@ -47,13 +45,13 @@ Um hook por subseção, para poder nomear e desligar. Valor de `mode` ainda em a
 
 A ordem de execução é a ordem em que as seções aparecem no config resolvido (inclui `includeIf`), inspecionável com `git config --list --show-origin`.
 
-### Confiança (D17)
+### Confiança (D17, decidido)
 
 Hook em `.gitconfig` de repositório é execução de código vinda de quem criou o repo. Padrão: ler hooks só do config global e do de usuário. Hooks de repo exigem aprovação, guardada fora do repo e amarrada ao hash do comando (como `direnv allow`). `includeIf "gitdir:~/trabalho/"` ativa hooks por árvore de diretórios sem escrever nada no repositório.
 
-### Hooks nativos (D18)
+### Hooks nativos (D18, D29)
 
-Os hooks nativos do Git (`.git/hooks`, `core.hooksPath`, Husky) continuam rodando, antes dos do GitMaster.
+Os hooks nativos do Git (`.git/hooks`, `core.hooksPath`, Husky) continuam rodando e continuam sendo do Git. O GitMaster não os reimplementa, não os envolve e não mostra chip para eles: o `pre-commit`, por exemplo, roda dentro de `git commit` e, se vetar, a saída dele é o erro do commit (já é assim desde a fatia 1b).
 
 ## Contrato
 
@@ -106,14 +104,10 @@ Exemplo: o usuário digitou a mensagem enquanto o LLM gerava. A sugestão aparec
 - Cada hook aparece como chip (rodando, ok, bloqueou, falhou), com cancelar.
 - Transforms em cadeia somam latência: um chip por hook.
 
-## `pre-commit` contra a index tree (D19)
-
-Com stage parcial, passar no working tree não prova que o commit compila. O gate roda num checkout temporário da index tree, que testa exatamente o que vai ser commitado.
-
 ## Saída de LLM
 
 Não é determinística, então vale só como proposta: preenche o campo da mensagem, e o commit só acontece por ação do usuário. O operation log registra comando, hash do comando e exit code de cada hook.
 
-## Questão aberta (Q1)
+## Q1 resolvida (D30)
 
-Escrever JSON em one-liners de shell exige `jq`. Opções: (A) JSON puro; (B) pipe de texto com contrato paralelo; (C) JSON canônico com `mode = text` opcional por hook, em que o host extrai o campo principal para o stdin e embrulha o stdout de volta (e faz o eco do id). Recomendação: C.
+Escrever JSON em one-liners de shell exige `jq`. Decisão do autor (2026-10-16): JSON puro, sem modo texto. Quem quiser texto escreve um script curto que lê o JSON.

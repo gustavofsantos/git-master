@@ -65,15 +65,17 @@ Ordem: log de comandos, depois trocar de branch, depois trocar de projeto. O log
 
 Pronto quando: troca de projeto e de branch sem sair do app, todo comando Git executado é inspecionável no painel, e abrir o app sem projeto leva a uma tela que explica o que fazer em vez de uma janela vazia.
 
-## Fatia 2: hooks
+## Fatia 2: hook `prepare-commit`
 
-- Contrato JSON versionado em `gm-schema`; configuração por `.gitconfig`.
-- `prepare-commit` (transform assíncrono) e `pre-commit` (gate contra a index tree).
-- Chips de hooks no composer; reconciliação; cancelar.
-- Aprovação de hooks de repo.
-- Decidir Q1 (modo texto) antes de começar.
+Revisada em 2026-10-16 (D29, D30): só o que o Git não tem vira hook do GitMaster. O `pre-commit` e os demais hooks nativos ficam com o Git; Q1 decidida (JSON puro).
 
-Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem travar a UI.
+- Contrato JSON versionado em `gm-schema` (entrada: mensagem atual, diff staged, repo; saída: mensagem), sempre JSON.
+- Configuração em `[gitmaster "prepare-commit.<nome>"]` (`command`, `match`, `timeout`), lida do config global e de usuário; hook de repo só roda após aprovação guardada fora do repo, amarrada ao hash do comando (D17).
+- Execução assíncrona com id de correlação, timeout e cancelamento; fingerprint do alvo (HEAD, index tree, hash da mensagem) e reconciliação: estado igual aplica, estado mudado vira sugestão.
+- Chip no composer (rodando, ok, falhou) com cancelar; sugestão com "Replace" e "Discard", sem sobrescrever o que o usuário digitou.
+- Operation log com comando, hash do comando e exit code.
+
+Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem travar a UI, e o `pre-commit` nativo segue rodando como antes.
 
 ## Fatia 3: histórico e branches (visão por nome)
 
