@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use gm_core::stage_math::pair_warning;
+use gm_core::stage_math::{pair_hunk, pair_warning};
 use gm_schema::{DiffSide, FileDiff, Hunk, LineKind};
 
 /// Which comparison a hunk belongs to. Unstaged sorts first, as it is shown
@@ -152,6 +152,86 @@ pub fn build_rows(diffs: Diffs<'_>, side: Side) -> Vec<Row> {
         }));
     }
     rows
+}
+
+/// How a diff is laid out (D39). Unified lists each hunk's lines one after the
+/// other; Split puts the old and the new side of each row next to each other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)] // wired into the pane by the next commit
+pub enum Layout {
+    #[default]
+    Unified,
+    Split,
+}
+
+/// One side of a split row: a line of a hunk, keyed like a unified row. A
+/// context line is a cell on both sides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // wired into the pane by the next commit
+pub struct Cell {
+    pub key: LineKey,
+    /// The line is unterminated (`\ No newline at end of file`).
+    pub no_newline: bool,
+}
+
+/// One row of the split list: a hunk header across both sides, or a pair of
+/// cells. An empty side is `None`: it is drawn as a plain panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // wired into the pane by the next commit
+pub enum SplitRow {
+    HunkHeader {
+        side: Side,
+        hunk_index: usize,
+    },
+    Pair {
+        old: Option<Cell>,
+        new: Option<Cell>,
+    },
+}
+
+/// The split rows of one side, and for each unified row the split row that
+/// holds it, so the cursor and scrolling can follow the unified rows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)] // wired into the pane by the next commit
+pub struct SplitRows {
+    pub rows: Vec<SplitRow>,
+    pub of_unified: Vec<usize>,
+}
+
+/// The split rows of one side, built from the same hunks as `build_rows`. The
+/// pairing is `pair_hunk`'s (D24 uses the same pairs for its warning).
+#[allow(dead_code)] // wired into the pane by the next commit
+pub fn split_rows(diffs: Diffs<'_>, side: Side) -> SplitRows {
+    let mut out = SplitRows::default();
+    for (hunk_index, hunk) in diffs.hunks(side).iter().enumerate() {
+        let header = out.rows.len();
+        out.rows.push(SplitRow::HunkHeader { side, hunk_index });
+        out.of_unified.push(header);
+        // The split row holding each line of the hunk, in line order.
+        let mut landed = vec![header; hunk.lines.len()];
+        for pair in pair_hunk(hunk) {
+            let at = out.rows.len();
+            let cell = |index: Option<u32>| {
+                let line_index = usize::try_from(index?).ok()?;
+                let line = hunk.lines.get(line_index)?;
+                Some(Cell {
+                    key: (side, hunk_index, line_index),
+                    no_newline: line.no_newline,
+                })
+            };
+            for index in [pair.old, pair.new].into_iter().flatten() {
+                if let Some(slot) = usize::try_from(index).ok().and_then(|i| landed.get_mut(i)) {
+                    *slot = at;
+                }
+            }
+            out.rows.push(SplitRow::Pair {
+                old: cell(pair.old),
+                new: cell(pair.new),
+            });
+        }
+        out.of_unified.extend(landed);
+    }
+    out
 }
 
 /// The key of the row when it is an added or removed line.
@@ -429,6 +509,7 @@ fn index_u32(index: usize) -> u32 {
 mod tests {
     use super::*;
     use gm_schema::{DiffLine, HunkId};
+    use proptest::prelude::*;
 
     fn line(kind: LineKind, text: &str) -> DiffLine {
         DiffLine {
@@ -772,5 +853,161 @@ mod tests {
     #[test]
     fn hunks_of_none_is_empty() {
         assert!(hunks_of(None).is_empty());
+    }
+
+    fn cell(side: Side, hunk_index: usize, line_index: usize) -> Cell {
+        Cell {
+            key: (side, hunk_index, line_index),
+            no_newline: false,
+        }
+    }
+
+    #[test]
+    fn the_layout_starts_unified() {
+        assert_eq!(Layout::default(), Layout::Unified);
+    }
+
+    #[test]
+    fn split_pairs_a_replacement_line_by_line_and_marks_the_empty_side() {
+        // 0 ctx, 1 -a, 2 -b, 3 +A, 4 +B, 5 +C, 6 ctx
+        let hunk = hunk(
+            "h",
+            vec![
+                line(LineKind::Context, "c0"),
+                line(LineKind::Removed, "a"),
+                line(LineKind::Removed, "b"),
+                line(LineKind::Added, "A"),
+                line(LineKind::Added, "B"),
+                line(LineKind::Added, "C"),
+                line(LineKind::Context, "c1"),
+            ],
+        );
+        let unstaged = [hunk];
+        let split = split_rows(diffs(&unstaged, &[]), Side::Unstaged);
+        let s = Side::Unstaged;
+        assert_eq!(
+            split.rows,
+            vec![
+                SplitRow::HunkHeader {
+                    side: s,
+                    hunk_index: 0
+                },
+                SplitRow::Pair {
+                    old: Some(cell(s, 0, 0)),
+                    new: Some(cell(s, 0, 0))
+                },
+                SplitRow::Pair {
+                    old: Some(cell(s, 0, 1)),
+                    new: Some(cell(s, 0, 3))
+                },
+                SplitRow::Pair {
+                    old: Some(cell(s, 0, 2)),
+                    new: Some(cell(s, 0, 4))
+                },
+                SplitRow::Pair {
+                    old: None,
+                    new: Some(cell(s, 0, 5))
+                },
+                SplitRow::Pair {
+                    old: Some(cell(s, 0, 6)),
+                    new: Some(cell(s, 0, 6))
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn split_maps_every_unified_row_to_the_split_row_that_holds_it() {
+        // Unified: header, ctx c0, -a, +b, ctx c1. Split: header, c0, a|b, c1.
+        let unstaged = [simple("h")];
+        let split = split_rows(diffs(&unstaged, &[]), Side::Unstaged);
+        assert_eq!(split.of_unified, vec![0, 1, 2, 2, 3]);
+        assert_eq!(split.rows.len(), 4);
+    }
+
+    #[test]
+    fn a_missing_final_newline_is_a_flag_of_its_cell() {
+        let mut last = line(LineKind::Added, "tail");
+        last.no_newline = true;
+        let unstaged = [hunk("h", vec![line(LineKind::Removed, "x"), last])];
+        let split = split_rows(diffs(&unstaged, &[]), Side::Unstaged);
+        assert_eq!(
+            split.rows[1],
+            SplitRow::Pair {
+                old: Some(Cell {
+                    key: (Side::Unstaged, 0, 0),
+                    no_newline: false
+                }),
+                new: Some(Cell {
+                    key: (Side::Unstaged, 0, 1),
+                    no_newline: true
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn a_read_only_diff_has_the_same_split_rows_as_its_unified_rows() {
+        let unstaged = [simple("h")];
+        let split = split_rows(diffs(&unstaged, &[]), Side::Unstaged);
+        assert_eq!(
+            build_rows(diffs(&unstaged, &[]), Side::Unstaged).len(),
+            split.of_unified.len()
+        );
+    }
+
+    fn kind_strategy() -> impl Strategy<Value = LineKind> {
+        prop::sample::select(vec![LineKind::Context, LineKind::Added, LineKind::Removed])
+    }
+
+    proptest! {
+        #[test]
+        fn every_changed_line_is_in_exactly_one_cell_and_every_unified_row_lands(
+            kinds in prop::collection::vec(kind_strategy(), 0..16),
+        ) {
+            let lines: Vec<DiffLine> = kinds
+                .iter()
+                .enumerate()
+                .map(|(i, kind)| line(*kind, &format!("l{i}")))
+                .collect();
+            let unstaged = [hunk("h", lines)];
+            let d = diffs(&unstaged, &[]);
+            let split = split_rows(d, Side::Unstaged);
+            let mut old_hits = vec![0u32; kinds.len()];
+            let mut new_hits = vec![0u32; kinds.len()];
+            for row in &split.rows {
+                if let SplitRow::Pair { old, new } = row {
+                    if let Some(cell) = old {
+                        old_hits[cell.key.2] += 1;
+                    }
+                    if let Some(cell) = new {
+                        new_hits[cell.key.2] += 1;
+                    }
+                }
+            }
+            for (i, kind) in kinds.iter().enumerate() {
+                let (want_old, want_new) = match kind {
+                    LineKind::Context => (1, 1),
+                    LineKind::Removed => (1, 0),
+                    LineKind::Added => (0, 1),
+                };
+                prop_assert_eq!(old_hits[i], want_old);
+                prop_assert_eq!(new_hits[i], want_new);
+            }
+            // Each unified row lands in a split row that holds it.
+            let unified = build_rows(d, Side::Unstaged);
+            prop_assert_eq!(unified.len(), split.of_unified.len());
+            for (u, row) in unified.iter().enumerate() {
+                let at = split.of_unified[u];
+                let holds = match (row, split.rows[at]) {
+                    (Row::HunkHeader { .. }, SplitRow::HunkHeader { .. }) => true,
+                    (Row::Line { line_index, .. }, SplitRow::Pair { old, new }) => {
+                        [old, new].into_iter().flatten().any(|c| c.key.2 == *line_index)
+                    }
+                    _ => false,
+                };
+                prop_assert!(holds);
+            }
+        }
     }
 }

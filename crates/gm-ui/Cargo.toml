@@ -20,4 +20,5 @@ gpui = "0.2"
 gpui = { version = "0.2", features = ["runtime_shaders"] }
 
 [dev-dependencies]
+proptest.workspace = true
 tempfile.workspace = true
