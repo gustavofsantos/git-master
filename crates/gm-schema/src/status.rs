@@ -56,3 +56,23 @@ pub struct RepoStatus {
     pub branch: BranchInfo,
     pub entries: Vec<StatusEntry>,
 }
+
+/// A worktree as `git worktree list` reports it. The first entry is the main
+/// checkout (or the bare repository itself).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeEntry {
+    /// Absolute path of the worktree; for a bare entry, the repository path.
+    pub path: String,
+    /// Commit HEAD points at; `None` for a bare entry.
+    pub head: Option<String>,
+    /// Short branch name; `None` when detached or bare.
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub bare: bool,
+    /// The first entry: the main checkout.
+    pub is_main: bool,
+    /// Why the worktree is locked. `Some("")` when it is locked without a reason.
+    pub locked: Option<String>,
+    /// Why git may prune the worktree. `Some("")` when no reason was given.
+    pub prunable: Option<String>,
+}

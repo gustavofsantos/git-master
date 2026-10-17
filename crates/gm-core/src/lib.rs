@@ -11,6 +11,7 @@ mod port;
 mod runner;
 pub mod stage_math;
 pub mod watch;
+pub mod worktree;
 
 pub use engine::{Engine, LogEntry};
 pub use port::{GitError, GitPort};

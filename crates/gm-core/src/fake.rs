@@ -3,12 +3,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use gm_schema::{BranchEntry, RepoStatus};
+use gm_schema::{BranchEntry, RepoStatus, WorktreeEntry};
 
 use crate::{GitError, GitPort};
 
-/// Answers `resolve_root` with its own root, and `status`, `branches` and
-/// `checkout` with shared, replaceable results, so a test can change what the
+/// Answers `resolve_root` with its own root, and `status`, `branches`,
+/// `worktrees` and `checkout` with shared, replaceable results, so a test can change what the
 /// next call sees.
 #[derive(Clone)]
 pub struct FakeGit {
@@ -16,6 +16,7 @@ pub struct FakeGit {
     status: Arc<Mutex<Result<RepoStatus, GitError>>>,
     branches: Arc<Mutex<Result<Vec<BranchEntry>, GitError>>>,
     checkout: Arc<Mutex<Result<(), GitError>>>,
+    worktrees: Arc<Mutex<Result<Vec<WorktreeEntry>, GitError>>>,
 }
 
 impl FakeGit {
@@ -25,6 +26,7 @@ impl FakeGit {
             status: Arc::new(Mutex::new(Ok(status))),
             branches: Arc::new(Mutex::new(Ok(Vec::new()))),
             checkout: Arc::new(Mutex::new(Ok(()))),
+            worktrees: Arc::new(Mutex::new(Ok(Vec::new()))),
         }
     }
 
@@ -40,6 +42,13 @@ impl FakeGit {
     /// If another thread panicked while holding the branches lock.
     pub fn set_branches(&self, branches: Result<Vec<BranchEntry>, GitError>) {
         *self.branches.lock().unwrap() = branches;
+    }
+
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the worktrees lock.
+    pub fn set_worktrees(&self, worktrees: Result<Vec<WorktreeEntry>, GitError>) {
+        *self.worktrees.lock().unwrap() = worktrees;
     }
 
     /// # Panics
@@ -68,6 +77,10 @@ impl GitPort for FakeGit {
 
     fn branches(&self, _root: &Path) -> Result<Vec<BranchEntry>, GitError> {
         self.branches.lock().unwrap().clone()
+    }
+
+    fn worktrees(&self, _root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
+        self.worktrees.lock().unwrap().clone()
     }
 
     fn checkout(&self, _root: &Path, _branch: &str) -> Result<(), GitError> {

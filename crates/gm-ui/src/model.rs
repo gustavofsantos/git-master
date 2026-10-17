@@ -2,7 +2,9 @@
 //! selected file, the diffs being loaded for it and the last message. The view
 //! renders it and forwards keys to it.
 
-use gm_schema::{DiffSide, Event, FileDiff, OperationId, OperationState, RepoStatus, StatusEntry};
+use gm_schema::{
+    DiffSide, Event, FileDiff, OperationId, OperationState, RepoStatus, StatusEntry, WorktreeEntry,
+};
 
 use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
@@ -42,6 +44,8 @@ pub struct Model {
     pub branches: Branches,
     /// The prepare-commit hooks: what is listed, the run and its suggestion.
     pub hooks: Hooks,
+    /// The worktrees of the open repository, main checkout first.
+    pub worktrees: Vec<WorktreeEntry>,
 }
 
 /// A repository replaced by a successful open.
@@ -170,6 +174,10 @@ impl Model {
             }
             Event::BranchesLoaded { id, branches } => {
                 let _ = self.branches.listed(id, branches);
+                None
+            }
+            Event::WorktreesLoaded { worktrees, .. } => {
+                self.worktrees = worktrees;
                 None
             }
             // An operation that ends without a status (vetoed, cancelled) ends its checkout too.
@@ -418,6 +426,7 @@ fn event_id(event: &Event) -> OperationId {
         | Event::DiffLoaded { id, .. }
         | Event::Committed { id, .. }
         | Event::BranchesLoaded { id, .. }
+        | Event::WorktreesLoaded { id, .. }
         | Event::HooksListed { id, .. }
         | Event::HookStarted { id, .. }
         | Event::HookFinished { id, .. }
@@ -811,6 +820,31 @@ mod tests {
         });
         assert!(!model.branches.checkout_in_flight());
         assert_eq!(model.error, None);
+    }
+
+    #[test]
+    fn the_worktree_list_is_replaced_by_each_listing() {
+        let entry = |path: &str| WorktreeEntry {
+            path: path.into(),
+            head: None,
+            branch: None,
+            detached: true,
+            bare: false,
+            is_main: false,
+            locked: None,
+            prunable: None,
+        };
+        let mut model = Model::default();
+        let _ = model.apply(Event::WorktreesLoaded {
+            id: OperationId(1),
+            worktrees: vec![entry("/a"), entry("/b")],
+        });
+        assert_eq!(model.worktrees.len(), 2);
+        let _ = model.apply(Event::WorktreesLoaded {
+            id: OperationId(2),
+            worktrees: vec![entry("/a")],
+        });
+        assert_eq!(model.worktrees, vec![entry("/a")]);
     }
 
     #[test]

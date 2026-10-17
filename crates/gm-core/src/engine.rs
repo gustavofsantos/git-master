@@ -249,13 +249,19 @@ impl Engine {
             CommandKind::OpenRepo { path } => {
                 let root = self.git.resolve_root(path.as_ref()).map_err(|e| e.0)?;
                 let status = self.git.status(&root).map_err(|e| e.0)?;
+                let events = self.loaded(id, &root, status)?;
                 self.root = Some(root);
-                Ok(vec![Event::StatusLoaded { id, status }])
+                Ok(events)
             }
             CommandKind::RefreshStatus => {
                 let root = self.open_root()?;
                 let status = self.git.status(&root).map_err(|e| e.0)?;
-                Ok(vec![Event::StatusLoaded { id, status }])
+                self.loaded(id, &root, status)
+            }
+            CommandKind::ListWorktrees => {
+                let root = self.open_root()?;
+                let worktrees = self.git.worktrees(&root).map_err(|e| e.0)?;
+                Ok(vec![Event::WorktreesLoaded { id, worktrees }])
             }
             CommandKind::LoadDiff { path, side } => {
                 let root = self.open_root()?;
@@ -436,6 +442,20 @@ impl Engine {
     }
 
     /// A mutation ends by showing the new state, so no front-end has to ask.
+    /// The status and the worktree list of one read, so both reach the UI together.
+    fn loaded(
+        &self,
+        id: OperationId,
+        root: &std::path::Path,
+        status: gm_schema::RepoStatus,
+    ) -> Result<Vec<Event>, String> {
+        let worktrees = self.git.worktrees(root).map_err(|e| e.0)?;
+        Ok(vec![
+            Event::StatusLoaded { id, status },
+            Event::WorktreesLoaded { id, worktrees },
+        ])
+    }
+
     fn reload_status(&self, id: OperationId, root: &std::path::Path) -> Result<Vec<Event>, String> {
         let status = self.git.status(root).map_err(|e| e.0)?;
         Ok(vec![Event::StatusLoaded { id, status }])
@@ -567,6 +587,93 @@ mod tests {
             id: OperationId(2),
             branches,
         }));
+    }
+
+    fn worktree(path: &str, branch: &str) -> gm_schema::WorktreeEntry {
+        gm_schema::WorktreeEntry {
+            path: path.into(),
+            head: Some("abc123".into()),
+            branch: Some(branch.into()),
+            detached: false,
+            bare: false,
+            is_main: path == "/r",
+            locked: None,
+            prunable: None,
+        }
+    }
+
+    #[test]
+    fn list_worktrees_emits_the_worktrees_it_read() {
+        let worktrees = vec![worktree("/r", "main"), worktree("/r-feature", "feature")];
+        let git = FakeGit::new(
+            "/r",
+            RepoStatus {
+                root: "/r".into(),
+                ..RepoStatus::default()
+            },
+        );
+        git.set_worktrees(Ok(worktrees.clone()));
+        let mut engine = Engine::new(Box::new(git));
+        engine.handle(OperationId(1), &open());
+
+        let events = engine.handle(OperationId(2), &command(CommandKind::ListWorktrees));
+
+        assert_eq!(states(&events).last(), Some(&OperationState::Done));
+        assert!(events.contains(&Event::WorktreesLoaded {
+            id: OperationId(2),
+            worktrees,
+        }));
+    }
+
+    #[test]
+    fn refresh_follows_the_status_with_the_worktrees() {
+        let git = FakeGit::new(
+            "/r",
+            RepoStatus {
+                root: "/r".into(),
+                ..RepoStatus::default()
+            },
+        );
+        git.set_worktrees(Ok(vec![worktree("/r", "main")]));
+        let mut engine = Engine::new(Box::new(git));
+
+        let opened = engine.handle(OperationId(1), &open());
+        assert!(
+            opened
+                .iter()
+                .any(|e| matches!(e, Event::WorktreesLoaded { id, .. } if *id == OperationId(1)))
+        );
+
+        let refreshed = engine.handle(OperationId(2), &command(CommandKind::RefreshStatus));
+        assert_eq!(states(&refreshed).last(), Some(&OperationState::Done));
+        assert!(
+            refreshed
+                .iter()
+                .any(|e| matches!(e, Event::StatusLoaded { id, .. } if *id == OperationId(2)))
+        );
+        assert!(
+            refreshed
+                .iter()
+                .any(|e| matches!(e, Event::WorktreesLoaded { id, .. } if *id == OperationId(2)))
+        );
+    }
+
+    #[test]
+    fn a_failed_worktree_list_fails_the_refresh() {
+        let git = FakeGit::new(
+            "/r",
+            RepoStatus {
+                root: "/r".into(),
+                ..RepoStatus::default()
+            },
+        );
+        git.set_worktrees(Err(GitError("worktree list broke".into())));
+        let mut engine = Engine::new(Box::new(git));
+        engine.handle(OperationId(1), &open());
+
+        let events = engine.handle(OperationId(2), &command(CommandKind::RefreshStatus));
+
+        assert_eq!(states(&events).last(), Some(&OperationState::Failed));
     }
 
     #[test]

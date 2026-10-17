@@ -10,13 +10,14 @@ use std::time::Instant;
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, DiffSide, FileDiff, HookScope, Hunk, HunkId, RepoStatus,
-    StageTarget, StatusEntry,
+    StageTarget, StatusEntry, WorktreeEntry,
 };
 
 use crate::command_log::{CommandLog, CommandRecord, bounded_text};
 use crate::diff::{hunk_patch, parse_unified};
 use crate::hook::ConfigValue;
 use crate::stage_math;
+use crate::worktree;
 use crate::{GitError, GitPort};
 
 /// `login_path` is the user's login-shell PATH, filled in once from a
@@ -408,6 +409,20 @@ impl GitPort for SubprocessGit {
         remote.sort_by(|a, b| a.name.cmp(&b.name));
         local.extend(remote);
         Ok(local)
+    }
+
+    fn worktrees(&self, root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
+        // `-z` needs git 2.36; older gits get the newline form, which cannot
+        // tell a path with a newline from two lines.
+        let mut command = self.git(root);
+        command.args(["worktree", "list", "--porcelain", "-z"]);
+        if let Ok(out) = Self::run(command) {
+            return worktree::parse(&out, true);
+        }
+        let mut command = self.git(root);
+        command.args(["worktree", "list", "--porcelain"]);
+        let out = Self::run(command)?;
+        worktree::parse(&out, false)
     }
 
     fn checkout(&self, root: &Path, branch: &str) -> Result<(), GitError> {

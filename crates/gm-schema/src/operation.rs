@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::hook::{HookFailure, HookInfo};
-use crate::status::{BranchEntry, RepoStatus};
+use crate::status::{BranchEntry, RepoStatus, WorktreeEntry};
 
 /// Sequential, so the operation log is deterministic.
 #[derive(
@@ -52,6 +52,9 @@ pub enum CommandKind {
     Checkout {
         branch: String,
     },
+    /// Lists the worktrees of the repository, the main checkout first. Never
+    /// records anything.
+    ListWorktrees,
     /// Lists the hooks read from config, with their state (docs/03).
     ListHooks,
     /// Approves the repository hook `name` whose command still hashes to
@@ -169,6 +172,12 @@ pub enum Event {
     BranchesLoaded {
         id: OperationId,
         branches: Vec<BranchEntry>,
+    },
+    /// Answers `ListWorktrees`, and follows each `RefreshStatus` and
+    /// `OpenRepo`, so the worktree list is as fresh as the status.
+    WorktreesLoaded {
+        id: OperationId,
+        worktrees: Vec<WorktreeEntry>,
     },
     HooksListed {
         id: OperationId,

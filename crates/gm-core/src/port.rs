@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use gm_schema::{BranchEntry, DiffSide, FileDiff, HookScope, HunkId, RepoStatus, StageTarget};
+use gm_schema::{
+    BranchEntry, DiffSide, FileDiff, HookScope, HunkId, RepoStatus, StageTarget, WorktreeEntry,
+};
 
 use crate::hook::ConfigValue;
 
@@ -55,6 +57,14 @@ pub trait GitPort: Send {
     /// records anything.
     fn branches(&self, _root: &Path) -> Result<Vec<BranchEntry>, GitError> {
         Err(GitError("branches is not supported by this adapter".into()))
+    }
+
+    /// The worktrees of the repository, the main checkout first. Never
+    /// records anything.
+    fn worktrees(&self, _root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
+        Err(GitError(
+            "worktrees is not supported by this adapter".into(),
+        ))
     }
 
     /// Switches HEAD to `branch`. A remote-only branch gets a local tracking
