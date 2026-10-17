@@ -38,6 +38,7 @@ use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
 use crate::worktree_create::WorktreeDialog;
+use crate::worktree_prune::PruneDialog;
 use crate::worktree_remove::RemoveDialog;
 use crate::{CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, StartPath};
 
@@ -82,6 +83,8 @@ pub struct StatusView {
     pub(crate) worktree_dialog: Option<WorktreeDialog>,
     /// The remove-worktree dialog, while it is open.
     pub(crate) removal_dialog: Option<RemoveDialog>,
+    /// The prune dialog, while it is open.
+    pub(crate) prune_dialog: Option<PruneDialog>,
     /// The recent repositories, newest first, as last saved or loaded.
     pub(crate) recents: Recents,
     /// Where the list is kept; `None` when there is no home directory.
@@ -204,6 +207,7 @@ impl StatusView {
             palette_view: PaletteView::new(palette_filter),
             worktree_dialog: None,
             removal_dialog: None,
+            prune_dialog: None,
             recents,
             recent_store,
             recent_generation: 0,
@@ -284,6 +288,9 @@ impl StatusView {
         }
         if let Some(outcome) = self.model.removal.take_outcome() {
             self.on_worktree_removal_settled(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.pruning.take_outcome() {
+            self.on_worktrees_pruned(outcome, window, cx);
         }
         // A finished hook run fills the composer only while it still holds what the run was
         // started from; otherwise the answer waits as a suggestion (see hook_run).
@@ -563,6 +570,7 @@ impl StatusView {
             }
             Ok(Effect::OpenWorktree(path)) => self.open_worktree(&path, cx),
             Ok(Effect::OpenRemoveDialog(path)) => self.open_remove_dialog(&path, window, cx),
+            Ok(Effect::OpenPruneDialog) => self.open_prune_dialog(cx),
         }
         cx.notify();
     }
@@ -847,6 +855,11 @@ impl Render for StatusView {
                 self.removal_dialog
                     .is_some()
                     .then(|| self.removal_layer(window, cx)),
+            )
+            .children(
+                self.prune_dialog
+                    .is_some()
+                    .then(|| self.prune_layer(window, cx)),
             )
             .children(window_chrome::resize_layer(window))
     }

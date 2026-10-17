@@ -362,6 +362,12 @@ fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> Div {
             row.missing
                 .then(|| tag("missing", theme::warn_fg(), theme::warn_bg())),
         )
+        .children(
+            row.entry
+                .locked
+                .is_some()
+                .then(|| tag("locked", theme::warn_fg(), theme::warn_bg())),
+        )
         .when_some(action, |this, action| {
             this.on_mouse_down(
                 MouseButton::Left,

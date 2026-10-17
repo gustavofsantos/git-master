@@ -105,6 +105,8 @@ pub enum Effect {
     /// Opens the remove dialog for the worktree at this path; the dialog
     /// inspects it and the removal is sent from there.
     OpenRemoveDialog(String),
+    /// Opens the prune dialog, which lists the stale records before anything is removed.
+    OpenPruneDialog,
 }
 
 /// What the window knows of the prepare-commit hooks, for the rules.
@@ -142,7 +144,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 31] = [
+const SPECS: [Spec; 34] = [
     spec(
         "file.stage",
         "Stage File",
@@ -354,6 +356,27 @@ const SPECS: [Spec; 31] = [
         ArgKind::Worktree,
         Category::Worktrees,
     ),
+    spec(
+        "worktree.lock",
+        "Lock Worktree",
+        None,
+        ArgKind::Worktree,
+        Category::Worktrees,
+    ),
+    spec(
+        "worktree.unlock",
+        "Unlock Worktree",
+        None,
+        ArgKind::Worktree,
+        Category::Worktrees,
+    ),
+    spec(
+        "worktree.prune",
+        "Prune Worktrees",
+        None,
+        ArgKind::None,
+        Category::Worktrees,
+    ),
 ];
 
 const fn spec(
@@ -407,6 +430,9 @@ pub enum Action {
     RevealWorktree,
     CopyWorktreePath,
     RemoveWorktree,
+    LockWorktree,
+    UnlockWorktree,
+    PruneWorktrees,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -443,6 +469,8 @@ fn worktree_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), R
     let missing = entry.prunable.is_some();
     match action {
         Action::RemoveWorktree if entry.is_main => Err("The main checkout cannot be removed."),
+        Action::LockWorktree if entry.locked.is_some() => Err("It is already locked."),
+        Action::UnlockWorktree if entry.locked.is_none() => Err("It is not locked."),
         Action::OpenWorktree | Action::RevealWorktree if missing => {
             Err("This worktree's folder is missing.")
         }
@@ -472,7 +500,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 31] = [
+    pub const ALL: [Action; 34] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -504,6 +532,9 @@ impl Action {
         Action::RevealWorktree,
         Action::CopyWorktreePath,
         Action::RemoveWorktree,
+        Action::LockWorktree,
+        Action::UnlockWorktree,
+        Action::PruneWorktrees,
     ];
 
     #[must_use]
@@ -551,11 +582,27 @@ impl Action {
         )
     }
 
+    /// Whether the rule of `worktree_rule` decides the action.
+    fn is_worktree_rule(self) -> bool {
+        matches!(
+            self,
+            Action::OpenWorktree
+                | Action::RevealWorktree
+                | Action::CopyWorktreePath
+                | Action::RemoveWorktree
+                | Action::LockWorktree
+                | Action::UnlockWorktree
+        )
+    }
+
     /// Whether the action opens its own dialog, which asks before anything runs.
     /// A menu then does not ask a second time.
     #[must_use]
     pub fn opens_dialog(self) -> bool {
-        matches!(self, Action::CreateWorktree | Action::RemoveWorktree)
+        matches!(
+            self,
+            Action::CreateWorktree | Action::RemoveWorktree | Action::PruneWorktrees
+        )
     }
 
     /// The action with this id, if any.
@@ -631,11 +678,8 @@ impl Action {
                     Ok(())
                 }
             }
-            Action::OpenWorktree
-            | Action::RevealWorktree
-            | Action::CopyWorktreePath
-            | Action::RemoveWorktree => worktree_rule(self, args, ctx),
-            Action::Refresh | Action::CreateWorktree => {
+            _ if self.is_worktree_rule() => worktree_rule(self, args, ctx),
+            Action::Refresh | Action::CreateWorktree | Action::PruneWorktrees => {
                 if ctx.repo_open {
                     Ok(())
                 } else {
@@ -726,6 +770,17 @@ impl Action {
             (Action::RemoveWorktree, Args::Worktree(path)) => {
                 Effect::OpenRemoveDialog(path.clone())
             }
+            // The menu does not ask for a lock reason yet, so Git gets none.
+            (Action::LockWorktree, Args::Worktree(path)) => {
+                Effect::Send(vec![CommandKind::LockWorktree {
+                    path: path.clone(),
+                    reason: String::new(),
+                }])
+            }
+            (Action::UnlockWorktree, Args::Worktree(path)) => {
+                Effect::Send(vec![CommandKind::UnlockWorktree { path: path.clone() }])
+            }
+            (Action::PruneWorktrees, _) => Effect::OpenPruneDialog,
             (Action::SuggestMessage, _) => Effect::Send(vec![CommandKind::RunPrepareCommit {
                 message: ctx.message.to_owned(),
             }]),
@@ -1342,6 +1397,66 @@ mod tests {
         assert_eq!(
             Action::OpenWorktree.enabled(&target, &own),
             Err("This window is open in this worktree.")
+        );
+    }
+
+    #[test]
+    fn lock_and_unlock_follow_the_lock_state_and_send_the_path() {
+        let target = Args::Worktree("/r-feature".to_owned());
+        let unlocked = [
+            listed("/r", "main", true),
+            listed("/r-feature", "feature", false),
+        ];
+        let context = Context {
+            root: Some("/r"),
+            worktrees: &unlocked,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::LockWorktree.plan(&target, &context),
+            Ok(Effect::Send(vec![CommandKind::LockWorktree {
+                path: "/r-feature".to_owned(),
+                reason: String::new(),
+            }]))
+        );
+        assert_eq!(
+            Action::UnlockWorktree.enabled(&target, &context),
+            Err("It is not locked.")
+        );
+
+        let mut locked_entry = listed("/r-feature", "feature", false);
+        locked_entry.locked = Some("usb".to_owned());
+        let locked = [listed("/r", "main", true), locked_entry];
+        let context = Context {
+            root: Some("/r"),
+            worktrees: &locked,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::LockWorktree.enabled(&target, &context),
+            Err("It is already locked.")
+        );
+        assert_eq!(
+            Action::UnlockWorktree.plan(&target, &context),
+            Ok(Effect::Send(vec![CommandKind::UnlockWorktree {
+                path: "/r-feature".to_owned(),
+            }]))
+        );
+    }
+
+    #[test]
+    fn prune_opens_its_dialog_and_needs_an_open_repository() {
+        assert_eq!(
+            Action::PruneWorktrees.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::OpenPruneDialog)
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::PruneWorktrees.enabled(&Args::None, &closed),
+            Err("No repository is open.")
         );
     }
 

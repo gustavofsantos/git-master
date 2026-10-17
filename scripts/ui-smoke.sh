@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -879,6 +879,57 @@ scenario_u() {
   [ "$differing" -gt 300 ] || fail "the sidebar still shows the removed worktree ($differing pixels changed)"
 }
 
+# --- 3v. Lock, unlock and prune worktrees from their menus (W6) ----------------
+# The feature worktree's menu locks it, then unlocks it; Git's list shows each
+# change. The gone worktree's menu opens the prune dialog, which lists the stale
+# record; Prune removes that record and the folder of the live worktree stays.
+# Row and menu positions are those of the WORKTREES rows at the sidebar's foot.
+WT_FEATURE_X=182; WT_FEATURE_Y=703          # feature/x row, right-clicked
+WT_GONE_X=182; WT_GONE_Y=731                # gone-branch row, right-clicked
+MENU_LOCK_X=242; MENU_LOCK_Y=798            # "Lock Worktree" (or "Unlock Worktree") in feature/x's menu
+MENU_PRUNE_X=250; MENU_PRUNE_Y=798          # "Prune Worktrees" in gone-branch's menu
+PRUNE_BUTTON_X=912; PRUNE_BUTTON_Y=325     # "Prune" in the prune dialog
+wt_lock_reason() {
+  # Prints "locked" when git lists the worktree at $1 as locked, nothing otherwise.
+  git -C "$RUN_DIR/repo" worktree list --porcelain \
+    | awk -v want="worktree $1" '$0 == want { on = 1; next } /^worktree / { on = 0 } on && /^locked/ { print "locked" }'
+}
+scenario_v() {
+  local theme="$1" feature="$RUN_DIR/repo-feature" gone="$RUN_DIR/repo-gone" differing
+  shoot "$RUN_DIR/v-before.png"
+  convert "$RUN_DIR/v-before.png" -crop "$SECTION_CROP" +repage "$RUN_DIR/v-section-before.png"
+
+  xdotool mousemove "$WT_FEATURE_X" "$WT_FEATURE_Y" click 3; sleep 1
+  xdotool mousemove "$MENU_LOCK_X" "$MENU_LOCK_Y" click 1; sleep 1.5
+  [ "$(wt_lock_reason "$feature")" = locked ] || fail "git does not list $feature as locked after Lock Worktree"
+  shoot "$SMOKE_OUT/v-locked-$theme.png"
+
+  xdotool mousemove "$WT_FEATURE_X" "$WT_FEATURE_Y" click 3; sleep 1
+  xdotool mousemove "$MENU_LOCK_X" "$MENU_LOCK_Y" click 1; sleep 1.5
+  [ -z "$(wt_lock_reason "$feature")" ] || fail "git still lists $feature as locked after Unlock Worktree"
+
+  xdotool mousemove "$WT_GONE_X" "$WT_GONE_Y" click 3; sleep 1
+  xdotool mousemove "$MENU_PRUNE_X" "$MENU_PRUNE_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/v-prune-dialog-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/v-before.png" "$SMOKE_OUT/v-prune-dialog-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the prune dialog did not open ($differing pixels changed)"
+
+  xdotool mousemove "$PRUNE_BUTTON_X" "$PRUNE_BUTTON_Y" click 1; sleep 2.5
+  if git -C "$RUN_DIR/repo" worktree list --porcelain | grep -qxF "worktree $gone"; then
+    fail "git worktree list still shows the stale $gone after Prune"
+  fi
+  [ ! -e "$RUN_DIR/repo/.git/worktrees/repo-gone" ] || fail "the admin record of $gone is still there"
+  [ -d "$feature" ] || fail "pruning removed the live worktree folder $feature"
+  shoot "$RUN_DIR/v-after.png"
+  convert "$RUN_DIR/v-after.png" -crop "$SECTION_CROP" +repage "$RUN_DIR/v-section-after.png"
+  differing="$(compare -metric AE "$RUN_DIR/v-section-before.png" "$RUN_DIR/v-section-after.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare section screenshots: $differing"
+  [ "$differing" -gt 300 ] || fail "the sidebar still shows the pruned worktree ($differing pixels changed)"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -907,6 +958,12 @@ run_scenario() {
   if [ "$name" = s-worktrees ]; then git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"; fi
   if [ "$name" = l-branch-menu ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
   if [ "$name" = t-create-worktree ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
+  if [ "$name" = v-lock-prune-worktree ]; then
+    # A live worktree to lock, and one whose folder is gone: a stale record to prune.
+    git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"
+    git -C "$RUN_DIR/repo" worktree add -q -b gone-branch "$RUN_DIR/repo-gone"
+    rm -rf "$RUN_DIR/repo-gone"
+  fi
   if [ "$name" = u-remove-worktree ]; then
     # A dirty worktree: the removal is blocked until the name is typed.
     git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"
@@ -943,6 +1000,7 @@ run_scenario() {
     s-worktrees) scenario_s "$theme" ;;
     t-create-worktree) scenario_t "$theme" ;;
     u-remove-worktree) scenario_u "$theme" ;;
+    v-lock-prune-worktree) scenario_v "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app

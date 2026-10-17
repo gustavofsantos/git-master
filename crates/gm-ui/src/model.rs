@@ -11,6 +11,7 @@ use crate::changes::{Summary, summarize};
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
 use crate::worktree_create::Creating;
+use crate::worktree_prune::Pruning;
 use crate::worktree_remove::Removal;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -52,6 +53,8 @@ pub struct Model {
     pub creating: Creating,
     /// The remove-worktree dialog's inspection, removal in flight and outcome.
     pub removal: Removal,
+    /// The prune dialog's listing, prune in flight and outcome.
+    pub pruning: Pruning,
 }
 
 /// A repository replaced by a successful open.
@@ -162,6 +165,16 @@ impl Model {
                 id, state, detail, ..
             } if self.removal.owns(id) => {
                 self.removal.settle(state, detail);
+                None
+            }
+            Event::PrunableListed { id, candidates } if self.pruning.owns(id) => {
+                self.pruning.listed(candidates);
+                None
+            }
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.pruning.owns(id) => {
+                self.pruning.settle(state, detail);
                 None
             }
             // A hook run's failure belongs to the composer's chip, not to the status bar.

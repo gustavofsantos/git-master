@@ -96,17 +96,29 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     ]
 }
 
-/// The menu of a worktree row (W5): open it, reveal and copy its folder, then
-/// remove it. Remove opens its own dialog, which is the confirmation.
+/// The menu of a worktree row: open it, reveal and copy its folder, lock or
+/// unlock it, prune it when its folder is gone, then remove it. Remove opens
+/// its own dialog, which is the confirmation.
 pub(crate) fn worktree_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     let target = Args::Worktree(path.to_owned());
     let item = |action, group| Item::new(action, target.clone(), group, ctx);
-    vec![
+    let entry = ctx.worktrees.iter().find(|entry| entry.path == path);
+    let lock = if entry.is_some_and(|entry| entry.locked.is_some()) {
+        Action::UnlockWorktree
+    } else {
+        Action::LockWorktree
+    };
+    let mut items = vec![
         item(Action::OpenWorktree, 0),
         item(Action::RevealWorktree, 1),
         item(Action::CopyWorktreePath, 1),
-        item(Action::RemoveWorktree, 2),
-    ]
+        item(lock, 2),
+    ];
+    if entry.is_some_and(|entry| entry.prunable.is_some()) {
+        items.push(Item::new(Action::PruneWorktrees, Args::None, 3, ctx));
+    }
+    items.push(item(Action::RemoveWorktree, 4));
+    items
 }
 
 /// The items split where the group changes, one slice per group.
@@ -422,7 +434,7 @@ fn separator() -> Div {
 
 #[cfg(test)]
 mod tests {
-    use gm_schema::{Change, StatusEntry};
+    use gm_schema::{Change, StatusEntry, WorktreeEntry};
 
     use super::*;
 
@@ -487,6 +499,60 @@ mod tests {
         let items = branch_items("feature", &ctx(&[]));
         let sizes: Vec<usize> = sections(&items).iter().map(|s| s.len()).collect();
         assert_eq!(sizes, [1, 3, 1, 1, 2]);
+    }
+
+    #[test]
+    fn a_worktree_menu_offers_lock_or_unlock_and_prune_only_when_its_folder_is_gone() {
+        let entry = |path: &str, locked: Option<&str>, prunable: Option<&str>| WorktreeEntry {
+            path: path.to_owned(),
+            head: None,
+            branch: Some("feature".to_owned()),
+            detached: false,
+            bare: false,
+            is_main: false,
+            locked: locked.map(str::to_owned),
+            prunable: prunable.map(str::to_owned),
+        };
+        let listed = [
+            entry("/r-live", None, None),
+            entry("/r-locked", Some(""), None),
+            entry("/r-gone", None, Some("")),
+        ];
+        let context = ActionContext {
+            root: Some("/r"),
+            worktrees: &listed,
+            ..ctx(&[])
+        };
+        let titles = |items: &[Item]| items.iter().map(Item::label).collect::<Vec<_>>();
+        assert_eq!(
+            titles(&worktree_items("/r-live", &context)),
+            vec![
+                "Open Worktree",
+                "Reveal Worktree in File Manager",
+                "Copy Worktree Path",
+                "Lock Worktree",
+                "Remove Worktree"
+            ]
+        );
+        assert_eq!(
+            titles(&worktree_items("/r-locked", &context)),
+            vec![
+                "Open Worktree",
+                "Reveal Worktree in File Manager",
+                "Copy Worktree Path",
+                "Unlock Worktree",
+                "Remove Worktree"
+            ]
+        );
+        let gone = worktree_items("/r-gone", &context);
+        assert!(
+            gone.iter()
+                .any(|item| item.action == Action::PruneWorktrees && item.state.is_ok())
+        );
+        assert_eq!(
+            gone.last().map(|item| item.action),
+            Some(Action::RemoveWorktree)
+        );
     }
 
     #[test]
