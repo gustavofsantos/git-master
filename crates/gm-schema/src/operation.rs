@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::diff::{DiffSide, FileDiff, StageTarget};
+use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::status::{BranchEntry, RepoStatus};
 
 /// Sequential, so the operation log is deterministic.
@@ -35,6 +35,12 @@ pub enum CommandKind {
     },
     Unstage {
         target: StageTarget,
+    },
+    /// Reverts one unstaged hunk in the working tree. Destructive: the
+    /// hunk's changes are lost, and the id must name a current unstaged hunk.
+    DiscardHunk {
+        path: String,
+        hunk: HunkId,
     },
     Commit {
         message: String,

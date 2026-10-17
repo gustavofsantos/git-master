@@ -98,6 +98,11 @@ impl Engine {
                 self.git.unstage(&root, target).map_err(|e| e.0)?;
                 self.reload_status(id, &root)
             }
+            CommandKind::DiscardHunk { path, hunk } => {
+                let root = self.open_root()?;
+                self.git.discard_hunk(&root, path, hunk).map_err(|e| e.0)?;
+                self.reload_status(id, &root)
+            }
             CommandKind::Commit { message } => {
                 if message.trim().is_empty() {
                     return Err("the commit message is empty".to_owned());

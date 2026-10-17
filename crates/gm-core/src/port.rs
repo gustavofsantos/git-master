@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gm_schema::{BranchEntry, DiffSide, FileDiff, RepoStatus, StageTarget};
+use gm_schema::{BranchEntry, DiffSide, FileDiff, HunkId, RepoStatus, StageTarget};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitError(pub String);
@@ -35,6 +35,12 @@ pub trait GitPort: Send {
     /// Moves `target` out of the index (staged diff, HEAD against index).
     fn unstage(&self, _root: &Path, _target: &StageTarget) -> Result<(), GitError> {
         Err(GitError("unstage is not supported by this adapter".into()))
+    }
+
+    /// Reverts the unstaged hunk `hunk` of `path` in the working tree. The
+    /// index is not touched. A stale id is an error, never a guess.
+    fn discard_hunk(&self, _root: &Path, _path: &str, _hunk: &HunkId) -> Result<(), GitError> {
+        Err(GitError("discard is not supported by this adapter".into()))
     }
 
     /// Commits the index; returns the new commit id.

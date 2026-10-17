@@ -14,7 +14,7 @@ use gm_schema::{
 };
 
 use crate::command_log::{CommandLog, CommandRecord, bounded_text};
-use crate::diff::parse_unified;
+use crate::diff::{hunk_patch, parse_unified};
 use crate::stage_math;
 use crate::{GitError, GitPort};
 
@@ -318,6 +318,22 @@ impl GitPort for SubprocessGit {
                 self.unstage_hunk(root, &repo, &index, path, hunk, lines)
             }
         }
+    }
+
+    fn discard_hunk(&self, root: &Path, path: &str, hunk: &HunkId) -> Result<(), GitError> {
+        let repo = open(root)?;
+        if !is_tracked(&repo, path)? {
+            return Err(GitError(format!(
+                "{path} is untracked: its chunks cannot be discarded"
+            )));
+        }
+        let diff = self.diff(root, path, DiffSide::Unstaged)?;
+        let hunk = find_hunk(&diff, hunk)?;
+        // Reversed against the working tree only: the index keeps what it has.
+        let mut command = self.git(root);
+        command.args(["apply", "--reverse"]);
+        self.logged(command, Some(hunk_patch(path, hunk).as_bytes()))
+            .map(drop)
     }
 
     fn commit(&self, root: &Path, message: &str) -> Result<String, GitError> {

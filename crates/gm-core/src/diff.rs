@@ -9,6 +9,35 @@ use crate::GitError;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+/// A one-hunk patch for `path`, in the form `git apply` reads back. Every line
+/// keeps its kind, so reversing it removes exactly what the hunk added.
+#[must_use]
+pub fn hunk_patch(path: &str, hunk: &Hunk) -> String {
+    let mut text = format!(
+        "--- a/{path}\n+++ b/{path}\n@@ -{},{} +{},{} @@",
+        hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+    );
+    if !hunk.header.is_empty() {
+        text.push(' ');
+        text.push_str(&hunk.header);
+    }
+    text.push('\n');
+    for line in &hunk.lines {
+        let sign = match line.kind {
+            LineKind::Context => ' ',
+            LineKind::Added => '+',
+            LineKind::Removed => '-',
+        };
+        text.push(sign);
+        text.push_str(&line.text);
+        text.push('\n');
+        if line.no_newline {
+            text.push_str("\\ No newline at end of file\n");
+        }
+    }
+    text
+}
+
 /// Line counters of the hunk being read, from its header.
 struct Open {
     old_left: u32,
