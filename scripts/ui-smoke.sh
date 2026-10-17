@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -56,6 +56,8 @@ WORKING_COPY_X=120; WORKING_COPY_Y=147       # "Working Copy" row, back from the
 HISTORY_ROW_X=420; HISTORY_ROW_TOP_Y=162     # the history list's first row, 48 px rows below it
 DETAIL_PANEL_CROP="360x700+920+88"           # the commit detail panel, window-relative
 COMMIT_FILE_X=1082; COMMIT_FILE_Y=505        # api/new.rs, the first file row of the feat commit
+SPLIT_FILE_X=1082; SPLIT_CALC_Y=449          # src/calc.rs, the file row of the split fixture's commit
+LAYOUT_SPLIT_X=1320; LAYOUT_UNIFIED_X=1257; LAYOUT_Y=196   # "Split" and "Unified" in the diff header
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -166,7 +168,7 @@ launch_app() {
   if [ -n "$2" ]; then args=("$2"); fi
   (cd "${3:-$RUN_DIR}" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_NUM" \
     VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
-    XDG_DATA_HOME="$RUN_DIR/xdg" GIT_CONFIG_GLOBAL="$RUN_DIR/gitconfig" \
+    XDG_DATA_HOME="$RUN_DIR/xdg" XDG_CONFIG_HOME="$RUN_DIR/xdg-config" GIT_CONFIG_GLOBAL="$RUN_DIR/gitconfig" \
     GITMASTER_THEME="$1" "$BIN" "${args[@]}") >"$RUN_DIR/app.log" 2>&1 &
   APP_PID=$!
   sleep 4
@@ -1067,6 +1069,12 @@ run_scenario() {
     echo "PASS  $LABEL"
     return
   fi
+  if [ "$name" = h-commit-diff-split ]; then
+    make_split_repo "$RUN_DIR/detail"
+    scenario_commit_diff_split "$theme"
+    echo "PASS  $LABEL"
+    return
+  fi
   if [ "$name" = h-welcome ]; then
     # Starts with no recent list at all; scenario_h makes its own launches.
     scenario_h "$theme"
@@ -1270,6 +1278,99 @@ scenario_commit_diff() {
 
   [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
     || fail "reading a commit's diff changed the repository"
+}
+
+# --- 3k. Split layout of a commit's diff (H4b-A, D39 to D41) --------------------
+# One commit with a replacement (two lines become three), a pure addition and a
+# pure deletion, so the split view shows paired rows and both kinds of empty side.
+make_split_repo() {
+  local repo="$1"
+  rm -rf "$repo"
+  mkdir -p "$repo/src"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.name "gm smoke"
+  git -C "$repo" config user.email "smoke@example.invalid"
+  git -C "$repo" config commit.gpgsign false
+  printf 'fn one() -> i32 { 1 }\nfn two() -> i32 { 2 }\nfn keep() {}\n' > "$repo/src/calc.rs"
+  printf 'fn gone() {}\nfn stays() {}\n' > "$repo/src/gone.rs"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m "init"
+  printf 'fn one() -> u64 { 1 }\nfn two() -> u64 { 2 }\nfn three() -> u64 { 3 }\nfn keep() {}\n' > "$repo/src/calc.rs"
+  printf 'pub fn fresh() {}\n' > "$repo/src/added.rs"
+  git -C "$repo" rm -q src/gone.rs
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m "feat: replace, add and delete"
+}
+
+# Waits up to five seconds for the settings file to hold the layout $2.
+wait_for_layout_saved() {
+  local file="$1" layout="$2" tries=0
+  until grep -qs "\"diff_layout\": \"$layout\"" "$file"; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || fail "the layout '$layout' was not saved to $file"
+    sleep 0.1
+  done
+}
+
+scenario_commit_diff_split() {
+  local repo="$RUN_DIR/detail" theme="$1" differing
+  local settings="$RUN_DIR/xdg-config/gitmaster/settings.json"
+  launch_app "$theme" "$repo"
+  xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
+  xdotool mousemove "$HISTORY_ROW_X" "$(history_row_y "feat: replace, add and delete")" click 1; sleep 1.5
+  xdotool mousemove "$SPLIT_FILE_X" "$SPLIT_CALC_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-split-unified-$theme.png"
+
+  xdotool mousemove "$LAYOUT_SPLIT_X" "$LAYOUT_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-split-split-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-unified-$theme.png" "$SMOKE_OUT/h-commit-diff-split-split-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "Split did not change the diff ($differing pixels changed)"
+
+  # A pure addition and a pure deletion: one side is empty, and the file is not calc.rs.
+  xdotool key Up; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-split-added-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-split-$theme.png" "$SMOKE_OUT/h-commit-diff-split-added-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 2000 ] || fail "src/added.rs did not open in the split view ($differing pixels changed)"
+  xdotool key Down Down; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-split-gone-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-added-$theme.png" "$SMOKE_OUT/h-commit-diff-split-gone-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 2000 ] || fail "src/gone.rs did not open in the split view ($differing pixels changed)"
+  xdotool key Up; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-split-recheck-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-split-$theme.png" "$SMOKE_OUT/h-commit-diff-split-recheck-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -lt 2000 ] || fail "calc.rs did not come back in the split view ($differing pixels changed)"
+
+  xdotool mousemove "$LAYOUT_UNIFIED_X" "$LAYOUT_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-split-back-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-unified-$theme.png" "$SMOKE_OUT/h-commit-diff-split-back-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -lt 2000 ] || fail "Unified did not come back ($differing pixels changed)"
+
+  # The split choice is saved and comes back after a restart of the app (D40).
+  xdotool mousemove "$LAYOUT_SPLIT_X" "$LAYOUT_Y" click 1; sleep 1.5
+  wait_for_layout_saved "$settings" split
+  stop_app
+  launch_app "$theme" "$repo"
+  xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
+  xdotool mousemove "$HISTORY_ROW_X" "$(history_row_y "feat: replace, add and delete")" click 1; sleep 1.5
+  xdotool mousemove "$SPLIT_FILE_X" "$SPLIT_CALC_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-split-restart-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-split-$theme.png" "$SMOKE_OUT/h-commit-diff-split-restart-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -lt 2000 ] || fail "the split layout was not kept across a restart ($differing pixels changed)"
+  stop_app
 }
 
 # --- 2/3. Run everything -------------------------------------------------------
