@@ -1099,3 +1099,161 @@ mod tests {
         }
     }
 }
+
+/// The split rows of commits read with real git: an addition, a deletion and a
+/// rename with an edit (the H4b-A cases the split view must pair correctly).
+#[cfg(test)]
+mod real_git {
+    use super::*;
+    use gm_core::GitPort;
+    use gm_core::git::SubprocessGit;
+    use gm_schema::FileDiff;
+    use std::fmt::Write as _;
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::atomic::AtomicBool;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn commit(dir: &Path, message: &str) -> String {
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", message]);
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    /// The file diff of `path` in `oid`, as the engine reads it, and its split
+    /// rows on the unstaged side (the side a commit diff shows).
+    fn read(dir: &Path, oid: &str, path: &str, old_path: Option<&str>) -> (FileDiff, SplitRows) {
+        let read = SubprocessGit::default()
+            .commit_file_diff(dir, oid, path, old_path)
+            .unwrap();
+        let diff = read(&AtomicBool::new(false)).unwrap();
+        let split = split_rows(
+            Diffs {
+                unstaged: &diff.hunks,
+                staged: &[],
+            },
+            Side::Unstaged,
+        );
+        (diff, split)
+    }
+
+    /// The kind of the line a cell names.
+    fn kind_of(diff: &FileDiff, cell: Cell) -> LineKind {
+        diff.hunks[cell.key.1].lines[cell.key.2].kind
+    }
+
+    fn pairs(split: &SplitRows) -> Vec<(Option<Cell>, Option<Cell>)> {
+        split
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                SplitRow::Pair { old, new } => Some((*old, *new)),
+                SplitRow::HunkHeader { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_added_file_has_an_empty_old_side_on_every_row() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        commit(dir.path(), "root");
+        std::fs::write(dir.path().join("new.txt"), "x\ny\n").unwrap();
+        let oid = commit(dir.path(), "add");
+
+        let (diff, split) = read(dir.path(), &oid, "new.txt", None);
+        assert_eq!(split.rows.len(), 1 + diff.hunks[0].lines.len());
+        for (old, new) in pairs(&split) {
+            assert_eq!(old, None);
+            assert_eq!(kind_of(&diff, new.unwrap()), LineKind::Added);
+        }
+    }
+
+    #[test]
+    fn a_deleted_file_has_an_empty_new_side_on_every_row() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("gone.txt"), "x\ny\n").unwrap();
+        commit(dir.path(), "root");
+        std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+        let oid = commit(dir.path(), "delete");
+
+        let (diff, split) = read(dir.path(), &oid, "gone.txt", None);
+        assert_eq!(pairs(&split).len(), 2);
+        for (old, new) in pairs(&split) {
+            assert_eq!(new, None);
+            assert_eq!(kind_of(&diff, old.unwrap()), LineKind::Removed);
+        }
+    }
+
+    #[test]
+    fn a_rename_with_an_edit_pairs_the_changed_line_across_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        let mut body = String::new();
+        for n in 1..=10 {
+            writeln!(body, "line {n}").unwrap();
+        }
+        std::fs::write(dir.path().join("old.txt"), &body).unwrap();
+        commit(dir.path(), "root");
+        git(dir.path(), &["mv", "old.txt", "new.txt"]);
+        std::fs::write(
+            dir.path().join("new.txt"),
+            body.replace("line 5\n", "five\n"),
+        )
+        .unwrap();
+        let oid = commit(dir.path(), "rename and edit");
+
+        let (diff, split) = read(dir.path(), &oid, "new.txt", Some("old.txt"));
+        assert_eq!(diff.old_path.as_deref(), Some("old.txt"));
+        let both_changed: Vec<_> = pairs(&split)
+            .into_iter()
+            .filter_map(|(old, new)| Some((old?, new?)))
+            .filter(|(old, _)| kind_of(&diff, *old) != LineKind::Context)
+            .collect();
+        assert_eq!(both_changed.len(), 1);
+        let (old, new) = both_changed[0];
+        assert_eq!(kind_of(&diff, old), LineKind::Removed);
+        assert_eq!(kind_of(&diff, new), LineKind::Added);
+        // Every changed line sits in exactly one cell of its own side.
+        let changed_old = pairs(&split)
+            .iter()
+            .filter(|(old, _)| old.is_some_and(|c| kind_of(&diff, c) == LineKind::Removed))
+            .count();
+        let changed_new = pairs(&split)
+            .iter()
+            .filter(|(_, new)| new.is_some_and(|c| kind_of(&diff, c) == LineKind::Added))
+            .count();
+        let total = |kind| {
+            diff.hunks
+                .iter()
+                .flat_map(|h| h.lines.iter())
+                .filter(|l| l.kind == kind)
+                .count()
+        };
+        assert_eq!(changed_old, total(LineKind::Removed));
+        assert_eq!(changed_new, total(LineKind::Added));
+    }
+}
