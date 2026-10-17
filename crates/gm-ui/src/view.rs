@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
-use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff};
+use gm_core::watch::{Notice, Notices, WatchHandle};
+use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff, OperationId};
 use gpui::{
     ClipboardItem, Context, Div, Entity, FocusHandle, MouseButton, MouseDownEvent, Render,
     ScrollHandle, Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
@@ -37,6 +38,11 @@ pub const KEY_CONTEXT: &str = "GitMaster";
 
 /// How long a notice stays on the status bar.
 const NOTICE_TIME: Duration = Duration::from_secs(4);
+
+/// How long a refresh runs before "Updating…" shows. Quicker ones never show it.
+const UPDATING_DELAY: Duration = Duration::from_millis(300);
+
+const WATCH_LIMITED: &str = "Watching is limited; refreshing when the window gains focus.";
 
 pub struct StatusView {
     pub(crate) engine: EngineHandle,
@@ -68,6 +74,8 @@ pub struct StatusView {
     pub(crate) startup: Option<Startup>,
     /// Set while the window shows the welcome screen instead of a repository.
     pub(crate) welcome: Option<Welcome>,
+    /// Asks the watcher for a refresh when the window gains focus.
+    watch: WatchHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -78,10 +86,12 @@ impl StatusView {
     pub fn new(
         engine: EngineHandle,
         command_log: CommandLog,
+        watch: (WatchHandle, Notices),
         start: StartPath,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (watch, notices) = watch;
         let events = engine.subscribe();
         cx.spawn(async move |this, cx| {
             while let Ok(event) = events.recv().await {
@@ -95,6 +105,7 @@ impl StatusView {
         })
         .detach();
         Self::follow_command_log(&command_log, cx);
+        Self::follow_watch(notices, cx);
         let may_fall_back = !start.from_argument;
         let open = engine.dispatch(Actor::Human, CommandKind::OpenRepo { path: start.path });
         theme::follow(window.appearance());
@@ -135,6 +146,12 @@ impl StatusView {
                     this.on_diff_pane_event(event, window, cx);
                 },
             ),
+            // Coming back to the window is a reason to refresh; the watcher debounces it.
+            cx.observe_window_activation(window, |this, window, _cx| {
+                if window.is_window_active() {
+                    this.watch.request();
+                }
+            }),
             // Also fires when the compositor answers the decoration request, so
             // the title bar appears or goes as soon as the grant is known.
             cx.observe_window_appearance(window, |_, window, cx| {
@@ -167,8 +184,49 @@ impl StatusView {
                 may_fall_back,
             }),
             welcome: None,
+            watch,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Applies the watcher's notices on the UI thread: the refresh indicator
+    /// and, once, the notice that watching is limited.
+    fn follow_watch(notices: Notices, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            while let Some(notice) = notices.next().await {
+                if this
+                    .update(cx, |view, cx| view.on_watch_notice(&notice, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn on_watch_notice(&mut self, notice: &Notice, cx: &mut Context<Self>) {
+        match notice {
+            Notice::Refreshing(id) => self.start_refresh_indicator(*id, cx),
+            Notice::Degraded { .. } => self.notify_user(WATCH_LIMITED, cx),
+            Notice::Watching { .. } => {}
+        }
+    }
+
+    /// Tracks a refresh and shows "Updating…" only if it outlasts `UPDATING_DELAY`.
+    fn start_refresh_indicator(&mut self, id: OperationId, cx: &mut Context<Self>) {
+        if !self.model.begin_refresh(id) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(UPDATING_DELAY).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.model.refresh_is_slow(id) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Repaints when the adapter records a command, and keeps an open panel
@@ -404,14 +462,17 @@ impl StatusView {
             Err(reason) => self.notify_user(reason, cx),
             Ok(Effect::Send(kinds)) => {
                 if action == Action::Refresh {
-                    self.model.begin_refresh();
                     self.request_branch_list();
                 }
                 for kind in kinds {
                     let checkout = matches!(kind, CommandKind::Checkout { .. });
+                    let refresh = matches!(kind, CommandKind::RefreshStatus);
                     let id = self.engine.dispatch(Actor::Human, kind);
                     if checkout {
                         self.model.branches.begin_checkout(id);
+                    }
+                    if refresh {
+                        self.start_refresh_indicator(id, cx);
                     }
                 }
             }
@@ -509,7 +570,13 @@ impl StatusView {
             ),
             None => (String::new(), 0, 0),
         };
-        let loading = if self.model.loading { "Loading…" } else { "" };
+        let loading = if self.model.loading {
+            "Loading…"
+        } else if self.model.updating() {
+            "Updating…"
+        } else {
+            ""
+        };
         // Same action as the `r` key, through the registry.
         let refresh = window_chrome::no_drag(
             div()

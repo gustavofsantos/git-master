@@ -10,6 +10,7 @@ pub mod hook;
 mod port;
 mod runner;
 pub mod stage_math;
+pub mod watch;
 
 pub use engine::{Engine, LogEntry};
 pub use port::{GitError, GitPort};

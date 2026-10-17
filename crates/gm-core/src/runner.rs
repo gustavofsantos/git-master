@@ -4,7 +4,7 @@
 //! channel and the engine thread records the result.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_channel::{Receiver, Sender};
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId};
@@ -27,6 +27,8 @@ enum Message {
 pub struct EngineHandle {
     tx: Sender<Message>,
     next_id: Arc<AtomicU64>,
+    /// Set while the engine thread handles a command.
+    busy: Arc<AtomicBool>,
 }
 
 impl EngineHandle {
@@ -42,6 +44,12 @@ impl EngineHandle {
             self.tx.clone(),
         ));
         id
+    }
+
+    /// Whether the engine thread is handling a command right now. A status
+    /// started meanwhile would queue behind it and see its writes twice.
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
     }
 
     /// A new stream of every event from now on. Each subscriber gets its own.
@@ -69,17 +77,20 @@ pub fn spawn(git: Box<dyn GitPort>) -> EngineHandle {
 /// If the OS cannot start the engine thread.
 pub fn spawn_with(git: Box<dyn GitPort>, approvals: ApprovalStore) -> EngineHandle {
     let (tx, rx) = async_channel::unbounded::<Message>();
+    let busy = Arc::new(AtomicBool::new(false));
+    let thread_busy = Arc::clone(&busy);
     std::thread::Builder::new()
         .name("gm-engine".into())
-        .spawn(move || run(Engine::with_approvals(git, approvals), &rx))
+        .spawn(move || run(Engine::with_approvals(git, approvals), &rx, &thread_busy))
         .expect("spawn the engine thread");
     EngineHandle {
         tx,
         next_id: Arc::new(AtomicU64::new(1)),
+        busy,
     }
 }
 
-fn run(mut engine: Engine, rx: &Receiver<Message>) {
+fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     let broadcast = |events: Vec<Event>, subscribers: &mut Vec<Sender<Event>>| {
         for event in events {
@@ -90,8 +101,10 @@ fn run(mut engine: Engine, rx: &Receiver<Message>) {
         match message {
             Message::Subscribe(tx) => subscribers.push(tx),
             Message::Dispatch(id, command, reports) => {
+                busy.store(true, Ordering::SeqCst);
                 let events = engine.handle(id, &command);
                 broadcast(events, &mut subscribers);
+                busy.store(false, Ordering::SeqCst);
                 for plan in engine.take_jobs() {
                     let reports = reports.clone();
                     std::thread::Builder::new()
