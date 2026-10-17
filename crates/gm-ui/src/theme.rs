@@ -33,6 +33,10 @@ pub struct Palette {
     pub panel: u32,
     pub hairline: u32,
     pub hairline_strong: u32,
+    /// The 1px outline of the frame the app draws itself (Linux, client decorations).
+    pub window_border: u32,
+    /// The colour of the drop shadow behind that frame. Drawn at reduced alpha.
+    pub window_shadow: u32,
     /// Primary text.
     pub text: u32,
     /// Secondary text: labels, counts, hints.
@@ -81,6 +85,8 @@ pub const LIGHT: Palette = Palette {
     panel: 0xf7_f7f4,
     hairline: 0xdb_d9d2,
     hairline_strong: 0xb7_b5ae,
+    window_border: 0xa8_a69f,
+    window_shadow: 0x00_0000,
     text: 0x31_302d,
     muted: 0x69_6761,
     faint: 0x69_6761,
@@ -115,6 +121,8 @@ pub const DARK: Palette = Palette {
     panel: 0x1a_1918,
     hairline: 0x39_3833,
     hairline_strong: 0x52_514b,
+    window_border: 0x5e_5c55,
+    window_shadow: 0x00_0000,
     text: 0xd2_cfc5,
     muted: 0x9d_9b92,
     faint: 0x9d_9b92,
@@ -236,6 +244,8 @@ accessors!(
     panel,
     hairline,
     hairline_strong,
+    window_border,
+    window_shadow,
     text,
     muted,
     faint,

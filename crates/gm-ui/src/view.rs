@@ -714,8 +714,9 @@ impl StatusView {
             )
     }
 
-    fn status_bar(&self, cx: &Context<Self>) -> Div {
+    fn status_bar(&self, window: &Window, cx: &Context<Self>) -> Div {
         let muted = theme::muted();
+        let corners = window_chrome::inner_radii(window);
         let root = self
             .model
             .status()
@@ -742,6 +743,8 @@ impl StatusView {
             .flex_row()
             .items_center()
             .gap_4()
+            .rounded_bl(corners.bottom_left)
+            .rounded_br(corners.bottom_right)
             .bg(theme::panel())
             .border_t_1()
             .border_color(theme::hairline())
@@ -786,7 +789,8 @@ impl Render for StatusView {
         let viewport = window.viewport_size();
         let left_width = resize::LEFT.clamp(self.left_width, f32::from(viewport.width));
         let commit_height = resize::COMMIT.clamp(self.commit_height, f32::from(viewport.height));
-        div()
+        window_chrome::sync_client_inset(window);
+        let app = div()
             .size_full()
             .relative()
             .flex()
@@ -830,7 +834,7 @@ impl Render for StatusView {
                             .child(self.diff_pane.clone()),
                     )
             }))
-            .children(self.welcome.is_none().then(|| self.status_bar(cx)))
+            .children(self.welcome.is_none().then(|| self.status_bar(window, cx)))
             .children(
                 self.welcome
                     .as_ref()
@@ -860,7 +864,7 @@ impl Render for StatusView {
                 self.prune_dialog
                     .is_some()
                     .then(|| self.prune_layer(window, cx)),
-            )
-            .children(window_chrome::resize_layer(window))
+            );
+        window_chrome::framed(window, app)
     }
 }

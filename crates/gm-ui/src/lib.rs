@@ -45,7 +45,7 @@ use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
-    WindowBounds, WindowDecorations, WindowOptions, actions, px, size,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, actions, px, size,
 };
 
 use crate::theme::ThemeMode;
@@ -115,6 +115,15 @@ pub fn run(
                 } else {
                     WindowDecorations::Server
                 }),
+                // With client decorations the app draws a margin around its frame
+                // and the shadow falls into it, so the window must be transparent
+                // there (X11 needs an alpha visual; Wayland already is). macOS
+                // keeps an opaque window.
+                window_background: if cfg!(target_os = "linux") {
+                    WindowBackgroundAppearance::Transparent
+                } else {
+                    WindowBackgroundAppearance::Opaque
+                },
                 // Matches the window class a desktop entry would use.
                 app_id: Some("gitmaster".into()),
                 ..WindowOptions::default()

@@ -1,18 +1,20 @@
 //! The window frame the app draws itself when the compositor does not: the
 //! window controls (minimize, maximize, close) at the right end of the app's
 //! header row, the drag region of that row, and the invisible resize band
-//! along the edges. Everything here is inert when `Window::window_decorations`
-//! reports `Server`, which is the case whenever the platform draws the frame,
-//! and always on macOS.
+//! along the edges. Where the app draws the frame it also draws the window's
+//! edge: a transparent margin, rounded corners, a 1px outline and a drop
+//! shadow in the margin (see `framed`). Everything here is inert when
+//! `Window::window_decorations` reports `Server`, which is the case whenever
+//! the platform draws the frame, and always on macOS.
 //!
 //! Ported from `rvw` (`crates/rvw-gui/src/window_chrome.rs`), same author,
 //! MIT licensed.
 
 use gpui::prelude::*;
 use gpui::{
-    AnyView, App, Bounds, CursorStyle, Decorations, DispatchPhase, Div, HitboxBehavior, Hsla,
-    MouseButton, MouseDownEvent, Pixels, Point, ResizeEdge, Size, Stateful, Tiling, Window,
-    WindowControlArea, canvas, div, point, px,
+    AnyView, App, Bounds, BoxShadow, Corners, CursorStyle, Decorations, DispatchPhase, Div, Edges,
+    HitboxBehavior, Hsla, MouseButton, MouseDownEvent, Pixels, Point, ResizeEdge, Size, Stateful,
+    Tiling, Window, WindowControlArea, canvas, div, point, px,
 };
 
 use crate::icon::{self, Icon};
@@ -20,10 +22,16 @@ use crate::theme;
 
 /// Height of the app's header row, the top bar or the welcome header.
 pub const HEADER_HEIGHT: Pixels = px(36.);
-/// Width of the invisible resize band along each edge.
-const RESIZE_BAND: Pixels = px(6.);
-/// Side of the square at each corner that resizes both ways.
-const RESIZE_CORNER: Pixels = px(12.);
+/// Width of the transparent margin around the app's own frame, on each side
+/// the compositor does not tile. The shadow is drawn in it, and the resize
+/// band lies in it, so the band never covers the app's content.
+pub const SHADOW_MARGIN: Pixels = px(12.);
+/// Corner radius of the app's own frame, where its corners are not tiled.
+pub const FRAME_RADIUS: Pixels = px(10.);
+/// Width of the outline around the app's own frame.
+const FRAME_BORDER: Pixels = px(1.);
+/// Opacity of the drop shadow behind the app's own frame.
+const SHADOW_ALPHA: f32 = 0.4;
 /// Side of each control button.
 const CONTROL_SIZE: Pixels = px(28.);
 
@@ -206,21 +214,135 @@ pub fn draws_frame(window: &Window) -> bool {
     matches!(window.window_decorations(), Decorations::Client { .. })
 }
 
+/// The tiling of the frame the app draws around its content, or `None` when
+/// it draws none: server decorations (macOS, or a compositor that frames the
+/// window), and a window that is maximized or full screen, which has no
+/// margin, no rounding and no shadow.
+pub fn drawn_frame(decorations: Decorations, maximized: bool, fullscreen: bool) -> Option<Tiling> {
+    match decorations {
+        Decorations::Client { tiling } if !maximized && !fullscreen => Some(tiling),
+        _ => None,
+    }
+}
+
+/// `drawn_frame` for a window.
+pub fn frame_tiling(window: &Window) -> Option<Tiling> {
+    drawn_frame(
+        window.window_decorations(),
+        window.is_maximized(),
+        window.is_fullscreen(),
+    )
+}
+
+/// The width of the margin on each side of a frame with `tiling`: `inset` on
+/// each side the compositor does not tile, zero on a tiled side.
+pub fn margins(tiling: Tiling, inset: Pixels) -> Edges<Pixels> {
+    let side = |tiled: bool| if tiled { px(0.) } else { inset };
+    Edges {
+        top: side(tiling.top),
+        right: side(tiling.right),
+        bottom: side(tiling.bottom),
+        left: side(tiling.left),
+    }
+}
+
+/// The corner radii of the frame: `FRAME_RADIUS` at each corner whose two
+/// sides are both untiled, square otherwise.
+pub fn radii(tiling: Tiling) -> Corners<Pixels> {
+    let corner = |a: bool, b: bool| if a || b { px(0.) } else { FRAME_RADIUS };
+    Corners {
+        top_left: corner(tiling.top, tiling.left),
+        top_right: corner(tiling.top, tiling.right),
+        bottom_right: corner(tiling.bottom, tiling.right),
+        bottom_left: corner(tiling.bottom, tiling.left),
+    }
+}
+
+/// The corner radii of the header and footer rows, which reach the frame's
+/// corners: the frame's radii less its outline, so they sit inside it. All
+/// zero when the app draws no frame.
+pub fn inner_radii(window: &Window) -> Corners<Pixels> {
+    let inner = |r: Pixels| {
+        if r > FRAME_BORDER {
+            r - FRAME_BORDER
+        } else {
+            px(0.)
+        }
+    };
+    let outer = frame_tiling(window).map_or_else(Corners::default, radii);
+    Corners {
+        top_left: inner(outer.top_left),
+        top_right: inner(outer.top_right),
+        bottom_right: inner(outer.bottom_right),
+        bottom_left: inner(outer.bottom_left),
+    }
+}
+
+/// Tells the platform how wide the frame's margin is, so the compositor does
+/// not count it as window content: the margin when the app draws a frame, and
+/// zero when it is maximized or full screen. Only with client decorations;
+/// server decorations and macOS are left alone. Called on every render, as
+/// GPUI only sends a change to the platform.
+pub fn sync_client_inset(window: &mut Window) {
+    if !matches!(window.window_decorations(), Decorations::Client { .. }) {
+        return;
+    }
+    let inset = if frame_tiling(window).is_some() {
+        SHADOW_MARGIN
+    } else {
+        px(0.)
+    };
+    window.set_client_inset(inset);
+}
+
+/// The window's root, wrapped in the frame the app draws when it draws one:
+/// a transparent margin around `app`, which gets rounded corners, a 1px
+/// outline and a drop shadow that falls into the margin. The resize band goes
+/// last, over the margin. Without a drawn frame, `app` is returned with the
+/// resize band (none, under server decorations) as its last child, exactly as
+/// before the frame existed.
+pub fn framed(window: &Window, app: Div) -> Div {
+    let Some(tiling) = frame_tiling(window) else {
+        return app.children(resize_layer(window));
+    };
+    let edge = margins(tiling, SHADOW_MARGIN);
+    let corners = radii(tiling);
+    div()
+        .size_full()
+        .relative()
+        .pt(edge.top)
+        .pr(edge.right)
+        .pb(edge.bottom)
+        .pl(edge.left)
+        .child(
+            app.rounded_tl(corners.top_left)
+                .rounded_tr(corners.top_right)
+                .rounded_br(corners.bottom_right)
+                .rounded_bl(corners.bottom_left)
+                .border_1()
+                .border_color(theme::window_border())
+                .shadow(vec![BoxShadow {
+                    color: theme::window_shadow().opacity(SHADOW_ALPHA),
+                    offset: point(px(0.), px(2.)),
+                    blur_radius: px(10.),
+                    spread_radius: px(0.),
+                }]),
+        )
+        .children(resize_layer(window))
+}
+
 /// The invisible resize band, to be the last child of the root so it sits
 /// above everything. `None` when the platform draws the frame, or when the
 /// window is maximized or full screen. The band's hitboxes are `Normal`, so
 /// they do not take hover away from the content under them.
 pub fn resize_layer(window: &Window) -> Option<impl IntoElement + use<>> {
-    let Decorations::Client { tiling } = window.window_decorations() else {
-        return None;
-    };
-    if window.is_maximized() || window.is_fullscreen() {
-        return None;
-    }
+    let tiling = frame_tiling(window)?;
+    // The band is the margin: a side with no margin (tiled) has no band.
+    let inset = SHADOW_MARGIN;
     Some(
         canvas(
             move |bounds, window, _cx| {
-                band_rects(bounds.size, RESIZE_BAND, RESIZE_CORNER, tiling)
+                band_rects(bounds.size, inset, inset, tiling)
                     .into_iter()
                     .map(|(edge, rect)| {
                         let at = Bounds::new(bounds.origin + rect.origin, rect.size);
@@ -237,13 +359,7 @@ pub fn resize_layer(window: &Window) -> Option<impl IntoElement + use<>> {
                     if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
                         return;
                     }
-                    let found = edge_at(
-                        event.position,
-                        window_size,
-                        RESIZE_BAND,
-                        RESIZE_CORNER,
-                        tiling,
-                    );
+                    let found = edge_at(event.position, window_size, inset, inset, tiling);
                     if let Some(edge) = found {
                         window.start_window_resize(edge);
                         cx.stop_propagation();
@@ -282,6 +398,7 @@ pub fn drag_region(bar: Div, window: &Window) -> Div {
 /// drag region applied when the app draws the frame. The caller adds the
 /// row's content and, when `draws_frame`, `window_controls` at its right end.
 pub fn header_bar(window: &Window) -> Div {
+    let corners = inner_radii(window);
     let bar = div()
         .h(HEADER_HEIGHT)
         .flex_none()
@@ -291,6 +408,8 @@ pub fn header_bar(window: &Window) -> Div {
         .flex_row()
         .items_center()
         .gap_4()
+        .rounded_tl(corners.top_left)
+        .rounded_tr(corners.top_right)
         .bg(theme::panel())
         .border_b_1()
         .border_color(theme::hairline());
@@ -458,5 +577,105 @@ mod tests {
             maximize: false,
         };
         assert_eq!(visible_controls(none, true), [Control::Close]);
+    }
+
+    fn margin_of(tiling: Tiling) -> [Pixels; 4] {
+        let m = margins(tiling, SHADOW_MARGIN);
+        [m.top, m.right, m.bottom, m.left]
+    }
+
+    #[test]
+    fn a_frame_is_drawn_only_with_client_decorations_on_a_window_not_maximized_or_full_screen() {
+        let client = Decorations::Client {
+            tiling: Tiling::default(),
+        };
+        assert_eq!(drawn_frame(client, false, false), Some(Tiling::default()));
+        assert_eq!(drawn_frame(client, true, false), None);
+        assert_eq!(drawn_frame(client, false, true), None);
+        assert_eq!(drawn_frame(Decorations::Server, false, false), None);
+    }
+
+    #[test]
+    fn a_free_window_has_a_margin_on_every_side() {
+        assert_eq!(
+            margin_of(Tiling::default()),
+            [SHADOW_MARGIN; 4],
+            "every side of a free window carries the margin"
+        );
+    }
+
+    #[test]
+    fn a_tiled_side_has_no_margin() {
+        let top = Tiling {
+            top: true,
+            ..Tiling::default()
+        };
+        assert_eq!(
+            margin_of(top),
+            [px(0.), SHADOW_MARGIN, SHADOW_MARGIN, SHADOW_MARGIN]
+        );
+        assert_eq!(margin_of(Tiling::tiled()), [px(0.); 4]);
+    }
+
+    #[test]
+    fn a_corner_is_rounded_only_where_both_sides_are_free() {
+        let free = radii(Tiling::default());
+        assert_eq!(
+            [
+                free.top_left,
+                free.top_right,
+                free.bottom_right,
+                free.bottom_left
+            ],
+            [FRAME_RADIUS; 4]
+        );
+        let left = radii(Tiling {
+            left: true,
+            ..Tiling::default()
+        });
+        assert_eq!(left.top_left, px(0.));
+        assert_eq!(left.bottom_left, px(0.));
+        assert_eq!(left.top_right, FRAME_RADIUS);
+        assert_eq!(left.bottom_right, FRAME_RADIUS);
+        let tiled = radii(Tiling::tiled());
+        assert_eq!(
+            [
+                tiled.top_left,
+                tiled.top_right,
+                tiled.bottom_right,
+                tiled.bottom_left
+            ],
+            [px(0.); 4]
+        );
+    }
+
+    #[test]
+    fn the_resize_band_is_the_margin_and_never_the_content() {
+        let window = size(px(1000.), px(800.));
+        let free = Tiling::default();
+        let m = SHADOW_MARGIN;
+        assert_eq!(
+            edge_at(point(px(5.), px(400.)), window, m, m, free),
+            Some(ResizeEdge::Left)
+        );
+        assert_eq!(
+            edge_at(point(px(500.), px(3.)), window, m, m, free),
+            Some(ResizeEdge::Top)
+        );
+        assert_eq!(
+            edge_at(point(px(995.), px(790.)), window, m, m, free),
+            Some(ResizeEdge::BottomRight)
+        );
+        // Just inside the margin is content, so no resize there.
+        assert_eq!(edge_at(point(px(12.5), px(400.)), window, m, m, free), None);
+        assert_eq!(edge_at(point(px(500.), px(12.5)), window, m, m, free), None);
+        assert_eq!(
+            edge_at(point(px(987.5), px(400.)), window, m, m, free),
+            None
+        );
+        assert_eq!(
+            edge_at(point(px(500.), px(787.5)), window, m, m, free),
+            None
+        );
     }
 }
