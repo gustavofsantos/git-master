@@ -79,7 +79,9 @@ pub enum HookState {
     /// `enabled = false` in its config section.
     Disabled,
     /// The section cannot run as written; `reason` says why.
-    Invalid { reason: String },
+    Invalid {
+        reason: String,
+    },
 }
 
 /// One `[gitmaster "prepare-commit.<name>"]` section, as the UI lists it.
@@ -104,13 +106,25 @@ pub struct HookInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HookFailure {
-    Timeout { timeout_ms: u64 },
+    Timeout {
+        timeout_ms: u64,
+    },
     /// `code` is `None` when the process was killed by a signal. `stderr`
     /// holds the first lines only.
-    Exited { code: Option<i32>, stderr: String },
-    InvalidOutput { detail: String },
-    InvocationMismatch { expected: String, got: String },
-    CannotStart { detail: String },
+    Exited {
+        code: Option<i32>,
+        stderr: String,
+    },
+    InvalidOutput {
+        detail: String,
+    },
+    InvocationMismatch {
+        expected: String,
+        got: String,
+    },
+    CannotStart {
+        detail: String,
+    },
 }
 
 #[cfg(test)]
@@ -173,9 +187,7 @@ mod tests {
             match_rule: Some("branch:feat/*".into()),
             timeout_ms: 30_000,
             applies_to_branch: true,
-            state: HookState::Invalid {
-                reason: "x".into(),
-            },
+            state: HookState::Invalid { reason: "x".into() },
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["match"], "branch:feat/*");

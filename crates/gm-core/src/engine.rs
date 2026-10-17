@@ -1,8 +1,15 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use gm_schema::{Actor, Command, CommandKind, Event, OperationId, OperationState};
+use gm_schema::{
+    Actor, Command, CommandKind, Event, HookFailure, HookScope, OperationId, OperationState,
+};
 
 use crate::GitPort;
+use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 
 /// One state change of one operation. The log is audit, and the base for undo
 /// later; it is not replayed to rebuild state (docs/06).
@@ -20,6 +27,28 @@ pub struct Engine {
     git: Box<dyn GitPort>,
     root: Option<PathBuf>,
     log: Vec<LogEntry>,
+    approvals: ApprovalStore,
+    /// Hook runs that started and have not answered yet, by run id.
+    runs: BTreeMap<OperationId, ActiveRun>,
+    /// Runs accepted but not yet handed to a thread; see `take_jobs`.
+    jobs: Vec<Plan>,
+    hook_log: Vec<HookRecord>,
+}
+
+/// What the engine keeps of a `RunPrepareCommit` until it answers.
+struct ActiveRun {
+    command: Command,
+    root: PathBuf,
+    fingerprint: Fingerprint,
+    cancel: Arc<AtomicBool>,
+    /// Command hash of each step, by hook name.
+    hashes: BTreeMap<String, String>,
+}
+
+/// A run the engine accepted: its record, and the plan for its thread.
+struct Accepted {
+    active: ActiveRun,
+    plan: Plan,
 }
 
 struct Op<'a> {
@@ -29,11 +58,21 @@ struct Op<'a> {
 }
 
 impl Engine {
+    /// An engine whose approvals are not saved anywhere: repository hooks
+    /// never get approved.
     pub fn new(git: Box<dyn GitPort>) -> Self {
+        Self::with_approvals(git, ApprovalStore::unavailable())
+    }
+
+    pub fn with_approvals(git: Box<dyn GitPort>, approvals: ApprovalStore) -> Self {
         Self {
             git,
             root: None,
             log: Vec::new(),
+            approvals,
+            runs: BTreeMap::new(),
+            jobs: Vec::new(),
+            hook_log: Vec::new(),
         }
     }
 
@@ -41,7 +80,118 @@ impl Engine {
         &self.log
     }
 
+    /// One record per hook step that ended, in the order they ended.
+    pub fn hook_log(&self) -> &[HookRecord] {
+        &self.hook_log
+    }
+
+    /// The hook runs accepted since the last call. The caller executes each
+    /// `Plan` on its own thread and passes every `Report` back to `hook_report`.
+    pub fn take_jobs(&mut self) -> Vec<Plan> {
+        std::mem::take(&mut self.jobs)
+    }
+
+    /// Turns one report of a hook run into events, and records the run's
+    /// state when it ends. A report for a run that already ended is ignored.
+    pub fn hook_report(&mut self, report: Report) -> Vec<Event> {
+        let mut events = Vec::new();
+        match report {
+            Report::Started {
+                run,
+                hook,
+                step,
+                of,
+            } => {
+                if self.runs.contains_key(&run) {
+                    events.push(Event::HookStarted {
+                        id: run,
+                        hook,
+                        step,
+                        of,
+                    });
+                }
+            }
+            Report::StepDone { run, hook } => {
+                if let Some(active) = self.runs.get(&run) {
+                    let command_hash = active.hashes.get(&hook).cloned().unwrap_or_default();
+                    self.hook_log.push(HookRecord {
+                        run,
+                        hook,
+                        command_hash,
+                        exit_code: Some(0),
+                        outcome: HookOutcome::Ok,
+                    });
+                }
+            }
+            Report::Finished { run, message } => {
+                let Some(active) = self.runs.remove(&run) else {
+                    return events;
+                };
+                let repo_changed = self.repo_changed(&active);
+                let mut op = Op {
+                    id: run,
+                    command: &active.command,
+                    state: OperationState::Executing,
+                };
+                events.push(Event::HookFinished {
+                    id: run,
+                    message,
+                    repo_changed,
+                });
+                self.advance(&mut op, OperationState::Done, &mut events);
+            }
+            Report::Failed { run, hook, failure } => {
+                let Some(active) = self.runs.remove(&run) else {
+                    return events;
+                };
+                let summary = hook::run::failure_summary(&hook, &failure);
+                self.hook_log.push(HookRecord {
+                    run,
+                    command_hash: active.hashes.get(&hook).cloned().unwrap_or_default(),
+                    hook: hook.clone(),
+                    exit_code: match &failure {
+                        HookFailure::Exited { code, .. } => *code,
+                        _ => None,
+                    },
+                    outcome: HookOutcome::Failed(summary.clone()),
+                });
+                events.push(Event::HookFailed {
+                    id: run,
+                    hook,
+                    failure,
+                });
+                let mut op = Op {
+                    id: run,
+                    command: &active.command,
+                    state: OperationState::Executing,
+                };
+                self.advance_with(&mut op, OperationState::Failed, Some(summary), &mut events);
+            }
+            Report::Cancelled { run, hook } => {
+                let Some(active) = self.runs.remove(&run) else {
+                    return events;
+                };
+                self.hook_log.push(HookRecord {
+                    run,
+                    command_hash: active.hashes.get(&hook).cloned().unwrap_or_default(),
+                    hook: hook.clone(),
+                    exit_code: None,
+                    outcome: HookOutcome::Cancelled,
+                });
+                events.push(Event::HookCancelled { id: run, hook });
+                let mut op = Op {
+                    id: run,
+                    command: &active.command,
+                    state: OperationState::Executing,
+                };
+                self.advance(&mut op, OperationState::Cancelled, &mut events);
+            }
+        }
+        events
+    }
+
     /// Runs one command to a terminal state and returns the events, in order.
+    /// A `RunPrepareCommit` returns at `Executing`; it ends in `hook_report`.
     pub fn handle(&mut self, id: OperationId, command: &Command) -> Vec<Event> {
         let mut events = Vec::new();
         let mut op = Op {
@@ -50,9 +200,22 @@ impl Engine {
             state: OperationState::Requested,
         };
         self.record(&op, None, &mut events);
-        // Nothing gates or needs approval yet; the states are walked anyway so
-        // hooks (slice 2) and agent approval (slice 7) slot in without a new path.
         self.advance(&mut op, OperationState::Gating, &mut events);
+        if let CommandKind::RunPrepareCommit { message } = &command.kind {
+            match self.prepare_run(id, command, message) {
+                Ok(accepted) => {
+                    self.advance(&mut op, OperationState::Executing, &mut events);
+                    self.runs.insert(id, accepted.active);
+                    self.jobs.push(accepted.plan);
+                }
+                Err(message) => {
+                    self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
+                }
+            }
+            return events;
+        }
+        // Gating has nothing to check for the other commands; the states are walked
+        // so that every operation has the same shape in the log.
         self.advance(&mut op, OperationState::Executing, &mut events);
         match self.execute(id, &command.kind) {
             Ok(produced) => {
@@ -118,7 +281,116 @@ impl Engine {
                 self.git.checkout(&root, branch).map_err(|e| e.0)?;
                 self.reload_status(id, &root)
             }
+            CommandKind::ListHooks => {
+                let root = self.open_root()?;
+                let (branch, _) = self.current(&root)?;
+                let hooks = self.list_hooks(&root, branch.as_deref())?;
+                Ok(vec![Event::HooksListed { id, hooks }])
+            }
+            CommandKind::ApproveHook { name, command_hash } => {
+                let root = self.open_root()?;
+                let (branch, _) = self.current(&root)?;
+                let hooks = self.list_hooks(&root, branch.as_deref())?;
+                let hook = hooks
+                    .iter()
+                    .find(|h| h.scope == HookScope::Repo && &h.name == name)
+                    .ok_or_else(|| format!("no repository hook named {name}"))?;
+                if &hook.command_hash != command_hash {
+                    return Err(format!(
+                        "the command of {name} changed since the hooks were listed; list them again"
+                    ));
+                }
+                self.approvals.approve(name, command_hash)?;
+                let hooks = self.list_hooks(&root, branch.as_deref())?;
+                Ok(vec![Event::HooksListed { id, hooks }])
+            }
+            CommandKind::RunPrepareCommit { .. } => {
+                Err("a prepare-commit run is started by handle, not execute".to_owned())
+            }
+            CommandKind::CancelHook { run } => match self.runs.get(run) {
+                Some(active) => {
+                    active.cancel.store(true, Ordering::SeqCst);
+                    Ok(Vec::new())
+                }
+                None => Err(format!("no hook run {} is active", run.0)),
+            },
         }
+    }
+
+    /// Checks a run and captures what it needs. Quick git reads only; the
+    /// hooks themselves run later, on their own thread.
+    fn prepare_run(
+        &self,
+        id: OperationId,
+        command: &Command,
+        message: &str,
+    ) -> Result<Accepted, String> {
+        let root = self.open_root()?;
+        let (branch, head) = self.current(&root)?;
+        let hooks = self.list_hooks(&root, branch.as_deref())?;
+        let chain = hook::chain(&hooks)?;
+        if chain.is_empty() {
+            return Err("no prepare-commit hook applies to this repository".to_owned());
+        }
+        let hashes = chain
+            .iter()
+            .map(|hook| (hook.name.clone(), hook.command_hash.clone()))
+            .collect();
+        let steps: Vec<Step> = chain
+            .into_iter()
+            .map(|hook| Step {
+                name: hook.name.clone(),
+                command: hook.command.clone(),
+                timeout: Duration::from_millis(hook.timeout_ms),
+            })
+            .collect();
+        let staged_diff = self.git.staged_diff(&root).map_err(|e| e.0)?;
+        let fingerprint = hook::fingerprint(head.as_deref(), &staged_diff);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let plan = Plan {
+            run: id,
+            root: root.clone(),
+            branch,
+            head,
+            staged_diff,
+            message: message.to_owned(),
+            steps,
+            cancel: Arc::clone(&cancel),
+        };
+        let active = ActiveRun {
+            command: command.clone(),
+            root,
+            fingerprint,
+            cancel,
+            hashes,
+        };
+        Ok(Accepted { active, plan })
+    }
+
+    fn list_hooks(
+        &self,
+        root: &std::path::Path,
+        branch: Option<&str>,
+    ) -> Result<Vec<gm_schema::HookInfo>, String> {
+        hook::list(self.git.as_ref(), root, branch, &self.approvals).map_err(|e| e.0)
+    }
+
+    /// Branch name and HEAD commit, both `None` when they do not apply.
+    fn current(&self, root: &std::path::Path) -> Result<(Option<String>, Option<String>), String> {
+        let status = self.git.status(root).map_err(|e| e.0)?;
+        Ok((status.branch.head, status.branch.oid))
+    }
+
+    /// Whether HEAD or the staged diff moved since the run started. When the
+    /// repository cannot be read now, it counts as changed.
+    fn repo_changed(&self, active: &ActiveRun) -> bool {
+        let Ok((_, head)) = self.current(&active.root) else {
+            return true;
+        };
+        let Ok(staged) = self.git.staged_diff(&active.root) else {
+            return true;
+        };
+        hook::fingerprint(head.as_deref(), &staged) != active.fingerprint
     }
 
     fn open_root(&self) -> Result<PathBuf, String> {

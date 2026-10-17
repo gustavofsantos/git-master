@@ -17,6 +17,7 @@ schemars = "1"
 async-channel = "2"
 git2 = "0.20"
 proptest = "1"
+sha2 = "0.10"
 tempfile = "3"
 gm-schema = { path = "crates/gm-schema" }
 gm-core = { path = "crates/gm-core" }
