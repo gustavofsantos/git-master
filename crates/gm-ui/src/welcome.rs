@@ -15,6 +15,7 @@ use crate::icon::{self, Icon};
 use crate::project_menu::folder_name;
 use crate::theme;
 use crate::view::StatusView;
+use crate::window_chrome;
 
 const MARK_DARK: &str = "brand/gitmaster-dark-256.png";
 const MARK_LIGHT: &str = "brand/gitmaster-light-256.png";
@@ -213,6 +214,17 @@ impl StatusView {
                     ),
             )
     }
+}
+
+/// The welcome screen's only row, drawn when the app draws the frame: the
+/// drag region, with the window controls at its right end. Under server
+/// decorations the compositor draws the frame, so there is no row.
+pub(crate) fn header(window: &Window) -> Option<Div> {
+    window_chrome::draws_frame(window).then(|| {
+        window_chrome::header_bar(window)
+            .child(div().flex_1())
+            .child(window_chrome::window_controls(window))
+    })
 }
 
 /// The reason an open failed, under the action.

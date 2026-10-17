@@ -27,7 +27,7 @@ use crate::resize;
 use crate::sidebar::Grouping;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
-use crate::welcome::{Startup, Welcome};
+use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
 use crate::{FocusNext, FocusPrev, StartPath};
 
@@ -499,7 +499,7 @@ impl StatusView {
         cx.notify();
     }
 
-    fn top_bar(&self, cx: &Context<Self>) -> Div {
+    fn top_bar(&self, window: &Window, cx: &Context<Self>) -> Div {
         let muted = theme::muted();
         let (upstream, ahead, behind) = match self.model.status() {
             Some(status) => (
@@ -511,35 +511,28 @@ impl StatusView {
         };
         let loading = if self.model.loading { "Loading…" } else { "" };
         // Same action as the `r` key, through the registry.
-        let refresh = div()
-            .id("top-refresh")
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(26.))
-            .rounded_sm()
-            .cursor_pointer()
-            .text_color(muted)
-            .hover(|style| style.bg(theme::selected_row()))
-            .child(icon::view(Icon::ArrowClockwise, icon::SIZE, muted))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                    this.run_action(Action::Refresh, &Args::None, window, cx);
-                }),
-            );
-        div()
-            .h(px(36.))
-            .px_4()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_4()
-            .bg(theme::panel())
-            .border_b_1()
-            .border_color(theme::hairline())
-            .child(self.project_button(cx))
-            .child(self.branch_button(cx))
+        let refresh = window_chrome::no_drag(
+            div()
+                .id("top-refresh")
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(26.))
+                .rounded_sm()
+                .cursor_pointer()
+                .text_color(muted)
+                .hover(|style| style.bg(theme::selected_row()))
+                .child(icon::view(Icon::ArrowClockwise, icon::SIZE, muted))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        this.run_action(Action::Refresh, &Args::None, window, cx);
+                    }),
+                ),
+        );
+        window_chrome::header_bar(window)
+            .child(window_chrome::no_drag(self.project_button(cx)))
+            .child(window_chrome::no_drag(self.branch_button(cx)))
             .child(
                 div()
                     .flex()
@@ -556,6 +549,9 @@ impl StatusView {
             .child(div().flex_1())
             .child(div().text_color(muted).child(loading))
             .child(refresh)
+            .children(
+                window_chrome::draws_frame(window).then(|| window_chrome::window_controls(window)),
+            )
     }
 
     fn status_bar(&self, cx: &Context<Self>) -> Div {
@@ -625,10 +621,6 @@ impl StatusView {
 
 impl Render for StatusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Drawn only when the compositor left the frame to the app; under
-        // server decorations the title bar is the compositor's.
-        let title_bar =
-            window_chrome::draws_frame(window).then(|| window_chrome::title_bar(window));
         // The stored sizes are clamped again here, because a window resized
         // after a drag may have moved the limits.
         let viewport = window.viewport_size();
@@ -649,9 +641,13 @@ impl Render for StatusView {
             .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
                 this.cycle_focus(false, window, cx);
             }))
-            .children(title_bar)
             // With no repository, the welcome screen replaces every part below.
-            .children(self.welcome.is_none().then(|| self.top_bar(cx)))
+            .children(self.welcome.is_none().then(|| self.top_bar(window, cx)))
+            .children(
+                (self.welcome.is_some())
+                    .then(|| welcome::header(window))
+                    .flatten(),
+            )
             .children(self.welcome.is_none().then(|| {
                 div()
                     .flex_1()
@@ -675,11 +671,7 @@ impl Render for StatusView {
                     .map(|welcome| self.welcome_body(welcome, cx)),
             )
             .children(self.log_open.then(|| self.command_log_panel(cx)))
-            .children(
-                self.project_menu
-                    .open
-                    .then(|| self.project_menu_layer(window, cx)),
-            )
+            .children(self.project_menu.open.then(|| self.project_menu_layer(cx)))
             .children(self.branch_menu.open.then(|| self.branch_menu_layer(cx)))
             .children(window_chrome::resize_layer(window))
     }

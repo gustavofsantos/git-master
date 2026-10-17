@@ -85,7 +85,7 @@ pub fn run(engine: EngineHandle, command_log: CommandLog, start: StartPath) {
                     ..TitlebarOptions::default()
                 }),
                 // The compositor draws the frame when it can. Where it cannot, the
-                // app draws its own title bar and controls (see `window_chrome`).
+                // app draws its own header controls (see `window_chrome`).
                 // On Linux, ask for Client: GPUI then negotiates with the compositor
                 // (Server is reported as granted even where nothing draws a frame,
                 // as on GNOME/Wayland) and the app draws its own title bar when it

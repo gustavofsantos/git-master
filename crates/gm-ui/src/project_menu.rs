@@ -15,7 +15,6 @@ use gpui::{
 use crate::icon::{self, Icon};
 use crate::theme;
 use crate::view::StatusView;
-use crate::window_chrome::{self, TITLE_BAR_HEIGHT};
 
 const TOP_BAR_HEIGHT: f32 = 36.;
 const MENU_WIDTH: f32 = 360.;
@@ -160,12 +159,7 @@ impl StatusView {
 
     /// The list and the layer under it that closes it on a click outside.
     /// Drawn last, so it sits above the whole window.
-    pub(crate) fn project_menu_layer(&self, window: &Window, cx: &Context<Self>) -> Div {
-        let chrome = if window_chrome::draws_frame(window) {
-            TITLE_BAR_HEIGHT
-        } else {
-            px(0.)
-        };
+    pub(crate) fn project_menu_layer(&self, cx: &Context<Self>) -> Div {
         let outside = div().absolute().size_full().occlude().on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -176,7 +170,7 @@ impl StatusView {
             .absolute()
             .inset_0()
             .child(outside)
-            .child(self.project_list(chrome + px(TOP_BAR_HEIGHT + 4.), cx))
+            .child(self.project_list(px(TOP_BAR_HEIGHT + 4.), cx))
     }
 
     /// One recent repository: name, then its path. A missing one is greyed and

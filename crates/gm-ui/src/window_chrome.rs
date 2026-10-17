@@ -1,8 +1,9 @@
 //! The window frame the app draws itself when the compositor does not: the
-//! title bar with minimize, maximize and close, the drag region of that bar,
-//! and the invisible resize band along the edges. Everything here is inert
-//! when `Window::window_decorations` reports `Server`, which is the case
-//! whenever the platform draws the frame, and always on macOS.
+//! window controls (minimize, maximize, close) at the right end of the app's
+//! header row, the drag region of that row, and the invisible resize band
+//! along the edges. Everything here is inert when `Window::window_decorations`
+//! reports `Server`, which is the case whenever the platform draws the frame,
+//! and always on macOS.
 //!
 //! Ported from `rvw` (`crates/rvw-gui/src/window_chrome.rs`), same author,
 //! MIT licensed.
@@ -17,8 +18,8 @@ use gpui::{
 use crate::icon::{self, Icon};
 use crate::theme;
 
-/// Height of the title bar the app draws.
-pub const TITLE_BAR_HEIGHT: Pixels = px(36.);
+/// Height of the app's header row, the top bar or the welcome header.
+pub const HEADER_HEIGHT: Pixels = px(36.);
 /// Width of the invisible resize band along each edge.
 const RESIZE_BAND: Pixels = px(6.);
 /// Side of the square at each corner that resizes both ways.
@@ -257,7 +258,7 @@ pub fn resize_layer(window: &Window) -> Option<impl IntoElement + use<>> {
 
 /// Makes `bar` the window's drag handle: a press moves the window, a double
 /// click toggles maximize, a right click opens the window menu. Children that
-/// must keep their clicks stop the press from reaching the bar.
+/// must keep their clicks wrap themselves in `no_drag`.
 pub fn drag_region(bar: Div, window: &Window) -> Div {
     let controls = window.window_controls();
     bar.window_control_area(WindowControlArea::Drag)
@@ -277,41 +278,54 @@ pub fn drag_region(bar: Div, window: &Window) -> Div {
         })
 }
 
-/// The title bar: the app name on the left, the window controls on the right.
-/// Its whole area is the drag region.
-pub fn title_bar(window: &Window) -> Div {
+/// The header row every screen starts with: the layout of the row, with the
+/// drag region applied when the app draws the frame. The caller adds the
+/// row's content and, when `draws_frame`, `window_controls` at its right end.
+pub fn header_bar(window: &Window) -> Div {
+    let bar = div()
+        .h(HEADER_HEIGHT)
+        .flex_none()
+        .pl_4()
+        .pr_1()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_4()
+        .bg(theme::panel())
+        .border_b_1()
+        .border_color(theme::hairline());
+    if draws_frame(window) {
+        drag_region(bar, window)
+    } else {
+        bar
+    }
+}
+
+/// The window controls the platform supports, left to right, drawn for the
+/// caller to place at the end of a header row.
+pub fn window_controls(window: &Window) -> Div {
     let platform = window.window_controls();
     let supported = Supported {
         minimize: platform.minimize,
         maximize: platform.maximize,
     };
-    let controls = visible_controls(supported, window.is_maximized())
+    visible_controls(supported, window.is_maximized())
         .into_iter()
         .fold(div().flex().items_center().gap(px(2.)), |row, control| {
             row.child(control_button(control))
-        });
-    let bar = div()
-        .h(TITLE_BAR_HEIGHT)
-        .w_full()
+        })
+}
+
+/// Wraps a header item that must keep its own clicks. A press on it never
+/// reaches the drag region, so it neither moves the window nor opens the
+/// window menu. The wrapper is the item's parent, so the item's own handlers
+/// run first and this one only stops the press from going further up.
+pub fn no_drag(item: impl IntoElement) -> Div {
+    div()
         .flex_none()
-        .pl_3()
-        .pr_1()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .bg(theme::panel())
-        .border_b_1()
-        .border_color(theme::hairline())
-        .child(
-            div()
-                .flex_1()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::text())
-                .child("GitMaster"),
-        )
-        .child(controls);
-    drag_region(bar, window)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+        .child(item)
 }
 
 fn control_button(control: Control) -> Stateful<Div> {
