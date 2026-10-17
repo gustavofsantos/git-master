@@ -6,6 +6,9 @@
 //! Sources of change:
 //! - the git dir (and the common dir of a linked worktree), non-recursively,
 //!   plus `refs/` recursively; only `git_metadata_matters` paths count;
+//! - the worktree registry, `worktrees/` in the common dir, non-recursively:
+//!   a worktree added or removed from any shell changes its direct entries
+//!   (not the files inside them, which belong to the other worktrees);
 //! - the worktree: the root and each directory holding tracked files
 //!   (`set::watch_dirs`); changes whose paths `check-ignore` reports as ignored
 //!   are dropped, so `target/` and `node_modules/` cost nothing;
@@ -156,6 +159,7 @@ pub fn spawn_with(
         dirs: None,
         os: None,
         degraded: false,
+        registry: false,
     };
     std::thread::Builder::new()
         .name("gm-watch".into())
@@ -181,6 +185,9 @@ struct Worker {
     dirs: Option<BTreeSet<PathBuf>>,
     /// Set once the degraded notice went out for the open repository.
     degraded: bool,
+    /// Whether the worktree registry is watched. It is created by the first
+    /// linked worktree, so it may be watched only after it appears.
+    registry: bool,
 }
 
 impl Worker {
@@ -275,6 +282,7 @@ impl Worker {
         self.dirs = None;
         self.git = None;
         self.degraded = false;
+        self.registry = false;
         self.root = Some(root.to_path_buf());
         match self.install(root) {
             Ok(dirs) => {
@@ -299,9 +307,29 @@ impl Worker {
         if refs.is_dir() {
             watch(&refs, RecursiveMode::Recursive)?;
         }
+        let registry = git.common_dir.join("worktrees");
+        let registered = registry.is_dir();
+        if registered {
+            watch(&registry, RecursiveMode::NonRecursive)?;
+        }
+        self.registry = registered;
         self.git = Some(git);
         self.os = Some(os);
         self.sync_worktree(root)
+    }
+
+    /// Watches the worktree registry once git has created it. A failure is
+    /// not fatal: the next refresh still reads the list, and focus refreshes it.
+    fn watch_registry(&mut self, common_dir: &Path) {
+        let Some(os) = self.os.as_mut() else {
+            return;
+        };
+        if os
+            .watch(&common_dir.join("worktrees"), RecursiveMode::NonRecursive)
+            .is_ok()
+        {
+            self.registry = true;
+        }
     }
 
     /// Brings the worktree watches in line with the tracked set. Returns the
@@ -366,6 +394,7 @@ impl Worker {
             None => (root.join(".git"), root.join(".git")),
         };
         let mut worktree: BTreeSet<String> = BTreeSet::new();
+        let mut registry_appeared = false;
         for path in paths.drain(..) {
             if let Ok(rel) = path
                 .strip_prefix(&git_dir)
@@ -375,6 +404,7 @@ impl Worker {
                     matters = true;
                     tracked_set_changed |= filter::changes_tracked_set(rel);
                 }
+                registry_appeared |= !self.registry && rel == Path::new("worktrees");
             } else if let Ok(rel) = path.strip_prefix(&root)
                 && !filter::is_inside_dot_git(rel)
             {
@@ -386,6 +416,9 @@ impl Worker {
             // If the check fails, the change counts: a refresh is cheap, a stale view is not.
             let ignored = probe::ignored(&root, &self.login_path, &candidates).unwrap_or_default();
             matters |= candidates.iter().any(|rel| !ignored.contains(rel));
+        }
+        if registry_appeared {
+            self.watch_registry(&common_dir);
         }
         if tracked_set_changed && let Err(reason) = self.sync_worktree(&root) {
             self.degrade(reason);

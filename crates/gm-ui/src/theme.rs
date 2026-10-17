@@ -68,7 +68,12 @@ pub struct Palette {
     pub unstaged: u32,
     pub untracked: u32,
     pub error: u32,
+    /// The colours a worktree takes from its name (`LANE_COUNT` of them).
+    pub lanes: [u32; LANE_COUNT],
 }
+
+/// How many colours `lane` picks from.
+pub const LANE_COUNT: usize = 6;
 
 pub const LIGHT: Palette = Palette {
     ground: 0xee_ede7,
@@ -99,6 +104,9 @@ pub const LIGHT: Palette = Palette {
     unstaged: 0x63_4e06,
     untracked: 0x00_6cbc,
     error: 0x89_323a,
+    lanes: [
+        0x00_6cbc, 0x78_56c0, 0x00_7b2f, 0x8a_8882, 0x84_6600, 0xba_3e4b,
+    ],
 };
 
 pub const DARK: Palette = Palette {
@@ -130,6 +138,9 @@ pub const DARK: Palette = Palette {
     unstaged: 0xdb_b855,
     untracked: 0x64_b2ff,
     error: 0xfe_a1a4,
+    lanes: [
+        0x64_b2ff, 0xb9_9cf0, 0x82_cc8e, 0x9d_9b92, 0xdb_b855, 0xfe_a1a4,
+    ],
 };
 
 /// The setting the user chose. `System` follows the OS appearance.
@@ -249,6 +260,12 @@ accessors!(
     untracked,
     error,
 );
+
+/// The colour of lane `index` (taken modulo `LANE_COUNT`) in the palette in use.
+#[must_use]
+pub fn lane(index: usize) -> Hsla {
+    color(palette().lanes[index % LANE_COUNT])
+}
 
 #[must_use]
 pub fn color(hex: u32) -> Hsla {
@@ -387,6 +404,19 @@ mod tests {
                 assert!(
                     ratio >= 3.0,
                     "{name}: {mark:06x} on {bg:06x} is {ratio:.2}:1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_lane_is_a_visible_mark_on_the_sidebar() {
+        for (name, p) in [("light", LIGHT), ("dark", DARK)] {
+            for lane in p.lanes {
+                let ratio = contrast(lane, p.ground);
+                assert!(
+                    ratio >= 3.0,
+                    "{name}: lane {lane:06x} on the sidebar is {ratio:.2}:1"
                 );
             }
         }

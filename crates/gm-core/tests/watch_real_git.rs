@@ -11,7 +11,7 @@ use gm_core::EngineHandle;
 use gm_core::git::SubprocessGit;
 use gm_core::hook::ApprovalStore;
 use gm_core::watch::{self, Notice, WatchConfig, WatchHandle};
-use gm_schema::{Actor, CommandKind, StageTarget};
+use gm_schema::{Actor, CommandKind, Event, StageTarget, WorktreeEntry};
 
 /// The longest any single wait may take.
 const WAIT: Duration = Duration::from_secs(10);
@@ -161,6 +161,67 @@ fn a_focus_request_refreshes_once() {
 
     let seen = settle(&s.notices, QUIET);
     assert_eq!(refreshes(&seen), 1, "notices: {seen:?}");
+}
+
+/// Polls the engine's events until a worktree listing satisfies `want`, and returns it.
+fn worktrees_until(
+    events: &async_channel::Receiver<Event>,
+    want: impl Fn(&[WorktreeEntry]) -> bool,
+) -> Vec<WorktreeEntry> {
+    let deadline = Instant::now() + WAIT;
+    let mut last = Vec::new();
+    loop {
+        while let Ok(event) = events.try_recv() {
+            if let Event::WorktreesLoaded { worktrees, .. } = event {
+                if want(&worktrees) {
+                    return worktrees;
+                }
+                last = worktrees;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no matching listing; last: {last:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_worktree_added_and_removed_from_the_cli_refreshes_the_list() {
+    let dir = repo();
+    let base = tempfile::tempdir().unwrap();
+    let linked = base.path().join("linked wt");
+    let s = session(CONFIG);
+    let events = s.engine.subscribe();
+    open(&s, dir.path());
+    watching(&s.notices);
+    worktrees_until(&events, |list| list.len() == 1);
+
+    // The first linked worktree creates `worktrees/`, which the watcher only learns of now.
+    git(
+        dir.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let added = settle(&s.notices, QUIET);
+    assert_eq!(refreshes(&added), 1, "notices: {added:?}");
+    let listed = worktrees_until(&events, |list| list.len() == 2);
+    assert!(listed[1].path.ends_with("linked wt"), "{listed:?}");
+
+    git(
+        dir.path(),
+        &["worktree", "remove", linked.to_str().unwrap()],
+    );
+    let removed = settle(&s.notices, QUIET);
+    assert_eq!(refreshes(&removed), 1, "notices: {removed:?}");
+    worktrees_until(&events, |list| list.len() == 1);
 }
 
 #[test]

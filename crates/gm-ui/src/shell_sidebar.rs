@@ -1,12 +1,13 @@
 //! The sidebar at the window's left: the workspace destinations, the switch
-//! between the two ways of grouping branches, and the branch tree. Only the
-//! Working Copy exists; the other destinations and the stack tree are
-//! placeholders until their slices land (docs/07).
+//! between the two ways of grouping branches, the branch tree and the
+//! worktrees. Only the Working Copy exists; the other destinations and the
+//! stack tree are placeholders until their slices land (docs/07). The
+//! worktrees are read-only for now: a click does nothing yet (docs/07, W2).
 
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Context, Div, FontWeight, MouseButton, MouseDownEvent, Stateful, Window, div,
+    AnyElement, Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div,
     prelude::*, px, uniform_list,
 };
 
@@ -14,9 +15,13 @@ use crate::action_registry::{Action, Args};
 use crate::sidebar::{self, Grouping, Row};
 use crate::theme;
 use crate::view::StatusView;
+use crate::worktree_list;
 
 pub(crate) const SIDEBAR_WIDTH: f32 = 240.;
 const ROW_HEIGHT: f32 = 28.;
+/// The most worktree rows shown at once. The section does not scroll yet,
+/// so the rest are cut off.
+const WORKTREE_ROWS_SHOWN: f32 = 6.;
 
 /// The destinations under "Workspace", and the slice that brings each one.
 const WORKSPACE: [(&str, Option<&str>); 5] = [
@@ -43,7 +48,26 @@ impl StatusView {
             .child(self.workspace_items(cx))
             .child(self.grouping_switch(cx))
             .child(self.branch_tree(cx))
+            .child(self.worktrees_section())
             .children((self.sidebar_grouping == Grouping::ByStack).then(footer_hint))
+    }
+
+    /// The WORKTREES section: the main checkout, then the linked worktrees.
+    /// Empty until a listing has arrived.
+    fn worktrees_section(&self) -> Div {
+        let root = self.model.status().map(|status| status.root.clone());
+        let rows = worktree_list::rows(&self.model.worktrees, root.as_deref(), theme::LANE_COUNT);
+        if rows.is_empty() {
+            return div();
+        }
+        div()
+            .flex_none()
+            .max_h(px(ROW_HEIGHT * WORKTREE_ROWS_SHOWN + 40.))
+            .overflow_hidden()
+            .px_2()
+            .pb_2()
+            .child(section_title("Worktrees"))
+            .children(rows.iter().map(worktree_row))
     }
 
     fn workspace_items(&self, cx: &mut Context<Self>) -> Div {
@@ -288,6 +312,64 @@ fn tree_row(
                 .into_any_element()
         }
     }
+}
+
+/// One worktree: its colour mark, its name, and the tags that say it is the
+/// window's own or that its folder is gone.
+fn worktree_row(row: &worktree_list::Row<'_>) -> Div {
+    div()
+        .h(px(ROW_HEIGHT))
+        .px_2()
+        .gap_2()
+        .flex()
+        .flex_row()
+        .items_center()
+        .rounded_md()
+        .when(row.here, |this| this.bg(theme::selection()))
+        .child(lane_mark(theme::lane(row.lane)))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .when(row.here, |this| {
+                    this.text_color(theme::accent())
+                        .font_weight(FontWeight::MEDIUM)
+                })
+                .child(row.name.clone()),
+        )
+        .children(
+            row.here
+                .then(|| tag("here", theme::on_accent(), theme::accent())),
+        )
+        .children(
+            row.missing
+                .then(|| tag("missing", theme::warn_fg(), theme::warn_bg())),
+        )
+}
+
+/// A small window glyph in the worktree's colour: an outline with a title bar.
+fn lane_mark(color: Hsla) -> Div {
+    div()
+        .w(px(14.))
+        .h(px(12.))
+        .flex_none()
+        .rounded_sm()
+        .border_1()
+        .border_color(color)
+        .child(div().h(px(3.)).w_full().bg(color))
+}
+
+fn tag(text: &'static str, text_color: Hsla, background: Hsla) -> Div {
+    div()
+        .px_1()
+        .rounded_sm()
+        .bg(background)
+        .text_color(text_color)
+        .text_xs()
+        .child(text)
 }
 
 /// The hint under the stack tree, for the gesture slice 4 adds.

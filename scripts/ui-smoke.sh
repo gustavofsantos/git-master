@@ -5,7 +5,8 @@
 # with xdotool, and asserts the outcome with git. Screenshots go to $SMOKE_OUT.
 # Each scenario runs once per theme (light, dark) on a freshly created repo.
 #
-# Usage:  scripts/ui-smoke.sh
+# Usage:  scripts/ui-smoke.sh                  every scenario, both themes
+#         scripts/ui-smoke.sh s-worktrees      only the named scenarios
 #         SMOKE_OUT=/some/dir scripts/ui-smoke.sh
 #
 # Exits 0 when every scenario passes. On the first failed assertion it prints
@@ -18,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -49,6 +50,7 @@ MENU_CHECKOUT_X=190; MENU_CHECKOUT_Y=439    # "Checkout Branch" in the branch me
 CHIP_X=316; CHIP_Y=590; CHIP_W=142; CHIP_H=28   # the hook chip's text in the message header, window-relative
 TITLE_BAR_H=44                              # the title bar: name row over the branch and path row
 TOOLBAR_Y=72; TOOLBAR_FETCH_X=1082; TOOLBAR_RESTACK_X=1322   # Fetch and Restack buttons, right of the title bar
+SECTION_CROP="240x84+0+612"                  # the WORKTREES rows at the sidebar's foot, window-relative
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -740,6 +742,35 @@ scenario_r() {
   shoot "$SMOKE_OUT/r-title-bar-clicked-$theme.png"
 }
 
+# --- 3s. Worktrees section: two worktrees, then one removed from the CLI -------
+# The section sits at the sidebar's foot. The screenshot cannot be read as text
+# here, so the rows are read from pixels: the window's own worktree carries the
+# accent "here" tag, and removing the other worktree from the CLI must change
+# the rows without a manual refresh.
+scenario_s() {
+  local theme="$1" accent differing tagged
+  case "$theme" in
+    light) accent="006cbc" ;;
+    dark) accent="64b2ff" ;;
+    *) fail "no accent colour for theme $theme" ;;
+  esac
+  shoot "$SMOKE_OUT/s-worktrees-$theme.png"
+  convert "$SMOKE_OUT/s-worktrees-$theme.png" -crop "$SECTION_CROP" +repage "$RUN_DIR/section-before.png"
+  # The share of accent pixels in the section: white where the colour is, black elsewhere.
+  tagged="$(convert "$RUN_DIR/section-before.png" -fuzz 10% -fill white -opaque "#$accent" \
+    -fill black +opaque white -format '%[fx:mean]' info:)"
+  awk -v m="$tagged" 'BEGIN { exit !(m > 0.01) }' || fail "no 'here' tag in the worktrees section (accent share $tagged)"
+
+  git -C "$RUN_DIR/repo" worktree remove "$RUN_DIR/repo-feature"
+  sleep 2.5
+  shoot "$RUN_DIR/after-remove.png"
+  convert "$RUN_DIR/after-remove.png" -crop "$SECTION_CROP" +repage "$RUN_DIR/section-after.png"
+  differing="$(compare -metric AE "$RUN_DIR/section-before.png" "$RUN_DIR/section-after.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare section screenshots: $differing"
+  [ "$differing" -gt 300 ] || fail "the section did not drop the removed worktree ($differing pixels changed)"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -765,6 +796,7 @@ run_scenario() {
       ;;
   esac
   if [ "$name" = g-switch-branch ]; then prepare_branches "$RUN_DIR/repo"; fi
+  if [ "$name" = s-worktrees ]; then git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"; fi
   if [ "$name" = l-branch-menu ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
   if [ "$name" = h-welcome ]; then
     # Starts with no recent list at all; scenario_h makes its own launches.
@@ -794,6 +826,7 @@ run_scenario() {
     p-hook-failure) scenario_p "$theme" ;;
     q-repo-hook-approval) scenario_q "$theme" ;;
     r-title-bar) scenario_r "$theme" ;;
+    s-worktrees) scenario_s "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app
@@ -801,9 +834,18 @@ run_scenario() {
 }
 
 # --- 2/3. Run everything -------------------------------------------------------
+# The arguments name the scenarios to run; none means all of them.
+selected=("$@")
+if [ ${#selected[@]} -eq 0 ]; then selected=("${SCENARIOS[@]}"); fi
+for name in "${selected[@]}"; do
+  case " ${SCENARIOS[*]} " in
+    *" $name "*) ;;
+    *) echo "unknown scenario: $name (known: ${SCENARIOS[*]})" >&2; exit 2 ;;
+  esac
+done
 start_xvfb
 for theme in "${THEMES[@]}"; do
-  for scenario in "${SCENARIOS[@]}"; do
+  for scenario in "${selected[@]}"; do
     run_scenario "$scenario" "$theme"
   done
 done

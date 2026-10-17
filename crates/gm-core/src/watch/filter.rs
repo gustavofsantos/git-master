@@ -14,9 +14,9 @@ fn is_lock(name: &str) -> bool {
 }
 
 /// Whether a change under the git dir (or the common dir of a linked
-/// worktree, which holds `packed-refs` and `refs/`) can change the status.
-/// `rel` is relative to either directory. Lock files, objects, logs and
-/// messages are not status inputs.
+/// worktree, which holds `packed-refs`, `refs/` and `worktrees/`) can change
+/// the status or the worktree list. `rel` is relative to either directory.
+/// Lock files, objects, logs and messages are not status inputs.
 pub fn git_metadata_matters(rel: &Path) -> bool {
     let mut parts = rel.components();
     let Some(Component::Normal(first)) = parts.next() else {
@@ -44,6 +44,7 @@ pub fn git_metadata_matters(rel: &Path) -> bool {
             | "refs"
             | "rebase-merge"
             | "rebase-apply"
+            | "worktrees"
     )
 }
 
@@ -102,6 +103,13 @@ mod tests {
         assert!(is_inside_dot_git(Path::new("sub/.git/index")));
         assert!(!is_inside_dot_git(Path::new("sub/.gitignore")));
         assert!(!is_inside_dot_git(Path::new(".github/ci.yml")));
+    }
+
+    #[test]
+    fn the_worktree_registry_matters_but_not_its_files() {
+        // The watch on `worktrees/` is non-recursive, so only its direct entries arrive.
+        assert!(matters("worktrees"));
+        assert!(matters("worktrees/feature"));
     }
 
     #[test]
