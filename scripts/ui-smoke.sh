@@ -18,7 +18,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -36,6 +36,8 @@ DIFF_LINE_A_Y=224                           # first pure-insertion row in total.
 DIFF_LINE_B_Y=312                           # second pure-insertion row in total.rs
 COMPOSER_X=300; COMPOSER_Y=255              # commit message box
 LOG_BUTTON_X=1300; LOG_BUTTON_Y=837         # "Git log" button, right end of the status bar
+PROJECT_X=139; PROJECT_Y=67                 # project button at the left of the top bar
+RECENT_OTHER_X=150; RECENT_OTHER_Y=185      # second row of the open list: billing-api
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -134,9 +136,10 @@ EOF
 }
 
 launch_app() {
-  # $1: theme, $2: repo
+  # $1: theme, $2: repo. The recent list is private to this run.
   env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_NUM" \
     VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+    XDG_DATA_HOME="$RUN_DIR/xdg" \
     GITMASTER_THEME="$1" "$BIN" "$2" >"$RUN_DIR/app.log" 2>&1 &
   APP_PID=$!
   sleep 4
@@ -263,14 +266,87 @@ scenario_e() {
   [ "$differing" -gt 20000 ] || fail "the log panel did not open (only $differing pixels changed)"
 }
 
+# A second repository with its own name and content, for the project switch.
+make_other_repo() {
+  local repo="$1"
+  rm -rf "$repo"
+  mkdir -p "$repo/src"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.name "gm smoke"
+  git -C "$repo" config user.email "smoke@example.invalid"
+  git -C "$repo" config commit.gpgsign false
+  printf 'fn main() {}\n' > "$repo/src/main.rs"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m "init"
+  printf 'fn main() { billing() }\n' > "$repo/src/main.rs"
+  printf 'untracked\n' > "$repo/notes.txt"
+}
+
+# What the repository looks like from outside git: its status and every path
+# in the working tree. Equal before and after means nothing was written there.
+repo_state() {
+  git -C "$1" status --porcelain --ignored --untracked-files=all
+  (cd "$1" && find . -path ./.git -prune -o -print | sort)
+}
+
+# --- 3f. Switch the repository from the top bar's project list -----------------
+scenario_f() {
+  local repo="$RUN_DIR/repo" other="$RUN_DIR/billing-api" theme="$1"
+  local recents="$RUN_DIR/xdg/gitmaster/recent.json"
+  local before_repo before_other after_repo after_other differing top_line
+  before_repo="$(repo_state "$repo")"
+  before_other="$(repo_state "$other")"
+  # The pointer rests off the button, so its hover tint is not in the shots.
+  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y"; sleep 0.5
+  shoot "$RUN_DIR/closed.png"
+
+  xdotool mousemove "$PROJECT_X" "$PROJECT_Y" click 1; sleep 1
+  shoot "$SMOKE_OUT/f-project-list-$theme.png"
+
+  # Escape closes the list and leaves the repository as it was.
+  xdotool key Escape; sleep 1
+  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y"; sleep 0.5
+  shoot "$RUN_DIR/escaped.png"
+  differing="$(compare -metric AE "$RUN_DIR/closed.png" "$RUN_DIR/escaped.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -lt 2000 ] || fail "Escape did not close the project list ($differing pixels changed)"
+
+  # Reopen, then pick the other repository.
+  xdotool mousemove "$PROJECT_X" "$PROJECT_Y" click 1; sleep 1
+  xdotool mousemove "$RECENT_OTHER_X" "$RECENT_OTHER_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/f-project-switched-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/f-project-list-$theme.png" "$SMOKE_OUT/f-project-switched-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the view did not change after picking the other repository ($differing pixels)"
+
+  # The recent list written in the background: the picked repository is first.
+  sleep 1
+  top_line="$(sed -n 2p "$recents")"
+  grep -qF "$other" <<<"$top_line" || fail "recent.json does not list billing-api first: $(cat "$recents")"
+  [ "$(grep -c '^  "' "$recents")" -eq 2 ] || fail "recent.json should hold the two repositories once each: $(cat "$recents")"
+
+  # Neither repository was written to.
+  after_repo="$(repo_state "$repo")"
+  after_other="$(repo_state "$other")"
+  [ "$before_repo" = "$after_repo" ] || fail "the first repository changed while the app ran:
+$(diff <(printf '%s\n' "$before_repo") <(printf '%s\n' "$after_repo") || true)"
+  [ "$before_other" = "$after_other" ] || fail "the second repository changed while the app ran:
+$(diff <(printf '%s\n' "$before_other") <(printf '%s\n' "$after_other") || true)"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
   LABEL="$name-$theme"
   RUN_DIR="$RUN_ROOT/$LABEL"
   rm -rf "$RUN_DIR"
-  mkdir -p "$RUN_DIR"
+  mkdir -p "$RUN_DIR" "$RUN_DIR/xdg/gitmaster"
   make_repo "$RUN_DIR/repo"
+  make_other_repo "$RUN_DIR/billing-api"
+  # Most recent first: the app opens repo, which moves it to the top.
+  printf '[\n  "%s",\n  "%s"\n]\n' "$RUN_DIR/billing-api" "$RUN_DIR/repo" > "$RUN_DIR/xdg/gitmaster/recent.json"
   launch_app "$theme" "$RUN_DIR/repo"
   case "$name" in
     a-stage-lines) scenario_a "$theme" ;;
@@ -278,6 +354,7 @@ run_scenario() {
     c-commit)      scenario_c "$theme" ;;
     d-refresh)     scenario_d "$theme" ;;
     e-command-log) scenario_e "$theme" ;;
+    f-open-project) scenario_f "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app
