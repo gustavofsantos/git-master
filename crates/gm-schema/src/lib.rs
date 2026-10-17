@@ -15,4 +15,7 @@ pub use operation::{
     Actor, Command, CommandKind, Event, IllegalTransition, OperationId, OperationState,
     WorktreeMode,
 };
-pub use status::{BranchEntry, BranchInfo, Change, RepoStatus, StatusEntry, WorktreeEntry};
+pub use status::{
+    Blocker, BranchEntry, BranchInfo, Change, PruneCandidate, RepoStatus, StatusEntry,
+    WorktreeEntry, WorktreeInspection,
+};

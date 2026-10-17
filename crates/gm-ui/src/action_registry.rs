@@ -9,7 +9,9 @@
 
 use std::path::PathBuf;
 
-use gm_schema::{CommandKind, DiffSide, HunkId, OperationId, StageTarget, StatusEntry};
+use gm_schema::{
+    CommandKind, DiffSide, HunkId, OperationId, StageTarget, StatusEntry, WorktreeEntry,
+};
 
 /// Why an action is not enabled, as a short English sentence for the user.
 pub type Reason = &'static str;
@@ -45,6 +47,7 @@ pub enum ArgKind {
     Branch,
     File,
     Chunk,
+    Worktree,
 }
 
 /// The target of one run. Its kind must match the action's `ArgKind`.
@@ -60,6 +63,8 @@ pub enum Args {
         hunk: HunkId,
         side: DiffSide,
     },
+    /// The worktree whose folder is `path`, as the list gives it.
+    Worktree(String),
 }
 
 /// Static description of an action.
@@ -95,6 +100,11 @@ pub enum Effect {
     OpenWorktreeDialog {
         branch: String,
     },
+    /// Opens the worktree at this path in its own window.
+    OpenWorktree(String),
+    /// Opens the remove dialog for the worktree at this path; the dialog
+    /// inspects it and the removal is sent from there.
+    OpenRemoveDialog(String),
 }
 
 /// What the window knows of the prepare-commit hooks, for the rules.
@@ -127,10 +137,12 @@ pub struct Context<'a> {
     /// The repository's working tree root; `None` when no repository is open.
     pub root: Option<&'a str>,
     pub hooks: HookCtx<'a>,
+    /// The worktrees listed for the open repository, main checkout first.
+    pub worktrees: &'a [WorktreeEntry],
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 27] = [
+const SPECS: [Spec; 31] = [
     spec(
         "file.stage",
         "Stage File",
@@ -314,6 +326,34 @@ const SPECS: [Spec; 27] = [
         Category::Remote,
     ),
     spec("remote.pull", "Pull", None, ArgKind::None, Category::Remote),
+    spec(
+        "worktree.open",
+        "Open Worktree",
+        None,
+        ArgKind::Worktree,
+        Category::Worktrees,
+    ),
+    spec(
+        "worktree.reveal",
+        "Reveal Worktree in File Manager",
+        None,
+        ArgKind::Worktree,
+        Category::Worktrees,
+    ),
+    spec(
+        "worktree.copy_path",
+        "Copy Worktree Path",
+        None,
+        ArgKind::Worktree,
+        Category::Worktrees,
+    ),
+    spec(
+        "worktree.remove",
+        "Remove Worktree",
+        None,
+        ArgKind::Worktree,
+        Category::Worktrees,
+    ),
 ];
 
 const fn spec(
@@ -363,6 +403,10 @@ pub enum Action {
     DenyHook,
     Fetch,
     Pull,
+    OpenWorktree,
+    RevealWorktree,
+    CopyWorktreePath,
+    RemoveWorktree,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -392,11 +436,43 @@ fn shortcut_words(shortcut: &str, mac: bool) -> String {
     parts.join("+")
 }
 
+/// The rule of a worktree action: whether its worktree allows it now.
+fn worktree_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    let entry = worktree_entry(args, ctx)?;
+    let here = ctx.root == Some(entry.path.as_str());
+    let missing = entry.prunable.is_some();
+    match action {
+        Action::RemoveWorktree if entry.is_main => Err("The main checkout cannot be removed."),
+        Action::OpenWorktree | Action::RevealWorktree if missing => {
+            Err("This worktree's folder is missing.")
+        }
+        Action::RemoveWorktree if missing => {
+            Err("Its folder is missing. Prune the worktree instead.")
+        }
+        Action::OpenWorktree | Action::RemoveWorktree if here => {
+            Err("This window is open in this worktree.")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The worktree the run names, as the list has it.
+fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntry, Reason> {
+    match args {
+        Args::Worktree(path) => ctx
+            .worktrees
+            .iter()
+            .find(|entry| &entry.path == path)
+            .ok_or("This worktree is not listed."),
+        _ => Err("No target for this action"),
+    }
+}
+
 /// The reason of an action the engine cannot run yet, whatever its target.
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 31] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -424,6 +500,10 @@ impl Action {
         Action::DenyHook,
         Action::Fetch,
         Action::Pull,
+        Action::OpenWorktree,
+        Action::RevealWorktree,
+        Action::CopyWorktreePath,
+        Action::RemoveWorktree,
     ];
 
     #[must_use]
@@ -464,8 +544,18 @@ impl Action {
     pub fn destructive(self) -> bool {
         matches!(
             self,
-            Action::DiscardChunk | Action::DiscardFile | Action::DeleteBranch
+            Action::DiscardChunk
+                | Action::DiscardFile
+                | Action::DeleteBranch
+                | Action::RemoveWorktree
         )
+    }
+
+    /// Whether the action opens its own dialog, which asks before anything runs.
+    /// A menu then does not ask a second time.
+    #[must_use]
+    pub fn opens_dialog(self) -> bool {
+        matches!(self, Action::CreateWorktree | Action::RemoveWorktree)
     }
 
     /// The action with this id, if any.
@@ -541,6 +631,10 @@ impl Action {
                     Ok(())
                 }
             }
+            Action::OpenWorktree
+            | Action::RevealWorktree
+            | Action::CopyWorktreePath
+            | Action::RemoveWorktree => worktree_rule(self, args, ctx),
             Action::Refresh | Action::CreateWorktree => {
                 if ctx.repo_open {
                     Ok(())
@@ -616,8 +710,9 @@ impl Action {
                     branch: name.clone(),
                 }])
             }
-            (Action::CopyBranchName, Args::Branch(name)) => Effect::Copy(name.clone()),
-            (Action::CopyFilePath, Args::File(path)) => Effect::Copy(path.clone()),
+            (Action::CopyBranchName, Args::Branch(text))
+            | (Action::CopyFilePath, Args::File(text))
+            | (Action::CopyWorktreePath, Args::Worktree(text)) => Effect::Copy(text.clone()),
             (Action::RevealFile, Args::File(path)) => {
                 // `enabled` has checked that the root is there.
                 Effect::Reveal(PathBuf::from(ctx.root.unwrap_or_default()).join(path))
@@ -626,6 +721,11 @@ impl Action {
             (Action::CreateWorktree, Args::Branch(name)) => Effect::OpenWorktreeDialog {
                 branch: name.clone(),
             },
+            (Action::OpenWorktree, Args::Worktree(path)) => Effect::OpenWorktree(path.clone()),
+            (Action::RevealWorktree, Args::Worktree(path)) => Effect::Reveal(PathBuf::from(path)),
+            (Action::RemoveWorktree, Args::Worktree(path)) => {
+                Effect::OpenRemoveDialog(path.clone())
+            }
             (Action::SuggestMessage, _) => Effect::Send(vec![CommandKind::RunPrepareCommit {
                 message: ctx.message.to_owned(),
             }]),
@@ -662,6 +762,7 @@ impl Action {
                 | (ArgKind::Branch, Args::Branch(_))
                 | (ArgKind::File, Args::File(_))
                 | (ArgKind::Chunk, Args::Chunk { .. })
+                | (ArgKind::Worktree, Args::Worktree(_))
         )
     }
 }
@@ -767,6 +868,7 @@ mod tests {
             current_branch: Some("main"),
             root: Some("/repo"),
             hooks: crate::action_registry::HookCtx::default(),
+            worktrees: &[],
         }
     }
 
@@ -1130,7 +1232,8 @@ mod tests {
             [
                 Action::DiscardChunk,
                 Action::DeleteBranch,
-                Action::DiscardFile
+                Action::DiscardFile,
+                Action::RemoveWorktree
             ]
         );
     }
@@ -1152,6 +1255,93 @@ mod tests {
         assert_eq!(
             Action::CopyBranchName.plan(&branch("feature"), &context),
             Ok(Effect::Copy("feature".into()))
+        );
+    }
+
+    fn listed(path: &str, branch: &str, is_main: bool) -> WorktreeEntry {
+        WorktreeEntry {
+            path: path.to_owned(),
+            head: Some("abc".to_owned()),
+            branch: Some(branch.to_owned()),
+            detached: false,
+            bare: false,
+            is_main,
+            locked: None,
+            prunable: None,
+        }
+    }
+
+    #[test]
+    fn remove_refuses_the_main_checkout_the_windows_own_and_a_missing_folder() {
+        let worktrees = [
+            listed("/r", "main", true),
+            listed("/r-feature", "feature", false),
+            WorktreeEntry {
+                prunable: Some(String::new()),
+                ..listed("/r-gone", "gone", false)
+            },
+        ];
+        let open_in = |root: &'static str| Context {
+            root: Some(root),
+            worktrees: &worktrees,
+            ..ctx(&[], "")
+        };
+        let args = |path: &str| Args::Worktree(path.to_owned());
+        assert_eq!(
+            Action::RemoveWorktree.enabled(&args("/r"), &open_in("/r-feature")),
+            Err("The main checkout cannot be removed.")
+        );
+        assert_eq!(
+            Action::RemoveWorktree.enabled(&args("/r-feature"), &open_in("/r-feature")),
+            Err("This window is open in this worktree.")
+        );
+        assert_eq!(
+            Action::RemoveWorktree.enabled(&args("/r-gone"), &open_in("/r")),
+            Err("Its folder is missing. Prune the worktree instead.")
+        );
+        assert_eq!(
+            Action::RemoveWorktree.plan(&args("/r-feature"), &open_in("/r")),
+            Ok(Effect::OpenRemoveDialog("/r-feature".to_owned()))
+        );
+    }
+
+    #[test]
+    fn open_reveal_and_copy_run_on_a_listed_worktree_only() {
+        let worktrees = [
+            listed("/r", "main", true),
+            listed("/r-feature", "feature", false),
+        ];
+        let context = Context {
+            root: Some("/r"),
+            worktrees: &worktrees,
+            ..ctx(&[], "")
+        };
+        let target = Args::Worktree("/r-feature".to_owned());
+        assert_eq!(
+            Action::OpenWorktree.plan(&target, &context),
+            Ok(Effect::OpenWorktree("/r-feature".to_owned()))
+        );
+        assert_eq!(
+            Action::RevealWorktree.plan(&target, &context),
+            Ok(Effect::Reveal(PathBuf::from("/r-feature")))
+        );
+        assert_eq!(
+            Action::CopyWorktreePath.plan(&target, &context),
+            Ok(Effect::Copy("/r-feature".to_owned()))
+        );
+        let unknown = Args::Worktree("/elsewhere".to_owned());
+        assert_eq!(
+            Action::CopyWorktreePath.enabled(&unknown, &context),
+            Err("This worktree is not listed.")
+        );
+        let own = Context {
+            root: Some("/r-feature"),
+            worktrees: &worktrees,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::OpenWorktree.enabled(&target, &own),
+            Err("This window is open in this worktree.")
         );
     }
 

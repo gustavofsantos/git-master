@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
-    BranchEntry, DiffSide, FileDiff, HookScope, HunkId, RepoStatus, StageTarget, WorktreeEntry,
-    WorktreeMode,
+    BranchEntry, DiffSide, FileDiff, HookScope, HunkId, PruneCandidate, RepoStatus, StageTarget,
+    WorktreeEntry, WorktreeMode,
 };
 
 use crate::hook::ConfigValue;
@@ -79,6 +79,52 @@ pub trait GitPort: Send {
     ) -> Result<(), GitError> {
         Err(GitError(
             "create worktree is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Commits of HEAD in the worktree at `path` that no other local branch or
+    /// remote has, or that are ahead of the upstream: whichever count is higher.
+    /// `branch` is the worktree's branch, `None` when detached. Zero on an unborn
+    /// HEAD. Never records anything.
+    fn unpushed_commits(&self, _path: &Path, _branch: Option<&str>) -> Result<u32, GitError> {
+        Err(GitError(
+            "unpushed commits is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Removes the linked worktree at `path` and its folder. `force` is 0 (Git
+    /// refuses changes), 1 (`--force`) or 2 (`--force --force`, which also
+    /// removes a locked worktree). Git's own refusal is the error.
+    fn remove_worktree(&self, _root: &Path, _path: &str, _force: u8) -> Result<(), GitError> {
+        Err(GitError(
+            "remove worktree is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Locks the worktree at `path`; an empty `reason` locks it without one.
+    fn lock_worktree(&self, _root: &Path, _path: &str, _reason: &str) -> Result<(), GitError> {
+        Err(GitError(
+            "lock worktree is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Unlocks the worktree at `path`.
+    fn unlock_worktree(&self, _root: &Path, _path: &str) -> Result<(), GitError> {
+        Err(GitError(
+            "unlock worktree is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The admin records `git worktree prune` would remove, from its dry run.
+    /// Never records anything.
+    fn prunable(&self, _root: &Path) -> Result<Vec<PruneCandidate>, GitError> {
+        Err(GitError("prunable is not supported by this adapter".into()))
+    }
+
+    /// Removes the admin records of the worktrees whose folders are gone.
+    fn prune_worktrees(&self, _root: &Path) -> Result<(), GitError> {
+        Err(GitError(
+            "prune worktrees is not supported by this adapter".into(),
         ))
     }
 

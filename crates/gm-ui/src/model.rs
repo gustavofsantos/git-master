@@ -11,6 +11,7 @@ use crate::changes::{Summary, summarize};
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
 use crate::worktree_create::Creating;
+use crate::worktree_remove::Removal;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Model {
@@ -49,6 +50,8 @@ pub struct Model {
     pub worktrees: Vec<WorktreeEntry>,
     /// The create-worktree dialog's operation in flight, and its outcome.
     pub creating: Creating,
+    /// The remove-worktree dialog's inspection, removal in flight and outcome.
+    pub removal: Removal,
 }
 
 /// A repository replaced by a successful open.
@@ -150,6 +153,17 @@ impl Model {
                 self.creating.settle(state, detail);
                 None
             }
+            // A remove's inspection and outcome belong to its dialog, not to the status bar.
+            Event::WorktreeInspected { id, inspection } if self.removal.owns(id) => {
+                self.removal.inspected(inspection);
+                None
+            }
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.removal.owns(id) => {
+                self.removal.settle(state, detail);
+                None
+            }
             // A hook run's failure belongs to the composer's chip, not to the status bar.
             Event::OperationChanged {
                 id, state, detail, ..
@@ -218,7 +232,12 @@ impl Model {
                 None
             }
             // The failure reason arrives on the operation's own event; a cancel has no text.
-            Event::HookFailed { .. } | Event::HookCancelled { .. } => None,
+            // An inspection nobody asked for is dropped; pruning's preview is shown by its
+            // dialog (W6), not here yet.
+            Event::HookFailed { .. }
+            | Event::HookCancelled { .. }
+            | Event::WorktreeInspected { .. }
+            | Event::PrunableListed { .. } => None,
         }
     }
 
@@ -438,6 +457,8 @@ fn event_id(event: &Event) -> OperationId {
         | Event::Committed { id, .. }
         | Event::BranchesLoaded { id, .. }
         | Event::WorktreesLoaded { id, .. }
+        | Event::WorktreeInspected { id, .. }
+        | Event::PrunableListed { id, .. }
         | Event::HooksListed { id, .. }
         | Event::HookStarted { id, .. }
         | Event::HookFinished { id, .. }

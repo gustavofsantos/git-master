@@ -38,6 +38,7 @@ use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
 use crate::worktree_create::WorktreeDialog;
+use crate::worktree_remove::RemoveDialog;
 use crate::{CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, StartPath};
 
 /// The key context of the change list. Its keys work only while the list has
@@ -79,6 +80,8 @@ pub struct StatusView {
     pub(crate) palette_view: PaletteView,
     /// The create-worktree dialog, while it is open.
     pub(crate) worktree_dialog: Option<WorktreeDialog>,
+    /// The remove-worktree dialog, while it is open.
+    pub(crate) removal_dialog: Option<RemoveDialog>,
     /// The recent repositories, newest first, as last saved or loaded.
     pub(crate) recents: Recents,
     /// Where the list is kept; `None` when there is no home directory.
@@ -200,6 +203,7 @@ impl StatusView {
             palette: Palette::default(),
             palette_view: PaletteView::new(palette_filter),
             worktree_dialog: None,
+            removal_dialog: None,
             recents,
             recent_store,
             recent_generation: 0,
@@ -277,6 +281,9 @@ impl StatusView {
         let shown = self.model.apply(event);
         if let Some(outcome) = self.model.creating.take() {
             self.on_worktree_created(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.removal.take_outcome() {
+            self.on_worktree_removal_settled(outcome, window, cx);
         }
         // A finished hook run fills the composer only while it still holds what the run was
         // started from; otherwise the answer waits as a suggestion (see hook_run).
@@ -554,6 +561,8 @@ impl StatusView {
             Ok(Effect::OpenWorktreeDialog { branch }) => {
                 self.open_worktree_dialog(Some(&branch), window, cx);
             }
+            Ok(Effect::OpenWorktree(path)) => self.open_worktree(&path, cx),
+            Ok(Effect::OpenRemoveDialog(path)) => self.open_remove_dialog(&path, window, cx),
         }
         cx.notify();
     }
@@ -583,6 +592,7 @@ impl StatusView {
                 .status()
                 .and_then(|status| status.branch.head.as_deref()),
             root: self.model.status().map(|status| status.root.as_str()),
+            worktrees: &self.model.worktrees,
             hooks: HookCtx {
                 running: self.model.hooks.in_flight(),
                 applicable: self.model.hooks.applicable(),
@@ -832,6 +842,11 @@ impl Render for StatusView {
                 self.worktree_dialog
                     .is_some()
                     .then(|| self.worktree_layer(window, cx)),
+            )
+            .children(
+                self.removal_dialog
+                    .is_some()
+                    .then(|| self.removal_layer(window, cx)),
             )
             .children(window_chrome::resize_layer(window))
     }

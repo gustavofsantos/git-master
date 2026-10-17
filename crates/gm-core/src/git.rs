@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
-    BranchEntry, BranchInfo, Change, DiffSide, FileDiff, HookScope, Hunk, HunkId, RepoStatus,
-    StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
+    BranchEntry, BranchInfo, Change, DiffSide, FileDiff, HookScope, Hunk, HunkId, PruneCandidate,
+    RepoStatus, StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::{CommandLog, CommandRecord, bounded_text};
@@ -463,6 +463,112 @@ impl GitPort for SubprocessGit {
         self.logged(command, None).map(drop)
     }
 
+    fn unpushed_commits(&self, path: &Path, branch: Option<&str>) -> Result<u32, GitError> {
+        let repo = open(path)?;
+        if repo.head().is_err() {
+            // An unborn HEAD has no commits to lose.
+            return Ok(0);
+        }
+        // HEAD's commits that no other local branch or remote has. The
+        // worktree's own branch is left out, so its own commits are counted.
+        // The refs are listed here, not with `--exclude`, whose matching
+        // differs by namespace.
+        let own = branch.map(|b| format!("refs/heads/{b}"));
+        let mut input = String::from("HEAD\n");
+        for reference in repo.references().map_err(|e| git_err(&e))? {
+            let reference = reference.map_err(|e| git_err(&e))?;
+            let Some(name) = reference.name() else {
+                continue;
+            };
+            let shared = name.starts_with("refs/heads/") || name.starts_with("refs/remotes/");
+            if shared && own.as_deref() != Some(name) {
+                input.push('^');
+                input.push_str(name);
+                input.push('\n');
+            }
+        }
+        let mut command = self.git(path);
+        command.args(["rev-list", "--count", "--stdin"]);
+        let output = Self::execute(&mut command, Some(input.as_bytes()))
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        let mut count = parse_count(&Self::checked(output, &[0])?)?;
+        // Commits ahead of the upstream, when the branch has one.
+        if let Some(branch) = branch {
+            let upstream = repo
+                .find_branch(branch, BranchType::Local)
+                .ok()
+                .and_then(|local| local.upstream().ok())
+                .and_then(|upstream| upstream.get().name().map(str::to_owned));
+            if let Some(name) = upstream {
+                let mut command = self.git(path);
+                command.args(["rev-list", "--count", &format!("{name}..HEAD")]);
+                count = count.max(parse_count(&Self::run(command)?)?);
+            }
+        }
+        Ok(count)
+    }
+
+    fn remove_worktree(&self, root: &Path, path: &str, force: u8) -> Result<(), GitError> {
+        if path.is_empty() || path.starts_with('-') {
+            return Err(GitError("invalid worktree path".into()));
+        }
+        // Git deletes the folder itself. Force is one `--force`, or two to take a locked one.
+        let mut command = self.git(root);
+        command.args(["worktree", "remove"]);
+        for _ in 0..force.min(2) {
+            command.arg("--force");
+        }
+        command.args(["--", path]);
+        self.logged(command, None).map(drop)
+    }
+
+    fn lock_worktree(&self, root: &Path, path: &str, reason: &str) -> Result<(), GitError> {
+        if path.is_empty() || path.starts_with('-') {
+            return Err(GitError("invalid worktree path".into()));
+        }
+        let mut command = self.git(root);
+        command.args(["worktree", "lock"]);
+        if !reason.is_empty() {
+            command.arg(format!("--reason={reason}"));
+        }
+        command.args(["--", path]);
+        self.logged(command, None).map(drop)
+    }
+
+    fn unlock_worktree(&self, root: &Path, path: &str) -> Result<(), GitError> {
+        if path.is_empty() || path.starts_with('-') {
+            return Err(GitError("invalid worktree path".into()));
+        }
+        let mut command = self.git(root);
+        command.args(["worktree", "unlock", "--", path]);
+        self.logged(command, None).map(drop)
+    }
+
+    fn prunable(&self, root: &Path) -> Result<Vec<PruneCandidate>, GitError> {
+        // Dry run only. Git prints the records on stdout or stderr depending on
+        // the version, so both are read.
+        let mut command = self.git(root);
+        command.args(["worktree", "prune", "-n", "-v"]);
+        let output = command
+            .output()
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        if !output.status.success() {
+            return Err(GitError(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            ));
+        }
+        let mut text = output.stdout;
+        text.push(b'\n');
+        text.extend_from_slice(&output.stderr);
+        Ok(worktree::prune_candidates(&text))
+    }
+
+    fn prune_worktrees(&self, root: &Path) -> Result<(), GitError> {
+        let mut command = self.git(root);
+        command.args(["worktree", "prune"]);
+        self.logged(command, None).map(drop)
+    }
+
     fn checkout(&self, root: &Path, branch: &str) -> Result<(), GitError> {
         // A leading dash would be read as an option by `git switch`.
         if branch.is_empty() || branch.starts_with('-') {
@@ -558,6 +664,13 @@ pub fn parse_null_config(bytes: &[u8]) -> Vec<ConfigValue> {
 
 fn git_err(error: &git2::Error) -> GitError {
     GitError(error.message().to_owned())
+}
+
+fn parse_count(out: &[u8]) -> Result<u32, GitError> {
+    String::from_utf8_lossy(out)
+        .trim()
+        .parse()
+        .map_err(|_| GitError("unexpected rev-list output".into()))
 }
 
 fn branch_name(branch: &git2::Branch<'_>) -> Result<String, GitError> {

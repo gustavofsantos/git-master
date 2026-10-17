@@ -38,6 +38,7 @@ mod welcome;
 mod window_chrome;
 mod worktree_create;
 mod worktree_list;
+mod worktree_remove;
 
 use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;

@@ -206,6 +206,7 @@ mod tests {
         let context = RuleContext {
             repo_open: true,
             busy: None,
+            worktrees: &[],
             entries: &[],
             staged_count: 0,
             message: "",

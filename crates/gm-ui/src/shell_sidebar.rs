@@ -324,6 +324,7 @@ fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> Div {
         worktree_list::Open::Missing => Some(Err("This worktree's folder is missing.")),
         worktree_list::Open::Path(path) => Some(Ok(path.to_owned())),
     };
+    let menu_path = row.entry.path.clone();
     div()
         .h(px(ROW_HEIGHT))
         .px_2()
@@ -346,6 +347,12 @@ fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> Div {
                         .font_weight(FontWeight::MEDIUM)
                 })
                 .child(row.name.clone()),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.open_worktree_menu(&menu_path, event.position, cx);
+            }),
         )
         .children(
             row.here

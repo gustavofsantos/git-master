@@ -18,6 +18,7 @@ use crate::fuzzy;
 const NO_BRANCH: Reason = "No branch to choose from.";
 const NO_FILE: Reason = "No file in the working copy.";
 const NEEDS_CHUNK: Reason = "Pick a chunk in the diff first.";
+const NEEDS_WORKTREE: Reason = "Run it from the worktree's menu in the sidebar.";
 
 /// The groups the palette shows, in the order they appear.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -348,6 +349,14 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
                 pick_state(action, &targets, ctx, NO_FILE),
             )
         }
+        // A worktree is run from its own menu, which names it, so the palette lists it disabled.
+        ArgKind::Worktree => (
+            Choice::Run {
+                action,
+                args: Args::None,
+            },
+            Err(NEEDS_WORKTREE),
+        ),
         // A chunk exists only in the diff pane, so the palette lists it disabled.
         ArgKind::Chunk => (
             Choice::Run {
@@ -403,7 +412,7 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
             .iter()
             .map(|entry| target_row(action, Section::Files, &entry.path, ctx))
             .collect(),
-        ArgKind::None | ArgKind::Chunk => Vec::new(),
+        ArgKind::None | ArgKind::Chunk | ArgKind::Worktree => Vec::new(),
     }
 }
 
@@ -477,6 +486,7 @@ mod tests {
             current_branch: Some("main"),
             root: Some("/repo"),
             hooks: crate::action_registry::HookCtx::default(),
+            worktrees: &[],
         }
     }
 
@@ -502,7 +512,11 @@ mod tests {
             .iter()
             .filter(|c| c.section == Section::Actions)
             .count();
-        assert_eq!(actions, Action::ALL.len() - 1);
+        let worktree_actions = Action::ALL
+            .iter()
+            .filter(|action| action.spec().category == Category::Worktrees)
+            .count();
+        assert_eq!(actions, Action::ALL.len() - worktree_actions);
         let worktree = find(&candidates, "Create Worktree");
         assert_eq!(worktree.section, Section::Worktrees);
         assert_eq!(worktree.state, Err(NO_BRANCH));

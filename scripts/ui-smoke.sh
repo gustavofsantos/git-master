@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -833,6 +833,52 @@ scenario_t() {
   [ "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')" -eq 2 ] || fail "closing the dialog changed the worktrees"
 }
 
+# --- 3u. Remove a dirty worktree from its menu (W5) ---------------------------
+# The worktree's row menu opens the remove dialog, which lists the uncommitted
+# change. A removal without the typed name is refused and nothing goes. With the
+# name typed, the removal runs: git no longer lists the worktree and its folder
+# is gone. The row positions are the WORKTREES rows at the sidebar's foot.
+WT_ROW_X=182; WT_ROW_Y=731                  # the feature/x worktree row, right-clicked
+MENU_REMOVE_X=252; MENU_REMOVE_Y=831        # "Remove Worktree" in that row's menu
+REMOVE_BUTTON_X=894; REMOVE_BUTTON_Y=331    # "Remove worktree" in the dialog, with the field typed
+scenario_u() {
+  local theme="$1" wt="$RUN_DIR/repo-feature" differing
+  shoot "$RUN_DIR/u-before.png"
+  xdotool mousemove "$WT_ROW_X" "$WT_ROW_Y" click 3; sleep 1
+  shoot "$SMOKE_OUT/u-remove-menu-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/u-before.png" "$SMOKE_OUT/u-remove-menu-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 2000 ] || fail "the worktree menu did not open ($differing pixels changed)"
+
+  xdotool mousemove "$MENU_REMOVE_X" "$MENU_REMOVE_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/u-remove-dialog-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/u-before.png" "$SMOKE_OUT/u-remove-dialog-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the remove dialog did not open ($differing pixels changed)"
+
+  # Blocked: the button is disabled without the name, so git keeps the worktree.
+  xdotool mousemove "$REMOVE_BUTTON_X" "$REMOVE_BUTTON_Y" click 1; sleep 1.5
+  [ -d "$wt" ] || fail "a removal without the typed name deleted $wt"
+  git -C "$RUN_DIR/repo" worktree list --porcelain | grep -qxF "worktree $wt" \
+    || fail "git worktree list lost $wt without the typed name"
+
+  xdotool type --delay 20 -- "feature/x"; sleep 1
+  xdotool mousemove "$REMOVE_BUTTON_X" "$REMOVE_BUTTON_Y" click 1; sleep 2.5
+  [ ! -e "$wt" ] || fail "the removed worktree folder $wt is still there"
+  if git -C "$RUN_DIR/repo" worktree list --porcelain | grep -qxF "worktree $wt"; then
+    fail "git worktree list still shows $wt after the removal"
+  fi
+  shoot "$RUN_DIR/u-after.png"
+  convert "$RUN_DIR/u-after.png" -crop "$SECTION_CROP" +repage "$RUN_DIR/u-section-after.png"
+  convert "$RUN_DIR/u-before.png" -crop "$SECTION_CROP" +repage "$RUN_DIR/u-section-before.png"
+  differing="$(compare -metric AE "$RUN_DIR/u-section-before.png" "$RUN_DIR/u-section-after.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare section screenshots: $differing"
+  [ "$differing" -gt 300 ] || fail "the sidebar still shows the removed worktree ($differing pixels changed)"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -861,6 +907,11 @@ run_scenario() {
   if [ "$name" = s-worktrees ]; then git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"; fi
   if [ "$name" = l-branch-menu ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
   if [ "$name" = t-create-worktree ]; then git -C "$RUN_DIR/repo" branch feature/x; fi
+  if [ "$name" = u-remove-worktree ]; then
+    # A dirty worktree: the removal is blocked until the name is typed.
+    git -C "$RUN_DIR/repo" worktree add -q -b feature/x "$RUN_DIR/repo-feature"
+    printf 'scratch\n' > "$RUN_DIR/repo-feature/scratch.txt"
+  fi
   if [ "$name" = h-welcome ]; then
     # Starts with no recent list at all; scenario_h makes its own launches.
     scenario_h "$theme"
@@ -891,6 +942,7 @@ run_scenario() {
     r-title-bar) scenario_r "$theme" ;;
     s-worktrees) scenario_s "$theme" ;;
     t-create-worktree) scenario_t "$theme" ;;
+    u-remove-worktree) scenario_u "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app

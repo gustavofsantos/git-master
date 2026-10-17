@@ -1,7 +1,9 @@
 //! Parses `git worktree list --porcelain`. Pure: the adapter runs git and
 //! passes the bytes here.
 
-use gm_schema::WorktreeEntry;
+use std::path::Path;
+
+use gm_schema::{Blocker, PruneCandidate, WorktreeEntry};
 
 use crate::GitError;
 
@@ -99,6 +101,47 @@ fn reason(line: &str, keyword: &str) -> String {
         .and_then(|rest| rest.strip_prefix(' '))
         .unwrap_or_default()
         .to_owned()
+}
+
+/// The blockers whose condition holds, in `Blocker` order: the same conditions
+/// always give the same list.
+#[must_use]
+pub fn blockers(conditions: [(bool, Blocker); 6]) -> Vec<Blocker> {
+    conditions
+        .into_iter()
+        .filter_map(|(on, blocker)| on.then_some(blocker))
+        .collect()
+}
+
+/// The name a removal must be confirmed with: the branch, or the folder's name
+/// when HEAD is detached.
+#[must_use]
+pub fn name_of(path: &str, branch: Option<&str>) -> String {
+    if let Some(branch) = branch {
+        return branch.to_owned();
+    }
+    Path::new(path).file_name().map_or_else(
+        || path.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// Parses the dry run of `git worktree prune -n -v`, which prints one
+/// `Removing worktrees/<name>: <reason>` line per record. Other lines are not
+/// records and are skipped.
+#[must_use]
+pub fn prune_candidates(raw: &[u8]) -> Vec<PruneCandidate> {
+    String::from_utf8_lossy(raw)
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("Removing worktrees/")?;
+            let (name, reason) = rest.split_once(": ").unwrap_or((rest, ""));
+            Some(PruneCandidate {
+                name: name.to_owned(),
+                reason: reason.to_owned(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -210,5 +253,50 @@ mod tests {
     #[test]
     fn an_attribute_before_any_worktree_is_an_error() {
         assert!(parse(b"HEAD aaa\0\0", true).is_err());
+    }
+
+    #[test]
+    fn blockers_keep_the_conditions_that_hold_in_a_fixed_order() {
+        let found = blockers([
+            (false, Blocker::Main),
+            (true, Blocker::Current),
+            (false, Blocker::Missing),
+            (true, Blocker::Locked),
+            (true, Blocker::Dirty),
+            (true, Blocker::Unpushed),
+        ]);
+        assert_eq!(
+            found,
+            vec![
+                Blocker::Current,
+                Blocker::Locked,
+                Blocker::Dirty,
+                Blocker::Unpushed
+            ]
+        );
+        assert!(blockers([(false, Blocker::Main); 6]).is_empty());
+    }
+
+    #[test]
+    fn the_name_is_the_branch_or_the_folder_when_detached() {
+        assert_eq!(name_of("/r-feature", Some("feature/x")), "feature/x");
+        assert_eq!(name_of("/r-scratch", None), "r-scratch");
+        assert_eq!(name_of("/", None), "/");
+    }
+
+    #[test]
+    fn prune_preview_reads_one_candidate_per_record_line() {
+        let raw = b"Removing worktrees/wd: gitdir file points to non-existent location\n\
+                    some other line\nRemoving worktrees/wz: \n";
+        let found = prune_candidates(raw);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].name, "wd");
+        assert_eq!(
+            found[0].reason,
+            "gitdir file points to non-existent location"
+        );
+        assert_eq!(found[1].name, "wz");
+        assert_eq!(found[1].reason, "");
+        assert!(prune_candidates(b"").is_empty());
     }
 }

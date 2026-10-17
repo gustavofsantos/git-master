@@ -1,15 +1,17 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gm_schema::{
-    Actor, Command, CommandKind, Event, HookFailure, HookScope, OperationId, OperationState,
+    Actor, Blocker, Command, CommandKind, Event, HookFailure, HookScope, OperationId,
+    OperationState, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
+use crate::worktree;
 
 /// One state change of one operation. The log is audit, and the base for undo
 /// later; it is not replayed to rebuild state (docs/06).
@@ -342,6 +344,8 @@ impl Engine {
                 }
                 None => Err(format!("no hook run {} is active", run.0)),
             },
+            // The worktree commands that `execute` does not list above.
+            _ => self.manage_worktree(id, actor, kind),
         }
     }
 
@@ -460,6 +464,170 @@ impl Engine {
         self.loaded(id, &root, status)
     }
 
+    /// The worktree commands after the listing: inspect, remove, lock, unlock,
+    /// and the prune pair.
+    fn manage_worktree(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        match kind {
+            CommandKind::InspectWorktree { path } => {
+                let root = self.open_root()?;
+                let inspection = self.inspect(&root, path)?;
+                Ok(vec![Event::WorktreeInspected { id, inspection }])
+            }
+            CommandKind::RemoveWorktree {
+                path,
+                force,
+                typed_name,
+            } => self.remove_worktree(id, actor, path, *force, typed_name),
+            CommandKind::LockWorktree { path, reason } => {
+                only_a_human(actor, "lock a worktree")?;
+                let root = self.open_root()?;
+                self.listed(&root, path)?;
+                self.git
+                    .lock_worktree(&root, path, reason)
+                    .map_err(|e| e.0)?;
+                self.reloaded(id, &root)
+            }
+            CommandKind::UnlockWorktree { path } => {
+                only_a_human(actor, "unlock a worktree")?;
+                let root = self.open_root()?;
+                self.listed(&root, path)?;
+                self.git.unlock_worktree(&root, path).map_err(|e| e.0)?;
+                self.reloaded(id, &root)
+            }
+            CommandKind::ListPrunable => {
+                let root = self.open_root()?;
+                let candidates = self.git.prunable(&root).map_err(|e| e.0)?;
+                Ok(vec![Event::PrunableListed { id, candidates }])
+            }
+            CommandKind::PruneWorktrees { names } => self.prune(id, actor, names),
+            _ => Err("not a worktree management command".to_owned()),
+        }
+    }
+
+    /// The listed worktree at `path`; any other path is refused before Git runs.
+    fn listed(&self, root: &Path, path: &str) -> Result<WorktreeEntry, String> {
+        self.git
+            .worktrees(root)
+            .map_err(|e| e.0)?
+            .into_iter()
+            .find(|entry| entry.path == path)
+            .ok_or_else(|| format!("{path} is not a worktree of this repository"))
+    }
+
+    /// What removing the worktree at `path` would lose or refuse. Reads only;
+    /// the same state gives the same inspection, with no timestamp in it.
+    fn inspect(&self, root: &Path, path: &str) -> Result<WorktreeInspection, String> {
+        let entry = self.listed(root, path)?;
+        let folder = Path::new(path);
+        let missing = !folder.is_dir();
+        let (mut staged, mut unstaged, mut untracked, mut unpushed) = (0, 0, 0, 0);
+        if !missing {
+            let status = self.git.status(folder).map_err(|e| e.0)?;
+            for change in &status.entries {
+                staged += u32::from(change.staged.is_some());
+                unstaged += u32::from(change.unstaged.is_some());
+                untracked += u32::from(change.untracked);
+            }
+            unpushed = self
+                .git
+                .unpushed_commits(folder, entry.branch.as_deref())
+                .map_err(|e| e.0)?;
+        }
+        let blockers = worktree::blockers([
+            (entry.is_main, Blocker::Main),
+            (
+                self.root
+                    .as_deref()
+                    .is_some_and(|open| same_folder(open, path)),
+                Blocker::Current,
+            ),
+            (missing, Blocker::Missing),
+            (entry.locked.is_some(), Blocker::Locked),
+            (staged + unstaged + untracked > 0, Blocker::Dirty),
+            (unpushed > 0, Blocker::Unpushed),
+        ]);
+        Ok(WorktreeInspection {
+            path: path.to_owned(),
+            branch: entry.branch.clone(),
+            name: worktree::name_of(path, entry.branch.as_deref()),
+            locked: entry.locked.clone(),
+            missing,
+            staged,
+            unstaged,
+            untracked,
+            unpushed,
+            blockers,
+        })
+    }
+
+    /// Removes a worktree after the rule of D31 checks it again, now: the
+    /// dialog's earlier inspection is not trusted.
+    fn remove_worktree(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        path: &str,
+        force: bool,
+        typed_name: &str,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "remove a worktree")?;
+        let root = self.open_root()?;
+        let inspection = self.inspect(&root, path)?;
+        inspection.check_removal(force, typed_name)?;
+        // A locked worktree needs Git's second `--force`.
+        let level = if inspection.blockers.is_empty() {
+            0
+        } else if inspection.locked.is_some() {
+            2
+        } else {
+            1
+        };
+        self.git
+            .remove_worktree(&root, path, level)
+            .map_err(|e| e.0)?;
+        self.reloaded(id, &root)
+    }
+
+    /// Removes the admin records named in `names`, if the dry run still lists
+    /// exactly those.
+    fn prune(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        names: &[String],
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "prune worktrees")?;
+        let root = self.open_root()?;
+        let mut now: Vec<String> = self
+            .git
+            .prunable(&root)
+            .map_err(|e| e.0)?
+            .into_iter()
+            .map(|candidate| candidate.name)
+            .collect();
+        let mut expected = names.to_vec();
+        now.sort();
+        expected.sort();
+        if now != expected {
+            return Err(
+                "the worktrees to prune changed since they were listed; list them again".to_owned(),
+            );
+        }
+        self.git.prune_worktrees(&root).map_err(|e| e.0)?;
+        self.reloaded(id, &root)
+    }
+
+    /// The status and the worktree list, after a change to the worktrees.
+    fn reloaded(&self, id: OperationId, root: &Path) -> Result<Vec<Event>, String> {
+        let status = self.git.status(root).map_err(|e| e.0)?;
+        self.loaded(id, root, status)
+    }
+
     fn open_root(&self) -> Result<PathBuf, String> {
         self.root
             .clone()
@@ -517,6 +685,24 @@ impl Engine {
             state: op.state,
             detail,
         });
+    }
+}
+
+/// Worktree changes are human decisions (D31, Q12): an agent may not make one.
+fn only_a_human(actor: &Actor, what: &str) -> Result<(), String> {
+    if matches!(actor, Actor::Human) {
+        Ok(())
+    } else {
+        Err(format!("only a human can {what}"))
+    }
+}
+
+/// Whether two paths name the same folder, through symbolic links when both exist.
+fn same_folder(open: &Path, path: &str) -> bool {
+    let path = Path::new(path);
+    match (std::fs::canonicalize(open), std::fs::canonicalize(path)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => open == path,
     }
 }
 

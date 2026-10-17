@@ -29,6 +29,8 @@ const MARGIN: f32 = 4.;
 pub(crate) enum Target {
     Branch(String),
     File(String),
+    /// A worktree, by its folder.
+    Worktree(String),
 }
 
 /// One line of a menu: an action, the target it runs on, and whether it runs now.
@@ -94,6 +96,19 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     ]
 }
 
+/// The menu of a worktree row (W5): open it, reveal and copy its folder, then
+/// remove it. Remove opens its own dialog, which is the confirmation.
+pub(crate) fn worktree_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
+    let target = Args::Worktree(path.to_owned());
+    let item = |action, group| Item::new(action, target.clone(), group, ctx);
+    vec![
+        item(Action::OpenWorktree, 0),
+        item(Action::RevealWorktree, 1),
+        item(Action::CopyWorktreePath, 1),
+        item(Action::RemoveWorktree, 2),
+    ]
+}
+
 /// The items split where the group changes, one slice per group.
 pub(crate) fn sections(items: &[Item]) -> Vec<&[Item]> {
     items.chunk_by(|a, b| a.group == b.group).collect()
@@ -131,6 +146,16 @@ impl StatusView {
         cx: &mut Context<Self>,
     ) {
         self.open_menu(Target::Branch(name.to_owned()), position, cx);
+    }
+
+    /// Opens the menu of the worktree whose folder is `path`, under the pointer.
+    pub(crate) fn open_worktree_menu(
+        &mut self,
+        path: &str,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_menu(Target::Worktree(path.to_owned()), position, cx);
     }
 
     /// Opens the menu of the file row at `index`, which becomes the selection and
@@ -187,7 +212,7 @@ impl StatusView {
                 self.close_context_menu(cx);
                 self.notify_user(reason, cx);
             }
-            Ok(()) if item.destructive() => {
+            Ok(()) if item.destructive() && !item.action.opens_dialog() => {
                 if let Some(open) = self.context_menu.open.as_mut() {
                     open.armed = Some(item);
                 }
@@ -206,6 +231,7 @@ impl StatusView {
         match target {
             Target::Branch(name) => branch_items(name, &ctx),
             Target::File(path) => file_items(path, &ctx),
+            Target::Worktree(path) => worktree_items(path, &ctx),
         }
     }
 
@@ -328,7 +354,7 @@ impl StatusView {
     /// The question that replaces the items after a destructive one is chosen:
     /// its name, then Cancel and the item's own title in red.
     fn confirm_panel(item: &Item, target: &Target, cx: &Context<Self>) -> Div {
-        let (Target::Branch(subject) | Target::File(subject)) = target;
+        let (Target::Branch(subject) | Target::File(subject) | Target::Worktree(subject)) = target;
         let confirm = item.clone();
         div()
             .px_3()
@@ -421,6 +447,7 @@ mod tests {
             current_branch: Some("main"),
             root: Some("/repo"),
             hooks: crate::action_registry::HookCtx::default(),
+            worktrees: &[],
         }
     }
 

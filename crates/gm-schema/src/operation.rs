@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::hook::{HookFailure, HookInfo};
-use crate::status::{BranchEntry, RepoStatus, WorktreeEntry};
+use crate::status::{BranchEntry, PruneCandidate, RepoStatus, WorktreeEntry, WorktreeInspection};
 
 /// Sequential, so the operation log is deterministic.
 #[derive(
@@ -72,6 +72,40 @@ pub enum CommandKind {
     CreateWorktree {
         path: String,
         mode: WorktreeMode,
+    },
+    /// Reads what removing the worktree at `path` would lose or refuse. Never
+    /// changes anything, so it is not an operation the log records as a change.
+    InspectWorktree {
+        path: String,
+    },
+    /// Removes the linked worktree at `path` with `git worktree remove`; the
+    /// folder is deleted, never by hand. Human only (D31). Refused while a hard
+    /// blocker applies (main, the window's own worktree, a missing folder). A
+    /// dirty, unpushed or locked worktree is refused unless `force` is set and
+    /// `typed_name` is the inspected name exactly.
+    RemoveWorktree {
+        path: String,
+        force: bool,
+        typed_name: String,
+    },
+    /// Locks the worktree at `path` with `git worktree lock`; an empty `reason`
+    /// locks it without one. Human only.
+    LockWorktree {
+        path: String,
+        reason: String,
+    },
+    /// Unlocks the worktree at `path`. Human only.
+    UnlockWorktree {
+        path: String,
+    },
+    /// Lists the admin records `git worktree prune` would remove, without
+    /// removing them. Never changes anything.
+    ListPrunable,
+    /// Removes the admin records named in `names`, the ones the last
+    /// `PrunableListed` showed. Refused when the list has changed since.
+    /// Human only.
+    PruneWorktrees {
+        names: Vec<String>,
     },
     /// Lists the hooks read from config, with their state (docs/03).
     ListHooks,
@@ -196,6 +230,16 @@ pub enum Event {
     WorktreesLoaded {
         id: OperationId,
         worktrees: Vec<WorktreeEntry>,
+    },
+    /// Answers `InspectWorktree`: what removing the worktree would lose or refuse.
+    WorktreeInspected {
+        id: OperationId,
+        inspection: WorktreeInspection,
+    },
+    /// Answers `ListPrunable`: the admin records a prune would remove.
+    PrunableListed {
+        id: OperationId,
+        candidates: Vec<PruneCandidate>,
     },
     HooksListed {
         id: OperationId,
