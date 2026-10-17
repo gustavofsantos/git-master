@@ -661,6 +661,58 @@ mod tests {
         assert!(!split_cell_on_cursor(old, None));
     }
 
+    #[test]
+    fn selecting_through_split_cells_selects_the_same_lines_as_the_unified_rows() {
+        // Two hunks, each with a -/+ pair and a surplus +: the cells must cover
+        // every changed line exactly as the unified rows do.
+        let unstaged = vec![simple("h0"), simple("h1")];
+        let diffs = Diffs {
+            unstaged: &unstaged,
+            staged: &[],
+        };
+        let unified: Vec<LineKey> = build_rows(diffs, Side::Unstaged)
+            .into_iter()
+            .filter_map(|row| match row {
+                Row::Line {
+                    side,
+                    hunk_index,
+                    line_index,
+                } => Some((side, hunk_index, line_index)),
+                Row::HunkHeader { .. } => None,
+            })
+            .filter(|key| diffs.is_changed(*key))
+            .collect();
+        let mut from_split: Vec<LineKey> = split_rows(diffs, Side::Unstaged)
+            .rows
+            .iter()
+            .flat_map(|row| match row {
+                SplitRow::Pair { old, new } => [*old, *new],
+                SplitRow::HunkHeader { .. } => [None, None],
+            })
+            .flatten()
+            .map(|cell| cell.key)
+            .filter(|key| diffs.is_changed(*key))
+            .collect();
+        from_split.sort_unstable();
+        from_split.dedup();
+        let mut unified_sorted = unified.clone();
+        unified_sorted.sort_unstable();
+        assert_eq!(from_split, unified_sorted);
+
+        let mut by_split = Selection::default();
+        let mut by_unified = Selection::default();
+        for key in &from_split {
+            by_split.toggle_line(diffs, *key);
+        }
+        for key in &unified {
+            by_unified.toggle_line(diffs, *key);
+        }
+        assert_eq!(
+            by_split.selected_lines_by_hunk(Side::Unstaged),
+            by_unified.selected_lines_by_hunk(Side::Unstaged)
+        );
+    }
+
     /// `ctx, -a, +b, ctx`: lines 1 and 2 are changes.
     fn simple(id: &str) -> Hunk {
         hunk(
@@ -1157,7 +1209,7 @@ mod real_git {
     use super::*;
     use gm_core::GitPort;
     use gm_core::git::SubprocessGit;
-    use gm_schema::FileDiff;
+    use gm_schema::{DiffSide, FileDiff, StageTarget};
     use std::fmt::Write as _;
     use std::path::Path;
     use std::process::Command;
@@ -1206,6 +1258,122 @@ mod real_git {
             Side::Unstaged,
         );
         (diff, split)
+    }
+
+    /// A repository with `one/two/three` committed and `ONE/TWO/three/four` in
+    /// the working copy: a -/+ pair, another -/+ pair and a surplus +.
+    fn working_copy_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("f.txt"), "one\ntwo\nthree\n").unwrap();
+        commit(dir.path(), "init");
+        std::fs::write(dir.path().join("f.txt"), "ONE\nTWO\nthree\nfour\n").unwrap();
+        dir
+    }
+
+    /// The index blob of `path`, as git stores it.
+    fn index_blob(dir: &Path, path: &str) -> Vec<u8> {
+        Command::new("git")
+            .args(["show", &format!(":{path}")])
+            .current_dir(dir)
+            .output()
+            .unwrap()
+            .stdout
+    }
+
+    /// The keys of the unstaged lines whose text is in `texts`, found by walking
+    /// `keys_of`, which lists the lines in some layout's order.
+    fn keys_with_text(diff: &FileDiff, texts: &[&str], keys: &[LineKey]) -> Vec<LineKey> {
+        let mut found: Vec<LineKey> = keys
+            .iter()
+            .copied()
+            .filter(|&(_, hunk, line)| texts.contains(&diff.hunks[hunk].lines[line].text.as_str()))
+            .collect();
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+
+    /// Stages the lines `keys` select, the way the pane's Stage Selected Lines
+    /// does (D24). Returns the index blob after it.
+    fn stage_keys(dir: &Path, keys: &[LineKey]) -> Vec<u8> {
+        let diff = SubprocessGit::default()
+            .diff(dir, "f.txt", DiffSide::Unstaged)
+            .unwrap();
+        let diffs = Diffs {
+            unstaged: &diff.hunks,
+            staged: &[],
+        };
+        let mut selection = Selection::default();
+        for &key in keys {
+            selection.toggle_line(diffs, key);
+        }
+        for (hunk_index, lines) in selection.selected_lines_by_hunk(Side::Unstaged) {
+            SubprocessGit::default()
+                .stage(
+                    dir,
+                    &StageTarget::Lines {
+                        path: "f.txt".into(),
+                        hunk: diff.hunks[hunk_index].id.clone(),
+                        lines,
+                    },
+                )
+                .unwrap();
+        }
+        index_blob(dir, "f.txt")
+    }
+
+    #[test]
+    fn staging_through_split_cells_writes_the_index_the_unified_rows_write() {
+        let wanted = ["two", "TWO", "four"];
+        let (by_hand, by_split_hand) = (working_copy_repo(), working_copy_repo());
+        let diff = SubprocessGit::default()
+            .diff(by_hand.path(), "f.txt", DiffSide::Unstaged)
+            .unwrap();
+        // The unified rows: every changed line, in row order.
+        let unified: Vec<LineKey> = build_rows(
+            Diffs {
+                unstaged: &diff.hunks,
+                staged: &[],
+            },
+            Side::Unstaged,
+        )
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::Line {
+                side,
+                hunk_index,
+                line_index,
+            } => Some((side, hunk_index, line_index)),
+            Row::HunkHeader { .. } => None,
+        })
+        .collect();
+        // The split cells: each cell names its own line, the same key.
+        let split: Vec<LineKey> = split_rows(
+            Diffs {
+                unstaged: &diff.hunks,
+                staged: &[],
+            },
+            Side::Unstaged,
+        )
+        .rows
+        .iter()
+        .flat_map(|row| match row {
+            SplitRow::Pair { old, new } => [*old, *new],
+            SplitRow::HunkHeader { .. } => [None, None],
+        })
+        .flatten()
+        .map(|cell| cell.key)
+        .collect();
+        let by_unified = keys_with_text(&diff, &wanted, &unified);
+        let by_split = keys_with_text(&diff, &wanted, &split);
+        assert_eq!(by_split, by_unified);
+        assert_eq!(by_unified.len(), 3);
+
+        let through_unified = stage_keys(by_hand.path(), &by_unified);
+        let through_split = stage_keys(by_split_hand.path(), &by_split);
+        assert_eq!(through_split, through_unified);
+        assert_eq!(through_split, b"one\nTWO\nthree\nfour\n");
     }
 
     /// The kind of the line a cell names.
