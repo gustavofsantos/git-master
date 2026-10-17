@@ -49,6 +49,7 @@
 | D35 | Busca por conteúdo (H7) com `git log -S` de texto fixo. O campo fica no cabeçalho do histórico, não na barra superior; a busca é com atraso (debounce) e cancelável | Decidido (2026-10-17) | 05, 07 |
 | D36 | Cor das lanes do grafo (H5, D25) deriva de um hash do nome da branch, estável entre sessões. O layout é determinístico e usa `--topo-order`. D25 segue Proposto no restante (aresta tracejada, dono do commit) | Decidido (2026-10-17) | 05, 07 |
 | D37 | Gate de performance do histórico (H8): benchmarks ignorados em repositórios de 50 mil e 200 mil commits, gerados com `git fast-import` | Decidido (2026-10-17) | 06, 07 |
+| D38 | Tela de configurações como diálogo modal na Fatia 9; configura tudo o que o app permitir até lá, persistindo fora do working tree (Princípio 5) | Decidido (2026-10-17) | 05, 07 |
 
 ## D31: worktrees na v1
 
@@ -70,6 +71,28 @@ As ações de worktree no registro seguem desabilitadas com "Not available yet" 
 Detalhes de cada sub-fatia (H1 a H8) em `07`.
 
 Fora da fatia 3 (decidido pelo autor em 2026-10-17, sem ID próprio): escopo de stack, dono do commit, pai de stack, aresta tracejada, aba Stacks, contador de Restack, Fetch e Pull, reflog, stashes e Review local. Os itens de stack ficam "Not available yet".
+
+## D38: tela de configurações (Settings)
+
+O autor decidiu em 2026-10-17 que a tela de configurações será construída na **Fatia 9 (acabamento premium)** e terá formato de **diálogo modal**. Quando implementada, ela cobrirá tudo o que o aplicativo permitir configurar até aquele momento.
+
+- **Formato modal:** diálogo centralizado sobre a janela atual com backdrop escurecido (`black/50`), fechável com tecla `Esc`, clique no backdrop ou botão de fechar. Layout com coluna de navegação lateral por categorias à esquerda e formulário de campos tipados à direita.
+- **Acesso:** atalho `⌘,` (macOS) / `Ctrl+,` (Linux/Windows), ação tipada `open_settings` no registro de ações (`action_registry.rs`), paleta de comandos (`Open Settings`) e botão/ícone no rodapé ou cabeçalho.
+- **Persistência estrita fora do working tree (Princípio 5):**
+  - Git config: alterações de identidade, branch padrão, worktree root e hooks vão para `~/.gitconfig` (global) ou `.git/config` (local), com seletor explícito de escopo.
+  - App settings: preferências visuais e comportamentais da aplicação vão para `settings.json` no diretório de configuração do usuário (`~/.config/gitmaster/` no Linux).
+  - Segurança e autorizações: lista de aprovações de hooks de repositório em `hook-approvals.json` no diretório de dados do usuário (`~/.local/share/gitmaster/`).
+  - Sem botão "Salvar": gravações imediatas ao alterar ou perder o foco do campo, com validação inline.
+- **Escopo abrangente na Fatia 9:**
+  - *General:* tema (System/Dark/Light), fontes de UI e código, limpeza de projetos recentes, limite de arquivos do observador de status.
+  - *Git & Identity:* `user.name`, `user.email` (Global vs Repositório), `init.defaultBranch`, `core.editor`.
+  - *Worktrees:* raiz padrão de novos worktrees (`gitmaster.worktree.root`), regras de remoção segura (D31).
+  - *Diff & Files:* algoritmo padrão (`histogram`, `myers`, `patience`), linhas de contexto, ignorar espaços por padrão.
+  - *Hooks & Security:* catálogo de hooks ativos, gestão de aprovações de scripts com hash e botão de revogação.
+  - *Stacks & Restack:* políticas de restack com repo sujo (Q2), push com lease padrão (D15).
+  - *Conflict Resolver:* estilo de conflito (`merge.conflictStyle`), rerere.
+  - *MCP & Agents:* ativação do servidor MCP, caminho do socket, tokens, políticas de autorização para ações de agentes (D20).
+  - *Local Review:* armazenamento de comentários e snapshots locais (D11).
 
 ## Questões abertas
 

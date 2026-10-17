@@ -64,3 +64,66 @@ Benchmark: JetBrains. Três painéis: esquerda, resultado (editável), direita.
 - Algoritmo `histogram` (ou `patience`) com heurística de indentação; detecção de código movido (`--color-moved`); diff intra-linha só nos hunks visíveis.
 - Diff e stage dos arquivos gerados: recolher via atributos do `.gitattributes` (somente leitura).
 - Comentários de review em linha, com o antes/depois do agente (ver `04`).
+
+## Tela de configurações (Settings modal, D38)
+
+Prevista para a Fatia 9 (acabamento premium), a tela de configurações consolida a gestão de todas as opções do aplicativo e do ambiente Git em um único lugar, cobrindo tudo o que o app permite configurar até aquele momento.
+
+### Comportamento e layout do modal
+
+- **Formato modal:** diálogo centralizado sobre a janela atual (dimensões ~860x580 px), com backdrop semitransparente escurecido (`black/50`). Fecha ao pressionar `Esc`, clicar fora ou no botão de fechar.
+- **Acesso:** atalho `⌘,` (macOS) / `Ctrl+,` (Linux/Windows), ação registrada `open_settings` em `action_registry.rs`, comando na paleta (`Open Settings`) e botão de engrenagem no rodapé.
+- **Navegação em duas colunas:**
+  - Sidebar esquerda (largura fixa ~200 px): lista de seções com ícones e rótulos em inglês.
+  - Painel de conteúdo direito: formulário com rolagem independente, seções agrupadas, campos de entrada tipados, switches e botões de ação com feedback inline.
+- **Persistência reativa sem botão "Salvar" (Princípio 5):**
+  - Cada alteração é persistida imediatamente ao mudar o valor ou ao desfocar o campo de texto.
+  - Gravações respeitam rigorosamente a fronteira de persistência:
+    - **Git config:** gravado via `git config` (`~/.gitconfig` para escopo global ou `.git/config` para escopo local do repo).
+    - **App settings:** gravado em `settings.json` no diretório de configuração do usuário (`~/.config/gitmaster/` no Linux).
+    - **Segurança:** gravado em `hook-approvals.json` no diretório de dados do usuário (`~/.local/share/gitmaster/`).
+    - Nenhuma configuração é escrita dentro do working tree do repositório.
+
+### Seções da interface
+
+1. **General:**
+   - *Appearance:* seletor de tema (`System`, `Dark`, `Light`) persistido em `settings.json`.
+   - *Typography:* seletores das famílias de fonte para interface e código monoespaçado, com visualização prévia e fallbacks instalados.
+   - *Recent Repositories:* lista de repositórios recentes abertos com opções para remover entradas específicas ou limpar o histórico.
+   - *File Watcher:* teto de diretórios observados pelo watcher e status de fallback de inotify.
+
+2. **Git & Identity:**
+   - *Scope Selector:* alternador entre escopo **Global (`~/.gitconfig`)** e **This Repository (`.git/config`)**.
+   - *Author Details:* campos para `user.name` e `user.email`.
+   - *Default Branch:* nome padrão para novas branches e inicializações (`init.defaultBranch`).
+   - *Editor:* executável externo configurado em `core.editor`.
+   - *Signing:* indicador de assinatura de commits (`commit.gpgSign`) e chave GPG/SSH.
+
+3. **Worktrees (D31):**
+   - *Default Location:* diretório base para novos worktrees (`gitmaster.worktree.root`, com padrão `../<repo>-<branch>`).
+   - *Safety Rules:* confirmações e regras de segurança para remoção de worktrees com commits não enviados, sujos ou travados.
+
+4. **Diff & Files:**
+   - *Algorithm:* seletor de algoritmo de diff (`histogram`, `myers`, `patience`).
+   - *Context:* quantidade padrão de linhas de contexto nos hunks (`diff.context`).
+   - *Display Options:* ignorar espaços em branco por padrão (`ignore-space-change`) e controle de wrap de linhas.
+
+5. **Hooks & Security (D17, D29, D30):**
+   - *Configured Hooks:* lista de hooks do GitMaster declarados no `.gitconfig` (`prepare-commit`, etc.) com seus comandos, matchers e timeouts.
+   - *Repository Hook Approvals:* tabela de hooks de repositório autorizados (`hook-approvals.json`), exibindo repositório, comando, hash SHA-256 e data de aprovação, com botão **Revoke** para revogar permissões concedidas.
+
+6. **Stacks & Restack (Fatias 4 e 5):**
+   - *Restack with Dirty Working Tree:* comportamento ao rodar restack com alterações não commitadas (política de bloqueio seguro de Q2).
+   - *Push Strategy:* preferência padrão para push de stacks (`--force-with-lease`).
+
+7. **Conflict Resolver (Fatia 6):**
+   - *Conflict Style:* estilo de exibição de conflitos (padrão `zdiff3`).
+   - *Git rerere:* ativar/desativar reutilização automática de resoluções gravadas.
+
+8. **MCP & Agents (Fatia 7):**
+   - *MCP Server:* ativar/desativar servidor interno e caminho do socket Unix.
+   - *Authentication:* geração e revogação de tokens de autenticação para o shim `gitmaster mcp`.
+   - *Agent Policies:* política de permissões para ações de `Actor::Agent` (quais ferramentas exigem aprovação humana explícita na UI antes do apply).
+
+9. **Local Review (Fatia 8):**
+   - *Review Storage:* local de armazenamento de comentários e snapshots de review no diretório comum do Git.
