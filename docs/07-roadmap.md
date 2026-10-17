@@ -103,17 +103,23 @@ Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu 
 
 Pronto quando: a Working Copy fica no desenho simplificado, toda ação da tela existe no registro e é alcançável por tecla, menu de contexto e paleta, e uma ação desabilitada explica por quê.
 
-## Fatia 2: hook `prepare-commit` (backend feito; interface a fazer)
+## Fatia 2: hook `prepare-commit` (feita, exceto o log de operações)
 
-Backend entregue (`gm-core/src/hook`, `gm-schema/src/hook.rs`; comandos `ListHooks`, `ApproveHook`, `RunPrepareCommit`, `CancelHook`; aprovações em `~/.local/share/gitmaster/hook-approvals.json`, por repositório). Falta a interface (chip e sugestão no composer, aprovação de hook de repo) e fazer os hooks usarem o PATH do shell de login, como o `git` já usa. Revisada em 2026-10-16 (D29, D30): só o que o Git não tem vira hook do GitMaster. O `pre-commit` e os demais hooks nativos ficam com o Git; Q1 decidida (JSON puro).
+Backend (`gm-core/src/hook`, `gm-schema/src/hook.rs`; comandos `ListHooks`, `ApproveHook`, `RunPrepareCommit`, `CancelHook`; aprovações em `~/.local/share/gitmaster/hook-approvals.json`, por repositório) e interface prontos. Revisada em 2026-10-16 (D29, D30): só o que o Git não tem vira hook do GitMaster. O `pre-commit` e os demais hooks nativos ficam com o Git (D18, D29).
 
-- Contrato JSON versionado em `gm-schema` (entrada: mensagem atual, diff staged, repo; saída: mensagem), sempre JSON.
-- Configuração em `[gitmaster "prepare-commit.<nome>"]` (`command`, `match`, `timeout`), lida do config global e de usuário; hook de repo só roda após aprovação guardada fora do repo, amarrada ao hash do comando (D17).
-- Execução assíncrona com id de correlação, timeout e cancelamento; fingerprint do alvo (HEAD, index tree, hash da mensagem) e reconciliação: estado igual aplica, estado mudado vira sugestão.
-- Chip no composer (rodando, ok, falhou) com cancelar; sugestão com "Replace" e "Discard", sem sobrescrever o que o usuário digitou.
-- Operation log com comando, hash do comando e exit code.
+Feito:
+- Contrato JSON versionado em `gm-schema` (entrada: mensagem atual, diff staged, repo; saída: mensagem), sempre JSON (D30).
+- Configuração em `[gitmaster "prepare-commit.<nome>"]`, lida do config global e de usuário; hook de repo só roda após aprovação guardada fora do repo, amarrada ao hash do comando (D17).
+- Hooks rodam com o PATH do shell de login, como o `git` (o `login_path` do adapter).
+- Execução assíncrona: o cabeçalho da mensagem mostra o estado do run (etapa, pronto, falhou com a razão de uma linha, cancelado) e tem "Cancel" enquanto roda; "Suggest message" o inicia (`commit.suggest_message`).
+- Reconciliação (`gm-ui/src/hook_run.rs`): a resposta preenche a mensagem só se HEAD e o diff staged não mudaram e o texto ainda é o enviado; senão vira sugestão, com "Replace" (troca a mensagem) e "Discard" (mantém o texto). O backend não inclui o hash da mensagem no fingerprint, então essa regra fica na UI.
+- Aprovação de hook de repo: o painel mostra o comando completo, com "Approve" e "Deny". Deny só esconde o painel nesta sessão; nada é gravado.
+- Testes: reconciliação e ciclo do run como funções puras; regras das ações no registro; cenários de smoke para texto digitado preservado, Replace, falha no chip e aprovação de hook de repo (nos dois temas).
 
-Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem travar a UI, e o `pre-commit` nativo segue rodando como antes.
+Falta:
+- Log de operações: o backend já guarda o `HookRecord` (comando, hash, exit code), mas o log de comandos ainda não mostra os hooks.
+
+Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem travar a UI, e o `pre-commit` nativo segue rodando como antes. A primeira parte está pronta; o log de operações fica para a parte final desta fatia.
 
 ## Fatia 3: histórico e branches (visão por nome)
 
