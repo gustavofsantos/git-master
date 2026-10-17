@@ -11,6 +11,7 @@ use gpui::{
 use crate::action_registry::{Action, Args, Context as ActionContext, Reason};
 use crate::theme;
 use crate::view::StatusView;
+use crate::window_chrome;
 
 const ROW_HEIGHT: f32 = 24.;
 /// The gap a separator takes, its line included.
@@ -284,12 +285,13 @@ impl StatusView {
         } else {
             theme::text()
         };
-        let note = match item.state {
-            Err(reason) => Some(reason),
-            Ok(()) => item.action.spec().shortcut,
-        };
+        // The shortcut stays on the row even when the item cannot run yet; the
+        // reason then moves to a hint. Without a shortcut the reason is the note.
+        let reason = item.state.err();
+        let shortcut = item.action.shortcut_label();
+        let note = shortcut.clone().or_else(|| reason.map(str::to_owned));
         let clicked = item.clone();
-        div()
+        let row = div()
             .id(("menu-item", index))
             .h(px(ROW_HEIGHT))
             .px_3()
@@ -310,13 +312,17 @@ impl StatusView {
                     .whitespace_nowrap()
                     .text_color(theme::muted())
                     .child(text)
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                    this.choose_menu_item(clicked.clone(), window, cx);
-                }),
-            )
+            }));
+        let row = match reason {
+            Some(reason) if shortcut.is_some() => row.tooltip(window_chrome::hint(reason)),
+            _ => row,
+        };
+        row.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.choose_menu_item(clicked.clone(), window, cx);
+            }),
+        )
     }
 
     /// The question that replaces the items after a destructive one is chosen:

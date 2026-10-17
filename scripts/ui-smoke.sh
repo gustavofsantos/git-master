@@ -543,6 +543,13 @@ scenario_l() {
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -gt 5000 ] || fail "the branch menu did not open ($differing pixels changed)"
 
+  # The Copy Branch Name row shows its shortcut at the right end, after a label
+  # that stops well to the left. The strip there is blank without it.
+  convert "$SMOKE_OUT/l-branch-menu-$theme.png" -crop "80x20+300+527" +repage "$RUN_DIR/shortcut.png"
+  local ink
+  ink="$(convert "$RUN_DIR/shortcut.png" -format '%[fx:standard_deviation]' info:)"
+  awk -v m="$ink" 'BEGIN { exit !(m > 0.02) }' || fail "Copy Branch Name shows no shortcut at the row's end (sd=$ink)"
+
   xdotool mousemove "$MENU_CHECKOUT_X" "$MENU_CHECKOUT_Y" click 1; sleep 1.5
   head="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
   [ "$head" = "feature/x" ] || fail "HEAD is '$head' after Checkout Branch in the menu, expected 'feature/x'"

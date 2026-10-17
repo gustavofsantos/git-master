@@ -59,6 +59,7 @@ actions!(
         FocusNext,
         FocusPrev,
         OpenPalette,
+        CopyCurrentBranch,
     ]
 );
 
@@ -141,6 +142,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-tab", FocusPrev, None),
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("secondary-k", OpenPalette, None),
+        KeyBinding::new("alt-secondary-c", CopyCurrentBranch, None),
     ]);
     composer::bind_keys(cx);
     diff_pane::bind_keys(cx);
@@ -181,6 +183,7 @@ mod tests {
             "shift-tab",
             "secondary-q",
             "secondary-k",
+            "alt-secondary-c",
         ] {
             let binding = KeyBinding::new(keys, Refresh, Some(KEY_CONTEXT));
             assert_eq!(binding.keystrokes().len(), 1, "{keys}");

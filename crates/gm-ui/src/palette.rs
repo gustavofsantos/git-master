@@ -54,7 +54,7 @@ pub(crate) enum Choice {
 pub(crate) struct Candidate {
     pub(crate) section: Section,
     pub(crate) label: String,
-    pub(crate) shortcut: Option<&'static str>,
+    pub(crate) shortcut: Option<String>,
     pub(crate) choice: Choice,
     /// `Ok` when the choice runs now (or, for `Pick`, can be opened); otherwise
     /// the reason, shown beside the row.
@@ -366,7 +366,7 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
     Candidate {
         section,
         label: spec.title.to_owned(),
-        shortcut: spec.shortcut,
+        shortcut: action.shortcut_label(),
         choice,
         state,
     }

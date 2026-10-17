@@ -178,14 +178,14 @@ const SPECS: [Spec; 27] = [
     spec(
         "branch.checkout",
         "Checkout Branch",
-        None,
+        Some("Enter"),
         ArgKind::Branch,
         Category::Branches,
     ),
     spec(
         "branch.copy_name",
         "Copy Branch Name",
-        None,
+        Some("⌥⌘C"),
         ArgKind::Branch,
         Category::Branches,
     ),
@@ -206,42 +206,42 @@ const SPECS: [Spec; 27] = [
     spec(
         "branch.new_child",
         "New Child Branch",
-        None,
+        Some("⌘B"),
         ArgKind::Branch,
         Category::Branches,
     ),
     spec(
         "stack.restack",
         "Restack This Stack",
-        None,
+        Some("⇧⌘R"),
         ArgKind::Branch,
         Category::Branches,
     ),
     spec(
         "remote.push_with_lease",
         "Push With Lease",
-        None,
+        Some("⇧⌘P"),
         ArgKind::Branch,
         Category::Remote,
     ),
     spec(
         "branch.rename",
         "Rename Branch",
-        None,
+        Some("F2"),
         ArgKind::Branch,
         Category::Branches,
     ),
     spec(
         "branch.delete",
         "Delete Branch",
-        None,
+        Some("⌫"),
         ArgKind::Branch,
         Category::Branches,
     ),
     spec(
         "worktree.create",
         "Create Worktree",
-        None,
+        Some("⌥⌘W"),
         ArgKind::Branch,
         Category::Worktrees,
     ),
@@ -360,6 +360,33 @@ pub enum Action {
     Pull,
 }
 
+/// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
+/// with Cmd read as Ctrl, which is the key the `secondary` bindings use.
+#[must_use]
+pub fn shortcut_text(shortcut: &str) -> String {
+    shortcut_words(shortcut, cfg!(target_os = "macos"))
+}
+
+fn shortcut_words(shortcut: &str, mac: bool) -> String {
+    if mac {
+        return shortcut.to_owned();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut key = String::new();
+    for glyph in shortcut.chars() {
+        match glyph {
+            '⌘' => parts.push("Ctrl".to_owned()),
+            '⌥' => parts.push("Alt".to_owned()),
+            '⇧' => parts.push("Shift".to_owned()),
+            '↵' => key.push_str("Enter"),
+            '⌫' => key.push_str("Backspace"),
+            other => key.push(other),
+        }
+    }
+    parts.push(key);
+    parts.join("+")
+}
+
 /// The reason of an action the engine cannot run yet, whatever its target.
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
@@ -402,6 +429,12 @@ impl Action {
     #[must_use]
     pub fn id(self) -> &'static str {
         self.spec().id
+    }
+
+    /// The shortcut as the window shows it (see `shortcut_text`), if any.
+    #[must_use]
+    pub fn shortcut_label(self) -> Option<String> {
+        self.spec().shortcut.map(shortcut_text)
     }
 
     /// Whether the engine can run the action at all yet. A placeholder is
@@ -747,6 +780,34 @@ mod tests {
             assert_eq!(Action::from_id(action.id()), Some(action));
         }
         assert_eq!(Action::from_id("nope"), None);
+    }
+
+    #[test]
+    fn the_branch_menu_shortcuts_are_the_designs() {
+        let expected = [
+            (Action::CheckoutBranch, "Enter"),
+            (Action::NewChildBranch, "⌘B"),
+            (Action::CreateWorktree, "⌥⌘W"),
+            (Action::Restack, "⇧⌘R"),
+            (Action::PushWithLease, "⇧⌘P"),
+            (Action::CopyBranchName, "⌥⌘C"),
+            (Action::RenameBranch, "F2"),
+            (Action::DeleteBranch, "⌫"),
+        ];
+        for (action, shortcut) in expected {
+            assert_eq!(action.spec().shortcut, Some(shortcut), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn shortcuts_read_as_words_off_macos_with_cmd_as_ctrl() {
+        assert_eq!(shortcut_words("⌘↵", false), "Ctrl+Enter");
+        assert_eq!(shortcut_words("⌥⌘C", false), "Alt+Ctrl+C");
+        assert_eq!(shortcut_words("⇧⌘P", false), "Shift+Ctrl+P");
+        assert_eq!(shortcut_words("⌫", false), "Backspace");
+        assert_eq!(shortcut_words("Space", false), "Space");
+        assert_eq!(shortcut_words("F2", false), "F2");
+        assert_eq!(shortcut_words("⌥⌘C", true), "⌥⌘C");
     }
 
     #[test]

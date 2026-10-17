@@ -458,8 +458,8 @@ fn row_element(
         theme::faint()
     };
     let note = match candidate.state {
-        Err(reason) => Some(reason),
-        Ok(()) => candidate.shortcut,
+        Err(reason) => Some(reason.to_owned()),
+        Ok(()) => candidate.shortcut.clone(),
     };
     div()
         .id(("palette-row", index))

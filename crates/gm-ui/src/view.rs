@@ -37,7 +37,7 @@ use crate::theme;
 use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
-use crate::{FocusNext, FocusPrev, OpenPalette, StartPath};
+use crate::{CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, StartPath};
 
 /// The key context of the change list. Its keys work only while the list has
 /// focus, so typing into the message is never taken as a key.
@@ -547,6 +547,18 @@ impl StatusView {
         cx.notify();
     }
 
+    /// Copy Branch Name on the checked-out branch: the `⌥⌘C` shortcut.
+    pub(crate) fn copy_current_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let head = self
+            .model
+            .status()
+            .and_then(|status| status.branch.head.clone());
+        match head {
+            Some(name) => self.run_action(Action::CopyBranchName, &Args::Branch(name), window, cx),
+            None => self.notify_user("HEAD is detached: there is no branch name to copy.", cx),
+        }
+    }
+
     /// What the registry's rules read, for a run made now.
     pub(crate) fn action_context<'a>(&'a self, message: &'a str) -> ActionContext<'a> {
         ActionContext {
@@ -762,6 +774,9 @@ impl Render for StatusView {
             }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.toggle_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyCurrentBranch, window, cx| {
+                this.copy_current_branch(window, cx);
             }))
             // With no repository, the welcome screen replaces every part below.
             .children(self.welcome.is_none().then(|| self.top_bar(window, cx)))
