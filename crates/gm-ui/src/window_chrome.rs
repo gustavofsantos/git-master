@@ -301,6 +301,12 @@ pub fn header_bar(window: &Window) -> Div {
     }
 }
 
+/// A tooltip that shows `text` on the hint card, for a control that is
+/// disabled and says why.
+pub fn hint(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |_: &mut Window, cx: &mut App| -> AnyView { cx.new(|_| HintCard { text }).into() }
+}
+
 /// The window controls the platform supports, left to right, drawn for the
 /// caller to place at the end of a header row.
 pub fn window_controls(window: &Window) -> Div {

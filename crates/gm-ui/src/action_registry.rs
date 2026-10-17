@@ -125,7 +125,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 25] = [
+const SPECS: [Spec; 27] = [
     spec(
         "file.stage",
         "Stage File",
@@ -301,6 +301,14 @@ const SPECS: [Spec; 25] = [
         ArgKind::None,
         Category::Repository,
     ),
+    spec(
+        "remote.fetch",
+        "Fetch",
+        None,
+        ArgKind::None,
+        Category::Remote,
+    ),
+    spec("remote.pull", "Pull", None, ArgKind::None, Category::Remote),
 ];
 
 const fn spec(
@@ -348,13 +356,15 @@ pub enum Action {
     CancelHook,
     ApproveHook,
     DenyHook,
+    Fetch,
+    Pull,
 }
 
 /// The reason of an action the engine cannot run yet, whatever its target.
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 27] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -380,6 +390,8 @@ impl Action {
         Action::CancelHook,
         Action::ApproveHook,
         Action::DenyHook,
+        Action::Fetch,
+        Action::Pull,
     ];
 
     #[must_use]
@@ -405,6 +417,8 @@ impl Action {
                 | Action::DeleteBranch
                 | Action::CreateWorktree
                 | Action::DiscardFile
+                | Action::Fetch
+                | Action::Pull
         )
     }
 
@@ -427,6 +441,9 @@ impl Action {
     pub fn enabled(self, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
         if !self.takes(args) {
             return Err("No target for this action");
+        }
+        if !self.available() {
+            return Err(NOT_AVAILABLE);
         }
         match self {
             Action::StageFile => {
@@ -516,13 +533,8 @@ impl Action {
             | Action::DiscardSuggestion
             | Action::ApproveHook
             | Action::DenyHook => hook_rule(self, ctx),
-            Action::NewChildBranch
-            | Action::Restack
-            | Action::PushWithLease
-            | Action::RenameBranch
-            | Action::DeleteBranch
-            | Action::CreateWorktree
-            | Action::DiscardFile => Err(NOT_AVAILABLE),
+            // The placeholders, refused above by `available`.
+            _ => Err(NOT_AVAILABLE),
         }
     }
 
@@ -765,6 +777,8 @@ mod tests {
             Action::DeleteBranch,
             Action::CreateWorktree,
             Action::DiscardFile,
+            Action::Fetch,
+            Action::Pull,
         ];
         for action in placeholders {
             let args = match action.spec().args {

@@ -31,6 +31,7 @@ mod text_area;
 mod text_area_element;
 mod text_area_math;
 mod theme;
+mod title_bar;
 mod view;
 mod welcome;
 mod window_chrome;

@@ -34,6 +34,7 @@ use crate::resize;
 use crate::sidebar::Grouping;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
+use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
 use crate::{FocusNext, FocusPrev, OpenPalette, StartPath};
@@ -649,8 +650,8 @@ impl StatusView {
             ""
         };
         window_chrome::header_bar(window)
-            .child(window_chrome::no_drag(self.project_button(cx)))
-            .child(window_chrome::no_drag(self.branch_button(cx)))
+            .h(title_bar::HEIGHT)
+            .child(window_chrome::no_drag(self.title_block(cx)))
             .child(
                 div()
                     .flex()
@@ -666,6 +667,7 @@ impl StatusView {
             .child(div().text_color(muted).child(upstream))
             .child(div().flex_1())
             .child(div().text_color(muted).child(loading))
+            .child(window_chrome::no_drag(self.toolbar(cx)))
             .children(
                 window_chrome::draws_frame(window).then(|| window_chrome::window_controls(window)),
             )

@@ -18,7 +18,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -26,27 +26,29 @@ SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-pr
 WIN_X=82; WIN_Y=50; WIN_W=1280; WIN_H=800   # window geometry, used to crop shots
 WAKE_X=400; WAKE_Y=300                      # first click: black until first input
 NAME_X=420                                  # file path column: a click selects, space stages
-ROW_HANDLERS_Y=186                          # api/handlers.rs (untracked)
-ROW_MOD_Y=138                               # src/ledger/mod.rs
-ROW_TOTAL_Y=162                             # src/ledger/total.rs
-LIST_EMPTY_X=540; LIST_EMPTY_Y=450          # empty list area, takes list focus
+ROW_HANDLERS_Y=194                          # api/handlers.rs (untracked)
+ROW_MOD_Y=146                               # src/ledger/mod.rs
+ROW_TOTAL_Y=170                             # src/ledger/total.rs
+LIST_EMPTY_X=540; LIST_EMPTY_Y=458          # empty list area, takes list focus
 DIFF_CHECK_X=841                            # gutter checkbox in the diff pane
-DIFF_LINE_A_Y=231                           # first pure-insertion row in total.rs
-DIFF_LINE_B_Y=319                           # second pure-insertion row in total.rs
-CHUNK_Y=165                                 # hunk header row of total.rs (its buttons)
+DIFF_LINE_A_Y=239                           # first pure-insertion row in total.rs
+DIFF_LINE_B_Y=327                           # second pure-insertion row in total.rs
+CHUNK_Y=173                                 # hunk header row of total.rs (its buttons)
 CHUNK_DISCARD_X=1181                        # "Discard Chunk" in that row
 CHUNK_STAGE_X=1298                          # "Stage Chunk" in that row (Unstage on Staged)
 CONFIRM_DISCARD_X=1243; CONFIRM_CANCEL_X=1317   # the inline confirmation in that row
 COMPOSER_X=540; COMPOSER_Y=690              # commit message box
 COMMIT_BUTTON_X=530; COMMIT_BUTTON_Y=798    # "Commit on <branch>" under the message box
 LOG_BUTTON_X=1300; LOG_BUTTON_Y=837         # "Git log" button, right end of the status bar
-PROJECT_X=139; PROJECT_Y=67                 # project button at the left of the top bar
+PROJECT_X=139; PROJECT_Y=61                 # project button at the left of the top bar
 RECENT_OTHER_X=150; RECENT_OTHER_Y=185      # second row of the open list: billing-api
-BRANCH_X=242; BRANCH_Y=67                   # branch button, right of the project button
-SIDEBAR_FEATURE_X=160; SIDEBAR_FEATURE_Y=415  # feature/x row in the sidebar (non-current)
-MENU_STAGE_X=470; MENU_STAGE_Y=155          # "Stage File" in the file row's menu, opened at NAME_X, ROW_MOD_Y
-MENU_CHECKOUT_X=190; MENU_CHECKOUT_Y=431    # "Checkout Branch" in the branch menu, opened at SIDEBAR_FEATURE_X/Y
+BRANCH_X=140; BRANCH_Y=81                   # branch button, right of the project button
+SIDEBAR_FEATURE_X=160; SIDEBAR_FEATURE_Y=423  # feature/x row in the sidebar (non-current)
+MENU_STAGE_X=470; MENU_STAGE_Y=163          # "Stage File" in the file row's menu, opened at NAME_X, ROW_MOD_Y
+MENU_CHECKOUT_X=190; MENU_CHECKOUT_Y=439    # "Checkout Branch" in the branch menu, opened at SIDEBAR_FEATURE_X/Y
 CHIP_X=316; CHIP_Y=590; CHIP_W=142; CHIP_H=28   # the hook chip's text in the message header, window-relative
+TITLE_BAR_H=44                              # the title bar: name row over the branch and path row
+TOOLBAR_Y=72; TOOLBAR_FETCH_X=1082; TOOLBAR_RESTACK_X=1322   # Fetch and Restack buttons, right of the title bar
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -705,6 +707,26 @@ scenario_q() {
   [ "$got" = "feat: from repo hook" ] || fail "commit message is '$got', expected the approved hook's answer"
 }
 
+# --- 3r. Title bar: Fetch and Restack are disabled; a click says why ----------
+scenario_r() {
+  local theme="$1" differing
+  shoot "$SMOKE_OUT/r-title-bar-$theme.png"
+  # A click on a disabled button runs nothing and writes the reason in the
+  # status bar, which therefore changes. Comparing the bar's strip is the
+  # check, since the screenshot cannot be read as text here.
+  convert "$SMOKE_OUT/r-title-bar-$theme.png" -crop "${WIN_W}x26+0+$((WIN_H - 26))" +repage "$RUN_DIR/status-before.png"
+  xdotool mousemove "$TOOLBAR_FETCH_X" "$TOOLBAR_Y" click 1; sleep 1
+  shoot "$RUN_DIR/after-fetch.png"
+  convert "$RUN_DIR/after-fetch.png" -crop "${WIN_W}x26+0+$((WIN_H - 26))" +repage "$RUN_DIR/status-after.png"
+  differing="$(compare -metric AE "$RUN_DIR/status-before.png" "$RUN_DIR/status-after.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 300 ] || fail "Fetch did not show its reason in the status bar ($differing pixels changed)"
+
+  xdotool mousemove "$TOOLBAR_RESTACK_X" "$TOOLBAR_Y" click 1; sleep 1
+  shoot "$SMOKE_OUT/r-title-bar-clicked-$theme.png"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -758,6 +780,7 @@ run_scenario() {
     o-suggestion-replace) scenario_o "$theme" ;;
     p-hook-failure) scenario_p "$theme" ;;
     q-repo-hook-approval) scenario_q "$theme" ;;
+    r-title-bar) scenario_r "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app
