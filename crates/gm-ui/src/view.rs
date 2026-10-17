@@ -26,8 +26,9 @@ use crate::resize;
 use crate::sidebar::Grouping;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
+use crate::welcome::{Startup, Welcome};
 use crate::window_chrome;
-use crate::{FocusNext, FocusPrev};
+use crate::{FocusNext, FocusPrev, StartPath};
 
 /// The key context of the change list. Its keys work only while the list has
 /// focus, so typing into the filter or the message is never taken as a key.
@@ -63,6 +64,10 @@ pub struct StatusView {
     recent_store: Option<Arc<recent::Store>>,
     /// Numbers the saves so an older one never lands after a newer one.
     recent_generation: u64,
+    /// The open that starts the window, until it succeeds or fails.
+    pub(crate) startup: Option<Startup>,
+    /// Set while the window shows the welcome screen instead of a repository.
+    pub(crate) welcome: Option<Welcome>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -73,7 +78,7 @@ impl StatusView {
     pub fn new(
         engine: EngineHandle,
         command_log: CommandLog,
-        path: String,
+        start: StartPath,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -90,7 +95,8 @@ impl StatusView {
         })
         .detach();
         Self::follow_command_log(&command_log, cx);
-        let open = engine.dispatch(Actor::Human, CommandKind::OpenRepo { path });
+        let may_fall_back = !start.from_argument;
+        let open = engine.dispatch(Actor::Human, CommandKind::OpenRepo { path: start.path });
         theme::follow(window.appearance());
         let list_focus = cx.focus_handle();
         list_focus.focus(window);
@@ -158,6 +164,11 @@ impl StatusView {
             recents,
             recent_store,
             recent_generation: 0,
+            startup: Some(Startup {
+                id: open,
+                may_fall_back,
+            }),
+            welcome: None,
             _subscriptions: subscriptions,
         }
     }
@@ -180,13 +191,24 @@ impl StatusView {
         let reload = matches!(event, Event::StatusLoaded { .. });
         let committed = matches!(event, Event::Committed { .. });
         let head_before = self.head_name();
+        let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
+        // On the welcome screen the error belongs to the screen, not the status bar.
+        if let Some(welcome) = self.welcome.as_mut()
+            && let Some(error) = self.model.error.take()
+        {
+            welcome.error = Some(error);
+        }
         if committed {
             self.composer.update(cx, |composer, cx| composer.clear(cx));
             Self::expire_notice_later(self.model.notice_generation(), cx);
         }
         if let Some(switched) = self.model.take_switched() {
+            self.welcome = None;
             self.on_switched(switched, cx);
+        }
+        if let Some(startup) = failed_start {
+            self.on_start_failed(startup, cx);
         }
         if let Some(diffs) = shown {
             self.show_diffs(diffs.unstaged, diffs.staged, cx);
@@ -638,8 +660,9 @@ impl Render for StatusView {
                 this.cycle_focus(false, window, cx);
             }))
             .children(title_bar)
-            .child(self.top_bar(cx))
-            .child(
+            // With no repository, the welcome screen replaces every part below.
+            .children(self.welcome.is_none().then(|| self.top_bar(cx)))
+            .children(self.welcome.is_none().then(|| {
                 div()
                     .flex_1()
                     .min_h(px(0.))
@@ -653,9 +676,14 @@ impl Render for StatusView {
                             .min_w(px(0.))
                             .min_h(px(0.))
                             .child(self.diff_pane.clone()),
-                    ),
+                    )
+            }))
+            .children(self.welcome.is_none().then(|| self.status_bar(cx)))
+            .children(
+                self.welcome
+                    .as_ref()
+                    .map(|welcome| self.welcome_body(welcome, cx)),
             )
-            .child(self.status_bar(cx))
             .children(self.log_open.then(|| self.command_log_panel(cx)))
             .children(
                 self.project_menu

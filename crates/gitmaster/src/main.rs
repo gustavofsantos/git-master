@@ -19,6 +19,7 @@ fn main() {
         eprintln!("usage: gitmaster [PATH]");
         std::process::exit(2);
     }
+    let from_argument = first.is_some();
     let path = match first {
         Some(path) => std::path::absolute(path),
         None => std::env::current_dir(),
@@ -46,7 +47,11 @@ fn main() {
         });
     }
     let engine = gm_core::spawn(Box::new(git));
-    gm_ui::run(engine, command_log, path.to_string_lossy().into_owned());
+    let start = gm_ui::StartPath {
+        path: path.to_string_lossy().into_owned(),
+        from_argument,
+    };
+    gm_ui::run(engine, command_log, start);
 }
 
 #[cfg(test)]

@@ -38,7 +38,7 @@ impl ProjectMenu {
 }
 
 /// The last component of a repository root, or the root itself.
-fn folder_name(root: &Path) -> String {
+pub(crate) fn folder_name(root: &Path) -> String {
     root.file_name().map_or_else(
         || root.to_string_lossy().into_owned(),
         |name| name.to_string_lossy().into_owned(),
@@ -134,7 +134,7 @@ impl StatusView {
 
     /// Shows the native folder prompt. Its outcome is handled in a task, so
     /// the UI never waits for the dialog.
-    fn pick_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn pick_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_project_menu(window, cx);
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,

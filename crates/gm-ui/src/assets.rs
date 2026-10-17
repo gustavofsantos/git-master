@@ -60,12 +60,25 @@ const ICONS: &[(&str, &[u8])] = icons![
     "terminal-fill",
 ];
 
+/// The app icon in both themes, as the PNG sizes the welcome screen draws.
+const BRAND: &[(&str, &[u8])] = &[
+    (
+        "brand/gitmaster-dark-256.png",
+        include_bytes!("../../../assets/icons/png/dark/gitmaster-256.png") as &[u8],
+    ),
+    (
+        "brand/gitmaster-light-256.png",
+        include_bytes!("../../../assets/icons/png/light/gitmaster-256.png") as &[u8],
+    ),
+];
+
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         Ok(ICONS
             .iter()
+            .chain(BRAND)
             .find(|(name, _)| *name == path)
             .map(|(_, bytes)| Cow::Borrowed(*bytes)))
     }
@@ -96,5 +109,19 @@ mod tests {
             }
         }
         assert!(Assets.load("icons/missing.svg").unwrap().is_none());
+    }
+
+    #[test]
+    fn both_app_icons_load_as_png() {
+        for path in [
+            "brand/gitmaster-dark-256.png",
+            "brand/gitmaster-light-256.png",
+        ] {
+            let bytes = Assets
+                .load(path)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{path} missing"));
+            assert!(bytes.starts_with(b"\x89PNG"), "{path} is not a png");
+        }
     }
 }

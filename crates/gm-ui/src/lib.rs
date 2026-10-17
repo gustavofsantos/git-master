@@ -26,6 +26,7 @@ mod text_area_element;
 mod text_area_math;
 mod theme;
 mod view;
+mod welcome;
 mod window_chrome;
 
 use gm_core::EngineHandle;
@@ -52,8 +53,17 @@ actions!(
     ]
 );
 
-/// Opens the window on the repository at `path` and runs until it closes.
-pub fn run(engine: EngineHandle, command_log: CommandLog, path: String) {
+/// Where the window starts: the path given on the command line, or the
+/// working directory when none was given.
+pub struct StartPath {
+    pub path: String,
+    /// Whether the path came from the command line.
+    pub from_argument: bool,
+}
+
+/// Opens the window on the repository at the start path, or on the welcome
+/// screen when that is not a repository, and runs until it closes.
+pub fn run(engine: EngineHandle, command_log: CommandLog, start: StartPath) {
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
@@ -90,7 +100,7 @@ pub fn run(engine: EngineHandle, command_log: CommandLog, path: String) {
                 ..WindowOptions::default()
             };
             let opened = cx.open_window(options, move |window, cx| {
-                cx.new(|cx| StatusView::new(engine, command_log, path, window, cx))
+                cx.new(|cx| StatusView::new(engine, command_log, start, window, cx))
             });
             if let Err(error) = opened {
                 eprintln!("gitmaster: {error}");
