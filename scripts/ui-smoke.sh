@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -58,6 +58,8 @@ DETAIL_PANEL_CROP="360x700+920+88"           # the commit detail panel, window-r
 COMMIT_FILE_X=1082; COMMIT_FILE_Y=505        # api/new.rs, the first file row of the feat commit
 SPLIT_FILE_X=1082; SPLIT_CALC_Y=449          # src/calc.rs, the file row of the split fixture's commit
 LAYOUT_SPLIT_X=1320; LAYOUT_UNIFIED_X=1257; LAYOUT_Y=196   # "Split" and "Unified" in the diff header
+STACK_A_Y=455; STACK_B_Y=480; STACK_C_Y=506   # a.txt, b.txt, c.txt rows of the stack fixture's commit (H4c)
+STACK_LIST_CROP="1040x520+322+222"           # the stacked diff's list, screen coordinates
 WORK_LAYOUT_SPLIT_X=1320; WORK_LAYOUT_Y=120               # "Split" in the Working Copy diff header
 SPLIT_OLD_CHECK_X=797; SPLIT_NEW_CHECK_X=1107             # gutter checkboxes of the split cells (old, new)
 MOD_ENTRY_Y=217                                           # src/ledger/mod.rs: the -/+ pair row (entry, ledger)
@@ -1134,6 +1136,11 @@ run_scenario() {
     echo "PASS  $LABEL"
     return
   fi
+  if [ "$base" = h-commit-stack ]; then
+    scenario_commit_stack "$theme"
+    echo "PASS  $LABEL"
+    return
+  fi
   if [ "$base" = h-commit-diff-split ]; then
     make_split_repo "$RUN_DIR/detail"
     scenario_commit_diff_split "$theme"
@@ -1301,10 +1308,12 @@ scenario_commit_detail() {
     || fail "reading a commit detail changed the repository"
 }
 
-# --- 3m. A file of a commit opens its diff, read-only (H4) ---------------------
+# --- 3m. The files of a commit open as one stacked diff, read-only (H4, H4c) ---
 # The feat commit has an added, a deleted, a binary and a renamed file, and a
-# modified one. Down steps to the next file; Escape goes back to the commit.
-# The fixture has an unstaged change: no key of the diff may stage or unstage it.
+# modified one. Clicking a file opens every file of the commit on one page; Escape
+# goes back to the commit. This fixture fits on screen, so the page does not move
+# when another file is clicked. The fixture has an unstaged change: no key of the
+# diff may stage or unstage it.
 scenario_commit_diff() {
   local repo="$RUN_DIR/detail" theme="$1" status_before differing
   launch_app "$theme" "$repo"
@@ -1321,14 +1330,6 @@ scenario_commit_diff() {
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -gt 20000 ] || fail "the file diff did not replace the commit view ($differing pixels changed)"
 
-  # Positive control: Down reaches the diff pane and moves to the next file.
-  xdotool key Down; sleep 1.5
-  shoot "$SMOKE_OUT/h-commit-diff-deleted-$theme.png"
-  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-added-$theme.png" "$SMOKE_OUT/h-commit-diff-deleted-$theme.png" null: 2>&1 || true)"
-  read -r differing _ <<<"$differing"
-  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
-  [ "$differing" -gt 2000 ] || fail "Down did not move to the next file ($differing pixels changed)"
-
   # Stage, unstage and discard keys do nothing in a commit's diff.
   xdotool key a s space u; sleep 1
   [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
@@ -1340,10 +1341,164 @@ scenario_commit_diff() {
   read -r differing _ <<<"$differing"
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -lt 2000 ] || fail "Escape did not go back to the commit view ($differing pixels changed)"
+
+  # Another file of the same commit opens the same page, since all of it fits.
+  xdotool mousemove "$COMMIT_FILE_X" "$(( COMMIT_FILE_Y + 25 ))" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-second-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-added-$theme.png" "$SMOKE_OUT/h-commit-diff-second-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -lt 2000 ] || fail "a second file's click changed the stacked page of a short commit ($differing pixels changed)"
   stop_app
 
   [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
     || fail "reading a commit's diff changed the repository"
+}
+
+# --- 3n. A commit's files as one stacked diff, taller than the window (H4c) ----
+# Three files of 60 lines, two changed lines in each: about 57 rows, more than
+# the list shows, so the page scrolls. Clicking b.txt puts b.txt at the top;
+# Ctrl+Shift+N and Ctrl+Shift+P move between the files, and Up, Down, PageUp and
+# PageDown scroll. The vim letters do nothing here. The layout switch keeps the
+# file at the top.
+make_stack_repo() {
+  local repo="$1" f i
+  rm -rf "$repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.name "gm smoke"
+  git -C "$repo" config user.email "smoke@example.invalid"
+  git -C "$repo" config commit.gpgsign false
+  for f in a b c; do
+    for i in $(seq 1 60); do printf '%s line %s\n' "$f" "$i"; done > "$repo/$f.txt"
+  done
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m "init"
+  # Each file changes two lines at its own place, so the files do not look alike.
+  local first=(10 20 30) second=(50 40 55) files=(a b c) n
+  for n in 0 1 2; do
+    sed -i -e "s/^\\(.\\) line ${first[$n]}\$/\\1 CHANGED ${first[$n]}/" \
+      -e "s/^\\(.\\) line ${second[$n]}\$/\\1 CHANGED ${second[$n]}/" "$repo/${files[$n]}.txt"
+  done
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m "feat: change three files" -m "Body line."
+}
+
+# How many pixels differ between two screenshots (AE), or the whole of them when
+# the images cannot be compared.
+pixels_changed() {
+  local differing
+  differing="$(compare -metric AE "$1" "$2" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  echo "$differing"
+}
+
+# The stacked diff's list, cut from a window screenshot. Its whole height is
+# compared: the file names differ by a letter, too little to tell files apart
+# by the first rows alone, but a scrolled list shifts every row.
+stack_top() {
+  convert "$1" -crop "$STACK_LIST_CROP" +repage "$2"
+}
+
+scenario_commit_stack() {
+  local repo="$RUN_DIR/stack" theme="$1" status_before differing
+  local top_a top_b top_n top_p top_down top_up top_pd top_pu
+  make_stack_repo "$repo"
+  launch_app "$theme" "$repo"
+  xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
+  # The stack fixture's commit is HEAD, the top row of the history list.
+  xdotool mousemove "$HISTORY_ROW_X" "$HISTORY_ROW_TOP_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-commit-$theme.png"
+  status_before="$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)"
+
+  # Click b.txt: the page opens with b.txt at its top, and a.txt above it.
+  xdotool mousemove "$COMMIT_FILE_X" "$STACK_B_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-b-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-b-$theme.png" "$RUN_DIR/top-b.png"
+  # Back to the commit view, then a.txt: its page must differ from b.txt's (positive control).
+  xdotool key Escape; sleep 1.5
+  xdotool mousemove "$COMMIT_FILE_X" "$STACK_A_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-a-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-a-$theme.png" "$RUN_DIR/top-a.png"
+  differing="$(pixels_changed "$RUN_DIR/top-a.png" "$RUN_DIR/top-b.png")"
+  [ "$differing" -gt 2000 ] || fail "a.txt and b.txt open with the same top ($differing pixels changed)"
+
+  # Ctrl+Shift+N from a.txt lands on the same page as clicking b.txt.
+  xdotool key ctrl+shift+n; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-next-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-next-$theme.png" "$RUN_DIR/top-next.png"
+  differing="$(pixels_changed "$RUN_DIR/top-next.png" "$RUN_DIR/top-b.png")"
+  [ "$differing" -lt 2000 ] || fail "Ctrl+Shift+N did not put b.txt at the top ($differing pixels changed)"
+
+  # Ctrl+Shift+P goes back to a.txt.
+  xdotool key ctrl+shift+p; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-prev-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-prev-$theme.png" "$RUN_DIR/top-prev.png"
+  differing="$(pixels_changed "$RUN_DIR/top-prev.png" "$RUN_DIR/top-a.png")"
+  [ "$differing" -lt 2000 ] || fail "Ctrl+Shift+P did not put a.txt back at the top ($differing pixels changed)"
+
+  # Down scrolls a row at a time, Up takes it back; a.txt's own hunks are reachable this way.
+  xdotool key Down Down Down; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-down-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-down-$theme.png" "$RUN_DIR/top-down.png"
+  differing="$(pixels_changed "$RUN_DIR/top-down.png" "$RUN_DIR/top-a.png")"
+  [ "$differing" -gt 2000 ] || fail "Down did not scroll the stack ($differing pixels changed)"
+  xdotool key Up Up Up; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-up-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-up-$theme.png" "$RUN_DIR/top-up.png"
+  differing="$(pixels_changed "$RUN_DIR/top-up.png" "$RUN_DIR/top-a.png")"
+  [ "$differing" -lt 2000 ] || fail "Up did not scroll the stack back ($differing pixels changed)"
+
+  # PageDown moves a page; PageUp takes it back.
+  xdotool key Next; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-pagedown-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-pagedown-$theme.png" "$RUN_DIR/top-pd.png"
+  differing="$(pixels_changed "$RUN_DIR/top-pd.png" "$RUN_DIR/top-a.png")"
+  [ "$differing" -gt 2000 ] || fail "PageDown did not scroll a page ($differing pixels changed)"
+  xdotool key Prior; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-pageup-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-pageup-$theme.png" "$RUN_DIR/top-pu.png"
+  differing="$(pixels_changed "$RUN_DIR/top-pu.png" "$RUN_DIR/top-a.png")"
+  [ "$differing" -lt 2000 ] || fail "PageUp did not scroll a page back ($differing pixels changed)"
+
+  # Vim letters are not keys here: nothing moves and nothing is staged.
+  xdotool key j k n p h l; sleep 1
+  shoot "$SMOKE_OUT/h-commit-stack-letters-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-letters-$theme.png" "$RUN_DIR/top-letters.png"
+  differing="$(pixels_changed "$RUN_DIR/top-letters.png" "$RUN_DIR/top-up.png")"
+  [ "$differing" -lt 2000 ] || fail "a vim letter moved the stacked diff ($differing pixels changed)"
+  [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
+    || fail "a key pressed in the stacked diff changed the repository"
+
+  # Split covers every file, and the page stays at the file it was on: Ctrl+Shift+N
+  # in the split view moves on from a.txt.
+  xdotool mousemove "$LAYOUT_SPLIT_X" "$LAYOUT_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-split-$theme.png"
+  differing="$(pixels_changed "$SMOKE_OUT/h-commit-stack-letters-$theme.png" "$SMOKE_OUT/h-commit-stack-split-$theme.png")"
+  [ "$differing" -gt 20000 ] || fail "Split did not change the stacked diff ($differing pixels changed)"
+  xdotool key ctrl+shift+n; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-split-next-$theme.png"
+  differing="$(pixels_changed "$SMOKE_OUT/h-commit-stack-split-$theme.png" "$SMOKE_OUT/h-commit-stack-split-next-$theme.png")"
+  [ "$differing" -gt 2000 ] || fail "Ctrl+Shift+N did not move on in the split view ($differing pixels changed)"
+
+  # Back to Unified, the file at the top is the one the split view moved to (b.txt).
+  xdotool mousemove "$LAYOUT_UNIFIED_X" "$LAYOUT_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-unified-again-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-unified-again-$theme.png" "$RUN_DIR/top-again.png"
+  differing="$(pixels_changed "$RUN_DIR/top-again.png" "$RUN_DIR/top-b.png")"
+  [ "$differing" -lt 2000 ] || fail "Unified did not keep b.txt at the top ($differing pixels changed)"
+
+  # Escape goes back to the commit view.
+  xdotool key Escape; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-back-$theme.png"
+  differing="$(pixels_changed "$SMOKE_OUT/h-commit-stack-commit-$theme.png" "$SMOKE_OUT/h-commit-stack-back-$theme.png")"
+  [ "$differing" -lt 2000 ] || fail "Escape did not go back to the commit view ($differing pixels changed)"
+  stop_app
+
+  [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
+    || fail "reading a commit's stacked diff changed the repository"
 }
 
 # --- 3k. Split layout of a commit's diff (H4b-A, D39 to D41) --------------------
@@ -1395,24 +1550,7 @@ scenario_commit_diff_split() {
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -gt 20000 ] || fail "Split did not change the diff ($differing pixels changed)"
 
-  # A pure addition and a pure deletion: one side is empty, and the file is not calc.rs.
-  xdotool key Up; sleep 1.5
-  shoot "$SMOKE_OUT/h-commit-diff-split-added-$theme.png"
-  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-split-$theme.png" "$SMOKE_OUT/h-commit-diff-split-added-$theme.png" null: 2>&1 || true)"
-  read -r differing _ <<<"$differing"
-  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
-  [ "$differing" -gt 2000 ] || fail "src/added.rs did not open in the split view ($differing pixels changed)"
-  # Two Down presses back to back: the second one is pressed while the first file
-  # loads, and must still step on. Up then returns to calc.rs only if both landed.
-  xdotool key Down Down; sleep 1.5
-  shoot "$SMOKE_OUT/h-commit-diff-split-gone-$theme.png"
-  xdotool key Up; sleep 1.5
-  shoot "$SMOKE_OUT/h-commit-diff-split-recheck-$theme.png"
-  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-split-$theme.png" "$SMOKE_OUT/h-commit-diff-split-recheck-$theme.png" null: 2>&1 || true)"
-  read -r differing _ <<<"$differing"
-  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
-  [ "$differing" -lt 2000 ] || fail "the second Down press was lost: Up from src/gone.rs did not return to src/calc.rs ($differing pixels changed)"
-
+  # Unified comes back with the same page, and the saved choice is kept below.
   xdotool mousemove "$LAYOUT_UNIFIED_X" "$LAYOUT_Y" click 1; sleep 1.5
   shoot "$SMOKE_OUT/h-commit-diff-split-back-$theme.png"
   differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-split-unified-$theme.png" "$SMOKE_OUT/h-commit-diff-split-back-$theme.png" null: 2>&1 || true)"
