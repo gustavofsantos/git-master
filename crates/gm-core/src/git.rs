@@ -19,7 +19,7 @@ use crate::commit_detail;
 use crate::diff::{hunk_patch, parse_unified};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
-use crate::port::DetailRead;
+use crate::port::{DetailRead, FileDiffRead};
 use crate::stage_math;
 use crate::worktree;
 use crate::{GitError, GitPort};
@@ -505,10 +505,7 @@ impl GitPort for SubprocessGit {
     /// The detail of commit `oid`: its header, then its files against the first
     /// parent. Two `git show` runs, neither logged (D28), both stoppable.
     fn commit_detail(&self, root: &Path, oid: &str) -> Result<DetailRead, GitError> {
-        // A full or abbreviated id is hex; anything else never reaches git's arguments.
-        if oid.is_empty() || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(GitError(format!("not a commit id: {oid:?}")));
-        }
+        require_commit_id(oid)?;
         let git = self.clone();
         let root = root.to_path_buf();
         let oid = oid.to_owned();
@@ -545,6 +542,50 @@ impl GitPort for SubprocessGit {
             detail.files = files;
             detail.more_files = more;
             Ok(detail)
+        }))
+    }
+
+    /// The diff of `path` in commit `oid` against its first parent, or against
+    /// nothing for a root commit. A rename passes its source too, so git pairs
+    /// both names. Neither git call is logged (D28); both are stoppable.
+    fn commit_file_diff(
+        &self,
+        root: &Path,
+        oid: &str,
+        path: &str,
+        old_path: Option<&str>,
+    ) -> Result<FileDiffRead, GitError> {
+        require_commit_id(oid)?;
+        let git = self.clone();
+        let root = root.to_path_buf();
+        let oid = oid.to_owned();
+        let path = path.to_owned();
+        let old_path = old_path.map(str::to_owned);
+        Ok(Box::new(move |stop: &AtomicBool| {
+            let mut args = vec![
+                "-c",
+                "core.quotepath=off",
+                "--literal-pathspecs",
+                "show",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-show-signature",
+                "--histogram",
+                "-U3",
+                "--format=",
+                "--patch",
+                "--diff-merges=first-parent",
+                "--root",
+                "-M",
+                oid.as_str(),
+                "--",
+            ];
+            if let Some(old) = old_path.as_deref() {
+                args.push(old);
+            }
+            args.push(path.as_str());
+            let raw = git.run_stoppable(&root, &args, stop)?;
+            parse_unified(&path, &raw)
         }))
     }
 
@@ -1105,6 +1146,14 @@ impl Drop for LogStream {
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+/// A full or abbreviated id is hex; anything else never reaches git's arguments.
+fn require_commit_id(oid: &str) -> Result<(), GitError> {
+    if oid.is_empty() || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GitError(format!("not a commit id: {oid:?}")));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -74,6 +74,14 @@ pub enum CommandKind {
     LoadCommitDetail {
         oid: String,
     },
+    /// Reads the diff of `path` in commit `oid`, against its first parent. For a
+    /// rename, `old_path` is the source, so git pairs the two sides. Never recorded
+    /// in the command log (D28). A request in flight is superseded by the next one.
+    LoadCommitFileDiff {
+        oid: String,
+        path: String,
+        old_path: Option<String>,
+    },
     /// A local branch, or a remote branch such as `origin/feature` (a local
     /// tracking branch is created for it when none exists).
     Checkout {
@@ -248,6 +256,11 @@ pub enum Event {
     CommitDetailLoaded {
         id: OperationId,
         detail: CommitDetail,
+    },
+    /// Answers `LoadCommitFileDiff`. A binary file has no hunks and says so.
+    CommitFileDiffLoaded {
+        id: OperationId,
+        diff: FileDiff,
     },
     /// Answers `ListWorktrees`, and follows each `RefreshStatus` and
     /// `OpenRepo`, so the worktree list is as fresh as the status.

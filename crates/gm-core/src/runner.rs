@@ -10,6 +10,7 @@ use async_channel::{Receiver, Sender};
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId};
 
 use crate::commit_detail::DetailReport;
+use crate::commit_diff::FileDiffReport;
 use crate::history::HistoryReport;
 use crate::hook::{ApprovalStore, Report};
 use crate::{Engine, GitPort};
@@ -23,6 +24,7 @@ enum Message {
     Hook(Report),
     History(HistoryReport),
     Detail(DetailReport),
+    FileDiff(FileDiffReport),
 }
 
 /// Cloneable front door to the engine thread. The thread stops when every
@@ -129,6 +131,16 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                         })
                         .expect("spawn a detail thread");
                 }
+                for job in engine.take_file_diff_jobs() {
+                    let reports = reports.clone();
+                    std::thread::Builder::new()
+                        .name("gm-file-diff".into())
+                        .spawn(move || {
+                            let report = job.run();
+                            let _ = reports.send_blocking(Message::FileDiff(report));
+                        })
+                        .expect("spawn a file diff thread");
+                }
                 for plan in engine.take_jobs() {
                     let reports = reports.clone();
                     std::thread::Builder::new()
@@ -151,6 +163,10 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
             }
             Message::Detail(report) => {
                 let events = engine.detail_report(report);
+                broadcast(events, &mut subscribers);
+            }
+            Message::FileDiff(report) => {
+                let events = engine.file_diff_report(report);
                 broadcast(events, &mut subscribers);
             }
         }

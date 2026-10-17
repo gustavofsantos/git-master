@@ -30,6 +30,8 @@ impl Side {
 pub enum Mode {
     /// The Working Copy: stage, unstage and discard.
     Working,
+    /// A commit's diff (H4): it only shows. No control acts on the repository.
+    ReadOnly,
 }
 
 /// The controls a mode shows and accepts. A control that is off is not drawn,
@@ -51,6 +53,11 @@ pub fn controls(mode: Mode) -> Controls {
             side_selector: true,
             line_selection: true,
             chunk_actions: true,
+        },
+        Mode::ReadOnly => Controls {
+            side_selector: false,
+            line_selection: false,
+            chunk_actions: false,
         },
     }
 }
@@ -445,6 +452,18 @@ mod tests {
             header: String::new(),
             lines,
         }
+    }
+
+    #[test]
+    fn a_read_only_diff_has_no_chunk_actions_no_line_selection_and_no_side_switch() {
+        assert_eq!(
+            controls(Mode::ReadOnly),
+            Controls {
+                side_selector: false,
+                line_selection: false,
+                chunk_actions: false,
+            }
+        );
     }
 
     #[test]

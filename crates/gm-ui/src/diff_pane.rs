@@ -23,6 +23,9 @@ use crate::theme;
 
 /// The key context the pane's bindings are scoped to.
 const CONTEXT: &str = "DiffPane";
+/// The key context of a read-only pane (H4): navigation only, with Up and Down
+/// moving between the files of the commit.
+const CONTEXT_READ_ONLY: &str = "DiffPaneReadOnly";
 
 /// Height of every list row; `uniform_list` needs equal heights.
 const ROW_HEIGHT: f32 = 22.;
@@ -42,6 +45,9 @@ actions!(
         UnstageSelectedLines,
         ClearSelection,
         ToggleVisual,
+        PrevFile,
+        NextFile,
+        LeaveCommit,
     ]
 );
 
@@ -56,6 +62,12 @@ pub enum DiffPaneEvent {
     /// Stage or unstage of selected lines (D24), sent to the engine as is.
     Stage(StageTarget),
     Unstage(StageTarget),
+    /// Up or Down in a read-only pane: the previous or next file of the commit.
+    StepFile {
+        forward: bool,
+    },
+    /// Escape in a read-only pane: back to the commit view.
+    LeaveCommit,
 }
 
 /// Visual mode: where it started, and the selection made before it.
@@ -96,9 +108,18 @@ fn sides<'a>(unstaged: Option<&'a FileDiff>, staged: Option<&'a FileDiff>) -> Di
 
 impl DiffPane {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::with_mode(Mode::Working, cx)
+    }
+
+    /// A pane that only shows one file of a commit (H4).
+    pub fn read_only(cx: &mut Context<Self>) -> Self {
+        Self::with_mode(Mode::ReadOnly, cx)
+    }
+
+    fn with_mode(mode: Mode, cx: &mut Context<Self>) -> Self {
         Self {
             focus: cx.focus_handle(),
-            mode: Mode::Working,
+            mode,
             scroll: UniformListScrollHandle::new(),
             unstaged: None,
             staged: None,
@@ -158,6 +179,22 @@ impl DiffPane {
         } else {
             self.cursor = next_changed_line(&self.rows, self.diffs(), 0).unwrap_or(0);
         }
+        cx.notify();
+    }
+
+    /// Shows one file's diff of a commit (H4). Its hunks are the only side, and
+    /// nothing is selected.
+    pub fn show_read_only(&mut self, diff: FileDiff, cx: &mut Context<Self>) {
+        self.unstaged = Some(diff);
+        self.staged = None;
+        self.side = Side::Unstaged;
+        self.rows = build_rows(self.diffs(), Side::Unstaged);
+        self.selection.clear();
+        self.visual = None;
+        self.pending = None;
+        self.discard_armed = None;
+        self.cursor = next_changed_line(&self.rows, self.diffs(), 0).unwrap_or(0);
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -332,6 +369,20 @@ impl DiffPane {
         cx.notify();
     }
 
+    /// Up or Down: asks the view for the file next to this one. Only a read-only pane asks.
+    fn step_file(&self, forward: bool, cx: &mut Context<Self>) {
+        if self.mode == Mode::ReadOnly {
+            cx.emit(DiffPaneEvent::StepFile { forward });
+        }
+    }
+
+    /// Escape in a read-only pane goes back to the commit view.
+    fn leave_commit(&self, cx: &mut Context<Self>) {
+        if self.mode == Mode::ReadOnly {
+            cx.emit(DiffPaneEvent::LeaveCommit);
+        }
+    }
+
     /// Escape ends a pending discard or visual mode first, then clears the selection.
     fn escape(&mut self, cx: &mut Context<Self>) {
         self.pending = None;
@@ -367,6 +418,13 @@ impl DiffPane {
         }
         let binary = self.unstaged.as_ref().is_some_and(|d| d.binary)
             || self.staged.as_ref().is_some_and(|d| d.binary);
+        if self.mode == Mode::ReadOnly {
+            return Some(if binary {
+                "Binary file: its contents are not shown."
+            } else {
+                "No text changes in this file."
+            });
+        }
         Some(match (binary, self.side) {
             (true, _) => "Binary file (n/a)",
             (false, Side::Unstaged) => "No unstaged changes",
@@ -607,12 +665,12 @@ impl DiffPane {
                     .text_color(theme::muted())
                     .child(hunk_header_text(hunk)),
             )
-            .child(
+            .children(controls(self.mode).line_selection.then(|| {
                 div()
                     .flex_none()
                     .text_color(theme::muted())
-                    .child(format!("{selected} of {total} lines")),
-            )
+                    .child(format!("{selected} of {total} lines"))
+            }))
             .children(controls(self.mode).chunk_actions.then_some(buttons))
             .into_any_element()
     }
@@ -788,6 +846,21 @@ fn chunk_button(
 /// Binds the pane's keys; called once at startup.
 pub fn bind_keys(cx: &mut gpui::App) {
     cx.bind_keys(key_bindings());
+    cx.bind_keys(read_only_key_bindings());
+}
+
+/// The keys of a read-only pane. Only navigation is bound: no key here reaches a
+/// stage, unstage or discard action, because none of them is bound in this context.
+fn read_only_key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("j", NextChangedLine, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("k", PrevChangedLine, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("n", NextHunk, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("p", PrevHunk, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("down", NextFile, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("up", PrevFile, Some(CONTEXT_READ_ONLY)),
+        KeyBinding::new("escape", LeaveCommit, Some(CONTEXT_READ_ONLY)),
+    ]
 }
 
 fn key_bindings() -> Vec<KeyBinding> {
@@ -819,9 +892,16 @@ impl Render for DiffPane {
                 .into_any_element(),
             None => self.list(cx),
         };
+        let context = match self.mode {
+            Mode::Working => CONTEXT,
+            Mode::ReadOnly => CONTEXT_READ_ONLY,
+        };
         div()
-            .key_context(CONTEXT)
+            .key_context(context)
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &PrevFile, _, cx| this.step_file(false, cx)))
+            .on_action(cx.listener(|this, _: &NextFile, _, cx| this.step_file(true, cx)))
+            .on_action(cx.listener(|this, _: &LeaveCommit, _, cx| this.leave_commit(cx)))
             .on_action(cx.listener(|this, _: &NextChangedLine, _, cx| this.step_changed(true, cx)))
             .on_action(cx.listener(|this, _: &PrevChangedLine, _, cx| this.step_changed(false, cx)))
             .on_action(cx.listener(|this, _: &NextHunk, _, cx| this.step_hunk(true, cx)))
@@ -858,6 +938,7 @@ mod tests {
     #[test]
     fn every_key_binding_parses() {
         assert_eq!(key_bindings().len(), 12);
+        assert_eq!(read_only_key_bindings().len(), 7);
     }
 
     #[test]

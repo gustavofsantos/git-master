@@ -27,6 +27,10 @@ impl std::error::Error for GitError {}
 /// it ends early and its answer is not wanted.
 pub type DetailRead = Box<dyn FnOnce(&AtomicBool) -> Result<CommitDetail, GitError> + Send>;
 
+/// The read of one file's diff in a commit, started by `GitPort::commit_file_diff`.
+/// It stops the same way a `DetailRead` does (H4).
+pub type FileDiffRead = Box<dyn FnOnce(&AtomicBool) -> Result<FileDiff, GitError> + Send>;
+
 /// What the core needs from Git. Adapters implement it; the core tests with fakes.
 pub trait GitPort: Send {
     /// The working tree root that contains `path`.
@@ -89,6 +93,22 @@ pub trait GitPort: Send {
     fn commit_detail(&self, _root: &Path, _oid: &str) -> Result<DetailRead, GitError> {
         Err(GitError(
             "commit detail is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Starts the read of the diff of `path` in commit `oid` against its first
+    /// parent (the root commit against nothing). `old_path` is a rename's source:
+    /// both paths are given to git so that it pairs them. Validates the id and
+    /// starts nothing else. Never records anything (D28).
+    fn commit_file_diff(
+        &self,
+        _root: &Path,
+        _oid: &str,
+        _path: &str,
+        _old_path: Option<&str>,
+    ) -> Result<FileDiffRead, GitError> {
+        Err(GitError(
+            "commit file diff is not supported by this adapter".into(),
         ))
     }
 

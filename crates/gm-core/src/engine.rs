@@ -11,6 +11,7 @@ use gm_schema::{
 
 use crate::GitPort;
 use crate::commit_detail::{DetailJob, DetailReport};
+use crate::commit_diff::{FileDiffJob, FileDiffReport};
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::worktree;
@@ -45,6 +46,10 @@ pub struct Engine {
     detail: Option<ActiveDetail>,
     /// Detail reads accepted since the last call; see `take_detail_jobs`.
     detail_jobs: Vec<DetailJob>,
+    /// The commit file diff read in flight, if any. A new request supersedes it.
+    file_diff: Option<ActiveDetail>,
+    /// File diff reads accepted since the last call; see `take_file_diff_jobs`.
+    file_diff_jobs: Vec<FileDiffJob>,
 }
 
 /// The walk behind the history list: the stream while no job reads it, how to
@@ -64,8 +69,8 @@ struct ActiveHistory {
     kind: CommandKind,
 }
 
-/// A commit detail read that has not answered yet. `stop` is shared with its
-/// job: setting it ends the read.
+/// A commit read (the detail, or one file of it) that has not answered yet.
+/// `stop` is shared with its job: setting it ends the read.
 struct ActiveDetail {
     op: ActiveHistory,
     stop: Arc<AtomicBool>,
@@ -120,6 +125,8 @@ impl Engine {
             history_jobs: Vec::new(),
             detail: None,
             detail_jobs: Vec::new(),
+            file_diff: None,
+            file_diff_jobs: Vec::new(),
         }
     }
 
@@ -148,6 +155,37 @@ impl Engine {
     /// each on a thread and passes its report to `detail_report`.
     pub fn take_detail_jobs(&mut self) -> Vec<DetailJob> {
         std::mem::take(&mut self.detail_jobs)
+    }
+
+    /// The file diff reads accepted since the last call. The caller runs each on a
+    /// thread and passes its report to `file_diff_report`.
+    pub fn take_file_diff_jobs(&mut self) -> Vec<FileDiffJob> {
+        std::mem::take(&mut self.file_diff_jobs)
+    }
+
+    /// Turns the answer of a file diff read into events. A report for a read that
+    /// was superseded, or for a repository that was left, is dropped.
+    pub fn file_diff_report(&mut self, report: FileDiffReport) -> Vec<Event> {
+        match self.file_diff.take() {
+            Some(active) if active.op.id == report.id => {
+                let (state, detail) = match &report.outcome {
+                    Ok(_) => (OperationState::Done, None),
+                    Err(message) => (OperationState::Failed, Some(message.clone())),
+                };
+                let mut events = vec![self.finish_op(&active.op, state, detail)];
+                if let Ok(diff) = report.outcome {
+                    events.push(Event::CommitFileDiffLoaded {
+                        id: report.id,
+                        diff,
+                    });
+                }
+                events
+            }
+            other => {
+                self.file_diff = other;
+                Vec::new()
+            }
+        }
     }
 
     /// Turns the answer of a commit detail read into events. A report for a
@@ -356,6 +394,30 @@ impl Engine {
             }
             return events;
         }
+        if let CommandKind::LoadCommitFileDiff {
+            oid,
+            path,
+            old_path,
+        } = &command.kind
+        {
+            match self.start_file_diff(
+                id,
+                &command.actor,
+                &command.kind,
+                oid,
+                path,
+                old_path.as_deref(),
+            ) {
+                Ok(superseded) => {
+                    events.extend(superseded);
+                    self.advance(&mut op, OperationState::Executing, &mut events);
+                }
+                Err(message) => {
+                    self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
+                }
+            }
+            return events;
+        }
         if let CommandKind::LoadCommitDetail { oid } = &command.kind {
             match self.start_detail(id, &command.actor, &command.kind, oid) {
                 Ok(superseded) => {
@@ -452,8 +514,8 @@ impl Engine {
             CommandKind::LoadHistory | CommandKind::LoadHistoryPage { .. } => {
                 Err("history is started by handle".to_owned())
             }
-            CommandKind::LoadCommitDetail { .. } => {
-                Err("commit detail is started by handle".to_owned())
+            CommandKind::LoadCommitDetail { .. } | CommandKind::LoadCommitFileDiff { .. } => {
+                Err("commit reads are started by handle".to_owned())
             }
             CommandKind::CreateWorktree { .. } => self.add_worktree(id, actor, kind),
             CommandKind::Checkout { branch } => {
@@ -658,7 +720,9 @@ impl Engine {
         let root = self.open_root()?;
         let read = self.git.commit_detail(&root, oid).map_err(|e| e.0)?;
         // The read is built before the old one is stopped, so a refusal keeps the old one.
-        let superseded = self.drop_detail();
+        // A file diff of the commit list before this one is no longer wanted either.
+        let mut superseded = self.drop_detail();
+        superseded.extend(self.drop_file_diff());
         let stop = Arc::new(AtomicBool::new(false));
         self.detail = Some(ActiveDetail {
             op: ActiveHistory {
@@ -670,6 +734,45 @@ impl Engine {
         });
         self.detail_jobs.push(DetailJob { id, read, stop });
         Ok(superseded)
+    }
+
+    /// Starts the diff of one file in commit `oid`. A read in flight is superseded.
+    /// Returns the events of that cancellation.
+    fn start_file_diff(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        oid: &str,
+        path: &str,
+        old_path: Option<&str>,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let read = self
+            .git
+            .commit_file_diff(&root, oid, path, old_path)
+            .map_err(|e| e.0)?;
+        let superseded = self.drop_file_diff();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.file_diff = Some(ActiveDetail {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            stop: Arc::clone(&stop),
+        });
+        self.file_diff_jobs.push(FileDiffJob { id, read, stop });
+        Ok(superseded)
+    }
+
+    /// Ends the file diff read: it is stopped, and a request still in flight is cancelled.
+    fn drop_file_diff(&mut self) -> Vec<Event> {
+        let Some(active) = self.file_diff.take() else {
+            return Vec::new();
+        };
+        active.stop.store(true, Ordering::SeqCst);
+        vec![self.finish_op(&active.op, OperationState::Cancelled, None)]
     }
 
     /// Ends the commit detail read: it is stopped, and a request still in flight
@@ -912,6 +1015,7 @@ impl Engine {
         let mut events = self.loaded(id, &root, status)?;
         events.extend(self.drop_history());
         events.extend(self.drop_detail());
+        events.extend(self.drop_file_diff());
         self.root = Some(root);
         Ok(events)
     }
@@ -1299,6 +1403,157 @@ mod tests {
             actor: Actor::Human,
             state: OperationState::Done,
             detail: None,
+        }));
+    }
+
+    fn file_diff_engine() -> (Engine, FakeGit) {
+        let status = RepoStatus {
+            root: "/r".into(),
+            ..RepoStatus::default()
+        };
+        let git = FakeGit::new("/r", status);
+        git.set_file_diff(Ok(gm_schema::FileDiff {
+            path: "a.txt".into(),
+            old_path: None,
+            binary: false,
+            hunks: Vec::new(),
+        }));
+        (Engine::new(Box::new(git.clone())), git)
+    }
+
+    fn load_file(oid: &str, path: &str) -> CommandKind {
+        CommandKind::LoadCommitFileDiff {
+            oid: oid.into(),
+            path: path.into(),
+            old_path: None,
+        }
+    }
+
+    /// Runs every file diff job the engine accepted, as the runner's threads do.
+    fn run_file_diff_jobs(engine: &mut Engine) -> Vec<Event> {
+        engine
+            .take_file_diff_jobs()
+            .into_iter()
+            .flat_map(|job| engine.file_diff_report(job.run()))
+            .collect()
+    }
+
+    #[test]
+    fn a_commit_file_diff_answers_once_it_is_read() {
+        let (mut engine, _) = file_diff_engine();
+        engine.handle(OperationId(1), &open());
+        let started = engine.handle(
+            OperationId(2),
+            &command(load_file(&"a".repeat(40), "a.txt")),
+        );
+        assert!(
+            !started
+                .iter()
+                .any(|e| matches!(e, Event::CommitFileDiffLoaded { .. }))
+        );
+
+        let events = run_file_diff_jobs(&mut engine);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::CommitFileDiffLoaded { id: OperationId(2), diff } if diff.path == "a.txt"
+        )));
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Done,
+            detail: None,
+        }));
+    }
+
+    #[test]
+    fn a_superseded_commit_file_diff_is_cancelled_stopped_and_dropped() {
+        let (mut engine, _) = file_diff_engine();
+        engine.handle(OperationId(1), &open());
+        engine.handle(
+            OperationId(2),
+            &command(load_file(&"a".repeat(40), "a.txt")),
+        );
+        let superseding = engine.handle(
+            OperationId(3),
+            &command(load_file(&"a".repeat(40), "b.txt")),
+        );
+        assert!(superseding.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Cancelled,
+            detail: None,
+        }));
+
+        let mut jobs = engine.take_file_diff_jobs().into_iter();
+        let stale = jobs.next().unwrap();
+        assert!(stale.stop.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(engine.file_diff_report(stale.run()).is_empty());
+
+        let current = jobs.next().unwrap();
+        assert!(!current.stop.load(std::sync::atomic::Ordering::SeqCst));
+        let events = engine.file_diff_report(current.run());
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::CommitFileDiffLoaded {
+                id: OperationId(3),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn a_new_commit_detail_ends_the_file_diff_in_flight() {
+        let (mut engine, _) = file_diff_engine();
+        engine.handle(OperationId(1), &open());
+        engine.handle(
+            OperationId(2),
+            &command(load_file(&"a".repeat(40), "a.txt")),
+        );
+        let job = engine.take_file_diff_jobs().pop().unwrap();
+
+        let events = engine.handle(OperationId(3), &command(load_detail(&"b".repeat(40))));
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Cancelled,
+            detail: None,
+        }));
+        assert!(job.stop.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(engine.file_diff_report(job.run()).is_empty());
+    }
+
+    #[test]
+    fn a_commit_file_diff_writes_nothing_and_stages_nothing() {
+        let (mut engine, git) = file_diff_engine();
+        engine.handle(OperationId(1), &open());
+        engine.handle(
+            OperationId(2),
+            &command(load_file(&"a".repeat(40), "a.txt")),
+        );
+        run_file_diff_jobs(&mut engine);
+
+        assert_eq!(git.writes(), Vec::<&str>::new());
+        assert!(!engine.log().iter().any(|entry| matches!(
+            entry.kind,
+            CommandKind::Stage { .. } | CommandKind::Unstage { .. }
+        )));
+    }
+
+    #[test]
+    fn a_failed_commit_file_diff_fails_with_gits_message() {
+        let (mut engine, git) = file_diff_engine();
+        git.set_file_diff(Err(GitError("fatal: bad object".into())));
+        engine.handle(OperationId(1), &open());
+        engine.handle(
+            OperationId(2),
+            &command(load_file(&"a".repeat(40), "a.txt")),
+        );
+        let events = run_file_diff_jobs(&mut engine);
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Failed,
+            detail: Some("fatal: bad object".into()),
         }));
     }
 

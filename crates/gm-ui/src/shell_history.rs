@@ -11,11 +11,11 @@ use gm_schema::{
     Actor, Change, CommandKind, CommitDetail, CommitFile, CommitSummary, RefKind, RefLabel,
 };
 use gpui::{
-    Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*,
-    px, uniform_list,
+    ClickEvent, Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div,
+    prelude::*, px, uniform_list,
 };
 
-use crate::model::{CommitPane, HistoryList};
+use crate::model::{CommitPane, HistoryList, file_position, step_index};
 use crate::shell_list::change_letter;
 use crate::theme;
 use crate::view::StatusView;
@@ -70,8 +70,9 @@ impl StatusView {
                     .child(div().font_weight(FontWeight::MEDIUM).child("History"))
                     .child(div().text_xs().text_color(theme::muted()).child(count)),
             )
-            .child(
-                div()
+            .child(match self.model.commit_file.index() {
+                Some(_) => self.commit_file_view(cx),
+                None => div()
                     .flex_1()
                     .min_h(px(0.))
                     .flex()
@@ -85,8 +86,8 @@ impl StatusView {
                             .flex_col()
                             .child(list),
                     )
-                    .child(commit_panel(&self.model.commit)),
-            )
+                    .child(commit_panel(&self.model.commit, cx)),
+            })
     }
 }
 
@@ -224,8 +225,8 @@ fn ref_chip(label: &RefLabel) -> Div {
 }
 
 /// The detail panel (H3): the selected commit's subject, body, hash, author,
-/// date, parents and files. Read-only; the rows are not clickable yet.
-fn commit_panel(pane: &CommitPane) -> Stateful<Div> {
+/// date, parents and files. A file row opens its diff (H4).
+fn commit_panel(pane: &CommitPane, cx: &mut Context<StatusView>) -> Stateful<Div> {
     let content = match pane {
         CommitPane::Empty => message_text("Select a commit to see its details.").into_any_element(),
         CommitPane::Loading(_) => message_text("Loading commit…").into_any_element(),
@@ -233,7 +234,7 @@ fn commit_panel(pane: &CommitPane) -> Stateful<Div> {
             .text_color(theme::error())
             .child(text.clone())
             .into_any_element(),
-        CommitPane::Shown(detail) => commit_detail(detail).into_any_element(),
+        CommitPane::Shown(detail) => commit_detail(detail, cx).into_any_element(),
     };
     div()
         .id("commit-detail")
@@ -257,7 +258,7 @@ fn message_text(text: &'static str) -> Div {
     div().text_color(theme::muted()).child(text)
 }
 
-fn commit_detail(detail: &CommitDetail) -> Div {
+fn commit_detail(detail: &CommitDetail, cx: &mut Context<StatusView>) -> Div {
     let mut column = div()
         .flex()
         .flex_col()
@@ -306,7 +307,13 @@ fn commit_detail(detail: &CommitDetail) -> Div {
                 .flex_col()
                 .gap_1p5()
                 .text_xs()
-                .children(detail.files.iter().map(file_row))
+                .children(
+                    detail
+                        .files
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, file)| file_row(file, ix, cx)),
+                )
                 .children((detail.more_files > 0).then(|| {
                     div()
                         .text_color(theme::muted())
@@ -343,10 +350,12 @@ fn body_block(body: &str) -> Div {
 }
 
 /// One changed file: its change letter, its path (old to new for a rename) and
-/// its line counts.
-fn file_row(file: &CommitFile) -> Div {
+/// its line counts. A click opens the file's diff (H4).
+fn file_row(file: &CommitFile, ix: usize, cx: &mut Context<StatusView>) -> Stateful<Div> {
     let (letter, color) = (change_letter(file.change), change_color(file.change));
     div()
+        .id(("commit-file", ix))
+        .cursor_pointer()
         .flex()
         .flex_row()
         .items_center()
@@ -376,6 +385,9 @@ fn file_row(file: &CommitFile) -> Div {
                 .text_color(theme::muted())
                 .child(file_counts(file)),
         )
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.open_commit_file(ix, window, cx);
+        }))
 }
 
 fn change_color(change: Change) -> Hsla {
@@ -442,6 +454,7 @@ impl StatusView {
     /// refresh of the list. Selecting another commit supersedes the read in flight.
     pub(crate) fn select_commit(&mut self, oid: &str, cx: &mut Context<Self>) {
         self.model.history.select(oid);
+        self.model.commit_file.close();
         let id = self.engine.dispatch(
             Actor::Human,
             CommandKind::LoadCommitDetail {
@@ -450,6 +463,148 @@ impl StatusView {
         );
         self.model.commit.request(id);
         cx.notify();
+    }
+
+    /// Opens file `index` of the selected commit: its diff replaces the commit view (H4).
+    /// The read is the commit's own file, against its first parent.
+    pub(crate) fn select_commit_file(&mut self, index: usize, cx: &mut Context<Self>) {
+        let (oid, path, old_path) = match &self.model.commit {
+            CommitPane::Shown(detail) => match detail.files.get(index) {
+                Some(file) => (detail.oid.clone(), file.path.clone(), file.old_path.clone()),
+                None => return,
+            },
+            _ => return,
+        };
+        let id = self.engine.dispatch(
+            Actor::Human,
+            CommandKind::LoadCommitFileDiff {
+                oid,
+                path,
+                old_path,
+            },
+        );
+        self.model.commit_file.request(id, index);
+        cx.notify();
+    }
+
+    /// A click on a file row: opens it and gives the diff pane the keys.
+    pub(crate) fn open_commit_file(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_commit_file(index, cx);
+        let handle = self.commit_diff_pane.read(cx).focus_handle();
+        window.focus(&handle);
+    }
+
+    /// Up or Down in the diff: the previous or the next file of the commit.
+    pub(crate) fn step_commit_file(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(index) = self.model.commit_file.index() else {
+            return;
+        };
+        let count = match &self.model.commit {
+            CommitPane::Shown(detail) => detail.files.len(),
+            _ => return,
+        };
+        if let Some(next) = step_index(index, count, forward) {
+            self.select_commit_file(next, cx);
+        }
+    }
+
+    /// Back to the commit view, from its button or Escape.
+    pub(crate) fn close_commit_file(&mut self, cx: &mut Context<Self>) {
+        self.model.commit_file.close();
+        cx.notify();
+    }
+
+    /// The diff of the open file in place of the commit list and panel: a header
+    /// with the way back, the commit and the file's place in it, then the diff, a
+    /// loading line or git's message.
+    pub(crate) fn commit_file_view(&self, cx: &mut Context<Self>) -> Div {
+        let index = self.model.commit_file.index().unwrap_or(0);
+        let (short, subject, count) = match &self.model.commit {
+            CommitPane::Shown(detail) => (
+                detail.short.clone(),
+                detail.subject.clone(),
+                detail.files.len(),
+            ),
+            _ => (String::new(), String::new(), 0),
+        };
+        let back = div()
+            .id("commit-file-back")
+            .px_2()
+            .h(px(24.))
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .border_1()
+            .border_color(theme::button_border())
+            .cursor_pointer()
+            .child("Back to commit")
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_commit_file(cx)));
+        let header = div()
+            .h(px(36.))
+            .px_4()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .min_w(px(0.))
+            .border_b_1()
+            .border_color(theme::hairline())
+            .child(back)
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(theme::code_font())
+                    .text_color(theme::muted())
+                    .child(short),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(subject),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(theme::muted())
+                    .child(file_position(index, count)),
+            );
+        let body = if let Some((_, message)) = self.model.commit_file.failure() {
+            div()
+                .px_4()
+                .py_3()
+                .text_color(theme::error())
+                .child(message.to_owned())
+        } else if self.model.commit_file.is_shown() {
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .child(self.commit_diff_pane.clone())
+        } else {
+            div()
+                .px_4()
+                .py_3()
+                .text_color(theme::muted())
+                .child("Loading file…")
+        };
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(body)
     }
 }
 

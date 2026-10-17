@@ -73,6 +73,8 @@ pub struct StatusView {
     pub(crate) scroll: UniformListScrollHandle,
     pub(crate) composer: Entity<Composer>,
     pub(crate) diff_pane: Entity<DiffPane>,
+    /// The read-only pane that shows one file of the open commit (H4).
+    pub(crate) commit_diff_pane: Entity<DiffPane>,
     /// The left column's width, in logical pixels, as the user dragged it.
     pub(crate) left_width: f32,
     /// The commit message box's height, in logical pixels, as dragged.
@@ -155,6 +157,7 @@ impl StatusView {
             cx.new(|cx| TextArea::new("Type a command, branch or file", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
+        let commit_diff_pane = cx.new(DiffPane::read_only);
         let mut subscriptions = vec![
             cx.observe(&branch_filter, |this, filter, cx| {
                 this.on_branch_filter_changed(&filter, cx);
@@ -175,6 +178,13 @@ impl StatusView {
             ),
             cx.subscribe_in(
                 &diff_pane,
+                window,
+                |this, _, event: &DiffPaneEvent, window, cx| {
+                    this.on_diff_pane_event(event, window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &commit_diff_pane,
                 window,
                 |this, _, event: &DiffPaneEvent, window, cx| {
                     this.on_diff_pane_event(event, window, cx);
@@ -207,6 +217,7 @@ impl StatusView {
             scroll: UniformListScrollHandle::new(),
             composer,
             diff_pane,
+            commit_diff_pane,
             left_width: resize::LEFT_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
             sidebar_grouping: Grouping::default(),
@@ -294,6 +305,10 @@ impl StatusView {
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
+        if let Some(diff) = self.model.commit_file.take_fresh_diff() {
+            self.commit_diff_pane
+                .update(cx, |pane, cx| pane.show_read_only(diff, cx));
+        }
         if let Some(outcome) = self.model.creating.take() {
             self.on_worktree_created(outcome, window, cx);
         }
@@ -381,6 +396,7 @@ impl StatusView {
     /// A successful open replaced the repository: the view state of the old
     /// one goes, and the new root joins the recent list.
     fn on_switched(&mut self, switched: Switched, cx: &mut Context<Self>) {
+        self.model.commit_file.close();
         if !switched.same_root {
             self.composer.update(cx, |composer, cx| composer.clear(cx));
         }
@@ -481,6 +497,8 @@ impl StatusView {
                 },
                 cx,
             ),
+            DiffPaneEvent::StepFile { forward } => self.step_commit_file(*forward, cx),
+            DiffPaneEvent::LeaveCommit => self.close_commit_file(cx),
         }
     }
 

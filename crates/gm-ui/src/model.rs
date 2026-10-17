@@ -54,12 +54,119 @@ pub struct Model {
     pub history: HistoryList,
     /// The commit detail panel: the read in flight, or what answered it.
     pub commit: CommitPane,
+    /// The file of the open commit whose diff replaces the commit view (H4).
+    pub commit_file: OpenFile,
     /// The create-worktree dialog's operation in flight, and its outcome.
     pub creating: Creating,
     /// The remove-worktree dialog's inspection, removal in flight and outcome.
     pub removal: Removal,
     /// The prune dialog's listing, prune in flight and outcome.
     pub pruning: Pruning,
+}
+
+/// The file diff of the open commit (H4). Only the answer to the request in
+/// flight is shown; an answer to a superseded or closed request is dropped.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpenFile {
+    view: FileView,
+    /// The diff that arrived for the request in flight, until the view takes it.
+    fresh: Option<FileDiff>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum FileView {
+    /// No file is open: the commit view is shown.
+    #[default]
+    Closed,
+    Loading {
+        id: OperationId,
+        index: usize,
+    },
+    Shown {
+        index: usize,
+    },
+    Failed {
+        index: usize,
+        message: String,
+    },
+}
+
+impl OpenFile {
+    /// Opens file `index` of the commit, as the request `id`. Whatever was open
+    /// before is replaced.
+    pub fn request(&mut self, id: OperationId, index: usize) {
+        *self = Self {
+            view: FileView::Loading { id, index },
+            fresh: None,
+        };
+    }
+
+    /// Back to the commit view; an answer still on its way is dropped.
+    pub fn close(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The index of the file open, or being read.
+    pub fn index(&self) -> Option<usize> {
+        match self.view {
+            FileView::Closed => None,
+            FileView::Loading { index, .. }
+            | FileView::Shown { index }
+            | FileView::Failed { index, .. } => Some(index),
+        }
+    }
+
+    pub fn is_shown(&self) -> bool {
+        matches!(self.view, FileView::Shown { .. })
+    }
+
+    /// The index of the failed file and git's message for it.
+    pub fn failure(&self) -> Option<(usize, &str)> {
+        match &self.view {
+            FileView::Failed { index, message } => Some((*index, message)),
+            _ => None,
+        }
+    }
+
+    /// The diff that arrived since the last call, for the view to show once.
+    pub fn take_fresh_diff(&mut self) -> Option<FileDiff> {
+        self.fresh.take()
+    }
+
+    fn received(&mut self, id: OperationId, diff: FileDiff) {
+        if let FileView::Loading { id: wanted, index } = self.view
+            && wanted == id
+        {
+            self.view = FileView::Shown { index };
+            self.fresh = Some(diff);
+        }
+    }
+
+    fn failed(&mut self, id: OperationId, message: String) {
+        if let FileView::Loading { id: wanted, index } = self.view
+            && wanted == id
+        {
+            self.view = FileView::Failed { index, message };
+        }
+    }
+}
+
+/// The file a step from `current` lands on: the next one or the previous one
+/// among `count` files. `None` at either end, or when `current` is not a file.
+pub fn step_index(current: usize, count: usize, forward: bool) -> Option<usize> {
+    if current >= count {
+        return None;
+    }
+    if forward {
+        (current + 1 < count).then_some(current + 1)
+    } else {
+        current.checked_sub(1)
+    }
+}
+
+/// "File 2 of 5", counting from one.
+pub fn file_position(index: usize, count: usize) -> String {
+    format!("File {} of {count}", index + 1)
 }
 
 /// The history page's listing. A reply to a request that was superseded is
@@ -382,6 +489,12 @@ impl Model {
                         .clone()
                         .unwrap_or_else(|| "git could not read the commit".to_owned()),
                 );
+                self.commit_file.failed(
+                    id,
+                    detail
+                        .clone()
+                        .unwrap_or_else(|| "git could not read the file".to_owned()),
+                );
                 // A refused checkout keeps the branch; git's reason, first line only, is the notice.
                 if self.branches.finish_checkout(id) {
                     self.error = Some(checkout_message(detail.as_deref()));
@@ -416,6 +529,10 @@ impl Model {
             }
             Event::CommitDetailLoaded { id, detail } => {
                 self.commit.received(id, detail);
+                None
+            }
+            Event::CommitFileDiffLoaded { id, diff } => {
+                self.commit_file.received(id, diff);
                 None
             }
             // An operation that ends without a status (vetoed, cancelled) ends its checkout too.
@@ -682,6 +799,7 @@ fn event_id(event: &Event) -> OperationId {
         | Event::BranchesLoaded { id, .. }
         | Event::HistoryLoaded { id, .. }
         | Event::CommitDetailLoaded { id, .. }
+        | Event::CommitFileDiffLoaded { id, .. }
         | Event::WorktreesLoaded { id, .. }
         | Event::WorktreeInspected { id, .. }
         | Event::PrunableListed { id, .. }
@@ -1448,5 +1566,98 @@ mod commit_pane_tests {
         model.reset_for_repo();
 
         assert_eq!(model.commit, CommitPane::Empty);
+    }
+}
+
+#[cfg(test)]
+mod commit_file_tests {
+    use super::*;
+    use gm_schema::{Actor, FileDiff, OperationState};
+
+    fn diff(path: &str) -> FileDiff {
+        FileDiff {
+            path: path.into(),
+            old_path: None,
+            binary: false,
+            hunks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_answer_to_the_request_in_flight_is_taken_once() {
+        let mut model = Model::default();
+        model.commit_file.request(OperationId(4), 2);
+        assert_eq!(model.commit_file.index(), Some(2));
+        assert!(!model.commit_file.is_shown());
+        assert_eq!(
+            model.apply(Event::CommitFileDiffLoaded {
+                id: OperationId(4),
+                diff: diff("a.txt"),
+            }),
+            None
+        );
+        assert_eq!(
+            model.commit_file.take_fresh_diff().map(|d| d.path),
+            Some("a.txt".into())
+        );
+        assert_eq!(model.commit_file.take_fresh_diff(), None);
+        assert!(model.commit_file.is_shown());
+    }
+
+    #[test]
+    fn an_answer_to_a_superseded_request_is_dropped() {
+        let mut model = Model::default();
+        model.commit_file.request(OperationId(4), 2);
+        model.commit_file.request(OperationId(5), 3);
+        let _ = model.apply(Event::CommitFileDiffLoaded {
+            id: OperationId(4),
+            diff: diff("old.txt"),
+        });
+        assert_eq!(model.commit_file.take_fresh_diff(), None);
+        assert_eq!(model.commit_file.index(), Some(3));
+        assert!(!model.commit_file.is_shown());
+    }
+
+    #[test]
+    fn closing_the_file_drops_the_answer_still_on_its_way() {
+        let mut model = Model::default();
+        model.commit_file.request(OperationId(4), 2);
+        model.commit_file.close();
+        let _ = model.apply(Event::CommitFileDiffLoaded {
+            id: OperationId(4),
+            diff: diff("a.txt"),
+        });
+        assert_eq!(model.commit_file.take_fresh_diff(), None);
+        assert_eq!(model.commit_file.index(), None);
+    }
+
+    #[test]
+    fn a_failed_file_read_keeps_gits_message_for_its_file() {
+        let mut model = Model::default();
+        model.commit_file.request(OperationId(4), 1);
+        let _ = model.apply(Event::OperationChanged {
+            id: OperationId(4),
+            actor: Actor::Human,
+            state: OperationState::Failed,
+            detail: Some("fatal: bad object".into()),
+        });
+        assert_eq!(model.commit_file.failure(), Some((1, "fatal: bad object")));
+    }
+
+    #[test]
+    fn stepping_moves_one_file_and_stops_at_either_end() {
+        assert_eq!(step_index(0, 3, true), Some(1));
+        assert_eq!(step_index(1, 3, true), Some(2));
+        assert_eq!(step_index(2, 3, true), None);
+        assert_eq!(step_index(2, 3, false), Some(1));
+        assert_eq!(step_index(0, 3, false), None);
+        assert_eq!(step_index(0, 1, true), None);
+        assert_eq!(step_index(0, 0, true), None);
+    }
+
+    #[test]
+    fn the_position_says_which_file_of_how_many() {
+        assert_eq!(file_position(0, 3), "File 1 of 3");
+        assert_eq!(file_position(2, 3), "File 3 of 3");
     }
 }

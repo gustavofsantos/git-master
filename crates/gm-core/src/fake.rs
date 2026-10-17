@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use gm_schema::{
-    BranchEntry, CommitDetail, CommitSummary, History, RepoStatus, WorktreeEntry, WorktreeMode,
+    BranchEntry, CommitDetail, CommitSummary, FileDiff, History, RepoStatus, WorktreeEntry,
+    WorktreeMode,
 };
 
 use crate::history::{Canceller, HistoryPage, HistoryStream};
-use crate::port::DetailRead;
+use crate::port::{DetailRead, FileDiffRead};
 use crate::{GitError, GitPort};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -26,6 +27,18 @@ pub struct FakeGit {
     created: Arc<Mutex<Vec<(String, WorktreeMode)>>>,
     history: Arc<Mutex<Result<History, GitError>>>,
     detail: Arc<Mutex<Result<CommitDetail, GitError>>>,
+    file_diff: Arc<Mutex<Result<FileDiff, GitError>>>,
+    /// Every write git was asked for (stage, unstage, discard, commit), by name.
+    writes: Arc<Mutex<Vec<&'static str>>>,
+}
+
+fn empty_diff() -> FileDiff {
+    FileDiff {
+        path: String::new(),
+        old_path: None,
+        binary: false,
+        hunks: Vec::new(),
+    }
 }
 
 impl FakeGit {
@@ -40,6 +53,8 @@ impl FakeGit {
             created: Arc::new(Mutex::new(Vec::new())),
             history: Arc::new(Mutex::new(Ok(History::default()))),
             detail: Arc::new(Mutex::new(Ok(CommitDetail::default()))),
+            file_diff: Arc::new(Mutex::new(Ok(empty_diff()))),
+            writes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -71,6 +86,24 @@ impl FakeGit {
     /// If another thread panicked while holding the detail lock.
     pub fn set_detail(&self, detail: Result<CommitDetail, GitError>) {
         *self.detail.lock().unwrap() = detail;
+    }
+
+    /// What the next commit file diff read answers.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the file diff lock.
+    pub fn set_file_diff(&self, diff: Result<FileDiff, GitError>) {
+        *self.file_diff.lock().unwrap() = diff;
+    }
+
+    /// The writes git was asked for, in order. Empty for a read-only session.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the writes lock.
+    pub fn writes(&self) -> Vec<&'static str> {
+        self.writes.lock().unwrap().clone()
     }
 
     /// The commits the next history walk yields. `History::more` is ignored.
@@ -109,6 +142,47 @@ impl FakeGit {
 }
 
 impl GitPort for FakeGit {
+    fn stage(&self, _root: &Path, _target: &gm_schema::StageTarget) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("stage");
+        Err(GitError("stage is not supported by this adapter".into()))
+    }
+
+    fn unstage(&self, _root: &Path, _target: &gm_schema::StageTarget) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("unstage");
+        Err(GitError("unstage is not supported by this adapter".into()))
+    }
+
+    fn discard_hunk(
+        &self,
+        _root: &Path,
+        _path: &str,
+        _hunk: &gm_schema::HunkId,
+    ) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("discard");
+        Err(GitError("discard is not supported by this adapter".into()))
+    }
+
+    fn commit(&self, _root: &Path, _message: &str) -> Result<String, GitError> {
+        self.writes.lock().unwrap().push("commit");
+        Err(GitError("commit is not supported by this adapter".into()))
+    }
+
+    fn commit_file_diff(
+        &self,
+        _root: &Path,
+        _oid: &str,
+        _path: &str,
+        _old_path: Option<&str>,
+    ) -> Result<FileDiffRead, GitError> {
+        let diff = self.file_diff.lock().unwrap().clone();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            if stop.load(Ordering::SeqCst) {
+                return Err(GitError("the commit read was superseded".into()));
+            }
+            diff
+        }))
+    }
+
     fn resolve_root(&self, path: &Path) -> Result<PathBuf, GitError> {
         if path.starts_with(&self.root) {
             Ok(self.root.clone())

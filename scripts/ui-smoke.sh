@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -55,6 +55,7 @@ HISTORY_X=120; HISTORY_Y=175                 # "History" row under Workspace in 
 WORKING_COPY_X=120; WORKING_COPY_Y=147       # "Working Copy" row, back from the history page
 HISTORY_ROW_X=420; HISTORY_ROW_TOP_Y=162     # the history list's first row, 48 px rows below it
 DETAIL_PANEL_CROP="360x700+920+88"           # the commit detail panel, window-relative
+COMMIT_FILE_X=1082; COMMIT_FILE_Y=505        # api/new.rs, the first file row of the feat commit
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -1058,6 +1059,14 @@ run_scenario() {
     echo "PASS  $LABEL"
     return
   fi
+  if [ "$name" = h-commit-diff ]; then
+    # An unstaged change, so that a stage key leaking into the diff would show.
+    make_detail_repo "$RUN_DIR/detail"
+    printf 'unstaged\n' >> "$RUN_DIR/detail/src/a.rs"
+    scenario_commit_diff "$theme"
+    echo "PASS  $LABEL"
+    return
+  fi
   if [ "$name" = h-welcome ]; then
     # Starts with no recent list at all; scenario_h makes its own launches.
     scenario_h "$theme"
@@ -1216,6 +1225,51 @@ scenario_commit_detail() {
 
   [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
     || fail "reading a commit detail changed the repository"
+}
+
+# --- 3m. A file of a commit opens its diff, read-only (H4) ---------------------
+# The feat commit has an added, a deleted, a binary and a renamed file, and a
+# modified one. Down steps to the next file; Escape goes back to the commit.
+# The fixture has an unstaged change: no key of the diff may stage or unstage it.
+scenario_commit_diff() {
+  local repo="$RUN_DIR/detail" theme="$1" status_before differing
+  launch_app "$theme" "$repo"
+  xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
+  xdotool mousemove "$HISTORY_ROW_X" "$(history_row_y "feat: add, modify, delete, rename")" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-commit-$theme.png"
+  status_before="$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)"
+
+  xdotool mousemove "$COMMIT_FILE_X" "$COMMIT_FILE_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-added-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-commit-$theme.png" "$SMOKE_OUT/h-commit-diff-added-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the file diff did not replace the commit view ($differing pixels changed)"
+
+  # Positive control: Down reaches the diff pane and moves to the next file.
+  xdotool key Down; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-deleted-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-added-$theme.png" "$SMOKE_OUT/h-commit-diff-deleted-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 2000 ] || fail "Down did not move to the next file ($differing pixels changed)"
+
+  # Stage, unstage and discard keys do nothing in a commit's diff.
+  xdotool key a s space u; sleep 1
+  [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
+    || fail "a key pressed in a commit's diff changed the repository"
+
+  xdotool key Escape; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-diff-back-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-commit-$theme.png" "$SMOKE_OUT/h-commit-diff-back-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -lt 2000 ] || fail "Escape did not go back to the commit view ($differing pixels changed)"
+  stop_app
+
+  [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
+    || fail "reading a commit's diff changed the repository"
 }
 
 # --- 2/3. Run everything -------------------------------------------------------
