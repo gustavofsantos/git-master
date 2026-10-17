@@ -143,6 +143,7 @@ impl StatusView {
                     .child(hint.unwrap_or("")),
             )
             .children(self.suggestion_row(cx))
+            .children(self.approval_row(cx))
             .child(button)
             .child(height_strip)
     }
@@ -221,6 +222,50 @@ impl StatusView {
                     Action::DiscardSuggestion,
                     cx,
                 )),
+        )
+    }
+
+    /// The prompt for a repository hook that has no approval yet: its command,
+    /// in full, with Approve and Deny. Deny only hides the prompt for this
+    /// session; the hook stays unapproved.
+    fn approval_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let hook = self.model.hooks.pending_approval()?;
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(theme::hairline_strong())
+                .child(
+                    div()
+                        .text_color(theme::muted())
+                        .child(format!("Repository hook {} wants to run:", hook.name)),
+                )
+                .child(
+                    div()
+                        .font_family(theme::code_font())
+                        .text_color(theme::text())
+                        .child(hook.command.clone()),
+                )
+                .child(div().text_color(theme::muted()).child(
+                    "Approval is kept outside the repository and ends if the command changes.",
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(chip_button(
+                            "hook-approve",
+                            "Approve",
+                            Action::ApproveHook,
+                            cx,
+                        ))
+                        .child(chip_button("hook-deny", "Deny", Action::DenyHook, cx)),
+                ),
         )
     }
 
