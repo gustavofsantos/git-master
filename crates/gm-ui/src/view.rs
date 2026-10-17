@@ -499,6 +499,8 @@ impl StatusView {
             ),
             DiffPaneEvent::StepFile { forward } => self.step_commit_file(*forward, cx),
             DiffPaneEvent::LeaveCommit => self.close_commit_file(cx),
+            // The choice is saved by the persistence commit (D40).
+            DiffPaneEvent::LayoutChosen(_) => {}
         }
     }
 

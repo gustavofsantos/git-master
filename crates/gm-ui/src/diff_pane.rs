@@ -8,15 +8,16 @@ use std::ops::Range;
 use gm_schema::{FileDiff, LineKind, StageTarget};
 use gpui::{
     AnyElement, ClickEvent, Context, Div, EventEmitter, FocusHandle, FontWeight, IntoElement,
-    KeyBinding, Render, ScrollStrategy, UniformListScrollHandle, Window, actions, div, prelude::*,
-    px, uniform_list,
+    KeyBinding, Render, ScrollStrategy, ScrollWheelEvent, UniformListScrollHandle, Window, actions,
+    div, prelude::*, px, uniform_list,
 };
 
 use crate::action_registry::{Action, Args};
 use crate::diff_rows::{
-    Apply, Diffs, LineKey, Mode, Press, Row, Selection, Side, build_rows, change_counts,
-    changed_keys_between, controls, default_side, hunk_header_text, hunk_selection_count, hunks_of,
-    next_changed_line, next_hunk_header, press, prev_changed_line, prev_hunk_header, split_pairs,
+    Apply, Cell, Diffs, Layout, LineKey, Mode, Press, Row, Selection, Side, SplitRow, SplitRows,
+    build_rows, change_counts, changed_keys_between, controls, default_side, hunk_header_text,
+    hunk_selection_count, hunks_of, max_scroll_columns, next_changed_line, next_hunk_header, press,
+    prev_changed_line, prev_hunk_header, skip_columns, split_pairs, split_rows,
 };
 use crate::icon::{self, Icon};
 use crate::theme;
@@ -29,6 +30,9 @@ const CONTEXT_READ_ONLY: &str = "DiffPaneReadOnly";
 
 /// Height of every list row; `uniform_list` needs equal heights.
 const ROW_HEIGHT: f32 = 22.;
+
+/// Columns the split view moves per wheel step, sideways (D41).
+const SCROLL_STEP: usize = 4;
 
 const PAIR_WARNING: &str = "Half-staged −/+ pair: the index would lose both the old and the new line, and may not compile.";
 
@@ -68,6 +72,8 @@ pub enum DiffPaneEvent {
     },
     /// Escape in a read-only pane: back to the commit view.
     LeaveCommit,
+    /// The user chose a layout in the header (D39); the shell saves it.
+    LayoutChosen(Layout),
 }
 
 /// Visual mode: where it started, and the selection made before it.
@@ -86,6 +92,12 @@ pub struct DiffPane {
     /// The side shown: its hunks are the only ones in `rows`.
     side: Side,
     rows: Vec<Row>,
+    /// How the rows are drawn (D39). The cursor and the selection always follow
+    /// `rows`; `split` is the same hunks paired for the split view.
+    layout: Layout,
+    split: SplitRows,
+    /// Columns the split cells are scrolled sideways by. Shared by both sides.
+    scroll_columns: usize,
     selection: Selection,
     /// Index into `rows`.
     cursor: usize,
@@ -125,6 +137,9 @@ impl DiffPane {
             staged: None,
             side: Side::Unstaged,
             rows: Vec::new(),
+            layout: Layout::Unified,
+            split: SplitRows::default(),
+            scroll_columns: 0,
             selection: Selection::default(),
             cursor: 0,
             visual: None,
@@ -169,7 +184,7 @@ impl DiffPane {
                 hunks_of(self.staged.as_ref()),
             );
         }
-        self.rows = build_rows(self.diffs(), self.side);
+        self.rebuild_rows();
         self.selection = kept;
         self.visual = None;
         self.pending = None;
@@ -188,7 +203,8 @@ impl DiffPane {
         self.unstaged = Some(diff);
         self.staged = None;
         self.side = Side::Unstaged;
-        self.rows = build_rows(self.diffs(), Side::Unstaged);
+        self.rebuild_rows();
+        self.scroll_columns = 0;
         self.selection.clear();
         self.visual = None;
         self.pending = None;
@@ -205,7 +221,7 @@ impl DiffPane {
             return;
         }
         self.side = side;
-        self.rows = build_rows(self.diffs(), side);
+        self.rebuild_rows();
         self.selection.clear();
         self.visual = None;
         self.pending = None;
@@ -213,6 +229,231 @@ impl DiffPane {
         self.cursor = next_changed_line(&self.rows, self.diffs(), 0).unwrap_or(0);
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
+    }
+
+    /// Rebuilds the unified rows and their split pairing for the shown side.
+    fn rebuild_rows(&mut self) {
+        self.rows = build_rows(self.diffs(), self.side);
+        self.split = split_rows(self.diffs(), self.side);
+    }
+
+    /// The row the cursor is on, as an index into the list being drawn. The
+    /// cursor walks the unified rows, so in the split view it is mapped to the
+    /// split row that holds it.
+    fn cursor_ix(&self) -> usize {
+        match self.layout {
+            Layout::Unified => self.cursor,
+            Layout::Split => self.split.of_unified.get(self.cursor).copied().unwrap_or(0),
+        }
+    }
+
+    fn row_count(&self) -> usize {
+        match self.layout {
+            Layout::Unified => self.rows.len(),
+            Layout::Split => self.split.rows.len(),
+        }
+    }
+
+    /// Shows the layout `layout` (D39) without saying so to the shell: used
+    /// when the saved choice is loaded.
+    pub fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        if layout == self.layout {
+            return;
+        }
+        self.layout = layout;
+        self.scroll
+            .scroll_to_item(self.cursor_ix(), ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    /// The user picked a layout in the header: shows it and tells the shell,
+    /// which saves the choice.
+    fn choose_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        if !controls(self.mode).layout_selector || layout == self.layout {
+            return;
+        }
+        self.set_layout(layout, cx);
+        cx.emit(DiffPaneEvent::LayoutChosen(layout));
+    }
+
+    /// A wheel step with a sideways part moves the split cells (D41). The
+    /// vertical part is left to the list.
+    fn scroll_across(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        if self.layout != Layout::Split {
+            return;
+        }
+        let dx = event.delta.pixel_delta(px(ROW_HEIGHT)).x;
+        if dx == px(0.) {
+            return;
+        }
+        let max = max_scroll_columns(self.diffs(), self.side);
+        self.scroll_columns = if dx < px(0.) {
+            (self.scroll_columns + SCROLL_STEP).min(max)
+        } else {
+            self.scroll_columns.saturating_sub(SCROLL_STEP)
+        };
+        cx.notify();
+    }
+
+    /// The "Unified | Split" switch in the file header (D39).
+    fn layout_selector(&self, cx: &Context<Self>) -> Div {
+        let segment = |layout: Layout, label: &'static str| {
+            let active = self.layout == layout;
+            div()
+                .id(label)
+                .px_3()
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .cursor_pointer()
+                .when(active, |this| {
+                    this.bg(theme::panel())
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::text())
+                })
+                .when(!active, |this| this.text_color(theme::muted()))
+                .child(label)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.choose_layout(layout, cx);
+                }))
+        };
+        div().flex_none().child(
+            div()
+                .p(px(2.))
+                .flex()
+                .flex_row()
+                .rounded_md()
+                .bg(theme::selected_row())
+                .child(segment(Layout::Unified, "Unified"))
+                .child(segment(Layout::Split, "Split")),
+        )
+    }
+
+    /// One row of the split list: a hunk header, or a pair of cells.
+    fn render_ix(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        match self.layout {
+            Layout::Unified => self.render_row(ix, cx),
+            Layout::Split => match self.split.rows.get(ix).copied() {
+                Some(SplitRow::HunkHeader { side, hunk_index }) => {
+                    self.hunk_row(ix, side, hunk_index, cx)
+                }
+                Some(SplitRow::Pair { old, new }) => self.pair_row(ix, old, new, cx),
+                None => div().into_any_element(),
+            },
+        }
+    }
+
+    /// A split row: the old side's cell, a divider, the new side's cell. A side
+    /// with no line is a plain panel.
+    fn pair_row(
+        &self,
+        ix: usize,
+        old: Option<Cell>,
+        new: Option<Cell>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let on_cursor = ix == self.cursor_ix();
+        div()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .flex()
+            .flex_row()
+            .child(self.split_cell(ix, 0, old, on_cursor, cx))
+            .child(self.split_cell(ix, 1, new, on_cursor, cx))
+            .into_any_element()
+    }
+
+    /// One cell of a split row. `which` is 0 for the old side and 1 for the new.
+    /// The gutter toggles this cell's own line (D41); the text is shifted by the
+    /// shared scroll and cut at the cell's edge, with no wrap.
+    fn split_cell(
+        &self,
+        ix: usize,
+        which: usize,
+        cell: Option<Cell>,
+        on_cursor: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let base = div()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .overflow_hidden()
+            .font_family(theme::code_font());
+        let base = if which == 0 {
+            base.border_r_1().border_color(theme::hairline())
+        } else {
+            base
+        };
+        let Some(cell) = cell else {
+            return base.bg(theme::panel());
+        };
+        let (side, hunk_index, line_index) = cell.key;
+        let Some(line) = self
+            .diffs()
+            .hunk(side, hunk_index)
+            .and_then(|hunk| hunk.lines.get(line_index))
+        else {
+            return base;
+        };
+        let (tint, text_colour, sign) = match line.kind {
+            LineKind::Added => (theme::added_bg(), theme::added_fg(), "+"),
+            LineKind::Removed => (theme::removed_bg(), theme::removed_fg(), "−"),
+            LineKind::Context => (theme::editor(), theme::text(), " "),
+        };
+        let changed = line.kind != LineKind::Context;
+        let selected = self.selection.contains(cell.key);
+        let background = if on_cursor { theme::cursor_row() } else { tint };
+        let number = if which == 0 { line.old_no } else { line.new_no };
+        let checkbox = if changed && controls(self.mode).line_selection {
+            let mark = if selected {
+                icon::filled(Icon::CheckSquare, icon::SMALL, theme::accent())
+            } else {
+                icon::view(Icon::Square, icon::SMALL, theme::muted())
+            };
+            div()
+                .id(("diff-split-check", ix * 2 + which))
+                .mx_1()
+                .flex_none()
+                .cursor_pointer()
+                .child(mark)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.toggle_key(cell.key, cx);
+                }))
+                .into_any_element()
+        } else {
+            div().w(icon::SMALL).mx_1().flex_none().into_any_element()
+        };
+        base.bg(background)
+            .child(
+                div()
+                    .w(px(44.))
+                    .flex_none()
+                    .text_right()
+                    .text_color(theme::gutter())
+                    .child(number.map_or_else(String::new, |n| n.to_string())),
+            )
+            .child(checkbox)
+            .child(
+                div()
+                    .w(px(14.))
+                    .flex_none()
+                    .text_color(text_colour)
+                    .child(sign),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(text_colour)
+                    .child(skip_columns(&line.text, self.scroll_columns).to_owned()),
+            )
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -473,10 +714,22 @@ impl DiffPane {
                             .child(format!("+{added} −{removed}")),
                     ),
             )
-            .children(
-                controls(self.mode)
-                    .side_selector
-                    .then(|| self.side_selector(cx)),
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .children(
+                        controls(self.mode)
+                            .side_selector
+                            .then(|| self.side_selector(cx)),
+                    )
+                    .children(
+                        controls(self.mode)
+                            .layout_selector
+                            .then(|| self.layout_selector(cx)),
+                    ),
             );
         let summary = (!hunks.is_empty()).then(|| {
             div()
@@ -579,7 +832,7 @@ impl DiffPane {
             return div().into_any_element();
         };
         let (selected, total) = hunk_selection_count(diffs, &self.selection, side, hunk_index);
-        let background = if ix == self.cursor {
+        let background = if ix == self.cursor_ix() {
             theme::cursor_row()
         } else {
             theme::hunk_header_bg()
@@ -697,7 +950,7 @@ impl DiffPane {
         };
         let changed = line.kind != LineKind::Context;
         let selected = self.selection.contains((side, hunk_index, line_index));
-        let background = if ix == self.cursor {
+        let background = if ix == self.cursor_ix() {
             theme::cursor_row()
         } else {
             tint
@@ -774,17 +1027,20 @@ impl DiffPane {
     fn list(&self, cx: &mut Context<Self>) -> AnyElement {
         uniform_list(
             "diff-rows",
-            self.rows.len(),
+            self.row_count(),
             cx.processor(
                 |this: &mut DiffPane,
                  range: Range<usize>,
                  _window: &mut Window,
                  cx: &mut Context<DiffPane>| {
-                    range.map(|ix| this.render_row(ix, cx)).collect::<Vec<_>>()
+                    range.map(|ix| this.render_ix(ix, cx)).collect::<Vec<_>>()
                 },
             ),
         )
         .track_scroll(self.scroll.clone())
+        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            this.scroll_across(event, cx);
+        }))
         .flex_1()
         .min_h(px(0.))
         .into_any_element()

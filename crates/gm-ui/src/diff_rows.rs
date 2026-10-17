@@ -37,6 +37,7 @@ pub enum Mode {
 /// The controls a mode shows and accepts. A control that is off is not drawn,
 /// and its key or click does nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // one bool per control of the mode
 pub struct Controls {
     /// The "Staged | Unstaged" switch in the file header.
     pub side_selector: bool,
@@ -44,6 +45,9 @@ pub struct Controls {
     pub line_selection: bool,
     /// The chunk buttons in each hunk header, and the keys that act on a hunk.
     pub chunk_actions: bool,
+    /// The "Unified | Split" switch in the file header (D39). Off in the
+    /// Working Copy until H4b-B.
+    pub layout_selector: bool,
 }
 
 /// The controls of `mode`.
@@ -53,11 +57,13 @@ pub fn controls(mode: Mode) -> Controls {
             side_selector: true,
             line_selection: true,
             chunk_actions: true,
+            layout_selector: false,
         },
         Mode::ReadOnly => Controls {
             side_selector: false,
             line_selection: false,
             chunk_actions: false,
+            layout_selector: true,
         },
     }
 }
@@ -157,7 +163,6 @@ pub fn build_rows(diffs: Diffs<'_>, side: Side) -> Vec<Row> {
 /// How a diff is laid out (D39). Unified lists each hunk's lines one after the
 /// other; Split puts the old and the new side of each row next to each other.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[allow(dead_code)] // wired into the pane by the next commit
 pub enum Layout {
     #[default]
     Unified,
@@ -167,7 +172,6 @@ pub enum Layout {
 /// One side of a split row: a line of a hunk, keyed like a unified row. A
 /// context line is a cell on both sides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // wired into the pane by the next commit
 pub struct Cell {
     pub key: LineKey,
     /// The line is unterminated (`\ No newline at end of file`).
@@ -177,7 +181,6 @@ pub struct Cell {
 /// One row of the split list: a hunk header across both sides, or a pair of
 /// cells. An empty side is `None`: it is drawn as a plain panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // wired into the pane by the next commit
 pub enum SplitRow {
     HunkHeader {
         side: Side,
@@ -192,7 +195,6 @@ pub enum SplitRow {
 /// The split rows of one side, and for each unified row the split row that
 /// holds it, so the cursor and scrolling can follow the unified rows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[allow(dead_code)] // wired into the pane by the next commit
 pub struct SplitRows {
     pub rows: Vec<SplitRow>,
     pub of_unified: Vec<usize>,
@@ -200,7 +202,6 @@ pub struct SplitRows {
 
 /// The split rows of one side, built from the same hunks as `build_rows`. The
 /// pairing is `pair_hunk`'s (D24 uses the same pairs for its warning).
-#[allow(dead_code)] // wired into the pane by the next commit
 pub fn split_rows(diffs: Diffs<'_>, side: Side) -> SplitRows {
     let mut out = SplitRows::default();
     for (hunk_index, hunk) in diffs.hunks(side).iter().enumerate() {
@@ -232,6 +233,55 @@ pub fn split_rows(diffs: Diffs<'_>, side: Side) -> SplitRows {
         out.of_unified.extend(landed);
     }
     out
+}
+
+/// Columns a tab takes up, counted from the column it starts at. Used for the
+/// width of a line, which bounds the horizontal scroll of the split view.
+pub const TAB_STOP: usize = 4;
+
+/// The number of columns `text` occupies: wide characters take two and
+/// combining marks none. A tab goes to the next multiple of `TAB_STOP`.
+pub fn display_columns(text: &str) -> usize {
+    let mut column = 0;
+    for ch in text.chars() {
+        column += char_columns(ch, column);
+    }
+    column
+}
+
+/// `text` without its leading characters that fit in `columns`. A character
+/// that starts before `columns` and ends after it is kept, so a cut never
+/// splits a character.
+pub fn skip_columns(text: &str, columns: usize) -> &str {
+    let mut column = 0;
+    for (at, ch) in text.char_indices() {
+        let end = column + char_columns(ch, column);
+        if end > columns {
+            return &text[at..];
+        }
+        column = end;
+    }
+    ""
+}
+
+/// The most columns a line of `side` takes, which is how far its cells can
+/// scroll.
+pub fn max_scroll_columns(diffs: Diffs<'_>, side: Side) -> usize {
+    diffs
+        .hunks(side)
+        .iter()
+        .flat_map(|hunk| hunk.lines.iter())
+        .map(|line| display_columns(&line.text))
+        .max()
+        .unwrap_or(0)
+}
+
+fn char_columns(ch: char, column: usize) -> usize {
+    if ch == '\t' {
+        TAB_STOP - column % TAB_STOP
+    } else {
+        unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+    }
 }
 
 /// The key of the row when it is an added or removed line.
@@ -543,6 +593,7 @@ mod tests {
                 side_selector: false,
                 line_selection: false,
                 chunk_actions: false,
+                layout_selector: true,
             }
         );
     }
@@ -555,6 +606,7 @@ mod tests {
                 side_selector: true,
                 line_selection: true,
                 chunk_actions: true,
+                layout_selector: false,
             }
         );
     }
@@ -954,6 +1006,42 @@ mod tests {
             build_rows(diffs(&unstaged, &[]), Side::Unstaged).len(),
             split.of_unified.len()
         );
+    }
+
+    #[test]
+    fn display_columns_count_wide_characters_twice_and_marks_once() {
+        assert_eq!(display_columns("abc"), 3);
+        assert_eq!(display_columns("日本"), 4);
+        assert_eq!(display_columns("e\u{301}"), 1);
+        assert_eq!(display_columns("\t"), TAB_STOP);
+        assert_eq!(display_columns("a\tb"), TAB_STOP + 1);
+    }
+
+    #[test]
+    fn skip_columns_drops_whole_characters_from_the_left() {
+        assert_eq!(skip_columns("abcdef", 0), "abcdef");
+        assert_eq!(skip_columns("abcdef", 2), "cdef");
+        assert_eq!(skip_columns("日本語", 2), "本語");
+        assert_eq!(skip_columns("abc", 9), "");
+        assert_eq!(skip_columns("a\tb", 1), "\tb");
+    }
+
+    #[test]
+    fn the_scroll_limit_is_the_widest_line_of_the_side() {
+        let long = hunk(
+            "h",
+            vec![
+                line(LineKind::Added, "0123456789"),
+                line(LineKind::Context, "x"),
+            ],
+        );
+        let short = hunk("i", vec![line(LineKind::Removed, "ab")]);
+        let unstaged = [short, long];
+        assert_eq!(
+            max_scroll_columns(diffs(&unstaged, &[]), Side::Unstaged),
+            10
+        );
+        assert_eq!(max_scroll_columns(diffs(&[], &[]), Side::Unstaged), 0);
     }
 
     fn kind_strategy() -> impl Strategy<Value = LineKind> {

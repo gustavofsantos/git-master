@@ -2156,8 +2156,10 @@ dependencies = [
  "gm-core",
  "gm-schema",
  "gpui",
+ "proptest",
  "serde_json",
  "tempfile",
+ "unicode-width",
 ]
 
 [[package]]
