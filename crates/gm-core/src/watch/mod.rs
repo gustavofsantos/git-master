@@ -204,7 +204,8 @@ impl Worker {
                 return;
             }
             let now = Instant::now();
-            if self.coalescer.should_start(now, self.engine.is_busy()) {
+            // Without an open repository there is nothing to refresh; the request waits.
+            if self.root.is_some() && self.coalescer.should_start(now, self.engine.is_busy()) {
                 let id = self
                     .engine
                     .dispatch(Actor::Human, CommandKind::RefreshStatus);
