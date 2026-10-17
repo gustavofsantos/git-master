@@ -334,7 +334,7 @@ fn line_element(line: &Line<'_>, index: usize, cx: &Context<StatusView>) -> AnyE
             .px_3()
             .flex()
             .items_center()
-            .pl(px(22.))
+            .pl(px(34.))
             .text_color(muted)
             .child("None")
             .into_any_element(),
