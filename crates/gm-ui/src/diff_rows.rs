@@ -45,8 +45,7 @@ pub struct Controls {
     pub line_selection: bool,
     /// The chunk buttons in each hunk header, and the keys that act on a hunk.
     pub chunk_actions: bool,
-    /// The "Unified | Split" switch in the file header (D39). Off in the
-    /// Working Copy until H4b-B.
+    /// The "Unified | Split" switch in the file header (D39).
     pub layout_selector: bool,
 }
 
@@ -57,7 +56,7 @@ pub fn controls(mode: Mode) -> Controls {
             side_selector: true,
             line_selection: true,
             chunk_actions: true,
-            layout_selector: false,
+            layout_selector: true,
         },
         Mode::ReadOnly => Controls {
             side_selector: false,
@@ -606,7 +605,7 @@ mod tests {
                 side_selector: true,
                 line_selection: true,
                 chunk_actions: true,
-                layout_selector: false,
+                layout_selector: true,
             }
         );
     }

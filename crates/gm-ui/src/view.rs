@@ -171,6 +171,8 @@ impl StatusView {
             .as_ref()
             .map(|store| store.load())
             .unwrap_or_default();
+        // Both diffs open in the saved layout (D39, D40).
+        diff_pane.update(cx, |pane, cx| pane.set_layout(settings.diff_layout, cx));
         commit_diff_pane.update(cx, |pane, cx| pane.set_layout(settings.diff_layout, cx));
         let mut subscriptions = vec![
             cx.observe(&branch_filter, |this, filter, cx| {
@@ -534,8 +536,14 @@ impl StatusView {
             ),
             DiffPaneEvent::StepFile { forward } => self.step_commit_file(*forward, cx),
             DiffPaneEvent::LeaveCommit => self.close_commit_file(cx),
-            // The choice is saved by the persistence commit (D40).
-            DiffPaneEvent::LayoutChosen(layout) => self.save_layout(*layout, cx),
+            // One layout for both diffs: the other pane follows, and the choice is saved (D40).
+            DiffPaneEvent::LayoutChosen(layout) => {
+                self.diff_pane
+                    .update(cx, |pane, cx| pane.set_layout(*layout, cx));
+                self.commit_diff_pane
+                    .update(cx, |pane, cx| pane.set_layout(*layout, cx));
+                self.save_layout(*layout, cx);
+            }
         }
     }
 
