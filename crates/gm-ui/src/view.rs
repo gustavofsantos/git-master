@@ -23,6 +23,8 @@ use crate::context_menu::ContextMenu;
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::icon::{self, Icon};
 use crate::model::{Model, Switched};
+use crate::palette::Palette;
+use crate::palette_view::{self, PaletteView};
 use crate::project_menu::ProjectMenu;
 use crate::recent::{self, Recents};
 use crate::resize;
@@ -31,7 +33,7 @@ use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
-use crate::{FocusNext, FocusPrev, StartPath};
+use crate::{FocusNext, FocusPrev, OpenPalette, StartPath};
 
 /// The key context of the change list. Its keys work only while the list has
 /// focus, so typing into the message is never taken as a key.
@@ -67,6 +69,9 @@ pub struct StatusView {
     pub(crate) branch_menu: BranchMenu,
     /// The right-click menu of a branch or a file row, when one is open.
     pub(crate) context_menu: ContextMenu,
+    /// The command palette's state: its query, its step and its ranked rows.
+    pub(crate) palette: Palette,
+    pub(crate) palette_view: PaletteView,
     /// The recent repositories, newest first, as last saved or loaded.
     pub(crate) recents: Recents,
     /// Where the list is kept; `None` when there is no home directory.
@@ -122,9 +127,11 @@ impl StatusView {
         let project_menu = ProjectMenu::new(cx.focus_handle());
         let branch_filter = cx.new(|cx| TextArea::new("Filter branches", cx).with_lines(1, 1));
         let branch_menu = BranchMenu::new(branch_filter.clone());
+        let palette_filter =
+            cx.new(|cx| TextArea::new("Type a command, branch or file", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.observe(&branch_filter, |this, filter, cx| {
                 this.on_branch_filter_changed(&filter, cx);
             }),
@@ -162,6 +169,7 @@ impl StatusView {
                 cx.notify();
             }),
         ];
+        subscriptions.extend(palette_view::subscriptions(&palette_filter, window, cx));
         let mut model = Model::default();
         model.request_open(open);
         Self {
@@ -180,6 +188,8 @@ impl StatusView {
             project_menu,
             branch_menu,
             context_menu: ContextMenu::default(),
+            palette: Palette::default(),
+            palette_view: PaletteView::new(palette_filter),
             recents,
             recent_store,
             recent_generation: 0,
@@ -249,6 +259,7 @@ impl StatusView {
 
     fn on_event(&mut self, event: Event, cx: &mut Context<Self>) {
         let reload = matches!(event, Event::StatusLoaded { .. });
+        let listed = matches!(event, Event::BranchesLoaded { .. });
         let committed = matches!(event, Event::Committed { .. });
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
@@ -273,6 +284,10 @@ impl StatusView {
         if let Some(diffs) = shown {
             self.show_diffs(diffs.unstaged, diffs.staged, cx);
         }
+        // The palette's offers come from the status and the branch listing.
+        if self.palette.open && (reload || listed) {
+            self.refresh_palette(cx);
+        }
         if reload {
             // A checkout moves HEAD; the tree marks the new branch.
             if self.head_name() != head_before {
@@ -291,7 +306,7 @@ impl StatusView {
 
     /// Asks for the branch list the sidebar draws. Not while the picker waits
     /// for its own: a newer request would make that reply stale.
-    fn request_branch_list(&mut self) {
+    pub(crate) fn request_branch_list(&mut self) {
         if self.branch_menu.open {
             return;
         }
@@ -693,6 +708,9 @@ impl Render for StatusView {
             .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
                 this.cycle_focus(false, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
+                this.toggle_palette(window, cx);
+            }))
             // With no repository, the welcome screen replaces every part below.
             .children(self.welcome.is_none().then(|| self.top_bar(window, cx)))
             .children(
@@ -731,6 +749,7 @@ impl Render for StatusView {
                     .is_some()
                     .then(|| self.context_menu_layer(window, cx)),
             )
+            .children(self.palette.open.then(|| self.palette_layer(window, cx)))
             .children(window_chrome::resize_layer(window))
     }
 }

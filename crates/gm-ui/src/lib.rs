@@ -13,8 +13,11 @@ mod context_menu;
 mod diff_pane;
 mod diff_rows;
 mod editor;
+mod fuzzy;
 mod icon;
 mod model;
+mod palette;
+mod palette_view;
 mod project_menu;
 mod recent;
 mod resize;
@@ -53,6 +56,7 @@ actions!(
         CloseContextMenu,
         FocusNext,
         FocusPrev,
+        OpenPalette,
     ]
 );
 
@@ -134,6 +138,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", FocusNext, None),
         KeyBinding::new("shift-tab", FocusPrev, None),
         KeyBinding::new("secondary-q", Quit, None),
+        KeyBinding::new("secondary-k", OpenPalette, None),
     ]);
     composer::bind_keys(cx);
     diff_pane::bind_keys(cx);
@@ -173,6 +178,7 @@ mod tests {
             "tab",
             "shift-tab",
             "secondary-q",
+            "secondary-k",
         ] {
             let binding = KeyBinding::new(keys, Refresh, Some(KEY_CONTEXT));
             assert_eq!(binding.keystrokes().len(), 1, "{keys}");

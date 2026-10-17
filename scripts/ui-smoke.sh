@@ -18,7 +18,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -546,6 +546,45 @@ scenario_l() {
   shoot "$SMOKE_OUT/l-branch-menu-checked-out-$theme.png"
 }
 
+# --- 3m. Ctrl+K opens the palette; type, Tab to a file, Enter stages it ---------
+scenario_m() {
+  local repo="$RUN_DIR/repo" theme="$1" staged differing
+  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y" click 1; sleep 1
+  shoot "$RUN_DIR/closed.png"
+
+  xdotool key ctrl+k; sleep 1.5
+  shoot "$SMOKE_OUT/m-command-palette-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/closed.png" "$SMOKE_OUT/m-command-palette-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the palette did not open ($differing pixels changed)"
+
+  # The query ranks Stage File first among the actions.
+  xdotool type --delay 20 -- "stage file"; sleep 1.5
+  shoot "$SMOKE_OUT/m-command-palette-filter-$theme.png"
+
+  # Tab opens the argument step of Stage File: the files, filtered by "mod".
+  xdotool key Tab; sleep 1.5
+  xdotool type --delay 20 -- mod; sleep 1.5
+  shoot "$SMOKE_OUT/m-command-palette-pick-$theme.png"
+
+  # Enter runs Stage File on the highlighted file and closes the palette.
+  xdotool key Return; sleep 1.5
+  staged="$(staged_names)"
+  grep -qxF -- 'src/ledger/mod.rs' <<<"$staged" || fail "mod.rs not staged by Stage File in the palette"
+  grep -qxF -- 'src/ledger/total.rs' <<<"$staged" && fail "the palette staged a file other than the one picked"
+  shoot "$RUN_DIR/m-done.png"
+
+  # Ctrl+K opens it again, Escape closes it: the screen is as it was.
+  xdotool key ctrl+k; sleep 1
+  xdotool key Escape; sleep 1
+  shoot "$RUN_DIR/m-escaped.png"
+  differing="$(compare -metric AE "$RUN_DIR/m-done.png" "$RUN_DIR/m-escaped.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -lt 2000 ] || fail "Escape did not close the palette ($differing pixels changed)"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -579,6 +618,7 @@ run_scenario() {
     j-discard-chunk) scenario_j "$theme" ;;
     k-file-menu) scenario_k "$theme" ;;
     l-branch-menu) scenario_l "$theme" ;;
+    m-command-palette) scenario_m "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app

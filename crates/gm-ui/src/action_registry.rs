@@ -4,8 +4,7 @@
 //! run to the engine commands it sends. Nothing here touches GPUI, so the rules
 //! are unit-tested on their own.
 
-// The palette (slice 1c, item 4) will read the whole registry; until it lands,
-// some helpers (`from_id`, `spec`) have no caller outside the tests.
+// `from_id` has no caller outside the tests yet.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
@@ -283,7 +282,8 @@ pub enum Action {
     RevealFile,
 }
 
-const NOT_AVAILABLE: Reason = "Not available yet";
+/// The reason of an action the engine cannot run yet, whatever its target.
+pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
     pub const ALL: [Action; 19] = [
@@ -316,6 +316,22 @@ impl Action {
     #[must_use]
     pub fn id(self) -> &'static str {
         self.spec().id
+    }
+
+    /// Whether the engine can run the action at all yet. A placeholder is
+    /// listed disabled with `NOT_AVAILABLE` wherever it appears.
+    #[must_use]
+    pub fn available(self) -> bool {
+        !matches!(
+            self,
+            Action::NewChildBranch
+                | Action::Restack
+                | Action::PushWithLease
+                | Action::RenameBranch
+                | Action::DeleteBranch
+                | Action::CreateWorktree
+                | Action::DiscardFile
+        )
     }
 
     /// Whether the action throws away work. Menus show it in red and ask first.
@@ -625,6 +641,21 @@ mod tests {
             };
             assert_eq!(action.enabled(&args, &context), Err("Not available yet"));
             assert_eq!(action.plan(&args, &context), Err("Not available yet"));
+        }
+    }
+
+    #[test]
+    fn available_is_false_exactly_for_the_placeholders_that_refuse_every_target() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let context = ctx(&entries, "msg");
+        for action in Action::ALL {
+            let args = match action.spec().args {
+                ArgKind::Branch => Args::Branch("main".into()),
+                ArgKind::File => Args::File("a.txt".into()),
+                _ => Args::None,
+            };
+            let refused = action.enabled(&args, &context) == Err(NOT_AVAILABLE);
+            assert_eq!(action.available(), !refused, "{action:?}");
         }
     }
 
