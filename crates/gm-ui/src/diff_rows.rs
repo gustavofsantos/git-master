@@ -25,6 +25,36 @@ impl Side {
     }
 }
 
+/// What a diff list is for. The Working Copy diff stages and discards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// The Working Copy: stage, unstage and discard.
+    Working,
+}
+
+/// The controls a mode shows and accepts. A control that is off is not drawn,
+/// and its key or click does nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Controls {
+    /// The "Staged | Unstaged" switch in the file header.
+    pub side_selector: bool,
+    /// The checkbox of each changed line, and the keys that select lines.
+    pub line_selection: bool,
+    /// The chunk buttons in each hunk header, and the keys that act on a hunk.
+    pub chunk_actions: bool,
+}
+
+/// The controls of `mode`.
+pub fn controls(mode: Mode) -> Controls {
+    match mode {
+        Mode::Working => Controls {
+            side_selector: true,
+            line_selection: true,
+            chunk_actions: true,
+        },
+    }
+}
+
 /// The side the pane opens on: unstaged, unless the file has only staged
 /// changes.
 pub fn default_side(unstaged: &[Hunk], staged: &[Hunk]) -> Side {
@@ -415,6 +445,18 @@ mod tests {
             header: String::new(),
             lines,
         }
+    }
+
+    #[test]
+    fn the_working_copy_shows_every_control() {
+        assert_eq!(
+            controls(Mode::Working),
+            Controls {
+                side_selector: true,
+                line_selection: true,
+                chunk_actions: true,
+            }
+        );
     }
 
     /// `ctx, -a, +b, ctx`: lines 1 and 2 are changes.

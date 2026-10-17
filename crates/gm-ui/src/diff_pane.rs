@@ -14,8 +14,8 @@ use gpui::{
 
 use crate::action_registry::{Action, Args};
 use crate::diff_rows::{
-    Apply, Diffs, LineKey, Press, Row, Selection, Side, build_rows, change_counts,
-    changed_keys_between, default_side, hunk_header_text, hunk_selection_count, hunks_of,
+    Apply, Diffs, LineKey, Mode, Press, Row, Selection, Side, build_rows, change_counts,
+    changed_keys_between, controls, default_side, hunk_header_text, hunk_selection_count, hunks_of,
     next_changed_line, next_hunk_header, press, prev_changed_line, prev_hunk_header, split_pairs,
 };
 use crate::icon::{self, Icon};
@@ -66,6 +66,8 @@ struct Visual {
 
 pub struct DiffPane {
     focus: FocusHandle,
+    /// What the pane is for; decides which controls it draws and accepts.
+    mode: Mode,
     scroll: UniformListScrollHandle,
     unstaged: Option<FileDiff>,
     staged: Option<FileDiff>,
@@ -96,6 +98,7 @@ impl DiffPane {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus: cx.focus_handle(),
+            mode: Mode::Working,
             scroll: UniformListScrollHandle::new(),
             unstaged: None,
             staged: None,
@@ -234,6 +237,9 @@ impl DiffPane {
 
     /// Toggles one changed line. Leaves visual mode.
     fn toggle_key(&mut self, key: LineKey, cx: &mut Context<Self>) {
+        if !controls(self.mode).line_selection {
+            return;
+        }
         self.pending = None;
         self.visual = None;
         let diffs = sides(self.unstaged.as_ref(), self.staged.as_ref());
@@ -258,6 +264,9 @@ impl DiffPane {
 
     /// Emits a chunk action for one hunk of `side`.
     fn run_chunk(&mut self, action: Action, side: Side, hunk_index: usize, cx: &mut Context<Self>) {
+        if !controls(self.mode).chunk_actions {
+            return;
+        }
         self.pending = None;
         let (Some(path), Some(hunk)) = (self.path(), self.hunk_id(side, hunk_index)) else {
             return;
@@ -283,6 +292,9 @@ impl DiffPane {
     /// Stages or unstages the selected lines, one event per hunk, applying the
     /// two-press rule to a split pair.
     fn apply_lines(&mut self, action: Apply, cx: &mut Context<Self>) {
+        if !controls(self.mode).line_selection {
+            return;
+        }
         let side = match action {
             Apply::Stage => Side::Unstaged,
             Apply::Unstage => Side::Staged,
@@ -330,6 +342,9 @@ impl DiffPane {
     }
 
     fn toggle_visual(&mut self, cx: &mut Context<Self>) {
+        if !controls(self.mode).line_selection {
+            return;
+        }
         self.pending = None;
         if self.visual.take().is_none() {
             let base = self.selection.clone();
@@ -400,7 +415,11 @@ impl DiffPane {
                             .child(format!("+{added} −{removed}")),
                     ),
             )
-            .child(self.side_selector(cx));
+            .children(
+                controls(self.mode)
+                    .side_selector
+                    .then(|| self.side_selector(cx)),
+            );
         let summary = (!hunks.is_empty()).then(|| {
             div()
                 .px_3()
@@ -594,7 +613,7 @@ impl DiffPane {
                     .text_color(theme::muted())
                     .child(format!("{selected} of {total} lines")),
             )
-            .child(buttons)
+            .children(controls(self.mode).chunk_actions.then_some(buttons))
             .into_any_element()
     }
 
@@ -633,7 +652,7 @@ impl DiffPane {
                 .text_color(theme::gutter())
                 .child(n.map_or_else(String::new, |n| n.to_string()))
         };
-        let checkbox = if changed {
+        let checkbox = if changed && controls(self.mode).line_selection {
             let mark = if selected {
                 icon::filled(Icon::CheckSquare, icon::SMALL, theme::accent())
             } else {
