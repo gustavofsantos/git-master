@@ -1,28 +1,25 @@
-//! The left column of the Working Copy window: the heading, the filter, the
-//! commit box and the change list.
+//! The left column of the Working Copy window: the heading, the flat change
+//! list and, at its bottom, the commit box.
 
 use std::ops::Range;
 
 use gm_schema::{Change, StatusEntry};
 use gpui::{
-    Context, Div, Hsla, MouseButton, MouseDownEvent, Pixels, Window, div, prelude::*, px,
-    uniform_list,
+    Context, Div, Hsla, MouseButton, MouseDownEvent, Window, div, prelude::*, px, uniform_list,
 };
 
-use crate::changes::{Check, Row};
-use crate::icon::{self, Icon};
-use crate::model::entry_label;
+use crate::action_registry::{Action, Args};
 use crate::resize::{self, LEFT};
 use crate::resize_handle::{self, Edge};
 use crate::theme;
 use crate::view::{KEY_CONTEXT, StatusView};
-use crate::{FocusFilter, Refresh, SelectNext, SelectPrev, ToggleStage};
+use crate::{Refresh, SelectNext, SelectPrev, ToggleStage};
 
 const ROW_HEIGHT: f32 = 24.;
 
 impl StatusView {
-    /// The left column at `width`, with its commit box `commit_height` tall.
-    /// Its right edge and the commit box's bottom edge are the two strips.
+    /// The left column at `width`, with its commit box `commit_height` tall at
+    /// its bottom. Its right edge is the strip that resizes the column.
     pub(crate) fn left_column(
         &self,
         width: f32,
@@ -49,17 +46,14 @@ impl StatusView {
             .border_r_1()
             .border_color(theme::hairline())
             .child(self.heading())
-            .child(self.filter_line())
-            .child(self.commit_block(commit_height, cx))
             .child(self.change_list(cx))
+            .child(self.commit_block(commit_height, cx))
             .child(width_strip)
     }
 
+    /// "Working Copy", and the number of changed files muted beside it.
     fn heading(&self) -> Div {
-        let muted = theme::muted();
-        let summary = self.model.summary();
-        let files = self.model.entry_count();
-        let noun = if files == 1 { "file" } else { "files" };
+        let count = self.model.entry_count();
         div()
             .px_3()
             .py_2()
@@ -67,6 +61,8 @@ impl StatusView {
             .flex_row()
             .items_center()
             .justify_between()
+            .border_b_1()
+            .border_color(theme::hairline())
             .child(
                 div()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -74,33 +70,15 @@ impl StatusView {
             )
             .child(
                 div()
-                    .text_color(muted)
-                    .child(format!("{files} {noun} · {} staged", summary.staged)),
+                    .text_color(theme::muted())
+                    .child(format!("{count} changed")),
             )
-    }
-
-    fn filter_line(&self) -> Div {
-        div()
-            .px_3()
-            .py_2()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .border_b_1()
-            .border_color(theme::hairline())
-            .child(icon::view(
-                Icon::MagnifyingGlass,
-                icon::SIZE,
-                theme::muted(),
-            ))
-            .child(div().flex_1().min_w(px(0.)).child(self.filter.clone()))
     }
 
     /// The file list. It is always rendered and always holds the list focus,
     /// so the list keys have a place to go even when there is nothing to list.
     fn change_list(&self, cx: &Context<Self>) -> Div {
-        let count = self.model.tree().row_count();
+        let count = self.model.entry_count();
         div()
             .flex_1()
             .min_h(px(0.))
@@ -110,10 +88,11 @@ impl StatusView {
             .track_focus(&self.list_focus)
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step_file(true, cx)))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| this.step_file(false, cx)))
-            .on_action(cx.listener(|this, _: &Refresh, _, cx| this.refresh(cx)))
-            .on_action(cx.listener(|this, _: &ToggleStage, _, cx| this.toggle_selected(cx)))
-            .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
-                this.focus_filter(window, cx);
+            .on_action(cx.listener(|this, _: &Refresh, window, cx| {
+                this.run_action(Action::Refresh, &Args::None, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleStage, window, cx| {
+                this.toggle_selected(window, cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -138,15 +117,13 @@ impl StatusView {
                          cx: &mut Context<StatusView>| {
                             let selected = this.model.selected_row();
                             let entries = this.model.entries();
-                            this.model
-                                .tree()
-                                .rows()
+                            entries
                                 .get(range.clone())
                                 .unwrap_or_default()
                                 .iter()
                                 .zip(range)
-                                .map(|(row, index)| {
-                                    row_element(row, entries, selected == Some(index), index, cx)
+                                .map(|(entry, index)| {
+                                    file_row(entry, selected == Some(index), index, cx)
                                 })
                                 .collect()
                         },
@@ -164,163 +141,144 @@ impl StatusView {
             None if self.model.loading => Some("Loading…"),
             None => Some("No repository is open."),
             Some(_) if self.model.entry_count() == 0 => Some("Working tree clean."),
-            Some(_) if self.model.tree().row_count() == 0 => Some("No file matches the filter."),
             Some(_) => None,
         }
     }
 }
 
-/// One row of the list. A folder row toggles its check and, from its chevron,
-/// its expansion; a file row selects on click and toggles from its checkbox.
-fn row_element(
-    row: &Row,
-    entries: &[StatusEntry],
-    selected: bool,
-    index: usize,
-    cx: &Context<StatusView>,
-) -> Div {
-    match row {
-        Row::Dir {
-            path,
-            name,
-            depth,
-            expanded,
-            check,
-        } => {
-            let folder = path.clone();
-            let caret = if *expanded {
-                Icon::CaretDown
-            } else {
-                Icon::CaretRight
-            };
-            let folder_icon = if *expanded {
-                Icon::FolderOpen
-            } else {
-                Icon::Folder
-            };
-            let chevron = div()
-                .flex_none()
-                .cursor_pointer()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        this.toggle_folder(&folder, cx);
-                        cx.stop_propagation();
-                    }),
-                )
-                .child(icon::view(caret, icon::SIZE, theme::muted()));
-            base_row(*depth)
-                .child(chevron)
-                .child(checkbox(*check, index, cx))
-                .child(icon::view(folder_icon, icon::SIZE, theme::muted()))
-                .child(div().min_w(px(0.)).child(name.clone()))
-        }
-        Row::File {
-            entry_index,
-            name,
-            depth,
-            check,
-            ..
-        } => {
-            let entry = entries.get(*entry_index);
-            let (staged, unstaged) = entry.map_or((' ', ' '), entry_label);
-            let label = match entry.and_then(|entry| entry.orig_path.as_deref()) {
-                Some(orig) => format!("{name}  ← {orig}"),
-                None => name.clone(),
-            };
-            base_row(*depth)
-                .when(selected, |row| row.bg(theme::selected_row()))
-                .cursor_pointer()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        this.select_row(index, cx);
-                    }),
-                )
-                .child(checkbox(*check, index, cx))
-                .child(
-                    div()
-                        .w(px(14.))
-                        .font_family(theme::code_font())
-                        .text_color(letter_colour(staged, theme::staged()))
-                        .child(staged.to_string()),
-                )
-                .child(
-                    div()
-                        .w(px(14.))
-                        .font_family(theme::code_font())
-                        .text_color(letter_colour(unstaged, theme::unstaged()))
-                        .child(unstaged.to_string()),
-                )
-                .child(icon::view(file_icon(entry), icon::SIZE, theme::muted()))
-                .child(div().min_w(px(0.)).child(label))
-        }
-    }
-}
-
-/// The file's kind: added (or untracked), deleted, or any other change.
-fn file_icon(entry: Option<&StatusEntry>) -> Icon {
-    let Some(entry) = entry else {
-        return Icon::File;
+/// One file: its status letter and its full path. A discreet dot after the
+/// letter marks a file that has something staged.
+fn file_row(entry: &StatusEntry, selected: bool, index: usize, cx: &Context<StatusView>) -> Div {
+    let (letter, colour) = status_letter(entry);
+    let label = match entry.orig_path.as_deref() {
+        Some(orig) => format!("{}  ← {orig}", entry.path),
+        None => entry.path.clone(),
     };
-    if entry.untracked || entry.staged == Some(Change::Added) {
-        Icon::FilePlus
-    } else if entry.staged == Some(Change::Deleted) || entry.unstaged == Some(Change::Deleted) {
-        Icon::FileMinus
-    } else {
-        Icon::File
-    }
-}
-
-fn base_row(depth: usize) -> Div {
+    let staged_mark =
+        (entry.staged.is_some() && !entry.conflicted && !entry.untracked).then(|| {
+            div()
+                .id(("staged-mark", index))
+                .size(px(5.))
+                .flex_none()
+                .rounded_full()
+                .bg(theme::staged())
+        });
     div()
+        .w_full()
         .flex()
         .flex_row()
         .items_center()
         .gap_2()
         .h(px(ROW_HEIGHT))
-        .pl(indent(depth))
-        .pr_3()
-}
-
-/// The tri-state checkbox: checked, mixed or unchecked. Clicking it stages or
-/// unstages the row without selecting it.
-fn checkbox(check: Check, index: usize, cx: &Context<StatusView>) -> Div {
-    let (glyph, colour) = match check {
-        Check::Checked => (Icon::CheckSquare, theme::accent()),
-        Check::Mixed => (Icon::MinusSquare, theme::accent()),
-        Check::Unchecked => (Icon::Square, theme::muted()),
-    };
-    let image = if check == Check::Checked {
-        icon::filled(glyph, icon::SIZE, colour)
-    } else {
-        icon::view(glyph, icon::SIZE, colour)
-    };
-    div()
-        .flex_none()
+        .px_3()
+        .when(selected, |row| row.bg(theme::selected_row()))
         .cursor_pointer()
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                this.toggle_row(index, cx);
-                cx.stop_propagation();
+                this.select_row(index, cx);
             }),
         )
-        .child(image)
+        .child(
+            div()
+                .w(px(14.))
+                .flex_none()
+                .font_family(theme::code_font())
+                .text_color(colour)
+                .child(letter.to_string()),
+        )
+        .child(div().w(px(6.)).flex_none().children(staged_mark))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .font_family(theme::code_font())
+                .child(label),
+        )
 }
 
-/// A letter's colour: its side's colour, or a marker colour for the special ones.
-fn letter_colour(letter: char, side: Hsla) -> Hsla {
-    match letter {
-        '?' => theme::untracked(),
-        'U' => theme::error(),
-        ' ' => theme::muted(),
-        _ => side,
+/// The letter that stands for the file: `?` untracked, `U` conflicted, else the
+/// unstaged change, else the staged one. Its colour is that side's.
+fn status_letter(entry: &StatusEntry) -> (char, Hsla) {
+    if entry.untracked {
+        return ('?', theme::untracked());
+    }
+    if entry.conflicted {
+        return ('U', theme::error());
+    }
+    match (entry.unstaged, entry.staged) {
+        (Some(change), _) => (change_letter(change), theme::unstaged()),
+        (None, Some(change)) => (change_letter(change), theme::staged()),
+        (None, None) => (' ', theme::muted()),
     }
 }
 
-/// Indentation for a row at `depth`, in steps of 14 pixels.
-fn indent(depth: usize) -> Pixels {
-    let steps = u16::try_from(depth).unwrap_or(u16::MAX);
-    px(8. + f32::from(steps) * 14.)
+fn change_letter(change: Change) -> char {
+    match change {
+        Change::Added => 'A',
+        Change::Modified => 'M',
+        Change::Deleted => 'D',
+        Change::Renamed => 'R',
+        Change::Copied => 'C',
+        Change::TypeChanged => 'T',
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(staged: Option<Change>, unstaged: Option<Change>) -> StatusEntry {
+        StatusEntry {
+            path: "a.txt".into(),
+            orig_path: None,
+            staged,
+            unstaged,
+            untracked: false,
+            conflicted: false,
+        }
+    }
+
+    #[test]
+    fn the_letter_is_the_unstaged_change_first() {
+        assert_eq!(
+            status_letter(&entry(Some(Change::Added), Some(Change::Modified))).0,
+            'M'
+        );
+        assert_eq!(status_letter(&entry(Some(Change::Added), None)).0, 'A');
+        assert_eq!(status_letter(&entry(None, Some(Change::Deleted))).0, 'D');
+    }
+
+    #[test]
+    fn every_change_kind_has_its_letter() {
+        let letters: Vec<char> = [
+            Change::Added,
+            Change::Modified,
+            Change::Deleted,
+            Change::Renamed,
+            Change::Copied,
+            Change::TypeChanged,
+        ]
+        .into_iter()
+        .map(change_letter)
+        .collect();
+        assert_eq!(letters, ['A', 'M', 'D', 'R', 'C', 'T']);
+    }
+
+    #[test]
+    fn untracked_and_conflicted_have_their_own_letters() {
+        let untracked = StatusEntry {
+            untracked: true,
+            ..entry(None, None)
+        };
+        let conflicted = StatusEntry {
+            conflicted: true,
+            ..entry(None, None)
+        };
+        assert_eq!(status_letter(&untracked).0, '?');
+        assert_eq!(status_letter(&conflicted).0, 'U');
+    }
 }

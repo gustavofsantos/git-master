@@ -4,7 +4,7 @@
 
 use gpui::{Hsla, Pixels, Styled, Svg, px, svg};
 
-/// An icon in a row, a button or a tree.
+/// An icon in a row or a button.
 pub const SIZE: Pixels = px(16.);
 /// An icon beside small counter text.
 pub const SMALL: Pixels = px(14.);
@@ -14,14 +14,8 @@ pub const SMALL: Pixels = px(14.);
 pub enum Icon {
     CheckSquare,
     Square,
-    MinusSquare,
-    CaretRight,
     CaretDown,
-    File,
-    FilePlus,
-    FileMinus,
     Folder,
-    FolderOpen,
     GitBranch,
     ArrowUp,
     ArrowDown,
@@ -42,14 +36,8 @@ impl Icon {
     pub const ALL: &[Icon] = &[
         Self::CheckSquare,
         Self::Square,
-        Self::MinusSquare,
-        Self::CaretRight,
         Self::CaretDown,
-        Self::File,
-        Self::FilePlus,
-        Self::FileMinus,
         Self::Folder,
-        Self::FolderOpen,
         Self::GitBranch,
         Self::ArrowUp,
         Self::ArrowDown,
@@ -68,14 +56,8 @@ impl Icon {
         match self {
             Self::CheckSquare => "check-square",
             Self::Square | Self::Maximize => "square",
-            Self::MinusSquare => "minus-square",
-            Self::CaretRight => "caret-right",
             Self::CaretDown => "caret-down",
-            Self::File => "file",
-            Self::FilePlus => "file-plus",
-            Self::FileMinus => "file-minus",
             Self::Folder => "folder",
-            Self::FolderOpen => "folder-open",
             Self::GitBranch => "git-branch",
             Self::ArrowUp => "arrow-up",
             Self::ArrowDown => "arrow-down",

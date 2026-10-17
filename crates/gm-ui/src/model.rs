@@ -1,28 +1,18 @@
 //! The window's state, with no GPUI in it: the status the engine reported, the
-//! change tree built from it, the selected file, the diffs being loaded for it
-//! and the last message. The view renders it and forwards keys to it.
+//! selected file, the diffs being loaded for it and the last message. The view
+//! renders it and forwards keys to it.
 
-use std::collections::HashSet;
-
-use gm_schema::{
-    Change, DiffSide, Event, FileDiff, OperationId, OperationState, RepoStatus, StatusEntry,
-};
+use gm_schema::{DiffSide, Event, FileDiff, OperationId, OperationState, RepoStatus, StatusEntry};
 
 use crate::branches::Branches;
-use crate::changes::{ChangeTree, Row, Summary, ToggleAction};
+use crate::changes::{Summary, summarize};
 use crate::icon::Icon;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Model {
     status: Option<RepoStatus>,
-    tree: ChangeTree,
-    filter: String,
-    /// Full paths of folders whose rows are hidden.
-    collapsed: HashSet<String>,
     /// Path of the selected file. Kept across status changes while it exists.
     selected: Option<String>,
-    /// Row of the selected file in `tree`; `Some` exactly when `selected` is.
-    selected_row: Option<usize>,
     /// The two diffs being loaded for the selected file.
     diffs: Option<DiffSlots>,
     /// Why the last operation failed. Cleared by the next status.
@@ -110,6 +100,7 @@ impl Model {
             Event::StatusLoaded { id, status } => {
                 // A successful checkout ends with its status; the repaint is the same as any other.
                 let _ = self.branches.finish_checkout(id);
+                let old_row = self.selected_row();
                 if self.pending_open == Some(id) {
                     self.pending_open = None;
                     self.floor = Some(id);
@@ -124,7 +115,7 @@ impl Model {
                     self.reset_for_repo();
                 }
                 self.status = Some(status);
-                self.rebuild();
+                self.reconcile_selection(old_row);
                 self.error = None;
                 self.loading = false;
                 None
@@ -194,10 +185,7 @@ impl Model {
     /// Clears what belonged to the repository being left. The status stays
     /// until the new one replaces it.
     fn reset_for_repo(&mut self) {
-        self.filter.clear();
-        self.collapsed.clear();
         self.selected = None;
-        self.selected_row = None;
         self.diffs = None;
         self.notice = None;
         self.notice_icon = None;
@@ -268,60 +256,25 @@ impl Model {
         self.notice_generation
     }
 
-    /// Sets the filter to the first line of `text`. Returns whether the
-    /// selected file changed, so the caller reloads its diffs.
-    pub fn set_filter(&mut self, text: &str) -> bool {
-        let needle = text.lines().next().unwrap_or("");
-        if needle == self.filter {
-            return false;
-        }
-        needle.clone_into(&mut self.filter);
-        self.change_selection(Self::rebuild)
-    }
-
-    /// Shows or hides a folder's rows. Returns whether the selected file changed.
-    pub fn toggle_collapsed(&mut self, folder: &str) -> bool {
-        self.change_selection(|model| {
-            if !model.collapsed.remove(folder) {
-                model.collapsed.insert(folder.to_owned());
-            }
-            model.rebuild();
-        })
-    }
-
-    /// Selects the file on `row`. Folders are not selectable. Returns whether
-    /// the selected file changed.
+    /// Selects the file on `row`. Returns whether the selected file changed.
     pub fn select_row(&mut self, row: usize) -> bool {
-        match self.path_at(row).map(str::to_owned) {
-            Some(path) => self.choose(row, path),
+        match self.entries().get(row).map(|entry| entry.path.clone()) {
+            Some(path) => self.choose(path),
             None => false,
         }
     }
 
-    /// Moves the selection to the next (or previous) file row. Returns whether
-    /// the selected file changed.
+    /// Moves the selection to the next (or previous) file. Returns whether the
+    /// selected file changed.
     pub fn select_file_step(&mut self, down: bool) -> bool {
-        let target = match (self.selected_row, down) {
-            (Some(row), true) => self.tree.next_file(row),
-            (Some(row), false) => self.tree.prev_file(row),
-            (None, true) => self.file_forward(0),
-            (None, false) => self.file_backward(self.tree.row_count()),
+        let count = self.entry_count();
+        let target = match (self.selected_row(), down) {
+            (Some(row), true) => row.checked_add(1).filter(|&next| next < count),
+            (Some(row), false) => row.checked_sub(1),
+            (None, true) => (count > 0).then_some(0),
+            (None, false) => count.checked_sub(1),
         };
-        match target {
-            Some(row) => self.select_row(row),
-            None => false,
-        }
-    }
-
-    /// What toggling `row` does to the index.
-    #[must_use]
-    pub fn toggle_action(&self, row: usize) -> ToggleAction {
-        self.tree.toggle_action(row)
-    }
-
-    #[must_use]
-    pub fn tree(&self) -> &ChangeTree {
-        &self.tree
+        target.is_some_and(|row| self.select_row(row))
     }
 
     #[must_use]
@@ -338,13 +291,8 @@ impl Model {
     }
 
     #[must_use]
-    pub fn filter(&self) -> &str {
-        &self.filter
-    }
-
-    #[must_use]
     pub fn summary(&self) -> Summary {
-        self.tree.summary()
+        summarize(self.entries())
     }
 
     #[must_use]
@@ -352,77 +300,35 @@ impl Model {
         self.selected.as_deref()
     }
 
+    /// The row of the selected file in the list.
     #[must_use]
     pub fn selected_row(&self) -> Option<usize> {
-        self.selected_row
+        let path = self.selected.as_deref()?;
+        self.entries().iter().position(|entry| entry.path == path)
     }
 
-    /// The count of changed paths, whatever the filter.
+    /// The count of changed paths.
     #[must_use]
     pub fn entry_count(&self) -> usize {
         self.entries().len()
     }
 
-    /// Runs `change`, then reports whether the selected file changed.
-    fn change_selection(&mut self, change: impl FnOnce(&mut Self)) -> bool {
-        let before = self.selected.clone();
-        change(self);
-        self.selected != before
-    }
-
-    fn choose(&mut self, row: usize, path: String) -> bool {
+    /// Selects `path`. Returns whether the selected file changed.
+    fn choose(&mut self, path: String) -> bool {
         let changed = self.selected.as_deref() != Some(path.as_str());
         self.selected = Some(path);
-        self.selected_row = Some(row);
         changed
     }
 
-    /// Rebuilds the tree from the status and filter, then keeps the selection:
-    /// by path while the file is listed, else the nearest file to its old row.
-    fn rebuild(&mut self) {
-        let old_row = self.selected_row;
-        self.tree = ChangeTree::build(self.entries(), &self.filter, &self.collapsed);
-        let Some(path) = self.selected.clone() else {
-            self.selected_row = None;
-            return;
-        };
-        if let Some(row) = self.row_of(&path) {
-            self.selected_row = Some(row);
+    /// Keeps the selection by path while the file is listed. When it is gone,
+    /// the file now at its old row is selected, or the last one.
+    fn reconcile_selection(&mut self, old_row: Option<usize>) {
+        if self.selected.is_none() || self.selected_row().is_some() {
             return;
         }
-        let nearest =
-            old_row.and_then(|old| self.file_forward(old).or_else(|| self.file_backward(old)));
-        let moved = nearest.and_then(|row| self.path_at(row).map(str::to_owned).map(|p| (row, p)));
-        if let Some((row, path)) = moved {
-            self.selected = Some(path);
-            self.selected_row = Some(row);
-        } else {
-            self.selected = None;
-            self.selected_row = None;
-        }
-    }
-
-    fn row_of(&self, path: &str) -> Option<usize> {
-        (0..self.tree.row_count()).find(|&row| self.path_at(row) == Some(path))
-    }
-
-    fn path_at(&self, row: usize) -> Option<&str> {
-        match self.tree.rows().get(row)? {
-            Row::File { path, .. } => Some(path.as_str()),
-            Row::Dir { .. } => None,
-        }
-    }
-
-    /// The first file row at or after `from`.
-    fn file_forward(&self, from: usize) -> Option<usize> {
-        (from..self.tree.row_count()).find(|&row| self.tree.file_at(row).is_some())
-    }
-
-    /// The last file row strictly before `before`.
-    fn file_backward(&self, before: usize) -> Option<usize> {
-        (0..before.min(self.tree.row_count()))
-            .rev()
-            .find(|&row| self.tree.file_at(row).is_some())
+        let count = self.entry_count();
+        let next = old_row.filter(|_| count > 0).map(|row| row.min(count - 1));
+        self.selected = next.map(|row| self.entries()[row].path.clone());
     }
 }
 
@@ -444,35 +350,10 @@ fn event_id(event: &Event) -> OperationId {
     }
 }
 
-/// The two status letters shown before a path: staged, then unstaged.
-/// `?` marks an untracked path, `U` a conflicted one, a space an unchanged side.
-#[must_use]
-pub fn entry_label(entry: &StatusEntry) -> (char, char) {
-    if entry.untracked {
-        ('?', '?')
-    } else if entry.conflicted {
-        ('U', 'U')
-    } else {
-        (change_letter(entry.staged), change_letter(entry.unstaged))
-    }
-}
-
-fn change_letter(change: Option<Change>) -> char {
-    match change {
-        Some(Change::Added) => 'A',
-        Some(Change::Modified) => 'M',
-        Some(Change::Deleted) => 'D',
-        Some(Change::Renamed) => 'R',
-        Some(Change::Copied) => 'C',
-        Some(Change::TypeChanged) => 'T',
-        None => ' ',
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_schema::{Actor, BranchInfo};
+    use gm_schema::{Actor, BranchInfo, Change};
 
     fn entry(path: &str) -> StatusEntry {
         StatusEntry {
@@ -530,7 +411,11 @@ mod tests {
     fn selected(paths: &[&str], path: &str) -> Model {
         let mut model = Model::default();
         let _ = model.apply(loaded(paths));
-        let row = model.row_of(path).expect("path is listed");
+        let row = model
+            .entries()
+            .iter()
+            .position(|entry| entry.path == path)
+            .expect("path is listed");
         let _ = model.select_row(row);
         model.expect_diffs(path.to_owned(), OperationId(10), OperationId(11));
         model
@@ -572,7 +457,7 @@ mod tests {
         let mut model = selected(&["a/x", "b", "c"], "b");
         let _ = model.apply(loaded(&["z", "b", "c", "a/x"]));
         assert_eq!(model.selected_path(), Some("b"));
-        assert_eq!(model.selected_row(), model.row_of("b"));
+        assert_eq!(model.selected_row(), Some(1));
     }
 
     #[test]
@@ -588,37 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn a_filter_that_hides_the_selection_selects_the_nearest_file() {
-        let mut model = selected(&["a", "bb", "c"], "bb");
-        assert!(model.set_filter("c"));
-        assert_eq!(model.selected_path(), Some("c"));
-        assert!(!model.set_filter("")); // the selection is kept, so no reload
-        assert_eq!(model.selected_path(), Some("c"));
-    }
-
-    #[test]
-    fn a_filter_keeps_the_selection_when_the_file_still_matches() {
-        let mut model = selected(&["a", "ab", "c"], "ab");
-        assert!(!model.set_filter("a"));
-        assert_eq!(model.selected_path(), Some("ab"));
-    }
-
-    #[test]
-    fn only_the_first_line_of_the_filter_counts() {
-        let mut model = selected(&["a", "b"], "a");
-        let _ = model.set_filter("b\nignored");
-        assert_eq!(model.filter(), "b");
-    }
-
-    #[test]
-    fn collapsing_the_folder_of_the_selection_moves_it() {
-        let mut model = selected(&["dir/x", "other"], "dir/x");
-        assert!(model.toggle_collapsed("dir"));
-        assert_eq!(model.selected_path(), Some("other"));
-    }
-
-    #[test]
-    fn an_empty_tree_has_no_selection() {
+    fn an_empty_list_has_no_selection() {
         let mut model = Model::default();
         assert!(!model.select_file_step(true));
         assert!(!model.select_file_step(false));
@@ -626,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn steps_skip_folders_and_stop_at_both_ends() {
+    fn steps_move_through_the_files_and_stop_at_both_ends() {
         let mut model = Model::default();
         let _ = model.apply(loaded(&["dir/a", "dir/b"]));
         assert!(model.select_file_step(true));
@@ -637,14 +492,6 @@ mod tests {
         assert!(model.select_file_step(false));
         assert_eq!(model.selected_path(), Some("dir/a"));
         assert!(!model.select_file_step(false));
-    }
-
-    #[test]
-    fn clicking_a_folder_does_not_select_anything() {
-        let mut model = Model::default();
-        let _ = model.apply(loaded(&["dir/a"]));
-        assert!(!model.select_row(0));
-        assert_eq!(model.selected_path(), None);
     }
 
     #[test]
@@ -736,45 +583,6 @@ mod tests {
         assert_eq!(model.notice.as_deref(), Some("nothing staged"));
     }
 
-    #[test]
-    fn labels_show_staged_then_unstaged() {
-        let mut modified = entry("a");
-        modified.unstaged = Some(Change::Modified);
-        assert_eq!(entry_label(&modified), (' ', 'M'));
-
-        let mut added = entry("b");
-        added.unstaged = None;
-        added.staged = Some(Change::Added);
-        assert_eq!(entry_label(&added), ('A', ' '));
-    }
-
-    #[test]
-    fn every_change_kind_has_its_letter() {
-        let letters: Vec<char> = [
-            Change::Added,
-            Change::Modified,
-            Change::Deleted,
-            Change::Renamed,
-            Change::Copied,
-            Change::TypeChanged,
-        ]
-        .into_iter()
-        .map(|change| change_letter(Some(change)))
-        .collect();
-        assert_eq!(letters, ['A', 'M', 'D', 'R', 'C', 'T']);
-    }
-
-    #[test]
-    fn untracked_and_conflicted_entries_have_their_own_labels() {
-        let mut untracked = entry("new");
-        untracked.untracked = true;
-        assert_eq!(entry_label(&untracked), ('?', '?'));
-
-        let mut conflicted = entry("both");
-        conflicted.conflicted = true;
-        assert_eq!(entry_label(&conflicted), ('U', 'U'));
-    }
-
     fn status_at(root: &str, paths: &[&str]) -> RepoStatus {
         RepoStatus {
             root: root.to_owned(),
@@ -783,17 +591,13 @@ mod tests {
         }
     }
 
-    /// A model showing repository `/r` with `a` selected, a folder collapsed,
-    /// a filter typed and a notice up, with `a`'s diffs pending as ids 10 and 11.
+    /// A model showing repository `/r` with `a` selected and a notice up, with
+    /// `a`'s diffs pending as ids 10 and 11.
     fn busy() -> Model {
         let mut model = Model::default();
         let _ = model.apply(loaded(&["a", "dir/b"]));
-        let _ = model.set_filter("a");
-        let _ = model.set_filter("");
-        let _ = model.toggle_collapsed("dir");
         let _ = model.set_notice("nothing staged".into());
-        let row = model.row_of("a").expect("a is listed");
-        let _ = model.select_row(row);
+        let _ = model.select_row(0);
         model.expect_diffs("a".to_owned(), OperationId(10), OperationId(11));
         model
     }
@@ -809,10 +613,8 @@ mod tests {
         });
         assert!(!model.is_opening());
         assert_eq!(model.selected_path(), None);
-        assert_eq!(model.filter(), "");
         assert!(!model.diffs_are_for("a"));
         assert_eq!(model.notice, None);
-        assert!(model.collapsed.is_empty());
         assert_eq!(model.entries().len(), 1);
         assert_eq!(
             model.take_switched(),

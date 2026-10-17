@@ -1,8 +1,9 @@
-//! The commit box above the change list: the message, its subject counter and
-//! hint, and the Commit button.
+//! The commit box at the bottom of the left column: the message, its subject
+//! counter and hint, and the Commit button under it.
 
 use gpui::{Context, Div, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*, px};
 
+use crate::action_registry::{Action, Args};
 use crate::composer;
 use crate::resize::{self, COMMIT};
 use crate::resize_handle::{self, Edge};
@@ -13,34 +14,39 @@ use crate::view::StatusView;
 const SUBJECT_LIMIT: usize = 72;
 
 impl StatusView {
-    /// The commit box, with its message box `height` tall. Its bottom edge is
-    /// the strip that resizes the message box.
+    /// The commit box, with its message box `height` tall. Its top edge is the
+    /// strip that resizes the message box.
     pub(crate) fn commit_block(&self, height: f32, cx: &mut Context<Self>) -> Div {
         let muted = theme::muted();
         let text = self.composer.read(cx).text(cx);
         let subject = composer::subject_len(&text);
         let hint = composer::subject_hint(&text);
-        let staged = self.model.summary().staged;
         let counter_colour = if subject > SUBJECT_LIMIT {
             theme::error()
         } else {
             muted
         };
-        let enabled = staged > 0 && !text.trim().is_empty();
-        // Enabled: solid accent with its own text colour. Disabled: the panel
-        // with muted text and an outline, so the label stays readable.
+        let branch = self
+            .model
+            .status()
+            .and_then(|status| status.branch.head.as_deref())
+            .unwrap_or("detached HEAD")
+            .to_owned();
+        let enabled = self.commit_enabled(&text);
+        // Enabled: the dark primary button. Disabled: the panel with muted text
+        // and an outline, so the label stays readable.
         let (button_fill, button_text, button_edge) = if enabled {
-            (theme::accent(), theme::on_accent(), theme::accent())
+            (theme::text(), theme::ground(), theme::text())
         } else {
             (theme::panel(), muted, theme::hairline_strong())
         };
         let button = div()
+            .id("commit-button")
+            .w_full()
+            .h(px(28.))
             .flex()
-            .flex_row()
             .items_center()
-            .gap_2()
-            .px_3()
-            .h(px(26.))
+            .justify_center()
             .rounded_md()
             .border_1()
             .border_color(button_edge)
@@ -49,13 +55,14 @@ impl StatusView {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| this.commit(cx)),
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.run_action(Action::Commit, &Args::None, window, cx);
+                }),
             )
-            .child(format!("Commit ({staged})"))
-            .child(div().child("⌘↵"));
+            .child(format!("Commit on {branch}"));
         let height_strip = resize_handle::handle(
             "commit-height-resize",
-            Edge::Bottom,
+            Edge::Top,
             height,
             COMMIT,
             |this: &mut StatusView, height, _| this.commit_height = height,
@@ -64,12 +71,13 @@ impl StatusView {
         );
         div()
             .relative()
+            .flex_none()
             .flex()
             .flex_col()
             .gap_2()
             .p_3()
             .bg(theme::panel())
-            .border_b_1()
+            .border_t_1()
             .border_color(theme::hairline())
             .child(
                 div()
@@ -99,22 +107,12 @@ impl StatusView {
                     .text_color(theme::warn_fg())
                     .child(hint.unwrap_or("")),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .px_2()
-                            .rounded_sm()
-                            .bg(theme::added_bg())
-                            .text_color(theme::added_fg())
-                            .child(format!("{staged} staged")),
-                    )
-                    .child(button),
-            )
+            .child(button)
             .child(height_strip)
+    }
+
+    /// Whether the Commit button is drawn enabled: something staged and a message.
+    fn commit_enabled(&self, text: &str) -> bool {
+        self.model.summary().staged > 0 && !text.trim().is_empty()
     }
 }

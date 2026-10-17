@@ -13,6 +13,7 @@ use gpui::{
     UniformListScrollHandle, Window, canvas, div, prelude::*, px, uniform_list,
 };
 
+use crate::action_registry::{Action, Args};
 use crate::branches::{Line, Section};
 use crate::icon::{self, Icon};
 use crate::text_area::{Down, Newline, TextArea, TextAreaEvent, Up};
@@ -117,26 +118,15 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Checks out `name`, unless it is the current branch, which only closes the list.
-    fn choose_branch(
-        &mut self,
-        name: &str,
-        current: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Closes the list, then checks out `name` through the registry.
+    fn choose_branch(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.close_branch_menu(window, cx);
-        if current || self.refuse_while_busy(cx) {
-            return;
-        }
-        let id = self.engine.dispatch(
-            Actor::Human,
-            CommandKind::Checkout {
-                branch: name.to_owned(),
-            },
+        self.run_action(
+            Action::CheckoutBranch,
+            &Args::Branch(name.to_owned()),
+            window,
+            cx,
         );
-        self.model.branches.begin_checkout(id);
-        cx.notify();
     }
 
     /// Enter: checks out the highlighted branch. Nothing happens with no match.
@@ -144,8 +134,8 @@ impl StatusView {
         let Some(branch) = self.model.branches.highlighted() else {
             return;
         };
-        let (name, current) = (branch.name.clone(), branch.is_current);
-        self.choose_branch(&name, current, window, cx);
+        let name = branch.name.clone();
+        self.choose_branch(&name, window, cx);
     }
 
     /// Up and down: moves the highlight and keeps it on screen.
@@ -382,7 +372,7 @@ fn branch_row(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                this.choose_branch(&name, current, window, cx);
+                this.choose_branch(&name, window, cx);
             }),
         )
         .child(

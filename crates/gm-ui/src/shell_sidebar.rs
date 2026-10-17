@@ -5,12 +5,12 @@
 
 use std::ops::Range;
 
-use gm_schema::{Actor, CommandKind};
 use gpui::{
     AnyElement, Context, Div, FontWeight, MouseButton, MouseDownEvent, Stateful, Window, div,
     prelude::*, px, uniform_list,
 };
 
+use crate::action_registry::{Action, Args};
 use crate::sidebar::{self, Grouping, Row};
 use crate::theme;
 use crate::view::StatusView;
@@ -146,23 +146,13 @@ impl StatusView {
     }
 
     /// Checks out `name`, as the top bar's picker does.
-    fn checkout_from_sidebar(&mut self, name: &str, cx: &mut Context<Self>) {
-        let current = self
-            .model
-            .status()
-            .and_then(|status| status.branch.head.as_deref())
-            == Some(name);
-        if current || self.refuse_while_busy(cx) {
-            return;
-        }
-        let id = self.engine.dispatch(
-            Actor::Human,
-            CommandKind::Checkout {
-                branch: name.to_owned(),
-            },
+    fn checkout_from_sidebar(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_action(
+            Action::CheckoutBranch,
+            &Args::Branch(name.to_owned()),
+            window,
+            cx,
         );
-        self.model.branches.begin_checkout(id);
-        cx.notify();
     }
 }
 
@@ -276,8 +266,8 @@ fn tree_row(
                 }))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        this.checkout_from_sidebar(&name, cx);
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.checkout_from_sidebar(&name, window, cx);
                     }),
                 );
             // A `uniform_list` item takes no margin, so the inset is padding here.

@@ -1,7 +1,7 @@
-//! The diff of the selected file: unstaged hunks, then staged hunks, with
-//! stage and unstage by hunk and by line (D24). The rows and the selection
-//! rules live in `diff_rows`; this file draws them and maps keys and clicks
-//! onto them.
+//! The diff of the selected file, one side at a time (Staged or Unstaged), with
+//! chunk actions in each hunk header and stage and unstage by line (D24). The
+//! rows and the selection rules live in `diff_rows`; this file draws them and
+//! maps keys and clicks onto them.
 
 use std::ops::Range;
 
@@ -12,10 +12,11 @@ use gpui::{
     px, uniform_list,
 };
 
+use crate::action_registry::{Action, Args};
 use crate::diff_rows::{
     Apply, Diffs, LineKey, Press, Row, Selection, Side, build_rows, change_counts,
-    changed_keys_between, hunk_header_text, hunk_selection_count, hunks_of, next_changed_line,
-    next_hunk_header, press, prev_changed_line, prev_hunk_header, split_pairs,
+    changed_keys_between, default_side, hunk_header_text, hunk_selection_count, hunks_of,
+    next_changed_line, next_hunk_header, press, prev_changed_line, prev_hunk_header, split_pairs,
 };
 use crate::icon::{self, Icon};
 use crate::theme;
@@ -47,6 +48,12 @@ actions!(
 /// What the pane asks the shell to do; the shell turns it into a command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffPaneEvent {
+    /// A chunk action from a hunk header, run through the action registry.
+    Chunk {
+        action: Action,
+        args: Args,
+    },
+    /// Stage or unstage of selected lines (D24), sent to the engine as is.
     Stage(StageTarget),
     Unstage(StageTarget),
 }
@@ -62,6 +69,8 @@ pub struct DiffPane {
     scroll: UniformListScrollHandle,
     unstaged: Option<FileDiff>,
     staged: Option<FileDiff>,
+    /// The side shown: its hunks are the only ones in `rows`.
+    side: Side,
     rows: Vec<Row>,
     selection: Selection,
     /// Index into `rows`.
@@ -69,6 +78,8 @@ pub struct DiffPane {
     visual: Option<Visual>,
     /// The apply key pressed once while its selection splits a pair.
     pending: Option<Apply>,
+    /// The hunk whose discard waits for its confirmation.
+    discard_armed: Option<usize>,
 }
 
 impl EventEmitter<DiffPaneEvent> for DiffPane {}
@@ -88,17 +99,21 @@ impl DiffPane {
             scroll: UniformListScrollHandle::new(),
             unstaged: None,
             staged: None,
+            side: Side::Unstaged,
             rows: Vec::new(),
             selection: Selection::default(),
             cursor: 0,
             visual: None,
             pending: None,
+            discard_armed: None,
         }
     }
 
     /// Replaces what is shown. `None` for a side means it has no diff (or is
     /// still loading). Selection state resets when the path changes and is kept
-    /// when the same path is reloaded and a hunk id is still present.
+    /// when the same path is reloaded and a hunk id is still present. A new
+    /// path opens on the side it has changes on; so does a reload whose
+    /// current side has emptied.
     pub fn set_diffs(
         &mut self,
         unstaged: Option<FileDiff>,
@@ -119,15 +134,44 @@ impl DiffPane {
         };
         self.unstaged = unstaged;
         self.staged = staged;
-        self.rows = build_rows(self.diffs());
+        let current_empty = hunks_of(match self.side {
+            Side::Unstaged => self.unstaged.as_ref(),
+            Side::Staged => self.staged.as_ref(),
+        })
+        .is_empty();
+        if !same_file || current_empty {
+            self.side = default_side(
+                hunks_of(self.unstaged.as_ref()),
+                hunks_of(self.staged.as_ref()),
+            );
+        }
+        self.rows = build_rows(self.diffs(), self.side);
         self.selection = kept;
         self.visual = None;
         self.pending = None;
+        self.discard_armed = None;
         if same_file {
             self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
         } else {
             self.cursor = next_changed_line(&self.rows, self.diffs(), 0).unwrap_or(0);
         }
+        cx.notify();
+    }
+
+    /// Shows `side`. Selection, visual mode and a pending discard belong to the
+    /// side they were made on, so they end here.
+    fn select_side(&mut self, side: Side, cx: &mut Context<Self>) {
+        if side == self.side {
+            return;
+        }
+        self.side = side;
+        self.rows = build_rows(self.diffs(), side);
+        self.selection.clear();
+        self.visual = None;
+        self.pending = None;
+        self.discard_armed = None;
+        self.cursor = next_changed_line(&self.rows, self.diffs(), 0).unwrap_or(0);
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -212,31 +256,32 @@ impl DiffPane {
         }
     }
 
-    /// Stage or unstage the whole hunk, as the button does.
-    fn stage_hunk(&mut self, side: Side, hunk_index: usize, cx: &mut Context<Self>) {
+    /// Emits a chunk action for one hunk of `side`.
+    fn run_chunk(&mut self, action: Action, side: Side, hunk_index: usize, cx: &mut Context<Self>) {
         self.pending = None;
         let (Some(path), Some(hunk)) = (self.path(), self.hunk_id(side, hunk_index)) else {
             return;
         };
-        let target = StageTarget::Hunk { path, hunk };
-        let event = match side {
-            Side::Unstaged => DiffPaneEvent::Stage(target),
-            Side::Staged => DiffPaneEvent::Unstage(target),
+        let args = Args::Chunk {
+            path,
+            hunk,
+            side: side.diff_side(),
         };
-        cx.emit(event);
+        cx.emit(DiffPaneEvent::Chunk { action, args });
     }
 
-    fn stage_hunk_at_cursor(&mut self, cx: &mut Context<Self>) {
+    /// Stage (unstaged side) or unstage (staged side) the hunk under the cursor.
+    fn chunk_action_at_cursor(&mut self, cx: &mut Context<Self>) {
         self.pending = None;
-        if let Some((side, hunk_index)) = self.rows.get(self.cursor).and_then(|row| row.hunk()) {
-            self.stage_hunk(side, hunk_index, cx);
-        } else {
+        let Some((side, hunk_index)) = self.rows.get(self.cursor).map(|row| row.hunk()) else {
             cx.notify();
-        }
+            return;
+        };
+        self.run_chunk(chunk_toggle(side), side, hunk_index, cx);
     }
 
-    /// Stages (unstaged side) or unstages (staged side) the selected lines,
-    /// one event per hunk, applying the two-press rule to a split pair.
+    /// Stages or unstages the selected lines, one event per hunk, applying the
+    /// two-press rule to a split pair.
     fn apply_lines(&mut self, action: Apply, cx: &mut Context<Self>) {
         let side = match action {
             Apply::Stage => Side::Unstaged,
@@ -275,13 +320,10 @@ impl DiffPane {
         cx.notify();
     }
 
-    /// Escape leaves visual mode when it is on, and clears the selection
-    /// otherwise.
+    /// Escape ends a pending discard or visual mode first, then clears the selection.
     fn escape(&mut self, cx: &mut Context<Self>) {
         self.pending = None;
-        if self.visual.is_some() {
-            self.visual = None;
-        } else {
+        if self.discard_armed.take().is_none() && self.visual.take().is_none() {
             self.selection.clear();
         }
         cx.notify();
@@ -305,37 +347,111 @@ impl DiffPane {
         if !self.rows.is_empty() {
             return None;
         }
+        if self.path().is_none() {
+            return Some("Select a file to see its diff.");
+        }
         let binary = self.unstaged.as_ref().is_some_and(|d| d.binary)
             || self.staged.as_ref().is_some_and(|d| d.binary);
-        Some(if binary {
-            "Binary file (n/a)"
-        } else {
-            "No changes"
+        Some(match (binary, self.side) {
+            (true, _) => "Binary file (n/a)",
+            (false, Side::Unstaged) => "No unstaged changes",
+            (false, Side::Staged) => "No staged changes",
         })
     }
 
-    fn file_header(&self) -> Option<Div> {
+    /// The file's path and its `+ −` counts on the left, the side selector on
+    /// the right, and under them a one-line summary of the side's chunks.
+    fn file_header(&self, cx: &Context<Self>) -> Option<Div> {
         let path = self.path()?;
-        let diffs = self.diffs();
-        let mut parts = Vec::new();
-        for (side, label) in [(Side::Unstaged, "unstaged"), (Side::Staged, "staged")] {
-            let hunks = diffs.hunks(side);
-            if !hunks.is_empty() {
-                let (added, removed) = change_counts(hunks);
-                parts.push(format!("{label} +{added} −{removed}"));
-            }
-        }
+        let hunks = hunks_of(match self.side {
+            Side::Unstaged => self.unstaged.as_ref(),
+            Side::Staged => self.staged.as_ref(),
+        });
+        let (added, removed) = change_counts(hunks);
+        let top = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .px_3()
+            .pt_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .min_w(px(0.))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .font_family(theme::code_font())
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(path),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(theme::muted())
+                            .child(format!("+{added} −{removed}")),
+                    ),
+            )
+            .child(self.side_selector(cx));
+        let summary = (!hunks.is_empty()).then(|| {
+            div()
+                .px_3()
+                .pb_2()
+                .text_color(theme::muted())
+                .child(summary_text(hunks.len(), added, removed))
+        });
         Some(
             div()
                 .flex()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .px_3()
-                .py_2()
+                .flex_col()
                 .bg(theme::panel())
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(path))
-                .child(div().text_color(theme::muted()).child(parts.join(" · "))),
+                .border_b_1()
+                .border_color(theme::hairline())
+                .child(top)
+                .children(summary),
+        )
+    }
+
+    /// The two-way switch "Staged | Unstaged", styled like the sidebar's.
+    fn side_selector(&self, cx: &Context<Self>) -> Div {
+        let segment = |side: Side, label: &'static str| {
+            let active = self.side == side;
+            div()
+                .id(label)
+                .px_3()
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .cursor_pointer()
+                .when(active, |this| {
+                    this.bg(theme::panel())
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::text())
+                })
+                .when(!active, |this| this.text_color(theme::muted()))
+                .child(label)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.select_side(side, cx);
+                }))
+        };
+        div().flex_none().child(
+            div()
+                .p(px(2.))
+                .flex()
+                .flex_row()
+                .rounded_md()
+                .bg(theme::selected_row())
+                .child(segment(Side::Staged, "Staged"))
+                .child(segment(Side::Unstaged, "Unstaged")),
         )
     }
 
@@ -372,6 +488,8 @@ impl DiffPane {
         )
     }
 
+    /// A hunk's header row: its text, its line count, and on the right the chunk
+    /// buttons. Discard asks first, inline in this row.
     fn hunk_row(
         &self,
         ix: usize,
@@ -384,17 +502,77 @@ impl DiffPane {
             return div().into_any_element();
         };
         let (selected, total) = hunk_selection_count(diffs, &self.selection, side, hunk_index);
-        let button = match side {
-            Side::Unstaged => "Stage hunk",
-            Side::Staged => "Unstage hunk",
-        };
         let background = if ix == self.cursor {
             theme::cursor_row()
         } else {
             theme::hunk_header_bg()
         };
+        let buttons = match self.discard_armed {
+            Some(armed) if armed == hunk_index => div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_color(theme::removed_fg())
+                        .child("Discard this chunk?"),
+                )
+                .child(
+                    chunk_button(("chunk-confirm", ix), "Discard", true, theme::removed_fg())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.discard_armed = None;
+                            this.run_chunk(Action::DiscardChunk, Side::Unstaged, hunk_index, cx);
+                        })),
+                )
+                .child(
+                    chunk_button(("chunk-cancel", ix), "Cancel", true, theme::text()).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.discard_armed = None;
+                            cx.notify();
+                        }),
+                    ),
+                ),
+            _ => {
+                // Discard is for unstaged chunks only: on the staged side the
+                // button is shown, muted, and does nothing.
+                let discard_enabled = side == Side::Unstaged;
+                let discard = chunk_button(
+                    ("chunk-discard", ix),
+                    "Discard Chunk",
+                    discard_enabled,
+                    if discard_enabled {
+                        theme::text()
+                    } else {
+                        theme::muted()
+                    },
+                );
+                let discard = if discard_enabled {
+                    discard.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.discard_armed = Some(hunk_index);
+                        cx.notify();
+                    }))
+                } else {
+                    discard
+                };
+                let stage_label = chunk_label(side);
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(discard)
+                    .child(
+                        chunk_button(("chunk-stage", ix), stage_label, true, theme::text())
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.run_chunk(chunk_toggle(side), side, hunk_index, cx);
+                            })),
+                    )
+            }
+        };
         div()
             .h(px(ROW_HEIGHT))
+            .w_full()
             .flex()
             .flex_row()
             .items_center()
@@ -412,25 +590,11 @@ impl DiffPane {
             )
             .child(
                 div()
+                    .flex_none()
                     .text_color(theme::muted())
                     .child(format!("{selected} of {total} lines")),
             )
-            .child(
-                div()
-                    .id(("diff-hunk-button", ix))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(theme::button_border())
-                    .text_color(theme::text())
-                    .cursor_pointer()
-                    .child(button)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.stage_hunk(side, hunk_index, cx);
-                    })),
-            )
+            .child(buttons)
             .into_any_element()
     }
 
@@ -490,6 +654,7 @@ impl DiffPane {
         };
         div()
             .h(px(ROW_HEIGHT))
+            .w_full()
             .flex()
             .flex_row()
             .items_center()
@@ -519,16 +684,6 @@ impl DiffPane {
 
     fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         match self.rows.get(ix).copied() {
-            Some(Row::Section { title, .. }) => div()
-                .h(px(ROW_HEIGHT))
-                .flex()
-                .items_center()
-                .px_3()
-                .bg(theme::editor())
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::muted())
-                .child(title)
-                .into_any_element(),
             Some(Row::HunkHeader { side, hunk_index }) => self.hunk_row(ix, side, hunk_index, cx),
             Some(Row::Line {
                 side,
@@ -556,6 +711,58 @@ impl DiffPane {
         .flex_1()
         .min_h(px(0.))
         .into_any_element()
+    }
+}
+
+/// The stage or unstage action for a chunk of `side`.
+fn chunk_toggle(side: Side) -> Action {
+    match side {
+        Side::Unstaged => Action::StageChunk,
+        Side::Staged => Action::UnstageChunk,
+    }
+}
+
+fn chunk_label(side: Side) -> &'static str {
+    match side {
+        Side::Unstaged => "Stage Chunk",
+        Side::Staged => "Unstage Chunk",
+    }
+}
+
+/// "2 chunks, 3 insertions, 4 deletions", with the singular where it is one.
+fn summary_text(chunks: usize, insertions: usize, deletions: usize) -> String {
+    let noun = |count: usize, one: &str, many: &str| {
+        format!("{count} {}", if count == 1 { one } else { many })
+    };
+    format!(
+        "{}, {}, {}",
+        noun(chunks, "chunk", "chunks"),
+        noun(insertions, "insertion", "insertions"),
+        noun(deletions, "deletion", "deletions"),
+    )
+}
+
+/// A small outlined button for a chunk header.
+fn chunk_button(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    enabled: bool,
+    text: gpui::Hsla,
+) -> gpui::Stateful<Div> {
+    let button = div()
+        .id(id)
+        .px_2()
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::button_border())
+        .text_color(text)
+        .child(label);
+    if enabled {
+        button.cursor_pointer()
+    } else {
+        button
     }
 }
 
@@ -602,7 +809,7 @@ impl Render for DiffPane {
             .on_action(cx.listener(|this, _: &PrevHunk, _, cx| this.step_hunk(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleLine, _, cx| this.toggle_at_cursor(cx)))
             .on_action(cx.listener(|this, _: &StageHunkUnderCursor, _, cx| {
-                this.stage_hunk_at_cursor(cx);
+                this.chunk_action_at_cursor(cx);
             }))
             .on_action(cx.listener(|this, _: &StageSelectedLines, _, cx| {
                 this.apply_lines(Apply::Stage, cx);
@@ -619,7 +826,7 @@ impl Render for DiffPane {
             .text_color(theme::text())
             .font_family(theme::ui_font())
             .text_sm()
-            .children(self.file_header())
+            .children(self.file_header(cx))
             .child(body)
             .children(self.warning_bar())
     }
@@ -632,5 +839,18 @@ mod tests {
     #[test]
     fn every_key_binding_parses() {
         assert_eq!(key_bindings().len(), 12);
+    }
+
+    #[test]
+    fn the_summary_counts_chunks_insertions_and_deletions_in_the_plural_and_singular() {
+        assert_eq!(summary_text(2, 3, 4), "2 chunks, 3 insertions, 4 deletions");
+        assert_eq!(summary_text(1, 1, 0), "1 chunk, 1 insertion, 0 deletions");
+    }
+
+    #[test]
+    fn chunk_actions_follow_the_side() {
+        assert_eq!(chunk_toggle(Side::Unstaged), Action::StageChunk);
+        assert_eq!(chunk_toggle(Side::Staged), Action::UnstageChunk);
+        assert_eq!(chunk_label(Side::Staged), "Unstage Chunk");
     }
 }

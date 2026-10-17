@@ -2,6 +2,7 @@
 //! the engine. The engine runs on its own thread; this crate only renders what
 //! the engine reports.
 
+mod action_registry;
 mod assets;
 mod branch_menu;
 mod branches;
@@ -47,7 +48,6 @@ actions!(
         SelectPrev,
         Refresh,
         ToggleStage,
-        FocusFilter,
         FocusNext,
         FocusPrev,
     ]
@@ -111,7 +111,7 @@ pub fn run(engine: EngineHandle, command_log: CommandLog, start: StartPath) {
 }
 
 /// The list keys are scoped to the list's context, so they never fire while
-/// typing into the filter, the message or the diff pane. Tab and the quit key
+/// typing into the message or the diff pane. Tab and the quit key
 /// work everywhere.
 fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -120,7 +120,6 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("k", SelectPrev, Some(KEY_CONTEXT)),
         KeyBinding::new("up", SelectPrev, Some(KEY_CONTEXT)),
         KeyBinding::new("space", ToggleStage, Some(KEY_CONTEXT)),
-        KeyBinding::new("/", FocusFilter, Some(KEY_CONTEXT)),
         KeyBinding::new("r", Refresh, Some(KEY_CONTEXT)),
         KeyBinding::new("tab", FocusNext, None),
         KeyBinding::new("shift-tab", FocusPrev, None),
@@ -158,7 +157,6 @@ mod tests {
             "k",
             "up",
             "space",
-            "/",
             "r",
             "tab",
             "shift-tab",

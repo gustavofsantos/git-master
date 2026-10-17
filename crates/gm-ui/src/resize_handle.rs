@@ -24,13 +24,18 @@ const THICKNESS: f32 = 5.;
 pub enum Edge {
     /// A panel's right edge: moving right enlarges it.
     Right,
-    /// A panel's bottom edge: moving down enlarges it.
-    Bottom,
+    /// A panel's top edge: moving up enlarges it.
+    Top,
 }
 
 impl Edge {
     fn vertical(self) -> bool {
-        self == Self::Bottom
+        self == Self::Top
+    }
+
+    /// Whether moving the pointer to larger coordinates enlarges the panel.
+    fn grows_with_pointer(self) -> bool {
+        self != Self::Top
     }
 }
 
@@ -81,8 +86,8 @@ pub fn handle<V: 'static>(
             .h_full()
             .w(px(THICKNESS))
             .cursor_col_resize(),
-        Edge::Bottom => strip
-            .bottom_0()
+        Edge::Top => strip
+            .top_0()
             .left_0()
             .w_full()
             .h(px(THICKNESS))
@@ -114,8 +119,15 @@ pub fn handle<V: 'static>(
                 // not at mouse down: the drag threshold would otherwise jump.
                 let origin = drag.origin.get().unwrap_or(pointer);
                 drag.origin.set(Some(origin));
-                // Both edges grow the panel as the pointer moves away from it.
-                let next = resize::dragged(drag.size, origin, pointer, true, limits, extent);
+                // Every edge grows the panel as the pointer moves away from it.
+                let next = resize::dragged(
+                    drag.size,
+                    origin,
+                    pointer,
+                    edge.grows_with_pointer(),
+                    limits,
+                    extent,
+                );
                 set(this, next, cx);
                 cx.notify();
             },

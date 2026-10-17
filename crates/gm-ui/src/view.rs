@@ -1,6 +1,7 @@
-//! The Working Copy window: the top bar, the left column (filter, commit box,
-//! file list), the diff pane on the right and the status bar. It sends
-//! commands to the engine and renders the model; it never waits for git.
+//! The Working Copy window: the top bar, the left column (file list, commit
+//! box), the diff pane on the right and the status bar. It sends commands to
+//! the engine and renders the model; it never waits for git. Every action the
+//! window runs goes through `run_action`, which checks the action registry.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,14 +9,14 @@ use std::time::Duration;
 
 use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
-use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff, StageTarget};
+use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff};
 use gpui::{
-    Context, Div, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, Render,
+    ClipboardItem, Context, Div, Entity, FocusHandle, MouseButton, MouseDownEvent, Render,
     ScrollHandle, Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
 };
 
+use crate::action_registry::{self, Action, Args, Context as ActionContext, Effect, Reason};
 use crate::branch_menu::BranchMenu;
-use crate::changes::ToggleAction;
 use crate::composer::{Composer, ComposerEvent};
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::icon::{self, Icon};
@@ -31,7 +32,7 @@ use crate::window_chrome;
 use crate::{FocusNext, FocusPrev, StartPath};
 
 /// The key context of the change list. Its keys work only while the list has
-/// focus, so typing into the filter or the message is never taken as a key.
+/// focus, so typing into the message is never taken as a key.
 pub const KEY_CONTEXT: &str = "GitMaster";
 
 /// How long a notice stays on the status bar.
@@ -46,7 +47,6 @@ pub struct StatusView {
     pub(crate) model: Model,
     pub(crate) list_focus: FocusHandle,
     pub(crate) scroll: UniformListScrollHandle,
-    pub(crate) filter: Entity<TextArea>,
     pub(crate) composer: Entity<Composer>,
     pub(crate) diff_pane: Entity<DiffPane>,
     /// The left column's width, in logical pixels, as the user dragged it.
@@ -106,22 +106,11 @@ impl StatusView {
             .map(|store| store.load())
             .unwrap_or_default();
         let project_menu = ProjectMenu::new(cx.focus_handle());
-        let filter = cx.new(|cx| TextArea::new("Filter", cx).with_lines(1, 1));
         let branch_filter = cx.new(|cx| TextArea::new("Filter branches", cx).with_lines(1, 1));
         let branch_menu = BranchMenu::new(branch_filter.clone());
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
         let subscriptions = vec![
-            cx.observe(&filter, |this, filter, cx| {
-                this.on_filter_changed(&filter, cx);
-            }),
-            cx.subscribe_in(
-                &filter,
-                window,
-                |this, _, event: &TextAreaEvent, window, cx| {
-                    this.on_filter_event(*event, window, cx);
-                },
-            ),
             cx.observe(&branch_filter, |this, filter, cx| {
                 this.on_branch_filter_changed(&filter, cx);
             }),
@@ -132,10 +121,20 @@ impl StatusView {
                     this.on_branch_filter_event(*event, window, cx);
                 },
             ),
-            cx.subscribe(&composer, |this, _, event: &ComposerEvent, cx| {
-                this.on_composer_event(*event, cx);
-            }),
-            cx.subscribe(&diff_pane, Self::on_diff_pane_event),
+            cx.subscribe_in(
+                &composer,
+                window,
+                |this, _, event: &ComposerEvent, window, cx| {
+                    this.on_composer_event(*event, window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &diff_pane,
+                window,
+                |this, _, event: &DiffPaneEvent, window, cx| {
+                    this.on_diff_pane_event(event, window, cx);
+                },
+            ),
             // Also fires when the compositor answers the decoration request, so
             // the title bar appears or goes as soon as the grant is known.
             cx.observe_window_appearance(window, |_, window, cx| {
@@ -153,7 +152,6 @@ impl StatusView {
             model,
             list_focus,
             scroll: UniformListScrollHandle::new(),
-            filter,
             composer,
             diff_pane,
             left_width: resize::LEFT_DEFAULT,
@@ -244,7 +242,6 @@ impl StatusView {
     /// A successful open replaced the repository: the view state of the old
     /// one goes, and the new root joins the recent list.
     fn on_switched(&mut self, switched: Switched, cx: &mut Context<Self>) {
-        self.filter.update(cx, |area, cx| area.set_text("", cx));
         if !switched.same_root {
             self.composer.update(cx, |composer, cx| composer.clear(cx));
         }
@@ -272,59 +269,51 @@ impl StatusView {
         .detach();
     }
 
-    fn on_filter_changed(&mut self, filter: &Entity<TextArea>, cx: &mut Context<Self>) {
-        let text = filter.read(cx).text().to_owned();
-        if text.contains('\n') {
-            // The filter is one line; the area still takes enter as a line break.
-            let first = text.lines().next().unwrap_or("").to_owned();
-            filter.update(cx, |area, cx| area.set_text(&first, cx));
-            return;
-        }
-        // The caret blinks by notifying the area; redraw only on a real change.
-        if text == self.model.filter() {
-            return;
-        }
-        if self.model.set_filter(&text) {
-            self.load_selected(cx);
-        }
-        cx.notify();
-    }
-
-    fn on_filter_event(
+    fn on_composer_event(
         &mut self,
-        event: TextAreaEvent,
+        event: ComposerEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event == TextAreaEvent::Cancel {
-            self.filter.update(cx, TextArea::clear);
-            self.list_focus.focus(window);
-        }
-    }
-
-    fn on_composer_event(&mut self, event: ComposerEvent, cx: &mut Context<Self>) {
         match event {
-            ComposerEvent::CommitRequested => self.commit(cx),
+            ComposerEvent::CommitRequested => {
+                self.run_action(Action::Commit, &Args::None, window, cx);
+            }
         }
     }
 
     fn on_diff_pane_event(
         &mut self,
-        _: Entity<DiffPane>,
         event: &DiffPaneEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.refuse_while_busy(cx) {
+        match event {
+            DiffPaneEvent::Chunk { action, args } => {
+                self.run_action(*action, args, window, cx);
+            }
+            DiffPaneEvent::Stage(target) => self.send_line_command(
+                CommandKind::Stage {
+                    target: target.clone(),
+                },
+                cx,
+            ),
+            DiffPaneEvent::Unstage(target) => self.send_line_command(
+                CommandKind::Unstage {
+                    target: target.clone(),
+                },
+                cx,
+            ),
+        }
+    }
+
+    /// Sends a line-level stage or unstage (D24), which the registry does not
+    /// list. It waits for an open or a checkout like every other change.
+    fn send_line_command(&mut self, kind: CommandKind, cx: &mut Context<Self>) {
+        if let Some(reason) = self.busy_reason() {
+            self.notify_user(reason, cx);
             return;
         }
-        let kind = match event {
-            DiffPaneEvent::Stage(target) => CommandKind::Stage {
-                target: target.clone(),
-            },
-            DiffPaneEvent::Unstage(target) => CommandKind::Unstage {
-                target: target.clone(),
-            },
-        };
         self.engine.dispatch(Actor::Human, kind);
         cx.notify();
     }
@@ -362,14 +351,6 @@ impl StatusView {
             .update(cx, |pane, cx| pane.set_diffs(unstaged, staged, cx));
     }
 
-    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.model.begin_refresh();
-        self.request_branch_list();
-        self.engine
-            .dispatch(Actor::Human, CommandKind::RefreshStatus);
-        cx.notify();
-    }
-
     pub(crate) fn step_file(&mut self, down: bool, cx: &mut Context<Self>) {
         if self.model.select_file_step(down) {
             self.load_selected(cx);
@@ -387,66 +368,76 @@ impl StatusView {
         cx.notify();
     }
 
-    pub(crate) fn toggle_folder(&mut self, folder: &str, cx: &mut Context<Self>) {
-        if self.model.toggle_collapsed(folder) {
-            self.load_selected(cx);
-        }
-        cx.notify();
-    }
-
-    /// Stages or unstages the rows a checkbox covers, one command per file.
-    pub(crate) fn toggle_row(&mut self, row: usize, cx: &mut Context<Self>) {
-        if self.refuse_while_busy(cx) {
+    /// Space: stages the selected file, or unstages it when nothing is left unstaged.
+    pub(crate) fn toggle_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.model.selected_path().map(str::to_owned) else {
             return;
-        }
-        let kinds: Vec<CommandKind> = match self.model.toggle_action(row) {
-            ToggleAction::Stage(paths) => paths
-                .into_iter()
-                .map(|path| CommandKind::Stage {
-                    target: StageTarget::File { path },
-                })
-                .collect(),
-            ToggleAction::Unstage(paths) => paths
-                .into_iter()
-                .map(|path| CommandKind::Unstage {
-                    target: StageTarget::File { path },
-                })
-                .collect(),
         };
-        for kind in kinds {
-            self.engine.dispatch(Actor::Human, kind);
+        let action = self
+            .model
+            .entries()
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(action_registry::toggle_file_action);
+        if let Some(action) = action {
+            self.run_action(action, &Args::File(path), window, cx);
         }
-        cx.notify();
     }
 
-    pub(crate) fn toggle_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(row) = self.model.selected_row() {
-            self.toggle_row(row, cx);
-        }
+    pub(crate) fn focus_commit_message(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.focus(window, cx));
     }
 
-    pub(crate) fn focus_filter(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.filter.update(cx, |area, cx| area.focus(window, cx));
-    }
-
-    /// Commits the message when there is one and something is staged; otherwise
-    /// says why nothing happened.
-    pub(crate) fn commit(&mut self, cx: &mut Context<Self>) {
-        if self.refuse_while_busy(cx) {
-            return;
-        }
+    /// The one path from a run to the engine: checks the action's rule, then
+    /// does what it says, with `Actor::Human`. A refused run says why.
+    pub(crate) fn run_action(
+        &mut self,
+        action: Action,
+        args: &Args,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let message = self.composer.read(cx).text(cx);
-        if message.trim().is_empty() {
-            self.notify_user("Nothing to commit: the message is empty.", cx);
-            return;
+        let planned = action.plan(args, &self.action_context(&message));
+        match planned {
+            Err(reason) => self.notify_user(reason, cx),
+            Ok(Effect::Send(kinds)) => {
+                if action == Action::Refresh {
+                    self.model.begin_refresh();
+                    self.request_branch_list();
+                }
+                for kind in kinds {
+                    let checkout = matches!(kind, CommandKind::Checkout { .. });
+                    let id = self.engine.dispatch(Actor::Human, kind);
+                    if checkout {
+                        self.model.branches.begin_checkout(id);
+                    }
+                }
+            }
+            Ok(Effect::Copy(text)) => {
+                let notice = format!("Copied {text}");
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.notify_user(&notice, cx);
+            }
+            Ok(Effect::FocusCommitMessage) => self.focus_commit_message(window, cx),
         }
-        if self.model.summary().staged == 0 {
-            self.notify_user("Nothing is staged.", cx);
-            return;
-        }
-        self.engine
-            .dispatch(Actor::Human, CommandKind::Commit { message });
         cx.notify();
+    }
+
+    /// What the registry's rules read, for a run made now.
+    fn action_context<'a>(&'a self, message: &'a str) -> ActionContext<'a> {
+        ActionContext {
+            repo_open: self.model.status().is_some(),
+            busy: self.busy_reason(),
+            entries: self.model.entries(),
+            staged_count: self.model.summary().staged,
+            message,
+            current_branch: self
+                .model
+                .status()
+                .and_then(|status| status.branch.head.as_deref()),
+        }
     }
 
     pub(crate) fn notify_user(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -455,19 +446,17 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Changes to the repository wait for an open or a checkout in flight: they
-    /// would run against the repository being left, the one being opened, or a
-    /// branch that is about to change.
-    pub(crate) fn refuse_while_busy(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Why a repository change must wait: an open or a checkout is in flight.
+    /// Changes would run against the repository being left, the one being
+    /// opened, or a branch that is about to change.
+    fn busy_reason(&self) -> Option<Reason> {
         if self.model.is_opening() {
-            self.notify_user("Wait for the repository to open.", cx);
-            return true;
+            Some("Wait for the repository to open.")
+        } else if self.model.branches.checkout_in_flight() {
+            Some("Wait for the branch checkout to finish.")
+        } else {
+            None
         }
-        if self.model.branches.checkout_in_flight() {
-            self.notify_user("Wait for the branch checkout to finish.", cx);
-            return true;
-        }
-        false
     }
 
     fn expire_notice_later(generation: u64, cx: &mut Context<Self>) {
@@ -481,10 +470,9 @@ impl StatusView {
         .detach();
     }
 
-    /// Tab and shift-Tab: list (and filter), then diff pane, then composer.
+    /// Tab and shift-Tab: list, then diff pane, then composer.
     fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let in_list = self.list_focus.is_focused(window)
-            || self.filter.read(cx).focus_handle(cx).is_focused(window);
+        let in_list = self.list_focus.is_focused(window);
         let in_composer = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let current = if in_list {
             0
@@ -522,7 +510,7 @@ impl StatusView {
             None => (String::new(), 0, 0),
         };
         let loading = if self.model.loading { "Loading…" } else { "" };
-        // Same action as the `r` key: the refresh command, through `refresh`.
+        // Same action as the `r` key, through the registry.
         let refresh = div()
             .id("top-refresh")
             .flex()
@@ -536,7 +524,9 @@ impl StatusView {
             .child(icon::view(Icon::ArrowClockwise, icon::SIZE, muted))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| this.refresh(cx)),
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.run_action(Action::Refresh, &Args::None, window, cx);
+                }),
             );
         div()
             .h(px(36.))

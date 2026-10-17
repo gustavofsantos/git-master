@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use gm_core::stage_math::pair_warning;
-use gm_schema::{FileDiff, Hunk, LineKind};
+use gm_schema::{DiffSide, FileDiff, Hunk, LineKind};
 
 /// Which comparison a hunk belongs to. Unstaged sorts first, as it is shown
 /// first.
@@ -16,11 +16,22 @@ pub enum Side {
 }
 
 impl Side {
-    pub fn title(self) -> &'static str {
+    /// The side of the diff this list side is, for actions and commands.
+    pub fn diff_side(self) -> DiffSide {
         match self {
-            Side::Unstaged => "Unstaged changes",
-            Side::Staged => "Staged changes",
+            Side::Unstaged => DiffSide::Unstaged,
+            Side::Staged => DiffSide::Staged,
         }
+    }
+}
+
+/// The side the pane opens on: unstaged, unless the file has only staged
+/// changes.
+pub fn default_side(unstaged: &[Hunk], staged: &[Hunk]) -> Side {
+    if unstaged.is_empty() && !staged.is_empty() {
+        Side::Staged
+    } else {
+        Side::Unstaged
     }
 }
 
@@ -31,10 +42,6 @@ pub type LineKey = (Side, usize, usize);
 /// One row of the virtualized list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Row {
-    Section {
-        side: Side,
-        title: &'static str,
-    },
     HunkHeader {
         side: Side,
         hunk_index: usize,
@@ -47,14 +54,13 @@ pub enum Row {
 }
 
 impl Row {
-    /// The side and hunk a row belongs to; `None` for a section title.
-    pub fn hunk(self) -> Option<(Side, usize)> {
+    /// The side and hunk a row belongs to.
+    pub fn hunk(self) -> (Side, usize) {
         match self {
             Row::HunkHeader { side, hunk_index }
             | Row::Line {
                 side, hunk_index, ..
-            } => Some((side, hunk_index)),
-            Row::Section { .. } => None,
+            } => (side, hunk_index),
         }
     }
 }
@@ -96,27 +102,17 @@ impl<'a> Diffs<'a> {
     }
 }
 
-/// The rows for both sides: a section title for each side that has hunks,
-/// then per hunk its header and all of its lines.
-pub fn build_rows(diffs: Diffs<'_>) -> Vec<Row> {
+/// The rows of one side: per hunk its header and all of its lines. The other
+/// side is not listed; the pane shows one side at a time.
+pub fn build_rows(diffs: Diffs<'_>, side: Side) -> Vec<Row> {
     let mut rows = Vec::new();
-    for side in [Side::Unstaged, Side::Staged] {
-        let hunks = diffs.hunks(side);
-        if hunks.is_empty() {
-            continue;
-        }
-        rows.push(Row::Section {
+    for (hunk_index, hunk) in diffs.hunks(side).iter().enumerate() {
+        rows.push(Row::HunkHeader { side, hunk_index });
+        rows.extend((0..hunk.lines.len()).map(|line_index| Row::Line {
             side,
-            title: side.title(),
-        });
-        for (hunk_index, hunk) in hunks.iter().enumerate() {
-            rows.push(Row::HunkHeader { side, hunk_index });
-            rows.extend((0..hunk.lines.len()).map(|line_index| Row::Line {
-                side,
-                hunk_index,
-                line_index,
-            }));
-        }
+            hunk_index,
+            line_index,
+        }));
     }
     rows
 }
@@ -440,32 +436,27 @@ mod tests {
 
     #[test]
     fn no_hunks_gives_no_rows() {
-        assert!(build_rows(diffs(&[], &[])).is_empty());
+        assert!(build_rows(diffs(&[], &[]), Side::Unstaged).is_empty());
+        assert!(build_rows(diffs(&[], &[]), Side::Staged).is_empty());
     }
 
     #[test]
-    fn rows_list_sections_only_for_sides_with_hunks() {
+    fn rows_list_only_the_chosen_side() {
         let unstaged = [simple("u0")];
-        let rows = build_rows(diffs(&unstaged, &[]));
-        assert_eq!(rows.len(), 1 + 1 + 4);
+        let staged = [simple("s0")];
+        let rows = build_rows(diffs(&unstaged, &staged), Side::Staged);
+        assert_eq!(rows.len(), 5);
         assert_eq!(
             rows[0],
-            Row::Section {
-                side: Side::Unstaged,
-                title: "Unstaged changes"
-            }
-        );
-        assert_eq!(
-            rows[1],
             Row::HunkHeader {
-                side: Side::Unstaged,
+                side: Side::Staged,
                 hunk_index: 0
             }
         );
         assert_eq!(
-            rows[3],
+            rows[2],
             Row::Line {
-                side: Side::Unstaged,
+                side: Side::Staged,
                 hunk_index: 0,
                 line_index: 1
             }
@@ -473,39 +464,16 @@ mod tests {
     }
 
     #[test]
-    fn unstaged_section_comes_before_staged() {
-        let unstaged = [simple("u0")];
-        let staged = [simple("s0"), simple("s1")];
-        let rows = build_rows(diffs(&unstaged, &staged));
-        let sections: Vec<_> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| matches!(r, Row::Section { .. }))
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(sections, vec![0, 6]);
-        // unstaged: section + 5 rows; staged: section + 2 hunks of 5 rows
-        assert_eq!(rows.len(), 1 + 5 + 1 + 10);
-        assert_eq!(
-            rows.last(),
-            Some(&Row::Line {
-                side: Side::Staged,
-                hunk_index: 1,
-                line_index: 3
-            })
-        );
+    fn the_pane_opens_on_staged_only_when_a_file_has_only_staged_changes() {
+        let hunk_list = [simple("h")];
+        assert_eq!(default_side(&hunk_list, &[]), Side::Unstaged);
+        assert_eq!(default_side(&hunk_list, &hunk_list), Side::Unstaged);
+        assert_eq!(default_side(&[], &hunk_list), Side::Staged);
+        assert_eq!(default_side(&[], &[]), Side::Unstaged);
     }
 
     #[test]
-    fn row_hunk_is_none_for_sections_only() {
-        assert_eq!(
-            Row::Section {
-                side: Side::Staged,
-                title: "x"
-            }
-            .hunk(),
-            None
-        );
+    fn a_row_names_its_side_and_hunk() {
         assert_eq!(
             Row::Line {
                 side: Side::Staged,
@@ -513,22 +481,21 @@ mod tests {
                 line_index: 0
             }
             .hunk(),
-            Some((Side::Staged, 3))
+            (Side::Staged, 3)
         );
     }
 
     #[test]
     fn hunk_header_moves_skip_other_rows() {
         let unstaged = [simple("u0"), simple("u1")];
-        let rows = build_rows(diffs(&unstaged, &[]));
-        // 0 section, 1 header, 2-5 lines, 6 header, 7-10 lines
-        assert_eq!(next_hunk_header(&rows, 0), Some(1));
-        assert_eq!(next_hunk_header(&rows, 1), Some(6));
-        assert_eq!(next_hunk_header(&rows, 4), Some(6));
-        assert_eq!(next_hunk_header(&rows, 6), None);
-        assert_eq!(prev_hunk_header(&rows, 10), Some(6));
-        assert_eq!(prev_hunk_header(&rows, 6), Some(1));
-        assert_eq!(prev_hunk_header(&rows, 1), None);
+        let rows = build_rows(diffs(&unstaged, &[]), Side::Unstaged);
+        // 0 header, 1-4 lines, 5 header, 6-9 lines
+        assert_eq!(next_hunk_header(&rows, 0), Some(5));
+        assert_eq!(next_hunk_header(&rows, 1), Some(5));
+        assert_eq!(next_hunk_header(&rows, 4), Some(5));
+        assert_eq!(next_hunk_header(&rows, 5), None);
+        assert_eq!(prev_hunk_header(&rows, 9), Some(5));
+        assert_eq!(prev_hunk_header(&rows, 5), Some(0));
         assert_eq!(prev_hunk_header(&rows, 0), None);
     }
 
@@ -536,15 +503,15 @@ mod tests {
     fn changed_line_moves_skip_context_and_headers() {
         let unstaged = [simple("u0")];
         let d = diffs(&unstaged, &[]);
-        let rows = build_rows(d);
-        // changed lines are rows 3 and 4; context rows 2 and 5
-        assert_eq!(next_changed_line(&rows, d, 0), Some(3));
-        assert_eq!(next_changed_line(&rows, d, 1), Some(3));
-        assert_eq!(next_changed_line(&rows, d, 3), Some(4));
-        assert_eq!(next_changed_line(&rows, d, 4), None);
-        assert_eq!(prev_changed_line(&rows, d, 5), Some(4));
+        let rows = build_rows(d, Side::Unstaged);
+        // changed lines are rows 2 and 3; context rows 1 and 4
+        assert_eq!(next_changed_line(&rows, d, 0), Some(2));
+        assert_eq!(next_changed_line(&rows, d, 1), Some(2));
+        assert_eq!(next_changed_line(&rows, d, 2), Some(3));
+        assert_eq!(next_changed_line(&rows, d, 3), None);
         assert_eq!(prev_changed_line(&rows, d, 4), Some(3));
-        assert_eq!(prev_changed_line(&rows, d, 3), None);
+        assert_eq!(prev_changed_line(&rows, d, 3), Some(2));
+        assert_eq!(prev_changed_line(&rows, d, 2), None);
     }
 
     #[test]
@@ -670,9 +637,9 @@ mod tests {
     fn changed_range_is_inclusive_in_either_order() {
         let unstaged = [simple("u0"), simple("u1")];
         let d = diffs(&unstaged, &[]);
-        let rows = build_rows(d);
-        let forward = changed_keys_between(&rows, d, 3, 10);
-        let backward = changed_keys_between(&rows, d, 10, 3);
+        let rows = build_rows(d, Side::Unstaged);
+        let forward = changed_keys_between(&rows, d, 2, 9);
+        let backward = changed_keys_between(&rows, d, 9, 2);
         assert_eq!(forward, backward);
         assert_eq!(forward.len(), 4);
         assert!(forward.contains(&(Side::Unstaged, 0, 1)));
@@ -683,10 +650,10 @@ mod tests {
     fn visual_selection_is_base_plus_range() {
         let unstaged = [simple("u0")];
         let d = diffs(&unstaged, &[]);
-        let rows = build_rows(d);
+        let rows = build_rows(d, Side::Unstaged);
         let mut base = Selection::default();
         base.toggle_line(d, (Side::Unstaged, 0, 2));
-        let range = changed_keys_between(&rows, d, 3, 4);
+        let range = changed_keys_between(&rows, d, 2, 3);
         let visual = Selection::with_range(&base, range);
         assert_eq!(visual.len(), 2);
     }
