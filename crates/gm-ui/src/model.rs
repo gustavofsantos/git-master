@@ -8,6 +8,7 @@ use gm_schema::{
     Change, DiffSide, Event, FileDiff, OperationId, OperationState, RepoStatus, StatusEntry,
 };
 
+use crate::branches::Branches;
 use crate::changes::{ChangeTree, Row, Summary, ToggleAction};
 use crate::icon::Icon;
 
@@ -39,6 +40,8 @@ pub struct Model {
     floor: Option<OperationId>,
     /// Set by the open that just succeeded, until the view takes it.
     switched: Option<Switched>,
+    /// The branch picker's listing, filter and checkout in flight.
+    pub branches: Branches,
 }
 
 /// A repository replaced by a successful open.
@@ -105,6 +108,8 @@ impl Model {
         }
         match event {
             Event::StatusLoaded { id, status } => {
+                // A successful checkout ends with its status; the repaint is the same as any other.
+                let _ = self.branches.finish_checkout(id);
                 if self.pending_open == Some(id) {
                     self.pending_open = None;
                     self.floor = Some(id);
@@ -130,6 +135,12 @@ impl Model {
                 detail,
                 ..
             } => {
+                // A refused checkout keeps the branch; git's reason, first line only, is the notice.
+                if self.branches.finish_checkout(id) {
+                    self.error = Some(checkout_message(detail.as_deref()));
+                    return None;
+                }
+                let _ = self.branches.list_failed(id);
                 if self.pending_open == Some(id) {
                     self.pending_open = None;
                 }
@@ -144,8 +155,20 @@ impl Model {
                 self.notice_icon = Some(Icon::CheckCircle);
                 None
             }
-            // The branch picker will consume `BranchesLoaded`; nothing shows it yet.
-            Event::BranchesLoaded { .. } | Event::OperationChanged { .. } => None,
+            Event::BranchesLoaded { id, branches } => {
+                let _ = self.branches.listed(id, branches);
+                None
+            }
+            // An operation that ends without a status (vetoed, cancelled) ends its checkout too.
+            Event::OperationChanged { id, state, .. } => {
+                if matches!(
+                    state,
+                    OperationState::Done | OperationState::Vetoed | OperationState::Cancelled
+                ) {
+                    let _ = self.branches.finish_checkout(id);
+                }
+                None
+            }
         }
     }
 
@@ -401,6 +424,14 @@ impl Model {
             .rev()
             .find(|&row| self.tree.file_at(row).is_some())
     }
+}
+
+/// The notice for a refused checkout: git's first non-empty line.
+fn checkout_message(detail: Option<&str>) -> String {
+    detail
+        .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+        .unwrap_or("the checkout failed")
+        .to_owned()
 }
 
 fn event_id(event: &Event) -> OperationId {
@@ -841,5 +872,93 @@ mod tests {
         });
         let _ = model.apply(failed(5, Some("stale failure")));
         assert_eq!(model.error, None);
+    }
+
+    fn branch(name: &str, current: bool) -> gm_schema::BranchEntry {
+        gm_schema::BranchEntry {
+            name: name.to_owned(),
+            is_remote: false,
+            is_current: current,
+            upstream: None,
+        }
+    }
+
+    #[test]
+    fn a_refused_checkout_shows_git_first_line_and_keeps_the_branch() {
+        let mut model = Model::default();
+        let _ = model.apply(loaded(&["a"]));
+        model.branches.begin_checkout(OperationId(7));
+        let _ = model.apply(failed(
+            7,
+            Some("error: local changes would be overwritten\n\tapi/routes.rs\nAborting"),
+        ));
+        assert_eq!(
+            model.error.as_deref(),
+            Some("error: local changes would be overwritten")
+        );
+        assert!(!model.branches.checkout_in_flight());
+        assert_eq!(model.status().map(|s| s.root.as_str()), Some("/r"));
+        assert!(!model.is_opening());
+    }
+
+    #[test]
+    fn a_refused_checkout_without_detail_says_so() {
+        let mut model = Model::default();
+        model.branches.begin_checkout(OperationId(7));
+        let _ = model.apply(failed(7, Some("  \n")));
+        assert_eq!(model.error.as_deref(), Some("the checkout failed"));
+    }
+
+    #[test]
+    fn a_successful_checkout_ends_with_its_status() {
+        let mut model = Model::default();
+        model.branches.begin_checkout(OperationId(7));
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(7),
+            status: status_at("/r", &["a"]),
+        });
+        assert!(!model.branches.checkout_in_flight());
+        assert_eq!(model.error, None);
+    }
+
+    #[test]
+    fn a_vetoed_checkout_ends_too() {
+        let mut model = Model::default();
+        model.branches.begin_checkout(OperationId(7));
+        let _ = model.apply(Event::OperationChanged {
+            id: OperationId(7),
+            actor: Actor::Human,
+            state: OperationState::Vetoed,
+            detail: None,
+        });
+        assert!(!model.branches.checkout_in_flight());
+    }
+
+    #[test]
+    fn a_listing_reply_to_an_older_request_is_dropped() {
+        let mut model = Model::default();
+        model.branches.request(OperationId(2));
+        let _ = model.apply(Event::BranchesLoaded {
+            id: OperationId(1),
+            branches: vec![branch("old", true)],
+        });
+        assert!(model.branches.lines().is_empty());
+        let _ = model.apply(Event::BranchesLoaded {
+            id: OperationId(2),
+            branches: vec![branch("new", true)],
+        });
+        assert_eq!(
+            model.branches.highlighted().map(|b| b.name.as_str()),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn a_failed_listing_is_recorded_as_a_failed_listing() {
+        let mut model = Model::default();
+        model.branches.request(OperationId(2));
+        let _ = model.apply(failed(2, Some("not a repository")));
+        assert!(model.branches.is_failed());
+        assert_eq!(model.error.as_deref(), Some("not a repository"));
     }
 }

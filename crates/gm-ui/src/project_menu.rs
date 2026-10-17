@@ -81,6 +81,7 @@ impl StatusView {
             self.close_project_menu(window, cx);
             return;
         }
+        self.branch_menu.open = false;
         self.project_menu.open = true;
         self.project_menu.focus.focus(window);
         // The directory checks run off the UI thread; the rows say "missing"
@@ -115,6 +116,10 @@ impl StatusView {
         self.project_menu.open = false;
         if self.model.is_opening() {
             self.notify_user("Already opening a repository.", cx);
+            return;
+        }
+        if self.model.branches.checkout_in_flight() {
+            self.notify_user("Wait for the branch checkout to finish.", cx);
             return;
         }
         let id = self.engine.dispatch(

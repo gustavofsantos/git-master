@@ -2,7 +2,7 @@
 //! painted in the text colour of their parent. Each name has a regular and a
 //! fill weight.
 
-use gpui::{Div, Hsla, IntoElement, ParentElement, Pixels, Styled, Svg, div, px, svg};
+use gpui::{Hsla, Pixels, Styled, Svg, px, svg};
 
 /// An icon in a row, a button or a tree.
 pub const SIZE: Pixels = px(16.);
@@ -117,15 +117,4 @@ pub fn filled(icon: Icon, size: Pixels, colour: Hsla) -> Svg {
         .size(size)
         .flex_none()
         .text_color(colour)
-}
-
-/// An icon followed by a label, centred on one line.
-pub fn labelled(icon: Icon, size: Pixels, colour: Hsla, label: impl IntoElement) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(5.))
-        .text_color(colour)
-        .child(view(icon, size, colour))
-        .child(label)
 }

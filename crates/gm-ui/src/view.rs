@@ -10,10 +10,11 @@ use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
 use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff, StageTarget};
 use gpui::{
-    Context, Div, Entity, FocusHandle, Focusable, FontWeight, MouseButton, MouseDownEvent, Render,
+    Context, Div, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, Render,
     ScrollHandle, Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
 };
 
+use crate::branch_menu::BranchMenu;
 use crate::changes::ToggleAction;
 use crate::composer::{Composer, ComposerEvent};
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
@@ -51,6 +52,8 @@ pub struct StatusView {
     /// The commit message box's height, in logical pixels, as dragged.
     pub(crate) commit_height: f32,
     pub(crate) project_menu: ProjectMenu,
+    /// The branch button's list: filter, scroll and the button's place.
+    pub(crate) branch_menu: BranchMenu,
     /// The recent repositories, newest first, as last saved or loaded.
     pub(crate) recents: Recents,
     /// Where the list is kept; `None` when there is no home directory.
@@ -95,6 +98,8 @@ impl StatusView {
             .unwrap_or_default();
         let project_menu = ProjectMenu::new(cx.focus_handle());
         let filter = cx.new(|cx| TextArea::new("Filter", cx).with_lines(1, 1));
+        let branch_filter = cx.new(|cx| TextArea::new("Filter branches", cx).with_lines(1, 1));
+        let branch_menu = BranchMenu::new(branch_filter.clone());
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
         let subscriptions = vec![
@@ -106,6 +111,16 @@ impl StatusView {
                 window,
                 |this, _, event: &TextAreaEvent, window, cx| {
                     this.on_filter_event(*event, window, cx);
+                },
+            ),
+            cx.observe(&branch_filter, |this, filter, cx| {
+                this.on_branch_filter_changed(&filter, cx);
+            }),
+            cx.subscribe_in(
+                &branch_filter,
+                window,
+                |this, _, event: &TextAreaEvent, window, cx| {
+                    this.on_branch_filter_event(*event, window, cx);
                 },
             ),
             cx.subscribe(&composer, |this, _, event: &ComposerEvent, cx| {
@@ -135,6 +150,7 @@ impl StatusView {
             left_width: resize::LEFT_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
             project_menu,
+            branch_menu,
             recents,
             recent_store,
             recent_generation: 0,
@@ -247,7 +263,7 @@ impl StatusView {
         event: &DiffPaneEvent,
         cx: &mut Context<Self>,
     ) {
-        if self.refuse_while_opening(cx) {
+        if self.refuse_while_busy(cx) {
             return;
         }
         let kind = match event {
@@ -328,7 +344,7 @@ impl StatusView {
 
     /// Stages or unstages the rows a checkbox covers, one command per file.
     pub(crate) fn toggle_row(&mut self, row: usize, cx: &mut Context<Self>) {
-        if self.refuse_while_opening(cx) {
+        if self.refuse_while_busy(cx) {
             return;
         }
         let kinds: Vec<CommandKind> = match self.model.toggle_action(row) {
@@ -364,7 +380,7 @@ impl StatusView {
     /// Commits the message when there is one and something is staged; otherwise
     /// says why nothing happened.
     pub(crate) fn commit(&mut self, cx: &mut Context<Self>) {
-        if self.refuse_while_opening(cx) {
+        if self.refuse_while_busy(cx) {
             return;
         }
         let message = self.composer.read(cx).text(cx);
@@ -387,14 +403,19 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Changes to the repository wait for an open in flight: they would run
-    /// against the repository being left or the one being opened.
-    fn refuse_while_opening(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.model.is_opening() {
-            return false;
+    /// Changes to the repository wait for an open or a checkout in flight: they
+    /// would run against the repository being left, the one being opened, or a
+    /// branch that is about to change.
+    pub(crate) fn refuse_while_busy(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.model.is_opening() {
+            self.notify_user("Wait for the repository to open.", cx);
+            return true;
         }
-        self.notify_user("Wait for the repository to open.", cx);
-        true
+        if self.model.branches.checkout_in_flight() {
+            self.notify_user("Wait for the branch checkout to finish.", cx);
+            return true;
+        }
+        false
     }
 
     fn expire_notice_later(generation: u64, cx: &mut Context<Self>) {
@@ -440,18 +461,13 @@ impl StatusView {
 
     fn top_bar(&self, cx: &Context<Self>) -> Div {
         let muted = theme::muted();
-        let (branch, upstream, ahead, behind) = match self.model.status() {
+        let (upstream, ahead, behind) = match self.model.status() {
             Some(status) => (
-                status
-                    .branch
-                    .head
-                    .clone()
-                    .unwrap_or_else(|| "(detached)".to_owned()),
                 status.branch.upstream.clone().unwrap_or_default(),
                 status.branch.ahead,
                 status.branch.behind,
             ),
-            None => (String::new(), String::new(), 0, 0),
+            None => (String::new(), 0, 0),
         };
         let loading = if self.model.loading { "Loading…" } else { "" };
         // Same action as the `r` key: the refresh command, through `refresh`.
@@ -481,12 +497,7 @@ impl StatusView {
             .border_b_1()
             .border_color(theme::hairline())
             .child(self.project_button(cx))
-            .child(icon::labelled(
-                Icon::GitBranch,
-                icon::SIZE,
-                theme::text(),
-                div().font_weight(FontWeight::SEMIBOLD).child(branch),
-            ))
+            .child(self.branch_button(cx))
             .child(
                 div()
                     .flex()
@@ -611,6 +622,7 @@ impl Render for StatusView {
                     .open
                     .then(|| self.project_menu_layer(window, cx)),
             )
+            .children(self.branch_menu.open.then(|| self.branch_menu_layer(cx)))
             .children(window_chrome::resize_layer(window))
     }
 }

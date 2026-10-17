@@ -26,10 +26,12 @@ mod pointer;
 pub use keys::bind_keys;
 use keys::{
     Backspace, Cancel, Delete, DeleteToLineStart, DeleteWordLeft, DeleteWordRight, DocEnd,
-    DocStart, Down, Left, LineEnd, LineStart, Newline, Redo, Right, SelectAll, SelectDocEnd,
-    SelectDocStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart, SelectRight, SelectUp,
-    SelectWordLeft, SelectWordRight, ShowCharacterPalette, Undo, Up, WordLeft, WordRight,
+    DocStart, Left, LineEnd, LineStart, Redo, Right, SelectAll, SelectDocEnd, SelectDocStart,
+    SelectDown, SelectLeft, SelectLineEnd, SelectLineStart, SelectRight, SelectUp, SelectWordLeft,
+    SelectWordRight, ShowCharacterPalette, Undo, WordLeft, WordRight,
 };
+/// Re-exported for owners that take these keys before the area does.
+pub(crate) use keys::{Down, Newline, Up};
 
 const KEY_CONTEXT: &str = "TextArea";
 const BASE_FONT_SIZE: f32 = 13.5;

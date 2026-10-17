@@ -3,6 +3,8 @@
 //! the engine reports.
 
 mod assets;
+mod branch_menu;
+mod branches;
 mod changes;
 mod command_panel;
 mod composer;
