@@ -63,7 +63,12 @@ pub struct StartPath {
 
 /// Opens the window on the repository at the start path, or on the welcome
 /// screen when that is not a repository, and runs until it closes.
-pub fn run(engine: EngineHandle, command_log: CommandLog, start: StartPath) {
+pub fn run(
+    engine: EngineHandle,
+    command_log: CommandLog,
+    watch: (gm_core::watch::WatchHandle, gm_core::watch::Notices),
+    start: StartPath,
+) {
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
@@ -100,7 +105,7 @@ pub fn run(engine: EngineHandle, command_log: CommandLog, start: StartPath) {
                 ..WindowOptions::default()
             };
             let opened = cx.open_window(options, move |window, cx| {
-                cx.new(|cx| StatusView::new(engine, command_log, start, window, cx))
+                cx.new(|cx| StatusView::new(engine, command_log, watch, start, window, cx))
             });
             if let Err(error) = opened {
                 eprintln!("gitmaster: {error}");

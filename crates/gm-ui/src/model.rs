@@ -23,6 +23,13 @@ pub struct Model {
     pub notice_icon: Option<Icon>,
     notice_generation: u64,
     pub loading: bool,
+    /// The refresh the indicator follows, while it runs.
+    refresh: Option<OperationId>,
+    /// Set once `refresh` has run past the indicator delay.
+    refresh_slow: bool,
+    /// The last operation that reached a final state. Ids follow dispatch
+    /// order, so every id at or below it has ended.
+    settled: Option<OperationId>,
     /// The `OpenRepo` the window waits for. Its `StatusLoaded` replaces the
     /// repository and resets the view state that belonged to the old one.
     pending_open: Option<OperationId>,
@@ -95,6 +102,11 @@ impl Model {
     pub fn apply(&mut self, event: Event) -> Option<Diffs> {
         if self.floor.is_some_and(|floor| event_id(&event) < floor) {
             return None;
+        }
+        if let Event::OperationChanged { id, state, .. } = &event
+            && state.is_terminal()
+        {
+            self.end_refresh(*id);
         }
         match event {
             Event::StatusLoaded { id, status } => {
@@ -238,8 +250,39 @@ impl Model {
         self.diffs.as_ref().is_some_and(|slots| slots.path == path)
     }
 
-    pub fn begin_refresh(&mut self) {
-        self.loading = true;
+    /// Starts tracking the refresh `id`. False when it has already ended: the
+    /// watcher's notice can arrive after the event that ends the refresh.
+    pub fn begin_refresh(&mut self, id: OperationId) -> bool {
+        if self.settled.is_some_and(|done| id <= done) {
+            return false;
+        }
+        self.refresh = Some(id);
+        self.refresh_slow = false;
+        true
+    }
+
+    /// Marks the refresh `id` as slow, once the indicator delay has passed.
+    /// True when it is still running, so the indicator should show.
+    pub fn refresh_is_slow(&mut self, id: OperationId) -> bool {
+        if self.refresh != Some(id) {
+            return false;
+        }
+        self.refresh_slow = true;
+        true
+    }
+
+    /// Whether "Updating…" shows: a refresh has run past the indicator delay.
+    /// Quick refreshes never show it, so they do not flash.
+    pub fn updating(&self) -> bool {
+        self.refresh_slow
+    }
+
+    fn end_refresh(&mut self, id: OperationId) {
+        self.settled = Some(self.settled.map_or(id, |done| done.max(id)));
+        if self.refresh == Some(id) {
+            self.refresh = None;
+            self.refresh_slow = false;
+        }
     }
 
     /// Shows `text` on the notice line. Returns a generation for `expire_notice`.
@@ -773,5 +816,53 @@ mod tests {
         let _ = model.apply(failed(2, Some("not a repository")));
         assert!(model.branches.is_failed());
         assert_eq!(model.error.as_deref(), Some("not a repository"));
+    }
+
+    fn done(id: u64) -> Event {
+        Event::OperationChanged {
+            id: OperationId(id),
+            actor: Actor::Human,
+            state: OperationState::Done,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn a_refresh_does_not_set_loading() {
+        let mut model = Model::default();
+        assert!(model.begin_refresh(OperationId(4)));
+        assert!(!model.loading);
+    }
+
+    #[test]
+    fn updating_shows_only_once_the_refresh_is_slow() {
+        let mut model = Model::default();
+        assert!(model.begin_refresh(OperationId(9)));
+        assert!(!model.updating(), "a fresh refresh does not show it");
+        assert!(model.refresh_is_slow(OperationId(9)));
+        assert!(model.updating());
+        let _ = model.apply(done(9));
+        assert!(!model.updating(), "it ends with the refresh");
+    }
+
+    #[test]
+    fn a_quick_refresh_never_shows_updating() {
+        let mut model = Model::default();
+        assert!(model.begin_refresh(OperationId(9)));
+        let _ = model.apply(done(9));
+        assert!(
+            !model.refresh_is_slow(OperationId(9)),
+            "the timer finds it over"
+        );
+        assert!(!model.updating());
+    }
+
+    #[test]
+    fn a_notice_that_arrives_after_its_refresh_ended_is_ignored() {
+        let mut model = Model::default();
+        let _ = model.apply(done(9));
+        assert!(!model.begin_refresh(OperationId(9)));
+        assert!(!model.begin_refresh(OperationId(8)));
+        assert!(model.begin_refresh(OperationId(10)));
     }
 }

@@ -77,6 +77,21 @@ enum Input {
     Shutdown,
 }
 
+/// The notices of one watcher, read by the front-end.
+pub struct Notices(AsyncReceiver<Notice>);
+
+impl Notices {
+    /// The next notice, or `None` once the watcher has stopped.
+    pub async fn next(&self) -> Option<Notice> {
+        self.0.recv().await.ok()
+    }
+
+    /// Like `next`, for threads that are not async.
+    pub fn next_blocking(&self) -> Option<Notice> {
+        self.0.recv_blocking().ok()
+    }
+}
+
 /// Owns the watcher thread. Dropping it stops watching.
 pub struct WatchHandle {
     tx: mpsc::Sender<Input>,
@@ -101,10 +116,7 @@ impl Drop for WatchHandle {
 /// # Panics
 ///
 /// If the OS cannot start the watcher thread.
-pub fn spawn(
-    engine: EngineHandle,
-    login_path: Arc<OnceLock<String>>,
-) -> (WatchHandle, AsyncReceiver<Notice>) {
+pub fn spawn(engine: EngineHandle, login_path: Arc<OnceLock<String>>) -> (WatchHandle, Notices) {
     spawn_with(engine, login_path, WatchConfig::default())
 }
 
@@ -117,7 +129,7 @@ pub fn spawn_with(
     engine: EngineHandle,
     login_path: Arc<OnceLock<String>>,
     config: WatchConfig,
-) -> (WatchHandle, AsyncReceiver<Notice>) {
+) -> (WatchHandle, Notices) {
     let (tx, rx) = mpsc::channel();
     let (notices_tx, notices) = async_channel::unbounded();
     let events = engine.subscribe();
@@ -149,7 +161,7 @@ pub fn spawn_with(
         .name("gm-watch".into())
         .spawn(move || worker.run(&rx))
         .expect("spawn the watcher thread");
-    (WatchHandle { tx }, notices)
+    (WatchHandle { tx }, Notices(notices))
 }
 
 /// State of the watcher thread. Only that thread touches it.

@@ -69,7 +69,7 @@ fn session(config: WatchConfig) -> Session {
     // The front-ends await the async channel; the tests bridge it to a bounded wait.
     let (tx, notices) = mpsc::channel();
     std::thread::spawn(move || {
-        while let Ok(notice) = async_notices.recv_blocking() {
+        while let Some(notice) = async_notices.next_blocking() {
             if tx.send(notice).is_err() {
                 break;
             }
