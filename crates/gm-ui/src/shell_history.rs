@@ -594,7 +594,7 @@ impl StatusView {
                 .flex_col()
                 .overflow_hidden()
                 .when(loading, |this| this.h(px(0.)))
-                .when(!loading, |this| this.flex_1())
+                .when(!loading, gpui::Styled::flex_1)
                 .child(self.commit_diff_pane.clone());
             div()
                 .flex_1()
