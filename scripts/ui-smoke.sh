@@ -18,23 +18,27 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
 # with the Read tool on a screenshot before changing anything else.
 WIN_X=82; WIN_Y=50; WIN_W=1280; WIN_H=800   # window geometry, used to crop shots
 WAKE_X=400; WAKE_Y=300                      # first click: black until first input
-FILE_CHECK_X=352                            # file row checkbox (dirs are at 362)
-NAME_X=458                                  # file name column
-ROW_HANDLERS_Y=407                          # api/handlers.rs (untracked)
-ROW_MOD_Y=455                               # src/ledger/mod.rs
-ROW_TOTAL_Y=479                             # src/ledger/total.rs
-LIST_EMPTY_X=540; LIST_EMPTY_Y=650          # empty list area, takes list focus
+NAME_X=420                                  # file path column: a click selects, space stages
+ROW_HANDLERS_Y=186                          # api/handlers.rs (untracked)
+ROW_MOD_Y=138                               # src/ledger/mod.rs
+ROW_TOTAL_Y=162                             # src/ledger/total.rs
+LIST_EMPTY_X=540; LIST_EMPTY_Y=450          # empty list area, takes list focus
 DIFF_CHECK_X=841                            # gutter checkbox in the diff pane
-DIFF_LINE_A_Y=224                           # first pure-insertion row in total.rs
-DIFF_LINE_B_Y=312                           # second pure-insertion row in total.rs
-COMPOSER_X=540; COMPOSER_Y=255              # commit message box
+DIFF_LINE_A_Y=231                           # first pure-insertion row in total.rs
+DIFF_LINE_B_Y=319                           # second pure-insertion row in total.rs
+CHUNK_Y=165                                 # hunk header row of total.rs (its buttons)
+CHUNK_DISCARD_X=1181                        # "Discard Chunk" in that row
+CHUNK_STAGE_X=1298                          # "Stage Chunk" in that row (Unstage on Staged)
+CONFIRM_DISCARD_X=1243; CONFIRM_CANCEL_X=1317   # the inline confirmation in that row
+COMPOSER_X=540; COMPOSER_Y=690              # commit message box
+COMMIT_BUTTON_X=530; COMMIT_BUTTON_Y=798    # "Commit on <branch>" under the message box
 LOG_BUTTON_X=1300; LOG_BUTTON_Y=837         # "Git log" button, right end of the status bar
 PROJECT_X=139; PROJECT_Y=67                 # project button at the left of the top bar
 RECENT_OTHER_X=150; RECENT_OTHER_Y=185      # second row of the open list: billing-api
@@ -198,16 +202,23 @@ $expected"
   shoot "$SMOKE_OUT/a-stage-lines-$theme.png"
 }
 
-# --- 3b. Stage and unstage a whole file from its row checkbox ------------------
+# Selects mod.rs from its row, then space: stages it, or unstages it when it has
+# nothing unstaged left.
+space_on_mod_file() {
+  xdotool mousemove "$NAME_X" "$ROW_MOD_Y" click 1; sleep 0.7
+  xdotool key space
+}
+
+# --- 3b. Stage and unstage a whole file with space on its row ------------------
 scenario_b() {
   local repo="$RUN_DIR/repo" theme="$1" staged
-  xdotool mousemove "$FILE_CHECK_X" "$ROW_MOD_Y" click 1; sleep 1.5
+  space_on_mod_file; sleep 1
   staged="$(staged_names)"
-  grep -qxF -- 'src/ledger/mod.rs' <<<"$staged" || fail "mod.rs not staged after row checkbox click"
+  grep -qxF -- 'src/ledger/mod.rs' <<<"$staged" || fail "mod.rs not staged after space on its row"
 
-  xdotool mousemove "$FILE_CHECK_X" "$ROW_MOD_Y" click 1; sleep 1.5
+  space_on_mod_file; sleep 1
   staged="$(staged_names)"
-  grep -qxF -- 'src/ledger/mod.rs' <<<"$staged" && fail "mod.rs still staged after second row checkbox click"
+  grep -qxF -- 'src/ledger/mod.rs' <<<"$staged" && fail "mod.rs still staged after second space"
 
   shoot "$SMOKE_OUT/b-stage-file-$theme.png"
 }
@@ -215,7 +226,7 @@ scenario_b() {
 # --- 3c. Stage a file, type a message, commit with ctrl+Return -----------------
 scenario_c() {
   local repo="$RUN_DIR/repo" theme="$1" staged status got
-  xdotool mousemove "$FILE_CHECK_X" "$ROW_MOD_Y" click 1; sleep 1.5
+  space_on_mod_file; sleep 1
   staged="$(staged_names)"
   grep -qxF -- 'src/ledger/mod.rs' <<<"$staged" || fail "mod.rs not staged before commit"
 
@@ -258,7 +269,7 @@ scenario_d() {
 # --- 3e. Open the command log panel after a stage ------------------------------
 scenario_e() {
   local theme="$1" differing
-  xdotool mousemove "$FILE_CHECK_X" "$ROW_MOD_Y" click 1; sleep 1.5
+  space_on_mod_file; sleep 1
   grep -qxF -- 'src/ledger/mod.rs' <<<"$(staged_names)" || fail "mod.rs not staged"
   shoot "$RUN_DIR/closed.png"
 
@@ -458,6 +469,44 @@ scenario_h() {
   [ "$(find "$plain" | sort)" = "$before_plain" ] || fail "the folder the app started in changed"
 }
 
+# --- 3i. Stage one hunk with its header button ---------------------------------
+scenario_i() {
+  local repo="$RUN_DIR/repo" theme="$1" cached
+  xdotool mousemove "$NAME_X" "$ROW_TOTAL_Y" click 1; sleep 1
+  xdotool mousemove "$CHUNK_STAGE_X" "$CHUNK_Y" click 1; sleep 1.5
+
+  cached="$(git -C "$repo" diff --cached -U0 --no-color -- src/ledger/total.rs)"
+  grep -qF -- '+        // smoke: first' <<<"$cached" || fail "Stage Chunk did not stage the first line"
+  grep -qF -- '+        // smoke: second' <<<"$cached" || fail "Stage Chunk did not stage the second line"
+  git -C "$repo" diff --quiet -- src/ledger/total.rs \
+    || fail "total.rs still has unstaged changes after Stage Chunk"
+
+  shoot "$SMOKE_OUT/i-stage-chunk-$theme.png"
+}
+
+# --- 3j. Discard one chunk: Cancel keeps it, Discard reverts it ----------------
+scenario_j() {
+  local repo="$RUN_DIR/repo" theme="$1"
+  xdotool mousemove "$NAME_X" "$ROW_TOTAL_Y" click 1; sleep 1
+
+  xdotool mousemove "$CHUNK_DISCARD_X" "$CHUNK_Y" click 1; sleep 0.8
+  xdotool mousemove "$CONFIRM_CANCEL_X" "$CHUNK_Y" click 1; sleep 0.8
+  git -C "$repo" diff --quiet -- src/ledger/total.rs \
+    && fail "Cancel in the discard confirmation changed total.rs"
+
+  xdotool mousemove "$CHUNK_DISCARD_X" "$CHUNK_Y" click 1; sleep 0.8
+  shoot "$SMOKE_OUT/j-discard-confirm-$theme.png"
+  xdotool mousemove "$CONFIRM_DISCARD_X" "$CHUNK_Y" click 1; sleep 1.5
+
+  git -C "$repo" diff --quiet -- src/ledger/total.rs \
+    || fail "total.rs still has changes after Discard Chunk"
+  grep -qF -- 'smoke: first' "$repo/src/ledger/total.rs" \
+    && fail "the discarded line is still in total.rs"
+  git -C "$repo" diff --cached --quiet \
+    || fail "Discard Chunk touched the index"
+  shoot "$SMOKE_OUT/j-discard-chunk-$theme.png"
+}
+
 run_scenario() {
   # $1: scenario name, $2: theme
   local name="$1" theme="$2"
@@ -486,6 +535,8 @@ run_scenario() {
     f-open-project) scenario_f "$theme" ;;
     g-switch-branch) scenario_g "$theme" ;;
     h-welcome) ;;
+    i-stage-chunk) scenario_i "$theme" ;;
+    j-discard-chunk) scenario_j "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app
