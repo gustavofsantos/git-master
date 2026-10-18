@@ -19,8 +19,8 @@ use crate::diff_rows::{
     StackFile, build_rows, build_stack, change_counts, changed_keys_between, concat_hunks,
     controls, default_side, file_at_row, file_notice, hunk_header_text, hunk_selection_count,
     hunks_of, max_scroll_columns, next_changed_line, next_hunk_header, no_newline_mark,
-    notice_text, press, prev_changed_line, prev_hunk_header, skip_columns, split_cell_on_cursor,
-    split_pairs, split_rows, scroll_padding, step_from_top,
+    notice_text, press, prev_changed_line, prev_hunk_header, scroll_padding, skip_columns,
+    split_cell_on_cursor, split_pairs, split_rows, step_from_top,
 };
 use crate::icon::{self, Icon};
 use crate::shell_history::{change_color, file_counts, path_label};
@@ -33,20 +33,140 @@ const CONTEXT: &str = "DiffPane";
 /// listed in `COMMIT_KEYS`: no vim-style letters, and Up and Down scroll.
 const CONTEXT_READ_ONLY: &str = "DiffPaneReadOnly";
 
-/// The keys of the commit's stacked diff (H4c), as (keystroke, what it does).
-/// Ctrl+Shift is literal Ctrl on every platform, so the keys never clash with
-/// the app's own shortcuts (⌘K for the palette, ⌘Q for quit). The bindings are
-/// in `read_only_key_bindings`; a test checks that they match this list.
-#[cfg(test)]
-const COMMIT_KEYS: [(&str, &str); 7] = [
-    ("ctrl-shift-n", "Next file"),
-    ("ctrl-shift-p", "Previous file"),
-    ("up", "Scroll up one row"),
-    ("down", "Scroll down one row"),
-    ("pageup", "Scroll up one page"),
-    ("pagedown", "Scroll down one page"),
-    ("escape", "Back to the commit"),
+/// One key of a diff pane: its keystroke, the action it runs (by name, see
+/// `binding`) and what it does. `secondary` is what gpui reads as Cmd on macOS
+/// and Ctrl elsewhere (`resolve_secondary`), so one table serves both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeyRow {
+    keys: &'static str,
+    action: &'static str,
+    /// Read by the tests; the bindings only need `keys` and `action`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    what: &'static str,
+}
+
+/// The keys of the Working Copy diff (`CONTEXT`). No letter is bound on its
+/// own: a letter key is Shift with the secondary modifier. Up and Down move the
+/// cursor by changed line; Ctrl+Shift+N and B go to the next and the previous
+/// hunk. The letters avoid the registry's shortcuts (⇧⌘R restack, ⇧⌘P push), the
+/// text area's redo (⇧⌘Z), the palette and quit (⌘K, ⌘Q), and Ctrl+Shift+U, which
+/// is the Unicode entry of `IBus` on GNOME: that key never reaches the app there.
+const WORKING_KEYS: [KeyRow; 10] = [
+    KeyRow {
+        keys: "up",
+        action: "PrevChangedLine",
+        what: "Previous changed line",
+    },
+    KeyRow {
+        keys: "down",
+        action: "NextChangedLine",
+        what: "Next changed line",
+    },
+    KeyRow {
+        keys: "secondary-shift-n",
+        action: "NextHunk",
+        what: "Next hunk",
+    },
+    KeyRow {
+        keys: "secondary-shift-b",
+        action: "PrevHunk",
+        what: "Previous hunk",
+    },
+    KeyRow {
+        keys: "space",
+        action: "ToggleLine",
+        what: "Select or clear the line",
+    },
+    KeyRow {
+        keys: "secondary-shift-v",
+        action: "ToggleVisual",
+        what: "Visual selection",
+    },
+    KeyRow {
+        keys: "secondary-shift-a",
+        action: "StageHunkUnderCursor",
+        what: "Stage or unstage the chunk under the cursor",
+    },
+    KeyRow {
+        keys: "secondary-shift-s",
+        action: "StageSelectedLines",
+        what: "Stage the selected lines",
+    },
+    KeyRow {
+        keys: "secondary-shift-i",
+        action: "UnstageSelectedLines",
+        what: "Unstage the selected lines",
+    },
+    KeyRow {
+        keys: "escape",
+        action: "ClearSelection",
+        what: "Clear the selection",
+    },
 ];
+
+/// The keys of the commit's stacked diff (H4c, H4c-keys), bound in the read-only
+/// context only. Up and Down scroll a row; the file keys wrap around.
+const COMMIT_KEYS: [KeyRow; 7] = [
+    KeyRow {
+        keys: "secondary-shift-n",
+        action: "NextFile",
+        what: "Next file",
+    },
+    KeyRow {
+        keys: "secondary-shift-p",
+        action: "PrevFile",
+        what: "Previous file",
+    },
+    KeyRow {
+        keys: "up",
+        action: "ScrollLineUp",
+        what: "Scroll up one row",
+    },
+    KeyRow {
+        keys: "down",
+        action: "ScrollLineDown",
+        what: "Scroll down one row",
+    },
+    KeyRow {
+        keys: "pageup",
+        action: "ScrollPageUp",
+        what: "Scroll up one page",
+    },
+    KeyRow {
+        keys: "pagedown",
+        action: "ScrollPageDown",
+        what: "Scroll down one page",
+    },
+    KeyRow {
+        keys: "escape",
+        action: "LeaveCommit",
+        what: "Back to the commit",
+    },
+];
+
+/// The keystroke as gpui reads it on the given platform: `secondary` is Cmd on
+/// macOS and Ctrl elsewhere (gpui 0.2.2, `Keystroke::parse`).
+#[cfg(test)]
+fn resolve_secondary(keys: &str, mac: bool) -> String {
+    keys.replacen("secondary", if mac { "cmd" } else { "ctrl" }, 1)
+}
+
+/// The keystroke as the registry writes shortcuts on macOS: ⌥, ⇧ and ⌘ in that
+/// order, then the key in capitals (⇧⌘R, ⌥⌘C).
+#[cfg(test)]
+fn mac_glyph(keys: &str) -> String {
+    let (mut alt, mut shift, mut cmd) = ("", "", "");
+    let mut key = String::new();
+    for part in keys.split('-') {
+        match part {
+            "secondary" | "cmd" => cmd = "⌘",
+            "shift" => shift = "⇧",
+            "alt" => alt = "⌥",
+            other => key = other.to_uppercase(),
+        }
+    }
+    format!("{alt}{shift}{cmd}{key}")
+}
 
 /// Height of every list row; `uniform_list` needs equal heights.
 const ROW_HEIGHT: f32 = 22.;
@@ -1407,36 +1527,48 @@ pub fn bind_keys(cx: &mut gpui::App) {
     cx.bind_keys(read_only_key_bindings());
 }
 
-/// The keys of a read-only pane. Only navigation is bound: no key here reaches a
-/// stage, unstage or discard action, because none of them is bound in this context.
-fn read_only_key_bindings() -> Vec<KeyBinding> {
-    // The keys of `COMMIT_KEYS`, bound in the read-only context only.
-    vec![
-        KeyBinding::new("ctrl-shift-n", NextFile, Some(CONTEXT_READ_ONLY)),
-        KeyBinding::new("ctrl-shift-p", PrevFile, Some(CONTEXT_READ_ONLY)),
-        KeyBinding::new("up", ScrollLineUp, Some(CONTEXT_READ_ONLY)),
-        KeyBinding::new("down", ScrollLineDown, Some(CONTEXT_READ_ONLY)),
-        KeyBinding::new("pageup", ScrollPageUp, Some(CONTEXT_READ_ONLY)),
-        KeyBinding::new("pagedown", ScrollPageDown, Some(CONTEXT_READ_ONLY)),
-        KeyBinding::new("escape", LeaveCommit, Some(CONTEXT_READ_ONLY)),
-    ]
+/// The bindings of the Working Copy diff, from `WORKING_KEYS`.
+fn key_bindings() -> Vec<KeyBinding> {
+    table_bindings(&WORKING_KEYS, CONTEXT)
 }
 
-fn key_bindings() -> Vec<KeyBinding> {
-    vec![
-        KeyBinding::new("j", NextChangedLine, Some(CONTEXT)),
-        KeyBinding::new("down", NextChangedLine, Some(CONTEXT)),
-        KeyBinding::new("k", PrevChangedLine, Some(CONTEXT)),
-        KeyBinding::new("up", PrevChangedLine, Some(CONTEXT)),
-        KeyBinding::new("n", NextHunk, Some(CONTEXT)),
-        KeyBinding::new("p", PrevHunk, Some(CONTEXT)),
-        KeyBinding::new("space", ToggleLine, Some(CONTEXT)),
-        KeyBinding::new("a", StageHunkUnderCursor, Some(CONTEXT)),
-        KeyBinding::new("s", StageSelectedLines, Some(CONTEXT)),
-        KeyBinding::new("u", UnstageSelectedLines, Some(CONTEXT)),
-        KeyBinding::new("escape", ClearSelection, Some(CONTEXT)),
-        KeyBinding::new("V", ToggleVisual, Some(CONTEXT)),
-    ]
+/// The bindings of a read-only pane, from `COMMIT_KEYS`. Only navigation is
+/// bound: no key here reaches a stage, unstage or discard action, because none of
+/// them is bound in this context.
+fn read_only_key_bindings() -> Vec<KeyBinding> {
+    table_bindings(&COMMIT_KEYS, CONTEXT_READ_ONLY)
+}
+
+fn table_bindings(table: &[KeyRow], context: &'static str) -> Vec<KeyBinding> {
+    table
+        .iter()
+        .map(|row| binding(row.action, row.keys, context))
+        .collect()
+}
+
+/// One binding: the action named in a table row, on its keystroke, in `context`.
+fn binding(action: &str, keys: &str, context: &'static str) -> KeyBinding {
+    let context = Some(context);
+    match action {
+        "PrevChangedLine" => KeyBinding::new(keys, PrevChangedLine, context),
+        "NextChangedLine" => KeyBinding::new(keys, NextChangedLine, context),
+        "NextHunk" => KeyBinding::new(keys, NextHunk, context),
+        "PrevHunk" => KeyBinding::new(keys, PrevHunk, context),
+        "ToggleLine" => KeyBinding::new(keys, ToggleLine, context),
+        "ToggleVisual" => KeyBinding::new(keys, ToggleVisual, context),
+        "StageHunkUnderCursor" => KeyBinding::new(keys, StageHunkUnderCursor, context),
+        "StageSelectedLines" => KeyBinding::new(keys, StageSelectedLines, context),
+        "UnstageSelectedLines" => KeyBinding::new(keys, UnstageSelectedLines, context),
+        "ClearSelection" => KeyBinding::new(keys, ClearSelection, context),
+        "NextFile" => KeyBinding::new(keys, NextFile, context),
+        "PrevFile" => KeyBinding::new(keys, PrevFile, context),
+        "ScrollLineUp" => KeyBinding::new(keys, ScrollLineUp, context),
+        "ScrollLineDown" => KeyBinding::new(keys, ScrollLineDown, context),
+        "ScrollPageUp" => KeyBinding::new(keys, ScrollPageUp, context),
+        "ScrollPageDown" => KeyBinding::new(keys, ScrollPageDown, context),
+        "LeaveCommit" => KeyBinding::new(keys, LeaveCommit, context),
+        other => panic!("no diff pane action named {other}"),
+    }
 }
 
 impl Render for DiffPane {
@@ -1509,25 +1641,138 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_key_binding_parses() {
-        assert_eq!(key_bindings().len(), 12);
-        assert_eq!(read_only_key_bindings().len(), 7);
+    fn every_key_binding_parses_and_is_bound_once() {
+        assert_eq!(key_bindings().len(), WORKING_KEYS.len());
+        assert_eq!(read_only_key_bindings().len(), COMMIT_KEYS.len());
+        for binding in key_bindings().iter().chain(read_only_key_bindings().iter()) {
+            assert_eq!(binding.keystrokes().len(), 1);
+        }
+        for table in [&WORKING_KEYS[..], &COMMIT_KEYS[..]] {
+            let mut seen: Vec<&str> = table.iter().map(|row| row.keys).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), table.len(), "a keystroke is listed twice");
+        }
+    }
+
+    #[test]
+    fn no_bare_letter_is_bound_in_a_diff_pane() {
+        // A letter on its own would be typed by the user, or fire on one keystroke.
+        for row in WORKING_KEYS.iter().chain(COMMIT_KEYS.iter()) {
+            let letter = row.keys.rsplit('-').next().unwrap_or(row.keys);
+            let is_letter = letter.len() == 1 && letter.chars().all(|c| c.is_ascii_alphabetic());
+            assert!(
+                !is_letter || row.keys.starts_with("secondary-shift-"),
+                "{} is a letter without Ctrl or Cmd and Shift",
+                row.keys
+            );
+        }
+    }
+
+    #[test]
+    fn the_secondary_modifier_is_cmd_on_macos_and_ctrl_elsewhere() {
+        assert_eq!(resolve_secondary("secondary-shift-n", true), "cmd-shift-n");
+        assert_eq!(
+            resolve_secondary("secondary-shift-n", false),
+            "ctrl-shift-n"
+        );
+        assert_eq!(resolve_secondary("pagedown", true), "pagedown");
+        for mac in [true, false] {
+            for row in WORKING_KEYS.iter().chain(COMMIT_KEYS.iter()) {
+                assert!(!resolve_secondary(row.keys, mac).contains("secondary"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_keys_of_each_context_are_unique_on_both_platforms() {
+        for mac in [true, false] {
+            for table in [&WORKING_KEYS[..], &COMMIT_KEYS[..]] {
+                let mut seen: Vec<String> = table
+                    .iter()
+                    .map(|row| resolve_secondary(row.keys, mac))
+                    .collect();
+                seen.sort_unstable();
+                seen.dedup();
+                assert_eq!(seen.len(), table.len(), "mac: {mac}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_diff_key_is_a_registry_shortcut_on_macos() {
+        // The registry's glyphs are macOS glyphs, ⌘ being the secondary modifier.
+        // The commit's previous file is the one exception: ⇧⌘P is Push With Lease's
+        // label. Nothing binds that label, and its key is an open question (docs/01).
+        // The chunk actions are this pane's own: their label is the key bound here.
+        let registry: Vec<&str> = Action::ALL
+            .iter()
+            .filter(|action| !matches!(action, Action::StageChunk | Action::UnstageChunk))
+            .filter_map(|action| action.spec().shortcut)
+            .collect();
+        for row in WORKING_KEYS.iter().chain(COMMIT_KEYS.iter()) {
+            if !row.keys.contains("secondary") {
+                continue;
+            }
+            let glyph = mac_glyph(row.keys);
+            if glyph == "⇧⌘P" && row.action == "PrevFile" {
+                continue;
+            }
+            assert!(
+                !registry.contains(&glyph.as_str()),
+                "{glyph} is a registry shortcut"
+            );
+        }
     }
 
     #[test]
     fn the_commit_keys_are_the_listed_ones_and_no_vim_letter_is_bound() {
-        let keys: Vec<&str> = COMMIT_KEYS.iter().map(|(keys, _)| *keys).collect();
-        assert_eq!(keys.len(), read_only_key_bindings().len());
-        for listed in &keys {
-            assert!(
-                !matches!(*listed, "j" | "k" | "h" | "l" | "n" | "p"),
-                "{listed} is a vim letter"
-            );
+        assert_eq!(
+            COMMIT_KEYS.iter().map(|row| row.keys).collect::<Vec<_>>(),
+            [
+                "secondary-shift-n",
+                "secondary-shift-p",
+                "up",
+                "down",
+                "pageup",
+                "pagedown",
+                "escape",
+            ]
+        );
+        for row in COMMIT_KEYS {
+            assert!(!matches!(row.keys, "j" | "k" | "h" | "l" | "n" | "p"));
         }
-        // Every keystroke parses: a malformed one panics when bound at startup.
-        for listed in keys {
-            let _ = KeyBinding::new(listed, NextFile, Some(CONTEXT_READ_ONLY));
-        }
+    }
+
+    #[test]
+    fn the_chunk_actions_show_the_key_they_are_bound_to() {
+        // The palette and the menus show the registry's shortcut: it is the key bound here.
+        let key = |action: &str| {
+            WORKING_KEYS
+                .iter()
+                .find(|row| row.action == action)
+                .map(|row| mac_glyph(row.keys))
+        };
+        assert_eq!(
+            key("StageHunkUnderCursor").as_deref(),
+            Action::StageChunk.spec().shortcut
+        );
+        assert_eq!(
+            key("StageHunkUnderCursor").as_deref(),
+            Action::UnstageChunk.spec().shortcut
+        );
+    }
+
+    #[test]
+    fn up_and_down_move_the_working_copy_cursor_by_changed_line() {
+        let action = |keys: &str| {
+            WORKING_KEYS
+                .iter()
+                .find(|row| row.keys == keys)
+                .map(|row| row.action)
+        };
+        assert_eq!(action("up"), Some("PrevChangedLine"));
+        assert_eq!(action("down"), Some("NextChangedLine"));
     }
 
     #[test]

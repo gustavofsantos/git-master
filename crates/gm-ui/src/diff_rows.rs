@@ -2012,7 +2012,10 @@ mod stack_tests {
                 let rows = 200 + tail;
                 let total = rows + scroll_padding(tail, visible);
                 // The scroll reaches `total - visible`; the last header is at `rows - tail`.
-                assert!(total - visible >= rows - tail, "tail {tail}, visible {visible}");
+                assert!(
+                    total - visible >= rows - tail,
+                    "tail {tail}, visible {visible}"
+                );
             }
         }
     }

@@ -164,14 +164,14 @@ const SPECS: [Spec; 35] = [
     spec(
         "chunk.stage",
         "Stage Chunk",
-        Some("A"),
+        Some("⇧⌘A"),
         ArgKind::Chunk,
         Category::WorkingCopy,
     ),
     spec(
         "chunk.unstage",
         "Unstage Chunk",
-        Some("A"),
+        Some("⇧⌘A"),
         ArgKind::Chunk,
         Category::WorkingCopy,
     ),
