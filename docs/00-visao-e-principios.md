@@ -11,6 +11,12 @@ Cliente Git desktop, nativo, open source, entregue como produto premium. Feito p
 - **Git Tower**: sidebar de branches, Working Copy com stage por linha, histórico, menus de contexto, worktrees, commit com IA.
 - **JetBrains (VCS)**: ferramenta de resolução de conflitos em três painéis (aplicar mudanças não conflitantes, destaque por palavra, setas de aceitar esquerda/direita).
 
+## Posicionamento
+
+O GitMaster não é um clone do Tower. Os benchmarks acima são referência: onde eles fizeram uma escolha que funciona, adotamos e fazemos bem; depois vamos além. O produto junta três coisas: um cliente Git completo e rápido; um espaço de trabalho com o código (navegar no repositório onde se está: arquivos, texto, símbolos), e a integração com agentes de IA para quem responde pelo código-fonte. Toda funcionalidade deve servir a pelo menos uma das três.
+
+Duas qualidades acompanham tudo: o app tem de continuar fluido e rápido (uma funcionalidade mais rica só entra se a sensação se mantiver) e autocontido (o único programa externo exigido é o `git`).
+
 ## Diferenciais
 
 1. **Hooks extensíveis via `.gitconfig`**, para eventos do próprio app (ex.: `prepare-commit` chamando um LLM por script).

@@ -1,12 +1,12 @@
 # Navegação no código
 
-Última atualização: 2026-10-18. Status: **proposta** (D43 a D51 em `01` estão como Proposto; nada aqui é compromisso até o autor confirmar).
+Última atualização: 2026-10-18. Status: escopo decidido (D43); motores e ordem como **proposta** (D43 a D51 em `01` estão como Proposto; nada aqui é compromisso até o autor confirmar).
 
 ## Por que
 
 Quem revisa mudanças de agentes (Fatia 8) e navega num monorepo precisa achar contexto sem sair do app: abrir um arquivo pelo nome, buscar um texto no repositório, saltar para a definição de um símbolo. O GitHub oferece isso na web; localmente deveria ser mais rápido, porque os dados já estão no disco e não há rede.
 
-Isto passa da paridade com o Tower (`00`, benchmarks), então é uma decisão de escopo do autor (Q13), não uma consequência da Fatia 3.
+Isto vai além do Tower, de propósito: o produto é um cliente Git unido a ferramentas para trabalhar com o código, e o Tower é referência, não molde (`00`, Posicionamento). O escopo está decidido (D43); a posição no roadmap segue em aberto (Q13).
 
 ## O que entra
 
@@ -29,6 +29,10 @@ Mais um **visualizador somente leitura** com árvore de pastas, que é para onde
 - **A UI nunca bloqueia (4).** Toda busca roda em thread própria, com atraso (debounce), cancelável (mata o processo, como o `Canceller` do histórico) e com resposta de pedido superado descartada por `OperationId`. É o mesmo modelo do H2 a H4.
 - **Determinismo (1).** Mesma entrada, mesma ordem de resultados: o desempate do ranking é o caminho, nunca a ordem de chegada das threads. Navegar até a definição nunca "adivinha": se há mais de um candidato, lista todos.
 - **Leitura não vai ao log de comandos (D28).**
+
+## Fluidez como condição
+
+A análise estrutural (tree-sitter) é bem-vinda, mas só se o app continuar fluido e rápido. Na prática: o índice roda em segundo plano, em poucas threads e com prioridade baixa; nenhuma busca espera por ele (resultado parcial é sinalizado); o destaque de sintaxe só trata o intervalo visível; e o gate do D49 inclui "rolagem e digitação sem queda de quadros durante a indexação". Se o spike S-B mostrar que não dá para cumprir isso, a primeira versão sai sem símbolos (arquivos e texto) e os símbolos esperam.
 
 ## Sem programas extras (D51)
 
