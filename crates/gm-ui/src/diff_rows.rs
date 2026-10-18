@@ -439,10 +439,11 @@ pub fn file_at_row(starts: &[usize], top: usize) -> usize {
         .saturating_sub(1)
 }
 
-/// The file a step from the top row goes to, clamped at the ends (no wrap).
-/// Forward goes to the file after the one at the top. Backward goes to the
-/// top file's own header when the top is below it, otherwise to the file
-/// before. `None` when there is no such file.
+/// The file a step from the top row goes to. It wraps: forward from the last
+/// file goes to the first, and backward from the first file's header goes to
+/// the last. Forward goes to the file after the one at the top. Backward goes
+/// to the top file's own header when the top is below it, otherwise to the file
+/// before. `None` only when there are no files.
 #[must_use]
 pub fn step_from_top(starts: &[usize], top: usize, forward: bool) -> Option<usize> {
     if starts.is_empty() {
@@ -450,11 +451,11 @@ pub fn step_from_top(starts: &[usize], top: usize, forward: bool) -> Option<usiz
     }
     let current = file_at_row(starts, top);
     if forward {
-        (current + 1 < starts.len()).then_some(current + 1)
+        Some((current + 1) % starts.len())
     } else if top > starts[current] {
         Some(current)
     } else {
-        current.checked_sub(1)
+        Some(current.checked_sub(1).unwrap_or(starts.len() - 1))
     }
 }
 
@@ -1959,11 +1960,12 @@ mod stack_tests {
     }
 
     #[test]
-    fn forward_goes_to_the_next_file_and_stops_at_the_last() {
+    fn forward_goes_to_the_next_file_and_wraps_from_the_last_to_the_first() {
         let starts = [0, 4, 9];
         assert_eq!(step_from_top(&starts, 0, true), Some(1));
         assert_eq!(step_from_top(&starts, 6, true), Some(2));
-        assert_eq!(step_from_top(&starts, 9, true), None);
+        assert_eq!(step_from_top(&starts, 9, true), Some(0));
+        assert_eq!(step_from_top(&starts, 12, true), Some(0));
         assert_eq!(step_from_top(&[], 0, true), None);
     }
 
@@ -1974,7 +1976,15 @@ mod stack_tests {
         assert_eq!(step_from_top(&starts, 6, false), Some(1));
         // At file 1's header: back to file 0.
         assert_eq!(step_from_top(&starts, 4, false), Some(0));
-        // At the first file's header there is nothing before it.
-        assert_eq!(step_from_top(&starts, 0, false), None);
+        // At the first file's header: wraps to the last file.
+        assert_eq!(step_from_top(&starts, 0, false), Some(2));
+        // Inside the first file, below its header: its header comes first.
+        assert_eq!(step_from_top(&starts, 2, false), Some(0));
+    }
+
+    #[test]
+    fn a_single_file_wraps_onto_itself() {
+        assert_eq!(step_from_top(&[0], 0, true), Some(0));
+        assert_eq!(step_from_top(&[0], 0, false), Some(0));
     }
 }

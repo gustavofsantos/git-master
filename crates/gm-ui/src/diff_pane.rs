@@ -320,8 +320,8 @@ impl DiffPane {
         }
     }
 
-    /// Next or previous file of a stack (ctrl-shift-n, ctrl-shift-p). Clamped at
-    /// the first and the last file; see `diff_rows::step_from_top`.
+    /// Next or previous file of a stack (ctrl-shift-n, ctrl-shift-p). Wraps from
+    /// the last file to the first and back; see `diff_rows::step_from_top`.
     fn step_stack_file(&self, forward: bool, cx: &mut Context<Self>) {
         if self.mode != Mode::ReadOnly {
             return;
