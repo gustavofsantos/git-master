@@ -12,7 +12,7 @@ Design documents (Portuguese), exported verbatim on 2026-10-16 from the author's
 | `05-telas.md` | Screens: sidebar, conflicts, history graph, Working Copy, diff |
 | `06-arquitetura.md` | Hexagonal architecture, rules, persistence, crates, risks |
 | `07-roadmap.md` | Slices 0-9 |
-| `08-identidade-visual.md` | Visual identity: cursorized palette, Divisa icon decisions and geometry, files in `assets/icons/` |
+| `08-identidade-visual.md` | Visual identity: palette, Divisa icon decisions and geometry, files in `assets/icons/` |
 | `09-navegacao-no-codigo.md` | Proposal: Quick Open, grep and symbol search over a read-only code viewer (slice 3c) |
 | `rvw-lessons.md` | Lessons from `~/Projects/rvw` (English) and the slice 0 bootstrap plan (done) |
 
