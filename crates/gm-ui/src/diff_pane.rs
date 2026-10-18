@@ -20,7 +20,7 @@ use crate::diff_rows::{
     controls, default_side, file_at_row, file_notice, hunk_header_text, hunk_selection_count,
     hunks_of, max_scroll_columns, next_changed_line, next_hunk_header, no_newline_mark,
     notice_text, press, prev_changed_line, prev_hunk_header, skip_columns, split_cell_on_cursor,
-    split_pairs, split_rows, step_from_top,
+    split_pairs, split_rows, scroll_padding, step_from_top,
 };
 use crate::icon::{self, Icon};
 use crate::shell_history::{change_color, file_counts, path_label};
@@ -345,6 +345,21 @@ impl DiffPane {
         cx.notify();
     }
 
+    /// Blank rows after the last row of a stacked list, so that the last file can
+    /// be scrolled to the top of the page (see `diff_rows::scroll_padding`). The
+    /// page's height is the window's: a taller guess only adds blank rows.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn padding_rows(&self, window: &Window) -> usize {
+        if self.mode != Mode::ReadOnly {
+            return 0;
+        }
+        let Some(&last) = self.starts_for(self.layout).last() else {
+            return 0;
+        };
+        let visible = (f32::from(window.viewport_size().height) / ROW_HEIGHT).floor() as usize;
+        scroll_padding(self.row_count().saturating_sub(last), visible)
+    }
+
     /// The number of rows a page of the list shows, at least one.
     fn page_rows(&self) -> isize {
         let height = self.scroll.0.borrow().base_handle.bounds().size.height;
@@ -492,6 +507,10 @@ impl DiffPane {
 
     /// One row of the split list: a hunk header, or a pair of cells.
     fn render_ix(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        if ix >= self.row_count() {
+            // Padding past the last row (see `padding_rows`): blank, one row high.
+            return div().h(px(ROW_HEIGHT)).w_full().into_any_element();
+        }
         match self.layout {
             Layout::Unified => self.render_row(ix, cx),
             Layout::Split => match self.split.rows.get(ix).copied() {
@@ -1272,10 +1291,10 @@ impl DiffPane {
             .child(self.layout_selector(cx))
     }
 
-    fn list(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn list(&self, cx: &mut Context<Self>, padding: usize) -> AnyElement {
         uniform_list(
             "diff-rows",
-            self.row_count(),
+            self.row_count() + padding,
             cx.processor(
                 |this: &mut DiffPane,
                  range: Range<usize>,
@@ -1421,7 +1440,7 @@ fn key_bindings() -> Vec<KeyBinding> {
 }
 
 impl Render for DiffPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match self.placeholder() {
             Some(message) => div()
                 .flex_1()
@@ -1430,7 +1449,7 @@ impl Render for DiffPane {
                 .text_color(theme::muted())
                 .child(message)
                 .into_any_element(),
-            None => self.list(cx),
+            None => self.list(cx, self.padding_rows(window)),
         };
         let context = match self.mode {
             Mode::Working => CONTEXT,

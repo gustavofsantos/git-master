@@ -459,6 +459,18 @@ pub fn step_from_top(starts: &[usize], top: usize, forward: bool) -> Option<usiz
     }
 }
 
+/// The blank rows to add after the last row of a stacked list, so that the
+/// last file's header can scroll to the top of the page. `tail_rows` counts the
+/// rows from the last file's header to the end (the header included) and
+/// `visible_rows` the rows a page shows. A list is scrolled at most to its end,
+/// so the rows past the end must make up `visible_rows` below the header.
+/// Padding is not a row of the diff: the cursor, the hits and the file starts
+/// never see it.
+#[must_use]
+pub fn scroll_padding(tail_rows: usize, visible_rows: usize) -> usize {
+    visible_rows.saturating_sub(tail_rows)
+}
+
 /// Whether a split cell holds the cursor's line. A context line is one line on
 /// both sides, so both of its cells hold the cursor; a changed line is one cell.
 #[must_use]
@@ -1986,5 +1998,22 @@ mod stack_tests {
     fn a_single_file_wraps_onto_itself() {
         assert_eq!(step_from_top(&[0], 0, true), Some(0));
         assert_eq!(step_from_top(&[0], 0, false), Some(0));
+    }
+    #[test]
+    fn the_padding_lets_the_last_header_reach_the_top_for_any_tail() {
+        // A short last file needs the rest of a page below it; a long one needs none.
+        assert_eq!(scroll_padding(3, 20), 17);
+        assert_eq!(scroll_padding(20, 20), 0);
+        assert_eq!(scroll_padding(100, 20), 0);
+        assert_eq!(scroll_padding(1, 1), 0);
+        assert_eq!(scroll_padding(5, 0), 0);
+        for tail in 1..=60 {
+            for visible in 1..=40 {
+                let rows = 200 + tail;
+                let total = rows + scroll_padding(tail, visible);
+                // The scroll reaches `total - visible`; the last header is at `rows - tail`.
+                assert!(total - visible >= rows - tail, "tail {tail}, visible {visible}");
+            }
+        }
     }
 }
