@@ -7,7 +7,7 @@ Source: `~/Projects/rvw` (Rust + GPUI review hub by the same author). Read on 20
 
 ## Build and toolchain
 
-- `gpui = "0.2"` from crates.io (rvw's lock resolves 0.2.2). No git dependency on the GPUI source repository.
+- `gpui = "0.2"` from crates.io (rvw's lock resolves 0.2.2). No git dependency on Zed.
 - On macOS add `gpui` with feature `runtime_shaders`, so Command Line Tools suffice (no full Xcode).
 - `xattr` 0.2.3 (pulled by gpui) needs `libc::ENOATTR`, which libc 0.2.190 no longer exports on Linux. rvw's `Cargo.lock` pins `libc` to **0.2.186**. Do the same: `cargo update -p libc --precise 0.2.186`.
 - Linux link needs dev packages: `libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig-dev` (plus `build-essential pkg-config`).
