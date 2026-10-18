@@ -8,11 +8,11 @@ Estado: ícone decidido, paleta decidida, tela escura e tipografia em aberto. As
 |---|---|---|
 | V01 | Ícone: direção **Divisa** (chevrons de patente empilhados + um nó acima). Chevron = "master" e = pilha de branches; o nó é o commit HEAD. | Decidido |
 | V02 | Os ícones do app são **6a (escuro, padrão)** e **6b (claro)**. As outras variações (Lanes, Azul, Duas, Insígnia) ficam só como exploração. | Decidido |
-| V03 | Paleta do app e do ícone: o tema Neovim **cursorized** do Gustavo (`config/nvim/colors/cursorized.lua`). Claro e escuro. | Decidido |
+| V03 | Paleta do app e do ícone: as cores do tema do Gustavo, sem nome próprio. Claro e escuro. | Decidido |
 | V04 | Nó do ícone na cor de assinatura `#f54e00`. | Decidido (vale nos arquivos de `assets/icons/`) |
 | V05 | Telas desenhadas na variante clara. Variante escura ainda não desenhada. | Aberto |
 
-## Paleta (cursorized)
+## Paleta
 
 Regras do tema: tinta primeiro (código é quase todo `fg`), oito acentos com a mesma luminosidade OKLab, rampa de cinco tons de tinta com matiz quente único, cursor em laranja fora das regras.
 
