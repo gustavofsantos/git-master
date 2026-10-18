@@ -195,6 +195,20 @@ Fora da fatia 3 (decisão do autor em 2026-10-17): escopo de stack, dono do comm
 
 Pronto quando: navega o histórico de um repositório grande com rolagem fluida.
 
+## Fatia 3c: navegação no código (proposta, depende de Q13)
+
+Detalhes, motores e riscos em `09-navegacao-no-codigo.md`; decisões D43 a D49 em `01`, todas Proposto. Página Code com Quick Open de arquivos, grep e símbolos, sobre um visualizador somente leitura. Sub-fatias, cada uma com o "pronto quando" em `09`:
+
+- **Spikes S-A, S-B e S-C** (listas e grep em escala, tree-sitter, casador de caminhos), antes de construir.
+- **N1, Quick Open** de arquivos do worktree ativo.
+- **N2, visualizador e árvore**, com "View file" a partir do diff e do detalhe do commit.
+- **N3, grep** com `git grep`.
+- **N4, destaque de sintaxe** (depende do S-B).
+- **N5, símbolos**: índice por blob, busca, outline, ir para a definição.
+- **N6, revisões, tools Read do MCP e gate de performance.**
+
+Pronto quando: abrir um arquivo pelo nome, achar um texto e saltar para uma definição leva segundos num repositório de 100 mil arquivos, sem a UI travar.
+
 ## Fatia 4: stacks (modelo e visualização)
 
 - Metadata `stackParent` e `stackParentBase`; criar e reparentar branch (arrastar).
