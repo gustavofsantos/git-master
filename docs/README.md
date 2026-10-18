@@ -1,6 +1,6 @@
 # GitMaster docs
 
-Design documents (Portuguese), exported verbatim on 2026-10-16 from the claude.ai Project "GitMaster" (`gitmaster/00` to `gitmaster/07`); `08` was added later from the same Project. Start with `00`, then `01` for the decision log.
+Design documents (Portuguese), exported verbatim on 2026-10-16 from the author's design workspace (`gitmaster/00` to `gitmaster/07`); `08` was added later from the same place. Start with `00`, then `01` for the decision log.
 
 | File | Content |
 |---|---|
@@ -18,7 +18,7 @@ Design documents (Portuguese), exported verbatim on 2026-10-16 from the claude.a
 
 ## Design canvas
 
-The screens and the visual identity are drawn in a Claude design canvas, "GitMaster: o todo": https://claude.ai/artifact/Qb4Ht2rnfEC8HueFR5Gtqx#play-15dd8cd198dd
+The screens and the visual identity are drawn in a design canvas, "GitMaster: o todo": https://claude.ai/artifact/Qb4Ht2rnfEC8HueFR5Gtqx#play-15dd8cd198dd
 
 The canvas is the source for mockups; these docs are the source for decisions. Its labels are in Portuguese: translate them in the UI.
 

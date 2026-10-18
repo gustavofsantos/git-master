@@ -7,7 +7,7 @@ Source: `~/Projects/rvw` (Rust + GPUI review hub by the same author). Read on 20
 
 ## Build and toolchain
 
-- `gpui = "0.2"` from crates.io (rvw's lock resolves 0.2.2). No git dependency on Zed.
+- `gpui = "0.2"` from crates.io (rvw's lock resolves 0.2.2). No git dependency on the GPUI source repository.
 - On macOS add `gpui` with feature `runtime_shaders`, so Command Line Tools suffice (no full Xcode).
 - `xattr` 0.2.3 (pulled by gpui) needs `libc::ENOATTR`, which libc 0.2.190 no longer exports on Linux. rvw's `Cargo.lock` pins `libc` to **0.2.186**. Do the same: `cargo update -p libc --precise 0.2.186`.
 - Linux link needs dev packages: `libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig-dev` (plus `build-essential pkg-config`).
@@ -26,7 +26,7 @@ Source: `~/Projects/rvw` (Rust + GPUI review hub by the same author). Read on 20
 - Do not paste a mockup literally (canvas margin around a fake window made the first run look wrong).
 - A status/key strip is a promise: every lit control must do something. Audit it before calling a milestone done.
 - Quit: `cx.on_window_closed` quits when no windows remain; bind `secondary-q`.
-- Windows opened from a desktop launcher have no shell `PATH`. rvw reads `$SHELL -l -i -c env` once in the background (10 s limit) and gives it to every git process. GitMaster needs the same, since hooks may call `claude`, `jq`, linters.
+- Windows opened from a desktop launcher have no shell `PATH`. rvw reads `$SHELL -l -i -c env` once in the background (10 s limit) and gives it to every git process. GitMaster needs the same, since hooks may call an agent CLI, `jq`, linters.
 - Linux windows: `WindowDecorations::Client` plus own controls where the compositor draws none; set `app_id`.
 - Multi-line text editing is the hard part (see Q7). rvw has a ported single-line input and a custom text area; a Sonnet-class agent did the GPUI text area well, a cheaper one was not trusted there.
 

@@ -75,7 +75,7 @@ Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu 
    - Cabeçalho "Working Copy" com a contagem ("6 changed"); lista plana, uma linha por arquivo: letra de estado (M, A, D, ?) e caminho completo, sem filtro, sem campo de contagem e sem checkbox por linha.
    - Composer na base da coluna: caixa da mensagem e botão "Commit on <branch>".
    - Diff com o caminho e o resumo `+5 −1` no cabeçalho, sem barra de botões extra.
-   - Decidido pelo autor em 2026-10-16: stage e unstage como no Git Tower (prancha de referência na conversa de design).
+   - Decidido pelo autor em 2026-10-16: stage e unstage como nos clientes de referência (prancha de referência na conversa de design).
      - O diff tem o seletor "Staged | Unstaged" no topo, ao lado do nome do arquivo, que escolhe de que lado do arquivo se olha (hoje os dois lados aparecem juntos).
      - Abaixo do cabeçalho, um resumo ("2 chunks, 3 insertions, 4 deletions").
      - Cada hunk tem na linha do seu cabeçalho `@@` os botões "Discard Chunk" (pede confirmação) e "Stage Chunk" ("Unstage Chunk" no lado staged). O stage por linha (D24) continua, pelo gutter.
@@ -282,4 +282,4 @@ Pronto quando: todas as opções do aplicativo e do ambiente Git podem ser inspe
 
 - GPUI: texto editável, ecossistema de componentes e licenças.
 - Escala: status, grafo e diff em repositórios massivos.
-- Escopo: Tower tem pull requests, worktrees, submódulos e LFS. Worktrees entram na v1 (D31); pull requests, submódulos e LFS seguem em aberto (Q8).
+- Escopo: clientes de referência têm pull requests, worktrees, submódulos e LFS. Worktrees entram na v1 (D31); pull requests, submódulos e LFS seguem em aberto (Q8).

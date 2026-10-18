@@ -1872,7 +1872,7 @@ mod tests {
         engine.handle(OperationId(1), &open());
         let command = Command {
             actor: Actor::Agent {
-                name: "claude".into(),
+                name: "agent".into(),
             },
             kind: create(
                 "/r-agent",
@@ -1899,7 +1899,7 @@ mod tests {
         let mut engine = engine();
         let command = Command {
             actor: Actor::Agent {
-                name: "claude".into(),
+                name: "agent".into(),
             },
             kind: CommandKind::ApproveHook {
                 name: "team".into(),

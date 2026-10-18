@@ -4,7 +4,7 @@
 
 ## Ideia central
 
-Eventos do próprio app (não os hooks nativos do Git, que continuam sendo do Git: D29) disparam scripts configurados no `.gitconfig`. Modelo inspirado nos hooks do Claude Code, com schema versionado de entrada e de saída por evento (D04). Execução assíncrona (D05), com id de correlação (D06) e resposta pelo stdout (D07).
+Eventos do próprio app (não os hooks nativos do Git, que continuam sendo do Git: D29) disparam scripts configurados no `.gitconfig`. Modelo inspirado em hooks de eventos de agentes, com schema versionado de entrada e de saída por evento (D04). Execução assíncrona (D05), com id de correlação (D06) e resposta pelo stdout (D07).
 
 ## Classes (proposto, D16)
 

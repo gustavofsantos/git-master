@@ -372,7 +372,7 @@ mod tests {
         let event = Event::OperationChanged {
             id: OperationId(1),
             actor: Actor::Agent {
-                name: "claude".into(),
+                name: "agent".into(),
             },
             state: OperationState::AwaitingApproval,
             detail: None,

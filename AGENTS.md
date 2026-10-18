@@ -6,7 +6,7 @@ Native desktop app in Rust + GPUI, open source, sold as a premium product. This 
 
 GitMaster is a powerful Git client joined to the tools an engineer needs to work with code, built so that people who are accountable for their source code can use AI agents safely.
 
-It is **not a Tower clone**. Tower and JetBrains are references: where they made a choice that works (branch sidebar, per-line staging, three-pane conflict resolution), we adopt it and do it well; then we go beyond. The product rests on three pillars:
+It is **not a clone of any existing client**. Mature Git clients and IDE tooling are references: where they made a choice that works (branch sidebar, per-line staging, three-pane conflict resolution), we adopt the idea and do it well; then we go beyond. Do not copy another product's name, branding, artwork or wording, and do not name other products in code, docs, UI or commits. The product rests on three pillars:
 
 1. **A Git client that is complete and fast.** Working Copy, history, branches, worktrees, conflicts, command palette. This is the base and has to be excellent on its own.
 2. **A workspace for working with code, not only commits.** Navigating the repository where you stand: file search, text search, symbol search, a read-only viewer. Local, so it should feel instant.
@@ -17,7 +17,7 @@ Every feature should serve at least one pillar. If it serves none, question it b
 ## Non-negotiable qualities
 
 - **Smooth and fast.** The UI never blocks; long lists are virtualized; work runs off the UI thread and is cancellable. A richer feature (for example structural code analysis) is welcome only if the app still feels smooth. Measure in a **release** build; when a feature cannot meet that, it degrades or is left out, it does not ship slow.
-- **Self-contained.** The only external program the app may require is `git`. Never make a feature depend on something the engineer must install (ripgrep, ctags, language servers). Extra engines are Rust libraries compiled into the binary.
+- **Self-contained.** The only external program the app may require is `git`. Never make a feature depend on something the engineer must install (a separate search tool, a symbol indexer, a language server). Extra engines are Rust libraries compiled into the binary.
 - **Local-first.** One engineer, their machine. No headless or server mode, no account.
 - **Nothing written into the repository working tree.** Configuration and state live in the user's config, in `.git/` or in the app data directory. Many work repositories do not even allow a `.gitignore` edit.
 
