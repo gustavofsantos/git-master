@@ -197,14 +197,14 @@ Pronto quando: navega o histórico de um repositório grande com rolagem fluida.
 
 ## Fatia 3c: navegação no código (proposta, depende de Q13)
 
-Detalhes, motores e riscos em `09-navegacao-no-codigo.md`; decisões D43 a D50 em `01`, todas Proposto. Página Code com Quick Open de arquivos, grep e símbolos, sobre um visualizador somente leitura. Sub-fatias, cada uma com o "pronto quando" em `09`:
+Detalhes, motores e riscos em `09-navegacao-no-codigo.md`; decisões D43 a D51 em `01`, todas Proposto. Página Code com Quick Open de arquivos, grep e símbolos, sobre um visualizador somente leitura. Sub-fatias, cada uma com o "pronto quando" em `09`:
 
-- **Spikes S-A, S-B e S-C** (listas e grep em escala, tree-sitter e ast-grep, casador de caminhos), antes de construir.
+- **Spikes S-A, S-B e S-C** (listas e grep em escala, tree-sitter, casador de caminhos), antes de construir.
 - **N1, Quick Open** de arquivos do worktree ativo.
 - **N2, visualizador e árvore**, com "View file" a partir do diff e do detalhe do commit.
 - **N3, grep** com `git grep`.
 - **N4, destaque de sintaxe** (depende do S-B).
-- **N5, símbolos e caixa única**: índice por blob, classificador da caixa única (D50), outline, ir para a definição, usos classificados.
+- **N5, símbolos e caixa única**: índice por blob, caixa única (D50), outline, ir para a definição.
 - **N6, revisões, tools Read do MCP e gate de performance.**
 
 Pronto quando: abrir um arquivo pelo nome, achar um texto e saltar para uma definição leva segundos num repositório de 100 mil arquivos, sem a UI travar.

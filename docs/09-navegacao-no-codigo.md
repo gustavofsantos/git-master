@@ -1,6 +1,6 @@
 # Navegação no código
 
-Última atualização: 2026-10-18. Status: **proposta** (D43 a D50 em `01` estão como Proposto; nada aqui é compromisso até o autor confirmar).
+Última atualização: 2026-10-18. Status: **proposta** (D43 a D51 em `01` estão como Proposto; nada aqui é compromisso até o autor confirmar).
 
 ## Por que
 
@@ -30,6 +30,10 @@ Mais um **visualizador somente leitura** com árvore de pastas, que é para onde
 - **Determinismo (1).** Mesma entrada, mesma ordem de resultados: o desempate do ranking é o caminho, nunca a ordem de chegada das threads. Navegar até a definição nunca "adivinha": se há mais de um candidato, lista todos.
 - **Leitura não vai ao log de comandos (D28).**
 
+## Sem programas extras (D51)
+
+O GitMaster é autocontido: a busca não pode exigir que o engenheiro instale nada além do que o app já exige. O único programa externo é o `git` (D26, D32), que a Working Copy e o histórico já usam. Ficam de fora ripgrep, ctags, ast-grep e servidores LSP, como executáveis. Qualquer motor adicional entra como **biblioteca Rust compilada no binário** (tree-sitter para símbolos; `regex` e `ignore` se um dia o `git grep` não bastar), e seu custo de compilação e de tamanho entra nos spikes.
+
 ## Caixa única (D50)
 
 O usuário digita o que quer, sem sintaxe. Um **classificador determinístico** (regras, sem LLM, Princípio 1) decide quais motores rodam, todos em paralelo, e a resposta chega em seções que aparecem conforme cada motor termina:
@@ -43,7 +47,7 @@ O usuário digita o que quer, sem sintaxe. Um **classificador determinístico** 
 
 - Seções em ordem fixa; dentro de cada uma, pontuação por regra e desempate por caminho e linha, nunca pela ordem de chegada. Mesma entrada, mesma lista.
 - Cada tecla cancela os motores anteriores (mata os processos), com atraso curto.
-- Sintaxe nunca é obrigatória. Filtros (`lang:`, `path:`, caso, regex, padrão ast-grep cru) podem existir como atalho para quem quiser, mas a caixa sem eles já tem de resolver o dia a dia.
+- Sintaxe nunca é obrigatória. Filtros (`lang:`, `path:`, caso, regex) podem existir como atalho para quem quiser, mas a caixa sem eles já tem de resolver o dia a dia.
 - "Semântica" no sentido de busca por significado (descrever em linguagem natural e achar o código) é outra coisa: depende de embeddings ou de um LLM, não é determinística e fica fora daqui. Um agente pode fazê-la pelo MCP (`code_grep`, `symbols_search`) e propor; o app não decide sozinho.
 
 ## Busca de arquivos
@@ -67,7 +71,7 @@ git grep -I -n --column -z --no-color [-i] [-w] [-F|-E|-P] [--untracked] -e <pad
 - **Opções na UI:** diferenciar maiúsculas, palavra inteira, regex (`-E`; `-P` só se o Git foi compilado com PCRE), e um campo de pathspec ("incluir" e "excluir" com `:(exclude)`), como o GitHub.
 - **Limites:** por exemplo 1000 linhas no total e 100 por arquivo, com "N mais" explícito; a busca para ao atingir o limite (mata o processo). Linhas longas truncadas ao redor do trecho casado.
 - **Resultado:** agrupado por arquivo, com contagem, trecho casado em destaque e clique que abre o visualizador na linha. Ordem determinística: por caminho, depois por linha (a saída do `git grep` é paralela, então é reordenada antes de mostrar, ou a busca roda com `--threads=1` se o custo ficar baixo).
-- **Alternativa, ripgrep:** mais rápido no worktree, mas é dependência externa que pode não estar instalada e não lê blobs de uma revisão. Fica como otimização opcional (D44), só se o benchmark de N3 mostrar que `git grep` não basta num repositório alvo. Não vira requisito.
+- **Alternativa embutida:** se o benchmark de N3 mostrar que `git grep` não basta, a saída é uma busca em processo (crates Rust `regex` e `ignore`, compiladas no binário), nunca um programa externo (D51).
 - **Segurança:** o padrão vai sempre depois de `-e`, e o pathspec depois de `--`, para que texto digitado nunca seja lido como opção.
 
 ## Símbolos
@@ -76,14 +80,13 @@ git grep -I -n --column -z --no-color [-i] [-w] [-F|-E|-P] [--untracked] -e <pad
 
 | Caminho | A favor | Contra |
 |---|---|---|
-| **tree-sitter** (direto, com `tags.scm`, ou via **ast-grep**) | Em processo, sem dependência externa, determinístico, incremental; a mesma gramática dá o destaque de sintaxe do visualizador | Uma gramática (código C) por linguagem aumenta tempo de compilação e tamanho do binário; cobertura é por linguagem |
-| `universal-ctags` | Cobre dezenas de linguagens | Dependência externa que não dá para exigir; saída baseada em regex, mais imprecisa |
+| **tree-sitter** com `tags.scm`, compilado no binário | Em processo, sem dependência externa, determinístico, incremental; a mesma gramática dá o destaque de sintaxe do visualizador | Uma gramática (código C) por linguagem aumenta tempo de compilação e tamanho do binário; cobertura é por linguagem |
+| `universal-ctags` | Cobre dezenas de linguagens | Programa externo que o engenheiro teria de instalar (D51): descartado |
 | LSP | Referências e definição precisas | Pesado, um servidor por linguagem e por projeto, estado não determinístico, contraria "local-first, simples" |
 | Regex via `git grep` (`fn \w+`, `class \w+`) | Zero dependência | Falsos positivos e negativos, por linguagem; só serve de plano B |
 
-**D45, proposto: tree-sitter, usado pelo ast-grep, para um conjunto curado de linguagens.** O ast-grep (MIT, escrito em Rust, crates `ast-grep-core` e `ast-grep-language`) é uma camada de busca estrutural sobre o tree-sitter: acha nós da árvore sintática, então ignora comentários e strings e distingue definição, chamada, import e tipo. Ele serve de motor no lugar de `tags.scm` escrito à mão: as definições de cada linguagem viram padrões como `fn $NOME($$$)`, e os usos viram padrões de chamada. Continua sendo sintaxe, não semântica: não resolve escopo nem tipos (D47). O custo de compilação e de binário é o mesmo do tree-sitter puro, então o spike S-B passa a medir `ast-grep-language` também. Pontos do desenho:
+**D45, proposto: tree-sitter compilado no binário, com consultas `tags.scm`, para um conjunto curado de linguagens.** É uma biblioteca, não um programa a instalar (D51). Continua sendo sintaxe, não semântica: não resolve escopo nem tipos (D47). Pontos do desenho:
 
-- **Pipeline de usos em dois passos:** `git grep -l -w <nome>` reduz a milhares de arquivos candidatos em milissegundos; o ast-grep só parseia esses e classifica cada ocorrência (definição, chamada, import, tipo, comentário/string). Parsear o repositório inteiro a cada consulta não escala, e o passo do `git grep` evita isso.
 - **Cache da classificação** pelo OID do blob, como o índice de definições.
 
 - **Índice endereçado por conteúdo.** A chave é o OID do blob (ou o hash do conteúdo, para arquivo modificado no worktree). O mesmo blob em outra branch, ou no histórico, reaproveita o resultado, e nada fica velho: o índice é derivado e descartável (Princípio 3). Perder o arquivo só custa reconstruir.
@@ -91,7 +94,7 @@ git grep -I -n --column -z --no-color [-i] [-w] [-F|-E|-P] [--untracked] -e <pad
 - **Construção em segundo plano**, com prioridade baixa, limite de threads e progresso visível ("símbolos: 12 340 / 98 000 arquivos"). A busca de símbolos funciona com o índice parcial e diz que está parcial.
 - **Busca:** fuzzy sobre o nome, com filtro por tipo (`fn`, `struct`, `class`, `trait`…), nome do arquivo e linha ao lado. A "visão geral do arquivo" (outline) usa a mesma tabela filtrada por arquivo.
 - **Ir para a definição** (clique ou atalho sobre um identificador no visualizador): busca o nome no índice. Um candidato abre direto; vários listam todos. Sem resolução semântica de escopo.
-- **Usos:** o `git grep -w <nome>` acha os candidatos e o ast-grep os classifica; a interface diz que são ocorrências sintáticas com o mesmo nome, não referências semânticas (dois `new` de tipos diferentes aparecem juntos). Sem ast-grep (linguagem sem gramática), o uso cai para texto puro, e a interface diz isso. Não vamos fingir precisão que a abordagem não tem; referências precisas pedem LSP ou grafos de pilha, fora de escopo (D47).
+- **Usos:** "Find usages" é `git grep -w <nome>`, e a interface diz que são ocorrências de texto, não referências semânticas. Linguagem sem gramática continua achável por nome e por texto. Não vamos fingir precisão que a abordagem não tem; referências precisas pedem LSP, fora de escopo (D47).
 - **Linguagens, em ondas:** Rust, TypeScript/JavaScript, Python, Go; depois Java, C/C++, C#, Kotlin, Ruby, Swift. Arquivo de linguagem sem gramática continua achável por nome e por texto, só não tem símbolos.
 
 ## Visualizador
@@ -122,7 +125,7 @@ Cada uma é vertical, usável sozinha e tem "pronto quando" com Git real, como a
 
 0. **Spikes (primeiro, risco técnico).**
    - **S-A, listas e grep em escala:** tempos de `git ls-files`, `git grep` (worktree e revisão) e da leitura em streaming num repositório de 100 mil e outro de 1 milhão de arquivos.
-   - **S-B, tree-sitter e ast-grep:** custo de compilação e tamanho do binário em Linux e macOS com 4 gramáticas, com `ast-grep-language` e sem ele; qualidade dos padrões de definição e de chamada em repositórios reais; tempo do passo `git grep -l` + parse dos candidatos; tempo para indexar 100 mil arquivos; onde guardar o índice.
+   - **S-B, tree-sitter:** custo de compilação e tamanho do binário em Linux e macOS com 4 gramáticas; qualidade de `tags.scm` em repositórios reais; tempo para indexar 100 mil arquivos; onde guardar o índice.
    - **S-C, casador de caminhos:** a variante do fuzzy sobre 1 milhão de caminhos, com top-K paralelo.
    Resultado de cada spike vira linha em `01` (confirma ou derruba D44 e D45).
 1. **N1, Quick Open.** Lista do worktree, casador de caminhos, `arquivo:linha`, atualização pelo watcher. *Pronto quando:* testes do casador (ordem, desempate, Unicode), lista idêntica à de `git ls-files` em repositório com ignorados, renomeados e sparse-checkout, pedido superado descartado, cenário do smoke nos dois temas. Ainda sem destino de clique: abre o visualizador do N2; até lá, o N1 só mostra o caminho.
@@ -150,7 +153,7 @@ Proposta: **Fatia 3c**, depois de H5 a H8, antes das stacks, porque reaproveita 
 | Risco | Mitigação |
 |---|---|
 | Gramáticas tree-sitter pesam na compilação e no binário, em dois SOs | Spike S-B antes de decidir; linguagens atrás de features do Cargo; fallback para regex via `git grep` |
-| `git grep` lento em monorepo enorme | Pathspec obrigatório sugerido na UI, limites, benchmark; ripgrep opcional; índice próprio como último recurso |
+| `git grep` lento em monorepo enorme | Pathspec obrigatório sugerido na UI, limites, benchmark; busca embutida em processo (D51); índice próprio como último recurso |
 | Lista de arquivos de 1 milhão de caminhos engasga o casador | Buffer contíguo, top-K paralelo, spike S-C |
 | Índice de símbolos cria expectativa de precisão semântica | Texto da interface honesto ("ocorrências de texto"), candidatos listados, sem adivinhar |
 | Escopo cresce para virar um IDE | O visualizador é somente leitura por decisão; edição e LSP ficam em D47 |
