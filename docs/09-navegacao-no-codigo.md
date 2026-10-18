@@ -1,6 +1,6 @@
 # Navegação no código
 
-Última atualização: 2026-10-18. Status: **proposta** (D43 a D49 em `01` estão como Proposto; nada aqui é compromisso até o autor confirmar).
+Última atualização: 2026-10-18. Status: **proposta** (D43 a D50 em `01` estão como Proposto; nada aqui é compromisso até o autor confirmar).
 
 ## Por que
 
@@ -29,6 +29,22 @@ Mais um **visualizador somente leitura** com árvore de pastas, que é para onde
 - **A UI nunca bloqueia (4).** Toda busca roda em thread própria, com atraso (debounce), cancelável (mata o processo, como o `Canceller` do histórico) e com resposta de pedido superado descartada por `OperationId`. É o mesmo modelo do H2 a H4.
 - **Determinismo (1).** Mesma entrada, mesma ordem de resultados: o desempate do ranking é o caminho, nunca a ordem de chegada das threads. Navegar até a definição nunca "adivinha": se há mais de um candidato, lista todos.
 - **Leitura não vai ao log de comandos (D28).**
+
+## Caixa única (D50)
+
+O usuário digita o que quer, sem sintaxe. Um **classificador determinístico** (regras, sem LLM, Princípio 1) decide quais motores rodam, todos em paralelo, e a resposta chega em seções que aparecem conforme cada motor termina:
+
+| O que foi digitado | Motores | Seções |
+|---|---|---|
+| `diff_pane`, `DiffPane` (identificador, sem espaço) | arquivos + símbolos + usos | Files, Definitions, Usages |
+| `gm-ui/diff`, `foo.rs`, `foo.rs:120` | arquivos | Files (abre na linha, se houver) |
+| `foo(` ou `foo()` | símbolos + usos, com dica de chamada | Definitions, Calls |
+| várias palavras, pontuação, aspas (`"not available yet"`) | texto literal | Text |
+
+- Seções em ordem fixa; dentro de cada uma, pontuação por regra e desempate por caminho e linha, nunca pela ordem de chegada. Mesma entrada, mesma lista.
+- Cada tecla cancela os motores anteriores (mata os processos), com atraso curto.
+- Sintaxe nunca é obrigatória. Filtros (`lang:`, `path:`, caso, regex, padrão ast-grep cru) podem existir como atalho para quem quiser, mas a caixa sem eles já tem de resolver o dia a dia.
+- "Semântica" no sentido de busca por significado (descrever em linguagem natural e achar o código) é outra coisa: depende de embeddings ou de um LLM, não é determinística e fica fora daqui. Um agente pode fazê-la pelo MCP (`code_grep`, `symbols_search`) e propor; o app não decide sozinho.
 
 ## Busca de arquivos
 
@@ -60,19 +76,22 @@ git grep -I -n --column -z --no-color [-i] [-w] [-F|-E|-P] [--untracked] -e <pad
 
 | Caminho | A favor | Contra |
 |---|---|---|
-| **tree-sitter** com consultas `tags.scm` | Em processo, sem dependência externa, determinístico, incremental; a mesma gramática dá o destaque de sintaxe do visualizador | Uma gramática (código C) por linguagem aumenta tempo de compilação e tamanho do binário; cobertura é por linguagem |
+| **tree-sitter** (direto, com `tags.scm`, ou via **ast-grep**) | Em processo, sem dependência externa, determinístico, incremental; a mesma gramática dá o destaque de sintaxe do visualizador | Uma gramática (código C) por linguagem aumenta tempo de compilação e tamanho do binário; cobertura é por linguagem |
 | `universal-ctags` | Cobre dezenas de linguagens | Dependência externa que não dá para exigir; saída baseada em regex, mais imprecisa |
 | LSP | Referências e definição precisas | Pesado, um servidor por linguagem e por projeto, estado não determinístico, contraria "local-first, simples" |
 | Regex via `git grep` (`fn \w+`, `class \w+`) | Zero dependência | Falsos positivos e negativos, por linguagem; só serve de plano B |
 
-**D45, proposto: tree-sitter com `tags.scm`, para um conjunto curado de linguagens.** Pontos do desenho:
+**D45, proposto: tree-sitter, usado pelo ast-grep, para um conjunto curado de linguagens.** O ast-grep (MIT, escrito em Rust, crates `ast-grep-core` e `ast-grep-language`) é uma camada de busca estrutural sobre o tree-sitter: acha nós da árvore sintática, então ignora comentários e strings e distingue definição, chamada, import e tipo. Ele serve de motor no lugar de `tags.scm` escrito à mão: as definições de cada linguagem viram padrões como `fn $NOME($$$)`, e os usos viram padrões de chamada. Continua sendo sintaxe, não semântica: não resolve escopo nem tipos (D47). O custo de compilação e de binário é o mesmo do tree-sitter puro, então o spike S-B passa a medir `ast-grep-language` também. Pontos do desenho:
+
+- **Pipeline de usos em dois passos:** `git grep -l -w <nome>` reduz a milhares de arquivos candidatos em milissegundos; o ast-grep só parseia esses e classifica cada ocorrência (definição, chamada, import, tipo, comentário/string). Parsear o repositório inteiro a cada consulta não escala, e o passo do `git grep` evita isso.
+- **Cache da classificação** pelo OID do blob, como o índice de definições.
 
 - **Índice endereçado por conteúdo.** A chave é o OID do blob (ou o hash do conteúdo, para arquivo modificado no worktree). O mesmo blob em outra branch, ou no histórico, reaproveita o resultado, e nada fica velho: o índice é derivado e descartável (Princípio 3). Perder o arquivo só custa reconstruir.
 - **Onde guardar:** SQLite em `.git/gitmaster/` (alinhado com o `gm-store` previsto em `06`) ou no diretório de dados do app. Decidir no spike; ambos respeitam o Princípio 5.
 - **Construção em segundo plano**, com prioridade baixa, limite de threads e progresso visível ("símbolos: 12 340 / 98 000 arquivos"). A busca de símbolos funciona com o índice parcial e diz que está parcial.
 - **Busca:** fuzzy sobre o nome, com filtro por tipo (`fn`, `struct`, `class`, `trait`…), nome do arquivo e linha ao lado. A "visão geral do arquivo" (outline) usa a mesma tabela filtrada por arquivo.
 - **Ir para a definição** (clique ou atalho sobre um identificador no visualizador): busca o nome no índice. Um candidato abre direto; vários listam todos. Sem resolução semântica de escopo.
-- **Usos:** "Find usages" é `git grep -w <nome>`, e a interface diz que são ocorrências de texto, não referências semânticas. Não vamos fingir precisão que a abordagem não tem; referências precisas pedem LSP ou grafos de pilha, fora de escopo (D47).
+- **Usos:** o `git grep -w <nome>` acha os candidatos e o ast-grep os classifica; a interface diz que são ocorrências sintáticas com o mesmo nome, não referências semânticas (dois `new` de tipos diferentes aparecem juntos). Sem ast-grep (linguagem sem gramática), o uso cai para texto puro, e a interface diz isso. Não vamos fingir precisão que a abordagem não tem; referências precisas pedem LSP ou grafos de pilha, fora de escopo (D47).
 - **Linguagens, em ondas:** Rust, TypeScript/JavaScript, Python, Go; depois Java, C/C++, C#, Kotlin, Ruby, Swift. Arquivo de linguagem sem gramática continua achável por nome e por texto, só não tem símbolos.
 
 ## Visualizador
@@ -103,7 +122,7 @@ Cada uma é vertical, usável sozinha e tem "pronto quando" com Git real, como a
 
 0. **Spikes (primeiro, risco técnico).**
    - **S-A, listas e grep em escala:** tempos de `git ls-files`, `git grep` (worktree e revisão) e da leitura em streaming num repositório de 100 mil e outro de 1 milhão de arquivos.
-   - **S-B, tree-sitter:** custo de compilação e tamanho do binário em Linux e macOS com 4 gramáticas; qualidade de `tags.scm` em repositórios reais; tempo para indexar 100 mil arquivos; onde guardar o índice.
+   - **S-B, tree-sitter e ast-grep:** custo de compilação e tamanho do binário em Linux e macOS com 4 gramáticas, com `ast-grep-language` e sem ele; qualidade dos padrões de definição e de chamada em repositórios reais; tempo do passo `git grep -l` + parse dos candidatos; tempo para indexar 100 mil arquivos; onde guardar o índice.
    - **S-C, casador de caminhos:** a variante do fuzzy sobre 1 milhão de caminhos, com top-K paralelo.
    Resultado de cada spike vira linha em `01` (confirma ou derruba D44 e D45).
 1. **N1, Quick Open.** Lista do worktree, casador de caminhos, `arquivo:linha`, atualização pelo watcher. *Pronto quando:* testes do casador (ordem, desempate, Unicode), lista idêntica à de `git ls-files` em repositório com ignorados, renomeados e sparse-checkout, pedido superado descartado, cenário do smoke nos dois temas. Ainda sem destino de clique: abre o visualizador do N2; até lá, o N1 só mostra o caminho.

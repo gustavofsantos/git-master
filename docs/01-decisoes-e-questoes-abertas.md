@@ -56,11 +56,12 @@
 | D42 | Destaque de diferença dentro da linha (intraline) fica adiado para depois da Fatia 3 | Decidido (2026-10-17) | 07 |
 | D43 | Navegação no código (`09`): página Code com Quick Open de arquivos, grep e símbolos, sobre um visualizador somente leitura do worktree ativo; revisões quaisquer só no N6 | Proposto | 07, 09 |
 | D44 | Grep com `git grep` como subprocess (mesmo argumento do D32: já instalado, respeita `.gitignore`, lê blobs de qualquer revisão, faz streaming, cancelável). Padrão sempre depois de `-e`, pathspec depois de `--`. ripgrep só como otimização opcional se o benchmark pedir | Proposto | 09 |
-| D45 | Símbolos com tree-sitter (`tags.scm`) para um conjunto curado de linguagens; índice endereçado pelo OID do blob, derivado e descartável, fora do working tree. "Find usages" é `git grep -w` e a interface diz que é texto. Confirmar no spike S-B (compilação, binário, qualidade) | Proposto | 09 |
+| D45 | Símbolos e usos com ast-grep sobre tree-sitter (busca estrutural, não semântica) para um conjunto curado de linguagens, com `git grep -l -w` pré-filtrando os arquivos; índice endereçado pelo OID do blob, derivado e descartável, fora do working tree. "Find usages" é `git grep -w` e a interface diz que é texto. Confirmar no spike S-B (compilação, binário, qualidade) | Proposto | 09 |
 | D46 | Lista de arquivos de `git ls-files -z` (ou `ls-tree -r` numa revisão) em buffer contíguo, atualizada pelo watcher; casador de caminhos próprio (bônus de nome de arquivo, top-K paralelo), separado do `fuzzy.rs` das ações | Proposto | 09 |
 | D47 | Fora do escopo: edição, LSP e referências semânticas, índice de texto próprio (estilo Zoekt) | Proposto | 09 |
 | D48 | Tools Read do MCP (`files_search`, `code_grep`, `symbols_search`, `file_read`) entram na Fatia 7, sobre os mesmos comandos do motor que a UI usa | Proposto | 04, 09 |
 | D49 | Gate de performance da navegação (N6): benchmarks ignorados em repositórios de 100 mil e 1 milhão de arquivos gerados com `git fast-import`; metas a calibrar nos spikes | Proposto | 09 |
+| D50 | Caixa única de busca, sem sintaxe: um classificador determinístico por regras escolhe os motores (arquivos, símbolos, usos, texto), que rodam em paralelo e entram em seções de ordem fixa. Sem LLM no caminho; filtros e padrão ast-grep cru são só atalho opcional | Proposto | 09 |
 
 ## D31: worktrees na v1
 
@@ -120,4 +121,4 @@ O autor decidiu em 2026-10-17 que a tela de configurações será construída na
 - **Q10. Licença e modelo de produto:** como combinar open source com "produto premium" (open core, binário pago com fonte aberta, etc.).
 - **Q12. Worktrees e agentes:** um agente criar, marcar ou remover worktrees (tag de agente na lista, `Actor::Agent`, ações pelo MCP) não faz parte de D31. Decidir junto com a fatia 7 (MCP), com aprovação do humano pela UI.
 - **Q13. Navegação no código (`09`):** isto entra no produto e em que posição do roadmap (Fatia 3c depois de H8, ou depois da 5)? É escopo além do Tower, então precisa do aval do autor antes do N1.
-- **Q14. Motor de símbolos:** tree-sitter (D45) ou `universal-ctags` opcional? Decidir com os números do spike S-B (tempo de compilação, tamanho do binário em Linux e macOS, qualidade das consultas). Também: quais linguagens vêm na primeira onda e onde fica o índice (`.git/gitmaster/` ou diretório de dados do app).
+- **Q14. Motor de símbolos:** ast-grep sobre tree-sitter (D45) ou `universal-ctags` opcional? Decidir com os números do spike S-B (tempo de compilação, tamanho do binário em Linux e macOS, qualidade das consultas). Também: quais linguagens vêm na primeira onda e onde fica o índice (`.git/gitmaster/` ou diretório de dados do app).
