@@ -36,7 +36,7 @@ A análise estrutural (tree-sitter) é bem-vinda, mas só se o app continuar flu
 
 ## Sem programas extras (D51)
 
-O GitMaster é autocontido: a busca não pode exigir que o engenheiro instale nada além do que o app já exige. O único programa externo é o `git` (D26, D32), que a Working Copy e o histórico já usam. Ficam de fora, como executáveis, ferramentas de busca, indexadores de símbolos e servidores de linguagem. Qualquer motor adicional entra como **biblioteca Rust compilada no binário** (tree-sitter para símbolos; `regex` e `ignore` se um dia o `git grep` não bastar), e seu custo de compilação e de tamanho entra nos spikes.
+O GitMaster é autocontido: a busca não pode exigir que o engenheiro instale nada além do que o app já exige. O único programa externo é o `git` (D26, D32), que a Working Copy e o histórico já usam. Ficam de fora, como executáveis, ripgrep, ctags, ast-grep e servidores de linguagem (LSP). Qualquer motor adicional entra como **biblioteca Rust compilada no binário** (tree-sitter para símbolos; `regex` e `ignore` se um dia o `git grep` não bastar), e seu custo de compilação e de tamanho entra nos spikes.
 
 ## Caixa única (D50)
 
@@ -85,7 +85,7 @@ git grep -I -n --column -z --no-color [-i] [-w] [-F|-E|-P] [--untracked] -e <pad
 | Caminho | A favor | Contra |
 |---|---|---|
 | **tree-sitter** com `tags.scm`, compilado no binário | Em processo, sem dependência externa, determinístico, incremental; a mesma gramática dá o destaque de sintaxe do visualizador | Uma gramática (código C) por linguagem aumenta tempo de compilação e tamanho do binário; cobertura é por linguagem |
-| Indexador externo de símbolos (baseado em regex) | Cobre dezenas de linguagens | Programa externo que o engenheiro teria de instalar (D51): descartado |
+| `universal-ctags` | Cobre dezenas de linguagens | Programa externo que o engenheiro teria de instalar (D51): descartado |
 | LSP | Referências e definição precisas | Pesado, um servidor por linguagem e por projeto, estado não determinístico, contraria "local-first, simples" |
 | Regex via `git grep` (`fn \w+`, `class \w+`) | Zero dependência | Falsos positivos e negativos, por linguagem; só serve de plano B |
 
@@ -150,7 +150,7 @@ Proposta: **Fatia 3c**, depois de H5 a H8, antes das stacks, porque reaproveita 
 - Busca em histórico de conteúdo (`git log -S`): já é o H7.
 - Blame e histórico do arquivo: natural depois, mas pertence à Fatia 3 (`git log -- <caminho>` e `git blame`), não a esta.
 - Busca em submódulos e em LFS (Q8).
-- Indexar texto de todo o repositório num índice próprio : só se o `git grep` não alcançar o gate, e então como decisão nova.
+- Indexar texto de todo o repositório num índice próprio (estilo Zoekt): só se o `git grep` não alcançar o gate, e então como decisão nova.
 
 ## Riscos
 

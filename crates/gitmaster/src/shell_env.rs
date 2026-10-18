@@ -1,7 +1,7 @@
 //! The user's PATH, for git started from a window that was not started by a
 //! shell. A window opened from the Finder or the Dock has the system's minimal
 //! PATH, and a commit hook that needs a program the shell's startup files add
-//! (a package manager's, say) fails there. Asking the login shell once closes the gap.
+//! (Homebrew's, say) fails there. Asking the login shell once closes the gap.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
