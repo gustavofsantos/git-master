@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn repo_status_returns_the_open_repository() {
-        let status = repo_status(&engine(), "claude").unwrap();
+        let status = repo_status(&engine(), "agent").unwrap();
         assert_eq!(status.branch.head.as_deref(), Some("main"));
     }
 
@@ -103,7 +103,7 @@ mod tests {
     fn repo_status_without_a_repository_reports_why() {
         let handle = gm_core::spawn(Box::new(FakeGit::new("/r", RepoStatus::default())));
         assert_eq!(
-            repo_status(&handle, "claude"),
+            repo_status(&handle, "agent"),
             Err("no repository is open".to_owned())
         );
     }

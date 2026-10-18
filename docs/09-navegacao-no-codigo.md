@@ -4,9 +4,9 @@
 
 ## Por que
 
-Quem revisa mudanças de agentes (Fatia 8) e navega num monorepo precisa achar contexto sem sair do app: abrir um arquivo pelo nome, buscar um texto no repositório, saltar para a definição de um símbolo. O GitHub oferece isso na web; localmente deveria ser mais rápido, porque os dados já estão no disco e não há rede.
+Quem revisa mudanças de agentes (Fatia 8) e navega num monorepo precisa achar contexto sem sair do app: abrir um arquivo pelo nome, buscar um texto no repositório, saltar para a definição de um símbolo. Serviços de hospedagem oferecem isso na web; localmente deveria ser mais rápido, porque os dados já estão no disco e não há rede.
 
-Isto vai além do Tower, de propósito: o produto é um cliente Git unido a ferramentas para trabalhar com o código, e o Tower é referência, não molde (`00`, Posicionamento). O escopo está decidido (D43); a posição no roadmap segue em aberto (Q13).
+Isto vai além de um cliente Git comum, de propósito: o produto é um cliente Git unido a ferramentas para trabalhar com o código, e os clientes existentes são referência, não molde (`00`, Posicionamento). O escopo está decidido (D43); a posição no roadmap segue em aberto (Q13).
 
 ## O que entra
 
@@ -36,7 +36,7 @@ A análise estrutural (tree-sitter) é bem-vinda, mas só se o app continuar flu
 
 ## Sem programas extras (D51)
 
-O GitMaster é autocontido: a busca não pode exigir que o engenheiro instale nada além do que o app já exige. O único programa externo é o `git` (D26, D32), que a Working Copy e o histórico já usam. Ficam de fora ripgrep, ctags, ast-grep e servidores LSP, como executáveis. Qualquer motor adicional entra como **biblioteca Rust compilada no binário** (tree-sitter para símbolos; `regex` e `ignore` se um dia o `git grep` não bastar), e seu custo de compilação e de tamanho entra nos spikes.
+O GitMaster é autocontido: a busca não pode exigir que o engenheiro instale nada além do que o app já exige. O único programa externo é o `git` (D26, D32), que a Working Copy e o histórico já usam. Ficam de fora, como executáveis, ferramentas de busca, indexadores de símbolos e servidores de linguagem. Qualquer motor adicional entra como **biblioteca Rust compilada no binário** (tree-sitter para símbolos; `regex` e `ignore` se um dia o `git grep` não bastar), e seu custo de compilação e de tamanho entra nos spikes.
 
 ## Caixa única (D50)
 
@@ -72,7 +72,7 @@ git grep -I -n --column -z --no-color [-i] [-w] [-F|-E|-P] [--untracked] -e <pad
 ```
 
 - `-I` ignora binários; `-z` torna a saída segura para nomes com caracteres estranhos; `--column` exige Git 2.19+ (conferir a versão mínima do app).
-- **Opções na UI:** diferenciar maiúsculas, palavra inteira, regex (`-E`; `-P` só se o Git foi compilado com PCRE), e um campo de pathspec ("incluir" e "excluir" com `:(exclude)`), como o GitHub.
+- **Opções na UI:** diferenciar maiúsculas, palavra inteira, regex (`-E`; `-P` só se o Git foi compilado com PCRE), e um campo de pathspec ("incluir" e "excluir" com `:(exclude)`), como em serviços de hospedagem.
 - **Limites:** por exemplo 1000 linhas no total e 100 por arquivo, com "N mais" explícito; a busca para ao atingir o limite (mata o processo). Linhas longas truncadas ao redor do trecho casado.
 - **Resultado:** agrupado por arquivo, com contagem, trecho casado em destaque e clique que abre o visualizador na linha. Ordem determinística: por caminho, depois por linha (a saída do `git grep` é paralela, então é reordenada antes de mostrar, ou a busca roda com `--threads=1` se o custo ficar baixo).
 - **Alternativa embutida:** se o benchmark de N3 mostrar que `git grep` não basta, a saída é uma busca em processo (crates Rust `regex` e `ignore`, compiladas no binário), nunca um programa externo (D51).
@@ -85,7 +85,7 @@ git grep -I -n --column -z --no-color [-i] [-w] [-F|-E|-P] [--untracked] -e <pad
 | Caminho | A favor | Contra |
 |---|---|---|
 | **tree-sitter** com `tags.scm`, compilado no binário | Em processo, sem dependência externa, determinístico, incremental; a mesma gramática dá o destaque de sintaxe do visualizador | Uma gramática (código C) por linguagem aumenta tempo de compilação e tamanho do binário; cobertura é por linguagem |
-| `universal-ctags` | Cobre dezenas de linguagens | Programa externo que o engenheiro teria de instalar (D51): descartado |
+| Indexador externo de símbolos (baseado em regex) | Cobre dezenas de linguagens | Programa externo que o engenheiro teria de instalar (D51): descartado |
 | LSP | Referências e definição precisas | Pesado, um servidor por linguagem e por projeto, estado não determinístico, contraria "local-first, simples" |
 | Regex via `git grep` (`fn \w+`, `class \w+`) | Zero dependência | Falsos positivos e negativos, por linguagem; só serve de plano B |
 
@@ -107,7 +107,7 @@ git grep -I -n --column -z --no-color [-i] [-w] [-F|-E|-P] [--untracked] -e <pad
 - Virtualizado por linha, reaproveitando o que o `diff_pane` já resolveu (medição de largura, rolagem horizontal, tabulação a 4 colunas). Número de linha, "ir para a linha", copiar `caminho:linha`.
 - Guardas: binário vira "Binary file"; arquivo acima de um limite (ordem de grandeza: 2 MB) abre truncado com aviso, nunca congela; fora de UTF-8 sai com caracteres de substituição, como no diff.
 - **Destaque de sintaxe** (N4) vem do mesmo tree-sitter, com `highlights.scm`, e só para o intervalo visível. O diff ganha o destaque de graça depois, mas isso é outra decisão.
-- **Árvore de pastas:** gerada da lista de arquivos, recolhida por padrão, com caminhos de pasta única compactados (`a/b/c`), como no GitHub.
+- **Árvore de pastas:** gerada da lista de arquivos, recolhida por padrão, com caminhos de pasta única compactados (`a/b/c`), como em serviços de hospedagem.
 - **Pontos de entrada fora da página Code:** a linha de arquivo do diff e do detalhe do commit ganha "View file"; o item de menu de arquivo da Working Copy também. Depois de H3/H4, é só uma ação nova no registro.
 
 ## Escala
@@ -150,7 +150,7 @@ Proposta: **Fatia 3c**, depois de H5 a H8, antes das stacks, porque reaproveita 
 - Busca em histórico de conteúdo (`git log -S`): já é o H7.
 - Blame e histórico do arquivo: natural depois, mas pertence à Fatia 3 (`git log -- <caminho>` e `git blame`), não a esta.
 - Busca em submódulos e em LFS (Q8).
-- Indexar texto de todo o repositório num índice próprio (estilo Zoekt): só se o `git grep` não alcançar o gate, e então como decisão nova.
+- Indexar texto de todo o repositório num índice próprio : só se o `git grep` não alcançar o gate, e então como decisão nova.
 
 ## Riscos
 

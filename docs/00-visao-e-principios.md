@@ -6,14 +6,14 @@
 
 Cliente Git desktop, nativo, open source, entregue como produto premium. Feito por e para engenheiros que trabalham em repositórios massivos, com muita gente e com agentes de IA gerando mudanças em volume. Consolida scripts e programas sob medida que o autor criou ao longo dos anos.
 
-## Benchmarks
+## Referências
 
-- **Git Tower**: sidebar de branches, Working Copy com stage por linha, histórico, menus de contexto, worktrees, commit com IA.
-- **JetBrains (VCS)**: ferramenta de resolução de conflitos em três painéis (aplicar mudanças não conflitantes, destaque por palavra, setas de aceitar esquerda/direita).
+- **Clientes Git desktop maduros**: sidebar de branches, Working Copy com stage por linha, histórico, menus de contexto, worktrees, commit com IA.
+- **Ferramentas de VCS de IDEs**: ferramenta de resolução de conflitos em três painéis (aplicar mudanças não conflitantes, destaque por palavra, setas de aceitar esquerda/direita).
 
 ## Posicionamento
 
-O GitMaster não é um clone do Tower. Os benchmarks acima são referência: onde eles fizeram uma escolha que funciona, adotamos e fazemos bem; depois vamos além. O produto junta três coisas: um cliente Git completo e rápido; um espaço de trabalho com o código (navegar no repositório onde se está: arquivos, texto, símbolos), e a integração com agentes de IA para quem responde pelo código-fonte. Toda funcionalidade deve servir a pelo menos uma das três.
+O GitMaster não é um clone de nenhum cliente existente. As referências acima valem como ideias: onde eles fizeram uma escolha que funciona, adotamos e fazemos bem; depois vamos além. O produto junta três coisas: um cliente Git completo e rápido; um espaço de trabalho com o código (navegar no repositório onde se está: arquivos, texto, símbolos), e a integração com agentes de IA para quem responde pelo código-fonte. Toda funcionalidade deve servir a pelo menos uma das três.
 
 Duas qualidades acompanham tudo: o app tem de continuar fluido e rápido (uma funcionalidade mais rica só entra se a sensação se mantiver) e autocontido (o único programa externo exigido é o `git`).
 

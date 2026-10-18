@@ -329,7 +329,7 @@ fn an_agent_cannot_remove_a_worktree() {
         OperationId(2),
         &command(
             Actor::Agent {
-                name: "claude".into(),
+                name: "agent".into(),
             },
             CommandKind::RemoveWorktree {
                 path: text(&fx.feature),

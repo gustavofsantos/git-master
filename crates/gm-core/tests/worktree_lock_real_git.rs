@@ -231,7 +231,7 @@ fn lock_and_unlock_refuse_an_unlisted_path_and_an_agent() {
     );
 
     let agent = Actor::Agent {
-        name: "claude".into(),
+        name: "agent".into(),
     };
     let refused = send(
         &mut engine,
@@ -418,7 +418,7 @@ fn an_agent_cannot_prune() {
         &mut engine,
         2,
         Actor::Agent {
-            name: "claude".into(),
+            name: "agent".into(),
         },
         CommandKind::PruneWorktrees {
             names: vec!["repo-feature".into()],

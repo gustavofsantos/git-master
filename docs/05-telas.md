@@ -2,20 +2,20 @@
 
 Última atualização: 2026-10-16. Status de cada decisão em `01`. Os mockups interativos foram feitos na conversa de design de 2026-10-16; este documento guarda as decisões, não a aparência exata.
 
-Referências visuais do Tower: sidebar com árvore de pastas por prefixo, Working Copy com composer de commit acima da lista de arquivos, diff com "Stage/Unstage chunk", menu de contexto de commit.
+Referências visuais de clientes Git desktop maduros: sidebar com árvore de pastas por prefixo, Working Copy com composer de commit acima da lista de arquivos, diff com "Stage/Unstage chunk", menu de contexto de commit.
 
 ## Sidebar de branches (D10 decidido)
 
 Duas organizações com alternância ("Por stack" e "Por nome"):
 
-- **Por stack**: árvore indentada por dependência. Seções "Stacks" e "Sem stack", para quem não usa stacking não pagar o custo da feature. Adoção gradual: a ferramenta funciona como um Tower comum até a primeira branch ganhar um pai.
+- **Por stack**: árvore indentada por dependência. Seções "Stacks" e "Sem stack", para quem não usa stacking não pagar o custo da feature. Adoção gradual: a ferramenta funciona como um cliente Git comum até a primeira branch ganhar um pai.
 - **Por nome**: visão clássica, agrupada por prefixo (`feature/`).
 
 Indicadores:
 
 - Ação no **pai** (`restack 3`), porque é ele que mudou. Filhos desatualizados ganham só um ponto âmbar.
 - `↑N`: commits à frente do **pai** (não da origin).
-- Arrastar uma branch sobre outra define o pai (mesmo idioma do Tower de arrastar commit sobre o sidebar).
+- Arrastar uma branch sobre outra define o pai (mesmo idioma de arrastar commit sobre a sidebar, comum em clientes Git desktop).
 - Estado calculado fora da thread de UI.
 - Lista virtualizada (`uniform_list` no GPUI), pensando em centenas de branches remotas.
 
@@ -25,7 +25,7 @@ Quatro etapas: Plano, Executando, Conflito, Concluído. Detalhes em `02`.
 
 ## Resolução de conflitos (D22)
 
-Benchmark: JetBrains. Três painéis: esquerda, resultado (editável), direita.
+Referência: resolvedores de conflito de IDEs. Três painéis: esquerda, resultado (editável), direita.
 
 - **Lados rotulados por papel e não por ours/theirs.** Em rebase, `ours` e `theirs` são invertidos. Exibir: nome da branch, papel ("novo pai") e assunto do commit.
 - Aplicar sozinho o que não conflita, mostrando o resultado ("3 mudanças aplicadas").

@@ -49,7 +49,7 @@ Regras do tema: tinta primeiro (código é quase todo `fg`), oito acentos com a 
 
 ### Ponto de atenção
 
-`#f54e00` é a cor do Cursor (editor). Como acento pequeno (nó, cursor de texto) é aceitável. Como fundo do ícone evoca a marca deles, por isso não é usada assim.
+`#f54e00` é a cor de marca de outro produto. Como acento pequeno (nó, cursor de texto) é aceitável. Como fundo do ícone evoca a marca dele, por isso não é usada assim.
 
 ## Ícone Divisa
 
