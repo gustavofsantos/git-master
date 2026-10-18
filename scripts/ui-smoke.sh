@@ -1342,13 +1342,14 @@ scenario_commit_diff() {
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -lt 2000 ] || fail "Escape did not go back to the commit view ($differing pixels changed)"
 
-  # Another file of the same commit opens the same page, since all of it fits.
+  # Another file of the same commit: its header goes to the top of the page (D46 pads
+  # the end, so even a short commit scrolls), which changes the page.
   xdotool mousemove "$COMMIT_FILE_X" "$(( COMMIT_FILE_Y + 25 ))" click 1; sleep 1.5
   shoot "$SMOKE_OUT/h-commit-diff-second-$theme.png"
   differing="$(compare -metric AE "$SMOKE_OUT/h-commit-diff-added-$theme.png" "$SMOKE_OUT/h-commit-diff-second-$theme.png" null: 2>&1 || true)"
   read -r differing _ <<<"$differing"
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
-  [ "$differing" -lt 2000 ] || fail "a second file's click changed the stacked page of a short commit ($differing pixels changed)"
+  [ "$differing" -gt 2000 ] || fail "a second file's click did not scroll the stacked page to it ($differing pixels changed)"
   stop_app
 
   [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
