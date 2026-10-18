@@ -217,7 +217,7 @@ scenario_a() {
   xdotool mousemove "$check_x" "$DIFF_LINE_A_Y" click 1; sleep 0.7
   xdotool mousemove "$check_x" "$DIFF_LINE_B_Y" click 1; sleep 0.7
   xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y"; sleep 0.5
-  xdotool key s; sleep 1.5
+  xdotool key ctrl+shift+s; sleep 1.5
 
   cached="$(git -C "$repo" diff --cached -U0 --no-color -- src/ledger/total.rs)"
   added="$(sed -n '/^@@/,$p' <<<"$cached" | grep '^[-+]' || true)"
@@ -578,11 +578,11 @@ scenario_g_stage_split() {
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare the warning bar: $differing"
   [ "$differing" -gt 3000 ] || fail "the half-pair warning bar did not appear ($differing pixels changed)"
   xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y"; sleep 0.5
-  xdotool key s; sleep 1
-  git -C "$repo" diff --cached --quiet || fail "the first s staged half of a pair (D24 asks twice)"
-  xdotool key s; sleep 1.5
+  xdotool key ctrl+shift+s; sleep 1
+  git -C "$repo" diff --cached --quiet || fail "the first Ctrl+Shift+S staged half of a pair (D24 asks twice)"
+  xdotool key ctrl+shift+s; sleep 1.5
   cached="$(git -C "$repo" diff --cached -U0 --no-color -- src/ledger/mod.rs | sed -n '/^@@/,$p' | grep '^[-+]' || true)"
-  [ "$cached" = "-pub mod entry;" ] || fail "the second s did not stage the removed line alone. got:
+  [ "$cached" = "-pub mod entry;" ] || fail "the second Ctrl+Shift+S did not stage the removed line alone. got:
 $cached"
   shoot "$SMOKE_OUT/g-stage-split-pair-applied-$theme.png"
 
@@ -590,7 +590,7 @@ $cached"
   xdotool mousemove "$NAME_X" "$ROW_TOTAL_Y" click 1; sleep 1
   xdotool mousemove "$SPLIT_NEW_CHECK_X" "$DIFF_LINE_A_Y" click 1; sleep 0.7
   xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y"; sleep 0.5
-  xdotool key s; sleep 1.5
+  xdotool key ctrl+shift+s; sleep 1.5
   cached="$(git -C "$repo" diff --cached -U0 --no-color -- src/ledger/total.rs | sed -n '/^@@/,$p' | grep '^[-+]' || true)"
   [ "$cached" = "+        // smoke: first" ] || fail "the split checkbox did not stage its line alone. got:
 $cached"
@@ -1331,7 +1331,7 @@ scenario_commit_diff() {
   [ "$differing" -gt 20000 ] || fail "the file diff did not replace the commit view ($differing pixels changed)"
 
   # Stage, unstage and discard keys do nothing in a commit's diff.
-  xdotool key a s space u; sleep 1
+  xdotool key a s space u ctrl+shift+a ctrl+shift+s ctrl+shift+i; sleep 1
   [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
     || fail "a key pressed in a commit's diff changed the repository"
 
@@ -1369,13 +1369,16 @@ make_stack_repo() {
   git -C "$repo" config user.name "gm smoke"
   git -C "$repo" config user.email "smoke@example.invalid"
   git -C "$repo" config commit.gpgsign false
+  # a and b are long; c is short, so it is the last file that must reach the top.
   for f in a b c; do
-    for i in $(seq 1 60); do printf '%s line %s\n' "$f" "$i"; done > "$repo/$f.txt"
+    local lines=60
+    if [ "$f" = c ]; then lines=6; fi
+    for i in $(seq 1 "$lines"); do printf '%s line %s\n' "$f" "$i"; done > "$repo/$f.txt"
   done
   git -C "$repo" add -A
   git -C "$repo" commit -q -m "init"
   # Each file changes two lines at its own place, so the files do not look alike.
-  local first=(10 20 30) second=(50 40 55) files=(a b c) n
+  local first=(10 20 3) second=(50 40 5) files=(a b c) n
   for n in 0 1 2; do
     sed -i -e "s/^\\(.\\) line ${first[$n]}\$/\\1 CHANGED ${first[$n]}/" \
       -e "s/^\\(.\\) line ${second[$n]}\$/\\1 CHANGED ${second[$n]}/" "$repo/${files[$n]}.txt"
@@ -1392,6 +1395,11 @@ pixels_changed() {
   read -r differing _ <<<"$differing"
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   echo "$differing"
+}
+
+# How many colours the bottom of a stack's crop has: one when the page is blank there.
+bottom_colours() {
+  convert "$1" -crop 1040x220+0+300 +repage -format %k info:
 }
 
 # The stacked diff's list, cut from a window screenshot. Its whole height is
@@ -1439,6 +1447,38 @@ scenario_commit_stack() {
   differing="$(pixels_changed "$RUN_DIR/top-prev.png" "$RUN_DIR/top-a.png")"
   [ "$differing" -lt 2000 ] || fail "Ctrl+Shift+P did not put a.txt back at the top ($differing pixels changed)"
 
+  # c.txt is the last file and a short one: it still opens with its header at the top,
+  # and the rows below it are blank (the padding). a.txt's page is the positive control.
+  xdotool key Escape; sleep 1.5
+  xdotool mousemove "$COMMIT_FILE_X" "$STACK_C_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-c-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-c-$theme.png" "$RUN_DIR/top-c.png"
+  differing="$(pixels_changed "$RUN_DIR/top-c.png" "$RUN_DIR/top-a.png")"
+  [ "$differing" -gt 2000 ] || fail "c.txt opened as a.txt ($differing pixels changed)"
+  [ "$(bottom_colours "$RUN_DIR/top-c.png")" -eq 1 ] \
+    || fail "c.txt is not at the top of the page: its page has content below it"
+  [ "$(bottom_colours "$RUN_DIR/top-a.png")" -gt 1 ] \
+    || fail "the blank check finds no content on a.txt's page (positive control)"
+
+  # Ctrl+Shift+N from c.txt, the last file, wraps to a.txt; Ctrl+Shift+P from a.txt wraps to c.txt.
+  xdotool key ctrl+shift+n; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-wrap-next-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-wrap-next-$theme.png" "$RUN_DIR/top-wrap-next.png"
+  differing="$(pixels_changed "$RUN_DIR/top-wrap-next.png" "$RUN_DIR/top-a.png")"
+  [ "$differing" -lt 2000 ] || fail "Ctrl+Shift+N from c.txt did not wrap to a.txt ($differing pixels changed)"
+  xdotool key Escape; sleep 1.5
+  xdotool mousemove "$COMMIT_FILE_X" "$STACK_A_Y" click 1; sleep 1.5
+  xdotool key ctrl+shift+p; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-wrap-prev-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-wrap-prev-$theme.png" "$RUN_DIR/top-wrap-prev.png"
+  differing="$(pixels_changed "$RUN_DIR/top-wrap-prev.png" "$RUN_DIR/top-c.png")"
+  [ "$differing" -lt 2000 ] || fail "Ctrl+Shift+P from a.txt did not wrap to c.txt ($differing pixels changed)"
+  xdotool key ctrl+shift+n; sleep 1.5
+  shoot "$SMOKE_OUT/h-commit-stack-back-a-$theme.png"
+  stack_top "$SMOKE_OUT/h-commit-stack-back-a-$theme.png" "$RUN_DIR/top-back-a.png"
+  differing="$(pixels_changed "$RUN_DIR/top-back-a.png" "$RUN_DIR/top-a.png")"
+  [ "$differing" -lt 2000 ] || fail "Ctrl+Shift+N from c.txt did not come back to a.txt ($differing pixels changed)"
+
   # Down scrolls a row at a time, Up takes it back; a.txt's own hunks are reachable this way.
   xdotool key Down Down Down; sleep 1.5
   shoot "$SMOKE_OUT/h-commit-stack-down-$theme.png"
@@ -1463,12 +1503,12 @@ scenario_commit_stack() {
   differing="$(pixels_changed "$RUN_DIR/top-pu.png" "$RUN_DIR/top-a.png")"
   [ "$differing" -lt 2000 ] || fail "PageUp did not scroll a page back ($differing pixels changed)"
 
-  # Vim letters are not keys here: nothing moves and nothing is staged.
-  xdotool key j k n p h l; sleep 1
+  # Bare letters and the Working Copy's Ctrl+Shift keys are not keys here: nothing moves and nothing is staged.
+  xdotool key j k n p h l ctrl+shift+a ctrl+shift+s ctrl+shift+i ctrl+shift+v ctrl+shift+b; sleep 1
   shoot "$SMOKE_OUT/h-commit-stack-letters-$theme.png"
   stack_top "$SMOKE_OUT/h-commit-stack-letters-$theme.png" "$RUN_DIR/top-letters.png"
   differing="$(pixels_changed "$RUN_DIR/top-letters.png" "$RUN_DIR/top-up.png")"
-  [ "$differing" -lt 2000 ] || fail "a vim letter moved the stacked diff ($differing pixels changed)"
+  [ "$differing" -lt 2000 ] || fail "a bare letter or a Working Copy key moved the stacked diff ($differing pixels changed)"
   [ "$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)" = "$status_before" ] \
     || fail "a key pressed in the stacked diff changed the repository"
 
