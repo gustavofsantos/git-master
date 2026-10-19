@@ -38,6 +38,9 @@ O core define traits (`GitPort`, `HookPort`, `StorePort`) e os adaptadores as im
 - Cada passo despacha um `Command` existente. Workflow não tem caminho de lógica próprio.
 - Cada execução é uma operação (`OperationId`), persistida em `state.db`.
 - Eventos produzidos por uma execução carregam o id da execução e nunca disparam gatilhos (sem cascata).
+- Salvar pela UI edita o TOML com `toml_edit`, para preservar os comentários e a formatação do usuário; a escrita é atômica (D76).
+- `exec` executa `argv` diretamente, nunca por shell (D74).
+- `HookPort` continua até a migração em WF3 (D75).
 
 ## Persistência
 

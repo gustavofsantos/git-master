@@ -66,7 +66,7 @@ Um workflow que chama `restack.apply` mostra este mesmo fluxo.
 
 ## Integração
 
-- Hooks: `pre-restack` (gate, recebe o plano) e `post-restack` (observer). Ver `03`.
+- Hooks: `pre-restack` e `post-restack` viram os workflows `before.restack` (gate, recebe o plano) e `after.restack` (observa) (D75). Ver `03` e `10`.
 - Workflows: ver `10`.
 - MCP: `stack_tree`, `restack_plan`, `restack_apply(plan_id)`. Ver `04`.
 - Sidebar e histórico: ver `05`.

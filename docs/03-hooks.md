@@ -2,6 +2,8 @@
 
 Última atualização: 2026-10-19. Status de cada decisão em `01`.
 
+Os hooks do GitMaster serão substituídos por workflows (D75, decidido em 2026-10-19). Este documento descreve o modelo atual, que segue valendo até a migração em WF3; o desenho novo está em `10`.
+
 ## Ideia central
 
 Eventos do próprio app (não os hooks nativos do Git, que continuam sendo do Git: D29) disparam scripts configurados no `.gitconfig`. Modelo inspirado em hooks de eventos de agentes, com schema versionado de entrada e de saída por evento (D04). Execução assíncrona (D05), com id de correlação (D06) e resposta pelo stdout (D07).
@@ -112,10 +114,14 @@ Não é determinística, então vale só como proposta: preenche o campo da mens
 
 Escrever JSON em one-liners de shell exige `jq`. Decisão do autor (2026-10-16): JSON puro, sem modo texto. Quem quiser texto escreve um script curto que lê o JSON.
 
-## Hooks e workflows (proposto, D70)
+## Hooks e workflows (D75, decidido)
 
-Hooks continuam pontos de extensão dentro de uma operação (gate, transform, observe). Workflows (`10`) orquestram entre operações.
+As classes de hook viram fases de workflow (`10`):
 
-- O passo `exec` de um workflow reusa exatamente este contrato de processo (stdin JSON com `schema_version` e `invocation_id`, stdout JSON, timeout mata o processo) e as mesmas regras de confiança (D17).
-- Os eventos do motor listados na D67 podem ser gatilhos de workflow.
-- Sem migração de hooks para workflows na v1 (Q18).
+- Gate → `before.<operação>`: a operação espera (assíncrono, sem travar a UI, D05); o workflow veta com a ação `block` (`with = { reason = "..." }`). Falha em fase `before` veta (fail-closed).
+- Transform → `transform.<campo>`: o último passo chama `set` com o novo valor do campo (ex.: `transform.commit_message`). Vale a seção Reconciliação deste documento: se o usuário mudou o campo enquanto isso, o valor vira sugestão.
+- Observe → `after.<operação>`: roda depois; falha só avisa.
+
+- `exec` roda uma linha de comando (argv e stdin), sem shell (D74). Assim um CLI de LLM funciona sem script intermediário.
+- Migração em WF3, com a ação "Convert hooks to workflows", que grava workflows equivalentes no diretório de workflows do usuário.
+- Hooks nativos do Git não mudam: continuam sendo do Git (D18, D29).

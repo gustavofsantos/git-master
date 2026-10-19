@@ -10,7 +10,7 @@ It is **not a clone of any existing client**. Mature Git clients and IDE tooling
 
 1. **A Git client that is complete and fast.** Working Copy, history, branches, worktrees, conflicts, command palette. This is the base and has to be excellent on its own.
 2. **A workspace for working with code, not only commits.** Navigating the repository where you stand: file search, text search, symbol search, a read-only viewer. Local, so it should feel instant.
-3. **Agents under human accountability.** The agent proposes, the human approves, and what the agent did is observed, not self-reported. Exposed through MCP, hooks configured in `.gitconfig`, a local review loop. Branch stacking with restack is first class.
+3. **Agents under human accountability.** The agent proposes, the human approves, and what the agent did is observed, not self-reported. Exposed through MCP, workflows written in plain text (they replace the hooks configured in `.gitconfig`, D75), a local review loop. Branch stacking with restack is first class.
 
 Every feature should serve at least one pillar. If it serves none, question it before building it.
 

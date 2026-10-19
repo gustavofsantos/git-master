@@ -1,6 +1,6 @@
 # GitMaster: visão e princípios
 
-Última atualização: 2026-10-16
+Última atualização: 2026-10-19
 
 ## O que é
 
@@ -19,7 +19,7 @@ Duas qualidades acompanham tudo: o app tem de continuar fluido e rápido (uma fu
 
 ## Diferenciais
 
-1. **Hooks extensíveis via `.gitconfig`**, para eventos do próprio app (ex.: `prepare-commit` chamando um LLM por script).
+1. **Workflows em texto puro** (`10`), que substituem os hooks via `.gitconfig` (D75): sequências de ações ligadas a gatilhos do próprio app (ex.: mensagem de commit sugerida por um CLI de LLM; restack automático de um stack).
 2. **Stacking de branches** como cidadão de primeira classe: cada branch tem um pai e vários filhos; restack com plano, execução e undo.
 3. **Amigável a IA**: funcionalidades expostas via MCP; loop de code review local com agentes.
 

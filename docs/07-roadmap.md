@@ -138,6 +138,8 @@ Pronto quando: as cinco queixas do autor (copiar, criar e apagar branch e worktr
 
 Backend (`gm-core/src/hook`, `gm-schema/src/hook.rs`; comandos `ListHooks`, `ApproveHook`, `RunPrepareCommit`, `CancelHook`; aprovações em `~/.local/share/gitmaster/hook-approvals.json`, por repositório) e interface prontos. Revisada em 2026-10-16 (D29, D30): só o que o Git não tem vira hook do GitMaster. O `pre-commit` e os demais hooks nativos ficam com o Git (D18, D29).
 
+Será migrada para workflow em WF3 (D75).
+
 Feito:
 - Contrato JSON versionado em `gm-schema` (entrada: mensagem atual, diff staged, repo; saída: mensagem), sempre JSON (D30).
 - Configuração em `[gitmaster "prepare-commit.<nome>"]`, lida do config global e de usuário; hook de repo só roda após aprovação guardada fora do repo, amarrada ao hash do comando (D17).
@@ -242,13 +244,14 @@ Decisão D53 (`01`, proposta em 2026-10-19). A barra lateral mostra "Meus" (a br
 
 ## Fatia 3w: workflows (proposta, depende de Q20)
 
-Proposta de 2026-10-19, detalhada em `10-workflows.md`, com as decisões D60 a D72 em `01`, todas Proposto. Um workflow é uma sequência de ações tipadas do motor, ligada a um gatilho e declarada em TOML, um arquivo por workflow. Cada passo é um `Command`, então a fatia não cria caminho de lógica novo. As políticas de stack e a mensagem de commit por LLM passam a ser workflows, sem código específico. A posição no roadmap segue a confirmar (Q20).
+Proposta de 2026-10-19, detalhada em `10-workflows.md`, com as decisões D60 a D77 em `01` (D73 a D75 decididas, as demais propostas). Um workflow é uma sequência de ações tipadas do motor, ligada a um gatilho e declarada em TOML, um arquivo por workflow. Cada passo é um `Command`, então a fatia não cria caminho de lógica novo. As políticas de stack e a mensagem de commit por LLM passam a ser workflows, sem código específico. A posição no roadmap segue a confirmar (Q20).
 
 - **WF0, núcleo puro.** Parser TOML para um modelo tipado, avaliador de expressões e validador (ação ou referência desconhecida, tipos, forma do `for_each`) em gm-core, sem I/O; testes unitários e de propriedade (mesma entrada, mesma sequência de passos; o validador recusa todo fixture malformado). Pronto quando: os quatro arquivos de exemplo de `10` carregam, e fixtures malformados falham com erro de arquivo e linha.
-- **WF1, motor e gatilho manual.** Carregador (diretório do usuário e `gitmaster.workflowPath`), recarga ao mudar o arquivo, máquina de estados do run; ações `notify`, `approve`, `exec`, `commit.suggest_message`, `stage.all`, `commit.create`, `branch.create` e `branch.checkout`; página de Workflows e visão de run; entrada na paleta por workflow. Pronto quando: "suggest-commit-message" roda pela paleta e preenche o composer como sugestão; um arquivo quebrado mostra o erro e nunca roda; testes com Git real em `crates/gm-core/tests/workflows_real_git.rs`; cenário de smoke da UI.
-- **WF2, gatilhos de evento.** Eventos do motor como gatilhos, `match`, debounce, concorrência, aprovação dos passos `apply` de evento presa ao hash do arquivo, reconciliação `Stale`, runs persistidos em `state.db`. Pronto quando: um workflow em `commit.created` roda; o passo `apply` espera aprovação; editar o arquivo revoga a aprovação automática; fechar o app no meio de um run mantém o estado do run.
-- **WF3, ações de stack e templates (com as fatias 4 e 5).** `stack.*`, `restack.*`, `reparent.*`, `push.lease`, eventos `stack.parent_moved` e `stack.parent_merged`, e três templates embutidos. Pronto quando: ativar "Restack children when parent moves" faz o restack da subárvore após um commit no pai, com plano, undo e pausa em conflito, sem código específico dessa política.
-- **WF4, MCP (com a fatia 7).** `workflow_list` e `workflow_run`. Pronto quando: um agente lista os workflows e dispara um; os passos `apply` do run esperam a aprovação do humano na UI (D64(c)).
+- **WF1, motor, gatilho manual e `exec` por linha de comando (D74).** Carregador (diretório do usuário e `gitmaster.workflowPath`), recarga ao mudar o arquivo, máquina de estados do run; ações `notify`, `approve`, `exec`, `commit.suggest_message`, `stage.all`, `commit.create`, `branch.create` e `branch.checkout`; página de Workflows e visão de run; entrada na paleta por workflow. Pronto quando: "suggest-commit-message", com um CLI de LLM via argv e stdin, roda pela paleta e preenche o composer como sugestão; um arquivo quebrado mostra o erro e nunca roda; testes com Git real em `crates/gm-core/tests/workflows_real_git.rs`; cenário de smoke da UI.
+- **WF2, página de Workflows (D76).** Lista, editor de passos, aba TOML, Runs, dry run, salvar com `toml_edit`, conflito de arquivo alterado no disco, novo a partir de modelo e exclusão para a lixeira. Pronto quando: um workflow é criado do zero na UI, salvo e reaberto com os comentários preservados; o dry run mostra os passos resolvidos; uma edição externa com o arquivo aberto mostra "Changed on disk"; cenário de smoke da UI.
+- **WF3, gatilhos de evento, fases e migração dos hooks (D75).** Eventos do motor como gatilhos, `match`, debounce, concorrência, aprovação dos passos `apply` de evento presa ao hash do arquivo, reconciliação `Stale` e runs persistidos em `state.db`; fases `before.<operação>` (gate, com `block`), `transform.<campo>` (com `set`) e `after.<operação>` (observação); paridade de `transform.commit_message` com `prepare-commit`; ação "Convert hooks to workflows", que grava os workflows equivalentes no diretório de workflows do usuário; o GitMaster deixa de ler as seções `[gitmaster "<hook>"]` do `.gitconfig`. Pronto quando: o comportamento do `prepare-commit` é reproduzido por um workflow e o caminho de código do hook é removido; um workflow em `commit.created` roda; o passo `apply` espera aprovação; editar o arquivo revoga a aprovação automática; fechar o app no meio de um run mantém o estado do run.
+- **WF4, ações de stack e templates (com as fatias 4 e 5).** `stack.*`, `restack.*`, `reparent.*`, `push.lease`, eventos `stack.parent_moved` e `stack.parent_merged`, e três templates embutidos. Pronto quando: ativar "Restack children when parent moves" faz o restack da subárvore após um commit no pai, com plano, undo e pausa em conflito, sem código específico dessa política.
+- **WF5, MCP (com a fatia 7).** `workflow_list` e `workflow_run`. Pronto quando: um agente lista os workflows e dispara um; os passos `apply` do run esperam a aprovação do humano na UI (D64(c)).
 
 ## Fatia 3c: navegação no código (proposta, depende de Q13)
 
@@ -276,17 +279,17 @@ Pronto quando: um stack real do dia a dia é representado e a defasagem é visí
 
 - Plano exato por commit, execução em memória, snapshot e undo atômico, estado persistido.
 - Fallback sem resolvedor: em conflito, pausa e entrega o conflito no working tree para resolver fora.
-- `pre-restack` e `post-restack`.
+- Workflows `before.restack` e `after.restack` (antigos hooks `pre-restack` e `post-restack`, D75).
 - Decidir Q2 (working copy sujo).
 - Primitivas expostas como Commands: `restack.plan`, `restack.apply`, `restack.undo`, `reparent.*` e `push.lease` (D68).
-- As políticas de atualização automática são templates de workflow (WF3), sem código específico (D68).
+- As políticas de atualização automática são templates de workflow (WF4), sem código específico (D68).
 
 Pronto quando: um restack completo roda, pode ser desfeito e sobrevive a fechar o app.
 
 ## Fatia 6: resolução de conflitos
 
 - Três painéis, lados rotulados por papel, base sob demanda, rerere.
-- Hook `resolve-conflict` como proposta.
+- Hook `resolve-conflict` vira o workflow `transform.conflict_hunk` (D75).
 
 Pronto quando: resolve os conflitos de um restack sem sair do app.
 
@@ -295,7 +298,7 @@ Pronto quando: resolve os conflitos de um restack sem sair do app.
 - Servidor no app mais shim por socket.
 - Tools de Read e Propose primeiro; Apply com aprovação na UI depois.
 - Política de config; operation log com `actor`.
-- Tools `workflow_list` (Read) e `workflow_run` (WF4, D71).
+- Tools `workflow_list` (Read) e `workflow_run` (WF5, D71).
 
 Pronto quando: um agente consegue ler o stack, propor um restack e aplicá-lo mediante aprovação.
 
@@ -323,7 +326,7 @@ Decidido pelo autor em 2026-10-17 (D38): a tela de configurações entra nesta f
      - *Git & Identity:* seletor de escopo (Global vs Este Repositório), `user.name`, `user.email`, `init.defaultBranch`, `core.editor`, assinatura de commits.
      - *Worktrees:* diretório raiz padrão (`gitmaster.worktree.root`, D31) e opções de proteção na remoção segura.
      - *Diff & Files:* algoritmo de diff (`histogram`, `myers`, `patience`), linhas de contexto (`diff.context`), ignorar espaços por padrão.
-     - *Hooks & Security:* catálogo de hooks ativos e tabela de autorizações em `hook-approvals.json` com botão "Revoke".
+     - *Hooks & Security:* catálogo de hooks ativos e tabela de autorizações em `hook-approvals.json` com botão "Revoke"; passa a fazer parte de *Workflows* após WF3.
      - *Stacks & Restack:* estratégia padrão de push com lease e política para restack com working copy sujo (Q2).
      - *Conflict Resolver:* estilo padrão (`merge.conflictStyle = zdiff3`) e reutilização com rerere.
      - *MCP & Agents:* controle do servidor interno, socket, gestão de tokens e matriz de autorização para ações de `Actor::Agent` (D20).
