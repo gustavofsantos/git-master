@@ -625,7 +625,9 @@ impl Model {
             Event::HookFailed { .. }
             | Event::HookCancelled { .. }
             | Event::WorktreeInspected { .. }
-            | Event::PrunableListed { .. } => None,
+            | Event::PrunableListed { .. }
+            | Event::MergedBranchesListed { .. }
+            | Event::MergedBranchesDeleted { .. } => None,
         }
     }
 
@@ -852,6 +854,8 @@ fn event_id(event: &Event) -> OperationId {
         | Event::WorktreesLoaded { id, .. }
         | Event::WorktreeInspected { id, .. }
         | Event::PrunableListed { id, .. }
+        | Event::MergedBranchesListed { id, .. }
+        | Event::MergedBranchesDeleted { id, .. }
         | Event::HooksListed { id, .. }
         | Event::HookStarted { id, .. }
         | Event::HookFinished { id, .. }

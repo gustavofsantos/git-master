@@ -122,6 +122,23 @@ pub struct PruneCandidate {
     pub reason: String,
 }
 
+/// A local branch that `git branch --merged <base>` lists, with its tip.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MergedBranch {
+    pub name: String,
+    /// Abbreviated hash of the branch tip.
+    pub tip: String,
+    /// Subject line of the branch tip commit.
+    pub subject: String,
+}
+
+/// A branch the delete of merged branches could not remove, with Git's message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BranchFailure {
+    pub name: String,
+    pub message: String,
+}
+
 impl Blocker {
     /// The sentence that refuses a hard blocker.
     fn refusal(self) -> &'static str {

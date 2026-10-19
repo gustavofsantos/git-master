@@ -3,8 +3,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
-    BranchEntry, CommitDetail, CommitFile, DiffSide, FileDiff, HookScope, HunkId, PruneCandidate,
-    RepoStatus, StageTarget, WorktreeEntry, WorktreeMode,
+    BranchEntry, CommitDetail, CommitFile, DiffSide, FileDiff, HookScope, HunkId, MergedBranch,
+    PruneCandidate, RepoStatus, StageTarget, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::CommandLog;
@@ -206,6 +206,21 @@ pub trait GitPort: Send {
     fn delete_branch(&self, _root: &Path, _name: &str, _force: bool) -> Result<(), GitError> {
         Err(GitError(
             "delete branch is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The branch `refs/remotes/origin/HEAD` names, as `git symbolic-ref --short`
+    /// prints it (`origin/main`); `None` when that ref is not there. Never records
+    /// anything.
+    fn origin_head(&self, _root: &Path) -> Result<Option<String>, GitError> {
+        Ok(None)
+    }
+
+    /// The local branches `git branch --merged <base>` lists, with their tips.
+    /// Never records anything.
+    fn merged_branches(&self, _root: &Path, _base: &str) -> Result<Vec<MergedBranch>, GitError> {
+        Err(GitError(
+            "merged branches is not supported by this adapter".into(),
         ))
     }
 

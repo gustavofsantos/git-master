@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, CommitFile, DiffSide, FileDiff, HookScope, Hunk, HunkId,
-    PruneCandidate, RepoStatus, StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
+    MergedBranch, PruneCandidate, RepoStatus, StageTarget, StatusEntry, WorktreeEntry,
+    WorktreeMode,
 };
 
 use crate::branch;
@@ -834,6 +835,38 @@ impl GitPort for SubprocessGit {
         let mut command = self.git(root);
         command.args(["branch", if force { "-D" } else { "-d" }, name]);
         self.logged(command, None).map(drop)
+    }
+
+    fn origin_head(&self, root: &Path) -> Result<Option<String>, GitError> {
+        // Git fails when origin/HEAD is not a symbolic ref, which is an answer here.
+        let mut command = self.git(root);
+        command.args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+        Ok(Self::run(command).ok().and_then(|out| {
+            let text = String::from_utf8_lossy(&out).trim().to_owned();
+            (!text.is_empty()).then_some(text)
+        }))
+    }
+
+    fn merged_branches(&self, root: &Path, base: &str) -> Result<Vec<MergedBranch>, GitError> {
+        // NUL separates the fields, so no subject can be mistaken for a separator.
+        let mut command = self.git(root);
+        command.args([
+            "branch",
+            "--merged",
+            base,
+            "--format=%(refname:short)%00%(objectname:short)%00%(contents:subject)",
+        ]);
+        let out = Self::run(command)?;
+        Ok(String::from_utf8_lossy(&out)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, '\0');
+                let name = fields.next()?.to_owned();
+                let tip = fields.next()?.to_owned();
+                let subject = fields.next().unwrap_or_default().to_owned();
+                Some(MergedBranch { name, tip, subject })
+            })
+            .collect())
     }
 
     fn fetch(&self, root: &Path) -> Result<RemoteRun, GitError> {

@@ -4,7 +4,15 @@ use serde::{Deserialize, Serialize};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::history::{CommitDetail, CommitFile, History};
 use crate::hook::{HookFailure, HookInfo};
-use crate::status::{BranchEntry, PruneCandidate, RepoStatus, WorktreeEntry, WorktreeInspection};
+use crate::status::{
+    BranchEntry, BranchFailure, MergedBranch, PruneCandidate, RepoStatus, WorktreeEntry,
+    WorktreeInspection,
+};
+
+/// The refusal of `DeleteMergedBranches` when the merged list no longer matches
+/// the one the human confirmed. The UI matches it to list the branches again.
+pub const MERGED_LIST_CHANGED: &str =
+    "the merged branches changed since they were listed; list them again";
 
 /// Sequential, so the operation log is deterministic.
 #[derive(
@@ -154,6 +162,18 @@ pub enum CommandKind {
     /// Human only.
     PruneWorktrees {
         names: Vec<String>,
+    },
+    /// Lists the local branches merged into the base branch, without deleting
+    /// anything. The base is `origin/HEAD`'s branch, else the first of `main`,
+    /// `master`, `trunk`, `develop` that exists, else the current branch. Never
+    /// records anything in the command log. Remote branches are not listed.
+    ListMergedBranches,
+    /// Deletes the local branches `branches`, which the last `MergedBranchesListed`
+    /// showed: each with `git branch -d`, never `-D`. Refused when the merged list
+    /// has changed since. A branch Git refuses is reported, and the others still go.
+    /// Human only.
+    DeleteMergedBranches {
+        branches: Vec<String>,
     },
     /// Lists the hooks read from config, with their state (docs/03).
     ListHooks,
@@ -306,6 +326,20 @@ pub enum Event {
         id: OperationId,
         candidates: Vec<PruneCandidate>,
     },
+    /// Answers `ListMergedBranches`: the base the check used (`None` when there
+    /// is none, as on a detached HEAD with no base branch) and the branches.
+    MergedBranchesListed {
+        id: OperationId,
+        base: Option<String>,
+        branches: Vec<MergedBranch>,
+    },
+    /// Answers `DeleteMergedBranches` with what was removed and what Git refused,
+    /// before the operation's own terminal event.
+    MergedBranchesDeleted {
+        id: OperationId,
+        deleted: Vec<String>,
+        failures: Vec<BranchFailure>,
+    },
     HooksListed {
         id: OperationId,
         hooks: Vec<HookInfo>,
@@ -372,6 +406,18 @@ mod tests {
         .unwrap();
         assert_eq!(delete["type"], "delete_branch");
         assert_eq!(delete["force"], false);
+    }
+
+    #[test]
+    fn merged_branch_commands_wire_format_is_tagged() {
+        let list = serde_json::to_value(CommandKind::ListMergedBranches).unwrap();
+        assert_eq!(list["type"], "list_merged_branches");
+        let delete = serde_json::to_value(CommandKind::DeleteMergedBranches {
+            branches: vec!["topic".into()],
+        })
+        .unwrap();
+        assert_eq!(delete["type"], "delete_merged_branches");
+        assert_eq!(delete["branches"][0], "topic");
     }
 
     #[test]

@@ -59,6 +59,65 @@ pub fn start_point_problem(start: &str) -> Option<&'static str> {
     }
 }
 
+/// Branches the merged-branch delete never removes, whatever they merge into.
+/// Exact names only: `release/1.0` is not protected by `release`.
+pub const PROTECTED: [&str; 8] = [
+    "main",
+    "master",
+    "trunk",
+    "develop",
+    "dev",
+    "staging",
+    "production",
+    "release",
+];
+
+/// The base names tried, in order, after `origin/HEAD`.
+const BASE_NAMES: [&str; 4] = ["main", "master", "trunk", "develop"];
+
+/// The local branch a remote's HEAD names, from `git symbolic-ref --short
+/// refs/remotes/origin/HEAD` (`origin/main`). `None` for any other ref.
+#[must_use]
+pub fn origin_head_branch(symref: &str) -> Option<&str> {
+    symref
+        .strip_prefix("origin/")
+        .filter(|name| !name.is_empty())
+}
+
+/// The base the merged check compares against: the `origin/HEAD` branch when it
+/// exists locally, else the first local `main`, `master`, `trunk` or `develop`,
+/// else the current branch. `None` when none of these is there (a detached HEAD).
+#[must_use]
+pub fn merge_base(
+    origin_head: Option<&str>,
+    locals: &[&str],
+    current: Option<&str>,
+) -> Option<String> {
+    if let Some(name) = origin_head.filter(|name| locals.contains(name)) {
+        return Some(name.to_owned());
+    }
+    if let Some(name) = BASE_NAMES.into_iter().find(|name| locals.contains(name)) {
+        return Some(name.to_owned());
+    }
+    current.map(str::to_owned)
+}
+
+/// Whether local branch `name` may be deleted by the merged delete: it is not
+/// the base, not the checked-out branch, not checked out in another worktree
+/// (`checked_out_elsewhere`), and not protected.
+#[must_use]
+pub fn is_merged_candidate(
+    name: &str,
+    base: &str,
+    current: Option<&str>,
+    checked_out_elsewhere: &[&str],
+) -> bool {
+    name != base
+        && current != Some(name)
+        && !checked_out_elsewhere.contains(&name)
+        && !PROTECTED.contains(&name)
+}
+
 /// Why local branch `name` cannot be deleted, given the checkout that has it:
 /// the folder and whether that folder is the window's own. `None` when no
 /// checkout has it.
@@ -229,5 +288,75 @@ mod tests {
             )
         );
         assert_eq!(delete_refusal("feature", None), None);
+    }
+
+    #[test]
+    fn the_base_comes_from_origin_head_then_the_fallback_names_then_the_current_branch() {
+        // origin/HEAD names a branch that exists locally: it wins over main.
+        assert_eq!(
+            merge_base(Some("develop"), &["main", "develop"], Some("feature")),
+            Some("develop".to_owned())
+        );
+        // origin/HEAD names a branch that is not local: the fallback names decide,
+        // in the order main, master, trunk, develop.
+        assert_eq!(
+            merge_base(Some("gone"), &["master", "trunk"], Some("feature")),
+            Some("master".to_owned())
+        );
+        assert_eq!(
+            merge_base(Some("gone"), &["trunk", "develop"], Some("feature")),
+            Some("trunk".to_owned())
+        );
+        assert_eq!(
+            merge_base(None, &["develop", "dev"], Some("feature")),
+            Some("develop".to_owned())
+        );
+        // None of the names is local: the current branch is the base.
+        assert_eq!(
+            merge_base(None, &["dev", "feature"], Some("feature")),
+            Some("feature".to_owned())
+        );
+        // Detached, and no base name: there is no base.
+        assert_eq!(merge_base(None, &["dev"], None), None);
+    }
+
+    #[test]
+    fn origin_head_is_read_only_when_it_names_a_remote_branch() {
+        assert_eq!(origin_head_branch("origin/main"), Some("main"));
+        assert_eq!(origin_head_branch("origin/release/2"), Some("release/2"));
+        assert_eq!(origin_head_branch("upstream/main"), None);
+        assert_eq!(origin_head_branch("origin/"), None);
+        assert_eq!(origin_head_branch("main"), None);
+    }
+
+    #[test]
+    fn a_candidate_is_neither_the_base_nor_checked_out_nor_protected() {
+        // (name, base, current, checked out elsewhere, expected)
+        type Case<'a> = (&'a str, &'a str, Option<&'a str>, &'a [&'a str], bool);
+        let table: &[Case<'_>] = &[
+            ("topic", "main", Some("main"), &[], true),
+            ("main", "main", Some("feature"), &[], false),
+            ("master", "main", Some("feature"), &[], false),
+            ("trunk", "main", Some("feature"), &[], false),
+            ("develop", "main", Some("feature"), &[], false),
+            ("dev", "main", Some("feature"), &[], false),
+            ("staging", "main", Some("feature"), &[], false),
+            ("production", "main", Some("feature"), &[], false),
+            ("release", "main", Some("feature"), &[], false),
+            ("release/1.0", "main", Some("feature"), &[], true),
+            ("main-old", "main", Some("feature"), &[], true),
+            ("feature", "main", Some("feature"), &[], false),
+            ("topic", "main", Some("main"), &["topic"], false),
+            ("topic", "main", None, &["other", "topic"], false),
+            ("topic", "main", None, &["other"], true),
+            ("develop", "develop", Some("main"), &[], false),
+        ];
+        for (name, base, current, elsewhere, expected) in table {
+            assert_eq!(
+                is_merged_candidate(name, base, *current, elsewhere),
+                *expected,
+                "{name:?} base {base:?} current {current:?} elsewhere {elsewhere:?}"
+            );
+        }
     }
 }

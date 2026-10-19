@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gm_schema::{
-    Actor, Blocker, Command, CommandKind, CommitFile, Event, History, HookFailure, HookScope,
-    OperationId, OperationState, WorktreeEntry, WorktreeInspection,
+    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, Event, History, HookFailure,
+    HookScope, MERGED_LIST_CHANGED, MergedBranch, OperationId, OperationState, WorktreeEntry,
+    WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -931,6 +932,10 @@ impl Engine {
             CommandKind::DeleteBranch { name, force } => {
                 self.delete_branch(id, actor, name, *force)
             }
+            CommandKind::ListMergedBranches => self.list_merged(id),
+            CommandKind::DeleteMergedBranches { branches } => {
+                self.delete_merged(id, actor, branches)
+            }
             _ => Err("not a worktree or branch command".to_owned()),
         }
     }
@@ -995,6 +1000,119 @@ impl Engine {
             .delete_branch(&root, name, force)
             .map_err(|e| e.0)?;
         self.branches_changed(id, &root)
+    }
+
+    /// The merged-branch list: the base the check used and the branches Git
+    /// would delete. Reads only.
+    fn list_merged(&self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let plan = self.merged_plan(&root)?;
+        Ok(vec![Event::MergedBranchesListed {
+            id,
+            base: plan.base,
+            branches: plan.branches,
+        }])
+    }
+
+    /// Deletes the branches the human confirmed, with `git branch -d`, if the
+    /// merged list still holds exactly those. Each branch is tried on its own: a
+    /// refusal is reported and the others still go. Human only.
+    fn delete_merged(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        names: &[String],
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "delete merged branches")?;
+        let root = self.open_root()?;
+        let mut now: Vec<String> = self
+            .merged_plan(&root)?
+            .branches
+            .into_iter()
+            .map(|branch| branch.name)
+            .collect();
+        let mut asked = names.to_vec();
+        now.sort();
+        asked.sort();
+        if now != asked {
+            return Err(MERGED_LIST_CHANGED.to_owned());
+        }
+        let mut deleted = Vec::new();
+        let mut failures = Vec::new();
+        for name in names {
+            match self.git.delete_branch(&root, name, false) {
+                Ok(()) => deleted.push(name.clone()),
+                Err(e) => failures.push(BranchFailure {
+                    name: name.clone(),
+                    message: e.0,
+                }),
+            }
+        }
+        let mut events = self.branches_changed(id, &root)?;
+        events.push(Event::MergedBranchesDeleted {
+            id,
+            deleted,
+            failures,
+        });
+        Ok(events)
+    }
+
+    /// The base and the branches merged into it that may be deleted now. Git
+    /// lists local branches only; the rules are `branch::merge_base` and
+    /// `branch::is_merged_candidate`.
+    fn merged_plan(&self, root: &Path) -> Result<MergedPlan, String> {
+        let status = self.git.status(root).map_err(|e| e.0)?;
+        let current = status.branch.head.clone();
+        let locals: Vec<String> = self
+            .git
+            .branches(root)
+            .map_err(|e| e.0)?
+            .into_iter()
+            .filter(|entry| !entry.is_remote)
+            .map(|entry| entry.name)
+            .collect();
+        let local_refs: Vec<&str> = locals.iter().map(String::as_str).collect();
+        let origin = self
+            .git
+            .origin_head(root)
+            .map_err(|e| e.0)?
+            .as_deref()
+            .and_then(branch::origin_head_branch)
+            .map(str::to_owned);
+        let Some(base) = branch::merge_base(origin.as_deref(), &local_refs, current.as_deref())
+        else {
+            return Ok(MergedPlan {
+                base: None,
+                branches: Vec::new(),
+            });
+        };
+        let elsewhere: Vec<String> = self
+            .git
+            .worktrees(root)
+            .map_err(|e| e.0)?
+            .into_iter()
+            .filter_map(|entry| entry.branch)
+            .collect();
+        let elsewhere_refs: Vec<&str> = elsewhere.iter().map(String::as_str).collect();
+        let branches = self
+            .git
+            .merged_branches(root, &base)
+            .map_err(|e| e.0)?
+            .into_iter()
+            .filter(|merged| local_refs.contains(&merged.name.as_str()))
+            .filter(|merged| {
+                branch::is_merged_candidate(
+                    &merged.name,
+                    &base,
+                    current.as_deref(),
+                    &elsewhere_refs,
+                )
+            })
+            .collect();
+        Ok(MergedPlan {
+            base: Some(base),
+            branches,
+        })
     }
 
     /// The status, the worktrees and the branch list, after a branch changed.
@@ -1283,6 +1401,12 @@ impl Engine {
             detail,
         });
     }
+}
+
+/// The base the merged check used, and the branches it would delete.
+struct MergedPlan {
+    base: Option<String>,
+    branches: Vec<MergedBranch>,
 }
 
 /// What a finished remote operation says in its `Done` event.
