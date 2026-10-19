@@ -112,10 +112,10 @@ Não é determinística, então vale só como proposta: preenche o campo da mens
 
 Escrever JSON em one-liners de shell exige `jq`. Decisão do autor (2026-10-16): JSON puro, sem modo texto. Quem quiser texto escreve um script curto que lê o JSON.
 
-## Hooks e workflows (proposto, D62)
+## Hooks e workflows (proposto, D70)
 
 Hooks continuam pontos de extensão dentro de uma operação (gate, transform, observe). Workflows (`10`) orquestram entre operações.
 
 - O passo `exec` de um workflow reusa exatamente este contrato de processo (stdin JSON com `schema_version` e `invocation_id`, stdout JSON, timeout mata o processo) e as mesmas regras de confiança (D17).
-- Os eventos do motor listados na D59 podem ser gatilhos de workflow.
+- Os eventos do motor listados na D67 podem ser gatilhos de workflow.
 - Sem migração de hooks para workflows na v1 (Q18).

@@ -222,13 +222,13 @@ Pronto quando: navega o histórico de um repositório grande com rolagem fluida.
 
 ## Fatia 3w: workflows (proposta, depende de Q20)
 
-Proposta de 2026-10-19, detalhada em `10-workflows.md`, com as decisões D52 a D64 em `01`, todas Proposto. Um workflow é uma sequência de ações tipadas do motor, ligada a um gatilho e declarada em TOML, um arquivo por workflow. Cada passo é um `Command`, então a fatia não cria caminho de lógica novo. As políticas de stack e a mensagem de commit por LLM passam a ser workflows, sem código específico. A posição no roadmap segue a confirmar (Q20).
+Proposta de 2026-10-19, detalhada em `10-workflows.md`, com as decisões D60 a D72 em `01`, todas Proposto. Um workflow é uma sequência de ações tipadas do motor, ligada a um gatilho e declarada em TOML, um arquivo por workflow. Cada passo é um `Command`, então a fatia não cria caminho de lógica novo. As políticas de stack e a mensagem de commit por LLM passam a ser workflows, sem código específico. A posição no roadmap segue a confirmar (Q20).
 
 - **WF0, núcleo puro.** Parser TOML para um modelo tipado, avaliador de expressões e validador (ação ou referência desconhecida, tipos, forma do `for_each`) em gm-core, sem I/O; testes unitários e de propriedade (mesma entrada, mesma sequência de passos; o validador recusa todo fixture malformado). Pronto quando: os quatro arquivos de exemplo de `10` carregam, e fixtures malformados falham com erro de arquivo e linha.
 - **WF1, motor e gatilho manual.** Carregador (diretório do usuário e `gitmaster.workflowPath`), recarga ao mudar o arquivo, máquina de estados do run; ações `notify`, `approve`, `exec`, `commit.suggest_message`, `stage.all`, `commit.create`, `branch.create` e `branch.checkout`; página de Workflows e visão de run; entrada na paleta por workflow. Pronto quando: "suggest-commit-message" roda pela paleta e preenche o composer como sugestão; um arquivo quebrado mostra o erro e nunca roda; testes com Git real em `crates/gm-core/tests/workflows_real_git.rs`; cenário de smoke da UI.
 - **WF2, gatilhos de evento.** Eventos do motor como gatilhos, `match`, debounce, concorrência, aprovação dos passos `apply` de evento presa ao hash do arquivo, reconciliação `Stale`, runs persistidos em `state.db`. Pronto quando: um workflow em `commit.created` roda; o passo `apply` espera aprovação; editar o arquivo revoga a aprovação automática; fechar o app no meio de um run mantém o estado do run.
 - **WF3, ações de stack e templates (com as fatias 4 e 5).** `stack.*`, `restack.*`, `reparent.*`, `push.lease`, eventos `stack.parent_moved` e `stack.parent_merged`, e três templates embutidos. Pronto quando: ativar "Restack children when parent moves" faz o restack da subárvore após um commit no pai, com plano, undo e pausa em conflito, sem código específico dessa política.
-- **WF4, MCP (com a fatia 7).** `workflow_list` e `workflow_run`. Pronto quando: um agente lista os workflows e dispara um; os passos `apply` do run esperam a aprovação do humano na UI (D56(c)).
+- **WF4, MCP (com a fatia 7).** `workflow_list` e `workflow_run`. Pronto quando: um agente lista os workflows e dispara um; os passos `apply` do run esperam a aprovação do humano na UI (D64(c)).
 
 ## Fatia 3c: navegação no código (proposta, depende de Q13)
 
@@ -248,7 +248,7 @@ Pronto quando: abrir um arquivo pelo nome, achar um texto e saltar para uma defi
 
 - Metadata `stackParent` e `stackParentBase`; criar e reparentar branch (arrastar).
 - Sidebar por stack; indicadores de defasagem; aresta tracejada no grafo.
-- Eventos derivados `stack.parent_moved` e `stack.parent_merged` (D60), que alimentam gatilhos de workflow.
+- Eventos derivados `stack.parent_moved` e `stack.parent_merged` (D68), que alimentam gatilhos de workflow.
 
 Pronto quando: um stack real do dia a dia é representado e a defasagem é visível.
 
@@ -258,8 +258,8 @@ Pronto quando: um stack real do dia a dia é representado e a defasagem é visí
 - Fallback sem resolvedor: em conflito, pausa e entrega o conflito no working tree para resolver fora.
 - `pre-restack` e `post-restack`.
 - Decidir Q2 (working copy sujo).
-- Primitivas expostas como Commands: `restack.plan`, `restack.apply`, `restack.undo`, `reparent.*` e `push.lease` (D60).
-- As políticas de atualização automática são templates de workflow (WF3), sem código específico (D60).
+- Primitivas expostas como Commands: `restack.plan`, `restack.apply`, `restack.undo`, `reparent.*` e `push.lease` (D68).
+- As políticas de atualização automática são templates de workflow (WF3), sem código específico (D68).
 
 Pronto quando: um restack completo roda, pode ser desfeito e sobrevive a fechar o app.
 
@@ -275,7 +275,7 @@ Pronto quando: resolve os conflitos de um restack sem sair do app.
 - Servidor no app mais shim por socket.
 - Tools de Read e Propose primeiro; Apply com aprovação na UI depois.
 - Política de config; operation log com `actor`.
-- Tools `workflow_list` (Read) e `workflow_run` (WF4, D63).
+- Tools `workflow_list` (Read) e `workflow_run` (WF4, D71).
 
 Pronto quando: um agente consegue ler o stack, propor um restack e aplicá-lo mediante aprovação.
 

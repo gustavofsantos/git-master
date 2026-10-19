@@ -31,7 +31,7 @@ Valores escalares, sem listas. Nome das chaves a confirmar (Q4).
 
 O cálculo roda fora da thread de UI e a interface mostra "calculando" enquanto isso.
 
-## Primitivas e políticas (proposto, D60)
+## Primitivas e políticas (proposto, D68)
 
 O motor expõe as primitivas de stack como Commands: `stack.tree`, `stack.stale`, `restack.plan`, `restack.apply`, `restack.undo`, `reparent.plan`, `reparent.apply`, `push.lease`. Emite os eventos derivados `stack.parent_moved` e `stack.parent_merged`.
 
@@ -52,7 +52,7 @@ Políticas (quando restackar, qual subárvore, se faz push, o que notificar) sã
 - **Conflito** pausa só a subárvore afetada. Irmãos independentes continuam; descendentes ficam bloqueados.
 - Em execução automática (workflow), o conflito pausa só aquela execução, no estado de conflito do restack e na subárvore afetada, e notifica. Nunca resolve sozinho.
 - **rerere** habilitado: o mesmo conflito reaparece a cada restack e a resolução gravada é reaplicada de forma determinística.
-- **Push com lease** (D15) é um passo separado e explícito, nunca automático. Em um workflow, `push.lease` sempre pede aprovação (D15, D56).
+- **Push com lease** (D15) é um passo separado e explícito, nunca automático. Em um workflow, `push.lease` sempre pede aprovação (D15, D64).
 - Working copy sujo com a branch atual no plano: bloquear com banner (Q2).
 
 ## Fluxo da UI

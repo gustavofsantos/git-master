@@ -21,7 +21,7 @@ Read  →  Propose  →  Aprovação (humano na UI)  →  Apply
 | Propose | `restack_plan`, `reparent_plan`, `conflict_propose` |
 | Apply | `restack_apply`, `conflict_resolve`, `commit_create`, `push`, `operation_undo`, `workflow_run` |
 
-Os passos de apply de um workflow disparado por `workflow_run` sempre esperam o humano (D56(c), D63). Ver `10`.
+Os passos de apply de um workflow disparado por `workflow_run` sempre esperam o humano (D64(c), D71). Ver `10`.
 
 - `apply` só aceita `plan_id`, nunca argumentos livres: o que o humano aprova é exatamente o que executa.
 - Anotações do MCP (`readOnlyHint`, `destructiveHint`) em cada tool.

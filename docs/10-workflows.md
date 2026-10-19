@@ -4,7 +4,7 @@
 
 ## Ideia central
 
-Workflow é uma sequência de ações ligada a um gatilho: um gatilho, entradas opcionais e passos tipados, em ordem. Cada passo é um `Command` do motor (D08), o mesmo que a UI e o MCP disparam. Não há caminho de lógica novo: workflow só compõe `Command`s (D52).
+Workflow é uma sequência de ações ligada a um gatilho: um gatilho, entradas opcionais e passos tipados, em ordem. Cada passo é um `Command` do motor (D08), o mesmo que a UI e o MCP disparam. Não há caminho de lógica novo: workflow só compõe `Command`s (D60).
 
 Para stacking, a divisão é:
 
@@ -15,7 +15,7 @@ Hooks (`03`) são pontos de extensão dentro de uma operação. Workflows orques
 
 Serve o pilar 1 (automações no cliente Git) e o pilar 3 (agente sob responsabilidade humana, com os mesmos níveis de aprovação e log observado).
 
-## Formato e localização (D53, proposto)
+## Formato e localização (D61, proposto)
 
 - Um workflow por arquivo TOML, com `schema = 1`.
 - Lido de `~/.config/gitmaster/workflows/*.toml` (no macOS, `Library/Application Support/gitmaster/workflows/`) e dos diretórios em `gitmaster.workflowPath` no git config. A chave é multivalorada; `includeIf` ativa por árvore de diretórios, como em D17.
@@ -55,7 +55,7 @@ Chaves de topo (`name`, `description`, `concurrency`) vêm antes de qualquer tab
 
 Raízes de expressão: `inputs`, `trigger`, `repo` (snapshot somente leitura: `root`, `branch`, `head`, `staged_diff`, com caminho de arquivo quando grande, como nos hooks) e `steps.<id>.output`.
 
-## Linguagem limitada (D54, proposto)
+## Linguagem limitada (D62, proposto)
 
 Não é linguagem de propósito geral:
 
@@ -88,9 +88,9 @@ steps = [
 ]
 ```
 
-Dentro do `for_each`, `steps.<id>` aponta primeiro para os passos da mesma iteração, e `${root}` é o item atual. Sem `approval = "auto"`, o `apply` de dentro do `for_each` espera o humano (D56, regra b).
+Dentro do `for_each`, `steps.<id>` aponta primeiro para os passos da mesma iteração, e `${root}` é o item atual. Sem `approval = "auto"`, o `apply` de dentro do `for_each` espera o humano (D64, regra b).
 
-## Validação (D55, proposto)
+## Validação (D63, proposto)
 
 O catálogo de ações vive em `gm-schema`, com JSON Schema de entrada e saída de cada ação. Ao carregar, o motor verifica ação desconhecida, referência desconhecida ou adiante, tipo incompatível, entrada obrigatória ausente e forma inválida de `for_each`. Workflow inválido nunca roda. O erro (arquivo, linha, mensagem) aparece na página Workflows. O watcher recarrega o arquivo quando ele muda.
 
@@ -110,7 +110,7 @@ O catálogo de ações vive em `gm-schema`, com JSON Schema de entrada e saída 
 | `restack.apply`, `reparent.apply`, `restack.undo` | apply | WF3 |
 | `push.lease` | apply, sempre pede | WF3 |
 
-Mensagem de commit por script, sem LLM embutido (D61):
+Mensagem de commit por script, sem LLM embutido (D69):
 
 ```toml
 schema = 1
@@ -156,7 +156,7 @@ action = "branch.create"
 with = { name = "${steps.name.output.branch}", checkout = true }
 ```
 
-## Gatilhos (D59, proposto)
+## Gatilhos (D67, proposto)
 
 | Gatilho | Dispara quando |
 |---|---|
@@ -170,7 +170,7 @@ with = { name = "${steps.name.output.branch}", checkout = true }
 
 `match` usa a sintaxe de hooks (`branch:feat/*`, `03`). Gatilho por tempo não existe na v1 (Q17).
 
-## Ator, níveis e aprovação (D56, proposto)
+## Ator, níveis e aprovação (D64, proposto)
 
 Cada execução tem ator `workflow:<name>` e registra quem a iniciou: `human`, `event:<name>` ou `agent:<client>`. Cada ação tem nível de efeito, como em D20: `read`, `propose` ou `apply`.
 
@@ -182,7 +182,7 @@ Cada execução tem ator `workflow:<name>` e registra quem a iniciou: `human`, `
 
 O passo `approve` pausa com um resumo para o humano, em qualquer modo.
 
-## Execução, concorrência e reconciliação (D57, D58, proposto)
+## Execução, concorrência e reconciliação (D65, D66, proposto)
 
 Cada execução é uma operação (`OperationId`). Estados por passo: `Pending`, `Running`, `AwaitingApproval`, `Done`, `Failed`, `Skipped`, `Cancelled`, `Stale`.
 
@@ -199,7 +199,7 @@ Reconciliação: cada passo registra o fingerprint do alvo (SHAs das refs, árvo
 
 Determinismo (D09): mesmo workflow, mesmo estado e mesmas entradas geram os mesmos passos e os mesmos `Command`s.
 
-## Stacks como workflows (D60, proposto)
+## Stacks como workflows (D68, proposto)
 
 O motor expõe as primitivas como `Command`s: `stack.tree`, `stack.stale`, `restack.plan`, `restack.apply`, `restack.undo`, `reparent.plan`, `reparent.apply`, `push.lease`. Emite `stack.parent_moved` e `stack.parent_merged`.
 
@@ -211,25 +211,25 @@ Atualização automática de stack não é código. Vem como três templates emb
 
 Um workflow que chama `restack.apply` mostra o mesmo fluxo interativo de `02`. Em execução automática, um conflito pausa só aquela execução, no estado de conflito e na subárvore afetada (D14), e notifica. Nunca resolve sozinho.
 
-## LLM e scripts (D61, proposto)
+## LLM e scripts (D69, proposto)
 
 O app não tem LLM embutido. Chamadas a LLM rodam em passos `exec`, scripts do usuário, com o contrato JSON de hooks (D30) e as regras de confiança de D17.
 
 - A saída de `exec` é não confiável (`04`, injeção de prompt). Alimenta livremente só passos `propose`: `commit.suggest_message` preenche o compositor como sugestão, e o humano faz o commit.
-- Em passos `apply`, vale D56(e).
+- Em passos `apply`, vale D64(e).
 - O app continua autocontido. A única dependência obrigatória é o `git`.
 
-## Hooks e workflows (D62, proposto)
+## Hooks e workflows (D70, proposto)
 
 Hooks continuam dentro de uma operação. O passo `exec` reusa o contrato de processo de hooks de `gm-schema` (stdin com `schema_version` e `invocation_id`, stdout em JSON, timeout mata o processo). Não há migração de hooks para workflows na v1 (Q18).
 
-## Interface (D64) e MCP (D63), proposto
+## Interface (D72) e MCP (D71), proposto
 
 Workflows são editados como texto, no editor do usuário. Sem editor visual na v1.
 
 A página Workflows lista caminho do arquivo, gatilho, habilitado neste repositório, última execução e erro de validação. Ações: "Abrir no editor" e "Novo a partir de template" (copia para o diretório do usuário, nunca para o repositório). A view de execução tem um chip por passo, no estilo dos hooks, com Cancelar e Aprovar.
 
-MCP, com a fatia 7 (WF4): `workflow_list` (read) e `workflow_run(name, inputs)`, com passos `apply` seguindo D56(c).
+MCP, com a fatia 7 (WF4): `workflow_list` (read) e `workflow_run(name, inputs)`, com passos `apply` seguindo D64(c).
 
 ## Questões abertas
 

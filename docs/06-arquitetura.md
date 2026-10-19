@@ -31,17 +31,17 @@ O core define traits (`GitPort`, `HookPort`, `StorePort`) e os adaptadores as im
 7. **Um binário `gitmaster`** com subcomandos: abre o app por padrão; `gitmaster mcp` é o shim.
 8. **Extensão por processo**, não por biblioteca dinâmica (ABI do Rust não é estável; segurança).
 
-## Workflows (proposto, D52, D55, D57)
+## Workflows (proposto, D60, D63, D65)
 
 - Interpretador em `gm-core`: modelo puro (TOML para modelo tipado), avaliador de expressões e validador, sem I/O. Testável sem janela.
-- Catálogo de ações em `gm-schema`, com JSON Schema da entrada e da saída de cada ação. O validador checa o workflow inteiro antes de rodar (D55).
+- Catálogo de ações em `gm-schema`, com JSON Schema da entrada e da saída de cada ação. O validador checa o workflow inteiro antes de rodar (D63).
 - Cada passo despacha um `Command` existente. Workflow não tem caminho de lógica próprio.
 - Cada execução é uma operação (`OperationId`), persistida em `state.db`.
 - Eventos produzidos por uma execução carregam o id da execução e nunca disparam gatilhos (sem cascata).
 
 ## Persistência
 
-- Arquivos de workflow: fora do repositório, em `~/.config/gitmaster/workflows/` (macOS: `Library/Application Support/gitmaster/workflows/`) e nos diretórios de `gitmaster.workflowPath`. Nada é lido nem escrito no working tree (D53).
+- Arquivos de workflow: fora do repositório, em `~/.config/gitmaster/workflows/` (macOS: `Library/Application Support/gitmaster/workflows/`) e nos diretórios de `gitmaster.workflowPath`. Nada é lido nem escrito no working tree (D61).
 - Estado habilitado por repositório e aprovações automáticas: diretório de dados do app, não no arquivo do workflow.
 - Execuções de workflow: `state.db`.
 - Pais de stack: git config do repositório.
@@ -54,7 +54,7 @@ O core define traits (`GitPort`, `HookPort`, `StorePort`) e os adaptadores as im
 - Propriedades (`proptest`): staged mais unstaged igual à mudança total; restack idempotente; plano invalidado quando uma ref muda.
 - Determinismo: a mesma sequência de comandos sobre o mesmo repositório gera o mesmo operation log.
 - Core testado com fakes das ports, sem GPUI (ciclos de teste rápidos).
-- Propriedade de workflows: mesmo workflow + mesmo estado do repositório + mesmas entradas → mesmos comandos (D09, D58).
+- Propriedade de workflows: mesmo workflow + mesmo estado do repositório + mesmas entradas → mesmos comandos (D09, D66).
 
 ## Estrutura de crates (D27)
 
