@@ -237,6 +237,18 @@ fn pull_refuses_a_diverged_branch_with_gits_message_and_keeps_it() {
         failure(&events).contains("Not possible to fast-forward"),
         "{events:?}"
     );
+    // The status is read before the failure, so the failure is the last event the
+    // status bar sees and its text is not wiped by the status.
+    assert!(
+        matches!(
+            events.last(),
+            Some(Event::OperationChanged {
+                state: OperationState::Failed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
     assert_eq!(head(&fx.repo), before, "the local branch moved");
     assert_eq!(
         git_in(&fx.repo, &["rev-list", "--count", "origin/main..HEAD"]),

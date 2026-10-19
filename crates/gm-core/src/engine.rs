@@ -203,7 +203,7 @@ impl Engine {
             ),
             Err(message) => (OperationState::Failed, Some(message)),
         };
-        let mut events = vec![self.finish_op(&active.op, state, detail)];
+        let mut events = Vec::new();
         // The status is read for the repository the operation ran in, and only while
         // it is still the open one. A read that fails leaves the last shown state.
         if self.root.as_deref() == Some(active.root.as_path()) {
@@ -222,6 +222,8 @@ impl Engine {
                 });
             }
         }
+        // The end comes last: a status clears the error line, and a failure must stay on it.
+        events.push(self.finish_op(&active.op, state, detail));
         events
     }
 
