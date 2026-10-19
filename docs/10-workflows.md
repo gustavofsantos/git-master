@@ -475,6 +475,17 @@ Layout: lista à esquerda, com nome, gatilho, habilitado neste repositório, úl
 
 MCP, com a fatia 7 (WF5): `workflow_list` (read) e `workflow_run(name, inputs)`, com ações `apply` seguindo D64(c).
 
+## Visão de execução (D84, proposto)
+
+Para ver o que um workflow fez, a aba Runs abre um run. Tudo vem do registro do motor no `state.db`, não do que o passo diz de si:
+
+- **Cabeçalho:** status, quem iniciou (`human`, `event:<nome>`, `agent:<cliente>`), início, fim e motivo do fim.
+- **Contexto:** `inputs`, `trigger` e `repo` como o run os viu ao começar; um `staged_diff` grande aparece cortado.
+- **Linha do tempo:** uma entrada por visita de estado, em ordem: a ação, a entrada já renderizada (os valores das "variáveis": cada `${...}` resolvido), a saída, o outcome e para onde o run foi. Um estado visitado de novo (retentativa com `limit`) aparece com a visita.
+- O arquivo do run (`definition_text`) é a versão que rodou, mesmo que o arquivo tenha mudado depois.
+
+Para isso, o esquema do `state.db` passa à versão 2 e guarda a entrada de cada passo ao entrar no estado, com a mesma regra de corte das saídas.
+
 ## Questões (todas resolvidas em 2026-10-19)
 
 Detalhes em `01`:
