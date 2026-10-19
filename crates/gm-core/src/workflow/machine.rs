@@ -497,7 +497,7 @@ fn default_route(place: &Place<'_>, outcome: &str) -> Route {
             Some(id) => Route::Goto(id.to_owned()),
             None => Route::End(End::Done, None),
         },
-        "failed" | "interrupted" => Route::End(End::Failed, None),
+        "failed" | "interrupted" | "timeout" => Route::End(End::Failed, None),
         other => Route::End(
             End::Failed,
             Some(format!("no transition for outcome `{other}`")),

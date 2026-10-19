@@ -25,8 +25,9 @@ pub struct ActionSpec {
 }
 
 /// Outcomes with a default transition when the file writes none (D78):
-/// `done` goes to the next state; `failed` and `interrupted` to `end.failed`.
-pub const DEFAULTED: &[&str] = &["done", "failed", "interrupted"];
+/// `done` goes to the next state; `failed`, `interrupted` and `timeout` to
+/// `end.failed`.
+pub const DEFAULTED: &[&str] = &["done", "failed", "interrupted", "timeout"];
 
 /// Phases a `before.<op>` or `after.<op>` trigger may name.
 const PHASE_OPS: &[&str] = &["commit", "restack", "branch_create", "conflict_resolve"];
