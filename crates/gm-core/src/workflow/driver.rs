@@ -125,6 +125,8 @@ pub struct Driver {
     store: Store,
     /// Where `exec` runs: the repository root.
     cwd: std::path::PathBuf,
+    /// The login-shell PATH `exec` steps run with; empty until it is read.
+    login_path: Arc<std::sync::OnceLock<String>>,
     active: BTreeMap<RunId, Active>,
 }
 
@@ -133,8 +135,14 @@ impl Driver {
         Self {
             store,
             cwd,
+            login_path: Arc::default(),
             active: BTreeMap::new(),
         }
+    }
+
+    /// Gives `exec` steps the login-shell PATH git runs with (see `GitPort::login_path`).
+    pub fn set_login_path(&mut self, path: Arc<std::sync::OnceLock<String>>) {
+        self.login_path = path;
     }
 
     pub fn store(&self) -> &Store {
@@ -531,7 +539,10 @@ impl Driver {
         out: &mut Outcome,
     ) -> Result<Option<(&'static str, Value)>, String> {
         let spec = match exec::spec(&call.input, &self.cwd) {
-            Ok(spec) => spec,
+            Ok(mut spec) => {
+                spec.path = self.login_path.get().cloned();
+                spec
+            }
             Err(error) => return Ok(Some(("failed", json!({"error": error})))),
         };
         let active = self
@@ -1061,7 +1072,10 @@ on.timeout = "end.failed"
         let (run, out) = driver
             .start(&entry(COMMIT_NOW), json!({}), json!({}), &mut git, 1000)
             .expect("start");
-        assert!(out.events.contains(&finished(run, End::Failed, None)));
+        assert!(out.events.iter().any(|event| matches!(
+            event,
+            RunEvent::Finished { run: r, end: End::Failed, reason: Some(_), .. } if *r == run
+        )));
         assert_eq!(
             driver.store().run(run).expect("read").expect("row").status,
             RunStatus::Failed
@@ -1209,7 +1223,10 @@ on.timeout = "end.failed"
         let out = driver.resume(&mut git, 2000);
 
         assert!(git.calls.is_empty());
-        assert!(out.events.contains(&finished(run, End::Failed, None)));
+        assert!(out.events.iter().any(|event| matches!(
+            event,
+            RunEvent::Finished { run: r, end: End::Failed, reason: Some(_), .. } if *r == run
+        )));
         assert_eq!(
             driver.store().run(run).expect("read").expect("row").status,
             RunStatus::Failed
@@ -1229,7 +1246,10 @@ on.timeout = "end.failed"
                 1000,
             )
             .expect("start");
-        assert!(out.events.contains(&finished(run, End::Failed, None)));
+        assert!(out.events.iter().any(|event| matches!(
+            event,
+            RunEvent::Finished { run: r, end: End::Failed, reason: Some(_), .. } if *r == run
+        )));
 
         let outputs = driver.store().outputs(run).expect("outputs");
         assert_eq!(

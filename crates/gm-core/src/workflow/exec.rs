@@ -32,6 +32,10 @@ pub struct ExecSpec {
     pub cwd: PathBuf,
     /// `format = "json"`: stdout must be JSON, exposed as `output.json`.
     pub json: bool,
+    /// The PATH the program is looked up in and runs with: the login shell's,
+    /// as git gets it. `None` keeps the app's own, which is the system's
+    /// minimal PATH when the window was opened from the Dock or the Finder.
+    pub path: Option<String>,
 }
 
 /// Reads the rendered `with` of an `exec` state: `argv` (non-empty list of
@@ -94,6 +98,7 @@ pub fn spec(input: &Value, cwd: &Path) -> Result<ExecSpec, String> {
         timeout,
         cwd: cwd.to_path_buf(),
         json,
+        path: None,
     })
 }
 
@@ -142,6 +147,10 @@ pub fn run(spec: &ExecSpec, cancel: &AtomicBool) -> ExecResult {
         return failure("failed", "argv is empty");
     };
     let mut command = Command::new(program);
+    if let Some(path) = &spec.path {
+        // Set before spawning: the program is then looked up in this PATH too.
+        command.env("PATH", path);
+    }
     command
         .args(args)
         .current_dir(&spec.cwd)
@@ -297,6 +306,7 @@ mod tests {
             timeout,
             cwd: std::env::temp_dir(),
             json,
+            path: None,
         }
     }
 
@@ -502,5 +512,23 @@ mod tests {
         let parsed = spec(&json!({"argv": ["~/tool", "~/kept"]}), Path::new("/repo")).unwrap();
         assert_eq!(parsed.argv[0], format!("{}/tool", home.to_string_lossy()));
         assert_eq!(parsed.argv[1], "~/kept");
+    }
+
+    #[test]
+    fn finds_the_program_in_the_given_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::os::unix::fs::symlink("/bin/echo", dir.path().join("gm-probe-echo")).expect("link");
+        let mut spec = exec(
+            &["gm-probe-echo", "hi"],
+            None,
+            Duration::from_secs(5),
+            false,
+        );
+        let cancel = AtomicBool::new(false);
+        assert_eq!(run(&spec, &cancel).outcome, "failed");
+        spec.path = Some(format!("{}:/usr/bin:/bin", dir.path().display()));
+        let found = run(&spec, &cancel);
+        assert_eq!(found.outcome, "done");
+        assert_eq!(found.output["text"], "hi");
     }
 }

@@ -197,18 +197,19 @@ impl StatusView {
         row
     }
 
-    /// The newest manual workflow run in one line: its status, and its notice.
-    /// It is cut short, never wrapped, so the composer does not move.
+    /// The newest manual workflow run: its status, and its notice or the reason
+    /// it failed. Wraps to at most three lines.
     fn workflow_line(&self) -> Option<Div> {
         let line = self.model.workflows.status_line()?;
         Some(
+            // Up to three lines: a failure names the command and the reason,
+            // which one line of this narrow column cuts off.
             div()
-                .h(px(18.))
+                .w_full()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
+                .line_clamp(3)
                 .text_color(theme::muted())
-                .child(line),
+                .child(one_line(&line)),
         )
     }
 
@@ -308,4 +309,9 @@ fn commit_label(branch: &str) -> Div {
         .overflow_hidden()
         .child(div().flex_none().whitespace_nowrap().child("Commit on "))
         .child(name_label(branch, &[]))
+}
+
+/// The status text on one line: an error that carries stderr can span many.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }

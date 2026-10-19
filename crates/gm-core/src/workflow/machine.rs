@@ -439,7 +439,7 @@ fn leave_each(
 /// use of the edge it takes.
 fn route(context: &Context, run: &mut Run, place: &Place<'_>, outcome: &str) -> Route {
     let Some(rule) = place.state.rule(outcome) else {
-        return default_route(place, outcome);
+        return default_route(run, place, outcome);
     };
     let chosen = {
         let outputs = visible_outputs(run);
@@ -491,17 +491,40 @@ fn route(context: &Context, run: &mut Run, place: &Place<'_>, outcome: &str) -> 
 }
 
 /// The transition of an outcome the rule does not list (D78's short form).
-fn default_route(place: &Place<'_>, outcome: &str) -> Route {
+fn default_route(run: &Run, place: &Place<'_>, outcome: &str) -> Route {
     match outcome {
         "done" => match next_sibling(place) {
             Some(id) => Route::Goto(id.to_owned()),
             None => Route::End(End::Done, None),
         },
-        "failed" | "interrupted" | "timeout" => Route::End(End::Failed, None),
+        "failed" | "interrupted" | "timeout" => {
+            Route::End(End::Failed, Some(failure_reason(run, place, outcome)))
+        }
         other => Route::End(
             End::Failed,
             Some(format!("no transition for outcome `{other}`")),
         ),
+    }
+}
+
+/// Why a state's failure ended the run: the `error` or the `stderr` its
+/// output carries (an `exec` that could not start, say), else the outcome.
+fn failure_reason(run: &Run, place: &Place<'_>, outcome: &str) -> String {
+    let id = place.state.id.as_str();
+    let output = visible_outputs(run).get(id).cloned();
+    let text = |key: &str| {
+        output
+            .as_ref()
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    let detail = text("error").or_else(|| text("stderr"));
+    match detail {
+        Some(detail) => format!("`{id}` {outcome}: {detail}"),
+        None => format!("`{id}` {outcome}"),
     }
 }
 
@@ -1070,7 +1093,10 @@ mod tests {
         let (run, _) = start(&def, &ctx).unwrap();
         let step = next(&def, &ctx, &run, "done", json!({"roots": ["a"]})).unwrap();
         let step = next(&def, &ctx, &step.run, "failed", json!({})).unwrap();
-        assert_eq!(step.effect, finished(End::Failed, None, None));
+        assert_eq!(
+            step.effect,
+            finished(End::Failed, Some("`each` failed"), None)
+        );
         assert_eq!(step.record.from, "each/plan");
         assert_eq!(step.record.to, "end.failed");
     }

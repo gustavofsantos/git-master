@@ -1471,6 +1471,7 @@ impl Engine {
         let common = self.git.common_dir(&root).map_err(|e| e.0)?;
         let store = Store::open(&common.join("gitmaster").join("state.db")).map_err(|e| e.0)?;
         let mut session = Session::new(root.clone(), store, id);
+        session.driver.set_login_path(self.git.login_path());
         let mut actions = Actions::new(self.git.as_ref(), &root, &mut self.log, id);
         let outcome = session.driver.resume(&mut actions, now_ms());
         let wrote = actions.wrote();
