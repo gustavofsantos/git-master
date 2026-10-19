@@ -296,6 +296,7 @@ impl StatusView {
                 let what = match action.spec().args {
                     ArgKind::File => "a file",
                     ArgKind::Worktree => "a worktree",
+                    ArgKind::Workflow => "a workflow",
                     _ => "a branch",
                 };
                 (
