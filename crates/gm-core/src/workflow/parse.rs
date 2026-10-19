@@ -10,8 +10,8 @@ use toml::{Spanned, Table, Value};
 
 use super::Diagnostic;
 use super::model::{
-    Approval, Concurrency, Definition, End, Input, OutcomeRule, State, StateKind, Target,
-    Transition, Trigger,
+    Approval, Concurrency, Definition, Input, OutcomeRule, State, StateKind, Target, Transition,
+    Trigger,
 };
 
 /// Parses one file. The error points at the line of the first problem.
@@ -437,10 +437,10 @@ fn parse_transition(
             format!("unknown key `{key}` in `on.{outcome}`"),
         ));
     }
-    if reason.is_some() && to != Target::End(End::Blocked) {
+    if reason.is_some() && !matches!(to, Target::End(_)) {
         return Err(Diagnostic::error(
             line,
-            "`reason` is only allowed when `to` is `end.blocked`",
+            "`reason` is only allowed when `to` is an `end.*` state",
         ));
     }
     Ok(Transition {
@@ -483,6 +483,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::workflow::model::End;
 
     const RESTACK_CHILDREN: &str =
         include_str!("../../tests/workflows/restack-children-on-parent-move.toml");
@@ -738,13 +739,13 @@ mod tests {
     }
 
     #[test]
-    fn reason_needs_end_blocked() {
+    fn reason_needs_an_end() {
         let diag = parse_err(&with_state(
-            "action = \"noop\"\non.done = { to = \"end.done\", reason = \"no\" }\n",
+            "action = \"noop\"\non.done = { to = \"a\", reason = \"no\" }\n",
         ));
         assert_eq!(
             diag,
-            Diagnostic::error(8, "`reason` is only allowed when `to` is `end.blocked`")
+            Diagnostic::error(8, "`reason` is only allowed when `to` is an `end.*` state")
         );
     }
 
