@@ -4,7 +4,15 @@ use serde::{Deserialize, Serialize};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::history::{CommitDetail, CommitFile, History};
 use crate::hook::{HookFailure, HookInfo};
-use crate::status::{BranchEntry, PruneCandidate, RepoStatus, WorktreeEntry, WorktreeInspection};
+use crate::status::{
+    BranchEntry, BranchFailure, MergedBranch, PruneCandidate, RepoStatus, WorktreeEntry,
+    WorktreeInspection,
+};
+
+/// The refusal of `DeleteMergedBranches` when the merged list no longer matches
+/// the one the human confirmed. The UI matches it to list the branches again.
+pub const MERGED_LIST_CHANGED: &str =
+    "the merged branches changed since they were listed; list them again";
 
 /// Sequential, so the operation log is deterministic.
 #[derive(
@@ -87,6 +95,32 @@ pub enum CommandKind {
     Checkout {
         branch: String,
     },
+    /// Creates the local branch `name` at `start_point` (HEAD when `None`), and
+    /// checks it out when `checkout` is set (`git checkout -b`). Git refuses a
+    /// name that exists; its message is the error. Human only.
+    CreateBranch {
+        name: String,
+        start_point: Option<String>,
+        checkout: bool,
+    },
+    /// Deletes the local branch `name`: `git branch -d`, or `-D` when `force`.
+    /// Refused while a worktree has the branch checked out. Git refuses an
+    /// unmerged branch under `-d`, and its message is the error. Human only.
+    DeleteBranch {
+        name: String,
+        force: bool,
+    },
+    /// `git fetch --all --prune`: every remote is fetched, and the remote-tracking
+    /// branches a remote has deleted are removed. Human only. Runs off the
+    /// engine thread; the status and the branches follow.
+    Fetch,
+    /// `git pull --ff-only` on the current branch, against its upstream. It only
+    /// fast-forwards, so it never makes a merge commit or a rebase. Human only.
+    Pull,
+    /// `git push --force-with-lease` of the current branch alone: to its upstream
+    /// when it has one, otherwise to the only remote, which becomes its upstream.
+    /// Never pushes tags or other branches. Human only.
+    PushWithLease,
     /// Lists the worktrees of the repository, the main checkout first. Never
     /// records anything.
     ListWorktrees,
@@ -128,6 +162,18 @@ pub enum CommandKind {
     /// Human only.
     PruneWorktrees {
         names: Vec<String>,
+    },
+    /// Lists the local branches merged into the base branch, without deleting
+    /// anything. The base is `origin/HEAD`'s branch, else the first of `main`,
+    /// `master`, `trunk`, `develop` that exists, else the current branch. Never
+    /// records anything in the command log. Remote branches are not listed.
+    ListMergedBranches,
+    /// Deletes the local branches `branches`, which the last `MergedBranchesListed`
+    /// showed: each with `git branch -d`, never `-D`. Refused when the merged list
+    /// has changed since. A branch Git refuses is reported, and the others still go.
+    /// Human only.
+    DeleteMergedBranches {
+        branches: Vec<String>,
     },
     /// Lists the hooks read from config, with their state (docs/03).
     ListHooks,
@@ -246,6 +292,8 @@ pub enum Event {
     BranchesLoaded {
         id: OperationId,
         branches: Vec<BranchEntry>,
+        /// The configured `user.email`, without angle brackets; `None` when unset.
+        user_email: Option<String>,
     },
     /// Answers `LoadHistory`.
     HistoryLoaded {
@@ -277,6 +325,20 @@ pub enum Event {
     PrunableListed {
         id: OperationId,
         candidates: Vec<PruneCandidate>,
+    },
+    /// Answers `ListMergedBranches`: the base the check used (`None` when there
+    /// is none, as on a detached HEAD with no base branch) and the branches.
+    MergedBranchesListed {
+        id: OperationId,
+        base: Option<String>,
+        branches: Vec<MergedBranch>,
+    },
+    /// Answers `DeleteMergedBranches` with what was removed and what Git refused,
+    /// before the operation's own terminal event.
+    MergedBranchesDeleted {
+        id: OperationId,
+        deleted: Vec<String>,
+        failures: Vec<BranchFailure>,
     },
     HooksListed {
         id: OperationId,
@@ -327,6 +389,48 @@ mod tests {
     }
 
     #[test]
+    fn branch_commands_wire_format_is_tagged() {
+        let create = serde_json::to_value(CommandKind::CreateBranch {
+            name: "topic".into(),
+            start_point: None,
+            checkout: true,
+        })
+        .unwrap();
+        assert_eq!(create["type"], "create_branch");
+        assert_eq!(create["checkout"], true);
+        assert!(create["start_point"].is_null());
+        let delete = serde_json::to_value(CommandKind::DeleteBranch {
+            name: "topic".into(),
+            force: false,
+        })
+        .unwrap();
+        assert_eq!(delete["type"], "delete_branch");
+        assert_eq!(delete["force"], false);
+    }
+
+    #[test]
+    fn merged_branch_commands_wire_format_is_tagged() {
+        let list = serde_json::to_value(CommandKind::ListMergedBranches).unwrap();
+        assert_eq!(list["type"], "list_merged_branches");
+        let delete = serde_json::to_value(CommandKind::DeleteMergedBranches {
+            branches: vec!["topic".into()],
+        })
+        .unwrap();
+        assert_eq!(delete["type"], "delete_merged_branches");
+        assert_eq!(delete["branches"][0], "topic");
+    }
+
+    #[test]
+    fn remote_commands_wire_format_is_tagged() {
+        let fetch = serde_json::to_value(CommandKind::Fetch).unwrap();
+        assert_eq!(fetch["type"], "fetch");
+        let pull = serde_json::to_value(CommandKind::Pull).unwrap();
+        assert_eq!(pull["type"], "pull");
+        let push = serde_json::to_value(CommandKind::PushWithLease).unwrap();
+        assert_eq!(push["type"], "push_with_lease");
+    }
+
+    #[test]
     fn branches_loaded_wire_format_is_tagged() {
         let event = Event::BranchesLoaded {
             id: OperationId(2),
@@ -335,12 +439,16 @@ mod tests {
                 is_remote: false,
                 is_current: true,
                 upstream: Some("origin/main".into()),
+                author_email: Some("ana@example.com".into()),
             }],
+            user_email: Some("me@example.com".into()),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "branches_loaded");
         assert_eq!(json["branches"][0]["is_current"], true);
         assert_eq!(json["branches"][0]["upstream"], "origin/main");
+        assert_eq!(json["branches"][0]["author_email"], "ana@example.com");
+        assert_eq!(json["user_email"], "me@example.com");
     }
 
     fn any_state() -> impl Strategy<Value = OperationState> {

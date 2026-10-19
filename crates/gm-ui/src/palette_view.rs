@@ -14,10 +14,12 @@ use gpui::{
 use crate::FocusNext;
 use crate::action_registry::{Action, ArgKind};
 use crate::icon::{self, Icon};
+use crate::name_fit::{self, name_label};
 use crate::palette::{self, Candidate, Choice, Hit, Line, Palette, Stage};
 use crate::text_area::{Down, Newline, TextArea, TextAreaEvent, Up};
 use crate::theme;
 use crate::view::StatusView;
+use crate::window_chrome;
 
 const ROW_HEIGHT: f32 = 24.;
 const WIDTH: f32 = 560.;
@@ -293,6 +295,7 @@ impl StatusView {
             Stage::Pick(action) => {
                 let what = match action.spec().args {
                     ArgKind::File => "a file",
+                    ArgKind::Worktree => "a worktree",
                     _ => "a branch",
                 };
                 (
@@ -461,6 +464,7 @@ fn row_element(
         Err(reason) => Some(reason.to_owned()),
         Ok(()) => candidate.shortcut.clone(),
     };
+    let full = candidate.label.clone();
     div()
         .id(("palette-row", index))
         .h(px(ROW_HEIGHT))
@@ -476,9 +480,13 @@ fn row_element(
             row.cursor_pointer()
                 .hover(|style| style.bg(theme::selected_row()))
         })
-        .child(label(&candidate.label, &found.ranges))
+        .when(name_fit::needs_hover(&full), |row| {
+            row.tooltip(window_chrome::hint(full))
+        })
+        .child(name_label(&candidate.label, &found.ranges))
         .children(note.map(|text| {
             div()
+                .flex_none()
                 .text_xs()
                 .whitespace_nowrap()
                 .text_color(theme::muted())
@@ -491,32 +499,4 @@ fn row_element(
                 this.choose_palette_row(window, cx);
             }),
         )
-}
-
-/// The text with the matched byte ranges in the accent colour. The ranges come
-/// from the matcher, on character boundaries.
-fn label(text: &str, ranges: &[Range<usize>]) -> Div {
-    let mut row = div()
-        .flex()
-        .flex_row()
-        .min_w(px(0.))
-        .overflow_hidden()
-        .whitespace_nowrap();
-    let mut at = 0;
-    for range in ranges {
-        if range.start > at {
-            row = row.child(text[at..range.start].to_owned());
-        }
-        row = row.child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::accent())
-                .child(text[range.clone()].to_owned()),
-        );
-        at = range.end;
-    }
-    if at < text.len() {
-        row = row.child(text[at..].to_owned());
-    }
-    row
 }

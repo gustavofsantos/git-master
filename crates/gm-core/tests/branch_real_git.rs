@@ -78,6 +78,8 @@ fn entry(name: &str, is_remote: bool, is_current: bool, upstream: Option<&str>) 
         is_remote,
         is_current,
         upstream: upstream.map(str::to_owned),
+        // Every commit in the fixtures is made by `t <t@t>`.
+        author_email: Some("t@t".into()),
     }
 }
 
@@ -221,4 +223,63 @@ fn checkout_runs_the_post_checkout_hook() {
     SubprocessGit::default().checkout(&clone, "wip").unwrap();
 
     assert!(clone.join(".git/hook-ran").exists());
+}
+
+#[test]
+fn each_branch_reports_the_author_of_its_tip_and_user_email_is_the_configured_one() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path();
+    git_in(dir, &["init", "-q", "-b", "main"]);
+    git_in(dir, &["config", "user.email", "me@example.com"]);
+    write(dir, "a.txt", "one\n");
+    git_in(dir, &["add", "."]);
+    git_in(
+        dir,
+        &[
+            "commit",
+            "-q",
+            "--author=Ana <ana@example.com>",
+            "-m",
+            "init",
+        ],
+    );
+    git_in(dir, &["switch", "-q", "-c", "feature"]);
+    write(dir, "a.txt", "two\n");
+    git_in(
+        dir,
+        &[
+            "commit",
+            "-q",
+            "--author=Bruno <Bruno@Example.com>",
+            "-am",
+            "feature",
+        ],
+    );
+
+    let port = SubprocessGit::default();
+    let branches = port.branches(dir).unwrap();
+
+    assert_eq!(
+        branches,
+        [
+            BranchEntry {
+                name: "feature".into(),
+                is_remote: false,
+                is_current: true,
+                upstream: None,
+                author_email: Some("Bruno@Example.com".into()),
+            },
+            BranchEntry {
+                name: "main".into(),
+                is_remote: false,
+                is_current: false,
+                upstream: None,
+                author_email: Some("ana@example.com".into()),
+            },
+        ]
+    );
+    assert_eq!(
+        port.user_email(dir).unwrap(),
+        Some("me@example.com".to_owned())
+    );
 }

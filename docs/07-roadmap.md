@@ -63,7 +63,7 @@ Ordem: log de comandos, depois trocar de branch, depois trocar de projeto. O log
 5. **Sidebar do desenho** (feito, com placeholders).
    - Coluna à esquerda, como no canvas: "Workspace" (Working Copy com a contagem de arquivos; Histórico, Stashes, Review local e Reflog são placeholders que avisam que ainda não existem), alternância "By stack" / "By name" e a árvore de branches.
    - "By name" é real: locais e remotas agrupadas pelo prefixo; clicar numa branch faz checkout, e a atual ganha o selo HEAD. "By stack" mostra "No stacks yet" e todas as locais em "No stack", até a fatia 4; a dica de arrastar para definir o pai também é placeholder.
-   - Barra superior (feito, na fatia 1c): nome do repositório com `branch · caminho` embaixo (o seletor de branch continua nessa linha) e, à direita, Fetch, Pull, Push with lease e Restack, todos desabilitados com "Not available yet" até o motor ter cada comando. Sem contador no Restack até existir o modelo de stacks. Sem busca na barra superior, por decisão desta fatia.
+   - Barra superior (feito, na fatia 1c): nome do repositório com `branch · caminho` embaixo (o seletor de branch continua nessa linha) e, à direita, Fetch, Pull, Push with lease e Restack, todos desabilitados com "Not available yet" até o motor ter cada comando (Fetch, Pull e Push with lease passaram a funcionar na Fatia 1d; o Restack segue desabilitado). Sem contador no Restack até existir o modelo de stacks. Sem busca na barra superior, por decisão desta fatia.
    - Faltam do desenho: indicadores de stack (`restack N`, `↑N`, ponto âmbar, PR), a barra de status com escopo, fsmonitor, operation log e MCP.
 
 Pronto quando: troca de projeto e de branch sem sair do app, todo comando Git executado é inspecionável no painel, e abrir o app sem projeto leva a uma tela que explica o que fazer em vez de uma janela vazia.
@@ -120,6 +120,19 @@ Pedido do autor em 2026-10-16, com base nas duas pranchas novas do canvas (menu 
    - Testes: integração com repositório temporário (editar arquivo, mudar de branch por fora com `git`, commit por fora) esperando o evento de status; o debounce e o filtro de ignorados como funções puras.
 
 Pronto quando: a Working Copy fica no desenho simplificado, toda ação da tela existe no registro e é alcançável por tecla, menu de contexto e paleta, e uma ação desabilitada explica por quê.
+
+## Fatia 1d: o básico que faltava no uso diário (feita, com lacunas)
+
+Pedido do autor em 2026-10-19. Decisões D54 a D59 em `01`. Nada disto foi visto numa janela: o ambiente de desenvolvimento não tinha display, então a interface foi coberta por testes unitários dos modelos puros e o motor por testes com Git real. O `scripts/ui-smoke.sh` não rodou (falta `xdotool` e `scrot`) e nenhum cenário novo foi escrito.
+
+1. **Copiar do painel de commit** (feito, D58). Lacunas: caminhos de arquivo não são selecionáveis nem copiáveis; a seleção é por área (selecionar num campo não limpa o destaque de outro); Esc dentro de uma área focada manda `Cancel` ao `TextArea` (sem efeito aqui, não conferido numa janela); seleção por arrasto, duplo e triplo clique e Ctrl/Cmd+C não têm teste, porque `gm-ui` não tem harness do GPUI.
+2. **Criar e apagar branch** (feito, D55). Lacunas: só locais; o ⌫ do registro não está ligado a tecla; a mensagem "is not fully merged" é reconhecida por texto (com `LC_ALL=C`); o diálogo de apagar é a única confirmação, no menu e na paleta.
+3. **Worktrees** (feito, D59). Fecha parte das lacunas de W3, W5 e W8: a branch ganhou lista de sugestões (só locais, máximo de 8, sem rolagem; não marca as já usadas em outro worktree), a paleta lista os worktrees para remover, travar e destravar, e a seção da sidebar tem "+" e "×". Lacunas: "New Worktree…" não tem atalho; só o campo da branch sugere (não o do commit); o travar ainda manda motivo vazio; a seção continua cortando em seis linhas.
+4. **Barra lateral redimensionável** (feito, D57). Lacuna: janelas com menos de cerca de 500 px de largura ainda zeram a área principal (não há tamanho mínimo de janela).
+5. **Apagar branches mescladas** (feito, D56), pela paleta ("Delete Merged Branches…"). Lacunas: squash e rebase não são detectados; a prévia mostra no máximo 15 linhas e diz quantas faltam (o diálogo não rola); se a releitura do status falhar depois de apagar, o relatório se perde.
+6. **Fetch, Pull e Push with lease** (feito, D54). Lacunas: não há tempo limite nem cancelamento, então um fetch parado ocupa a vaga remota até o Git terminar; `GIT_TERMINAL_PROMPT=0` não impede o prompt de senha do `ssh` quando o app abre de um terminal; uma leitura de status que falha depois da operação é ignorada em silêncio; sem cenário do smoke para os botões.
+
+Pronto quando: as cinco queixas do autor (copiar, criar e apagar branch e worktree, redimensionar a lateral, apagar mescladas, Fetch/Pull/Push) funcionam na janela real. Falta conferir isso à mão.
 
 ## Fatia 2: hook `prepare-commit` (feita)
 
@@ -219,6 +232,13 @@ Ordem definida pelo autor em 2026-10-16: esta fatia, junto com a visão de diff 
 Fora da fatia 3 (decisão do autor em 2026-10-17): escopo de stack, dono do commit, pai de stack, aresta tracejada, aba Stacks, contador de Restack, Fetch e Pull, reflog, stashes e Review local. Os itens de stack ficam "Not available yet".
 
 Pronto quando: navega o histórico de um repositório grande com rolagem fluida.
+
+## Fatia 3d: filtro de branches na barra lateral (feita, com lacunas)
+
+Decisão D53 (`01`, proposta em 2026-10-19). A barra lateral mostra "Meus" (a branch atual e as cujo commit de ponta é do usuário) ou "Todas", com busca por nome e contagem "N de M". Sem branch que case, aparece "No branches match" com um link para mostrar todas. Duas ações na paleta, "Show Only My Branches" e "Show All Branches", trocam o escopo; a que não muda nada fica desabilitada com o motivo. A paleta e o seletor do topo continuam com todas as branches. O escopo escolhido é guardado no `settings.json` (D40).
+
+- Pronto quando: as regras de escopo, busca e padrão são testadas em módulo puro (`branch_filter.rs`); as linhas da árvore saem do conjunto filtrado, sem cabeçalho de grupo vazio (`sidebar.rs`); as ações têm regra e plano testados; o escopo sobrevive ao reinício (teste de ida e volta do arquivo).
+- Lacunas: nada foi visto numa janela: o cenário do smoke não foi escrito nem rodado. Nesta máquina o GPUI não inicia (falta o driver Vulkan por software); a interface ainda não foi conferida em tela. Remotas sem autor legível ficam ocultas em "Meus"; o filtro é recalculado a cada quadro, sem cache; a navegação por teclado dentro da árvore filtrada não mudou; a busca não é guardada; "Mine" olha só o commit de ponta de cada branch; a seção "Local" some quando não há branch local, também sem filtro.
 
 ## Fatia 3w: workflows (proposta, depende de Q20)
 

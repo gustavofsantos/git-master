@@ -17,10 +17,10 @@ pub use hook::{
     HookResult, HookScope, HookState, PREPARE_COMMIT,
 };
 pub use operation::{
-    Actor, Command, CommandKind, Event, IllegalTransition, OperationId, OperationState,
-    WorktreeMode,
+    Actor, Command, CommandKind, Event, IllegalTransition, MERGED_LIST_CHANGED, OperationId,
+    OperationState, WorktreeMode,
 };
 pub use status::{
-    Blocker, BranchEntry, BranchInfo, Change, PruneCandidate, RepoStatus, StatusEntry,
-    WorktreeEntry, WorktreeInspection,
+    Blocker, BranchEntry, BranchFailure, BranchInfo, Change, MergedBranch, PruneCandidate,
+    RepoStatus, StatusEntry, WorktreeEntry, WorktreeInspection,
 };

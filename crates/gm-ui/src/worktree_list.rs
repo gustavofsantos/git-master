@@ -68,8 +68,10 @@ pub fn open_target<'a>(row: &Row<'a>) -> Open<'a> {
     }
 }
 
-/// The branch the worktree has, or else its folder name.
-fn display_name(entry: &WorktreeEntry) -> String {
+/// The branch the worktree has, or else its folder name. The sidebar and the
+/// palette both name a worktree this way.
+#[must_use]
+pub fn display_name(entry: &WorktreeEntry) -> String {
     if let Some(branch) = &entry.branch {
         return branch.clone();
     }

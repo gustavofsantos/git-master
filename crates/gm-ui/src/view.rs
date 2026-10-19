@@ -20,6 +20,8 @@ use crate::action_registry::{
     self, Action, Args, Context as ActionContext, Effect, HookCtx, Reason,
 };
 use crate::app_settings::{self, AppSettings};
+use crate::branch_delete::DeleteDialog;
+use crate::branch_filter::{self, BranchFilter};
 use crate::branch_menu::BranchMenu;
 use crate::composer::{Composer, ComposerEvent};
 use crate::context_menu::ContextMenu;
@@ -27,12 +29,17 @@ use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::diff_rows::Layout;
 use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
+use crate::merged_branches::MergedDialog;
 use crate::model::{Model, Switched};
+use crate::name_fit::name_label;
+use crate::new_branch::NewBranchDialog;
 use crate::palette::Palette;
 use crate::palette_view::{self, PaletteView};
 use crate::project_menu::ProjectMenu;
 use crate::recent::{self, Recents};
 use crate::resize;
+use crate::shell_history::CommitTexts;
+use crate::shell_sidebar;
 use crate::sidebar::Grouping;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
@@ -77,12 +84,23 @@ pub struct StatusView {
     pub(crate) diff_pane: Entity<DiffPane>,
     /// The read-only pane that shows one file of the open commit (H4).
     pub(crate) commit_diff_pane: Entity<DiffPane>,
+    /// The sidebar's width, in logical pixels, as the user dragged it.
+    pub(crate) sidebar_width: f32,
+    /// The selectable fields of the commit detail panel (H3).
+    pub(crate) commit_texts: CommitTexts,
     /// The left column's width, in logical pixels, as the user dragged it.
     pub(crate) left_width: f32,
     /// The commit message box's height, in logical pixels, as dragged.
     pub(crate) commit_height: f32,
     /// How the sidebar's branch tree is grouped.
     pub(crate) sidebar_grouping: Grouping,
+    /// The sidebar's branch filter: the scope and the typed query (D53).
+    pub(crate) sidebar_filter: BranchFilter,
+    /// The input the sidebar's query is typed into.
+    pub(crate) sidebar_input: Entity<TextArea>,
+    /// The preferences as last read or saved. A save writes all of them, so a
+    /// save for one preference keeps the others.
+    pub(crate) settings: AppSettings,
     /// The main area's screen; the Working Copy unless the history is open.
     pub(crate) screen: Screen,
     pub(crate) project_menu: ProjectMenu,
@@ -99,6 +117,12 @@ pub struct StatusView {
     pub(crate) removal_dialog: Option<RemoveDialog>,
     /// The prune dialog, while it is open.
     pub(crate) prune_dialog: Option<PruneDialog>,
+    /// The new-branch dialog, while it is open.
+    pub(crate) new_branch_dialog: Option<NewBranchDialog>,
+    /// The delete-branch dialog, while it is open.
+    pub(crate) delete_dialog: Option<DeleteDialog>,
+    /// The delete-merged-branches dialog, while it is open.
+    pub(crate) merged_dialog: Option<MergedDialog>,
     /// The recent repositories, newest first, as last saved or loaded.
     pub(crate) recents: Recents,
     /// Where the list is kept; `None` when there is no home directory.
@@ -160,9 +184,11 @@ impl StatusView {
         let branch_menu = BranchMenu::new(branch_filter.clone());
         let palette_filter =
             cx.new(|cx| TextArea::new("Type a command, branch or file", cx).with_lines(1, 1));
+        let sidebar_input = cx.new(|cx| TextArea::new("Find a branch", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
         let commit_diff_pane = cx.new(DiffPane::read_only);
+        let commit_texts = CommitTexts::new(cx);
         // The saved preferences are read here, before the first frame, so the
         // commit diff opens in the layout the user last chose (D40).
         let settings_store =
@@ -221,6 +247,7 @@ impl StatusView {
             }),
         ];
         subscriptions.extend(palette_view::subscriptions(&palette_filter, window, cx));
+        subscriptions.extend(shell_sidebar::subscriptions(&sidebar_input, window, cx));
         let mut model = Model::default();
         model.request_open(open);
         Self {
@@ -234,9 +261,14 @@ impl StatusView {
             composer,
             diff_pane,
             commit_diff_pane,
+            sidebar_width: resize::SIDEBAR_DEFAULT,
+            commit_texts,
             left_width: resize::LEFT_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
             sidebar_grouping: Grouping::default(),
+            sidebar_filter: BranchFilter::with_chosen(settings.branch_scope),
+            sidebar_input,
+            settings,
             screen: Screen::default(),
             project_menu,
             branch_menu,
@@ -246,6 +278,9 @@ impl StatusView {
             worktree_dialog: None,
             removal_dialog: None,
             prune_dialog: None,
+            new_branch_dialog: None,
+            delete_dialog: None,
+            merged_dialog: None,
             recents,
             recent_store,
             recent_generation: 0,
@@ -319,10 +354,19 @@ impl StatusView {
         let reload = matches!(event, Event::StatusLoaded { .. });
         let listed = matches!(event, Event::BranchesLoaded { .. });
         let committed = matches!(event, Event::Committed { .. });
+        let detail_loaded = matches!(event, Event::CommitDetailLoaded { .. });
         let finished = matches!(event, Event::HookFinished { .. });
+        let remote_ended = matches!(
+            &event,
+            Event::OperationChanged { id, state, .. }
+                if state.is_terminal() && self.model.remote.owns(*id)
+        );
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
+        if detail_loaded {
+            self.show_commit_texts(cx);
+        }
         if let Some(fresh) = self.model.commit_stack.take_fresh() {
             self.commit_diff_pane.update(cx, |pane, cx| {
                 pane.show_stack(
@@ -344,6 +388,15 @@ impl StatusView {
         if let Some(outcome) = self.model.pruning.take_outcome() {
             self.on_worktrees_pruned(outcome, window, cx);
         }
+        if let Some(outcome) = self.model.branch_create.take() {
+            self.on_branch_created(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.branch_delete.take() {
+            self.on_branch_delete_settled(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.merging.take_outcome() {
+            self.on_merged_settled(outcome, window, cx);
+        }
         // A finished hook run fills the composer only while it still holds what the run was
         // started from; otherwise the answer waits as a suggestion (see hook_run).
         if finished {
@@ -361,6 +414,9 @@ impl StatusView {
         }
         if committed {
             self.composer.update(cx, |composer, cx| composer.clear(cx));
+            Self::expire_notice_later(self.model.notice_generation(), cx);
+        }
+        if remote_ended {
             Self::expire_notice_later(self.model.notice_generation(), cx);
         }
         if let Some(switched) = self.model.take_switched() {
@@ -474,14 +530,18 @@ impl StatusView {
     /// Saves the commit diff's layout in the background (D40). The choice takes
     /// effect on screen before the file is written.
     fn save_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        self.settings.diff_layout = layout;
+        self.save_settings(cx);
+    }
+
+    /// Writes the preferences in the background, as the generation after the last save.
+    pub(crate) fn save_settings(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.settings_store.clone() else {
             return;
         };
         self.settings_generation += 1;
         let generation = self.settings_generation;
-        let settings = AppSettings {
-            diff_layout: layout,
-        };
+        let settings = self.settings;
         cx.background_spawn(async move {
             if let Err(error) = store.save(settings, generation) {
                 eprintln!("gitmaster: could not save the settings: {error}");
@@ -657,6 +717,10 @@ impl StatusView {
                 for kind in kinds {
                     let checkout = matches!(kind, CommandKind::Checkout { .. });
                     let refresh = matches!(kind, CommandKind::RefreshStatus);
+                    let remote = matches!(
+                        kind,
+                        CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease
+                    );
                     let prepare = match &kind {
                         CommandKind::RunPrepareCommit { message } => Some(message.clone()),
                         _ => None,
@@ -664,6 +728,9 @@ impl StatusView {
                     let id = self.engine.dispatch(Actor::Human, kind);
                     if checkout {
                         self.model.branches.begin_checkout(id);
+                    }
+                    if remote {
+                        self.model.remote.begin(id, action);
                     }
                     if let Some(sent) = prepare {
                         self.model.hooks.start(id, sent);
@@ -678,6 +745,10 @@ impl StatusView {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.notify_user(&notice, cx);
             }
+            Ok(Effect::CopyMessage(text)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.notify_user("Copied commit message", cx);
+            }
             Ok(Effect::Reveal(path)) => cx.reveal_path(&path),
             Ok(Effect::FocusCommitMessage) => self.focus_commit_message(window, cx),
             Ok(Effect::UseSuggestion(text)) => {
@@ -688,12 +759,20 @@ impl StatusView {
             Ok(Effect::DiscardSuggestion) => self.model.hooks.drop_suggestion(),
             Ok(Effect::DenyHook(hash)) => self.model.hooks.deny(&hash),
             Ok(Effect::OpenWorktreeDialog { branch }) => {
-                self.open_worktree_dialog(Some(&branch), window, cx);
+                self.open_worktree_dialog(branch.as_deref(), window, cx);
             }
             Ok(Effect::OpenWorktree(path)) => self.open_worktree(&path, cx),
             Ok(Effect::OpenRemoveDialog(path)) => self.open_remove_dialog(&path, window, cx),
             Ok(Effect::OpenPruneDialog) => self.open_prune_dialog(cx),
+            Ok(Effect::OpenNewBranchDialog { start }) => {
+                self.open_new_branch_dialog(start.as_deref(), window, cx);
+            }
+            Ok(Effect::OpenDeleteBranchDialog(branch)) => {
+                self.open_delete_branch_dialog(&branch, window, cx);
+            }
+            Ok(Effect::OpenMergedBranchesDialog) => self.open_merged_dialog(window, cx),
             Ok(Effect::ShowHistory) => self.show_history(cx),
+            Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
         }
         cx.notify();
     }
@@ -715,6 +794,7 @@ impl StatusView {
         ActionContext {
             repo_open: self.model.status().is_some(),
             busy: self.busy_reason(),
+            remote_running: self.model.remote.in_flight().is_some(),
             entries: self.model.entries(),
             staged_count: self.model.summary().staged,
             message,
@@ -724,6 +804,9 @@ impl StatusView {
                 .and_then(|status| status.branch.head.as_deref()),
             root: self.model.status().map(|status| status.root.as_str()),
             worktrees: &self.model.worktrees,
+            branch_scope: self.sidebar_filter.scope(self.model.branches.user_email()),
+            user_email_known: branch_filter::known_email(self.model.branches.user_email())
+                .is_some(),
             hooks: HookCtx {
                 running: self.model.hooks.in_flight(),
                 applicable: self.model.hooks.applicable(),
@@ -815,20 +898,28 @@ impl StatusView {
         };
         window_chrome::header_bar(window)
             .h(title_bar::HEIGHT)
-            .child(window_chrome::no_drag(self.title_block(cx)))
+            .child(window_chrome::no_drag_shrinking(self.title_block(cx)))
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_1()
                     .text_color(muted)
-                    .child(icon::view(Icon::ArrowUp, icon::SMALL, muted))
+                    .child(icon::view(Icon::ArrowUp, icon::SMALL, muted).flex_none())
                     .child(ahead.to_string())
-                    .child(icon::view(Icon::ArrowDown, icon::SMALL, muted))
+                    .child(icon::view(Icon::ArrowDown, icon::SMALL, muted).flex_none())
                     .child(behind.to_string()),
             )
-            .child(div().text_color(muted).child(upstream))
+            .child(
+                div()
+                    .flex_shrink()
+                    .min_w(px(0.))
+                    .max_w(px(title_bar::UPSTREAM_MAX_WIDTH))
+                    .text_color(muted)
+                    .child(name_label(&upstream, &[])),
+            )
             .child(div().flex_1())
             .child(div().text_color(muted).child(loading))
             .child(window_chrome::no_drag(self.toolbar(cx)))
@@ -908,9 +999,12 @@ impl StatusView {
 impl Render for StatusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The stored sizes are clamped again here, because a window resized
-        // after a drag may have moved the limits.
+        // after a drag may have moved the limits. The left column is fitted
+        // beside the sidebar's clamped width, so the main area keeps its room.
         let viewport = window.viewport_size();
-        let left_width = resize::LEFT.clamp(self.left_width, f32::from(viewport.width));
+        let sidebar_width = resize::SIDEBAR.clamp(self.sidebar_width, f32::from(viewport.width));
+        let left_width =
+            resize::left_beside_sidebar(self.left_width, sidebar_width, f32::from(viewport.width));
         let commit_height = resize::COMMIT.clamp(self.commit_height, f32::from(viewport.height));
         window_chrome::sync_client_inset(window);
         let app = div()
@@ -947,7 +1041,7 @@ impl Render for StatusView {
                     .min_h(px(0.))
                     .flex()
                     .flex_row()
-                    .child(self.sidebar(cx))
+                    .child(self.sidebar(sidebar_width, cx))
                     .children(
                         (self.screen == Screen::WorkingCopy)
                             .then(|| self.left_column(left_width, commit_height, cx)),
@@ -991,6 +1085,21 @@ impl Render for StatusView {
                 self.prune_dialog
                     .is_some()
                     .then(|| self.prune_layer(window, cx)),
+            )
+            .children(
+                self.new_branch_dialog
+                    .is_some()
+                    .then(|| self.new_branch_layer(window, cx)),
+            )
+            .children(
+                self.delete_dialog
+                    .is_some()
+                    .then(|| self.delete_branch_layer(window, cx)),
+            )
+            .children(
+                self.merged_dialog
+                    .is_some()
+                    .then(|| self.merged_layer(window, cx)),
             );
         window_chrome::framed(window, app)
     }

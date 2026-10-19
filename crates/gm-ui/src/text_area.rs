@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use gpui::{
     Action, App, Bounds, Context, CursorStyle, Div, EventEmitter, FocusHandle, Focusable,
-    MouseButton, Pixels, Point, SharedString, Window, div, prelude::*, px,
+    FontWeight, MouseButton, Pixels, Point, SharedString, Window, div, prelude::*, px,
 };
 
 use crate::editor::Editor;
@@ -40,11 +40,42 @@ const BASE_FONT_SIZE: f32 = 13.5;
 pub const LINE_HEIGHT: f32 = 20.;
 const BLINK: Duration = Duration::from_millis(530);
 
+/// How the area sets its text. The composer keeps the default; the read-only
+/// areas of the detail panels set their own size, row height and weight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextStyle {
+    pub size: f32,
+    pub line_height: f32,
+    pub weight: FontWeight,
+    /// The code font instead of the UI font.
+    pub mono: bool,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self {
+            size: BASE_FONT_SIZE,
+            line_height: LINE_HEIGHT,
+            weight: FontWeight::NORMAL,
+            mono: false,
+        }
+    }
+}
+
 /// What the area asks its owner to do. Typing is read from the view. The
 /// owner decides what a commit shortcut means; the area has none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextAreaEvent {
     Cancel,
+}
+
+/// Whether the area takes edits. A read-only area selects and copies its text
+/// only: no key, paste or input method changes it, it draws no caret and has
+/// no frame, and it sizes itself to its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Access {
+    Editable,
+    ReadOnly,
 }
 
 pub struct TextArea {
@@ -53,6 +84,8 @@ pub struct TextArea {
     placeholder: SharedString,
     min_lines: usize,
     max_lines: usize,
+    style: TextStyle,
+    access: Access,
     /// The IME's in-progress composition, underlined while it lasts.
     marked_range: Option<Range<usize>>,
     /// The layout of the last paint; `None` before the first one.
@@ -81,6 +114,8 @@ impl TextArea {
             placeholder: placeholder.to_owned().into(),
             min_lines: 3,
             max_lines: 10,
+            style: TextStyle::default(),
+            access: Access::Editable,
             marked_range: None,
             shaped: None,
             last_bounds: None,
@@ -99,6 +134,23 @@ impl TextArea {
     pub fn with_lines(mut self, min: usize, max: usize) -> Self {
         self.min_lines = min;
         self.max_lines = max;
+        self
+    }
+
+    /// Sets the size, row height, weight and family of the text.
+    #[must_use]
+    pub fn with_style(mut self, style: TextStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    /// Makes the area read-only (see `Access`): it grows to fit its text, with
+    /// no limit on the rows.
+    #[must_use]
+    pub fn read_only(mut self) -> Self {
+        self.access = Access::ReadOnly;
+        self.min_lines = 1;
+        self.max_lines = usize::MAX;
         self
     }
 
@@ -149,6 +201,14 @@ impl TextArea {
         self.caret_visible
     }
 
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.access == Access::ReadOnly
+    }
+
+    pub(crate) fn line_height(&self) -> f32 {
+        self.style.line_height
+    }
+
     pub(crate) fn is_focused(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)
     }
@@ -180,6 +240,9 @@ impl TextArea {
     // Blinking.
 
     fn restart_blink(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
         self.caret_visible = true;
         self.blink_gen = self.blink_gen.wrapping_add(1);
         Self::schedule_blink(self.blink_gen, window, cx);
@@ -238,7 +301,7 @@ impl TextArea {
         let shaped = self.fresh_shaped()?;
         let bounds = self.last_bounds?;
         let y = f32::from(position.y - bounds.top()) + self.scroll_y;
-        let row = row_at_y(y, LINE_HEIGHT, shaped.rows.len());
+        let row = row_at_y(y, self.style.line_height, shaped.rows.len());
         Some(shaped.offset_at(row, f32::from(position.x - bounds.left())))
     }
 
@@ -253,6 +316,9 @@ impl TextArea {
 
     fn edit<A: Action>(el: Div, cx: &mut Context<Self>, f: fn(&mut Editor)) -> Div {
         el.on_action(cx.listener(move |this, _: &A, window, cx| {
+            if this.is_read_only() {
+                return;
+            }
             f(&mut this.editor);
             this.marked_range = None;
             this.touched(window, cx);
@@ -272,6 +338,9 @@ impl TextArea {
     }
 
     fn replace_selection(&mut self, text: &str, window: &Window, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
         self.editor.insert(text);
         self.marked_range = None;
         self.touched(window, cx);
@@ -337,28 +406,39 @@ impl TextArea {
 impl Render for TextArea {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
+        let style = self.style;
         let el = div()
             .flex()
             .flex_col()
             .w_full()
-            .h_full()
-            .px(px(10.))
-            .py(px(8.))
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
-            .font_family(theme::ui_font())
-            .text_size(px(BASE_FONT_SIZE))
-            .line_height(px(LINE_HEIGHT))
-            .text_color(theme::text())
-            // The border is always 1px; only its colour changes, so focus
-            // never moves the layout.
-            .border_b_1()
-            .border_color(if focused {
-                theme::text()
+            .font_family(if style.mono {
+                theme::code_font()
             } else {
-                theme::muted()
-            });
+                theme::ui_font()
+            })
+            .font_weight(style.weight)
+            .text_size(px(style.size))
+            .line_height(px(style.line_height))
+            .text_color(theme::text());
+        // The frame belongs to the editor. A read-only area is only its text.
+        let el = if self.is_read_only() {
+            el
+        } else {
+            el.h_full()
+                .px(px(10.))
+                .py(px(8.))
+                // The border is always 1px; only its colour changes, so focus
+                // never moves the layout.
+                .border_b_1()
+                .border_color(if focused {
+                    theme::text()
+                } else {
+                    theme::muted()
+                })
+        };
         let el = Self::motion::<Left>(el, cx, |e| e.move_left(false));
         let el = Self::motion::<Right>(el, cx, |e| e.move_right(false));
         let el = Self::motion::<SelectLeft>(el, cx, |e| e.move_left(true));
@@ -409,7 +489,7 @@ impl Render for TextArea {
             .child(
                 div()
                     .w_full()
-                    .h_full()
+                    .when(!self.is_read_only(), Div::h_full)
                     .overflow_hidden()
                     .child(TextAreaElement { area: cx.entity() }),
             )

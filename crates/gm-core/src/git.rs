@@ -11,16 +11,19 @@ use std::time::{Duration, Instant};
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, CommitFile, DiffSide, FileDiff, HookScope, Hunk, HunkId,
-    PruneCandidate, RepoStatus, StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
+    MergedBranch, PruneCandidate, RepoStatus, StageTarget, StatusEntry, WorktreeEntry,
+    WorktreeMode,
 };
 
+use crate::branch;
 use crate::command_log::{CommandLog, CommandRecord, Source, bounded_text};
 use crate::commit_detail;
 use crate::commit_diff;
 use crate::diff::{hunk_patch, parse_unified};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
-use crate::port::{DetailRead, StackRead};
+use crate::port::{DetailRead, RemoteRun, StackRead};
+use crate::remote;
 use crate::stage_math;
 use crate::worktree;
 use crate::{GitError, GitPort};
@@ -169,6 +172,22 @@ impl SubprocessGit {
                 String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             ))
         }
+    }
+
+    /// The run of one remote command. It is built here and started on its own
+    /// thread. Git never prompts: a credential or host question fails the run
+    /// with Git's text instead of waiting for an answer nobody can give.
+    fn remote_run(&self, root: &Path, args: Vec<String>) -> RemoteRun {
+        let git = self.clone();
+        let root = root.to_path_buf();
+        Box::new(move || {
+            let mut command = git.git(&root);
+            command
+                .args(&args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::null());
+            git.logged(command, None).map(drop)
+        })
     }
 
     /// Whether the index differs from HEAD (from the empty tree on an unborn branch).
@@ -423,6 +442,14 @@ impl GitPort for SubprocessGit {
         Ok(String::from_utf8_lossy(&out).trim().to_owned())
     }
 
+    fn user_email(&self, root: &Path) -> Result<Option<String>, GitError> {
+        let mut command = self.git(root);
+        command.args(["config", "user.email"]);
+        // Exit 1 is git's answer for an unset key, not a failure.
+        let out = Self::run_allowing(command, &[0, 1])?;
+        Ok(clean_email(&String::from_utf8_lossy(&out)))
+    }
+
     fn branches(&self, root: &Path) -> Result<Vec<BranchEntry>, GitError> {
         let repo = open(root)?;
         let current = current_branch(&repo)?;
@@ -440,6 +467,7 @@ impl GitPort for SubprocessGit {
                 .transpose()?;
             local.push(BranchEntry {
                 is_current: current.as_deref() == Some(name.as_str()),
+                author_email: tip_author_email(&branch),
                 name,
                 is_remote: false,
                 upstream,
@@ -457,6 +485,7 @@ impl GitPort for SubprocessGit {
                 continue;
             }
             remote.push(BranchEntry {
+                author_email: tip_author_email(&branch),
                 name,
                 is_remote: true,
                 is_current: false,
@@ -769,6 +798,123 @@ impl GitPort for SubprocessGit {
         self.logged(command, None).map(drop)
     }
 
+    fn create_branch(
+        &self,
+        root: &Path,
+        name: &str,
+        start_point: Option<&str>,
+        checkout: bool,
+    ) -> Result<(), GitError> {
+        // The same rules the engine applies: a name or start point read as an option is refused here too.
+        if let Some(problem) =
+            branch::name_problem(name).or_else(|| start_point.and_then(branch::start_point_problem))
+        {
+            return Err(GitError(problem.into()));
+        }
+        let mut command = self.git(root);
+        if checkout {
+            let repo = open(root)?;
+            check_index_lock(&repo)?;
+            match start_point {
+                Some(start) => command.args(["checkout", "-b", name, start]),
+                None => command.args(["checkout", "-b", name]),
+            };
+        } else {
+            match start_point {
+                Some(start) => command.args(["branch", name, start]),
+                None => command.args(["branch", name]),
+            };
+        }
+        self.logged(command, None).map(drop)
+    }
+
+    fn delete_branch(&self, root: &Path, name: &str, force: bool) -> Result<(), GitError> {
+        if let Some(problem) = branch::name_problem(name) {
+            return Err(GitError(problem.into()));
+        }
+        let mut command = self.git(root);
+        command.args(["branch", if force { "-D" } else { "-d" }, name]);
+        self.logged(command, None).map(drop)
+    }
+
+    fn origin_head(&self, root: &Path) -> Result<Option<String>, GitError> {
+        // Git fails when origin/HEAD is not a symbolic ref, which is an answer here.
+        let mut command = self.git(root);
+        command.args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+        Ok(Self::run(command).ok().and_then(|out| {
+            let text = String::from_utf8_lossy(&out).trim().to_owned();
+            (!text.is_empty()).then_some(text)
+        }))
+    }
+
+    fn merged_branches(&self, root: &Path, base: &str) -> Result<Vec<MergedBranch>, GitError> {
+        // NUL separates the fields, so no subject can be mistaken for a separator.
+        let mut command = self.git(root);
+        command.args([
+            "branch",
+            "--merged",
+            base,
+            "--format=%(refname:short)%00%(objectname:short)%00%(contents:subject)",
+        ]);
+        let out = Self::run(command)?;
+        // `git branch -d` checks a branch against HEAD, not against the base, so
+        // a branch merged only into the base would be listed and then refused.
+        // Only the branches merged into HEAD as well are offered. An unborn HEAD
+        // merges nothing.
+        let mut into_head = self.git(root);
+        into_head.args(["branch", "--merged", "HEAD", "--format=%(refname:short)"]);
+        let head_out = Self::run(into_head).unwrap_or_default();
+        let head_merged: Vec<String> = String::from_utf8_lossy(&head_out)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        Ok(String::from_utf8_lossy(&out)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, '\0');
+                let name = fields.next()?.to_owned();
+                let tip = fields.next()?.to_owned();
+                let subject = fields.next().unwrap_or_default().to_owned();
+                Some(MergedBranch { name, tip, subject })
+            })
+            .filter(|merged| head_merged.contains(&merged.name))
+            .collect())
+    }
+
+    fn fetch(&self, root: &Path) -> Result<RemoteRun, GitError> {
+        Ok(self.remote_run(root, remote::fetch_args()))
+    }
+
+    fn pull(&self, root: &Path) -> Result<RemoteRun, GitError> {
+        let repo = open(root)?;
+        let branch = current_branch(&repo)?;
+        let upstream = match &branch {
+            Some(branch) => upstream_of(&repo, branch)?,
+            None => None,
+        };
+        let args = remote::pull_args(branch.as_deref(), upstream.is_some()).map_err(GitError)?;
+        Ok(self.remote_run(root, args))
+    }
+
+    fn push_with_lease(&self, root: &Path) -> Result<RemoteRun, GitError> {
+        let repo = open(root)?;
+        let branch = current_branch(&repo)?;
+        let upstream = match &branch {
+            Some(branch) => upstream_of(&repo, branch)?,
+            None => None,
+        };
+        let names = remote_names(&repo)?;
+        let args = remote::push_args(
+            branch.as_deref(),
+            upstream
+                .as_ref()
+                .map(|(remote, merge)| (remote.as_str(), merge.as_str())),
+            &names,
+        )
+        .map_err(GitError)?;
+        Ok(self.remote_run(root, args))
+    }
+
     fn hook_config(&self, root: &Path, scope: HookScope) -> Result<Vec<ConfigValue>, GitError> {
         // `--includes` follows `includeIf` and `include`: for the user scope
         // that is the point (D17), and for the repo scope it is why such hooks
@@ -859,6 +1005,39 @@ fn current_branch(repo: &Repository) -> Result<Option<String>, GitError> {
         .symbolic_target()
         .and_then(|target| target.strip_prefix("refs/heads/"))
         .map(str::to_owned))
+}
+
+/// The author email of the commit a branch points at. A tip that cannot be
+/// read gives `None` rather than failing the whole listing.
+fn tip_author_email(branch: &git2::Branch<'_>) -> Option<String> {
+    let commit = branch.get().peel_to_commit().ok()?;
+    clean_email(commit.author().email()?)
+}
+
+/// An email as the listing shows it: trimmed, without the angle brackets Git
+/// prints around it, and `None` when nothing is left.
+fn clean_email(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+        .unwrap_or(trimmed)
+        .trim();
+    (!inner.is_empty()).then(|| inner.to_owned())
+}
+
+/// The remote and the full name of the remote branch that `branch` tracks, when
+/// both `branch.<name>.remote` and `branch.<name>.merge` are set.
+fn upstream_of(repo: &Repository, branch: &str) -> Result<Option<(String, String)>, GitError> {
+    let config = repo.config().map_err(|e| git_err(&e))?;
+    let remote = config.get_string(&format!("branch.{branch}.remote")).ok();
+    let merge = config.get_string(&format!("branch.{branch}.merge")).ok();
+    Ok(remote.zip(merge))
+}
+
+fn remote_names(repo: &Repository) -> Result<Vec<String>, GitError> {
+    let names = repo.remotes().map_err(|e| git_err(&e))?;
+    Ok(names.iter().flatten().map(str::to_owned).collect())
 }
 
 fn has_ref(repo: &Repository, name: &str) -> bool {
@@ -1185,5 +1364,25 @@ u UU N... 100644 100644 100644 100644 a b c both.rs\0\
     #[test]
     fn a_truncated_record_is_an_error_not_a_panic() {
         assert!(parse_status(b"1 .M N...\0").is_err());
+    }
+
+    #[test]
+    fn clean_email_strips_the_angle_brackets() {
+        assert_eq!(
+            clean_email("<ana@example.com>").as_deref(),
+            Some("ana@example.com")
+        );
+        assert_eq!(
+            clean_email("  ana@example.com \n").as_deref(),
+            Some("ana@example.com")
+        );
+    }
+
+    #[test]
+    fn clean_email_gives_none_for_nothing() {
+        assert_eq!(clean_email(""), None);
+        assert_eq!(clean_email(" \n"), None);
+        assert_eq!(clean_email("<>"), None);
+        assert_eq!(clean_email("< >"), None);
     }
 }

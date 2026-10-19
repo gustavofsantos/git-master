@@ -12,6 +12,7 @@ use std::sync::{Mutex, PoisonError};
 
 use serde_json::{Map, Value, json};
 
+use crate::branch_filter::Scope;
 use crate::diff_rows::Layout;
 
 /// The preferences the app keeps. Each field has its default when unset.
@@ -19,6 +20,9 @@ use crate::diff_rows::Layout;
 pub struct AppSettings {
     /// The layout of the read-only commit diff (D39). Unified by default.
     pub diff_layout: Layout,
+    /// The scope the user chose for the sidebar's branches (D53). `None` until
+    /// they choose one, which leaves the default in force.
+    pub branch_scope: Option<Scope>,
 }
 
 impl AppSettings {
@@ -33,7 +37,14 @@ impl AppSettings {
             Some("split") => Layout::Split,
             _ => Layout::Unified,
         };
-        Self { diff_layout }
+        let branch_scope = fields
+            .get("branch_scope")
+            .and_then(Value::as_str)
+            .and_then(Scope::from_id);
+        Self {
+            diff_layout,
+            branch_scope,
+        }
     }
 
     /// The file's text once this app's settings are written into `existing`.
@@ -51,6 +62,10 @@ impl AppSettings {
             Layout::Split => "split",
         };
         fields.insert("diff_layout".to_owned(), json!(diff_layout));
+        match self.branch_scope {
+            Some(scope) => fields.insert("branch_scope".to_owned(), json!(scope.id())),
+            None => fields.remove("branch_scope"),
+        };
         // An object of JSON values always serializes.
         serde_json::to_string_pretty(&Value::Object(fields)).unwrap_or_else(|_| "{}".to_owned())
     }
@@ -158,6 +173,7 @@ mod tests {
     fn split() -> AppSettings {
         AppSettings {
             diff_layout: Layout::Split,
+            branch_scope: None,
         }
     }
 
@@ -171,6 +187,28 @@ mod tests {
         let unified = AppSettings::default();
         assert_eq!(AppSettings::parse(&unified.merge_into("")), unified);
         assert_eq!(AppSettings::parse(&split().merge_into("")), split());
+    }
+
+    #[test]
+    fn the_branch_scope_round_trips_and_an_unknown_one_reads_as_unset() {
+        let all = AppSettings {
+            branch_scope: Some(Scope::All),
+            ..split()
+        };
+        let text = all.merge_into("");
+        assert_eq!(AppSettings::parse(&text), all);
+        let unset = AppSettings {
+            branch_scope: None,
+            ..all
+        };
+        assert_eq!(
+            AppSettings::parse(&unset.merge_into(&text)).branch_scope,
+            None
+        );
+        assert_eq!(
+            AppSettings::parse(r#"{"branch_scope":"everyone"}"#).branch_scope,
+            None
+        );
     }
 
     #[test]

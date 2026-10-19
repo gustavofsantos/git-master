@@ -41,30 +41,43 @@ pub enum Row<'a> {
     },
 }
 
-/// The tree's rows for `branches` under `grouping`. Empty until a listing has
-/// arrived.
+/// The tree's rows for `branches` under `grouping`: the branches the filter
+/// kept, in the order listed. Empty until a listing has arrived. A header whose
+/// section has no branch left is not drawn.
 #[must_use]
-pub fn rows(branches: &[BranchEntry], grouping: Grouping) -> Vec<Row<'_>> {
-    if branches.is_empty() {
-        return Vec::new();
-    }
-    let local = branches.iter().filter(|branch| !branch.is_remote);
+pub fn rows<'a>(branches: &[&'a BranchEntry], grouping: Grouping) -> Vec<Row<'a>> {
     let mut rows = Vec::new();
+    if branches.is_empty() {
+        return rows;
+    }
+    let local: Vec<&'a BranchEntry> = branches
+        .iter()
+        .copied()
+        .filter(|branch| !branch.is_remote)
+        .collect();
+    let remote: Vec<&'a BranchEntry> = branches
+        .iter()
+        .copied()
+        .filter(|branch| branch.is_remote)
+        .collect();
     match grouping {
         Grouping::ByStack => {
             rows.push(Row::Header("Stacks"));
             rows.push(Row::Note("No stacks yet"));
-            rows.push(Row::Header("No stack"));
-            rows.extend(local.map(|branch| Row::Branch {
-                branch,
-                label: &branch.name,
-                indented: false,
-            }));
+            if !local.is_empty() {
+                rows.push(Row::Header("No stack"));
+                rows.extend(local.into_iter().map(|branch| Row::Branch {
+                    branch,
+                    label: &branch.name,
+                    indented: false,
+                }));
+            }
         }
         Grouping::ByName => {
-            rows.push(Row::Header("Local"));
-            grouped(&mut rows, local);
-            let remote: Vec<&BranchEntry> = branches.iter().filter(|b| b.is_remote).collect();
+            if !local.is_empty() {
+                rows.push(Row::Header("Local"));
+                grouped(&mut rows, local.into_iter());
+            }
             if !remote.is_empty() {
                 rows.push(Row::Header("Remote"));
                 grouped(&mut rows, remote.into_iter());
@@ -111,7 +124,28 @@ mod tests {
             is_remote: remote,
             is_current: false,
             upstream: None,
+            author_email: None,
         }
+    }
+
+    /// The branches as the filter hands them over: all of them, in order.
+    fn refs(all: &[BranchEntry]) -> Vec<&BranchEntry> {
+        all.iter().collect()
+    }
+
+    /// The rows as short text, for comparing whole trees.
+    fn texts(shown: &[Row<'_>]) -> Vec<String> {
+        shown
+            .iter()
+            .map(|row| match row {
+                Row::Header(title) => format!("# {title}"),
+                Row::Note(text) => format!("~ {text}"),
+                Row::Group(prefix) => format!("{prefix}/"),
+                Row::Branch {
+                    label, indented, ..
+                } => format!("{}{label}", if *indented { "  " } else { "" }),
+            })
+            .collect()
     }
 
     #[test]
@@ -127,7 +161,7 @@ mod tests {
             branch("origin/main", true),
             branch("topic", false),
         ];
-        let shown = rows(&all, Grouping::ByStack);
+        let shown = rows(&refs(&all), Grouping::ByStack);
         assert_eq!(shown[0], Row::Header("Stacks"));
         assert_eq!(shown[1], Row::Note("No stacks yet"));
         assert_eq!(shown[2], Row::Header("No stack"));
@@ -149,20 +183,9 @@ mod tests {
             branch("main", false),
             branch("origin/main", true),
         ];
-        let shown = rows(&all, Grouping::ByName);
-        let kinds: Vec<String> = shown
-            .iter()
-            .map(|row| match row {
-                Row::Header(title) => format!("# {title}"),
-                Row::Note(text) => format!("~ {text}"),
-                Row::Group(prefix) => format!("{prefix}/"),
-                Row::Branch {
-                    label, indented, ..
-                } => format!("{}{label}", if *indented { "  " } else { "" }),
-            })
-            .collect();
+        let shown = rows(&refs(&all), Grouping::ByName);
         assert_eq!(
-            kinds,
+            texts(&shown),
             [
                 "# Local", "feature/", "  a", "  b", "main", "# Remote", "origin/", "  main"
             ]
@@ -172,7 +195,40 @@ mod tests {
     #[test]
     fn by_name_leaves_out_an_empty_remote_section() {
         let all = [branch("main", false)];
-        let shown = rows(&all, Grouping::ByName);
+        let shown = rows(&refs(&all), Grouping::ByName);
         assert!(!shown.contains(&Row::Header("Remote")));
+    }
+
+    #[test]
+    fn a_filtered_out_group_leaves_no_header_behind() {
+        let all = [
+            branch("feature/a", false),
+            branch("main", false),
+            branch("origin/feature/a", true),
+        ];
+        // The filter kept `main` and the remote branch only.
+        let kept = [&all[1], &all[2]];
+        assert_eq!(
+            texts(&rows(&kept, Grouping::ByName)),
+            ["# Local", "main", "# Remote", "origin/", "  feature/a"]
+        );
+        let local_gone = [&all[2]];
+        assert_eq!(
+            texts(&rows(&local_gone, Grouping::ByName)),
+            ["# Remote", "origin/", "  feature/a"]
+        );
+    }
+
+    #[test]
+    fn by_stack_drops_the_no_stack_header_when_no_local_branch_is_left() {
+        let all = [branch("origin/main", true)];
+        let shown = rows(&refs(&all), Grouping::ByStack);
+        assert_eq!(texts(&shown), ["# Stacks", "~ No stacks yet"]);
+    }
+
+    #[test]
+    fn nothing_kept_gives_no_rows() {
+        assert!(rows(&[], Grouping::ByName).is_empty());
+        assert!(rows(&[], Grouping::ByStack).is_empty());
     }
 }

@@ -3,8 +3,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
-    BranchEntry, CommitDetail, CommitFile, DiffSide, FileDiff, HookScope, HunkId, PruneCandidate,
-    RepoStatus, StageTarget, WorktreeEntry, WorktreeMode,
+    BranchEntry, CommitDetail, CommitFile, DiffSide, FileDiff, HookScope, HunkId, MergedBranch,
+    PruneCandidate, RepoStatus, StageTarget, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::CommandLog;
@@ -30,6 +30,10 @@ pub type DetailRead = Box<dyn FnOnce(&AtomicBool) -> Result<CommitDetail, GitErr
 /// The read of every file's diff in a commit, started by `GitPort::commit_stack`.
 /// It stops the same way a `DetailRead` does (H4c).
 pub type StackRead = Box<dyn FnOnce(&AtomicBool) -> Result<Vec<FileDiff>, GitError> + Send>;
+
+/// A remote operation the adapter has checked: the Git run that is left. It
+/// runs on a thread of its own, and its error is Git's own text.
+pub type RemoteRun = Box<dyn FnOnce() -> Result<(), GitError> + Send>;
 
 /// What the core needs from Git. Adapters implement it; the core tests with fakes.
 pub trait GitPort: Send {
@@ -70,6 +74,12 @@ pub trait GitPort: Send {
     /// records anything.
     fn branches(&self, _root: &Path) -> Result<Vec<BranchEntry>, GitError> {
         Err(GitError("branches is not supported by this adapter".into()))
+    }
+
+    /// The configured `user.email` without angle brackets; `None` when unset.
+    /// Never records anything.
+    fn user_email(&self, _root: &Path) -> Result<Option<String>, GitError> {
+        Ok(None)
     }
 
     /// The worktrees of the repository, the main checkout first. Never
@@ -175,6 +185,64 @@ pub trait GitPort: Send {
     /// branch of the same short name. Git's own refusal is the error.
     fn checkout(&self, _root: &Path, _branch: &str) -> Result<(), GitError> {
         Err(GitError("checkout is not supported by this adapter".into()))
+    }
+
+    /// Creates the local branch `name` at `start_point` (HEAD when `None`), and
+    /// checks it out when `checkout` is set. Git's own refusal is the error.
+    fn create_branch(
+        &self,
+        _root: &Path,
+        _name: &str,
+        _start_point: Option<&str>,
+        _checkout: bool,
+    ) -> Result<(), GitError> {
+        Err(GitError(
+            "create branch is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Deletes the local branch `name`: `git branch -d`, or `-D` when `force`.
+    /// Git's own refusal is the error.
+    fn delete_branch(&self, _root: &Path, _name: &str, _force: bool) -> Result<(), GitError> {
+        Err(GitError(
+            "delete branch is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The branch `refs/remotes/origin/HEAD` names, as `git symbolic-ref --short`
+    /// prints it (`origin/main`); `None` when that ref is not there. Never records
+    /// anything.
+    fn origin_head(&self, _root: &Path) -> Result<Option<String>, GitError> {
+        Ok(None)
+    }
+
+    /// The local branches `git branch --merged <base>` lists, with their tips.
+    /// Never records anything.
+    fn merged_branches(&self, _root: &Path, _base: &str) -> Result<Vec<MergedBranch>, GitError> {
+        Err(GitError(
+            "merged branches is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Checks a `git fetch --all --prune` of the repository at `root` and returns
+    /// the run that does it. Starts no process itself. Human only (the engine checks).
+    fn fetch(&self, _root: &Path) -> Result<RemoteRun, GitError> {
+        Err(GitError("fetch is not supported by this adapter".into()))
+    }
+
+    /// Checks a `git pull --ff-only` of the current branch and returns the run.
+    /// Refuses a detached HEAD and a branch without an upstream, before Git runs.
+    fn pull(&self, _root: &Path) -> Result<RemoteRun, GitError> {
+        Err(GitError("pull is not supported by this adapter".into()))
+    }
+
+    /// Checks a `git push --force-with-lease` of the current branch alone and
+    /// returns the run. Refuses a detached HEAD, and a branch with no upstream
+    /// when there is no remote or more than one.
+    fn push_with_lease(&self, _root: &Path) -> Result<RemoteRun, GitError> {
+        Err(GitError(
+            "push with lease is not supported by this adapter".into(),
+        ))
     }
 
     /// The `gitmaster.prepare-commit.*` keys of one scope, in config order.

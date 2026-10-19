@@ -13,6 +13,8 @@ use gm_schema::{
     CommandKind, DiffSide, HunkId, OperationId, StageTarget, StatusEntry, WorktreeEntry,
 };
 
+use crate::branch_filter::Scope;
+
 /// Why an action is not enabled, as a short English sentence for the user.
 pub type Reason = &'static str;
 
@@ -45,9 +47,12 @@ impl Category {
 pub enum ArgKind {
     None,
     Branch,
+    /// No target, or a branch as the start point when the run names one.
+    OptionalBranch,
     File,
     Chunk,
     Worktree,
+    Commit,
 }
 
 /// The target of one run. Its kind must match the action's `ArgKind`.
@@ -65,6 +70,8 @@ pub enum Args {
     },
     /// The worktree whose folder is `path`, as the list gives it.
     Worktree(String),
+    /// The text to copy from a commit of the history page: its id, or its message.
+    Commit(String),
 }
 
 /// Static description of an action.
@@ -86,6 +93,8 @@ pub enum Effect {
     Send(Vec<CommandKind>),
     /// Text for the clipboard.
     Copy(String),
+    /// The commit message for the clipboard, noticed as a message and not echoed.
+    CopyMessage(String),
     /// Replaces the composer text with the suggestion.
     UseSuggestion(String),
     /// Drops the suggestion; the composer keeps its text.
@@ -96,9 +105,10 @@ pub enum Effect {
     Reveal(PathBuf),
     FocusCommitMessage,
     /// Opens the create-worktree dialog, with `branch` chosen as the branch
-    /// to check out (the dialog's Git refusal, if any, is shown there).
+    /// to check out when there is one. Without it the dialog starts empty and
+    /// the branch is typed or picked there.
     OpenWorktreeDialog {
-        branch: String,
+        branch: Option<String>,
     },
     /// Opens the worktree at this path in its own window.
     OpenWorktree(String),
@@ -107,8 +117,20 @@ pub enum Effect {
     OpenRemoveDialog(String),
     /// Opens the prune dialog, which lists the stale records before anything is removed.
     OpenPruneDialog,
+    /// Opens the new-branch dialog. `start` is the commit the new branch starts
+    /// from; `None` is the checked-out branch.
+    OpenNewBranchDialog {
+        start: Option<String>,
+    },
+    /// Opens the delete-branch dialog, which asks before the branch goes.
+    OpenDeleteBranchDialog(String),
+    /// Opens the delete-merged-branches dialog, which lists what Git would
+    /// delete and asks before anything goes.
+    OpenMergedBranchesDialog,
     /// Opens the history page and asks the engine for the commits of HEAD.
     ShowHistory,
+    /// Sets the sidebar's branches to the scope the window names (D53).
+    SetBranchScope(Scope),
 }
 
 /// What the window knows of the prepare-commit hooks, for the rules.
@@ -143,10 +165,16 @@ pub struct Context<'a> {
     pub hooks: HookCtx<'a>,
     /// The worktrees listed for the open repository, main checkout first.
     pub worktrees: &'a [WorktreeEntry],
+    /// The scope in effect for the sidebar's branches now (D53).
+    pub branch_scope: Scope,
+    /// Whether Git has a `user.email` to match branches against.
+    pub user_email_known: bool,
+    /// A fetch, pull or push with lease is in flight; the three refuse another one meanwhile.
+    pub remote_running: bool,
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 35] = [
+const SPECS: [Spec; 42] = [
     spec(
         "file.stage",
         "Stage File",
@@ -225,6 +253,13 @@ const SPECS: [Spec; 35] = [
         Category::Commit,
     ),
     spec(
+        "branch.new",
+        "New Branch…",
+        None,
+        ArgKind::OptionalBranch,
+        Category::Branches,
+    ),
+    spec(
         "branch.new_child",
         "New Child Branch",
         Some("⌘B"),
@@ -264,6 +299,13 @@ const SPECS: [Spec; 35] = [
         "Create Worktree",
         Some("⌥⌘W"),
         ArgKind::Branch,
+        Category::Worktrees,
+    ),
+    spec(
+        "worktree.new",
+        "New Worktree…",
+        None,
+        ArgKind::None,
         Category::Worktrees,
     ),
     spec(
@@ -386,6 +428,41 @@ const SPECS: [Spec; 35] = [
         ArgKind::None,
         Category::Repository,
     ),
+    spec(
+        "branch.show_mine",
+        "Show Only My Branches",
+        None,
+        ArgKind::None,
+        Category::Branches,
+    ),
+    spec(
+        "branch.show_all",
+        "Show All Branches",
+        None,
+        ArgKind::None,
+        Category::Branches,
+    ),
+    spec(
+        "commit.copy_hash",
+        "Copy Commit Hash",
+        None,
+        ArgKind::Commit,
+        Category::Commit,
+    ),
+    spec(
+        "commit.copy_message",
+        "Copy Commit Message",
+        None,
+        ArgKind::Commit,
+        Category::Commit,
+    ),
+    spec(
+        "branch.delete_merged",
+        "Delete Merged Branches…",
+        None,
+        ArgKind::None,
+        Category::Branches,
+    ),
 ];
 
 const fn spec(
@@ -419,12 +496,14 @@ pub enum Action {
     CopyBranchName,
     CopyFilePath,
     FocusCommitMessage,
+    NewBranch,
     NewChildBranch,
     Restack,
     PushWithLease,
     RenameBranch,
     DeleteBranch,
     CreateWorktree,
+    NewWorktree,
     DiscardFile,
     RevealFile,
     SuggestMessage,
@@ -443,6 +522,11 @@ pub enum Action {
     UnlockWorktree,
     PruneWorktrees,
     ShowHistory,
+    ShowOnlyMyBranches,
+    ShowAllBranches,
+    CopyCommitHash,
+    CopyCommitMessage,
+    DeleteMergedBranches,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -470,6 +554,34 @@ fn shortcut_words(shortcut: &str, mac: bool) -> String {
     }
     parts.push(key);
     parts.join("+")
+}
+
+/// The rule of Reveal in File Manager: a repository is open and the file is in it.
+fn reveal_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    if ctx.root.is_none() {
+        return Err("No repository is open.");
+    }
+    file_entry(args, ctx).map(|_| ())
+}
+
+/// The rule of the two sidebar scope actions: each is refused when it would
+/// change nothing, and Mine is refused when Git has no email to match.
+fn scope_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
+    if !ctx.repo_open {
+        return Err("No repository is open.");
+    }
+    match action {
+        Action::ShowOnlyMyBranches if !ctx.user_email_known => {
+            Err("Git has no user.email to match branches against.")
+        }
+        Action::ShowOnlyMyBranches if ctx.branch_scope == Scope::Mine => {
+            Err("Already showing only your branches.")
+        }
+        Action::ShowAllBranches if ctx.branch_scope == Scope::All => {
+            Err("Already showing all branches.")
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The rule of a worktree action: whether its worktree allows it now.
@@ -510,7 +622,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 35] = [
+    pub const ALL: [Action; 42] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -522,12 +634,14 @@ impl Action {
         Action::CopyBranchName,
         Action::CopyFilePath,
         Action::FocusCommitMessage,
+        Action::NewBranch,
         Action::NewChildBranch,
         Action::Restack,
         Action::PushWithLease,
         Action::RenameBranch,
         Action::DeleteBranch,
         Action::CreateWorktree,
+        Action::NewWorktree,
         Action::DiscardFile,
         Action::RevealFile,
         Action::SuggestMessage,
@@ -546,6 +660,11 @@ impl Action {
         Action::UnlockWorktree,
         Action::PruneWorktrees,
         Action::ShowHistory,
+        Action::ShowOnlyMyBranches,
+        Action::ShowAllBranches,
+        Action::CopyCommitHash,
+        Action::CopyCommitMessage,
+        Action::DeleteMergedBranches,
     ];
 
     #[must_use]
@@ -570,14 +689,7 @@ impl Action {
     pub fn available(self) -> bool {
         !matches!(
             self,
-            Action::NewChildBranch
-                | Action::Restack
-                | Action::PushWithLease
-                | Action::RenameBranch
-                | Action::DeleteBranch
-                | Action::DiscardFile
-                | Action::Fetch
-                | Action::Pull
+            Action::NewChildBranch | Action::Restack | Action::RenameBranch | Action::DiscardFile
         )
     }
 
@@ -589,7 +701,20 @@ impl Action {
             Action::DiscardChunk
                 | Action::DiscardFile
                 | Action::DeleteBranch
+                | Action::DeleteMergedBranches
                 | Action::RemoveWorktree
+        )
+    }
+
+    /// Whether the action is only its target: copying or focusing needs no rule of its own.
+    fn copies_its_target(self) -> bool {
+        matches!(
+            self,
+            Action::CopyBranchName
+                | Action::CopyFilePath
+                | Action::FocusCommitMessage
+                | Action::CopyCommitHash
+                | Action::CopyCommitMessage
         )
     }
 
@@ -612,7 +737,13 @@ impl Action {
     pub fn opens_dialog(self) -> bool {
         matches!(
             self,
-            Action::CreateWorktree | Action::RemoveWorktree | Action::PruneWorktrees
+            Action::CreateWorktree
+                | Action::NewWorktree
+                | Action::RemoveWorktree
+                | Action::PruneWorktrees
+                | Action::NewBranch
+                | Action::DeleteBranch
+                | Action::DeleteMergedBranches
         )
     }
 
@@ -692,14 +823,9 @@ impl Action {
             _ if self.is_worktree_rule() => worktree_rule(self, args, ctx),
             Action::Refresh
             | Action::CreateWorktree
+            | Action::NewWorktree
             | Action::PruneWorktrees
-            | Action::ShowHistory => {
-                if ctx.repo_open {
-                    Ok(())
-                } else {
-                    Err("No repository is open.")
-                }
-            }
+            | Action::ShowHistory => repository_open(ctx),
             Action::CheckoutBranch => {
                 idle(ctx)?;
                 match args {
@@ -709,13 +835,12 @@ impl Action {
                     _ => Ok(()),
                 }
             }
-            Action::RevealFile => {
-                if ctx.root.is_none() {
-                    return Err("No repository is open.");
-                }
-                file_entry(args, ctx).map(|_| ())
-            }
-            Action::CopyBranchName | Action::CopyFilePath | Action::FocusCommitMessage => Ok(()),
+            Action::NewBranch | Action::DeleteBranch => branch_rule(self, args, ctx),
+            Action::DeleteMergedBranches => idle(ctx),
+            Action::RevealFile => reveal_rule(args, ctx),
+            Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
+            _ if self.copies_its_target() => Ok(()),
+            Action::Fetch | Action::Pull | Action::PushWithLease => remote_rule(self, args, ctx),
             Action::SuggestMessage
             | Action::CancelHook
             | Action::UseSuggestion
@@ -763,6 +888,9 @@ impl Action {
                 message: ctx.message.to_owned(),
             }]),
             (Action::Refresh, _) => Effect::Send(vec![CommandKind::RefreshStatus]),
+            (Action::Fetch, _) => Effect::Send(vec![CommandKind::Fetch]),
+            (Action::Pull, _) => Effect::Send(vec![CommandKind::Pull]),
+            (Action::PushWithLease, _) => Effect::Send(vec![CommandKind::PushWithLease]),
             (Action::CheckoutBranch, Args::Branch(name)) => {
                 Effect::Send(vec![CommandKind::Checkout {
                     branch: name.clone(),
@@ -770,15 +898,17 @@ impl Action {
             }
             (Action::CopyBranchName, Args::Branch(text))
             | (Action::CopyFilePath, Args::File(text))
-            | (Action::CopyWorktreePath, Args::Worktree(text)) => Effect::Copy(text.clone()),
+            | (Action::CopyWorktreePath, Args::Worktree(text))
+            | (Action::CopyCommitHash, Args::Commit(text)) => Effect::Copy(text.clone()),
             (Action::RevealFile, Args::File(path)) => {
                 // `enabled` has checked that the root is there.
                 Effect::Reveal(PathBuf::from(ctx.root.unwrap_or_default()).join(path))
             }
             (Action::FocusCommitMessage, _) => Effect::FocusCommitMessage,
             (Action::CreateWorktree, Args::Branch(name)) => Effect::OpenWorktreeDialog {
-                branch: name.clone(),
+                branch: Some(name.clone()),
             },
+            (Action::NewWorktree, _) => Effect::OpenWorktreeDialog { branch: None },
             (Action::OpenWorktree, Args::Worktree(path)) => Effect::OpenWorktree(path.clone()),
             (Action::RevealWorktree, Args::Worktree(path)) => Effect::Reveal(PathBuf::from(path)),
             (Action::RemoveWorktree, Args::Worktree(path)) => {
@@ -796,29 +926,26 @@ impl Action {
             }
             (Action::PruneWorktrees, _) => Effect::OpenPruneDialog,
             (Action::ShowHistory, _) => Effect::ShowHistory,
-            (Action::SuggestMessage, _) => Effect::Send(vec![CommandKind::RunPrepareCommit {
-                message: ctx.message.to_owned(),
-            }]),
-            (Action::CancelHook, _) => match ctx.hooks.running {
-                Some(run) => Effect::Send(vec![CommandKind::CancelHook { run }]),
-                None => return Err("No hook is running."),
+            (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
+            (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
+            (Action::CopyCommitMessage, Args::Commit(text)) => Effect::CopyMessage(text.clone()),
+            (Action::NewBranch, Args::Branch(name)) => Effect::OpenNewBranchDialog {
+                start: Some(name.clone()),
             },
-            (Action::UseSuggestion, _) => match ctx.hooks.suggestion {
-                Some(text) => Effect::UseSuggestion(text.to_owned()),
-                None => return Err("There is no suggestion."),
-            },
-            (Action::DiscardSuggestion, _) => Effect::DiscardSuggestion,
-            (Action::ApproveHook, _) => match ctx.hooks.pending_approval {
-                Some((name, hash)) => Effect::Send(vec![CommandKind::ApproveHook {
-                    name: name.to_owned(),
-                    command_hash: hash.to_owned(),
-                }]),
-                None => return Err("No repository hook waits for approval."),
-            },
-            (Action::DenyHook, _) => match ctx.hooks.pending_approval {
-                Some((_, hash)) => Effect::DenyHook(hash.to_owned()),
-                None => return Err("No repository hook waits for approval."),
-            },
+            (Action::NewBranch, _) => Effect::OpenNewBranchDialog { start: None },
+            (Action::DeleteBranch, Args::Branch(name)) => {
+                Effect::OpenDeleteBranchDialog(name.clone())
+            }
+            (Action::DeleteMergedBranches, _) => Effect::OpenMergedBranchesDialog,
+            (
+                Action::SuggestMessage
+                | Action::CancelHook
+                | Action::UseSuggestion
+                | Action::DiscardSuggestion
+                | Action::ApproveHook
+                | Action::DenyHook,
+                _,
+            ) => hook_effect(self, ctx)?,
             // Only reached when `enabled` said Ok, which no placeholder does.
             _ => return Err(NOT_AVAILABLE),
         })
@@ -829,11 +956,32 @@ impl Action {
         matches!(
             (self.spec().args, args),
             (ArgKind::None, Args::None)
+                | (ArgKind::OptionalBranch, Args::None | Args::Branch(_))
                 | (ArgKind::Branch, Args::Branch(_))
                 | (ArgKind::File, Args::File(_))
                 | (ArgKind::Chunk, Args::Chunk { .. })
                 | (ArgKind::Worktree, Args::Worktree(_))
+                | (ArgKind::Commit, Args::Commit(_))
         )
+    }
+}
+
+/// The rule of the actions that create or delete a local branch. A delete
+/// refuses the branch that is checked out, and one another worktree has.
+fn branch_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    idle(ctx)?;
+    let Args::Branch(name) = args else {
+        return Ok(());
+    };
+    let current = ctx.current_branch == Some(name.as_str());
+    let elsewhere = ctx
+        .worktrees
+        .iter()
+        .any(|entry| entry.branch.as_deref() == Some(name.as_str()));
+    match action {
+        Action::DeleteBranch if current => Err("Cannot delete the checked-out branch"),
+        Action::DeleteBranch if elsewhere => Err("Checked out in another worktree"),
+        _ => Ok(()),
     }
 }
 
@@ -884,6 +1032,37 @@ pub fn has_unstaged(entry: &StatusEntry) -> bool {
     entry.unstaged.is_some() || entry.untracked || entry.conflicted
 }
 
+/// Refuses while no repository is open.
+fn repository_open(ctx: &Context<'_>) -> Result<(), Reason> {
+    if ctx.repo_open {
+        Ok(())
+    } else {
+        Err("No repository is open.")
+    }
+}
+
+/// The rule of the remote commands: a repository, no change in flight and no
+/// other remote operation. Pull and push need a checked-out branch, and push
+/// takes only that branch, so the engine never has to guess one.
+fn remote_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    idle(ctx)?;
+    if ctx.remote_running {
+        return Err("A remote operation is running");
+    }
+    if action == Action::Fetch {
+        return Ok(());
+    }
+    let Some(branch) = ctx.current_branch else {
+        return Err("Check out a branch first: HEAD is detached.");
+    };
+    match args {
+        Args::Branch(name) if name.as_str() != branch => {
+            Err("Only the checked-out branch can be pushed.")
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Refuses while an open or a checkout is in flight.
 fn idle(ctx: &Context<'_>) -> Result<(), Reason> {
     if !ctx.repo_open {
@@ -900,6 +1079,38 @@ fn file_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a StatusEntry, Rea
         .iter()
         .find(|entry| entry.path == *path)
         .ok_or("That file is not in the working copy")
+}
+
+/// What a hook action does, given the state of the hooks in `ctx`.
+fn hook_effect(action: Action, ctx: &Context<'_>) -> Result<Effect, Reason> {
+    Ok(match action {
+        Action::SuggestMessage => Effect::Send(vec![CommandKind::RunPrepareCommit {
+            message: ctx.message.to_owned(),
+        }]),
+        Action::CancelHook => match ctx.hooks.running {
+            Some(run) => Effect::Send(vec![CommandKind::CancelHook { run }]),
+            None => return Err("No hook is running."),
+        },
+        Action::UseSuggestion => match ctx.hooks.suggestion {
+            Some(text) => Effect::UseSuggestion(text.to_owned()),
+            None => return Err("There is no suggestion."),
+        },
+        Action::DiscardSuggestion => Effect::DiscardSuggestion,
+        Action::ApproveHook | Action::DenyHook => {
+            let Some((name, hash)) = ctx.hooks.pending_approval else {
+                return Err("No repository hook waits for approval.");
+            };
+            if action == Action::ApproveHook {
+                Effect::Send(vec![CommandKind::ApproveHook {
+                    name: name.to_owned(),
+                    command_hash: hash.to_owned(),
+                }])
+            } else {
+                Effect::DenyHook(hash.to_owned())
+            }
+        }
+        _ => return Err(NOT_AVAILABLE),
+    })
 }
 
 #[cfg(test)]
@@ -939,6 +1150,9 @@ mod tests {
             root: Some("/repo"),
             hooks: crate::action_registry::HookCtx::default(),
             worktrees: &[],
+            branch_scope: Scope::All,
+            user_email_known: false,
+            remote_running: false,
         }
     }
 
@@ -1012,12 +1226,8 @@ mod tests {
         let placeholders = [
             Action::NewChildBranch,
             Action::Restack,
-            Action::PushWithLease,
             Action::RenameBranch,
-            Action::DeleteBranch,
             Action::DiscardFile,
-            Action::Fetch,
-            Action::Pull,
         ];
         for action in placeholders {
             let args = match action.spec().args {
@@ -1046,6 +1256,99 @@ mod tests {
     }
 
     #[test]
+    fn fetch_pull_and_push_are_enabled_on_a_branch_and_send_their_command() {
+        let context = ctx(&[], "");
+        assert!(Action::Fetch.available());
+        assert!(Action::Pull.available());
+        assert!(Action::PushWithLease.available());
+        assert_eq!(
+            Action::Fetch.plan(&Args::None, &context),
+            Ok(Effect::Send(vec![CommandKind::Fetch]))
+        );
+        assert_eq!(
+            Action::Pull.plan(&Args::None, &context),
+            Ok(Effect::Send(vec![CommandKind::Pull]))
+        );
+        assert_eq!(
+            Action::PushWithLease.plan(&Args::Branch("main".into()), &context),
+            Ok(Effect::Send(vec![CommandKind::PushWithLease]))
+        );
+    }
+
+    #[test]
+    fn a_remote_operation_in_flight_refuses_all_three_with_one_reason() {
+        let entries: [StatusEntry; 0] = [];
+        let running = Context {
+            remote_running: true,
+            ..ctx(&entries, "")
+        };
+        for (action, args) in [
+            (Action::Fetch, Args::None),
+            (Action::Pull, Args::None),
+            (Action::PushWithLease, Args::Branch("main".into())),
+        ] {
+            assert_eq!(
+                action.enabled(&args, &running),
+                Err("A remote operation is running"),
+                "{action:?}"
+            );
+            assert_eq!(
+                action.plan(&args, &running),
+                Err("A remote operation is running"),
+                "{action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_commands_need_a_repository_and_a_branch_to_act_on() {
+        let entries: [StatusEntry; 0] = [];
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&entries, "")
+        };
+        assert_eq!(
+            Action::Fetch.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        let detached = Context {
+            current_branch: None,
+            ..ctx(&entries, "")
+        };
+        assert_eq!(Action::Fetch.enabled(&Args::None, &detached), Ok(()));
+        assert_eq!(
+            Action::Pull.enabled(&Args::None, &detached),
+            Err("Check out a branch first: HEAD is detached.")
+        );
+        assert_eq!(
+            Action::PushWithLease.enabled(&Args::Branch(String::new()), &detached),
+            Err("Check out a branch first: HEAD is detached.")
+        );
+        let busy = Context {
+            busy: Some("Wait for the branch checkout to finish."),
+            ..ctx(&entries, "")
+        };
+        assert_eq!(
+            Action::Fetch.enabled(&Args::None, &busy),
+            Err("Wait for the branch checkout to finish.")
+        );
+    }
+
+    #[test]
+    fn push_with_lease_pushes_only_the_checked_out_branch() {
+        let entries: [StatusEntry; 0] = [];
+        let context = ctx(&entries, "");
+        assert_eq!(
+            Action::PushWithLease.enabled(&Args::Branch("main".into()), &context),
+            Ok(())
+        );
+        assert_eq!(
+            Action::PushWithLease.enabled(&Args::Branch("feature".into()), &context),
+            Err("Only the checked-out branch can be pushed.")
+        );
+    }
+
+    #[test]
     fn create_worktree_is_enabled_for_a_branch_and_plans_the_dialog() {
         let context = ctx(&[], "");
         let args = Args::Branch("feature".into());
@@ -1053,10 +1356,75 @@ mod tests {
         assert_eq!(
             Action::CreateWorktree.plan(&args, &context),
             Ok(Effect::OpenWorktreeDialog {
-                branch: "feature".into()
+                branch: Some("feature".into())
             })
         );
         assert!(Action::CreateWorktree.available());
+    }
+
+    #[test]
+    fn new_worktree_needs_only_an_open_repository_and_opens_the_dialog_empty() {
+        let context = ctx(&[], "");
+        assert_eq!(Action::NewWorktree.enabled(&Args::None, &context), Ok(()));
+        assert_eq!(
+            Action::NewWorktree.plan(&Args::None, &context),
+            Ok(Effect::OpenWorktreeDialog { branch: None })
+        );
+        assert!(Action::NewWorktree.available());
+        assert!(Action::NewWorktree.opens_dialog());
+        assert_eq!(Action::NewWorktree.spec().args, ArgKind::None);
+        assert_eq!(Action::NewWorktree.spec().category, Category::Worktrees);
+        assert_eq!(Action::NewWorktree.spec().title, "New Worktree…");
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::NewWorktree.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::NewWorktree.enabled(&Args::Branch("main".into()), &context),
+            Err("No target for this action")
+        );
+    }
+
+    #[test]
+    fn the_worktree_actions_that_act_on_a_listed_worktree_take_a_worktree() {
+        let on_a_worktree = [
+            Action::OpenWorktree,
+            Action::RevealWorktree,
+            Action::CopyWorktreePath,
+            Action::RemoveWorktree,
+            Action::LockWorktree,
+            Action::UnlockWorktree,
+        ];
+        for action in on_a_worktree {
+            assert_eq!(action.spec().args, ArgKind::Worktree, "{}", action.id());
+        }
+        // Create, New and Prune work on the repository, not on a listed worktree.
+        assert_eq!(Action::CreateWorktree.spec().args, ArgKind::Branch);
+        assert_eq!(Action::NewWorktree.spec().args, ArgKind::None);
+        assert_eq!(Action::PruneWorktrees.spec().args, ArgKind::None);
+    }
+
+    #[test]
+    fn a_worktree_action_takes_only_a_worktree_target() {
+        let context = ctx(&[], "");
+        let target = Args::Worktree("/repo-feature".into());
+        assert_eq!(
+            Action::RemoveWorktree.enabled(&Args::None, &context),
+            Err("No target for this action")
+        );
+        assert_eq!(
+            Action::RemoveWorktree.enabled(&Args::Branch("main".into()), &context),
+            Err("No target for this action")
+        );
+        // A listed worktree's rule decides; this one is not listed, so it says so.
+        assert_eq!(
+            Action::RemoveWorktree.enabled(&target, &context),
+            Err("This worktree is not listed.")
+        );
     }
 
     #[test]
@@ -1166,6 +1534,30 @@ mod tests {
         assert_eq!(
             Action::Commit.enabled(&Args::None, &ctx(&entries, "subject")),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn copying_a_commit_takes_the_commit_it_names() {
+        let context = ctx(&[], "");
+        let hash = Args::Commit("3f2a9c1d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a39".into());
+        assert_eq!(
+            Action::CopyCommitHash.plan(&hash, &context),
+            Ok(Effect::Copy(
+                "3f2a9c1d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a39".into()
+            ))
+        );
+        assert_eq!(
+            Action::CopyCommitMessage.plan(&Args::Commit("fix: a\n\nbody".into()), &context),
+            Ok(Effect::CopyMessage("fix: a\n\nbody".into()))
+        );
+        assert_eq!(
+            Action::CopyCommitHash.enabled(&Args::None, &context),
+            Err("No target for this action")
+        );
+        assert_eq!(
+            Action::CopyCommitMessage.enabled(&Args::File("a.txt".into()), &context),
+            Err("No target for this action")
         );
     }
 
@@ -1303,8 +1695,41 @@ mod tests {
                 Action::DiscardChunk,
                 Action::DeleteBranch,
                 Action::DiscardFile,
-                Action::RemoveWorktree
+                Action::RemoveWorktree,
+                Action::DeleteMergedBranches
             ]
+        );
+    }
+
+    #[test]
+    fn delete_merged_branches_opens_its_dialog_and_needs_an_idle_repository() {
+        let action = Action::DeleteMergedBranches;
+        assert_eq!(action.id(), "branch.delete_merged");
+        assert_eq!(action.spec().title, "Delete Merged Branches…");
+        assert_eq!(action.spec().category, Category::Branches);
+        assert_eq!(action.spec().args, ArgKind::None);
+        assert_eq!(action.spec().shortcut, None);
+        assert!(action.opens_dialog());
+        assert!(action.destructive());
+        assert_eq!(
+            action.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::OpenMergedBranchesDialog)
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            action.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        let busy = Context {
+            busy: Some("Wait for the branch checkout to finish."),
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            action.enabled(&Args::None, &busy),
+            Err("Wait for the branch checkout to finish.")
         );
     }
 
@@ -1460,6 +1885,83 @@ mod tests {
     }
 
     #[test]
+    fn new_branch_is_enabled_with_or_without_a_branch_and_plans_the_dialog() {
+        let context = ctx(&[], "");
+        assert_eq!(Action::NewBranch.enabled(&Args::None, &context), Ok(()));
+        assert_eq!(
+            Action::NewBranch.plan(&Args::None, &context),
+            Ok(Effect::OpenNewBranchDialog { start: None })
+        );
+        assert_eq!(
+            Action::NewBranch.plan(&Args::Branch("feature".into()), &context),
+            Ok(Effect::OpenNewBranchDialog {
+                start: Some("feature".into())
+            })
+        );
+        assert!(Action::NewBranch.available());
+        assert!(Action::NewBranch.opens_dialog());
+        assert_eq!(Action::NewBranch.spec().args, ArgKind::OptionalBranch);
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::NewBranch.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn delete_branch_refuses_the_checked_out_branch_and_one_another_worktree_has() {
+        let worktrees = [
+            listed("/r", "main", true),
+            listed("/r-feature", "feature", false),
+        ];
+        let context = Context {
+            root: Some("/r"),
+            worktrees: &worktrees,
+            ..ctx(&[], "")
+        };
+        let branch = |name: &str| Args::Branch(name.to_owned());
+        assert_eq!(
+            Action::DeleteBranch.enabled(&branch("main"), &context),
+            Err("Cannot delete the checked-out branch")
+        );
+        assert_eq!(
+            Action::DeleteBranch.enabled(&branch("feature"), &context),
+            Err("Checked out in another worktree")
+        );
+        assert_eq!(
+            Action::DeleteBranch.enabled(&branch("topic"), &context),
+            Ok(())
+        );
+        assert_eq!(
+            Action::DeleteBranch.plan(&branch("topic"), &context),
+            Ok(Effect::OpenDeleteBranchDialog("topic".into()))
+        );
+        assert!(Action::DeleteBranch.available());
+        assert!(Action::DeleteBranch.destructive());
+        assert!(Action::DeleteBranch.opens_dialog());
+    }
+
+    #[test]
+    fn delete_branch_needs_a_branch_target_and_no_busy_repository() {
+        let entries: [StatusEntry; 0] = [];
+        let busy = Context {
+            busy: Some("Wait for the branch checkout to finish."),
+            ..ctx(&entries, "")
+        };
+        assert_eq!(
+            Action::DeleteBranch.enabled(&Args::Branch("topic".into()), &busy),
+            Err("Wait for the branch checkout to finish.")
+        );
+        assert_eq!(
+            Action::DeleteBranch.enabled(&Args::None, &ctx(&entries, "")),
+            Err("No target for this action")
+        );
+    }
+
+    #[test]
     fn show_history_needs_an_open_repository_and_plans_the_page() {
         assert_eq!(
             Action::ShowHistory.plan(&Args::None, &ctx(&[], "")),
@@ -1474,6 +1976,56 @@ mod tests {
             Err("No repository is open.")
         );
         assert_eq!(Action::ShowHistory.id(), "history.show");
+    }
+
+    #[test]
+    fn the_branch_scope_actions_switch_to_the_other_scope() {
+        let mine = Context {
+            branch_scope: Scope::Mine,
+            user_email_known: true,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowAllBranches.plan(&Args::None, &mine),
+            Ok(Effect::SetBranchScope(Scope::All))
+        );
+        assert_eq!(
+            Action::ShowOnlyMyBranches.enabled(&Args::None, &mine),
+            Err("Already showing only your branches.")
+        );
+        let all = Context {
+            branch_scope: Scope::All,
+            user_email_known: true,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowOnlyMyBranches.plan(&Args::None, &all),
+            Ok(Effect::SetBranchScope(Scope::Mine))
+        );
+        assert_eq!(
+            Action::ShowAllBranches.enabled(&Args::None, &all),
+            Err("Already showing all branches.")
+        );
+        assert_eq!(Action::ShowOnlyMyBranches.id(), "branch.show_mine");
+        assert_eq!(Action::ShowAllBranches.id(), "branch.show_all");
+    }
+
+    #[test]
+    fn show_only_my_branches_needs_a_known_email_and_a_repository() {
+        // Without an email, Mine would show every branch: the run is refused and says why.
+        let no_email = ctx(&[], "");
+        assert_eq!(
+            Action::ShowOnlyMyBranches.enabled(&Args::None, &no_email),
+            Err("Git has no user.email to match branches against.")
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowAllBranches.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
     }
 
     #[test]

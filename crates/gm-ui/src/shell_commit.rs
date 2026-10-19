@@ -8,10 +8,12 @@ use gpui::{
 use crate::action_registry::{Action, Args};
 use crate::composer;
 use crate::hook_run::Phase;
+use crate::name_fit::{self, name_label};
 use crate::resize::{self, COMMIT};
 use crate::resize_handle::{self, Edge};
 use crate::theme;
 use crate::view::StatusView;
+use crate::window_chrome;
 
 /// The subject length a commit should not pass.
 const SUBJECT_LIMIT: usize = 72;
@@ -71,9 +73,13 @@ impl StatusView {
         } else {
             (theme::panel(), muted, theme::hairline_strong())
         };
+        let full = branch.clone();
         let button = div()
             .id("commit-button")
             .w_full()
+            .when(name_fit::needs_hover(&full), |this| {
+                this.tooltip(window_chrome::hint(full))
+            })
             .h(px(28.))
             .flex()
             .items_center()
@@ -90,7 +96,7 @@ impl StatusView {
                     this.run_action(Action::Commit, &Args::None, window, cx);
                 }),
             )
-            .child(format!("Commit on {branch}"));
+            .child(commit_label(&branch));
         let height_strip = resize_handle::handle(
             "commit-height-resize",
             Edge::Top,
@@ -273,4 +279,17 @@ impl StatusView {
     fn commit_enabled(&self, text: &str) -> bool {
         self.model.summary().staged > 0 && !text.trim().is_empty()
     }
+}
+
+/// "Commit on" and the branch: the name is the part that gives way when the
+/// panel is narrow, so the label never wraps inside the fixed-height button.
+fn commit_label(branch: &str) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .min_w(px(0.))
+        .overflow_hidden()
+        .child(div().flex_none().whitespace_nowrap().child("Commit on "))
+        .child(name_label(branch, &[]))
 }

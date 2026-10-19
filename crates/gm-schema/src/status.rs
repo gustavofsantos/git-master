@@ -34,6 +34,9 @@ pub struct BranchEntry {
     pub is_current: bool,
     /// Full name of the upstream of a local branch, e.g. `origin/main`.
     pub upstream: Option<String>,
+    /// Author email of the branch tip commit, without angle brackets. Compare
+    /// it case-insensitively. `None` when the tip has no author email.
+    pub author_email: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -117,6 +120,23 @@ pub struct WorktreeInspection {
 pub struct PruneCandidate {
     pub name: String,
     pub reason: String,
+}
+
+/// A local branch that `git branch --merged <base>` lists, with its tip.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MergedBranch {
+    pub name: String,
+    /// Abbreviated hash of the branch tip.
+    pub tip: String,
+    /// Subject line of the branch tip commit.
+    pub subject: String,
+}
+
+/// A branch the delete of merged branches could not remove, with Git's message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BranchFailure {
+    pub name: String,
+    pub message: String,
 }
 
 impl Blocker {

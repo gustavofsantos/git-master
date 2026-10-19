@@ -14,13 +14,14 @@ use crate::{GitError, GitPort};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Answers `resolve_root` with its own root, and `status`, `branches`,
-/// `worktrees` and `checkout` with shared, replaceable results, so a test can change what the
-/// next call sees.
+/// `user_email`, `worktrees` and `checkout` with shared, replaceable results, so a test can
+/// change what the next call sees.
 #[derive(Clone)]
 pub struct FakeGit {
     root: PathBuf,
     status: Arc<Mutex<Result<RepoStatus, GitError>>>,
     branches: Arc<Mutex<Result<Vec<BranchEntry>, GitError>>>,
+    user_email: Arc<Mutex<Result<Option<String>, GitError>>>,
     checkout: Arc<Mutex<Result<(), GitError>>>,
     worktrees: Arc<Mutex<Result<Vec<WorktreeEntry>, GitError>>>,
     create: Arc<Mutex<Result<(), GitError>>>,
@@ -38,6 +39,7 @@ impl FakeGit {
             root: root.into(),
             status: Arc::new(Mutex::new(Ok(status))),
             branches: Arc::new(Mutex::new(Ok(Vec::new()))),
+            user_email: Arc::new(Mutex::new(Ok(None))),
             checkout: Arc::new(Mutex::new(Ok(()))),
             worktrees: Arc::new(Mutex::new(Ok(Vec::new()))),
             create: Arc::new(Mutex::new(Ok(()))),
@@ -61,6 +63,13 @@ impl FakeGit {
     /// If another thread panicked while holding the branches lock.
     pub fn set_branches(&self, branches: Result<Vec<BranchEntry>, GitError>) {
         *self.branches.lock().unwrap() = branches;
+    }
+
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the user email lock.
+    pub fn set_user_email(&self, email: Result<Option<String>, GitError>) {
+        *self.user_email.lock().unwrap() = email;
     }
 
     /// # Panics
@@ -190,6 +199,10 @@ impl GitPort for FakeGit {
 
     fn branches(&self, _root: &Path) -> Result<Vec<BranchEntry>, GitError> {
         self.branches.lock().unwrap().clone()
+    }
+
+    fn user_email(&self, _root: &Path) -> Result<Option<String>, GitError> {
+        self.user_email.lock().unwrap().clone()
     }
 
     fn worktrees(&self, _root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {

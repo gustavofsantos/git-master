@@ -7,10 +7,14 @@ use gm_schema::{
     StatusEntry, WorktreeEntry,
 };
 
+use crate::branch_delete::Deleting;
 use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
+use crate::merged_branches::Merging;
+use crate::new_branch::BranchCreate;
+use crate::remote_op::{Outcome, RemoteOp};
 use crate::worktree_create::Creating;
 use crate::worktree_prune::Pruning;
 use crate::worktree_remove::Removal;
@@ -50,6 +54,8 @@ pub struct Model {
     pub hooks: Hooks,
     /// The worktrees of the open repository, main checkout first.
     pub worktrees: Vec<WorktreeEntry>,
+    /// The fetch, pull or push with lease in flight, if any.
+    pub remote: RemoteOp,
     /// The history page's listing: the request in flight, or what answered it.
     pub history: HistoryList,
     /// The commit detail panel: the read in flight, or what answered it.
@@ -62,6 +68,12 @@ pub struct Model {
     pub removal: Removal,
     /// The prune dialog's listing, prune in flight and outcome.
     pub pruning: Pruning,
+    /// The new-branch dialog's create in flight, and its outcome.
+    pub branch_create: BranchCreate,
+    /// The delete-branch dialog's delete in flight, and its outcome.
+    pub branch_delete: Deleting,
+    /// The delete-merged-branches dialog's listing, delete in flight and outcome.
+    pub merging: Merging,
 }
 
 /// The stacked diff of the open commit (H4c): every file's diff, shown in one
@@ -470,8 +482,39 @@ impl Model {
                 self.removal.settle(state, detail);
                 None
             }
+            // A branch create or delete belongs to its dialog, not to the status bar.
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.branch_create.owns(id) => {
+                self.branch_create.settle(state, detail);
+                None
+            }
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.branch_delete.owns(id) => {
+                self.branch_delete.settle(state, detail);
+                None
+            }
             Event::PrunableListed { id, candidates } if self.pruning.owns(id) => {
                 self.pruning.listed(candidates);
+                None
+            }
+            Event::MergedBranchesListed { id, base, branches } if self.merging.owns(id) => {
+                self.merging.listed(base, branches);
+                None
+            }
+            Event::MergedBranchesDeleted {
+                id,
+                deleted,
+                failures,
+            } if self.merging.owns(id) => {
+                self.merging.reported(deleted.len(), failures);
+                None
+            }
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.merging.owns(id) => {
+                self.merging.settle(state, detail);
                 None
             }
             Event::OperationChanged {
@@ -485,6 +528,19 @@ impl Model {
                 id, state, detail, ..
             } if self.hooks.owns(id) => {
                 self.hooks.ended(id, state, detail);
+                None
+            }
+            // A remote operation's answer is the status bar's notice, or its error.
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.remote.owns(id) => {
+                match self.remote.settle(id, state, detail) {
+                    Some(Outcome::Done(message)) => {
+                        self.set_notice(message);
+                    }
+                    Some(Outcome::Failed(message)) => self.error = Some(message),
+                    None => {}
+                }
                 None
             }
             Event::OperationChanged {
@@ -525,8 +581,12 @@ impl Model {
                 self.notice_icon = Some(Icon::CheckCircle);
                 None
             }
-            Event::BranchesLoaded { id, branches } => {
-                let _ = self.branches.listed(id, branches);
+            Event::BranchesLoaded {
+                id,
+                branches,
+                user_email,
+            } => {
+                let _ = self.branches.listed(id, branches, user_email);
                 None
             }
             Event::WorktreesLoaded { worktrees, .. } => {
@@ -586,7 +646,9 @@ impl Model {
             Event::HookFailed { .. }
             | Event::HookCancelled { .. }
             | Event::WorktreeInspected { .. }
-            | Event::PrunableListed { .. } => None,
+            | Event::PrunableListed { .. }
+            | Event::MergedBranchesListed { .. }
+            | Event::MergedBranchesDeleted { .. } => None,
         }
     }
 
@@ -813,6 +875,8 @@ fn event_id(event: &Event) -> OperationId {
         | Event::WorktreesLoaded { id, .. }
         | Event::WorktreeInspected { id, .. }
         | Event::PrunableListed { id, .. }
+        | Event::MergedBranchesListed { id, .. }
+        | Event::MergedBranchesDeleted { id, .. }
         | Event::HooksListed { id, .. }
         | Event::HookStarted { id, .. }
         | Event::HookFinished { id, .. }
@@ -1167,6 +1231,7 @@ mod tests {
             is_remote: false,
             is_current: current,
             upstream: None,
+            author_email: None,
         }
     }
 
@@ -1253,11 +1318,13 @@ mod tests {
         let _ = model.apply(Event::BranchesLoaded {
             id: OperationId(1),
             branches: vec![branch("old", true)],
+            user_email: None,
         });
         assert!(model.branches.lines().is_empty());
         let _ = model.apply(Event::BranchesLoaded {
             id: OperationId(2),
             branches: vec![branch("new", true)],
+            user_email: None,
         });
         assert_eq!(
             model.branches.highlighted().map(|b| b.name.as_str()),
