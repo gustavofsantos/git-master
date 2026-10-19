@@ -226,6 +226,7 @@ mod tests {
             is_remote: false,
             is_current: current,
             upstream: None,
+            author_email: None,
         }
     }
 
@@ -235,6 +236,7 @@ mod tests {
             is_remote: true,
             is_current: false,
             upstream: None,
+            author_email: None,
         }
     }
 

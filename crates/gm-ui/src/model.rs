@@ -525,7 +525,7 @@ impl Model {
                 self.notice_icon = Some(Icon::CheckCircle);
                 None
             }
-            Event::BranchesLoaded { id, branches } => {
+            Event::BranchesLoaded { id, branches, .. } => {
                 let _ = self.branches.listed(id, branches);
                 None
             }
@@ -1167,6 +1167,7 @@ mod tests {
             is_remote: false,
             is_current: current,
             upstream: None,
+            author_email: None,
         }
     }
 
@@ -1253,11 +1254,13 @@ mod tests {
         let _ = model.apply(Event::BranchesLoaded {
             id: OperationId(1),
             branches: vec![branch("old", true)],
+            user_email: None,
         });
         assert!(model.branches.lines().is_empty());
         let _ = model.apply(Event::BranchesLoaded {
             id: OperationId(2),
             branches: vec![branch("new", true)],
+            user_email: None,
         });
         assert_eq!(
             model.branches.highlighted().map(|b| b.name.as_str()),

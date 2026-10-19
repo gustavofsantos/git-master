@@ -494,11 +494,7 @@ impl Engine {
                 events.extend(self.reload_status(id, &root)?);
                 Ok(events)
             }
-            CommandKind::ListBranches => {
-                let root = self.open_root()?;
-                let branches = self.git.branches(&root).map_err(|e| e.0)?;
-                Ok(vec![Event::BranchesLoaded { id, branches }])
-            }
+            CommandKind::ListBranches => self.list_branches(id),
             CommandKind::LoadHistory | CommandKind::LoadHistoryPage { .. } => {
                 Err("history is started by handle".to_owned())
             }
@@ -807,6 +803,19 @@ impl Engine {
         let root = self.open_root()?;
         let worktrees = self.git.worktrees(&root).map_err(|e| e.0)?;
         Ok(vec![Event::WorktreesLoaded { id, worktrees }])
+    }
+
+    /// The branch list, with the configured user email so the UI can tell
+    /// which branches are the user's own.
+    fn list_branches(&self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let branches = self.git.branches(&root).map_err(|e| e.0)?;
+        let user_email = self.git.user_email(&root).map_err(|e| e.0)?;
+        Ok(vec![Event::BranchesLoaded {
+            id,
+            branches,
+            user_email,
+        }])
     }
 
     /// A new linked worktree; the list and the status follow, as after a checkout.
@@ -1155,6 +1164,7 @@ mod tests {
             is_remote: false,
             is_current: true,
             upstream: None,
+            author_email: None,
         }];
         let git = FakeGit::new(
             "/r",
@@ -1173,6 +1183,7 @@ mod tests {
         assert!(events.contains(&Event::BranchesLoaded {
             id: OperationId(2),
             branches,
+            user_email: None,
         }));
     }
 

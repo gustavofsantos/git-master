@@ -246,6 +246,8 @@ pub enum Event {
     BranchesLoaded {
         id: OperationId,
         branches: Vec<BranchEntry>,
+        /// The configured `user.email`, without angle brackets; `None` when unset.
+        user_email: Option<String>,
     },
     /// Answers `LoadHistory`.
     HistoryLoaded {
@@ -335,12 +337,16 @@ mod tests {
                 is_remote: false,
                 is_current: true,
                 upstream: Some("origin/main".into()),
+                author_email: Some("ana@example.com".into()),
             }],
+            user_email: Some("me@example.com".into()),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "branches_loaded");
         assert_eq!(json["branches"][0]["is_current"], true);
         assert_eq!(json["branches"][0]["upstream"], "origin/main");
+        assert_eq!(json["branches"][0]["author_email"], "ana@example.com");
+        assert_eq!(json["user_email"], "me@example.com");
     }
 
     fn any_state() -> impl Strategy<Value = OperationState> {

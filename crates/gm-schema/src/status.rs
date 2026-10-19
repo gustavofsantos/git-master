@@ -34,6 +34,9 @@ pub struct BranchEntry {
     pub is_current: bool,
     /// Full name of the upstream of a local branch, e.g. `origin/main`.
     pub upstream: Option<String>,
+    /// Author email of the branch tip commit, without angle brackets. Compare
+    /// it case-insensitively. `None` when the tip has no author email.
+    pub author_email: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

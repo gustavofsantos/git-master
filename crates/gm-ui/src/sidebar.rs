@@ -111,6 +111,7 @@ mod tests {
             is_remote: remote,
             is_current: false,
             upstream: None,
+            author_email: None,
         }
     }
 

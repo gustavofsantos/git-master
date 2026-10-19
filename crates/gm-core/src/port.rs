@@ -72,6 +72,12 @@ pub trait GitPort: Send {
         Err(GitError("branches is not supported by this adapter".into()))
     }
 
+    /// The configured `user.email` without angle brackets; `None` when unset.
+    /// Never records anything.
+    fn user_email(&self, _root: &Path) -> Result<Option<String>, GitError> {
+        Ok(None)
+    }
+
     /// The worktrees of the repository, the main checkout first. Never
     /// records anything.
     fn worktrees(&self, _root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {

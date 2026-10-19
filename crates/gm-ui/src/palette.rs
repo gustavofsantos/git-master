@@ -473,6 +473,7 @@ mod tests {
             is_current: current,
             is_remote: false,
             upstream: None,
+            author_email: None,
         }
     }
 

@@ -423,6 +423,14 @@ impl GitPort for SubprocessGit {
         Ok(String::from_utf8_lossy(&out).trim().to_owned())
     }
 
+    fn user_email(&self, root: &Path) -> Result<Option<String>, GitError> {
+        let mut command = self.git(root);
+        command.args(["config", "user.email"]);
+        // Exit 1 is git's answer for an unset key, not a failure.
+        let out = Self::run_allowing(command, &[0, 1])?;
+        Ok(clean_email(&String::from_utf8_lossy(&out)))
+    }
+
     fn branches(&self, root: &Path) -> Result<Vec<BranchEntry>, GitError> {
         let repo = open(root)?;
         let current = current_branch(&repo)?;
@@ -440,6 +448,7 @@ impl GitPort for SubprocessGit {
                 .transpose()?;
             local.push(BranchEntry {
                 is_current: current.as_deref() == Some(name.as_str()),
+                author_email: tip_author_email(&branch),
                 name,
                 is_remote: false,
                 upstream,
@@ -457,6 +466,7 @@ impl GitPort for SubprocessGit {
                 continue;
             }
             remote.push(BranchEntry {
+                author_email: tip_author_email(&branch),
                 name,
                 is_remote: true,
                 is_current: false,
@@ -861,6 +871,25 @@ fn current_branch(repo: &Repository) -> Result<Option<String>, GitError> {
         .map(str::to_owned))
 }
 
+/// The author email of the commit a branch points at. A tip that cannot be
+/// read gives `None` rather than failing the whole listing.
+fn tip_author_email(branch: &git2::Branch<'_>) -> Option<String> {
+    let commit = branch.get().peel_to_commit().ok()?;
+    clean_email(commit.author().email()?)
+}
+
+/// An email as the listing shows it: trimmed, without the angle brackets Git
+/// prints around it, and `None` when nothing is left.
+fn clean_email(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+        .unwrap_or(trimmed)
+        .trim();
+    (!inner.is_empty()).then(|| inner.to_owned())
+}
+
 fn has_ref(repo: &Repository, name: &str) -> bool {
     repo.find_reference(name).is_ok()
 }
@@ -1185,5 +1214,25 @@ u UU N... 100644 100644 100644 100644 a b c both.rs\0\
     #[test]
     fn a_truncated_record_is_an_error_not_a_panic() {
         assert!(parse_status(b"1 .M N...\0").is_err());
+    }
+
+    #[test]
+    fn clean_email_strips_the_angle_brackets() {
+        assert_eq!(
+            clean_email("<ana@example.com>").as_deref(),
+            Some("ana@example.com")
+        );
+        assert_eq!(
+            clean_email("  ana@example.com \n").as_deref(),
+            Some("ana@example.com")
+        );
+    }
+
+    #[test]
+    fn clean_email_gives_none_for_nothing() {
+        assert_eq!(clean_email(""), None);
+        assert_eq!(clean_email(" \n"), None);
+        assert_eq!(clean_email("<>"), None);
+        assert_eq!(clean_email("< >"), None);
     }
 }
