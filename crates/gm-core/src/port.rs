@@ -183,6 +183,28 @@ pub trait GitPort: Send {
         Err(GitError("checkout is not supported by this adapter".into()))
     }
 
+    /// Creates the local branch `name` at `start_point` (HEAD when `None`), and
+    /// checks it out when `checkout` is set. Git's own refusal is the error.
+    fn create_branch(
+        &self,
+        _root: &Path,
+        _name: &str,
+        _start_point: Option<&str>,
+        _checkout: bool,
+    ) -> Result<(), GitError> {
+        Err(GitError(
+            "create branch is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Deletes the local branch `name`: `git branch -d`, or `-D` when `force`.
+    /// Git's own refusal is the error.
+    fn delete_branch(&self, _root: &Path, _name: &str, _force: bool) -> Result<(), GitError> {
+        Err(GitError(
+            "delete branch is not supported by this adapter".into(),
+        ))
+    }
+
     /// The `gitmaster.prepare-commit.*` keys of one scope, in config order.
     /// `User` is global config only; `Repo` is the repository's own config.
     /// Never records anything.

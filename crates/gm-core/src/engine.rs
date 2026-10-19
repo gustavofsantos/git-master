@@ -10,6 +10,7 @@ use gm_schema::{
 };
 
 use crate::GitPort;
+use crate::branch;
 use crate::commit_detail::{DetailJob, DetailReport};
 use crate::commit_diff::{StackJob, StackReport};
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
@@ -545,7 +546,7 @@ impl Engine {
                 }
                 None => Err(format!("no hook run {} is active", run.0)),
             },
-            // The worktree commands that `execute` does not list above.
+            // The worktree and branch commands that `execute` does not list above.
             _ => self.manage_worktree(id, actor, kind),
         }
     }
@@ -799,6 +800,97 @@ impl Engine {
         }
     }
 
+    /// The branch commands: create and delete. Human only.
+    fn branch_command(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        match kind {
+            CommandKind::CreateBranch {
+                name,
+                start_point,
+                checkout,
+            } => self.create_branch(id, actor, name, start_point.as_deref(), *checkout),
+            CommandKind::DeleteBranch { name, force } => {
+                self.delete_branch(id, actor, name, *force)
+            }
+            _ => Err("not a worktree or branch command".to_owned()),
+        }
+    }
+
+    /// A new local branch, checked out or not. The status, the worktrees and the
+    /// branch list follow, as after a checkout. Human only.
+    fn create_branch(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        name: &str,
+        start_point: Option<&str>,
+        checkout: bool,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "create a branch")?;
+        let root = self.open_root()?;
+        if let Some(problem) = branch::name_problem(name) {
+            return Err(problem.to_owned());
+        }
+        if let Some(problem) = start_point.and_then(branch::start_point_problem) {
+            return Err(problem.to_owned());
+        }
+        self.git
+            .create_branch(&root, name, start_point, checkout)
+            .map_err(|e| e.0)?;
+        self.branches_changed(id, &root)
+    }
+
+    /// Deletes a local branch, safely (`-d`) unless `force` (`-D`). A branch that a
+    /// worktree has checked out is refused here, naming the worktree. Human only.
+    fn delete_branch(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        name: &str,
+        force: bool,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "delete a branch")?;
+        let root = self.open_root()?;
+        if let Some(problem) = branch::name_problem(name) {
+            return Err(problem.to_owned());
+        }
+        let status = self.git.status(&root).map_err(|e| e.0)?;
+        let checked_out_at = if status.branch.head.as_deref() == Some(name) {
+            Some((root.to_string_lossy().into_owned(), true))
+        } else {
+            let worktrees = self.git.worktrees(&root).map_err(|e| e.0)?;
+            worktrees
+                .iter()
+                .find(|entry| entry.branch.as_deref() == Some(name))
+                .map(|entry| (entry.path.clone(), same_folder(&root, &entry.path)))
+        };
+        if let Some(refusal) = branch::delete_refusal(
+            name,
+            checked_out_at
+                .as_ref()
+                .map(|(path, open)| (path.as_str(), *open)),
+        ) {
+            return Err(refusal);
+        }
+        self.git
+            .delete_branch(&root, name, force)
+            .map_err(|e| e.0)?;
+        self.branches_changed(id, &root)
+    }
+
+    /// The status, the worktrees and the branch list, after a branch changed.
+    fn branches_changed(&self, id: OperationId, root: &Path) -> Result<Vec<Event>, String> {
+        let status = self.git.status(root).map_err(|e| e.0)?;
+        let mut events = self.loaded(id, root, status)?;
+        let branches = self.git.branches(root).map_err(|e| e.0)?;
+        events.push(Event::BranchesLoaded { id, branches });
+        Ok(events)
+    }
+
     fn list_worktrees(&self, id: OperationId) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
         let worktrees = self.git.worktrees(&root).map_err(|e| e.0)?;
@@ -841,7 +933,7 @@ impl Engine {
     }
 
     /// The worktree commands after the listing: inspect, remove, lock, unlock,
-    /// and the prune pair.
+    /// and the prune pair. Any other kind is passed on to `branch_command`.
     fn manage_worktree(
         &self,
         id: OperationId,
@@ -879,7 +971,7 @@ impl Engine {
                 Ok(vec![Event::PrunableListed { id, candidates }])
             }
             CommandKind::PruneWorktrees { names } => self.prune(id, actor, names),
-            _ => Err("not a worktree management command".to_owned()),
+            _ => self.branch_command(id, actor, kind),
         }
     }
 
@@ -1915,6 +2007,147 @@ mod tests {
         };
         assert_eq!(*state, OperationState::Failed);
         assert_eq!(detail.as_deref(), Some("only a human can approve a hook"));
+    }
+
+    fn failure(events: &[Event]) -> Option<String> {
+        events.iter().find_map(|e| match e {
+            Event::OperationChanged {
+                state: OperationState::Failed,
+                detail,
+                ..
+            } => detail.clone(),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn an_agent_cannot_create_or_delete_a_branch() {
+        let mut engine = engine();
+        engine.handle(OperationId(1), &open());
+        let agent = Actor::Agent {
+            name: "agent".into(),
+        };
+        let create = Command {
+            actor: agent.clone(),
+            kind: CommandKind::CreateBranch {
+                name: "topic".into(),
+                start_point: None,
+                checkout: false,
+            },
+        };
+        let events = engine.handle(OperationId(2), &create);
+        assert_eq!(
+            failure(&events).as_deref(),
+            Some("only a human can create a branch")
+        );
+        let delete = Command {
+            actor: agent,
+            kind: CommandKind::DeleteBranch {
+                name: "topic".into(),
+                force: true,
+            },
+        };
+        let events = engine.handle(OperationId(3), &delete);
+        assert_eq!(
+            failure(&events).as_deref(),
+            Some("only a human can delete a branch")
+        );
+    }
+
+    #[test]
+    fn an_invalid_branch_name_is_refused_before_git_runs() {
+        let mut engine = engine();
+        engine.handle(OperationId(1), &open());
+        let events = engine.handle(
+            OperationId(2),
+            &command(CommandKind::CreateBranch {
+                name: "a b".into(),
+                start_point: None,
+                checkout: false,
+            }),
+        );
+        assert_eq!(
+            failure(&events).as_deref(),
+            Some("A branch name cannot contain spaces.")
+        );
+        let events = engine.handle(
+            OperationId(3),
+            &command(CommandKind::CreateBranch {
+                name: "topic".into(),
+                start_point: Some("--all".into()),
+                checkout: true,
+            }),
+        );
+        assert_eq!(
+            failure(&events).as_deref(),
+            Some("Choose a branch, tag or commit to start from.")
+        );
+        let events = engine.handle(
+            OperationId(4),
+            &command(CommandKind::DeleteBranch {
+                name: "x..y".into(),
+                force: false,
+            }),
+        );
+        assert_eq!(
+            failure(&events).as_deref(),
+            Some("A branch name cannot contain '..'.")
+        );
+    }
+
+    #[test]
+    fn the_checked_out_branch_is_refused_before_git_runs() {
+        let status = RepoStatus {
+            root: "/r".into(),
+            branch: gm_schema::BranchInfo {
+                head: Some("main".into()),
+                ..gm_schema::BranchInfo::default()
+            },
+            ..RepoStatus::default()
+        };
+        let mut engine = Engine::new(Box::new(FakeGit::new("/r", status)));
+        engine.handle(OperationId(1), &open());
+        let events = engine.handle(
+            OperationId(2),
+            &command(CommandKind::DeleteBranch {
+                name: "main".into(),
+                force: true,
+            }),
+        );
+        assert_eq!(
+            failure(&events).as_deref(),
+            Some("Cannot delete the checked-out branch main.")
+        );
+    }
+
+    #[test]
+    fn a_branch_checked_out_in_another_worktree_is_refused_with_its_path() {
+        let status = RepoStatus {
+            root: "/r".into(),
+            branch: gm_schema::BranchInfo {
+                head: Some("main".into()),
+                ..gm_schema::BranchInfo::default()
+            },
+            ..RepoStatus::default()
+        };
+        let fake = FakeGit::new("/r", status);
+        fake.set_worktrees(Ok(vec![
+            worktree("/r", "main"),
+            worktree("/r-feature", "feature"),
+        ]));
+        let mut engine = Engine::new(Box::new(fake));
+        engine.handle(OperationId(1), &open());
+        let events = engine.handle(
+            OperationId(2),
+            &command(CommandKind::DeleteBranch {
+                name: "feature".into(),
+                force: false,
+            }),
+        );
+        assert_eq!(
+            failure(&events).as_deref(),
+            Some("Cannot delete feature: it is checked out in the worktree at /r-feature.")
+        );
     }
 
     fn any_kind() -> impl Strategy<Value = CommandKind> {

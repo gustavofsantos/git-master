@@ -87,6 +87,21 @@ pub enum CommandKind {
     Checkout {
         branch: String,
     },
+    /// Creates the local branch `name` at `start_point` (HEAD when `None`), and
+    /// checks it out when `checkout` is set (`git checkout -b`). Git refuses a
+    /// name that exists; its message is the error. Human only.
+    CreateBranch {
+        name: String,
+        start_point: Option<String>,
+        checkout: bool,
+    },
+    /// Deletes the local branch `name`: `git branch -d`, or `-D` when `force`.
+    /// Refused while a worktree has the branch checked out. Git refuses an
+    /// unmerged branch under `-d`, and its message is the error. Human only.
+    DeleteBranch {
+        name: String,
+        force: bool,
+    },
     /// Lists the worktrees of the repository, the main checkout first. Never
     /// records anything.
     ListWorktrees,
@@ -326,6 +341,26 @@ mod tests {
         assert_eq!(json["branch"], "origin/feature");
         let list = serde_json::to_value(CommandKind::ListBranches).unwrap();
         assert_eq!(list["type"], "list_branches");
+    }
+
+    #[test]
+    fn branch_commands_wire_format_is_tagged() {
+        let create = serde_json::to_value(CommandKind::CreateBranch {
+            name: "topic".into(),
+            start_point: None,
+            checkout: true,
+        })
+        .unwrap();
+        assert_eq!(create["type"], "create_branch");
+        assert_eq!(create["checkout"], true);
+        assert!(create["start_point"].is_null());
+        let delete = serde_json::to_value(CommandKind::DeleteBranch {
+            name: "topic".into(),
+            force: false,
+        })
+        .unwrap();
+        assert_eq!(delete["type"], "delete_branch");
+        assert_eq!(delete["force"], false);
     }
 
     #[test]

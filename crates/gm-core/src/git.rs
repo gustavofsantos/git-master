@@ -14,6 +14,7 @@ use gm_schema::{
     PruneCandidate, RepoStatus, StageTarget, StatusEntry, WorktreeEntry, WorktreeMode,
 };
 
+use crate::branch;
 use crate::command_log::{CommandLog, CommandRecord, Source, bounded_text};
 use crate::commit_detail;
 use crate::commit_diff;
@@ -776,6 +777,45 @@ impl GitPort for SubprocessGit {
             // Unknown name: git reports it.
             command.args(["switch", "--", branch]);
         }
+        self.logged(command, None).map(drop)
+    }
+
+    fn create_branch(
+        &self,
+        root: &Path,
+        name: &str,
+        start_point: Option<&str>,
+        checkout: bool,
+    ) -> Result<(), GitError> {
+        // The same rules the engine applies: a name or start point read as an option is refused here too.
+        if let Some(problem) =
+            branch::name_problem(name).or_else(|| start_point.and_then(branch::start_point_problem))
+        {
+            return Err(GitError(problem.into()));
+        }
+        let mut command = self.git(root);
+        if checkout {
+            let repo = open(root)?;
+            check_index_lock(&repo)?;
+            match start_point {
+                Some(start) => command.args(["checkout", "-b", name, start]),
+                None => command.args(["checkout", "-b", name]),
+            };
+        } else {
+            match start_point {
+                Some(start) => command.args(["branch", name, start]),
+                None => command.args(["branch", name]),
+            };
+        }
+        self.logged(command, None).map(drop)
+    }
+
+    fn delete_branch(&self, root: &Path, name: &str, force: bool) -> Result<(), GitError> {
+        if let Some(problem) = branch::name_problem(name) {
+            return Err(GitError(problem.into()));
+        }
+        let mut command = self.git(root);
+        command.args(["branch", if force { "-D" } else { "-d" }, name]);
         self.logged(command, None).map(drop)
     }
 
