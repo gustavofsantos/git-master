@@ -185,6 +185,13 @@ fn a_new_branch_starts_at_a_tag_or_another_branch() {
 
     assert_eq!(git_in(&main, &["rev-parse", "from-tag"]), tag);
     assert_eq!(git_in(&main, &["rev-parse", "from-side"]), side);
+
+    let first = git_in(&main, &["rev-parse", "HEAD~1"]);
+    assert!(done(&engine.handle(
+        OperationId(4),
+        &command(Actor::Human, create("from-commit", Some(&first), false)),
+    )));
+    assert_eq!(git_in(&main, &["rev-parse", "from-commit"]), first);
 }
 
 #[test]
