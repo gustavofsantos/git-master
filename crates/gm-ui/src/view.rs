@@ -10,7 +10,7 @@ use std::time::Duration;
 use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
 use gm_core::watch::{Notice, Notices, WatchHandle};
-use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff, OperationId};
+use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff, OperationId, OperationState};
 use gpui::{
     ClipboardItem, Context, Div, Entity, FocusHandle, Render, ScrollHandle, Subscription,
     UniformListScrollHandle, Window, div, prelude::*, px,
@@ -48,6 +48,7 @@ use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
 use crate::workflow_inputs::WorkflowInputsDialog;
 use crate::workflow_run::fill_for_message;
+use crate::workflows_page::is_conflict;
 use crate::worktree_create::WorktreeDialog;
 use crate::worktree_prune::PruneDialog;
 use crate::worktree_remove::RemoveDialog;
@@ -65,12 +66,14 @@ const UPDATING_DELAY: Duration = Duration::from_millis(300);
 
 const WATCH_LIMITED: &str = "Watching is limited; refreshing when the window gains focus.";
 
-/// What the main area shows: the Working Copy, or the history page (H1).
+/// What the main area shows: the Working Copy, the history page (H1), or the
+/// Workflows page (D76).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Screen {
     #[default]
     WorkingCopy,
     History,
+    Workflows,
 }
 
 pub struct StatusView {
@@ -123,6 +126,8 @@ pub struct StatusView {
     pub(crate) new_branch_dialog: Option<NewBranchDialog>,
     /// The inputs dialog of a workflow that declares inputs, while it is open.
     pub(crate) workflow_inputs_dialog: Option<WorkflowInputsDialog>,
+    /// The editor of the Workflows page's TOML tab; its text is the page's buffer.
+    pub(crate) workflow_source: Entity<TextArea>,
     /// The delete-branch dialog, while it is open.
     pub(crate) delete_dialog: Option<DeleteDialog>,
     /// The delete-merged-branches dialog, while it is open.
@@ -193,6 +198,8 @@ impl StatusView {
         let diff_pane = cx.new(DiffPane::new);
         let commit_diff_pane = cx.new(DiffPane::read_only);
         let commit_texts = CommitTexts::new(cx);
+        let workflow_source =
+            cx.new(|cx| TextArea::new("Workflow file", cx).with_lines(24, usize::MAX));
         // The saved preferences are read here, before the first frame, so the
         // commit diff opens in the layout the user last chose (D40).
         let settings_store =
@@ -207,6 +214,9 @@ impl StatusView {
         let mut subscriptions = vec![
             cx.observe(&branch_filter, |this, filter, cx| {
                 this.on_branch_filter_changed(&filter, cx);
+            }),
+            cx.observe(&workflow_source, |this, _, cx| {
+                this.on_workflow_source_changed(cx);
             }),
             cx.subscribe_in(
                 &branch_filter,
@@ -284,6 +294,7 @@ impl StatusView {
             prune_dialog: None,
             new_branch_dialog: None,
             workflow_inputs_dialog: None,
+            workflow_source,
             delete_dialog: None,
             merged_dialog: None,
             recents,
@@ -362,6 +373,7 @@ impl StatusView {
         let detail_loaded = matches!(event, Event::CommitDetailLoaded { .. });
         let finished = matches!(event, Event::HookFinished { .. });
         let workflow_refresh = self.on_workflow_event(&event, cx);
+        let workflows_listed = matches!(event, Event::WorkflowsListed { .. });
         let remote_ended = matches!(
             &event,
             Event::OperationChanged { id, state, .. }
@@ -434,6 +446,7 @@ impl StatusView {
         if let Some(startup) = failed_start {
             self.on_start_failed(startup, cx);
         }
+        self.follow_workflows(workflows_listed, cx);
         if let Some(diffs) = shown {
             self.show_diffs(diffs.unstaged, diffs.staged, cx);
         }
@@ -493,9 +506,20 @@ impl StatusView {
                 self.place_workflow_message(message, cx);
                 false
             }
-            Event::WorkflowRunFinished { .. } => {
+            Event::WorkflowRunFinished { run, .. } => {
                 self.request_workflow_list();
+                self.workflow_run_ended(*run, cx);
                 true
+            }
+            // A save refused because the file changed on disk: the listing is read
+            // again, so Overwrite expects the hash now on disk.
+            Event::OperationChanged {
+                state: OperationState::Failed,
+                detail: Some(detail),
+                ..
+            } if self.model.workflows_page.is_saving() && is_conflict(detail) => {
+                self.request_workflow_list();
+                false
             }
             // The new file joins the listing, and its folder opens so the user can edit it.
             Event::WorkflowCreated { path, .. } => {
@@ -510,6 +534,15 @@ impl StatusView {
             | Event::WorkflowApprovalRequested { .. } => true,
             _ => false,
         }
+    }
+
+    /// The Workflows page after the engine's answer is in the model: the first
+    /// listing opens the first workflow, and the buffer shows what the page holds.
+    fn follow_workflows(&mut self, listed: bool, cx: &mut Context<Self>) {
+        if listed && self.screen == Screen::Workflows {
+            self.open_first_workflow(cx);
+        }
+        self.sync_workflow_source(cx);
     }
 
     /// Puts a message a workflow suggested in the composer when it is empty, and
@@ -543,6 +576,7 @@ impl StatusView {
         self.model.branches.clear();
         self.model.hooks.reset();
         self.model.workflows.reset();
+        self.model.workflows_page.reset();
         self.request_branch_list();
         self.request_hook_list();
         self.request_workflow_list();
@@ -833,6 +867,10 @@ impl StatusView {
             }
             Ok(Effect::OpenMergedBranchesDialog) => self.open_merged_dialog(window, cx),
             Ok(Effect::ShowHistory) => self.show_history(cx),
+            Ok(Effect::ShowWorkflows) => self.show_workflows(cx),
+            Ok(Effect::SaveWorkflow) => self.save_workflow(false, cx),
+            Ok(Effect::RevertWorkflow) => self.revert_workflow(cx),
+            Ok(Effect::OpenDeleteWorkflow) => self.ask_delete_workflow(cx),
             Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
         }
         cx.notify();
@@ -897,6 +935,10 @@ impl StatusView {
                 active: self.model.workflows.active(),
                 user_dir: self.model.workflows.user_dir.as_deref(),
                 templates: &self.model.workflows.templates,
+                page: self
+                    .model
+                    .workflows_page
+                    .state(self.screen == Screen::Workflows),
             },
         }
     }
@@ -1106,6 +1148,7 @@ impl Render for StatusView {
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.toggle_palette(window, cx);
             }))
+            .on_action(cx.listener(Self::save_workflow_action))
             .on_action(cx.listener(|this, _: &CopyCurrentBranch, window, cx| {
                 this.copy_current_branch(window, cx);
             }))
@@ -1135,6 +1178,7 @@ impl Render for StatusView {
                             .child(self.diff_pane.clone())
                     }))
                     .children((self.screen == Screen::History).then(|| self.history_page(cx)))
+                    .children((self.screen == Screen::Workflows).then(|| self.workflows_page(cx)))
             }))
             .children(self.welcome.is_none().then(|| self.status_bar(window, cx)))
             .children(

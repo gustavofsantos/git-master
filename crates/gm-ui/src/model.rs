@@ -16,11 +16,13 @@ use crate::merged_branches::Merging;
 use crate::new_branch::BranchCreate;
 use crate::remote_op::{Outcome, RemoteOp};
 use crate::workflow_run::Workflows;
+use crate::workflows_page::WorkflowsPage;
 use crate::worktree_create::Creating;
 use crate::worktree_prune::Pruning;
 use crate::worktree_remove::Removal;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+// Not `Eq`: the Workflows page holds a parsed definition, which is only `PartialEq`.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Model {
     status: Option<RepoStatus>,
     /// Path of the selected file. Kept across status changes while it exists.
@@ -55,6 +57,8 @@ pub struct Model {
     pub hooks: Hooks,
     /// The manual workflows: what is listed and the runs the engine reported.
     pub workflows: Workflows,
+    /// The Workflows page: the open file, its buffer, its runs and its saves.
+    pub workflows_page: WorkflowsPage,
     /// The worktrees of the open repository, main checkout first.
     pub worktrees: Vec<WorktreeEntry>,
     /// The fetch, pull or push with lease in flight, if any.
@@ -612,7 +616,14 @@ impl Model {
                 None
             }
             // An operation that ends without a status (vetoed, cancelled) ends its checkout too.
-            Event::OperationChanged { id, state, .. } => {
+            Event::OperationChanged {
+                id,
+                state,
+                detail,
+                ..
+            } => {
+                self.workflows_page
+                    .operation_ended(id, state, detail.as_deref());
                 if matches!(
                     state,
                     OperationState::Done | OperationState::Vetoed | OperationState::Cancelled
@@ -653,7 +664,24 @@ impl Model {
                 templates,
                 ..
             } => {
+                self.workflows_page.listed(&workflows);
                 self.workflows.listed(workflows, ignored, user_dir, templates);
+                None
+            }
+            Event::WorkflowRunsListed { id, workflow, runs } => {
+                self.workflows_page.runs_listed(id, &workflow, runs);
+                None
+            }
+            Event::WorkflowRunLoaded { id, detail } => {
+                self.workflows_page.run_loaded(id, *detail);
+                None
+            }
+            Event::WorkflowFileSaved { id, hash, .. } => {
+                self.workflows_page.saved(id, &hash);
+                None
+            }
+            Event::WorkflowFileDeleted { path, .. } => {
+                self.workflows_page.deleted(&path);
                 None
             }
             Event::WorkflowCreated { path, .. } => {
@@ -694,10 +722,6 @@ impl Model {
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
-            | Event::WorkflowRunsListed { .. }
-            | Event::WorkflowRunLoaded { .. }
-            | Event::WorkflowFileSaved { .. }
-            | Event::WorkflowFileDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. } => None,
         }
