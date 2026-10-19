@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
@@ -68,6 +68,30 @@ pub trait GitPort: Send {
     /// Commits the index; returns the new commit id.
     fn commit(&self, _root: &Path, _message: &str) -> Result<String, GitError> {
         Err(GitError("commit is not supported by this adapter".into()))
+    }
+
+    /// Stages every change of the working tree (`git add -A`). Never commits.
+    fn stage_all(&self, _root: &Path) -> Result<(), GitError> {
+        Err(GitError(
+            "stage all is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The common Git directory (`.git` of the main checkout), which linked
+    /// worktrees share. Never records anything.
+    fn common_dir(&self, _root: &Path) -> Result<PathBuf, GitError> {
+        Err(GitError(
+            "common dir is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Every value of `key` in the configuration the repository sees, in config
+    /// order, following includes. Empty when the key is not set. Never records
+    /// anything.
+    fn config_values(&self, _root: &Path, _key: &str) -> Result<Vec<String>, GitError> {
+        Err(GitError(
+            "config values is not supported by this adapter".into(),
+        ))
     }
 
     /// Local branches first, then remote ones, each alphabetically. Never

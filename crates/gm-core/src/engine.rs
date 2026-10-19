@@ -17,6 +17,9 @@ use crate::commit_diff::{StackJob, StackReport};
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::remote::{RemoteJob, RemoteReport};
+use crate::workflow::driver::{ExecJob, ExecReport};
+use crate::workflow::store::Store;
+use crate::workflow_session::{self, Actions, Session};
 use crate::worktree;
 
 /// One state change of one operation. The log is audit, and the base for undo
@@ -57,6 +60,10 @@ pub struct Engine {
     remote: Option<ActiveRemote>,
     /// Remote operations accepted since the last call; see `take_remote_jobs`.
     remote_jobs: Vec<RemoteJob>,
+    /// The user's workflow directory, read before `gitmaster.workflowPath`.
+    workflow_user_dir: Option<PathBuf>,
+    /// The workflow runs of the open repository; see `workflow_session`.
+    workflow: Option<Session>,
 }
 
 /// The walk behind the history list: the stream while no job reads it, how to
@@ -143,7 +150,15 @@ impl Engine {
             stack_jobs: Vec::new(),
             remote: None,
             remote_jobs: Vec::new(),
+            workflow_user_dir: crate::workflow::loader::default_user_dir(),
+            workflow: None,
         }
+    }
+
+    /// Sets the directory workflows are read from before `gitmaster.workflowPath`.
+    /// `None` reads none. The default is the user's config directory.
+    pub fn set_workflow_user_dir(&mut self, dir: Option<PathBuf>) {
+        self.workflow_user_dir = dir;
     }
 
     pub fn log(&self) -> &[LogEntry] {
@@ -183,6 +198,31 @@ impl Engine {
     /// on a thread and passes its report to `remote_report`.
     pub fn take_remote_jobs(&mut self) -> Vec<RemoteJob> {
         std::mem::take(&mut self.remote_jobs)
+    }
+
+    /// The `exec` steps of workflow runs started since the last call. The caller
+    /// runs each on a thread and passes its report to `workflow_report`.
+    pub fn take_workflow_jobs(&mut self) -> Vec<ExecJob> {
+        self.workflow
+            .as_mut()
+            .map(|session| std::mem::take(&mut session.jobs))
+            .unwrap_or_default()
+    }
+
+    /// Turns the answer of an `exec` step into the run's next events. A report
+    /// for a run that was cancelled is dropped.
+    pub fn workflow_report(&mut self, report: ExecReport) -> Vec<Event> {
+        let now = now_ms();
+        let Some(session) = self.workflow.as_mut() else {
+            return Vec::new();
+        };
+        let origin = session.origin(report.run);
+        let root = session.root.clone();
+        let mut actions = Actions::new(self.git.as_ref(), &root, &mut self.log, origin);
+        let outcome = session.driver.exec_report(report, &mut actions, now);
+        let wrote = actions.wrote();
+        let events = session.absorb(outcome);
+        self.workflow_events(origin, &root, events, wrote)
     }
 
     /// Turns the answer of a remote operation into events: the operation ends
@@ -594,26 +634,7 @@ impl Engine {
                 Ok(vec![Event::HooksListed { id, hooks }])
             }
             CommandKind::ApproveHook { name, command_hash } => {
-                // Approval is the human's decision (docs/00); an agent may only propose.
-                if !matches!(actor, Actor::Human) {
-                    return Err("only a human can approve a hook".to_owned());
-                }
-                let root = self.open_root()?;
-                let (branch, _) = self.current(&root)?;
-                let hooks = self.list_hooks(&root, branch.as_deref())?;
-                let hook = hooks
-                    .iter()
-                    .find(|h| h.scope == HookScope::Repo && &h.name == name)
-                    .ok_or_else(|| format!("no repository hook named {name}"))?;
-                if &hook.command_hash != command_hash {
-                    return Err(format!(
-                        "the command of {name} changed since the hooks were listed; list them again"
-                    ));
-                }
-                self.approvals
-                    .approve(&root.to_string_lossy(), name, command_hash)?;
-                let hooks = self.list_hooks(&root, branch.as_deref())?;
-                Ok(vec![Event::HooksListed { id, hooks }])
+                self.approve_hook(id, actor, name, command_hash)
             }
             CommandKind::RunPrepareCommit { .. } => {
                 Err("a prepare-commit run is started by handle, not execute".to_owned())
@@ -625,6 +646,11 @@ impl Engine {
                 }
                 None => Err(format!("no hook run {} is active", run.0)),
             },
+            CommandKind::StageAll => self.stage_all(id),
+            CommandKind::ListWorkflows
+            | CommandKind::RunWorkflow { .. }
+            | CommandKind::ApproveWorkflowStep { .. }
+            | CommandKind::CancelWorkflowRun { .. } => self.workflow_command(id, actor, kind),
             // The worktree and branch commands that `execute` does not list above.
             _ => self.manage_worktree(id, actor, kind),
         }
@@ -1369,6 +1395,195 @@ impl Engine {
         Ok(vec![Event::StatusLoaded { id, status }])
     }
 
+    /// Approves the repository hook `name` at `command_hash`. Human only.
+    fn approve_hook(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        name: &str,
+        command_hash: &str,
+    ) -> Result<Vec<Event>, String> {
+        // Approval is the human's decision (docs/00); an agent may only propose.
+        if !matches!(actor, Actor::Human) {
+            return Err("only a human can approve a hook".to_owned());
+        }
+        let root = self.open_root()?;
+        let (branch, _) = self.current(&root)?;
+        let hooks = self.list_hooks(&root, branch.as_deref())?;
+        let hook = hooks
+            .iter()
+            .find(|h| h.scope == HookScope::Repo && h.name == name)
+            .ok_or_else(|| format!("no repository hook named {name}"))?;
+        if hook.command_hash != command_hash {
+            return Err(format!(
+                "the command of {name} changed since the hooks were listed; list them again"
+            ));
+        }
+        self.approvals
+            .approve(&root.to_string_lossy(), name, command_hash)?;
+        let hooks = self.list_hooks(&root, branch.as_deref())?;
+        Ok(vec![Event::HooksListed { id, hooks }])
+    }
+
+    /// Stages every change of the working tree, then reads the status again.
+    fn stage_all(&self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        self.git.stage_all(&root).map_err(|e| e.0)?;
+        self.reload_status(id, &root)
+    }
+
+    /// The workflow commands: the listing, and a run's start, approval and cancel.
+    fn workflow_command(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        match kind {
+            CommandKind::RunWorkflow { name, inputs } => self.run_workflow(id, actor, name, inputs),
+            CommandKind::ApproveWorkflowStep { run, approved } => {
+                self.approve_workflow_step(id, actor, *run, *approved)
+            }
+            CommandKind::CancelWorkflowRun { run } => self.cancel_workflow_run(id, actor, *run),
+            CommandKind::ListWorkflows => self.list_workflows(id),
+            _ => Err("not a workflow command".to_owned()),
+        }
+    }
+
+    /// Opens the workflow session of the open repository, unless it is open, and
+    /// resumes the unfinished runs its database holds (D80). Its events come first.
+    fn ensure_workflows(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        if self
+            .workflow
+            .as_ref()
+            .is_some_and(|session| session.root == root)
+        {
+            return Ok(Vec::new());
+        }
+        let common = self.git.common_dir(&root).map_err(|e| e.0)?;
+        let store = Store::open(&common.join("gitmaster").join("state.db")).map_err(|e| e.0)?;
+        let mut session = Session::new(root.clone(), store, id);
+        let mut actions = Actions::new(self.git.as_ref(), &root, &mut self.log, id);
+        let outcome = session.driver.resume(&mut actions, now_ms());
+        let wrote = actions.wrote();
+        let events = session.absorb(outcome);
+        self.workflow = Some(session);
+        Ok(self.workflow_events(id, &root, events, wrote))
+    }
+
+    /// The workflow files as the front-ends list them. Reads only.
+    fn list_workflows(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
+        let mut events = self.ensure_workflows(id)?;
+        let root = self.open_root()?;
+        let loaded =
+            workflow_session::load(self.git.as_ref(), &root, self.workflow_user_dir.as_deref())?;
+        events.push(Event::WorkflowsListed {
+            id,
+            workflows: loaded
+                .entries
+                .iter()
+                .map(workflow_session::workflow_info)
+                .collect(),
+            ignored: workflow_session::ignored_lines(&loaded.ignored),
+        });
+        Ok(events)
+    }
+
+    /// Starts a manual workflow run for a human. The run's own events follow;
+    /// the operation ends once it has started.
+    fn run_workflow(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        name: &str,
+        inputs: &BTreeMap<String, String>,
+    ) -> Result<Vec<Event>, String> {
+        if !matches!(actor, Actor::Human) {
+            return Err("agents run workflows through MCP in a later slice".to_owned());
+        }
+        let mut events = self.ensure_workflows(id)?;
+        let root = self.open_root()?;
+        let loaded =
+            workflow_session::load(self.git.as_ref(), &root, self.workflow_user_dir.as_deref())?;
+        let entry = loaded
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| format!("no workflow named `{name}`"))?;
+        let repo = workflow_session::repo_snapshot(self.git.as_ref(), &root);
+        let inputs = serde_json::to_value(inputs).map_err(|e| e.to_string())?;
+        let session = self
+            .workflow
+            .as_mut()
+            .ok_or_else(|| "the workflow session is not open".to_owned())?;
+        let mut actions = Actions::new(self.git.as_ref(), &root, &mut self.log, id);
+        let (run, outcome) = session
+            .driver
+            .start(entry, inputs, repo, &mut actions, now_ms())?;
+        let wrote = actions.wrote();
+        session.started(run, id);
+        events.extend(session.absorb(outcome));
+        Ok(self.workflow_events(id, &root, events, wrote))
+    }
+
+    /// The human's answer to the `approve` step a run waits at.
+    fn approve_workflow_step(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        run: i64,
+        approved: bool,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "approve a workflow step")?;
+        let mut events = self.ensure_workflows(id)?;
+        let root = self.open_root()?;
+        let session = self
+            .workflow
+            .as_mut()
+            .ok_or_else(|| format!("run {run} is not awaiting approval"))?;
+        let mut actions = Actions::new(self.git.as_ref(), &root, &mut self.log, id);
+        let outcome = session
+            .driver
+            .approve(run, approved, &mut actions, now_ms())?;
+        let wrote = actions.wrote();
+        events.extend(session.absorb(outcome));
+        Ok(self.workflow_events(id, &root, events, wrote))
+    }
+
+    /// Stops a workflow run; its `exec` step, if any, is killed.
+    fn cancel_workflow_run(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        run: i64,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "cancel a workflow run")?;
+        let mut events = self.ensure_workflows(id)?;
+        let session = self
+            .workflow
+            .as_mut()
+            .ok_or_else(|| format!("run {run} is not active"))?;
+        let outcome = session.driver.cancel(run, now_ms())?;
+        events.extend(session.absorb(outcome));
+        Ok(events)
+    }
+
+    /// The events of a workflow call. Once Git was written, the status is read
+    /// again, so the window shows the change.
+    fn workflow_events(
+        &self,
+        id: OperationId,
+        root: &Path,
+        mut events: Vec<Event>,
+        wrote: bool,
+    ) -> Vec<Event> {
+        if wrote && let Ok(status) = self.git.status(root) {
+            events.push(Event::StatusLoaded { id, status });
+        }
+        events
+    }
+
     fn advance(&mut self, op: &mut Op, to: OperationState, events: &mut Vec<Event>) {
         self.advance_with(op, to, None, events);
     }
@@ -1388,12 +1603,15 @@ impl Engine {
     }
 
     fn record(&mut self, op: &Op, detail: Option<String>, events: &mut Vec<Event>) {
-        self.log.push(LogEntry {
-            id: op.id,
-            actor: op.command.actor.clone(),
-            kind: op.command.kind.clone(),
-            state: op.state,
-        });
+        // A workflow listing is a read (D28): it changes nothing, so it is not logged.
+        if !matches!(op.command.kind, CommandKind::ListWorkflows) {
+            self.log.push(LogEntry {
+                id: op.id,
+                actor: op.command.actor.clone(),
+                kind: op.command.kind.clone(),
+                state: op.state,
+            });
+        }
         events.push(Event::OperationChanged {
             id: op.id,
             actor: op.command.actor.clone(),
@@ -1416,6 +1634,15 @@ fn success_message(kind: &CommandKind) -> &'static str {
         CommandKind::Pull => "Pulled",
         _ => "Pushed",
     }
+}
+
+/// Milliseconds since the Unix epoch: the clock of workflow runs.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// Worktree changes are human decisions (D31, Q12): an agent may not make one.
@@ -2260,6 +2487,29 @@ mod tests {
         };
         assert_eq!(*state, OperationState::Failed);
         assert_eq!(detail.as_deref(), Some("only a human can approve a hook"));
+    }
+
+    #[test]
+    fn an_agent_cannot_run_a_workflow_yet() {
+        let mut engine = engine();
+        engine.handle(OperationId(1), &open());
+        let command = Command {
+            actor: Actor::Agent {
+                name: "agent".into(),
+            },
+            kind: CommandKind::RunWorkflow {
+                name: "suggest".into(),
+                inputs: BTreeMap::new(),
+            },
+        };
+
+        let events = engine.handle(OperationId(2), &command);
+
+        assert_eq!(
+            failure(&events).as_deref(),
+            Some("agents run workflows through MCP in a later slice")
+        );
+        assert!(engine.take_workflow_jobs().is_empty());
     }
 
     fn failure(events: &[Event]) -> Option<String> {

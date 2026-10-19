@@ -442,6 +442,34 @@ impl GitPort for SubprocessGit {
         Ok(String::from_utf8_lossy(&out).trim().to_owned())
     }
 
+    fn stage_all(&self, root: &Path) -> Result<(), GitError> {
+        check_index_lock(&open(root)?)?;
+        let mut command = self.git(root);
+        command.args(["add", "-A"]);
+        self.logged(command, None).map(drop)
+    }
+
+    fn common_dir(&self, root: &Path) -> Result<PathBuf, GitError> {
+        let mut command = self.git(root);
+        command.args(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+        let out = Self::run(command)?;
+        Ok(PathBuf::from(
+            String::from_utf8_lossy(&out).trim_end_matches('\n'),
+        ))
+    }
+
+    fn config_values(&self, root: &Path, key: &str) -> Result<Vec<String>, GitError> {
+        let mut command = self.git(root);
+        command.args(["config", "--includes", "--null", "--get-all", key]);
+        // Exit 1 is git's answer for a key that is not set.
+        let out = Self::run_allowing(command, &[0, 1])?;
+        Ok(String::from_utf8_lossy(&out)
+            .split('\0')
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
     fn user_email(&self, root: &Path) -> Result<Option<String>, GitError> {
         let mut command = self.git(root);
         command.args(["config", "user.email"]);

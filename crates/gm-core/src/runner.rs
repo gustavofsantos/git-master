@@ -14,6 +14,7 @@ use crate::commit_diff::StackReport;
 use crate::history::HistoryReport;
 use crate::hook::{ApprovalStore, Report};
 use crate::remote::RemoteReport;
+use crate::workflow::driver::{ExecJob, ExecReport};
 use crate::{Engine, GitPort};
 
 enum Message {
@@ -27,6 +28,8 @@ enum Message {
     Detail(DetailReport),
     Stack(StackReport),
     Remote(RemoteReport),
+    /// A workflow `exec` step's report, with the sender for the next step's thread.
+    Workflow(ExecReport, Sender<Message>),
 }
 
 /// Cloneable front door to the engine thread. The thread stops when every
@@ -153,6 +156,9 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                         })
                         .expect("spawn a remote thread");
                 }
+                for job in engine.take_workflow_jobs() {
+                    spawn_workflow(job, reports.clone());
+                }
                 for plan in engine.take_jobs() {
                     let reports = reports.clone();
                     std::thread::Builder::new()
@@ -185,8 +191,28 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                 let events = engine.remote_report(report);
                 broadcast(events, &mut subscribers);
             }
+            Message::Workflow(report, reports) => {
+                let events = engine.workflow_report(report);
+                broadcast(events, &mut subscribers);
+                for job in engine.take_workflow_jobs() {
+                    spawn_workflow(job, reports.clone());
+                }
+            }
         }
     }
+}
+
+/// Runs one workflow `exec` step on its own thread. Its report goes back with
+/// the sender, which the engine drops once the report is handled.
+fn spawn_workflow(job: ExecJob, reports: Sender<Message>) {
+    std::thread::Builder::new()
+        .name("gm-workflow".into())
+        .spawn(move || {
+            let report = job.run();
+            let next = reports.clone();
+            let _ = reports.send_blocking(Message::Workflow(report, next));
+        })
+        .expect("spawn a workflow thread");
 }
 
 #[cfg(test)]

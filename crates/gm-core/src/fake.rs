@@ -167,6 +167,21 @@ impl GitPort for FakeGit {
         Err(GitError("commit is not supported by this adapter".into()))
     }
 
+    fn stage_all(&self, _root: &Path) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("stage_all");
+        Ok(())
+    }
+
+    /// The `.git` folder under the fake root, as a normal checkout has it.
+    fn common_dir(&self, _root: &Path) -> Result<PathBuf, GitError> {
+        Ok(self.root.join(".git"))
+    }
+
+    /// No configuration: every key is unset.
+    fn config_values(&self, _root: &Path, _key: &str) -> Result<Vec<String>, GitError> {
+        Ok(Vec::new())
+    }
+
     fn commit_stack(
         &self,
         _root: &Path,
