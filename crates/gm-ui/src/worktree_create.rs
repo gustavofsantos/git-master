@@ -6,14 +6,15 @@
 
 use std::path::Path;
 
-use gm_schema::{Actor, CommandKind, OperationId, OperationState, WorktreeMode};
+use gm_schema::{Actor, BranchEntry, CommandKind, OperationId, OperationState, WorktreeMode};
 use gpui::{
-    Context, Div, Entity, FontWeight, MouseButton, MouseDownEvent, Stateful, Subscription, Window,
-    div, prelude::*, px,
+    App, Context, Div, Entity, FontWeight, MouseButton, MouseDownEvent, Stateful, Subscription,
+    Window, div, prelude::*, px,
 };
 
 use crate::FocusNext;
-use crate::text_area::{Newline, TextArea, TextAreaEvent};
+use crate::fuzzy;
+use crate::text_area::{Down, Newline, TextArea, TextAreaEvent, Up};
 use crate::theme;
 use crate::view::StatusView;
 use crate::worktree_list;
@@ -23,6 +24,8 @@ const WIDTH: f32 = 560.;
 const TOP: f32 = 96.;
 /// The message shown when a folder is missing from the form.
 const NO_FOLDER: &str = "Choose a folder for the worktree.";
+/// The most branches the branch field lists under it. Typing narrows the list.
+pub(crate) const SUGGESTIONS_SHOWN: usize = 8;
 
 /// The three ways a new worktree can start.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,10 +75,47 @@ impl Form {
         }
     }
 
-    /// The folder the form suggests for its current name and mode.
+    /// The folder the form suggests for its current name and mode. Nothing is
+    /// suggested until there is a name to put in it.
     pub(crate) fn suggested_path(&self, root: &str) -> String {
+        if self.label().trim().is_empty() {
+            return String::new();
+        }
         default_path(root, self.label())
     }
+}
+
+/// The local branches the branch field lists for `query`, best match first and
+/// at most `SUGGESTIONS_SHOWN`. An empty query lists them in the order given.
+/// Remote branches are left out: the dialog checks out a local one.
+pub(crate) fn suggest_branches(query: &str, branches: &[BranchEntry]) -> Vec<String> {
+    let mut scored: Vec<(i64, &str)> = branches
+        .iter()
+        .filter(|branch| !branch.is_remote)
+        .filter_map(|branch| {
+            fuzzy::fuzzy_match(query, &branch.name).map(|found| (found.score, branch.name.as_str()))
+        })
+        .collect();
+    // A stable sort: equal scores keep the order the branches were listed in.
+    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
+    scored
+        .into_iter()
+        .take(SUGGESTIONS_SHOWN)
+        .map(|(_, name)| name.to_owned())
+        .collect()
+}
+
+/// The suggestion Up or Down moves to, among `count` rows. Nothing is
+/// highlighted until the first move, so Enter still submits what was typed.
+/// The moves stop at both ends.
+pub(crate) fn move_pick(current: Option<usize>, count: usize, down: bool) -> Option<usize> {
+    let last = count.checked_sub(1)?;
+    Some(match (current.map(|at| at.min(last)), down) {
+        (None, true) => 0,
+        (None, false) => last,
+        (Some(at), true) => (at + 1).min(last),
+        (Some(at), false) => at.saturating_sub(1),
+    })
 }
 
 /// The part of the form that the observers compare.
@@ -89,7 +129,8 @@ fn seen_of(form: &Form) -> (Mode, String, String, String) {
 }
 
 /// The folder a worktree of `label` gets by default: a sibling of the
-/// repository, named `<repo>-<label>`, with `/` in the label made `-`.
+/// repository, named `<repo>-<label>`, with `/` in the label made `-`. A label
+/// with no usable character gives `<repo>-worktree`, never the repository itself.
 pub(crate) fn default_path(root: &str, label: &str) -> String {
     let root = Path::new(root.trim_end_matches(['/', '\\']));
     let repo = root
@@ -97,7 +138,7 @@ pub(crate) fn default_path(root: &str, label: &str) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("worktree");
     let folder = match folder_label(label) {
-        tail if tail.is_empty() => repo.to_owned(),
+        tail if tail.is_empty() => format!("{repo}-worktree"),
         tail => format!("{repo}-{tail}"),
     };
     match root.parent() {
@@ -136,10 +177,6 @@ pub(crate) fn refresh_path(current: &str, previous: &str, next: &str) -> String 
 /// The form as a command: its folder and mode, trimmed. Or the reason it cannot
 /// run yet, for the first missing field.
 pub(crate) fn build(form: &Form) -> Result<(String, WorktreeMode), &'static str> {
-    let path = form.path.trim();
-    if path.is_empty() {
-        return Err(NO_FOLDER);
-    }
     let mode = match form.mode {
         Mode::Existing => {
             let branch = form.branch.trim();
@@ -174,6 +211,11 @@ pub(crate) fn build(form: &Form) -> Result<(String, WorktreeMode), &'static str>
             }
         }
     };
+    // The branch, name or commit comes first: it is the field the dialog opens on.
+    let path = form.path.trim();
+    if path.is_empty() {
+        return Err(NO_FOLDER);
+    }
     Ok((path.to_owned(), mode))
 }
 
@@ -263,6 +305,8 @@ pub(crate) struct WorktreeDialog {
     /// every caret blink, so a change counts only when these differ.
     seen: (Mode, String, String, String),
     pub(crate) error: Option<String>,
+    /// The branch suggestion Up and Down highlight; `None` until one is moved to.
+    pub(crate) pick: Option<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -288,9 +332,9 @@ impl WorktreeDialog {
 }
 
 impl StatusView {
-    /// Opens the dialog. `branch` is the branch the caller chose, which the
-    /// dialog checks out in the existing-branch mode; without one, it makes a
-    /// new branch from the checked-out one.
+    /// Opens the dialog in the existing-branch mode. `branch` is the branch the
+    /// caller chose; without one the branch field starts empty, to be typed or
+    /// picked from the suggestions, and the folder follows the branch.
     pub(crate) fn open_worktree_dialog(
         &mut self,
         branch: Option<&str>,
@@ -307,11 +351,7 @@ impl StatusView {
             .status()
             .and_then(|status| status.branch.head.clone())
             .unwrap_or_else(|| "HEAD".to_owned());
-        let mode = if branch.is_some() {
-            Mode::Existing
-        } else {
-            Mode::New
-        };
+        let mode = Mode::Existing;
         let field = |placeholder: &'static str, cx: &mut Context<Self>| {
             cx.new(|cx| TextArea::new(placeholder, cx).with_lines(1, 1))
         };
@@ -348,6 +388,7 @@ impl StatusView {
             suggested: String::new(),
             seen: (mode, String::new(), String::new(), String::new()),
             error: None,
+            pick: None,
             _subscriptions: subscriptions,
         };
         let form = dialog.form(cx);
@@ -380,6 +421,7 @@ impl StatusView {
             return;
         }
         dialog.seen = seen_of(&form);
+        dialog.pick = None;
         let next = form.suggested_path(&dialog.root);
         let shown = refresh_path(&form.path, &dialog.suggested, &next);
         dialog.suggested = next;
@@ -387,6 +429,55 @@ impl StatusView {
             dialog.path.update(cx, |area, cx| area.set_text(&shown, cx));
         }
         dialog.error = None;
+        cx.notify();
+    }
+
+    /// The local branches the branch field lists now, in the existing-branch mode.
+    fn branch_suggestions(&self, dialog: &WorktreeDialog, cx: &App) -> Vec<String> {
+        if dialog.mode != Mode::Existing {
+            return Vec::new();
+        }
+        let typed = dialog.branch.read(cx).text();
+        suggest_branches(typed, self.model.branches.known())
+    }
+
+    /// Up or Down with suggestions on screen: moves the highlight. Returns
+    /// whether it did, so the keys go on to the field when it did not.
+    pub(crate) fn move_worktree_pick(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
+        let Some(dialog) = self.worktree_dialog.as_ref() else {
+            return false;
+        };
+        let count = self.branch_suggestions(dialog, cx).len();
+        if count == 0 {
+            return false;
+        }
+        let pick = move_pick(dialog.pick, count, down);
+        if let Some(dialog) = self.worktree_dialog.as_mut() {
+            dialog.pick = pick;
+        }
+        cx.notify();
+        true
+    }
+
+    /// Enter: takes the highlighted suggestion, or else sends the create.
+    fn worktree_enter(&mut self, cx: &mut Context<Self>) {
+        let chosen = self.worktree_dialog.as_ref().and_then(|dialog| {
+            let at = dialog.pick?;
+            self.branch_suggestions(dialog, cx).into_iter().nth(at)
+        });
+        match chosen {
+            Some(name) => self.choose_worktree_branch(&name, cx),
+            None => self.submit_worktree(cx),
+        }
+    }
+
+    /// Puts `name` in the branch field. The field's observer then moves the
+    /// suggested folder to match.
+    fn choose_worktree_branch(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.worktree_dialog.as_mut() {
+            dialog.pick = None;
+            dialog.branch.update(cx, |area, cx| area.set_text(name, cx));
+        }
         cx.notify();
     }
 
@@ -401,6 +492,7 @@ impl StatusView {
         };
         dialog.mode = mode;
         dialog.error = None;
+        dialog.pick = None;
         let focus = dialog.fields()[0].clone();
         focus.update(cx, |area, cx| area.focus(window, cx));
         self.on_worktree_field(cx);
@@ -484,6 +576,8 @@ impl StatusView {
         let panel = self.worktree_panel(dialog, left, cx);
         let view = cx.entity().downgrade();
         let tab = view.clone();
+        let up = view.clone();
+        let down = view.clone();
         let enter = view;
         div().absolute().inset_0().child(outside).child(
             panel
@@ -491,8 +585,26 @@ impl StatusView {
                     let _ = tab.update(cx, |this, cx| this.next_worktree_field(window, cx));
                     cx.stop_propagation();
                 })
+                // Up and Down are kept only while suggestions are on screen; the
+                // field keeps them otherwise.
+                .capture_action(move |_: &Up, _, cx| {
+                    if matches!(
+                        up.update(cx, |this, cx| this.move_worktree_pick(false, cx)),
+                        Ok(true)
+                    ) {
+                        cx.stop_propagation();
+                    }
+                })
+                .capture_action(move |_: &Down, _, cx| {
+                    if matches!(
+                        down.update(cx, |this, cx| this.move_worktree_pick(true, cx)),
+                        Ok(true)
+                    ) {
+                        cx.stop_propagation();
+                    }
+                })
                 .capture_action(move |_: &Newline, _, cx| {
-                    let _ = enter.update(cx, StatusView::submit_worktree);
+                    let _ = enter.update(cx, StatusView::worktree_enter);
                     cx.stop_propagation();
                 }),
         )
@@ -505,6 +617,9 @@ impl StatusView {
             (true, Mode::Existing) => self.checked_out_elsewhere(form.branch.trim()),
             _ => None,
         };
+        let suggestions = self.branch_suggestions(dialog, cx);
+        let list =
+            (!suggestions.is_empty()).then(|| suggestion_list(&suggestions, dialog.pick, cx));
         div()
             .absolute()
             .top(px(TOP))
@@ -532,6 +647,7 @@ impl StatusView {
                 Mode::New => field_row("NEW BRANCH", dialog.name.clone()),
                 Mode::Detached => field_row("COMMIT", dialog.start.clone()),
             })
+            .children(list)
             .children(
                 (dialog.mode == Mode::New).then(|| field_row("STARTS FROM", dialog.start.clone())),
             )
@@ -565,6 +681,39 @@ impl StatusView {
         self.close_worktree_dialog(window, cx);
         self.open_worktree(path, cx);
     }
+}
+
+/// The local branches the branch field suggests, under the field. The row
+/// Up and Down highlight is `pick`; a click takes any row.
+fn suggestion_list(names: &[String], pick: Option<usize>, cx: &Context<StatusView>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .rounded_md()
+        .border_1()
+        .border_color(theme::hairline())
+        .children(names.iter().enumerate().map(|(at, name)| {
+            let chosen = name.clone();
+            div()
+                .id(("worktree-suggestion", at))
+                .h(px(24.))
+                .px_2()
+                .flex()
+                .items_center()
+                .text_sm()
+                .cursor_pointer()
+                .text_color(theme::text())
+                .when(pick == Some(at), |this| {
+                    this.bg(theme::selection()).text_color(theme::accent())
+                })
+                .child(name.clone())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.choose_worktree_branch(&chosen, cx);
+                    }),
+                )
+        }))
 }
 
 /// The button that goes to the worktree which has the branch.
@@ -738,9 +887,87 @@ mod tests {
     }
 
     #[test]
-    fn a_label_with_no_safe_characters_names_the_folder_after_the_repo() {
-        assert_eq!(default_path("/a/ledger", "///"), "/a/ledger");
-        assert_eq!(default_path("/a/ledger", ""), "/a/ledger");
+    fn a_label_with_no_safe_characters_gets_a_worktree_suffix_never_the_repo_itself() {
+        assert_eq!(default_path("/a/ledger", "///"), "/a/ledger-worktree");
+        assert_eq!(default_path("/a/ledger", ""), "/a/ledger-worktree");
+    }
+
+    #[test]
+    fn nothing_is_suggested_until_the_branch_has_a_name() {
+        let mut form = form(Mode::Existing);
+        assert_eq!(form.suggested_path("/a/ledger"), "");
+        form.branch = "  ".into();
+        assert_eq!(form.suggested_path("/a/ledger"), "");
+        form.branch = "feature".into();
+        assert_eq!(form.suggested_path("/a/ledger"), "/a/ledger-feature");
+    }
+
+    fn branch(name: &str, is_remote: bool) -> BranchEntry {
+        BranchEntry {
+            name: name.into(),
+            is_current: false,
+            is_remote,
+            upstream: None,
+            author_email: None,
+        }
+    }
+
+    #[test]
+    fn an_empty_branch_field_lists_the_local_branches_in_order_without_remotes() {
+        let branches = [
+            branch("main", false),
+            branch("origin/main", true),
+            branch("feature/x", false),
+        ];
+        assert_eq!(suggest_branches("", &branches), ["main", "feature/x"]);
+    }
+
+    #[test]
+    fn typing_filters_the_branches_fuzzily_and_the_best_match_comes_first() {
+        let branches = [
+            branch("feature/login", false),
+            branch("main", false),
+            branch("fix/login-timeout", false),
+        ];
+        // The word that starts earlier in the name ranks first.
+        assert_eq!(
+            suggest_branches("login", &branches),
+            ["fix/login-timeout", "feature/login"]
+        );
+        assert_eq!(suggest_branches("mn", &branches), ["main"]);
+        assert!(suggest_branches("zzz", &branches).is_empty());
+    }
+
+    #[test]
+    fn a_remote_branch_is_never_suggested_even_when_it_matches() {
+        let branches = [branch("origin/feature", true)];
+        assert!(suggest_branches("feature", &branches).is_empty());
+    }
+
+    #[test]
+    fn the_suggestions_are_capped_so_the_list_stays_short() {
+        let branches: Vec<BranchEntry> = (0..SUGGESTIONS_SHOWN + 5)
+            .map(|at| branch(&format!("topic-{at}"), false))
+            .collect();
+        assert_eq!(suggest_branches("", &branches).len(), SUGGESTIONS_SHOWN);
+    }
+
+    #[test]
+    fn up_and_down_move_the_pick_and_stop_at_both_ends() {
+        assert_eq!(move_pick(None, 0, true), None);
+        assert_eq!(move_pick(None, 3, true), Some(0));
+        assert_eq!(move_pick(None, 3, false), Some(2));
+        assert_eq!(move_pick(Some(0), 3, true), Some(1));
+        assert_eq!(move_pick(Some(2), 3, true), Some(2));
+        assert_eq!(move_pick(Some(0), 3, false), Some(0));
+        // A list that got shorter since the pick was made still lands on a row.
+        assert_eq!(move_pick(Some(9), 3, false), Some(1));
+        assert_eq!(move_pick(Some(9), 3, true), Some(2));
+    }
+
+    #[test]
+    fn the_new_worktree_dialog_starts_on_the_existing_branch_mode() {
+        assert_eq!(Mode::default(), Mode::Existing);
     }
 
     #[test]
@@ -759,9 +986,13 @@ mod tests {
     #[test]
     fn an_existing_branch_needs_a_branch_and_a_folder() {
         let mut form = form(Mode::Existing);
-        assert_eq!(build(&form), Err(NO_FOLDER));
+        assert_eq!(build(&form), Err("Choose the branch to check out."));
         form.path = "/a/wt".into();
         assert_eq!(build(&form), Err("Choose the branch to check out."));
+        form.path = String::new();
+        form.branch = "feature".into();
+        assert_eq!(build(&form), Err(NO_FOLDER));
+        form.path = "/a/wt".into();
         form.branch = "  feature  ".into();
         assert_eq!(
             build(&form),

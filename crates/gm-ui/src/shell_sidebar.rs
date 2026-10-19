@@ -73,21 +73,26 @@ impl StatusView {
             .child(width_strip)
     }
 
-    /// The WORKTREES section: the main checkout, then the linked worktrees.
-    /// Empty until a listing has arrived.
+    /// The WORKTREES section: its header with the New Worktree control, then the
+    /// main checkout and the linked worktrees. The section shows whenever a
+    /// repository is open, so the control is there even with no linked worktree;
+    /// the rows wait for a listing.
     fn worktrees_section(&self, cx: &Context<Self>) -> Div {
-        let root = self.model.status().map(|status| status.root.clone());
-        let rows = worktree_list::rows(&self.model.worktrees, root.as_deref(), theme::LANE_COUNT);
-        if rows.is_empty() {
+        let Some(status) = self.model.status() else {
             return div();
-        }
+        };
+        let rows = worktree_list::rows(
+            &self.model.worktrees,
+            Some(status.root.as_str()),
+            theme::LANE_COUNT,
+        );
         div()
             .flex_none()
             .max_h(px(ROW_HEIGHT * WORKTREE_ROWS_SHOWN + 40.))
             .overflow_hidden()
             .px_2()
             .pb_2()
-            .child(section_title("Worktrees"))
+            .child(worktrees_header(cx))
             .children(rows.iter().map(|row| worktree_row(row, cx)))
     }
 
@@ -422,6 +427,76 @@ fn new_branch_button(cx: &Context<StatusView>) -> Stateful<Div> {
         )
 }
 
+/// The WORKTREES heading, with the "+" that opens the New Worktree dialog.
+fn worktrees_header(cx: &Context<StatusView>) -> Div {
+    div()
+        .px_4()
+        .pt_4()
+        .pb_1()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .text_color(theme::muted())
+        .child("WORKTREES")
+        .child(new_worktree_button(cx))
+}
+
+/// The "+" of the WORKTREES heading: a plain glyph that brightens on hover.
+fn new_worktree_button(cx: &Context<StatusView>) -> Stateful<Div> {
+    div()
+        .id("worktrees-new")
+        .w(px(20.))
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_sm()
+        .text_color(theme::muted())
+        .hover(|style| style.bg(theme::selected_row()).text_color(theme::text()))
+        .child("+")
+        .tooltip(window_chrome::hint("New Worktree…"))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.run_action(Action::NewWorktree, &Args::None, window, cx);
+            }),
+        )
+}
+
+/// The "×" that shows on hover of a linked worktree row and removes it through
+/// the same dialog as the menu. Its click does not reach the row, so a double
+/// click on it does not open the worktree.
+fn remove_button(path: &str, group: SharedString, cx: &Context<StatusView>) -> Stateful<Div> {
+    let target = path.to_owned();
+    div()
+        .id(SharedString::from(format!("worktree-remove-{path}")))
+        .w(px(16.))
+        .h(px(16.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .invisible()
+        .group_hover(group, gpui::Styled::visible)
+        .hover(|style| style.bg(theme::selected_row()))
+        .child(icon::view(Icon::Close, icon::SMALL, theme::muted()))
+        .tooltip(window_chrome::hint("Remove Worktree"))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let args = Args::Worktree(target.clone());
+                this.run_action(Action::RemoveWorktree, &args, window, cx);
+            }),
+        )
+}
+
 fn section_title(text: &'static str) -> Div {
     div()
         .px_4()
@@ -602,8 +677,13 @@ fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> State
     };
     let menu_path = row.entry.path.clone();
     let id = SharedString::from(format!("sidebar-worktree-{menu_path}"));
+    // The main checkout and the window's own worktree cannot be removed here.
+    let group = SharedString::from(format!("worktree-row-{}", row.entry.path));
+    let remove = (!row.entry.is_main && !row.here)
+        .then(|| remove_button(&row.entry.path, group.clone(), cx));
     div()
         .id(id)
+        .group(group)
         .h(px(ROW_HEIGHT))
         .px_2()
         .gap_2()
@@ -654,6 +734,7 @@ fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> State
                 }),
             )
         })
+        .children(remove)
 }
 
 /// A small window glyph in the worktree's colour: an outline with a title bar.

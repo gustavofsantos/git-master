@@ -737,7 +737,7 @@ impl StatusView {
             Ok(Effect::DiscardSuggestion) => self.model.hooks.drop_suggestion(),
             Ok(Effect::DenyHook(hash)) => self.model.hooks.deny(&hash),
             Ok(Effect::OpenWorktreeDialog { branch }) => {
-                self.open_worktree_dialog(Some(&branch), window, cx);
+                self.open_worktree_dialog(branch.as_deref(), window, cx);
             }
             Ok(Effect::OpenWorktree(path)) => self.open_worktree(&path, cx),
             Ok(Effect::OpenRemoveDialog(path)) => self.open_remove_dialog(&path, window, cx),

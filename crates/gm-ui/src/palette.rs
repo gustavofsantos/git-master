@@ -8,18 +8,19 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use gm_schema::BranchEntry;
+use gm_schema::{BranchEntry, WorktreeEntry};
 
 use crate::action_registry::{
     Action, ArgKind, Args, Category, Context as ActionContext, NOT_AVAILABLE, Reason,
 };
 use crate::fuzzy;
+use crate::worktree_list;
 
 const NO_BRANCH: Reason = "No branch to choose from.";
 const NO_FILE: Reason = "No file in the working copy.";
 const NEEDS_CHUNK: Reason = "Pick a chunk in the diff first.";
 const NEEDS_COMMIT: Reason = "Pick a commit in the history first.";
-const NEEDS_WORKTREE: Reason = "Run it from the worktree's menu in the sidebar.";
+const NO_WORKTREE: Reason = "No worktree to choose from.";
 
 /// The groups the palette shows, in the order they appear.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -350,14 +351,16 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
                 pick_state(action, &targets, ctx, NO_FILE),
             )
         }
-        // A worktree is run from its own menu, which names it, so the palette lists it disabled.
-        ArgKind::Worktree => (
-            Choice::Run {
-                action,
-                args: Args::None,
-            },
-            Err(NEEDS_WORKTREE),
-        ),
+        ArgKind::Worktree => {
+            let targets: Vec<Args> = listed_worktrees(ctx)
+                .into_iter()
+                .map(|(_, path)| Args::Worktree(path))
+                .collect();
+            (
+                Choice::Pick(action),
+                pick_state(action, &targets, ctx, NO_WORKTREE),
+            )
+        }
         // A chunk exists only in the diff pane, so the palette lists it disabled.
         ArgKind::Chunk => (
             Choice::Run {
@@ -410,34 +413,56 @@ fn pick_state(
     Err(first.unwrap_or(nothing))
 }
 
+/// The worktrees the palette can pick, as the sidebar lists them: the name and
+/// the folder of each, main checkout first, bare entries left out.
+fn listed_worktrees(ctx: &ActionContext<'_>) -> Vec<(String, String)> {
+    let mut entries: Vec<&WorktreeEntry> = ctx.worktrees.iter().filter(|e| !e.bare).collect();
+    entries.sort_by_key(|entry| !entry.is_main);
+    entries
+        .into_iter()
+        .map(|entry| (worktree_list::display_name(entry), entry.path.clone()))
+        .collect()
+}
+
 fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Vec<Candidate> {
     match action.spec().args {
         ArgKind::Branch => branches
             .iter()
-            .map(|branch| target_row(action, Section::Branches, &branch.name, ctx))
+            .map(|branch| {
+                let args = Args::Branch(branch.name.clone());
+                target_row(action, Section::Branches, branch.name.clone(), args, ctx)
+            })
             .collect(),
         ArgKind::File => ctx
             .entries
             .iter()
-            .map(|entry| target_row(action, Section::Files, &entry.path, ctx))
+            .map(|entry| {
+                let args = Args::File(entry.path.clone());
+                target_row(action, Section::Files, entry.path.clone(), args, ctx)
+            })
             .collect(),
-        ArgKind::None
-        | ArgKind::OptionalBranch
-        | ArgKind::Chunk
-        | ArgKind::Worktree
-        | ArgKind::Commit => Vec::new(),
+        ArgKind::Worktree => listed_worktrees(ctx)
+            .into_iter()
+            .map(|(name, path)| {
+                let args = Args::Worktree(path);
+                target_row(action, Section::Worktrees, name, args, ctx)
+            })
+            .collect(),
+        ArgKind::None | ArgKind::OptionalBranch | ArgKind::Chunk | ArgKind::Commit => Vec::new(),
     }
 }
 
-fn target_row(action: Action, section: Section, name: &str, ctx: &ActionContext<'_>) -> Candidate {
-    let args = match section {
-        Section::Files => Args::File(name.to_owned()),
-        _ => Args::Branch(name.to_owned()),
-    };
+fn target_row(
+    action: Action,
+    section: Section,
+    label: String,
+    args: Args,
+    ctx: &ActionContext<'_>,
+) -> Candidate {
     let state = action.enabled(&args, ctx);
     Candidate {
         section,
-        label: name.to_owned(),
+        label,
         shortcut: None,
         choice: Choice::Run { action, args },
         state,
@@ -465,7 +490,7 @@ pub(crate) fn rank(query: &str, candidates: &[Candidate]) -> Vec<Hit> {
 
 #[cfg(test)]
 mod tests {
-    use gm_schema::{Change, StatusEntry};
+    use gm_schema::{Change, StatusEntry, WorktreeEntry};
 
     use super::*;
 
@@ -503,6 +528,29 @@ mod tests {
             worktrees: &[],
             branch_scope: crate::branch_filter::Scope::All,
             user_email_known: false,
+        }
+    }
+
+    fn worktree(path: &str, branch: &str, is_main: bool) -> WorktreeEntry {
+        WorktreeEntry {
+            path: path.into(),
+            head: Some("abc".into()),
+            branch: Some(branch.into()),
+            detached: false,
+            bare: false,
+            is_main,
+            locked: None,
+            prunable: None,
+        }
+    }
+
+    fn ctx_with_worktrees<'a>(
+        entries: &'a [StatusEntry],
+        worktrees: &'a [WorktreeEntry],
+    ) -> ActionContext<'a> {
+        ActionContext {
+            worktrees,
+            ..ctx_with(entries, "")
         }
     }
 
@@ -791,5 +839,131 @@ mod tests {
         palette.open();
         palette.set_query("stage\nmore");
         assert_eq!(palette.query(), "stage");
+    }
+
+    #[test]
+    fn remove_worktree_is_picked_from_the_listed_worktrees_not_refused() {
+        let entries: [StatusEntry; 0] = [];
+        let worktrees = [
+            worktree("/r", "main", true),
+            worktree("/r-feature", "feature", false),
+        ];
+        let ctx = ctx_with_worktrees(&entries, &worktrees);
+        let top = build(Stage::Actions, "", &ctx, &[]);
+        let remove = find(&top, "Remove Worktree");
+        assert_eq!(remove.section, Section::Worktrees);
+        assert_eq!(remove.choice, Choice::Pick(Action::RemoveWorktree));
+        assert_eq!(remove.state, Ok(()));
+
+        let pick = build(Stage::Pick(Action::RemoveWorktree), "", &ctx, &[]);
+        assert_eq!(pick.len(), 2);
+        assert!(pick.iter().all(|c| c.section == Section::Worktrees));
+        // The main checkout is listed first, disabled with the registry's reason.
+        assert_eq!(pick[0].label, "main");
+        assert_eq!(pick[0].state, Err("The main checkout cannot be removed."));
+        assert_eq!(pick[1].label, "feature");
+        assert_eq!(pick[1].state, Ok(()));
+        assert_eq!(
+            pick[1].choice,
+            Choice::Run {
+                action: Action::RemoveWorktree,
+                args: Args::Worktree("/r-feature".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_worktree_pick_with_only_the_main_checkout_says_why_it_cannot_run() {
+        let entries: [StatusEntry; 0] = [];
+        let worktrees = [worktree("/r", "main", true)];
+        let ctx = ctx_with_worktrees(&entries, &worktrees);
+        let top = build(Stage::Actions, "", &ctx, &[]);
+        assert_eq!(
+            find(&top, "Remove Worktree").state,
+            Err("The main checkout cannot be removed.")
+        );
+        assert_eq!(
+            find(&top, "Open Worktree").state,
+            Ok(()),
+            "the main checkout can be opened"
+        );
+    }
+
+    #[test]
+    fn a_worktree_action_with_no_worktree_to_pick_says_so() {
+        let entries: [StatusEntry; 0] = [];
+        let top = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
+        for label in [
+            "Open Worktree",
+            "Reveal Worktree in File Manager",
+            "Copy Worktree Path",
+            "Remove Worktree",
+            "Lock Worktree",
+            "Unlock Worktree",
+        ] {
+            let row = find(&top, label);
+            assert_eq!(row.choice, Choice::Pick(row_action(label)), "{label}");
+            assert_eq!(row.state, Err(NO_WORKTREE), "{label}");
+        }
+        let pick = build(
+            Stage::Pick(Action::RemoveWorktree),
+            "",
+            &ctx_with(&entries, ""),
+            &[],
+        );
+        assert!(pick.is_empty());
+    }
+
+    /// The action a worktree row label names, for the table above.
+    fn row_action(label: &str) -> Action {
+        Action::ALL
+            .into_iter()
+            .find(|action| action.spec().title == label)
+            .unwrap_or_else(|| panic!("no action titled {label}"))
+    }
+
+    #[test]
+    fn new_worktree_is_a_plain_row_that_runs_with_no_target() {
+        let entries: [StatusEntry; 0] = [];
+        let top = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
+        let row = find(&top, "New Worktree…");
+        assert_eq!(row.section, Section::Worktrees);
+        assert_eq!(
+            row.choice,
+            Choice::Run {
+                action: Action::NewWorktree,
+                args: Args::None,
+            }
+        );
+        assert_eq!(row.state, Ok(()));
+    }
+
+    #[test]
+    fn a_worktree_query_finds_the_worktree_pick_by_its_name() {
+        let entries: [StatusEntry; 0] = [];
+        let worktrees = [
+            worktree("/r", "main", true),
+            worktree("/r-feature", "feature", false),
+        ];
+        let ctx = ctx_with_worktrees(&entries, &worktrees);
+        let candidates = build(Stage::Pick(Action::RemoveWorktree), "", &ctx, &[]);
+        let mut palette = Palette::default();
+        palette.open();
+        palette.enter_pick(Action::RemoveWorktree);
+        shown(&mut palette, candidates);
+        assert_eq!(palette.count(), 2);
+        palette.set_query("feat");
+        let job = palette.begin(build(
+            Stage::Pick(Action::RemoveWorktree),
+            "feat",
+            &ctx,
+            &[],
+        ));
+        assert!(palette.apply(job.run()));
+        assert_eq!(palette.count(), 1);
+        assert_eq!(
+            palette.highlighted().map(|c| c.label.as_str()),
+            Some("feature")
+        );
     }
 }

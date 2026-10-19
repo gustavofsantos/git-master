@@ -105,9 +105,10 @@ pub enum Effect {
     Reveal(PathBuf),
     FocusCommitMessage,
     /// Opens the create-worktree dialog, with `branch` chosen as the branch
-    /// to check out (the dialog's Git refusal, if any, is shown there).
+    /// to check out when there is one. Without it the dialog starts empty and
+    /// the branch is typed or picked there.
     OpenWorktreeDialog {
-        branch: String,
+        branch: Option<String>,
     },
     /// Opens the worktree at this path in its own window.
     OpenWorktree(String),
@@ -168,7 +169,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 40] = [
+const SPECS: [Spec; 41] = [
     spec(
         "file.stage",
         "Stage File",
@@ -293,6 +294,13 @@ const SPECS: [Spec; 40] = [
         "Create Worktree",
         Some("⌥⌘W"),
         ArgKind::Branch,
+        Category::Worktrees,
+    ),
+    spec(
+        "worktree.new",
+        "New Worktree…",
+        None,
+        ArgKind::None,
         Category::Worktrees,
     ),
     spec(
@@ -483,6 +491,7 @@ pub enum Action {
     RenameBranch,
     DeleteBranch,
     CreateWorktree,
+    NewWorktree,
     DiscardFile,
     RevealFile,
     SuggestMessage,
@@ -600,7 +609,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 40] = [
+    pub const ALL: [Action; 41] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -619,6 +628,7 @@ impl Action {
         Action::RenameBranch,
         Action::DeleteBranch,
         Action::CreateWorktree,
+        Action::NewWorktree,
         Action::DiscardFile,
         Action::RevealFile,
         Action::SuggestMessage,
@@ -719,6 +729,7 @@ impl Action {
         matches!(
             self,
             Action::CreateWorktree
+                | Action::NewWorktree
                 | Action::RemoveWorktree
                 | Action::PruneWorktrees
                 | Action::NewBranch
@@ -802,8 +813,9 @@ impl Action {
             _ if self.is_worktree_rule() => worktree_rule(self, args, ctx),
             Action::Refresh
             | Action::CreateWorktree
+            | Action::NewWorktree
             | Action::PruneWorktrees
-            | Action::ShowHistory => ctx.repo_open.then_some(()).ok_or("No repository is open."),
+            | Action::ShowHistory => repository_open(ctx),
             Action::CheckoutBranch => {
                 idle(ctx)?;
                 match args {
@@ -879,8 +891,9 @@ impl Action {
             }
             (Action::FocusCommitMessage, _) => Effect::FocusCommitMessage,
             (Action::CreateWorktree, Args::Branch(name)) => Effect::OpenWorktreeDialog {
-                branch: name.clone(),
+                branch: Some(name.clone()),
             },
+            (Action::NewWorktree, _) => Effect::OpenWorktreeDialog { branch: None },
             (Action::OpenWorktree, Args::Worktree(path)) => Effect::OpenWorktree(path.clone()),
             (Action::RevealWorktree, Args::Worktree(path)) => Effect::Reveal(PathBuf::from(path)),
             (Action::RemoveWorktree, Args::Worktree(path)) => {
@@ -1001,6 +1014,15 @@ pub fn toggle_file_action(entry: &StatusEntry) -> Action {
 #[must_use]
 pub fn has_unstaged(entry: &StatusEntry) -> bool {
     entry.unstaged.is_some() || entry.untracked || entry.conflicted
+}
+
+/// Refuses while no repository is open.
+fn repository_open(ctx: &Context<'_>) -> Result<(), Reason> {
+    if ctx.repo_open {
+        Ok(())
+    } else {
+        Err("No repository is open.")
+    }
 }
 
 /// Refuses while an open or a checkout is in flight.
@@ -1205,10 +1227,75 @@ mod tests {
         assert_eq!(
             Action::CreateWorktree.plan(&args, &context),
             Ok(Effect::OpenWorktreeDialog {
-                branch: "feature".into()
+                branch: Some("feature".into())
             })
         );
         assert!(Action::CreateWorktree.available());
+    }
+
+    #[test]
+    fn new_worktree_needs_only_an_open_repository_and_opens_the_dialog_empty() {
+        let context = ctx(&[], "");
+        assert_eq!(Action::NewWorktree.enabled(&Args::None, &context), Ok(()));
+        assert_eq!(
+            Action::NewWorktree.plan(&Args::None, &context),
+            Ok(Effect::OpenWorktreeDialog { branch: None })
+        );
+        assert!(Action::NewWorktree.available());
+        assert!(Action::NewWorktree.opens_dialog());
+        assert_eq!(Action::NewWorktree.spec().args, ArgKind::None);
+        assert_eq!(Action::NewWorktree.spec().category, Category::Worktrees);
+        assert_eq!(Action::NewWorktree.spec().title, "New Worktree…");
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::NewWorktree.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::NewWorktree.enabled(&Args::Branch("main".into()), &context),
+            Err("No target for this action")
+        );
+    }
+
+    #[test]
+    fn the_worktree_actions_that_act_on_a_listed_worktree_take_a_worktree() {
+        let on_a_worktree = [
+            Action::OpenWorktree,
+            Action::RevealWorktree,
+            Action::CopyWorktreePath,
+            Action::RemoveWorktree,
+            Action::LockWorktree,
+            Action::UnlockWorktree,
+        ];
+        for action in on_a_worktree {
+            assert_eq!(action.spec().args, ArgKind::Worktree, "{}", action.id());
+        }
+        // Create, New and Prune work on the repository, not on a listed worktree.
+        assert_eq!(Action::CreateWorktree.spec().args, ArgKind::Branch);
+        assert_eq!(Action::NewWorktree.spec().args, ArgKind::None);
+        assert_eq!(Action::PruneWorktrees.spec().args, ArgKind::None);
+    }
+
+    #[test]
+    fn a_worktree_action_takes_only_a_worktree_target() {
+        let context = ctx(&[], "");
+        let target = Args::Worktree("/repo-feature".into());
+        assert_eq!(
+            Action::RemoveWorktree.enabled(&Args::None, &context),
+            Err("No target for this action")
+        );
+        assert_eq!(
+            Action::RemoveWorktree.enabled(&Args::Branch("main".into()), &context),
+            Err("No target for this action")
+        );
+        // A listed worktree's rule decides; this one is not listed, so it says so.
+        assert_eq!(
+            Action::RemoveWorktree.enabled(&target, &context),
+            Err("This worktree is not listed.")
+        );
     }
 
     #[test]

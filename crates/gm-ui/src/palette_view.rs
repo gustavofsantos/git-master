@@ -295,6 +295,7 @@ impl StatusView {
             Stage::Pick(action) => {
                 let what = match action.spec().args {
                     ArgKind::File => "a file",
+                    ArgKind::Worktree => "a worktree",
                     _ => "a branch",
                 };
                 (
