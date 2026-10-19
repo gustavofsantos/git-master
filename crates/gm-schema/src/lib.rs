@@ -6,6 +6,7 @@ mod history;
 mod hook;
 mod operation;
 mod status;
+mod workflow;
 
 pub use diff::{DiffLine, DiffSide, FileDiff, Hunk, HunkId, LineKind, StageTarget};
 pub use history::{
@@ -24,3 +25,4 @@ pub use status::{
     Blocker, BranchEntry, BranchFailure, BranchInfo, Change, MergedBranch, PruneCandidate,
     RepoStatus, StatusEntry, WorktreeEntry, WorktreeInspection,
 };
+pub use workflow::{WorkflowEnd, WorkflowInfo, WorkflowInput, WorkflowRunStatus};

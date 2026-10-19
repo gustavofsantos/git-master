@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +10,7 @@ use crate::status::{
     BranchEntry, BranchFailure, MergedBranch, PruneCandidate, RepoStatus, WorktreeEntry,
     WorktreeInspection,
 };
+use crate::workflow::{WorkflowEnd, WorkflowInfo, WorkflowRunStatus};
 
 /// The refusal of `DeleteMergedBranches` when the merged list no longer matches
 /// the one the human confirmed. The UI matches it to list the branches again.
@@ -64,6 +67,9 @@ pub enum CommandKind {
         path: String,
         hunk: HunkId,
     },
+    /// Stages every change of the working tree (`git add -A`), as a workflow's
+    /// `stage.all` does. Never commits.
+    StageAll,
     Commit {
         message: String,
     },
@@ -191,6 +197,26 @@ pub enum CommandKind {
     /// Stops the `RunPrepareCommit` operation `run`, if it is still running.
     CancelHook {
         run: OperationId,
+    },
+    /// Lists the workflow files of the user's directory and of every
+    /// `gitmaster.workflowPath`, with what loading each gave. Reads only; never
+    /// recorded in the command log (D28).
+    ListWorkflows,
+    /// Starts the manual workflow `name` with `inputs`, one string per declared
+    /// input. Human only. The run goes on with its own events, keyed by its run id.
+    RunWorkflow {
+        name: String,
+        inputs: BTreeMap<String, String>,
+    },
+    /// The human's answer to the `approve` state run `run` is in. Human only.
+    ApproveWorkflowStep {
+        run: i64,
+        approved: bool,
+    },
+    /// Stops the workflow run `run`, killing its `exec` step if one is running.
+    /// Human only.
+    CancelWorkflowRun {
+        run: i64,
     },
 }
 
@@ -368,6 +394,42 @@ pub enum Event {
     HookCancelled {
         id: OperationId,
         hook: String,
+    },
+    /// Answers `ListWorkflows`. `ignored` holds each directory that was not
+    /// read, as `<path>: <reason>`.
+    WorkflowsListed {
+        id: OperationId,
+        workflows: Vec<WorkflowInfo>,
+        ignored: Vec<String>,
+    },
+    /// A workflow run moved: its status, and the state it is in when it has one.
+    WorkflowRunChanged {
+        run: i64,
+        workflow: String,
+        status: WorkflowRunStatus,
+        state: Option<String>,
+    },
+    /// A `commit.suggest_message` step: the composer shows `message` as a suggestion.
+    WorkflowMessageSuggested {
+        run: i64,
+        message: String,
+    },
+    /// A `notify` step: a line for the user.
+    WorkflowNotice {
+        run: i64,
+        text: String,
+    },
+    /// The run waits at the `approve` state `state`; `summary` is what it asks.
+    WorkflowApprovalRequested {
+        run: i64,
+        state: String,
+        summary: String,
+    },
+    /// The run ended. `reason` says why when it failed, was cancelled or was blocked.
+    WorkflowRunFinished {
+        run: i64,
+        end: WorkflowEnd,
+        reason: Option<String>,
     },
 }
 

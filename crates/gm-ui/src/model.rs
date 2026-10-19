@@ -432,7 +432,10 @@ impl Model {
     #[must_use]
     #[allow(clippy::too_many_lines)] // one arm per event; the create's arm adds one more
     pub fn apply(&mut self, event: Event) -> Option<Diffs> {
-        if self.floor.is_some_and(|floor| event_id(&event) < floor) {
+        if self
+            .floor
+            .is_some_and(|floor| event_id(&event).is_some_and(|id| id < floor))
+        {
             return None;
         }
         if let Event::OperationChanged { id, state, .. } = &event
@@ -648,7 +651,13 @@ impl Model {
             | Event::WorktreeInspected { .. }
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
-            | Event::MergedBranchesDeleted { .. } => None,
+            | Event::MergedBranchesDeleted { .. }
+            | Event::WorkflowsListed { .. }
+            | Event::WorkflowRunChanged { .. }
+            | Event::WorkflowMessageSuggested { .. }
+            | Event::WorkflowNotice { .. }
+            | Event::WorkflowApprovalRequested { .. }
+            | Event::WorkflowRunFinished { .. } => None,
         }
     }
 
@@ -862,7 +871,9 @@ fn checkout_message(detail: Option<&str>) -> String {
         .to_owned()
 }
 
-fn event_id(event: &Event) -> OperationId {
+/// The operation an event answers; `None` for an event of a workflow run, which
+/// belongs to the run, not to an operation.
+fn event_id(event: &Event) -> Option<OperationId> {
     match event {
         Event::StatusLoaded { id, .. }
         | Event::OperationChanged { id, .. }
@@ -881,7 +892,13 @@ fn event_id(event: &Event) -> OperationId {
         | Event::HookStarted { id, .. }
         | Event::HookFinished { id, .. }
         | Event::HookFailed { id, .. }
-        | Event::HookCancelled { id, .. } => *id,
+        | Event::HookCancelled { id, .. }
+        | Event::WorkflowsListed { id, .. } => Some(*id),
+        Event::WorkflowRunChanged { .. }
+        | Event::WorkflowMessageSuggested { .. }
+        | Event::WorkflowNotice { .. }
+        | Event::WorkflowApprovalRequested { .. }
+        | Event::WorkflowRunFinished { .. } => None,
     }
 }
 
