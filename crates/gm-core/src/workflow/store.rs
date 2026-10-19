@@ -20,7 +20,7 @@ pub const OUTPUT_LIMIT: usize = 64 * 1024;
 pub const OUTPUT_HEAD: usize = 4 * 1024;
 
 /// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 /// How long a writer waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -69,6 +69,11 @@ CREATE TABLE workflow_wait (
     deadline INTEGER,
     PRIMARY KEY (run_id, state)
 );
+";
+
+/// Version 1 to 2: each output row keeps the rendered input of its step.
+const UPGRADE_1_TO_2: &str = "
+ALTER TABLE workflow_state_output ADD COLUMN input_json TEXT;
 ";
 
 /// Columns read back for a `RunRow`, in the order `raw_run` expects them.
@@ -158,6 +163,10 @@ pub struct OutputRow {
     /// The output was larger than `OUTPUT_LIMIT`: `output` is
     /// `{"sha256": .., "size": .., "head": ..}`.
     pub truncated: bool,
+    /// What the step received, rendered. `None` for a state that takes no
+    /// input, and for rows written before schema 2. Stored like `output`: an
+    /// input above `OUTPUT_LIMIT` reads back as `{"sha256", "size", "head"}`.
+    pub input: Option<Value>,
     pub started_at: i64,
     pub ended_at: Option<i64>,
 }
@@ -214,18 +223,28 @@ impl Store {
     }
 
     /// Records that the run is entering `state`, before its effect starts:
-    /// a new output row with no output yet, and `current_state`.
-    pub fn enter_state(&mut self, run: RunId, state: &str, now: i64) -> Result<(), StoreError> {
+    /// a new output row with no output yet, the rendered `input` of the step
+    /// (`None` for a state that takes none) and `current_state`.
+    pub fn enter_state(
+        &mut self,
+        run: RunId,
+        state: &str,
+        input: Option<&Value>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let input_json = input
+            .map(|value| stored_output(value).map(|(text, _)| text))
+            .transpose()?;
         let tx = self.conn.transaction().map_err(StoreError::from)?;
         ensure_run(&tx, run)?;
         tx.execute(
             "INSERT INTO workflow_state_output
-                (run_id, state, visit, output_json, truncated, started_at)
+                (run_id, state, visit, output_json, truncated, started_at, input_json)
              VALUES (?1, ?2,
                 (SELECT COALESCE(MAX(visit), 0) + 1 FROM workflow_state_output
                  WHERE run_id = ?1 AND state = ?2),
-                NULL, 0, ?3)",
-            params![run, state, now],
+                NULL, 0, ?3, ?4)",
+            params![run, state, now, input_json],
         )
         .map_err(StoreError::from)?;
         tx.execute(
@@ -436,7 +455,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT state, visit, output_json, truncated, started_at, ended_at
+                "SELECT state, visit, output_json, truncated, started_at, ended_at, input_json
                  FROM workflow_state_output
                  WHERE run_id = ?1 ORDER BY started_at, visit",
             )
@@ -450,6 +469,7 @@ impl Store {
                     row.get::<_, bool>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })
             .map_err(StoreError::from)?
@@ -457,12 +477,13 @@ impl Store {
             .map_err(StoreError::from)?;
         raw.into_iter()
             .map(
-                |(state, visit, output, truncated, started_at, ended_at)| -> Result<OutputRow, StoreError> {
+                |(state, visit, output, truncated, started_at, ended_at, input)| -> Result<OutputRow, StoreError> {
                     Ok(OutputRow {
                         state,
                         visit,
                         output: output.as_deref().map(parse_json).transpose()?,
                         truncated,
+                        input: input.as_deref().map(parse_json).transpose()?,
                         started_at,
                         ended_at,
                     })
@@ -526,21 +547,24 @@ fn configure(conn: &Connection) -> Result<(), StoreError> {
         .map_err(StoreError::from)
 }
 
-/// Creates the schema of an empty database; refuses one written by a newer
-/// version of the app.
+/// Creates the schema of an empty database, upgrades an older one, each in one
+/// transaction; refuses one written by a newer version of the app.
 fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(StoreError::from)?;
     match version {
-        0 => {
+        0 | 1 => {
             let tx = conn.transaction().map_err(StoreError::from)?;
-            tx.execute_batch(SCHEMA).map_err(StoreError::from)?;
+            if version == 0 {
+                tx.execute_batch(SCHEMA).map_err(StoreError::from)?;
+            }
+            tx.execute_batch(UPGRADE_1_TO_2).map_err(StoreError::from)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(StoreError::from)?;
             tx.commit().map_err(StoreError::from)
         }
-        1 => Ok(()),
+        v if v == SCHEMA_VERSION => Ok(()),
         v if v > SCHEMA_VERSION => Err(StoreError(
             "state.db was written by a newer GitMaster".to_string(),
         )),
@@ -631,8 +655,8 @@ fn read_runs<P: rusqlite::Params>(
     raw.into_iter().map(RawRun::into_row).collect()
 }
 
-/// The output as stored: the value itself, or, above `OUTPUT_LIMIT`, its
-/// hash, size and head. The flag tells which one it is.
+/// The output (or input) as stored: the value itself, or, above `OUTPUT_LIMIT`,
+/// its hash, size and head. The flag tells which one it is.
 fn stored_output(output: &Value) -> Result<(String, bool), StoreError> {
     let text = to_json(output)?;
     if text.len() <= OUTPUT_LIMIT {
@@ -726,7 +750,9 @@ mod tests {
         assert_eq!(row.trigger, json!({"kind": "manual"}));
         assert_eq!(row.definition_text, "[workflow]");
 
-        store.enter_state(run, "a", 1100).expect("enter a");
+        store
+            .enter_state(run, "a", Some(&json!({"text": "x"})), 1100)
+            .expect("enter a");
         store
             .record_transition(
                 run,
@@ -740,7 +766,7 @@ mod tests {
         let row = store.run(run).expect("read").expect("exists");
         assert_eq!(row.current_state.as_deref(), Some("b"));
 
-        store.enter_state(run, "b", 1300).expect("enter b");
+        store.enter_state(run, "b", None, 1300).expect("enter b");
         store
             .record_transition(
                 run,
@@ -792,6 +818,7 @@ mod tests {
                     visit: 1,
                     output: Some(json!({"n": 1})),
                     truncated: false,
+                    input: Some(json!({"text": "x"})),
                     started_at: 1100,
                     ended_at: Some(1200),
                 },
@@ -800,6 +827,7 @@ mod tests {
                     visit: 1,
                     output: Some(json!("fine")),
                     truncated: false,
+                    input: None,
                     started_at: 1300,
                     ended_at: Some(1400),
                 },
@@ -814,7 +842,7 @@ mod tests {
         let run = start(&mut store, "loop");
 
         for visit in 1..=3 {
-            store.enter_state(run, "a", 1000 + visit).expect("enter a");
+            store.enter_state(run, "a", None, 1000 + visit).expect("enter a");
             assert_eq!(store.open_state(run).expect("open"), Some("a".to_string()));
             store
                 .record_transition(
@@ -845,7 +873,7 @@ mod tests {
         let output = json!({ "text": "x".repeat(100 * 1024) });
         let text = serde_json::to_string(&output).expect("encode");
 
-        store.enter_state(run, "a", 1100).expect("enter");
+        store.enter_state(run, "a", None, 1100).expect("enter");
         store
             .record_transition(
                 run,
@@ -871,13 +899,35 @@ mod tests {
     }
 
     #[test]
+    fn large_input_is_stored_as_hash_size_and_head() {
+        let mut store = Store::open_in_memory().expect("open");
+        let run = start(&mut store, "big-input");
+        let input = json!({ "text": "y".repeat(100 * 1024) });
+        let text = serde_json::to_string(&input).expect("encode");
+
+        store
+            .enter_state(run, "a", Some(&input), 1100)
+            .expect("enter");
+
+        let rows = store.outputs(run).expect("outputs");
+        assert!(!rows[0].truncated, "the flag is the output's");
+        let stored = rows[0].input.clone().expect("input");
+        assert_eq!(
+            stored["sha256"],
+            json!(hex(&Sha256::digest(text.as_bytes())))
+        );
+        assert_eq!(stored["size"], json!(text.len()));
+        assert!(text.starts_with(stored["head"].as_str().expect("head")));
+    }
+
+    #[test]
     fn large_multibyte_output_is_cut_at_a_char_boundary() {
         let mut store = Store::open_in_memory().expect("open");
         let run = start(&mut store, "accents");
         let output = json!({ "text": "é".repeat(60 * 1024) });
         let text = serde_json::to_string(&output).expect("encode");
 
-        store.enter_state(run, "a", 1100).expect("enter");
+        store.enter_state(run, "a", None, 1100).expect("enter");
         store
             .record_transition(
                 run,
@@ -903,7 +953,7 @@ mod tests {
         {
             let mut store = Store::open(&path).expect("open creates the parent");
             let run = start(&mut store, "sync");
-            store.enter_state(run, "apply", 2000).expect("enter");
+            store.enter_state(run, "apply", None, 2000).expect("enter");
             // Dropped here without recording: the process went away.
         }
 
@@ -928,7 +978,7 @@ mod tests {
     fn a_failed_transition_leaves_nothing_behind() {
         let mut store = Store::open_in_memory().expect("open");
         let run = start(&mut store, "atomic");
-        store.enter_state(run, "a", 1100).expect("enter");
+        store.enter_state(run, "a", None, 1100).expect("enter");
         store
             .conn
             .execute_batch(
@@ -1025,7 +1075,7 @@ mod tests {
         for i in 0..205 {
             let id = start(&mut store, "daily");
             if i == 0 {
-                store.enter_state(id, "a", 1100).expect("enter");
+                store.enter_state(id, "a", None, 1100).expect("enter");
                 store
                     .record_transition(
                         id,
@@ -1063,6 +1113,64 @@ mod tests {
         assert_eq!(count(&store, "workflow_transition"), 0);
     }
 
+    fn user_version(store: &Store) -> i64 {
+        store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version")
+    }
+
+    #[test]
+    fn a_fresh_database_is_created_at_the_current_version() {
+        let store = Store::open_in_memory().expect("open");
+        assert_eq!(user_version(&store), 2);
+        let columns: Vec<String> = store
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('workflow_state_output')")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("columns");
+        assert!(columns.contains(&"input_json".to_string()));
+    }
+
+    #[test]
+    fn a_version_1_database_is_upgraded_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.db");
+        {
+            // Built by hand, as schema 1 wrote it.
+            let conn = Connection::open(&path).expect("raw open");
+            conn.execute_batch(SCHEMA).expect("schema 1");
+            conn.pragma_update(None, "user_version", 1)
+                .expect("version 1");
+            conn.execute_batch(
+                "INSERT INTO workflow_run
+                    (id, workflow, definition_hash, definition_text, trigger_json,
+                     started_by, status, started_at, ended_at)
+                 VALUES (1, 'old', 'h', '[workflow]', '{}', 'human', 'done', 1000, 1500);
+                 INSERT INTO workflow_state_output
+                    (run_id, state, visit, output_json, truncated, started_at, ended_at)
+                 VALUES (1, 'a', 1, '{\"n\":1}', 0, 1100, 1200);",
+            )
+            .expect("rows of schema 1");
+        }
+
+        let store = Store::open(&path).expect("upgrade");
+        assert_eq!(user_version(&store), 2);
+        let rows = store.outputs(1).expect("outputs");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].output, Some(json!({"n": 1})));
+        assert_eq!(rows[0].input, None);
+        assert_eq!(store.run(1).expect("read").expect("run").workflow, "old");
+        drop(store);
+
+        // Reopening a current database changes nothing.
+        let reopened = Store::open(&path).expect("reopen");
+        assert_eq!(user_version(&reopened), 2);
+    }
+
     #[test]
     fn a_database_from_a_newer_version_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1070,7 +1178,7 @@ mod tests {
         Store::open(&path).expect("create");
         {
             let conn = Connection::open(&path).expect("raw open");
-            conn.pragma_update(None, "user_version", 2).expect("bump");
+            conn.pragma_update(None, "user_version", 3).expect("bump");
         }
         let error = Store::open(&path).err().expect("refused");
         assert_eq!(
