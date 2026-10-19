@@ -28,6 +28,7 @@ use crate::diff_rows::Layout;
 use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
 use crate::model::{Model, Switched};
+use crate::name_fit::name_label;
 use crate::palette::Palette;
 use crate::palette_view::{self, PaletteView};
 use crate::project_menu::ProjectMenu;
@@ -815,20 +816,28 @@ impl StatusView {
         };
         window_chrome::header_bar(window)
             .h(title_bar::HEIGHT)
-            .child(window_chrome::no_drag(self.title_block(cx)))
+            .child(window_chrome::no_drag_shrinking(self.title_block(cx)))
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_1()
                     .text_color(muted)
-                    .child(icon::view(Icon::ArrowUp, icon::SMALL, muted))
+                    .child(icon::view(Icon::ArrowUp, icon::SMALL, muted).flex_none())
                     .child(ahead.to_string())
-                    .child(icon::view(Icon::ArrowDown, icon::SMALL, muted))
+                    .child(icon::view(Icon::ArrowDown, icon::SMALL, muted).flex_none())
                     .child(behind.to_string()),
             )
-            .child(div().text_color(muted).child(upstream))
+            .child(
+                div()
+                    .flex_shrink()
+                    .min_w(px(0.))
+                    .max_w(px(title_bar::UPSTREAM_MAX_WIDTH))
+                    .text_color(muted)
+                    .child(name_label(&upstream, &[])),
+            )
             .child(div().flex_1())
             .child(div().text_color(muted).child(loading))
             .child(window_chrome::no_drag(self.toolbar(cx)))

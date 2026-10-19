@@ -16,12 +16,18 @@ use gpui::{
 use crate::action_registry::{Action, Args};
 use crate::branches::{Line, Section};
 use crate::icon::{self, Icon};
+use crate::name_fit::{self, name_label};
 use crate::text_area::{Down, Newline, TextArea, TextAreaEvent, Up};
 use crate::theme;
 use crate::view::StatusView;
+use crate::window_chrome;
 
 const ROW_HEIGHT: f32 = 24.;
 const MENU_WIDTH: f32 = 360.;
+/// The widest the top bar's branch button gets; a longer name is cut in the middle.
+const BUTTON_MAX_WIDTH: f32 = 240.;
+/// The widest an upstream name in a menu row gets before it is cut at the end.
+const UPSTREAM_MAX_WIDTH: f32 = 150.;
 /// Twelve rows are shown; a longer list scrolls.
 const MAX_LIST_HEIGHT: f32 = ROW_HEIGHT * 12.;
 
@@ -56,6 +62,7 @@ impl StatusView {
                 .clone()
                 .unwrap_or_else(|| "(detached)".to_owned())
         });
+        let full = name.clone();
         let anchor = Rc::clone(&self.branch_menu.anchor);
         // The canvas only measures the button; it paints nothing.
         let measure = canvas(
@@ -70,6 +77,8 @@ impl StatusView {
             .id("branch-button")
             .relative()
             .h(px(26.))
+            .min_w(px(0.))
+            .max_w(px(BUTTON_MAX_WIDTH))
             .px_2()
             .flex()
             .flex_row()
@@ -78,10 +87,13 @@ impl StatusView {
             .rounded_sm()
             .cursor_pointer()
             .hover(|style| style.bg(theme::selected_row()))
+            .when(name_fit::needs_hover(&full), |this| {
+                this.tooltip(window_chrome::hint(full))
+            })
             .child(measure)
-            .child(icon::view(Icon::GitBranch, icon::SIZE, theme::text()))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
-            .child(icon::view(Icon::CaretDown, icon::SMALL, theme::muted()))
+            .child(icon::view(Icon::GitBranch, icon::SIZE, theme::text()).flex_none())
+            .child(name_label(&name, &[]).font_weight(FontWeight::SEMIBOLD))
+            .child(icon::view(Icon::CaretDown, icon::SMALL, theme::muted()).flex_none())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -357,6 +369,7 @@ fn branch_row(
 ) -> Stateful<Div> {
     let muted = theme::muted();
     let name = branch.name.clone();
+    let full = branch.name.clone();
     let current = branch.is_current;
     div()
         .id(("branch", index))
@@ -369,6 +382,9 @@ fn branch_row(
         .cursor_pointer()
         .when(highlighted, |row| row.bg(theme::selected_row()))
         .hover(|style| style.bg(theme::selected_row()))
+        .when(name_fit::needs_hover(&full), |row| {
+            row.tooltip(window_chrome::hint(full))
+        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -381,17 +397,16 @@ fn branch_row(
                 .flex_none()
                 .children(current.then(|| icon::view(Icon::CheckCircle, icon::SMALL, muted))),
         )
-        .child(
+        .child(name_label(&branch.name, &[]))
+        .children(branch.upstream.clone().map(|upstream| {
             div()
-                .flex_1()
-                .min_w(px(0.))
+                .flex_none()
+                .max_w(px(UPSTREAM_MAX_WIDTH))
                 .overflow_hidden()
-                .child(branch.name.clone()),
-        )
-        .children(
-            branch
-                .upstream
-                .clone()
-                .map(|upstream| div().text_xs().text_color(muted).child(upstream)),
-        )
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_xs()
+                .text_color(muted)
+                .child(upstream)
+        }))
 }

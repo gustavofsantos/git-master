@@ -13,8 +13,8 @@
 use gpui::prelude::*;
 use gpui::{
     AnyView, App, Bounds, BoxShadow, Corners, CursorStyle, Decorations, DispatchPhase, Div, Edges,
-    HitboxBehavior, Hsla, MouseButton, MouseDownEvent, Pixels, Point, ResizeEdge, Size, Stateful,
-    Tiling, Window, WindowControlArea, canvas, div, point, px,
+    HitboxBehavior, Hsla, MouseButton, MouseDownEvent, Pixels, Point, ResizeEdge, SharedString,
+    Size, Stateful, Tiling, Window, WindowControlArea, canvas, div, point, px,
 };
 
 use crate::icon::{self, Icon};
@@ -37,7 +37,7 @@ const CONTROL_SIZE: Pixels = px(28.);
 
 /// The small card a control's label shows in on hover.
 struct HintCard {
-    text: &'static str,
+    text: SharedString,
 }
 
 impl Render for HintCard {
@@ -51,7 +51,7 @@ impl Render for HintCard {
             .bg(theme::panel())
             .text_size(px(12.))
             .text_color(theme::text())
-            .child(self.text)
+            .child(self.text.clone())
     }
 }
 
@@ -420,10 +420,13 @@ pub fn header_bar(window: &Window) -> Div {
     }
 }
 
-/// A tooltip that shows `text` on the hint card, for a control that is
-/// disabled and says why.
-pub fn hint(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    move |_: &mut Window, cx: &mut App| -> AnyView { cx.new(|_| HintCard { text }).into() }
+/// A tooltip that shows `text` on the hint card: a control that is disabled
+/// and says why, or the full name of a truncated branch.
+pub fn hint(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text: SharedString = text.into();
+    move |_: &mut Window, cx: &mut App| -> AnyView {
+        cx.new(|_| HintCard { text: text.clone() }).into()
+    }
 }
 
 /// The window controls the platform supports, left to right, drawn for the
@@ -446,8 +449,17 @@ pub fn window_controls(window: &Window) -> Div {
 /// window menu. The wrapper is the item's parent, so the item's own handlers
 /// run first and this one only stops the press from going further up.
 pub fn no_drag(item: impl IntoElement) -> Div {
-    div()
-        .flex_none()
+    stop_presses(div().flex_none(), item)
+}
+
+/// `no_drag` for an item whose text must give way when the header is narrow:
+/// the wrapper takes the free width and may shrink, so the item can shrink too.
+pub fn no_drag_shrinking(item: impl IntoElement) -> Div {
+    stop_presses(div().flex_shrink().min_w(px(0.)), item)
+}
+
+fn stop_presses(wrapper: Div, item: impl IntoElement) -> Div {
+    wrapper
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .child(item)
@@ -482,7 +494,7 @@ fn control_button(control: Control) -> Stateful<Div> {
             Control::Close => window.dispatch_action(Box::new(crate::Quit), cx),
         })
         .tooltip(move |_: &mut Window, cx: &mut App| -> AnyView {
-            cx.new(|_| HintCard { text: label }).into()
+            cx.new(|_| HintCard { text: label.into() }).into()
         })
         .child(icon::view(control.icon(), icon::SIZE, ink))
 }

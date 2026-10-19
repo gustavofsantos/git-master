@@ -63,6 +63,7 @@
 | D49 | Gate de performance da navegação (N6): benchmarks ignorados em repositórios de 100 mil e 1 milhão de arquivos gerados com `git fast-import`; metas a calibrar nos spikes | Proposto | 09 |
 | D50 | Caixa única de busca, sem sintaxe: um classificador determinístico por regras escolhe os motores (arquivos, símbolos, usos, texto), que rodam em paralelo e entram em seções de ordem fixa. Sem LLM no caminho; filtros são só atalho opcional | Proposto | 09 |
 | D51 | O GitMaster é autocontido: a navegação não exige nenhum programa além do `git`, que o app já exige. Sem ripgrep, ctags, ast-grep nem servidor de linguagem (LSP) como executáveis; motores extras entram só como bibliotecas Rust compiladas no binário | Proposto | 09 |
+| D52 | Nomes de branch longos nas telas que os mostram (cabeçalho, seletor, barra lateral, paleta, worktrees, commit): a cabeça do nome encolhe com reticências e os últimos 16 caracteres ficam sempre visíveis, sem medir texto; ícones e contagens não encolhem. Acima de 24 caracteres, o nome completo aparece no tooltip | Proposto (2026-10-19) | 05 |
 
 ## D31: worktrees na v1
 

@@ -14,6 +14,9 @@ use crate::window_chrome;
 /// Height of the title bar: the name row over the subtitle row.
 pub(crate) const HEIGHT: Pixels = px(44.);
 
+/// The widest the upstream name in the header gets; a longer one is cut at its end.
+pub(crate) const UPSTREAM_MAX_WIDTH: f32 = 220.;
+
 /// The buttons on the right of the title bar, left to right.
 pub(crate) const TOOLBAR: [Action; 4] = [
     Action::Fetch,

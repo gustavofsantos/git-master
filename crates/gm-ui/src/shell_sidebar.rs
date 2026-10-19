@@ -8,14 +8,16 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div,
-    prelude::*, px, uniform_list,
+    AnyElement, Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, SharedString,
+    Stateful, Window, div, prelude::*, px, uniform_list,
 };
 
 use crate::action_registry::{Action, Args};
+use crate::name_fit::{self, name_label};
 use crate::sidebar::{self, Grouping, Row};
 use crate::theme;
 use crate::view::{Screen, StatusView};
+use crate::window_chrome;
 use crate::worktree_list;
 
 pub(crate) const SIDEBAR_WIDTH: f32 = 240.;
@@ -240,14 +242,21 @@ fn tree_row(
             .text_color(theme::faint())
             .child(*text)
             .into_any_element(),
-        Row::Group(prefix) => div()
-            .px_4()
-            .h(px(ROW_HEIGHT))
-            .flex()
-            .items_center()
-            .text_color(theme::muted())
-            .child(format!("{prefix}/"))
-            .into_any_element(),
+        Row::Group(prefix) => {
+            let text = format!("{prefix}/");
+            div()
+                .id(("sidebar-group", index))
+                .px_4()
+                .h(px(ROW_HEIGHT))
+                .flex()
+                .items_center()
+                .text_color(theme::muted())
+                .when(name_fit::needs_hover(&text), |this| {
+                    this.tooltip(window_chrome::hint(text.clone()))
+                })
+                .child(name_label(&text, &[]))
+                .into_any_element()
+        }
         Row::Branch {
             branch,
             label,
@@ -255,6 +264,7 @@ fn tree_row(
         } => {
             let current = !branch.is_remote && head == Some(branch.name.as_str());
             let name = branch.name.clone();
+            let full = branch.name.clone();
             let inner = div()
                 .id(("sidebar-branch", index))
                 .size_full()
@@ -275,17 +285,15 @@ fn tree_row(
                 .when(!current, |this| {
                     this.hover(|style| style.bg(theme::selected_row()))
                 })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child((*label).to_owned()),
-                )
+                // The tooltip shows the whole name: the label has lost its prefix
+                // under a group, and the name may be cut.
+                .when(name_fit::needs_hover(&full), |this| {
+                    this.tooltip(window_chrome::hint(full))
+                })
+                .child(name_label(label, &[]))
                 .children(current.then(|| {
                     div()
+                        .flex_none()
                         .px_1()
                         .rounded_sm()
                         .bg(theme::accent())
@@ -315,14 +323,16 @@ fn tree_row(
 /// One worktree: its colour mark, its name, and the tags that say it is the
 /// window's own or that its folder is gone. A double-click opens the others in
 /// a window of their own.
-fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> Div {
+fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> Stateful<Div> {
     let action = match worktree_list::open_target(row) {
         worktree_list::Open::Nothing => None,
         worktree_list::Open::Missing => Some(Err("This worktree's folder is missing.")),
         worktree_list::Open::Path(path) => Some(Ok(path.to_owned())),
     };
     let menu_path = row.entry.path.clone();
+    let id = SharedString::from(format!("sidebar-worktree-{menu_path}"));
     div()
+        .id(id)
         .h(px(ROW_HEIGHT))
         .px_2()
         .gap_2()
@@ -331,20 +341,14 @@ fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> Div {
         .items_center()
         .rounded_md()
         .when(row.here, |this| this.bg(theme::selection()))
+        .when(name_fit::needs_hover(&row.name), |this| {
+            this.tooltip(window_chrome::hint(row.name.clone()))
+        })
         .child(lane_mark(theme::lane(row.lane)))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .when(row.here, |this| {
-                    this.text_color(theme::accent())
-                        .font_weight(FontWeight::MEDIUM)
-                })
-                .child(row.name.clone()),
-        )
+        .child(name_label(&row.name, &[]).when(row.here, |this| {
+            this.text_color(theme::accent())
+                .font_weight(FontWeight::MEDIUM)
+        }))
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -395,6 +399,7 @@ fn lane_mark(color: Hsla) -> Div {
 
 fn tag(text: &'static str, text_color: Hsla, background: Hsla) -> Div {
     div()
+        .flex_none()
         .px_1()
         .rounded_sm()
         .bg(background)

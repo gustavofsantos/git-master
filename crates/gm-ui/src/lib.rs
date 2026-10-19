@@ -18,6 +18,7 @@ mod fuzzy;
 mod hook_run;
 mod icon;
 mod model;
+mod name_fit;
 mod open_window;
 mod palette;
 mod palette_view;
