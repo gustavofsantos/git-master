@@ -11,18 +11,23 @@ use gm_schema::{
     Actor, Change, CommandKind, CommitDetail, CommitFile, CommitSummary, RefKind, RefLabel,
 };
 use gpui::{
-    ClickEvent, Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div,
-    prelude::*, px, uniform_list,
+    App, ClickEvent, Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, Stateful,
+    Window, div, prelude::*, px, uniform_list,
 };
 
+use crate::action_registry::{Action, Args};
 use crate::model::{CommitPane, HistoryList};
 use crate::shell_list::change_letter;
+use crate::text_area::{TextArea, TextStyle};
 use crate::theme;
 use crate::view::StatusView;
 
 const ROW_HEIGHT: f32 = 48.;
 const TIME_WIDTH: f32 = 96.;
 const DETAIL_WIDTH: f32 = 360.;
+/// The label column of the detail's fields, and the row height of their text.
+const FIELD_LABEL_WIDTH: f32 = 56.;
+const DETAIL_LINE_HEIGHT: f32 = 17.;
 /// The next page is asked for when the rows drawn reach this close to the end.
 const PAGE_PREFETCH: usize = 20;
 
@@ -87,7 +92,7 @@ impl StatusView {
                             .flex_col()
                             .child(list),
                     )
-                    .child(commit_panel(&self.model.commit, cx))
+                    .child(commit_panel(&self.model.commit, &self.commit_texts, cx))
             })
     }
 }
@@ -225,9 +230,76 @@ fn ref_chip(label: &RefLabel) -> Div {
         .child(label.name.clone())
 }
 
+/// The read-only text areas of the detail panel: one per field of the selected
+/// commit, so its text can be selected and copied. `show` fills them.
+pub(crate) struct CommitTexts {
+    subject: Entity<TextArea>,
+    body: Entity<TextArea>,
+    hash: Entity<TextArea>,
+    author: Entity<TextArea>,
+    date: Entity<TextArea>,
+    parents: Entity<TextArea>,
+}
+
+impl CommitTexts {
+    pub(crate) fn new(cx: &mut Context<StatusView>) -> Self {
+        let detail = TextStyle {
+            line_height: DETAIL_LINE_HEIGHT,
+            size: 12.,
+            ..TextStyle::default()
+        };
+        let subject = TextStyle {
+            line_height: 22.,
+            size: 16.,
+            weight: FontWeight::SEMIBOLD,
+            ..TextStyle::default()
+        };
+        let code = TextStyle {
+            mono: true,
+            ..detail
+        };
+        Self {
+            subject: read_only_area(subject, cx),
+            body: read_only_area(detail, cx),
+            hash: read_only_area(code, cx),
+            author: read_only_area(detail, cx),
+            date: read_only_area(detail, cx),
+            parents: read_only_area(code, cx),
+        }
+    }
+
+    /// Puts the commit's fields in the areas. An area whose text is already
+    /// the same is left alone, so its selection survives a repaint.
+    fn show(&self, detail: &CommitDetail, cx: &mut Context<StatusView>) {
+        let author = author_label(&detail.author_name, &detail.author_email);
+        let parents = parents_label(&detail.parents);
+        show_text(&self.subject, &detail.subject, cx);
+        show_text(&self.body, &detail.body, cx);
+        show_text(&self.hash, &detail.oid, cx);
+        show_text(&self.author, &author, cx);
+        show_text(&self.date, &detail.author_date, cx);
+        show_text(&self.parents, &parents, cx);
+    }
+}
+
+fn read_only_area(style: TextStyle, cx: &mut Context<StatusView>) -> Entity<TextArea> {
+    cx.new(|cx| TextArea::new("", cx).read_only().with_style(style))
+}
+
+fn show_text(area: &Entity<TextArea>, text: &str, cx: &mut Context<StatusView>) {
+    if area.read(cx).text() != text {
+        area.update(cx, |area, cx| area.set_text(text, cx));
+    }
+}
+
 /// The detail panel (H3): the selected commit's subject, body, hash, author,
-/// date, parents and files. A file row opens its diff (H4).
-fn commit_panel(pane: &CommitPane, cx: &mut Context<StatusView>) -> Stateful<Div> {
+/// date, parents and files. Its text is selectable; the Copy controls copy the
+/// hash and the whole message. A file row opens its diff (H4).
+fn commit_panel(
+    pane: &CommitPane,
+    texts: &CommitTexts,
+    cx: &mut Context<StatusView>,
+) -> Stateful<Div> {
     let content = match pane {
         CommitPane::Empty => message_text("Select a commit to see its details.").into_any_element(),
         CommitPane::Loading(_) => message_text("Loading commit…").into_any_element(),
@@ -235,7 +307,7 @@ fn commit_panel(pane: &CommitPane, cx: &mut Context<StatusView>) -> Stateful<Div
             .text_color(theme::error())
             .child(text.clone())
             .into_any_element(),
-        CommitPane::Shown(detail) => commit_detail(detail, cx).into_any_element(),
+        CommitPane::Shown(detail) => commit_detail(detail, texts, cx).into_any_element(),
     };
     div()
         .id("commit-detail")
@@ -259,44 +331,45 @@ fn message_text(text: &'static str) -> Div {
     div().text_color(theme::muted()).child(text)
 }
 
-fn commit_detail(detail: &CommitDetail, cx: &mut Context<StatusView>) -> Div {
+fn commit_detail(detail: &CommitDetail, texts: &CommitTexts, cx: &mut Context<StatusView>) -> Div {
+    let copy_message = copy_button(
+        "commit-copy-message",
+        "Copy message",
+        cx.listener(|this, _: &ClickEvent, window, cx| this.copy_commit_message(window, cx)),
+    );
     let mut column = div()
         .flex()
         .flex_col()
         .gap_3p5()
-        .child(section_label("SELECTED COMMIT"))
         .child(
             div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_base()
-                .child(detail.subject.clone()),
-        );
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(section_label("SELECTED COMMIT"))
+                .child(copy_message),
+        )
+        .child(texts.subject.clone());
     if !detail.body.is_empty() {
-        column = column.child(body_block(&detail.body));
+        column = column.child(texts.body.clone());
     }
+    let copy_hash = copy_button(
+        "commit-copy-hash",
+        "Copy",
+        cx.listener(|this, _: &ClickEvent, window, cx| this.copy_commit_hash(window, cx)),
+    );
     column
         .child(
             div()
-                .grid()
-                .grid_cols(2)
-                .gap_y_2()
+                .flex()
+                .flex_col()
+                .gap_2()
                 .text_xs()
-                .child(field_label("Hash"))
-                .child(
-                    div()
-                        .font_family(theme::code_font())
-                        .child(detail.oid.clone()),
-                )
-                .child(field_label("Author"))
-                .child(author_label(&detail.author_name, &detail.author_email))
-                .child(field_label("Date"))
-                .child(detail.author_date.clone())
-                .child(field_label("Parents"))
-                .child(
-                    div()
-                        .font_family(theme::code_font())
-                        .child(parents_label(&detail.parents)),
-                ),
+                .child(field("Hash", texts.hash.clone(), Some(copy_hash)))
+                .child(field("Author", texts.author.clone(), None))
+                .child(field("Date", texts.date.clone(), None))
+                .child(field("Parents", texts.parents.clone(), None)),
         )
         .child(section_label(&format!(
             "FILES ({})",
@@ -323,6 +396,42 @@ fn commit_detail(detail: &CommitDetail, cx: &mut Context<StatusView>) -> Div {
         )
 }
 
+/// A labelled field of the detail: its label, then its selectable text, then an
+/// optional control such as Copy.
+fn field(label: &'static str, value: Entity<TextArea>, action: Option<Stateful<Div>>) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_2()
+        .child(field_label(label).flex_none().w(px(FIELD_LABEL_WIDTH)))
+        .child(div().flex_1().min_w(px(0.)).child(value))
+        .children(action)
+}
+
+/// A small text control with a border, for the Copy actions.
+fn copy_button(
+    id: &'static str,
+    text: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .px_1p5()
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::button_border())
+        .text_xs()
+        .text_color(theme::muted())
+        .cursor_pointer()
+        .child(text)
+        .on_click(on_click)
+}
+
 fn section_label(text: &str) -> Div {
     div()
         .text_xs()
@@ -332,22 +441,6 @@ fn section_label(text: &str) -> Div {
 
 fn field_label(text: &'static str) -> Div {
     div().text_color(theme::muted()).child(text)
-}
-
-/// The body, one line per row; a blank line is a paragraph break.
-fn body_block(body: &str) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .text_xs()
-        .line_height(px(17.))
-        .children(body.split('\n').map(|line| {
-            if line.is_empty() {
-                div().h(px(8.))
-            } else {
-                div().child(line.to_owned())
-            }
-        }))
 }
 
 /// One changed file: its change letter, its path (old to new for a rename) and
@@ -434,6 +527,17 @@ pub fn more_files_label(count: usize) -> String {
     format!("and {count} more")
 }
 
+/// The message as Git stores it: the subject, then a blank line and the body
+/// when there is one.
+#[must_use]
+pub fn full_message(subject: &str, body: &str) -> String {
+    if body.is_empty() {
+        subject.to_owned()
+    } else {
+        format!("{subject}\n\n{body}")
+    }
+}
+
 /// The parents, abbreviated and comma-separated; `none` for a root commit.
 #[must_use]
 pub fn parents_label(parents: &[String]) -> String {
@@ -464,6 +568,36 @@ impl StatusView {
         );
         self.model.commit.request(id);
         cx.notify();
+    }
+
+    /// Fills the detail panel's text areas with the shown commit.
+    pub(crate) fn show_commit_texts(&self, cx: &mut Context<Self>) {
+        if let CommitPane::Shown(detail) = &self.model.commit {
+            self.commit_texts.show(detail, cx);
+        }
+    }
+
+    /// The Copy control by the hash: copies the full commit id.
+    pub(crate) fn copy_commit_hash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let oid = match &self.model.commit {
+            CommitPane::Shown(detail) => detail.oid.clone(),
+            _ => return,
+        };
+        self.run_action(Action::CopyCommitHash, &Args::Commit(oid), window, cx);
+    }
+
+    /// The Copy control by the message: copies the subject and the body.
+    pub(crate) fn copy_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let message = match &self.model.commit {
+            CommitPane::Shown(detail) => full_message(&detail.subject, &detail.body),
+            _ => return,
+        };
+        self.run_action(
+            Action::CopyCommitMessage,
+            &Args::Commit(message),
+            window,
+            cx,
+        );
     }
 
     /// Opens the stacked diff of the selected commit, with file `focus` at the top
@@ -752,6 +886,19 @@ mod tests {
             author_label("Zo\u{eb} \u{dc}nal", "zoe@example.test"),
             "Zo\u{eb} \u{dc}nal <zoe@example.test>"
         );
+    }
+
+    #[test]
+    fn the_message_copied_is_the_subject_and_the_body_after_a_blank_line() {
+        assert_eq!(
+            full_message("feat: select text", "First paragraph.\n\nSecond."),
+            "feat: select text\n\nFirst paragraph.\n\nSecond."
+        );
+    }
+
+    #[test]
+    fn a_message_without_a_body_copies_only_the_subject() {
+        assert_eq!(full_message("fix: typo", ""), "fix: typo");
     }
 
     #[test]

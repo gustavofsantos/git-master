@@ -7,8 +7,8 @@ use gpui::{
     px,
 };
 
+use super::TextArea;
 use super::keys::{Copy, Cut, Paste};
-use super::{LINE_HEIGHT, TextArea};
 use crate::text_area_math::{ClickKind, click_kind, max_scroll};
 
 impl TextArea {
@@ -21,7 +21,7 @@ impl TextArea {
     }
 
     pub(super) fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.has_selection() {
+        if !self.is_read_only() && self.editor.has_selection() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.editor.selected_text().to_owned(),
             ));
@@ -30,6 +30,9 @@ impl TextArea {
     }
 
     pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_selection(&text, window, cx);
         }
@@ -93,7 +96,7 @@ impl TextArea {
         if limit <= 0. {
             return;
         }
-        let delta = f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y);
+        let delta = f32::from(event.delta.pixel_delta(px(self.style.line_height)).y);
         let scroll = (self.scroll_y - delta).max(0.).min(limit);
         if (scroll - self.scroll_y).abs() > f32::EPSILON {
             self.scroll_y = scroll;

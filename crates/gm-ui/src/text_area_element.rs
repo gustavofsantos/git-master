@@ -13,7 +13,7 @@ use gpui::{
     relative, size,
 };
 
-use crate::text_area::{LINE_HEIGHT, TextArea};
+use crate::text_area::TextArea;
 use crate::text_area_math::{
     LogicalSpan, VisualLine, build_visual_lines, clamp_scroll, row_for_offset, rows_height,
     scroll_to_caret, selection_segments, visible_rows,
@@ -207,6 +207,7 @@ pub struct TextAreaElement {
 }
 
 pub struct Prepaint {
+    line_height: f32,
     shaped: Option<Rc<Shaped>>,
     placeholder: Vec<WrappedLine>,
     selection: Vec<PaintQuad>,
@@ -247,13 +248,18 @@ impl Element for TextAreaElement {
         let text: SharedString = area.text().to_owned().into();
         let marked = area.marked_range().cloned();
         let (min, max) = area.line_limits();
+        let line_height = area.line_height();
+        let read_only = area.is_read_only();
         let face = Face::current(window);
 
         // Full width and full height of the owner. A filter line has no
-        // definite height, so there the height is the measured one.
+        // definite height, so there the height is the measured one, and so
+        // is a read-only area, which sizes itself to its text.
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
+        if !read_only {
+            style.size.height = relative(1.).into();
+        }
         let layout = window.request_measured_layout(
             style,
             move |known, available, window, _cx| -> Size<Pixels> {
@@ -265,7 +271,7 @@ impl Element for TextAreaElement {
                 let rows = face
                     .shape(window, &text, wrap, Hsla::default(), marked.as_ref())
                     .map_or(1, |lines| row_count(&lines));
-                let height = rows_height(visible_rows(rows, min, max), LINE_HEIGHT);
+                let height = rows_height(visible_rows(rows, min, max), line_height);
                 size(width.unwrap_or(px(0.)), px(height))
             },
         );
@@ -287,7 +293,11 @@ impl Element for TextAreaElement {
         let placeholder = area.placeholder().clone();
         let selection = area.selection();
         let cursor = area.cursor();
-        let caret_on = area.caret_visible() && area.is_focused(window) && selection.is_empty();
+        let caret_on = !area.is_read_only()
+            && area.caret_visible()
+            && area.is_focused(window)
+            && selection.is_empty();
+        let line_height = area.line_height();
         let (scroll, reveal) = area.scroll_state();
 
         let face = Face::current(window);
@@ -305,21 +315,21 @@ impl Element for TextAreaElement {
         };
 
         let viewport = f32::from(bounds.size.height);
-        let content_height = rows_height(shaped.rows.len(), LINE_HEIGHT);
+        let content_height = rows_height(shaped.rows.len(), line_height);
         let mut scroll = clamp_scroll(scroll, content_height, viewport);
         let cursor_row = shaped.row_for_offset(cursor);
         if reveal {
             scroll = scroll_to_caret(
                 scroll,
-                rows_height(cursor_row, LINE_HEIGHT),
-                LINE_HEIGHT,
+                rows_height(cursor_row, line_height),
+                line_height,
                 viewport,
                 content_height,
             );
         }
 
         let origin = point(bounds.left(), bounds.top() - px(scroll));
-        let row_top = |row: usize| origin.y + px(rows_height(row, LINE_HEIGHT));
+        let row_top = |row: usize| origin.y + px(rows_height(row, line_height));
         let selection_quads = selection_segments(&shaped.rows, &selection, text.len())
             .into_iter()
             .map(|segment| {
@@ -331,7 +341,7 @@ impl Element for TextAreaElement {
                 fill(
                     Bounds::new(
                         point(origin.x + px(x0), row_top(segment.row)),
-                        size(px((x1 - x0).max(0.)), px(LINE_HEIGHT)),
+                        size(px((x1 - x0).max(0.)), px(line_height)),
                     ),
                     selection_color(),
                 )
@@ -343,13 +353,14 @@ impl Element for TextAreaElement {
             fill(
                 Bounds::new(
                     point(origin.x + px(x), row_top(cursor_row) + px(2.)),
-                    size(px(CARET_WIDTH), px(LINE_HEIGHT - 4.)),
+                    size(px(CARET_WIDTH), px(line_height - 4.)),
                 ),
                 theme::caret(),
             )
         });
 
         Prepaint {
+            line_height,
             shaped: Some(shaped),
             placeholder: placeholder_lines,
             selection: selection_quads,
@@ -380,12 +391,12 @@ impl Element for TextAreaElement {
         for quad in prepaint.selection.drain(..) {
             window.paint_quad(quad);
         }
-        let line_height = px(LINE_HEIGHT);
+        let line_height = prepaint.line_height;
         if let Some(shaped) = prepaint.shaped.as_ref() {
             for (index, line) in shaped.lines.iter().enumerate() {
                 let top =
-                    prepaint.origin_y + px(rows_height(shaped.first_rows[index], LINE_HEIGHT));
-                let height = px(rows_height(line.wrap_boundaries().len() + 1, LINE_HEIGHT));
+                    prepaint.origin_y + px(rows_height(shaped.first_rows[index], line_height));
+                let height = px(rows_height(line.wrap_boundaries().len() + 1, line_height));
                 if top + height < bounds.top() || top > bounds.bottom() {
                     continue;
                 }
@@ -393,7 +404,7 @@ impl Element for TextAreaElement {
                 // frame repaints.
                 let _ = line.paint(
                     point(bounds.left(), top),
-                    line_height,
+                    px(line_height),
                     TextAlign::Left,
                     None,
                     window,
@@ -402,10 +413,10 @@ impl Element for TextAreaElement {
             }
         }
         for (index, line) in prepaint.placeholder.iter().enumerate() {
-            let top = prepaint.origin_y + px(rows_height(index, LINE_HEIGHT));
+            let top = prepaint.origin_y + px(rows_height(index, line_height));
             let _ = line.paint(
                 point(bounds.left(), top),
-                line_height,
+                px(line_height),
                 TextAlign::Left,
                 None,
                 window,

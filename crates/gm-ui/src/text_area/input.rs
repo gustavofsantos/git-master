@@ -8,7 +8,7 @@ use gpui::{
     Bounds, Context, EntityInputHandler, Pixels, Point, UTF16Selection, Window, point, px, size,
 };
 
-use super::{LINE_HEIGHT, TextArea};
+use super::TextArea;
 use crate::text_area_math::{offset_from_utf16, offset_to_utf16, rows_height};
 
 impl EntityInputHandler for TextArea {
@@ -58,6 +58,9 @@ impl EntityInputHandler for TextArea {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_read_only() {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -76,6 +79,9 @@ impl EntityInputHandler for TextArea {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_read_only() {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -112,10 +118,11 @@ impl EntityInputHandler for TextArea {
         } else {
             x
         };
-        let top = bounds.top() + px(rows_height(row, LINE_HEIGHT) - self.scroll_y);
+        let line_height = self.style.line_height;
+        let top = bounds.top() + px(rows_height(row, line_height) - self.scroll_y);
         Some(Bounds::new(
             point(bounds.left() + px(x), top),
-            size(px((end_x - x).max(2.)), px(LINE_HEIGHT)),
+            size(px((end_x - x).max(2.)), px(line_height)),
         ))
     }
 

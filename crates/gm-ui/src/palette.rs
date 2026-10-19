@@ -18,6 +18,7 @@ use crate::fuzzy;
 const NO_BRANCH: Reason = "No branch to choose from.";
 const NO_FILE: Reason = "No file in the working copy.";
 const NEEDS_CHUNK: Reason = "Pick a chunk in the diff first.";
+const NEEDS_COMMIT: Reason = "Pick a commit in the history first.";
 const NEEDS_WORKTREE: Reason = "Run it from the worktree's menu in the sidebar.";
 
 /// The groups the palette shows, in the order they appear.
@@ -365,6 +366,14 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
             },
             Err(NEEDS_CHUNK),
         ),
+        // A commit is copied from the history panel, which names it, so the palette lists it disabled.
+        ArgKind::Commit => (
+            Choice::Run {
+                action,
+                args: Args::None,
+            },
+            Err(NEEDS_COMMIT),
+        ),
     };
     // A placeholder says it is not available, whatever its target would be.
     let state = if action.available() {
@@ -412,7 +421,7 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
             .iter()
             .map(|entry| target_row(action, Section::Files, &entry.path, ctx))
             .collect(),
-        ArgKind::None | ArgKind::Chunk | ArgKind::Worktree => Vec::new(),
+        ArgKind::None | ArgKind::Chunk | ArgKind::Worktree | ArgKind::Commit => Vec::new(),
     }
 }
 
@@ -658,6 +667,19 @@ mod tests {
             find(&top, "Discard Chunk").state,
             Err("Pick a chunk in the diff first.")
         );
+    }
+
+    #[test]
+    fn commit_copies_are_listed_disabled_because_they_run_from_the_history() {
+        let entries: [StatusEntry; 0] = [];
+        let top = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
+        for title in ["Copy Commit Hash", "Copy Commit Message"] {
+            assert_eq!(
+                find(&top, title).state,
+                Err("Pick a commit in the history first."),
+                "{title}"
+            );
+        }
     }
 
     #[test]

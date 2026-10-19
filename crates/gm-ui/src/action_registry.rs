@@ -50,6 +50,7 @@ pub enum ArgKind {
     File,
     Chunk,
     Worktree,
+    Commit,
 }
 
 /// The target of one run. Its kind must match the action's `ArgKind`.
@@ -67,6 +68,8 @@ pub enum Args {
     },
     /// The worktree whose folder is `path`, as the list gives it.
     Worktree(String),
+    /// The text to copy from a commit of the history page: its id, or its message.
+    Commit(String),
 }
 
 /// Static description of an action.
@@ -88,6 +91,8 @@ pub enum Effect {
     Send(Vec<CommandKind>),
     /// Text for the clipboard.
     Copy(String),
+    /// The commit message for the clipboard, noticed as a message and not echoed.
+    CopyMessage(String),
     /// Replaces the composer text with the suggestion.
     UseSuggestion(String),
     /// Drops the suggestion; the composer keeps its text.
@@ -154,7 +159,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 37] = [
+const SPECS: [Spec; 39] = [
     spec(
         "file.stage",
         "Stage File",
@@ -408,6 +413,20 @@ const SPECS: [Spec; 37] = [
         ArgKind::None,
         Category::Branches,
     ),
+    spec(
+        "commit.copy_hash",
+        "Copy Commit Hash",
+        None,
+        ArgKind::Commit,
+        Category::Commit,
+    ),
+    spec(
+        "commit.copy_message",
+        "Copy Commit Message",
+        None,
+        ArgKind::Commit,
+        Category::Commit,
+    ),
 ];
 
 const fn spec(
@@ -467,6 +486,8 @@ pub enum Action {
     ShowHistory,
     ShowOnlyMyBranches,
     ShowAllBranches,
+    CopyCommitHash,
+    CopyCommitMessage,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -562,7 +583,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 37] = [
+    pub const ALL: [Action; 39] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -600,6 +621,8 @@ impl Action {
         Action::ShowHistory,
         Action::ShowOnlyMyBranches,
         Action::ShowAllBranches,
+        Action::CopyCommitHash,
+        Action::CopyCommitMessage,
     ];
 
     #[must_use]
@@ -644,6 +667,18 @@ impl Action {
                 | Action::DiscardFile
                 | Action::DeleteBranch
                 | Action::RemoveWorktree
+        )
+    }
+
+    /// Whether the action is only its target: copying or focusing needs no rule of its own.
+    fn copies_its_target(self) -> bool {
+        matches!(
+            self,
+            Action::CopyBranchName
+                | Action::CopyFilePath
+                | Action::FocusCommitMessage
+                | Action::CopyCommitHash
+                | Action::CopyCommitMessage
         )
     }
 
@@ -764,8 +799,8 @@ impl Action {
                 }
             }
             Action::RevealFile => reveal_rule(args, ctx),
-            Action::CopyBranchName | Action::CopyFilePath | Action::FocusCommitMessage => Ok(()),
             Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
+            _ if self.copies_its_target() => Ok(()),
             Action::SuggestMessage
             | Action::CancelHook
             | Action::UseSuggestion
@@ -820,7 +855,8 @@ impl Action {
             }
             (Action::CopyBranchName, Args::Branch(text))
             | (Action::CopyFilePath, Args::File(text))
-            | (Action::CopyWorktreePath, Args::Worktree(text)) => Effect::Copy(text.clone()),
+            | (Action::CopyWorktreePath, Args::Worktree(text))
+            | (Action::CopyCommitHash, Args::Commit(text)) => Effect::Copy(text.clone()),
             (Action::RevealFile, Args::File(path)) => {
                 // `enabled` has checked that the root is there.
                 Effect::Reveal(PathBuf::from(ctx.root.unwrap_or_default()).join(path))
@@ -848,6 +884,7 @@ impl Action {
             (Action::ShowHistory, _) => Effect::ShowHistory,
             (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
             (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
+            (Action::CopyCommitMessage, Args::Commit(text)) => Effect::CopyMessage(text.clone()),
             (Action::SuggestMessage, _) => Effect::Send(vec![CommandKind::RunPrepareCommit {
                 message: ctx.message.to_owned(),
             }]),
@@ -885,6 +922,7 @@ impl Action {
                 | (ArgKind::File, Args::File(_))
                 | (ArgKind::Chunk, Args::Chunk { .. })
                 | (ArgKind::Worktree, Args::Worktree(_))
+                | (ArgKind::Commit, Args::Commit(_))
         )
     }
 }
@@ -1220,6 +1258,30 @@ mod tests {
         assert_eq!(
             Action::Commit.enabled(&Args::None, &ctx(&entries, "subject")),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn copying_a_commit_takes_the_commit_it_names() {
+        let context = ctx(&[], "");
+        let hash = Args::Commit("3f2a9c1d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a39".into());
+        assert_eq!(
+            Action::CopyCommitHash.plan(&hash, &context),
+            Ok(Effect::Copy(
+                "3f2a9c1d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a39".into()
+            ))
+        );
+        assert_eq!(
+            Action::CopyCommitMessage.plan(&Args::Commit("fix: a\n\nbody".into()), &context),
+            Ok(Effect::CopyMessage("fix: a\n\nbody".into()))
+        );
+        assert_eq!(
+            Action::CopyCommitHash.enabled(&Args::None, &context),
+            Err("No target for this action")
+        );
+        assert_eq!(
+            Action::CopyCommitMessage.enabled(&Args::File("a.txt".into()), &context),
+            Err("No target for this action")
         );
     }
 

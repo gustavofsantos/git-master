@@ -35,6 +35,7 @@ use crate::palette_view::{self, PaletteView};
 use crate::project_menu::ProjectMenu;
 use crate::recent::{self, Recents};
 use crate::resize;
+use crate::shell_history::CommitTexts;
 use crate::shell_sidebar;
 use crate::sidebar::Grouping;
 use crate::text_area::{TextArea, TextAreaEvent};
@@ -82,6 +83,8 @@ pub struct StatusView {
     pub(crate) commit_diff_pane: Entity<DiffPane>,
     /// The sidebar's width, in logical pixels, as the user dragged it.
     pub(crate) sidebar_width: f32,
+    /// The selectable fields of the commit detail panel (H3).
+    pub(crate) commit_texts: CommitTexts,
     /// The left column's width, in logical pixels, as the user dragged it.
     pub(crate) left_width: f32,
     /// The commit message box's height, in logical pixels, as dragged.
@@ -176,6 +179,7 @@ impl StatusView {
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
         let commit_diff_pane = cx.new(DiffPane::read_only);
+        let commit_texts = CommitTexts::new(cx);
         // The saved preferences are read here, before the first frame, so the
         // commit diff opens in the layout the user last chose (D40).
         let settings_store =
@@ -249,6 +253,7 @@ impl StatusView {
             diff_pane,
             commit_diff_pane,
             sidebar_width: resize::SIDEBAR_DEFAULT,
+            commit_texts,
             left_width: resize::LEFT_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
             sidebar_grouping: Grouping::default(),
@@ -337,10 +342,14 @@ impl StatusView {
         let reload = matches!(event, Event::StatusLoaded { .. });
         let listed = matches!(event, Event::BranchesLoaded { .. });
         let committed = matches!(event, Event::Committed { .. });
+        let detail_loaded = matches!(event, Event::CommitDetailLoaded { .. });
         let finished = matches!(event, Event::HookFinished { .. });
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
+        if detail_loaded {
+            self.show_commit_texts(cx);
+        }
         if let Some(fresh) = self.model.commit_stack.take_fresh() {
             self.commit_diff_pane.update(cx, |pane, cx| {
                 pane.show_stack(
@@ -699,6 +708,10 @@ impl StatusView {
                 let notice = format!("Copied {text}");
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.notify_user(&notice, cx);
+            }
+            Ok(Effect::CopyMessage(text)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.notify_user("Copied commit message", cx);
             }
             Ok(Effect::Reveal(path)) => cx.reveal_path(&path),
             Ok(Effect::FocusCommitMessage) => self.focus_commit_message(window, cx),
