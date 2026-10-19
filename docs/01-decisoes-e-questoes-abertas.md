@@ -107,6 +107,7 @@ Escolhas feitas no código que a documentação não cobria. Valem até nova dec
 - O outcome `timeout` de uma espera só existe quando o estado define `timeout`.
 - Nas condições, um nome solto (`a == 1`) é erro de sintaxe: valores se escrevem `${caminho}`. Comparações não se encadeiam.
 - Um item de `for_each` não pode se chamar `inputs`, `trigger`, `repo` nem `states`.
+- O outcome `timeout` (de `exec` ou de uma espera) tem transição padrão para `end.failed`, como `failed`: um `exec` simples não precisa escrever `on.timeout` (decidido na WF1, 2026-10-19).
 
 ## D31: worktrees na v1
 
