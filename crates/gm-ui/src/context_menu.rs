@@ -494,6 +494,7 @@ mod tests {
             worktrees: &[],
             branch_scope: crate::branch_filter::Scope::All,
             user_email_known: false,
+            remote_running: false,
         }
     }
 
@@ -653,7 +654,6 @@ mod tests {
         for action in [
             Action::NewChildBranch,
             Action::Restack,
-            Action::PushWithLease,
             Action::RenameBranch,
         ] {
             assert_eq!(

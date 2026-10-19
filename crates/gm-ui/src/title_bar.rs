@@ -36,6 +36,15 @@ pub(crate) fn label(action: Action) -> &'static str {
     }
 }
 
+/// What a remote button says while its operation runs.
+pub(crate) fn busy_label(action: Action) -> &'static str {
+    match action {
+        Action::Fetch => "Fetching…",
+        Action::Pull => "Pulling…",
+        _ => "Pushing…",
+    }
+}
+
 /// The target a toolbar button runs on: the checked-out branch for the actions
 /// that take one, nothing for the others. A detached HEAD gives an empty name,
 /// which the rule of the action refuses.
@@ -125,6 +134,12 @@ impl StatusView {
         } else {
             theme::text()
         };
+        // The button of the operation in flight says so; the other two stay disabled.
+        let text = if self.model.remote.in_flight() == Some(action) {
+            busy_label(action)
+        } else {
+            label(action)
+        };
         let button = div()
             .id(action.id())
             .h(px(26.))
@@ -137,7 +152,7 @@ impl StatusView {
             .border_color(theme::hairline())
             .text_color(ink)
             .when(amber, |button| button.bg(theme::warn_bg()))
-            .child(label(action));
+            .child(text);
         let button = match reason {
             None => button
                 .cursor_pointer()
@@ -205,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn every_toolbar_button_is_disabled_with_the_reason() {
+    fn the_remote_buttons_are_enabled_on_a_branch_and_restack_is_not_available() {
         let context = RuleContext {
             repo_open: true,
             busy: None,
@@ -218,11 +233,46 @@ mod tests {
             current_branch: Some("main"),
             root: Some("/repo"),
             hooks: HookCtx::default(),
+            remote_running: false,
         };
-        for action in TOOLBAR {
+        for action in [Action::Fetch, Action::Pull, Action::PushWithLease] {
             let args = toolbar_args(action, Some("main"));
-            assert_eq!(action.enabled(&args, &context), Err(NOT_AVAILABLE));
-            assert!(!action.available());
+            assert_eq!(action.enabled(&args, &context), Ok(()), "{action:?}");
         }
+        let restack = toolbar_args(Action::Restack, Some("main"));
+        assert_eq!(
+            Action::Restack.enabled(&restack, &context),
+            Err(NOT_AVAILABLE)
+        );
+        assert!(!Action::Restack.available());
+    }
+
+    #[test]
+    fn a_running_remote_operation_disables_the_three_buttons_and_labels_its_own() {
+        let context = RuleContext {
+            repo_open: true,
+            busy: None,
+            worktrees: &[],
+            entries: &[],
+            staged_count: 0,
+            message: "",
+            current_branch: Some("main"),
+            root: Some("/repo"),
+            hooks: HookCtx::default(),
+            branch_scope: crate::branch_filter::Scope::All,
+            user_email_known: false,
+            remote_running: true,
+        };
+        for action in [Action::Fetch, Action::Pull, Action::PushWithLease] {
+            let args = toolbar_args(action, Some("main"));
+            assert_eq!(
+                action.enabled(&args, &context),
+                Err("A remote operation is running"),
+                "{action:?}"
+            );
+        }
+        assert_eq!(busy_label(Action::Fetch), "Fetching…");
+        assert_eq!(busy_label(Action::Pull), "Pulling…");
+        assert_eq!(busy_label(Action::PushWithLease), "Pushing…");
     }
 }

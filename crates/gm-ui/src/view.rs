@@ -352,6 +352,11 @@ impl StatusView {
         let committed = matches!(event, Event::Committed { .. });
         let detail_loaded = matches!(event, Event::CommitDetailLoaded { .. });
         let finished = matches!(event, Event::HookFinished { .. });
+        let remote_ended = matches!(
+            &event,
+            Event::OperationChanged { id, state, .. }
+                if state.is_terminal() && self.model.remote.owns(*id)
+        );
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
@@ -402,6 +407,9 @@ impl StatusView {
         }
         if committed {
             self.composer.update(cx, |composer, cx| composer.clear(cx));
+            Self::expire_notice_later(self.model.notice_generation(), cx);
+        }
+        if remote_ended {
             Self::expire_notice_later(self.model.notice_generation(), cx);
         }
         if let Some(switched) = self.model.take_switched() {
@@ -702,6 +710,10 @@ impl StatusView {
                 for kind in kinds {
                     let checkout = matches!(kind, CommandKind::Checkout { .. });
                     let refresh = matches!(kind, CommandKind::RefreshStatus);
+                    let remote = matches!(
+                        kind,
+                        CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease
+                    );
                     let prepare = match &kind {
                         CommandKind::RunPrepareCommit { message } => Some(message.clone()),
                         _ => None,
@@ -709,6 +721,9 @@ impl StatusView {
                     let id = self.engine.dispatch(Actor::Human, kind);
                     if checkout {
                         self.model.branches.begin_checkout(id);
+                    }
+                    if remote {
+                        self.model.remote.begin(id, action);
                     }
                     if let Some(sent) = prepare {
                         self.model.hooks.start(id, sent);
@@ -771,6 +786,7 @@ impl StatusView {
         ActionContext {
             repo_open: self.model.status().is_some(),
             busy: self.busy_reason(),
+            remote_running: self.model.remote.in_flight().is_some(),
             entries: self.model.entries(),
             staged_count: self.model.summary().staged,
             message,

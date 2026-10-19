@@ -13,6 +13,7 @@ use crate::changes::{Summary, summarize};
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
 use crate::new_branch::BranchCreate;
+use crate::remote_op::{Outcome, RemoteOp};
 use crate::worktree_create::Creating;
 use crate::worktree_prune::Pruning;
 use crate::worktree_remove::Removal;
@@ -52,6 +53,8 @@ pub struct Model {
     pub hooks: Hooks,
     /// The worktrees of the open repository, main checkout first.
     pub worktrees: Vec<WorktreeEntry>,
+    /// The fetch, pull or push with lease in flight, if any.
+    pub remote: RemoteOp,
     /// The history page's listing: the request in flight, or what answered it.
     pub history: HistoryList,
     /// The commit detail panel: the read in flight, or what answered it.
@@ -504,6 +507,19 @@ impl Model {
                 id, state, detail, ..
             } if self.hooks.owns(id) => {
                 self.hooks.ended(id, state, detail);
+                None
+            }
+            // A remote operation's answer is the status bar's notice, or its error.
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.remote.owns(id) => {
+                match self.remote.settle(id, state, detail) {
+                    Some(Outcome::Done(message)) => {
+                        self.set_notice(message);
+                    }
+                    Some(Outcome::Failed(message)) => self.error = Some(message),
+                    None => {}
+                }
                 None
             }
             Event::OperationChanged {

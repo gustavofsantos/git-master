@@ -27,6 +27,7 @@ mod palette;
 mod palette_view;
 mod project_menu;
 mod recent;
+mod remote_op;
 mod resize;
 mod resize_handle;
 mod shell_commit;

@@ -166,6 +166,8 @@ pub struct Context<'a> {
     pub branch_scope: Scope,
     /// Whether Git has a `user.email` to match branches against.
     pub user_email_known: bool,
+    /// A fetch, pull or push with lease is in flight; the three refuse another one meanwhile.
+    pub remote_running: bool,
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
@@ -675,13 +677,7 @@ impl Action {
     pub fn available(self) -> bool {
         !matches!(
             self,
-            Action::NewChildBranch
-                | Action::Restack
-                | Action::PushWithLease
-                | Action::RenameBranch
-                | Action::DiscardFile
-                | Action::Fetch
-                | Action::Pull
+            Action::NewChildBranch | Action::Restack | Action::RenameBranch | Action::DiscardFile
         )
     }
 
@@ -829,6 +825,7 @@ impl Action {
             Action::RevealFile => reveal_rule(args, ctx),
             Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
             _ if self.copies_its_target() => Ok(()),
+            Action::Fetch | Action::Pull | Action::PushWithLease => remote_rule(self, args, ctx),
             Action::SuggestMessage
             | Action::CancelHook
             | Action::UseSuggestion
@@ -876,6 +873,9 @@ impl Action {
                 message: ctx.message.to_owned(),
             }]),
             (Action::Refresh, _) => Effect::Send(vec![CommandKind::RefreshStatus]),
+            (Action::Fetch, _) => Effect::Send(vec![CommandKind::Fetch]),
+            (Action::Pull, _) => Effect::Send(vec![CommandKind::Pull]),
+            (Action::PushWithLease, _) => Effect::Send(vec![CommandKind::PushWithLease]),
             (Action::CheckoutBranch, Args::Branch(name)) => {
                 Effect::Send(vec![CommandKind::Checkout {
                     branch: name.clone(),
@@ -1025,6 +1025,28 @@ fn repository_open(ctx: &Context<'_>) -> Result<(), Reason> {
     }
 }
 
+/// The rule of the remote commands: a repository, no change in flight and no
+/// other remote operation. Pull and push need a checked-out branch, and push
+/// takes only that branch, so the engine never has to guess one.
+fn remote_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    idle(ctx)?;
+    if ctx.remote_running {
+        return Err("A remote operation is running");
+    }
+    if action == Action::Fetch {
+        return Ok(());
+    }
+    let Some(branch) = ctx.current_branch else {
+        return Err("Check out a branch first: HEAD is detached.");
+    };
+    match args {
+        Args::Branch(name) if name.as_str() != branch => {
+            Err("Only the checked-out branch can be pushed.")
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Refuses while an open or a checkout is in flight.
 fn idle(ctx: &Context<'_>) -> Result<(), Reason> {
     if !ctx.repo_open {
@@ -1114,6 +1136,7 @@ mod tests {
             worktrees: &[],
             branch_scope: Scope::All,
             user_email_known: false,
+            remote_running: false,
         }
     }
 
@@ -1187,11 +1210,8 @@ mod tests {
         let placeholders = [
             Action::NewChildBranch,
             Action::Restack,
-            Action::PushWithLease,
             Action::RenameBranch,
             Action::DiscardFile,
-            Action::Fetch,
-            Action::Pull,
         ];
         for action in placeholders {
             let args = match action.spec().args {
@@ -1217,6 +1237,99 @@ mod tests {
             let refused = action.enabled(&args, &context) == Err(NOT_AVAILABLE);
             assert_eq!(action.available(), !refused, "{action:?}");
         }
+    }
+
+    #[test]
+    fn fetch_pull_and_push_are_enabled_on_a_branch_and_send_their_command() {
+        let context = ctx(&[], "");
+        assert!(Action::Fetch.available());
+        assert!(Action::Pull.available());
+        assert!(Action::PushWithLease.available());
+        assert_eq!(
+            Action::Fetch.plan(&Args::None, &context),
+            Ok(Effect::Send(vec![CommandKind::Fetch]))
+        );
+        assert_eq!(
+            Action::Pull.plan(&Args::None, &context),
+            Ok(Effect::Send(vec![CommandKind::Pull]))
+        );
+        assert_eq!(
+            Action::PushWithLease.plan(&Args::Branch("main".into()), &context),
+            Ok(Effect::Send(vec![CommandKind::PushWithLease]))
+        );
+    }
+
+    #[test]
+    fn a_remote_operation_in_flight_refuses_all_three_with_one_reason() {
+        let entries: [StatusEntry; 0] = [];
+        let running = Context {
+            remote_running: true,
+            ..ctx(&entries, "")
+        };
+        for (action, args) in [
+            (Action::Fetch, Args::None),
+            (Action::Pull, Args::None),
+            (Action::PushWithLease, Args::Branch("main".into())),
+        ] {
+            assert_eq!(
+                action.enabled(&args, &running),
+                Err("A remote operation is running"),
+                "{action:?}"
+            );
+            assert_eq!(
+                action.plan(&args, &running),
+                Err("A remote operation is running"),
+                "{action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_commands_need_a_repository_and_a_branch_to_act_on() {
+        let entries: [StatusEntry; 0] = [];
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&entries, "")
+        };
+        assert_eq!(
+            Action::Fetch.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        let detached = Context {
+            current_branch: None,
+            ..ctx(&entries, "")
+        };
+        assert_eq!(Action::Fetch.enabled(&Args::None, &detached), Ok(()));
+        assert_eq!(
+            Action::Pull.enabled(&Args::None, &detached),
+            Err("Check out a branch first: HEAD is detached.")
+        );
+        assert_eq!(
+            Action::PushWithLease.enabled(&Args::Branch(String::new()), &detached),
+            Err("Check out a branch first: HEAD is detached.")
+        );
+        let busy = Context {
+            busy: Some("Wait for the branch checkout to finish."),
+            ..ctx(&entries, "")
+        };
+        assert_eq!(
+            Action::Fetch.enabled(&Args::None, &busy),
+            Err("Wait for the branch checkout to finish.")
+        );
+    }
+
+    #[test]
+    fn push_with_lease_pushes_only_the_checked_out_branch() {
+        let entries: [StatusEntry; 0] = [];
+        let context = ctx(&entries, "");
+        assert_eq!(
+            Action::PushWithLease.enabled(&Args::Branch("main".into()), &context),
+            Ok(())
+        );
+        assert_eq!(
+            Action::PushWithLease.enabled(&Args::Branch("feature".into()), &context),
+            Err("Only the checked-out branch can be pushed.")
+        );
     }
 
     #[test]
