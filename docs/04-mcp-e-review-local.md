@@ -1,6 +1,6 @@
 # MCP e review local
 
-Última atualização: 2026-10-16. Status de cada decisão em `01`.
+Última atualização: 2026-10-19. Status de cada decisão em `01`.
 
 ## Transporte (D02, D12)
 
@@ -17,9 +17,11 @@ Read  →  Propose  →  Aprovação (humano na UI)  →  Apply
 
 | Nível | Ferramentas iniciais |
 |---|---|
-| Read | `repo_status`, `stack_tree`, `diff_stat`, `conflict_list`, `conflict_get`, `operation_log` |
+| Read | `repo_status`, `stack_tree`, `diff_stat`, `conflict_list`, `conflict_get`, `operation_log`, `workflow_list` |
 | Propose | `restack_plan`, `reparent_plan`, `conflict_propose` |
-| Apply | `restack_apply`, `conflict_resolve`, `commit_create`, `push`, `operation_undo` |
+| Apply | `restack_apply`, `conflict_resolve`, `commit_create`, `push`, `operation_undo`, `workflow_run` |
+
+Os passos de apply de um workflow disparado por `workflow_run` sempre esperam o humano (D56(c), D63). Ver `10`.
 
 - `apply` só aceita `plan_id`, nunca argumentos livres: o que o humano aprova é exatamente o que executa.
 - Anotações do MCP (`readOnlyHint`, `destructiveHint`) em cada tool.

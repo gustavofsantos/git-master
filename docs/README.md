@@ -5,7 +5,7 @@ Design documents (Portuguese), exported verbatim on 2026-10-16 from the author's
 | File | Content |
 |---|---|
 | `00-visao-e-principios.md` | Vision, benchmarks, differentiators, principles, non-goals |
-| `01-decisoes-e-questoes-abertas.md` | Decision log D01-D27 (Decidido / Proposto) and open questions Q1-Q10 |
+| `01-decisoes-e-questoes-abertas.md` | Decision log D01-D64 (Decidido / Proposto) and open questions Q1-Q20 |
 | `02-stacks-e-restack.md` | Branch stacks, metadata, restack plan and execution |
 | `03-hooks.md` | Hook classes, `.gitconfig` format, JSON contract, reconciliation |
 | `04-mcp-e-review-local.md` | MCP tiers and tools, local review loop |
@@ -14,6 +14,7 @@ Design documents (Portuguese), exported verbatim on 2026-10-16 from the author's
 | `07-roadmap.md` | Slices 0-9 |
 | `08-identidade-visual.md` | Visual identity: palette, Divisa icon decisions and geometry, files in `assets/icons/` |
 | `09-navegacao-no-codigo.md` | Proposal: Quick Open, grep and symbol search over a read-only code viewer (slice 3c) |
+| `10-workflows.md` | Proposal: Workflows, sequences of typed actions bound to triggers, in TOML; stack policies and LLM commit message as workflows (slice 3w) |
 | `rvw-lessons.md` | Lessons from `~/Projects/rvw` (English) and the slice 0 bootstrap plan (done) |
 
 ## Design canvas
