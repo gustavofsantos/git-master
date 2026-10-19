@@ -4,6 +4,7 @@
 //! validator and the transition function. No I/O.
 
 pub mod catalog;
+pub mod driver;
 pub mod exec;
 pub mod expr;
 pub mod loader;
