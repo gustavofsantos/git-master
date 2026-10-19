@@ -210,6 +210,8 @@ mod tests {
             repo_open: true,
             busy: None,
             worktrees: &[],
+            branch_scope: crate::branch_filter::Scope::All,
+            user_email_known: false,
             entries: &[],
             staged_count: 0,
             message: "",

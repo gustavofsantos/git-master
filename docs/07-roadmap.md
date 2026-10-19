@@ -219,6 +219,13 @@ Fora da fatia 3 (decisão do autor em 2026-10-17): escopo de stack, dono do comm
 
 Pronto quando: navega o histórico de um repositório grande com rolagem fluida.
 
+## Fatia 3d: filtro de branches na barra lateral (feita, com lacunas)
+
+Decisão D53 (`01`, proposta em 2026-10-19). A barra lateral mostra "Meus" (a branch atual e as cujo commit de ponta é do usuário) ou "Todas", com busca por nome e contagem "N de M". Sem branch que case, aparece "No branches match" com um link para mostrar todas. Duas ações na paleta, "Show Only My Branches" e "Show All Branches", trocam o escopo; a que não muda nada fica desabilitada com o motivo. A paleta e o seletor do topo continuam com todas as branches. O escopo escolhido é guardado no `settings.json` (D40).
+
+- Pronto quando: as regras de escopo, busca e padrão são testadas em módulo puro (`branch_filter.rs`); as linhas da árvore saem do conjunto filtrado, sem cabeçalho de grupo vazio (`sidebar.rs`); as ações têm regra e plano testados; o escopo sobrevive ao reinício (teste de ida e volta do arquivo).
+- Lacunas: nada foi visto numa janela: o cenário do smoke não foi escrito nem rodado. Nesta máquina o GPUI não inicia (falta o driver Vulkan por software); a interface ainda não foi conferida em tela. Remotas sem autor legível ficam ocultas em "Meus"; o filtro é recalculado a cada quadro, sem cache; a navegação por teclado dentro da árvore filtrada não mudou; a busca não é guardada; "Mine" olha só o commit de ponta de cada branch; a seção "Local" some quando não há branch local, também sem filtro.
+
 ## Fatia 3c: navegação no código (proposta, depende de Q13)
 
 Detalhes, motores e riscos em `09-navegacao-no-codigo.md`; decisões D43 a D51 em `01`, todas Proposto. Página Code com Quick Open de arquivos, grep e símbolos, sobre um visualizador somente leitura. Sub-fatias, cada uma com o "pronto quando" em `09`:

@@ -20,6 +20,7 @@ use crate::action_registry::{
     self, Action, Args, Context as ActionContext, Effect, HookCtx, Reason,
 };
 use crate::app_settings::{self, AppSettings};
+use crate::branch_filter::{self, BranchFilter};
 use crate::branch_menu::BranchMenu;
 use crate::composer::{Composer, ComposerEvent};
 use crate::context_menu::ContextMenu;
@@ -34,6 +35,7 @@ use crate::palette_view::{self, PaletteView};
 use crate::project_menu::ProjectMenu;
 use crate::recent::{self, Recents};
 use crate::resize;
+use crate::shell_sidebar;
 use crate::sidebar::Grouping;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
@@ -84,6 +86,13 @@ pub struct StatusView {
     pub(crate) commit_height: f32,
     /// How the sidebar's branch tree is grouped.
     pub(crate) sidebar_grouping: Grouping,
+    /// The sidebar's branch filter: the scope and the typed query (D53).
+    pub(crate) sidebar_filter: BranchFilter,
+    /// The input the sidebar's query is typed into.
+    pub(crate) sidebar_input: Entity<TextArea>,
+    /// The preferences as last read or saved. A save writes all of them, so a
+    /// save for one preference keeps the others.
+    pub(crate) settings: AppSettings,
     /// The main area's screen; the Working Copy unless the history is open.
     pub(crate) screen: Screen,
     pub(crate) project_menu: ProjectMenu,
@@ -161,6 +170,7 @@ impl StatusView {
         let branch_menu = BranchMenu::new(branch_filter.clone());
         let palette_filter =
             cx.new(|cx| TextArea::new("Type a command, branch or file", cx).with_lines(1, 1));
+        let sidebar_input = cx.new(|cx| TextArea::new("Find a branch", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
         let commit_diff_pane = cx.new(DiffPane::read_only);
@@ -222,6 +232,7 @@ impl StatusView {
             }),
         ];
         subscriptions.extend(palette_view::subscriptions(&palette_filter, window, cx));
+        subscriptions.extend(shell_sidebar::subscriptions(&sidebar_input, window, cx));
         let mut model = Model::default();
         model.request_open(open);
         Self {
@@ -238,6 +249,9 @@ impl StatusView {
             left_width: resize::LEFT_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
             sidebar_grouping: Grouping::default(),
+            sidebar_filter: BranchFilter::with_chosen(settings.branch_scope),
+            sidebar_input,
+            settings,
             screen: Screen::default(),
             project_menu,
             branch_menu,
@@ -475,14 +489,18 @@ impl StatusView {
     /// Saves the commit diff's layout in the background (D40). The choice takes
     /// effect on screen before the file is written.
     fn save_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        self.settings.diff_layout = layout;
+        self.save_settings(cx);
+    }
+
+    /// Writes the preferences in the background, as the generation after the last save.
+    pub(crate) fn save_settings(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.settings_store.clone() else {
             return;
         };
         self.settings_generation += 1;
         let generation = self.settings_generation;
-        let settings = AppSettings {
-            diff_layout: layout,
-        };
+        let settings = self.settings;
         cx.background_spawn(async move {
             if let Err(error) = store.save(settings, generation) {
                 eprintln!("gitmaster: could not save the settings: {error}");
@@ -695,6 +713,7 @@ impl StatusView {
             Ok(Effect::OpenRemoveDialog(path)) => self.open_remove_dialog(&path, window, cx),
             Ok(Effect::OpenPruneDialog) => self.open_prune_dialog(cx),
             Ok(Effect::ShowHistory) => self.show_history(cx),
+            Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
         }
         cx.notify();
     }
@@ -725,6 +744,9 @@ impl StatusView {
                 .and_then(|status| status.branch.head.as_deref()),
             root: self.model.status().map(|status| status.root.as_str()),
             worktrees: &self.model.worktrees,
+            branch_scope: self.sidebar_filter.scope(self.model.branches.user_email()),
+            user_email_known: branch_filter::known_email(self.model.branches.user_email())
+                .is_some(),
             hooks: HookCtx {
                 running: self.model.hooks.in_flight(),
                 applicable: self.model.hooks.applicable(),

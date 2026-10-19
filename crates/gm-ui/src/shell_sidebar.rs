@@ -7,14 +7,18 @@
 
 use std::ops::Range;
 
+use gm_schema::BranchEntry;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, SharedString,
-    Stateful, Window, div, prelude::*, px, uniform_list,
+    AnyElement, Context, Div, ElementId, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    SharedString, Stateful, Subscription, Window, div, prelude::*, px, uniform_list,
 };
 
 use crate::action_registry::{Action, Args};
+use crate::branch_filter::{self, Scope};
+use crate::icon::{self, Icon};
 use crate::name_fit::{self, name_label};
 use crate::sidebar::{self, Grouping, Row};
+use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
 use crate::view::{Screen, StatusView};
 use crate::window_chrome;
@@ -49,6 +53,7 @@ impl StatusView {
             .child(section_title("Workspace"))
             .child(self.workspace_items(cx))
             .child(self.grouping_switch(cx))
+            .children(self.has_branches().then(|| self.branch_filter_bar(cx)))
             .child(self.branch_tree(cx))
             .child(self.worktrees_section(cx))
             .children((self.sidebar_grouping == Grouping::ByStack).then(footer_hint))
@@ -117,31 +122,14 @@ impl StatusView {
 
     /// The two-way switch between "By stack" and "By name".
     fn grouping_switch(&self, cx: &mut Context<Self>) -> Div {
-        let segment = |grouping: Grouping| {
-            let active = self.sidebar_grouping == grouping;
-            div()
-                .id(grouping.label())
-                .flex_1()
-                .h(px(24.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_sm()
-                .cursor_pointer()
-                .when(active, |this| {
-                    this.bg(theme::panel())
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::text())
-                })
-                .when(!active, |this| this.text_color(theme::muted()))
-                .child(grouping.label())
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        this.sidebar_grouping = grouping;
-                        cx.notify();
-                    }),
-                )
+        let segment_for = |grouping: Grouping| {
+            segment(grouping.label(), self.sidebar_grouping == grouping).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.sidebar_grouping = grouping;
+                    cx.notify();
+                }),
+            )
         };
         div().px_3().py_3().child(
             div()
@@ -150,13 +138,165 @@ impl StatusView {
                 .flex_row()
                 .rounded_md()
                 .bg(theme::selected_row())
-                .child(segment(Grouping::ByStack))
-                .child(segment(Grouping::ByName)),
+                .child(segment_for(Grouping::ByStack))
+                .child(segment_for(Grouping::ByName)),
         )
     }
 
+    /// Whether a listing has arrived with branches in it. The filter is only
+    /// shown then.
+    fn has_branches(&self) -> bool {
+        !self.model.branches.known().is_empty()
+    }
+
+    /// The branches the sidebar shows: the filter's scope and query applied to
+    /// the last listing. The branch picker and the palette still see them all.
+    pub(crate) fn visible_branches(&self) -> Vec<&BranchEntry> {
+        branch_filter::visible(
+            self.model.branches.known(),
+            &self.sidebar_filter,
+            self.model.branches.user_email(),
+        )
+    }
+
+    /// The filter's input, the scope toggle and the count of shown branches.
+    fn branch_filter_bar(&self, cx: &mut Context<Self>) -> Div {
+        let scope = self.sidebar_filter.scope(self.model.branches.user_email());
+        let shown = self.visible_branches().len();
+        let total = self.model.branches.known().len();
+        let clear = (!self.sidebar_filter.query().is_empty()).then(|| {
+            div()
+                .id("sidebar-branch-clear")
+                .flex_none()
+                .cursor_pointer()
+                .text_color(theme::muted())
+                .child(icon::view(Icon::Close, icon::SMALL, theme::muted()))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.sidebar_input.update(cx, TextArea::clear);
+                    }),
+                )
+        });
+        let input = div()
+            .h(px(26.))
+            .px_2()
+            .gap_1()
+            .flex()
+            .flex_row()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(theme::hairline())
+            .child(icon::view(Icon::MagnifyingGlass, icon::SMALL, theme::muted()).flex_none())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(self.sidebar_input.clone()),
+            )
+            .children(clear);
+        let scope_segment = |option: Scope| {
+            let id = SharedString::from(format!("sidebar-scope-{}", option.id()));
+            segment_with_id(id, option.label(), option == scope).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.choose_branch_scope(option, cx);
+                }),
+            )
+        };
+        let toggle = div()
+            .p(px(2.))
+            .w(px(120.))
+            .flex()
+            .flex_row()
+            .rounded_md()
+            .bg(theme::selected_row())
+            .child(scope_segment(Scope::Mine))
+            .child(scope_segment(Scope::All));
+        let count = div()
+            .text_xs()
+            .text_color(theme::muted())
+            .child(format!("{shown} of {total}"));
+        div()
+            .px_3()
+            .pb_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(input)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(toggle)
+                    .child(count),
+            )
+    }
+
+    /// Sets the sidebar's scope to one the user picked, and keeps it for the next start.
+    pub(crate) fn choose_branch_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        self.sidebar_filter.choose(scope);
+        self.remember_branch_scope(cx);
+        cx.notify();
+    }
+
+    /// Shows every branch and clears the query: the empty state's link and the
+    /// "Show All Branches" action both come here.
+    fn show_all_branches(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_filter.show_all();
+        self.sidebar_input.update(cx, TextArea::clear);
+        self.remember_branch_scope(cx);
+        cx.notify();
+    }
+
+    /// Saves the chosen scope in the settings, unless the file already has it.
+    fn remember_branch_scope(&mut self, cx: &mut Context<Self>) {
+        let chosen = self.sidebar_filter.chosen();
+        if self.settings.branch_scope == chosen {
+            return;
+        }
+        self.settings.branch_scope = chosen;
+        self.save_settings(cx);
+    }
+
+    /// The filter's input changed. Only its first line counts; the list follows it.
+    fn on_sidebar_filter_changed(&mut self, input: &Entity<TextArea>, cx: &mut Context<Self>) {
+        let text = input.read(cx).text().to_owned();
+        if text.contains('\n') {
+            // The input is one line; a line break is not part of a query.
+            let first = text.lines().next().unwrap_or("").to_owned();
+            input.update(cx, |area, cx| area.set_text(&first, cx));
+            return;
+        }
+        // The caret blinks by notifying the area; redraw only on a real change.
+        if text == self.sidebar_filter.query() {
+            return;
+        }
+        self.sidebar_filter.set_query(&text);
+        cx.notify();
+    }
+
+    /// Escape clears the query. The list stays as it is with nothing typed.
+    fn on_sidebar_filter_event(&mut self, event: TextAreaEvent, cx: &mut Context<Self>) {
+        if event == TextAreaEvent::Cancel {
+            self.sidebar_input.update(cx, TextArea::clear);
+        }
+    }
+
     fn branch_tree(&self, cx: &mut Context<Self>) -> Div {
-        let count = sidebar::rows(self.model.branches.known(), self.sidebar_grouping).len();
+        let visible = self.visible_branches();
+        if visible.is_empty() && self.has_branches() {
+            return div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .child(no_match_state(cx));
+        }
+        let count = sidebar::rows(&visible, self.sidebar_grouping).len();
         div().flex_1().min_h(px(0.)).flex().flex_col().child(
             uniform_list(
                 "sidebar-branches",
@@ -166,8 +306,8 @@ impl StatusView {
                      range: Range<usize>,
                      _window: &mut Window,
                      cx: &mut Context<StatusView>| {
-                        let rows =
-                            sidebar::rows(this.model.branches.known(), this.sidebar_grouping);
+                        let visible = this.visible_branches();
+                        let rows = sidebar::rows(&visible, this.sidebar_grouping);
                         let head = this
                             .model
                             .status()
@@ -187,6 +327,52 @@ impl StatusView {
     }
 }
 
+/// The empty state of the branch tree: nothing matches the filter, and a link
+/// shows every branch again.
+fn no_match_state(cx: &mut Context<StatusView>) -> Div {
+    div()
+        .px_4()
+        .py_3()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(div().text_color(theme::muted()).child("No branches match"))
+        .child(
+            div()
+                .id("sidebar-show-all-branches")
+                .cursor_pointer()
+                .text_color(theme::accent())
+                .child("Show all branches")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.show_all_branches(cx);
+                    }),
+                ),
+        )
+}
+
+/// The listeners that keep the sidebar's query input and the window in step.
+/// Made with the window, before the first event.
+pub(crate) fn subscriptions(
+    input: &Entity<TextArea>,
+    window: &mut Window,
+    cx: &mut Context<StatusView>,
+) -> Vec<Subscription> {
+    vec![
+        cx.observe(input, |this, input, cx| {
+            this.on_sidebar_filter_changed(&input, cx);
+        }),
+        cx.subscribe_in(
+            input,
+            window,
+            |this, _, event: &TextAreaEvent, _window, cx| {
+                this.on_sidebar_filter_event(*event, cx);
+            },
+        ),
+    ]
+}
+
 fn section_title(text: &'static str) -> Div {
     div()
         .px_4()
@@ -195,6 +381,30 @@ fn section_title(text: &'static str) -> Div {
         .text_xs()
         .text_color(theme::muted())
         .child(text.to_uppercase())
+}
+
+/// One segment of a two-way switch. `active` is the one shown as chosen.
+fn segment(label: &'static str, active: bool) -> Stateful<Div> {
+    segment_with_id(label, label, active)
+}
+
+fn segment_with_id(id: impl Into<ElementId>, label: &'static str, active: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_1()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .when(active, |this| {
+            this.bg(theme::panel())
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::text())
+        })
+        .when(!active, |this| this.text_color(theme::muted()))
+        .child(label)
 }
 
 /// A workspace row; `selected` is the screen being shown.

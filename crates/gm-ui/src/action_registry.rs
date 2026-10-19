@@ -13,6 +13,8 @@ use gm_schema::{
     CommandKind, DiffSide, HunkId, OperationId, StageTarget, StatusEntry, WorktreeEntry,
 };
 
+use crate::branch_filter::Scope;
+
 /// Why an action is not enabled, as a short English sentence for the user.
 pub type Reason = &'static str;
 
@@ -109,6 +111,8 @@ pub enum Effect {
     OpenPruneDialog,
     /// Opens the history page and asks the engine for the commits of HEAD.
     ShowHistory,
+    /// Sets the sidebar's branches to the scope the window names (D53).
+    SetBranchScope(Scope),
 }
 
 /// What the window knows of the prepare-commit hooks, for the rules.
@@ -143,10 +147,14 @@ pub struct Context<'a> {
     pub hooks: HookCtx<'a>,
     /// The worktrees listed for the open repository, main checkout first.
     pub worktrees: &'a [WorktreeEntry],
+    /// The scope in effect for the sidebar's branches now (D53).
+    pub branch_scope: Scope,
+    /// Whether Git has a `user.email` to match branches against.
+    pub user_email_known: bool,
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 35] = [
+const SPECS: [Spec; 37] = [
     spec(
         "file.stage",
         "Stage File",
@@ -386,6 +394,20 @@ const SPECS: [Spec; 35] = [
         ArgKind::None,
         Category::Repository,
     ),
+    spec(
+        "branch.show_mine",
+        "Show Only My Branches",
+        None,
+        ArgKind::None,
+        Category::Branches,
+    ),
+    spec(
+        "branch.show_all",
+        "Show All Branches",
+        None,
+        ArgKind::None,
+        Category::Branches,
+    ),
 ];
 
 const fn spec(
@@ -443,6 +465,8 @@ pub enum Action {
     UnlockWorktree,
     PruneWorktrees,
     ShowHistory,
+    ShowOnlyMyBranches,
+    ShowAllBranches,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -470,6 +494,34 @@ fn shortcut_words(shortcut: &str, mac: bool) -> String {
     }
     parts.push(key);
     parts.join("+")
+}
+
+/// The rule of Reveal in File Manager: a repository is open and the file is in it.
+fn reveal_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    if ctx.root.is_none() {
+        return Err("No repository is open.");
+    }
+    file_entry(args, ctx).map(|_| ())
+}
+
+/// The rule of the two sidebar scope actions: each is refused when it would
+/// change nothing, and Mine is refused when Git has no email to match.
+fn scope_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
+    if !ctx.repo_open {
+        return Err("No repository is open.");
+    }
+    match action {
+        Action::ShowOnlyMyBranches if !ctx.user_email_known => {
+            Err("Git has no user.email to match branches against.")
+        }
+        Action::ShowOnlyMyBranches if ctx.branch_scope == Scope::Mine => {
+            Err("Already showing only your branches.")
+        }
+        Action::ShowAllBranches if ctx.branch_scope == Scope::All => {
+            Err("Already showing all branches.")
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The rule of a worktree action: whether its worktree allows it now.
@@ -510,7 +562,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 35] = [
+    pub const ALL: [Action; 37] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -546,6 +598,8 @@ impl Action {
         Action::UnlockWorktree,
         Action::PruneWorktrees,
         Action::ShowHistory,
+        Action::ShowOnlyMyBranches,
+        Action::ShowAllBranches,
     ];
 
     #[must_use]
@@ -709,13 +763,9 @@ impl Action {
                     _ => Ok(()),
                 }
             }
-            Action::RevealFile => {
-                if ctx.root.is_none() {
-                    return Err("No repository is open.");
-                }
-                file_entry(args, ctx).map(|_| ())
-            }
+            Action::RevealFile => reveal_rule(args, ctx),
             Action::CopyBranchName | Action::CopyFilePath | Action::FocusCommitMessage => Ok(()),
+            Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
             Action::SuggestMessage
             | Action::CancelHook
             | Action::UseSuggestion
@@ -796,6 +846,8 @@ impl Action {
             }
             (Action::PruneWorktrees, _) => Effect::OpenPruneDialog,
             (Action::ShowHistory, _) => Effect::ShowHistory,
+            (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
+            (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
             (Action::SuggestMessage, _) => Effect::Send(vec![CommandKind::RunPrepareCommit {
                 message: ctx.message.to_owned(),
             }]),
@@ -939,6 +991,8 @@ mod tests {
             root: Some("/repo"),
             hooks: crate::action_registry::HookCtx::default(),
             worktrees: &[],
+            branch_scope: Scope::All,
+            user_email_known: false,
         }
     }
 
@@ -1474,6 +1528,56 @@ mod tests {
             Err("No repository is open.")
         );
         assert_eq!(Action::ShowHistory.id(), "history.show");
+    }
+
+    #[test]
+    fn the_branch_scope_actions_switch_to_the_other_scope() {
+        let mine = Context {
+            branch_scope: Scope::Mine,
+            user_email_known: true,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowAllBranches.plan(&Args::None, &mine),
+            Ok(Effect::SetBranchScope(Scope::All))
+        );
+        assert_eq!(
+            Action::ShowOnlyMyBranches.enabled(&Args::None, &mine),
+            Err("Already showing only your branches.")
+        );
+        let all = Context {
+            branch_scope: Scope::All,
+            user_email_known: true,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowOnlyMyBranches.plan(&Args::None, &all),
+            Ok(Effect::SetBranchScope(Scope::Mine))
+        );
+        assert_eq!(
+            Action::ShowAllBranches.enabled(&Args::None, &all),
+            Err("Already showing all branches.")
+        );
+        assert_eq!(Action::ShowOnlyMyBranches.id(), "branch.show_mine");
+        assert_eq!(Action::ShowAllBranches.id(), "branch.show_all");
+    }
+
+    #[test]
+    fn show_only_my_branches_needs_a_known_email_and_a_repository() {
+        // Without an email, Mine would show every branch: the run is refused and says why.
+        let no_email = ctx(&[], "");
+        assert_eq!(
+            Action::ShowOnlyMyBranches.enabled(&Args::None, &no_email),
+            Err("Git has no user.email to match branches against.")
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowAllBranches.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
     }
 
     #[test]

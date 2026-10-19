@@ -525,8 +525,12 @@ impl Model {
                 self.notice_icon = Some(Icon::CheckCircle);
                 None
             }
-            Event::BranchesLoaded { id, branches, .. } => {
-                let _ = self.branches.listed(id, branches);
+            Event::BranchesLoaded {
+                id,
+                branches,
+                user_email,
+            } => {
+                let _ = self.branches.listed(id, branches, user_email);
                 None
             }
             Event::WorktreesLoaded { worktrees, .. } => {
