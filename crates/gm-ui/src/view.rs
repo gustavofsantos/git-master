@@ -80,6 +80,8 @@ pub struct StatusView {
     pub(crate) diff_pane: Entity<DiffPane>,
     /// The read-only pane that shows one file of the open commit (H4).
     pub(crate) commit_diff_pane: Entity<DiffPane>,
+    /// The sidebar's width, in logical pixels, as the user dragged it.
+    pub(crate) sidebar_width: f32,
     /// The left column's width, in logical pixels, as the user dragged it.
     pub(crate) left_width: f32,
     /// The commit message box's height, in logical pixels, as dragged.
@@ -246,6 +248,7 @@ impl StatusView {
             composer,
             diff_pane,
             commit_diff_pane,
+            sidebar_width: resize::SIDEBAR_DEFAULT,
             left_width: resize::LEFT_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
             sidebar_grouping: Grouping::default(),
@@ -939,9 +942,12 @@ impl StatusView {
 impl Render for StatusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The stored sizes are clamped again here, because a window resized
-        // after a drag may have moved the limits.
+        // after a drag may have moved the limits. The left column is fitted
+        // beside the sidebar's clamped width, so the main area keeps its room.
         let viewport = window.viewport_size();
-        let left_width = resize::LEFT.clamp(self.left_width, f32::from(viewport.width));
+        let sidebar_width = resize::SIDEBAR.clamp(self.sidebar_width, f32::from(viewport.width));
+        let left_width =
+            resize::left_beside_sidebar(self.left_width, sidebar_width, f32::from(viewport.width));
         let commit_height = resize::COMMIT.clamp(self.commit_height, f32::from(viewport.height));
         window_chrome::sync_client_inset(window);
         let app = div()
@@ -978,7 +984,7 @@ impl Render for StatusView {
                     .min_h(px(0.))
                     .flex()
                     .flex_row()
-                    .child(self.sidebar(cx))
+                    .child(self.sidebar(sidebar_width, cx))
                     .children(
                         (self.screen == Screen::WorkingCopy)
                             .then(|| self.left_column(left_width, commit_height, cx)),

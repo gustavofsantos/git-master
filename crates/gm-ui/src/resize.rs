@@ -4,12 +4,24 @@
 //!
 //! Adapted from rvw's `crates/rvw-view/src/resize.rs` (MIT, same author).
 
+/// The sidebar's width before the user drags it.
+pub const SIDEBAR_DEFAULT: f32 = 240.;
 /// The left column's width before the user drags it.
 pub const LEFT_DEFAULT: f32 = 420.;
 /// The commit message box's height before the user drags it: three rows of
 /// the text area (20px each) plus its 8px padding top and bottom and its
 /// 1px bottom border.
 pub const COMMIT_DEFAULT: f32 = 77.;
+
+/// The narrowest the main area is kept while the columns beside it are
+/// dragged wider. Below this the left column gives way first.
+pub const MAIN_MIN: f32 = 320.;
+
+/// The sidebar: at least 200px, at most 40% of the window's width.
+pub const SIDEBAR: Limits = Limits {
+    min: 200.,
+    max_fraction: 0.4,
+};
 
 /// The left column: at least 280px, at most 60% of the window's width.
 pub const LEFT: Limits = Limits {
@@ -46,6 +58,16 @@ impl Limits {
         }
         size.clamp(self.min, self.max(extent))
     }
+}
+
+/// The left column's width once the sidebar is `sidebar` wide in a window
+/// `extent` wide: its own limits, and no wider than leaves the main area
+/// `MAIN_MIN` wide. Never below its floor, so a narrow window keeps the column
+/// usable and the main area takes what is left.
+#[must_use]
+pub fn left_beside_sidebar(size: f32, sidebar: f32, extent: f32) -> f32 {
+    let room = (extent - sidebar - MAIN_MIN).max(LEFT.min);
+    LEFT.clamp(size, extent).min(room)
 }
 
 /// The size after the pointer moved from `origin` to `pointer`, along the
@@ -86,6 +108,70 @@ mod tests {
         assert_eq!(COMMIT.clamp(10., 800.), 72.);
         assert_eq!(COMMIT.clamp(COMMIT_DEFAULT, 800.), COMMIT_DEFAULT);
         assert_eq!(COMMIT.clamp(900., 800.), 400.);
+    }
+
+    #[test]
+    fn the_sidebar_is_held_between_200_and_40_percent() {
+        assert_eq!(SIDEBAR.clamp(100., 1000.), 200.);
+        assert_eq!(SIDEBAR.clamp(SIDEBAR_DEFAULT, 1000.), SIDEBAR_DEFAULT);
+        assert_eq!(SIDEBAR.clamp(900., 1000.), 400.);
+        assert_eq!(SIDEBAR.clamp(f32::NAN, 1000.), 200.);
+    }
+
+    #[test]
+    fn the_sidebar_default_sits_inside_the_limits_of_a_1280_window() {
+        assert_eq!(SIDEBAR.clamp(SIDEBAR_DEFAULT, 1280.), SIDEBAR_DEFAULT);
+    }
+
+    #[test]
+    fn dragging_right_grows_the_sidebar() {
+        assert_eq!(dragged(240., 240., 300., true, SIDEBAR, 1280.), 300.);
+        assert_eq!(dragged(240., 240., 100., true, SIDEBAR, 1280.), 200.);
+        assert_eq!(dragged(240., 240., 900., true, SIDEBAR, 1280.), 512.);
+    }
+
+    #[test]
+    fn the_left_column_yields_to_a_wide_sidebar_and_keeps_the_main_area() {
+        // 1280 - 240 - 320 leaves room for 720px, below the column's own 768px.
+        assert_eq!(left_beside_sidebar(900., 240., 1280.), 720.);
+        // The column's own size wins when the room is larger.
+        assert_eq!(left_beside_sidebar(420., 240., 1280.), 420.);
+        // A widened sidebar takes room from the column.
+        assert_eq!(left_beside_sidebar(768., 512., 1280.), 448.);
+        assert_eq!(left_beside_sidebar(420., 512., 1280.), 420.);
+    }
+
+    #[test]
+    fn a_narrow_window_keeps_the_column_at_its_floor() {
+        // The room would be 140px; the column keeps its 280px floor.
+        assert_eq!(left_beside_sidebar(420., 240., 700.), 280.);
+        assert_eq!(left_beside_sidebar(f32::NAN, 240., 700.), 280.);
+    }
+
+    #[test]
+    fn the_main_area_stays_positive_and_at_its_minimum_when_it_can() {
+        // From 500px: at 480 the two floors already fill the window.
+        let mut extent = 500.;
+        while extent <= 3000. {
+            for sidebar in [200., 240., 512., 900.] {
+                let sidebar = SIDEBAR.clamp(sidebar, extent);
+                for size in [0., LEFT_DEFAULT, 900., extent] {
+                    let left = left_beside_sidebar(size, sidebar, extent);
+                    let main = extent - sidebar - left;
+                    assert!(
+                        main > 0.,
+                        "main {main} at {extent} with {sidebar} and {size}"
+                    );
+                    if extent - sidebar - MAIN_MIN >= LEFT.min {
+                        assert!(
+                            main >= MAIN_MIN,
+                            "main {main} at {extent}, {sidebar}, {size}"
+                        );
+                    }
+                }
+            }
+            extent += 20.;
+        }
     }
 
     #[test]

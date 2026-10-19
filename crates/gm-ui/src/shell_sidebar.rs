@@ -17,6 +17,8 @@ use crate::action_registry::{Action, Args};
 use crate::branch_filter::{self, Scope};
 use crate::icon::{self, Icon};
 use crate::name_fit::{self, name_label};
+use crate::resize::{self, SIDEBAR};
+use crate::resize_handle::{self, Edge};
 use crate::sidebar::{self, Grouping, Row};
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
@@ -24,7 +26,6 @@ use crate::view::{Screen, StatusView};
 use crate::window_chrome;
 use crate::worktree_list;
 
-pub(crate) const SIDEBAR_WIDTH: f32 = 240.;
 const ROW_HEIGHT: f32 = 28.;
 /// The most worktree rows shown at once. The section does not scroll yet,
 /// so the rest are cut off.
@@ -39,14 +40,26 @@ const PLACEHOLDERS: [(&str, &str); 3] = [
 ];
 
 impl StatusView {
-    pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+    /// The sidebar at `width`. Its right edge is the strip that resizes it.
+    pub(crate) fn sidebar(&self, width: f32, cx: &mut Context<Self>) -> Div {
+        let width_strip = resize_handle::handle(
+            "sidebar-resize",
+            Edge::Right,
+            width,
+            SIDEBAR,
+            |this: &mut StatusView, width, _| this.sidebar_width = width,
+            |this: &mut StatusView, _| this.sidebar_width = resize::SIDEBAR_DEFAULT,
+            cx,
+        );
         div()
-            .w(px(SIDEBAR_WIDTH))
+            .relative()
+            .w(px(width))
             .flex_none()
             .h_full()
             .min_h(px(0.))
             .flex()
             .flex_col()
+            .overflow_hidden()
             .bg(theme::ground())
             .border_r_1()
             .border_color(theme::hairline())
@@ -57,6 +70,7 @@ impl StatusView {
             .child(self.branch_tree(cx))
             .child(self.worktrees_section(cx))
             .children((self.sidebar_grouping == Grouping::ByStack).then(footer_hint))
+            .child(width_strip)
     }
 
     /// The WORKTREES section: the main checkout, then the linked worktrees.
@@ -94,6 +108,7 @@ impl StatusView {
                     )
                     .child(
                         div()
+                            .flex_none()
                             .px_2()
                             .rounded_full()
                             .bg(theme::selection())
@@ -425,7 +440,15 @@ fn item_row(label: &'static str, selected: bool) -> Stateful<Div> {
             this.cursor_pointer()
                 .hover(|style| style.bg(theme::selected_row()))
         })
-        .child(label)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(label),
+        )
 }
 
 /// A row of the branch tree. `head` is the branch HEAD is on.
@@ -449,6 +472,10 @@ fn tree_row(
             .h(px(ROW_HEIGHT))
             .flex()
             .items_center()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
             .text_color(theme::faint())
             .child(*text)
             .into_any_element(),
