@@ -1,0 +1,11 @@
+# expect: line 9: targets unknown state `nowhere`
+schema = 1
+name = "unknown-target"
+
+[trigger]
+on = "manual"
+
+[[state]]
+id = "check"
+action = "noop"
+on.done = "nowhere"

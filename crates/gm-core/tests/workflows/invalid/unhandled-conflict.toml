@@ -1,0 +1,13 @@
+# expect: line 9: has no rule for `conflict`
+schema = 1
+name = "unhandled-conflict"
+
+[trigger]
+on = "manual"
+
+[[state]]
+id = "apply"
+action = "restack.apply"
+with = { plan_id = "p1" }
+on.done = "end.done"
+on.stale = "end.failed"
