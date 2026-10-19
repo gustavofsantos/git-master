@@ -8,7 +8,7 @@
 2. Cada fatia é vertical e usável sozinha.
 3. O primeiro diferencial (hooks) aparece cedo; stacks e MCP depois da base de Working Copy e histórico.
 4. Se o diferencial mais urgente for o stacking, antecipar a fatia 5 (a ordem é uma decisão do autor).
-5. Workflows entram cedo porque tornam as políticas de stack e a mensagem de commit por LLM configuração, não código (ordem a confirmar, Q20).
+5. Workflows entram cedo porque tornam as políticas de stack e a mensagem de commit por LLM configuração, não código (ordem confirmada pelo autor em 2026-10-19, Q20).
 
 ## Fatia 0: spikes e esqueleto (feito)
 
@@ -242,7 +242,7 @@ Decisão D53 (`01`, proposta em 2026-10-19). A barra lateral mostra "Meus" (a br
 - Pronto quando: as regras de escopo, busca e padrão são testadas em módulo puro (`branch_filter.rs`); as linhas da árvore saem do conjunto filtrado, sem cabeçalho de grupo vazio (`sidebar.rs`); as ações têm regra e plano testados; o escopo sobrevive ao reinício (teste de ida e volta do arquivo).
 - Lacunas: nada foi visto numa janela: o cenário do smoke não foi escrito nem rodado. Nesta máquina o GPUI não inicia (falta o driver Vulkan por software); a interface ainda não foi conferida em tela. Remotas sem autor legível ficam ocultas em "Meus"; o filtro é recalculado a cada quadro, sem cache; a navegação por teclado dentro da árvore filtrada não mudou; a busca não é guardada; "Mine" olha só o commit de ponta de cada branch; a seção "Local" some quando não há branch local, também sem filtro.
 
-## Fatia 3w: workflows (proposta, depende de Q20)
+## Fatia 3w: workflows (proposta; posição confirmada em 2026-10-19, Q20)
 
 Proposta de 2026-10-19, detalhada em `10-workflows.md`, com as decisões D60 a D77 em `01` (D73 a D75 decididas, as demais propostas). Um workflow é uma sequência de ações tipadas do motor, ligada a um gatilho e declarada em TOML, um arquivo por workflow. Cada passo é um `Command`, então a fatia não cria caminho de lógica novo. As políticas de stack e a mensagem de commit por LLM passam a ser workflows, sem código específico. A posição no roadmap segue a confirmar (Q20).
 

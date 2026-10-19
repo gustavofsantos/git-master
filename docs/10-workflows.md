@@ -250,7 +250,7 @@ Regras e pontos fixos:
 | `stack.parent_merged` | derivado: o pai sumiu ou já está na `main` (`02`) |
 | `composer.opened` | o compositor de commit abre |
 
-`match` usa a sintaxe de hooks (`branch:feat/*`, `03`). Gatilho por tempo não existe na v1 (Q17).
+`match` usa a sintaxe de hooks (`branch:feat/*`, `03`). Gatilho por tempo não existe na v1 (Q17, resolvida).
 
 ## Ator, níveis e aprovação (D64, proposto)
 
@@ -313,14 +313,14 @@ Layout: lista à esquerda, com nome, gatilho, habilitado neste repositório, úl
 
 MCP, com a fatia 7 (WF5): `workflow_list` (read) e `workflow_run(name, inputs)`, com passos `apply` seguindo D64(c).
 
-## Questões abertas
+## Questões (todas resolvidas em 2026-10-19)
 
 Detalhes em `01`:
 
 - **Q15** **Resolvida (2026-10-19), D73**: workflows versionados no repositório exigem aprovação por hash (como D17) ou nunca são lidos da working tree? Resposta: nunca. Persona v1 é um engenheiro sozinho, que não compartilha configuração. Workflows vêm só da configuração do usuário, e `gitmaster.workflowPath` dentro da working tree do repositório aberto é ignorado com aviso.
 - **Q16** **Resolvida (2026-10-19), D74**: passo `llm` embutido (HTTP com a chave do usuário) ou só `exec`? Resposta: só `exec`, por linha de comando. Não há passo `llm` embutido, nem HTTP, nem chave de API guardada pelo app.
-- **Q17**: gatilhos de tempo enquanto o app está aberto?
+- **Q17** **Resolvida (2026-10-19)**: sem gatilhos de tempo na v1.
 - **Q18** **Resolvida (2026-10-19), D75**: no longo prazo, hooks viram workflows ou ficam separados? Resposta: workflows substituem hooks, com as fases `before`, `transform` e `after`.
-- **Q19**: subcomando `gitmaster workflow check <arquivo>` para validar em repositório de dotfiles, sem contrariar D02?
-- **Q20**: posição no roadmap: fatia 3w após a 3 e antes da 3c, com as ações de stack (WF4) nas fatias 4 e 5, e o MCP (WF5) na fatia 7. Status em `07`.
-- **Q21**: dry run de `exec`. Nunca roda, ou roda passos `exec` cujo argv o usuário marcou como `pure = true`? Padrão proposto: nunca.
+- **Q19** **Resolvida (2026-10-19)**: sem subcomando de validação na primeira versão; a validação fica só na UI (D76).
+- **Q20** **Resolvida (2026-10-19)**: fatia 3w logo depois da fatia 3, antes da 3c; ações de stack (WF4) com as fatias 4 e 5; MCP (WF5) com a fatia 7.
+- **Q21** **Resolvida (2026-10-19)**: `exec` nunca roda no dry run.
