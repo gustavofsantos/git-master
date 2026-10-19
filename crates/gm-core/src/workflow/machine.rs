@@ -16,8 +16,9 @@ use super::model::{Approval, Definition, End, State, StateKind, Target};
 /// Hard cap of transitions per run (D78).
 pub const MAX_TRANSITIONS: u32 = 1000;
 
-/// What the run reads besides state outputs.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// What the run reads besides state outputs. Stored whole by the engine, so a
+/// resume can rebuild it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Context {
     pub inputs: Value,
     pub trigger: Value,
@@ -142,6 +143,24 @@ pub fn start(definition: &Definition, context: &Context) -> Result<(Run, Effect)
     };
     let effect = walk(definition, context, &mut run, Flow::Enter)?;
     Ok((run, effect))
+}
+
+/// The effect of the run's current position, without changing the run. Used
+/// to pick up a run after a restart: entering the position renders its input
+/// again. An ended run gives its `Finish` effect.
+pub fn current_effect(
+    definition: &Definition,
+    context: &Context,
+    run: &Run,
+) -> Result<Effect, MachineError> {
+    match &run.position {
+        Position::Ended { end, reason } => Ok(Effect::Finish {
+            end: *end,
+            reason: reason.clone(),
+            value: run.last_set.clone(),
+        }),
+        Position::At { .. } => walk(definition, context, &mut run.clone(), Flow::Enter),
+    }
 }
 
 /// Applies the outcome of the current state and enters the next one.
@@ -1104,6 +1123,38 @@ mod tests {
         assert_eq!(
             step.effect,
             finished(End::Done, None, Some(json!("feat: x")))
+        );
+    }
+
+    #[test]
+    fn current_effect_re_enters_the_position_without_changing_the_run() {
+        let def = load(RESTACK_CHILDREN);
+        let ctx = context(json!({"parent": "main"}));
+        let (run, effect) = start(&def, &ctx).unwrap();
+        let before = run.clone();
+        assert_eq!(current_effect(&def, &ctx, &run).unwrap(), effect);
+        assert_eq!(run, before);
+
+        let step = next(
+            &def,
+            &ctx,
+            &run,
+            "done",
+            json!({"branch_count": 2, "plan_id": "p1"}),
+        )
+        .unwrap();
+        assert_eq!(current_effect(&def, &ctx, &step.run).unwrap(), step.effect);
+    }
+
+    #[test]
+    fn current_effect_of_an_ended_run_is_its_finish() {
+        let def = load(BLOCK_RESTACK);
+        let ctx = context(json!({"root": "feat"}));
+        let (run, _) = start(&def, &ctx).unwrap();
+        let ended = next(&def, &ctx, &run, "done", json!({})).unwrap();
+        assert_eq!(
+            current_effect(&def, &ctx, &ended.run).unwrap(),
+            finished(End::Done, None, None)
         );
     }
 
