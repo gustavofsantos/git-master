@@ -146,16 +146,26 @@ impl StatusView {
                 }),
             )
         };
-        div().px_3().py_3().child(
-            div()
-                .p(px(2.))
-                .flex()
-                .flex_row()
-                .rounded_md()
-                .bg(theme::selected_row())
-                .child(segment_for(Grouping::ByStack))
-                .child(segment_for(Grouping::ByName)),
-        )
+        div()
+            .px_3()
+            .py_3()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .p(px(2.))
+                    .flex()
+                    .flex_row()
+                    .rounded_md()
+                    .bg(theme::selected_row())
+                    .child(segment_for(Grouping::ByStack))
+                    .child(segment_for(Grouping::ByName)),
+            )
+            .child(new_branch_button(cx))
     }
 
     /// Whether a listing has arrived with branches in it. The filter is only
@@ -386,6 +396,30 @@ pub(crate) fn subscriptions(
             },
         ),
     ]
+}
+
+/// The "+" beside the grouping switch: starts a new branch.
+fn new_branch_button(cx: &Context<StatusView>) -> Stateful<Div> {
+    div()
+        .id("sidebar-new-branch")
+        .w(px(26.))
+        .h(px(26.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_color(theme::muted())
+        .hover(|style| style.bg(theme::selected_row()))
+        .child("+")
+        .tooltip(window_chrome::hint(Action::NewBranch.spec().title))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.run_action(Action::NewBranch, &Args::None, window, cx);
+            }),
+        )
 }
 
 fn section_title(text: &'static str) -> Div {

@@ -887,7 +887,12 @@ impl Engine {
         let status = self.git.status(root).map_err(|e| e.0)?;
         let mut events = self.loaded(id, root, status)?;
         let branches = self.git.branches(root).map_err(|e| e.0)?;
-        events.push(Event::BranchesLoaded { id, branches });
+        let user_email = self.git.user_email(root).map_err(|e| e.0)?;
+        events.push(Event::BranchesLoaded {
+            id,
+            branches,
+            user_email,
+        });
         Ok(events)
     }
 

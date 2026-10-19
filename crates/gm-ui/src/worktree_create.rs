@@ -625,7 +625,7 @@ fn mode_switch(selected_mode: Mode, cx: &Context<StatusView>) -> Div {
 }
 
 /// The Git command the form will run, in the code face.
-fn command_block(plan: &str) -> Div {
+pub(crate) fn command_block(plan: &str) -> Div {
     div()
         .flex()
         .flex_col()
@@ -697,7 +697,7 @@ fn buttons(pending: bool, cx: &Context<StatusView>) -> Div {
         )
 }
 
-fn field_row(label: &'static str, field: Entity<TextArea>) -> Div {
+pub(crate) fn field_row(label: &'static str, field: Entity<TextArea>) -> Div {
     div()
         .flex()
         .flex_col()

@@ -5,6 +5,7 @@
 mod action_registry;
 mod app_settings;
 mod assets;
+mod branch_delete;
 mod branch_filter;
 mod branch_menu;
 mod branches;
@@ -20,6 +21,7 @@ mod hook_run;
 mod icon;
 mod model;
 mod name_fit;
+mod new_branch;
 mod open_window;
 mod palette;
 mod palette_view;

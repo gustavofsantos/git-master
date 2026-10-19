@@ -20,6 +20,7 @@ use crate::action_registry::{
     self, Action, Args, Context as ActionContext, Effect, HookCtx, Reason,
 };
 use crate::app_settings::{self, AppSettings};
+use crate::branch_delete::DeleteDialog;
 use crate::branch_filter::{self, BranchFilter};
 use crate::branch_menu::BranchMenu;
 use crate::composer::{Composer, ComposerEvent};
@@ -30,6 +31,7 @@ use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
 use crate::model::{Model, Switched};
 use crate::name_fit::name_label;
+use crate::new_branch::NewBranchDialog;
 use crate::palette::Palette;
 use crate::palette_view::{self, PaletteView};
 use crate::project_menu::ProjectMenu;
@@ -114,6 +116,10 @@ pub struct StatusView {
     pub(crate) removal_dialog: Option<RemoveDialog>,
     /// The prune dialog, while it is open.
     pub(crate) prune_dialog: Option<PruneDialog>,
+    /// The new-branch dialog, while it is open.
+    pub(crate) new_branch_dialog: Option<NewBranchDialog>,
+    /// The delete-branch dialog, while it is open.
+    pub(crate) delete_dialog: Option<DeleteDialog>,
     /// The recent repositories, newest first, as last saved or loaded.
     pub(crate) recents: Recents,
     /// Where the list is kept; `None` when there is no home directory.
@@ -269,6 +275,8 @@ impl StatusView {
             worktree_dialog: None,
             removal_dialog: None,
             prune_dialog: None,
+            new_branch_dialog: None,
+            delete_dialog: None,
             recents,
             recent_store,
             recent_generation: 0,
@@ -370,6 +378,12 @@ impl StatusView {
         }
         if let Some(outcome) = self.model.pruning.take_outcome() {
             self.on_worktrees_pruned(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.branch_create.take() {
+            self.on_branch_created(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.branch_delete.take() {
+            self.on_branch_delete_settled(outcome, window, cx);
         }
         // A finished hook run fills the composer only while it still holds what the run was
         // started from; otherwise the answer waits as a suggestion (see hook_run).
@@ -728,6 +742,12 @@ impl StatusView {
             Ok(Effect::OpenWorktree(path)) => self.open_worktree(&path, cx),
             Ok(Effect::OpenRemoveDialog(path)) => self.open_remove_dialog(&path, window, cx),
             Ok(Effect::OpenPruneDialog) => self.open_prune_dialog(cx),
+            Ok(Effect::OpenNewBranchDialog { start }) => {
+                self.open_new_branch_dialog(start.as_deref(), window, cx);
+            }
+            Ok(Effect::OpenDeleteBranchDialog(branch)) => {
+                self.open_delete_branch_dialog(&branch, window, cx);
+            }
             Ok(Effect::ShowHistory) => self.show_history(cx),
             Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
         }
@@ -1041,6 +1061,16 @@ impl Render for StatusView {
                 self.prune_dialog
                     .is_some()
                     .then(|| self.prune_layer(window, cx)),
+            )
+            .children(
+                self.new_branch_dialog
+                    .is_some()
+                    .then(|| self.new_branch_layer(window, cx)),
+            )
+            .children(
+                self.delete_dialog
+                    .is_some()
+                    .then(|| self.delete_branch_layer(window, cx)),
             );
         window_chrome::framed(window, app)
     }

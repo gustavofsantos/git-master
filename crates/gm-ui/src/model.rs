@@ -7,10 +7,12 @@ use gm_schema::{
     StatusEntry, WorktreeEntry,
 };
 
+use crate::branch_delete::Deleting;
 use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
+use crate::new_branch::BranchCreate;
 use crate::worktree_create::Creating;
 use crate::worktree_prune::Pruning;
 use crate::worktree_remove::Removal;
@@ -62,6 +64,10 @@ pub struct Model {
     pub removal: Removal,
     /// The prune dialog's listing, prune in flight and outcome.
     pub pruning: Pruning,
+    /// The new-branch dialog's create in flight, and its outcome.
+    pub branch_create: BranchCreate,
+    /// The delete-branch dialog's delete in flight, and its outcome.
+    pub branch_delete: Deleting,
 }
 
 /// The stacked diff of the open commit (H4c): every file's diff, shown in one
@@ -468,6 +474,19 @@ impl Model {
                 id, state, detail, ..
             } if self.removal.owns(id) => {
                 self.removal.settle(state, detail);
+                None
+            }
+            // A branch create or delete belongs to its dialog, not to the status bar.
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.branch_create.owns(id) => {
+                self.branch_create.settle(state, detail);
+                None
+            }
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.branch_delete.owns(id) => {
+                self.branch_delete.settle(state, detail);
                 None
             }
             Event::PrunableListed { id, candidates } if self.pruning.owns(id) => {

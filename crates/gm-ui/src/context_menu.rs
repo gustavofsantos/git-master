@@ -75,6 +75,7 @@ pub(crate) fn branch_items(name: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     let item = |action, group| Item::new(action, target.clone(), group, ctx);
     vec![
         item(Action::CheckoutBranch, 0),
+        item(Action::NewBranch, 1),
         item(Action::NewChildBranch, 1),
         item(Action::CreateWorktree, 1),
         item(Action::Restack, 1),
@@ -120,6 +121,7 @@ fn worktree_branch_items(path: &str, name: &str, ctx: &ActionContext<'_>) -> Vec
         Item::new(Action::OpenWorktree, worktree.clone(), 0, ctx),
         Item::new(Action::RevealWorktree, worktree.clone(), 1, ctx),
         Item::new(Action::CopyWorktreePath, worktree.clone(), 1, ctx),
+        Item::new(Action::NewBranch, branch.clone(), 2, ctx),
         Item::new(Action::NewChildBranch, branch.clone(), 2, ctx),
         Item::new(Action::Restack, branch, 2, ctx),
         Item::new(Action::RemoveWorktree, worktree, 3, ctx),
@@ -510,6 +512,7 @@ mod tests {
             labels,
             [
                 "Checkout Branch",
+                "New Branch…",
                 "New Child Branch",
                 "Create Worktree",
                 "Restack This Stack",
@@ -530,7 +533,7 @@ mod tests {
     fn branch_menu_is_split_into_groups_by_the_separators() {
         let items = branch_items("feature", &ctx(&[]));
         let sizes: Vec<usize> = sections(&items).iter().map(|s| s.len()).collect();
-        assert_eq!(sizes, [1, 3, 1, 1, 2]);
+        assert_eq!(sizes, [1, 4, 1, 1, 2]);
     }
 
     #[test]
@@ -561,6 +564,7 @@ mod tests {
                 "Open Worktree",
                 "Reveal Worktree in File Manager",
                 "Copy Worktree Path",
+                "New Branch…",
                 "New Child Branch",
                 "Restack This Stack",
                 "Remove Worktree",
@@ -651,7 +655,6 @@ mod tests {
             Action::Restack,
             Action::PushWithLease,
             Action::RenameBranch,
-            Action::DeleteBranch,
         ] {
             assert_eq!(
                 find(&items, action).state,
@@ -685,6 +688,18 @@ mod tests {
             .map(Item::label)
             .collect();
         assert_eq!(destructive, ["Delete Branch"]);
+    }
+
+    #[test]
+    fn delete_runs_on_a_free_branch_and_says_why_it_cannot_on_the_checked_out_one() {
+        let on_main = branch_items("main", &ctx(&[]));
+        assert_eq!(
+            find(&on_main, Action::DeleteBranch).state,
+            Err("Cannot delete the checked-out branch")
+        );
+        let elsewhere = branch_items("feature", &ctx(&[]));
+        assert_eq!(find(&elsewhere, Action::DeleteBranch).state, Ok(()));
+        assert_eq!(find(&elsewhere, Action::NewBranch).state, Ok(()));
     }
 
     #[test]

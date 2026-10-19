@@ -322,7 +322,7 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
         Section::Actions
     };
     let (choice, state) = match spec.args {
-        ArgKind::None => (
+        ArgKind::None | ArgKind::OptionalBranch => (
             Choice::Run {
                 action,
                 args: Args::None,
@@ -421,7 +421,11 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
             .iter()
             .map(|entry| target_row(action, Section::Files, &entry.path, ctx))
             .collect(),
-        ArgKind::None | ArgKind::Chunk | ArgKind::Worktree | ArgKind::Commit => Vec::new(),
+        ArgKind::None
+        | ArgKind::OptionalBranch
+        | ArgKind::Chunk
+        | ArgKind::Worktree
+        | ArgKind::Commit => Vec::new(),
     }
 }
 

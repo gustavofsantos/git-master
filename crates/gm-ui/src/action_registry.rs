@@ -47,6 +47,8 @@ impl Category {
 pub enum ArgKind {
     None,
     Branch,
+    /// No target, or a branch as the start point when the run names one.
+    OptionalBranch,
     File,
     Chunk,
     Worktree,
@@ -114,6 +116,13 @@ pub enum Effect {
     OpenRemoveDialog(String),
     /// Opens the prune dialog, which lists the stale records before anything is removed.
     OpenPruneDialog,
+    /// Opens the new-branch dialog. `start` is the commit the new branch starts
+    /// from; `None` is the checked-out branch.
+    OpenNewBranchDialog {
+        start: Option<String>,
+    },
+    /// Opens the delete-branch dialog, which asks before the branch goes.
+    OpenDeleteBranchDialog(String),
     /// Opens the history page and asks the engine for the commits of HEAD.
     ShowHistory,
     /// Sets the sidebar's branches to the scope the window names (D53).
@@ -159,7 +168,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 39] = [
+const SPECS: [Spec; 40] = [
     spec(
         "file.stage",
         "Stage File",
@@ -236,6 +245,13 @@ const SPECS: [Spec; 39] = [
         None,
         ArgKind::None,
         Category::Commit,
+    ),
+    spec(
+        "branch.new",
+        "New Branch…",
+        None,
+        ArgKind::OptionalBranch,
+        Category::Branches,
     ),
     spec(
         "branch.new_child",
@@ -460,6 +476,7 @@ pub enum Action {
     CopyBranchName,
     CopyFilePath,
     FocusCommitMessage,
+    NewBranch,
     NewChildBranch,
     Restack,
     PushWithLease,
@@ -583,7 +600,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 39] = [
+    pub const ALL: [Action; 40] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -595,6 +612,7 @@ impl Action {
         Action::CopyBranchName,
         Action::CopyFilePath,
         Action::FocusCommitMessage,
+        Action::NewBranch,
         Action::NewChildBranch,
         Action::Restack,
         Action::PushWithLease,
@@ -651,7 +669,6 @@ impl Action {
                 | Action::Restack
                 | Action::PushWithLease
                 | Action::RenameBranch
-                | Action::DeleteBranch
                 | Action::DiscardFile
                 | Action::Fetch
                 | Action::Pull
@@ -701,7 +718,11 @@ impl Action {
     pub fn opens_dialog(self) -> bool {
         matches!(
             self,
-            Action::CreateWorktree | Action::RemoveWorktree | Action::PruneWorktrees
+            Action::CreateWorktree
+                | Action::RemoveWorktree
+                | Action::PruneWorktrees
+                | Action::NewBranch
+                | Action::DeleteBranch
         )
     }
 
@@ -782,13 +803,7 @@ impl Action {
             Action::Refresh
             | Action::CreateWorktree
             | Action::PruneWorktrees
-            | Action::ShowHistory => {
-                if ctx.repo_open {
-                    Ok(())
-                } else {
-                    Err("No repository is open.")
-                }
-            }
+            | Action::ShowHistory => ctx.repo_open.then_some(()).ok_or("No repository is open."),
             Action::CheckoutBranch => {
                 idle(ctx)?;
                 match args {
@@ -798,6 +813,7 @@ impl Action {
                     _ => Ok(()),
                 }
             }
+            Action::NewBranch | Action::DeleteBranch => branch_rule(self, args, ctx),
             Action::RevealFile => reveal_rule(args, ctx),
             Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
             _ if self.copies_its_target() => Ok(()),
@@ -885,29 +901,22 @@ impl Action {
             (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
             (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
             (Action::CopyCommitMessage, Args::Commit(text)) => Effect::CopyMessage(text.clone()),
-            (Action::SuggestMessage, _) => Effect::Send(vec![CommandKind::RunPrepareCommit {
-                message: ctx.message.to_owned(),
-            }]),
-            (Action::CancelHook, _) => match ctx.hooks.running {
-                Some(run) => Effect::Send(vec![CommandKind::CancelHook { run }]),
-                None => return Err("No hook is running."),
+            (Action::NewBranch, Args::Branch(name)) => Effect::OpenNewBranchDialog {
+                start: Some(name.clone()),
             },
-            (Action::UseSuggestion, _) => match ctx.hooks.suggestion {
-                Some(text) => Effect::UseSuggestion(text.to_owned()),
-                None => return Err("There is no suggestion."),
-            },
-            (Action::DiscardSuggestion, _) => Effect::DiscardSuggestion,
-            (Action::ApproveHook, _) => match ctx.hooks.pending_approval {
-                Some((name, hash)) => Effect::Send(vec![CommandKind::ApproveHook {
-                    name: name.to_owned(),
-                    command_hash: hash.to_owned(),
-                }]),
-                None => return Err("No repository hook waits for approval."),
-            },
-            (Action::DenyHook, _) => match ctx.hooks.pending_approval {
-                Some((_, hash)) => Effect::DenyHook(hash.to_owned()),
-                None => return Err("No repository hook waits for approval."),
-            },
+            (Action::NewBranch, _) => Effect::OpenNewBranchDialog { start: None },
+            (Action::DeleteBranch, Args::Branch(name)) => {
+                Effect::OpenDeleteBranchDialog(name.clone())
+            }
+            (
+                Action::SuggestMessage
+                | Action::CancelHook
+                | Action::UseSuggestion
+                | Action::DiscardSuggestion
+                | Action::ApproveHook
+                | Action::DenyHook,
+                _,
+            ) => hook_effect(self, ctx)?,
             // Only reached when `enabled` said Ok, which no placeholder does.
             _ => return Err(NOT_AVAILABLE),
         })
@@ -918,12 +927,32 @@ impl Action {
         matches!(
             (self.spec().args, args),
             (ArgKind::None, Args::None)
+                | (ArgKind::OptionalBranch, Args::None | Args::Branch(_))
                 | (ArgKind::Branch, Args::Branch(_))
                 | (ArgKind::File, Args::File(_))
                 | (ArgKind::Chunk, Args::Chunk { .. })
                 | (ArgKind::Worktree, Args::Worktree(_))
                 | (ArgKind::Commit, Args::Commit(_))
         )
+    }
+}
+
+/// The rule of the actions that create or delete a local branch. A delete
+/// refuses the branch that is checked out, and one another worktree has.
+fn branch_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    idle(ctx)?;
+    let Args::Branch(name) = args else {
+        return Ok(());
+    };
+    let current = ctx.current_branch == Some(name.as_str());
+    let elsewhere = ctx
+        .worktrees
+        .iter()
+        .any(|entry| entry.branch.as_deref() == Some(name.as_str()));
+    match action {
+        Action::DeleteBranch if current => Err("Cannot delete the checked-out branch"),
+        Action::DeleteBranch if elsewhere => Err("Checked out in another worktree"),
+        _ => Ok(()),
     }
 }
 
@@ -990,6 +1019,38 @@ fn file_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a StatusEntry, Rea
         .iter()
         .find(|entry| entry.path == *path)
         .ok_or("That file is not in the working copy")
+}
+
+/// What a hook action does, given the state of the hooks in `ctx`.
+fn hook_effect(action: Action, ctx: &Context<'_>) -> Result<Effect, Reason> {
+    Ok(match action {
+        Action::SuggestMessage => Effect::Send(vec![CommandKind::RunPrepareCommit {
+            message: ctx.message.to_owned(),
+        }]),
+        Action::CancelHook => match ctx.hooks.running {
+            Some(run) => Effect::Send(vec![CommandKind::CancelHook { run }]),
+            None => return Err("No hook is running."),
+        },
+        Action::UseSuggestion => match ctx.hooks.suggestion {
+            Some(text) => Effect::UseSuggestion(text.to_owned()),
+            None => return Err("There is no suggestion."),
+        },
+        Action::DiscardSuggestion => Effect::DiscardSuggestion,
+        Action::ApproveHook | Action::DenyHook => {
+            let Some((name, hash)) = ctx.hooks.pending_approval else {
+                return Err("No repository hook waits for approval.");
+            };
+            if action == Action::ApproveHook {
+                Effect::Send(vec![CommandKind::ApproveHook {
+                    name: name.to_owned(),
+                    command_hash: hash.to_owned(),
+                }])
+            } else {
+                Effect::DenyHook(hash.to_owned())
+            }
+        }
+        _ => return Err(NOT_AVAILABLE),
+    })
 }
 
 #[cfg(test)]
@@ -1106,7 +1167,6 @@ mod tests {
             Action::Restack,
             Action::PushWithLease,
             Action::RenameBranch,
-            Action::DeleteBranch,
             Action::DiscardFile,
             Action::Fetch,
             Action::Pull,
@@ -1572,6 +1632,83 @@ mod tests {
             Ok(Effect::Send(vec![CommandKind::UnlockWorktree {
                 path: "/r-feature".to_owned(),
             }]))
+        );
+    }
+
+    #[test]
+    fn new_branch_is_enabled_with_or_without_a_branch_and_plans_the_dialog() {
+        let context = ctx(&[], "");
+        assert_eq!(Action::NewBranch.enabled(&Args::None, &context), Ok(()));
+        assert_eq!(
+            Action::NewBranch.plan(&Args::None, &context),
+            Ok(Effect::OpenNewBranchDialog { start: None })
+        );
+        assert_eq!(
+            Action::NewBranch.plan(&Args::Branch("feature".into()), &context),
+            Ok(Effect::OpenNewBranchDialog {
+                start: Some("feature".into())
+            })
+        );
+        assert!(Action::NewBranch.available());
+        assert!(Action::NewBranch.opens_dialog());
+        assert_eq!(Action::NewBranch.spec().args, ArgKind::OptionalBranch);
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::NewBranch.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn delete_branch_refuses_the_checked_out_branch_and_one_another_worktree_has() {
+        let worktrees = [
+            listed("/r", "main", true),
+            listed("/r-feature", "feature", false),
+        ];
+        let context = Context {
+            root: Some("/r"),
+            worktrees: &worktrees,
+            ..ctx(&[], "")
+        };
+        let branch = |name: &str| Args::Branch(name.to_owned());
+        assert_eq!(
+            Action::DeleteBranch.enabled(&branch("main"), &context),
+            Err("Cannot delete the checked-out branch")
+        );
+        assert_eq!(
+            Action::DeleteBranch.enabled(&branch("feature"), &context),
+            Err("Checked out in another worktree")
+        );
+        assert_eq!(
+            Action::DeleteBranch.enabled(&branch("topic"), &context),
+            Ok(())
+        );
+        assert_eq!(
+            Action::DeleteBranch.plan(&branch("topic"), &context),
+            Ok(Effect::OpenDeleteBranchDialog("topic".into()))
+        );
+        assert!(Action::DeleteBranch.available());
+        assert!(Action::DeleteBranch.destructive());
+        assert!(Action::DeleteBranch.opens_dialog());
+    }
+
+    #[test]
+    fn delete_branch_needs_a_branch_target_and_no_busy_repository() {
+        let entries: [StatusEntry; 0] = [];
+        let busy = Context {
+            busy: Some("Wait for the branch checkout to finish."),
+            ..ctx(&entries, "")
+        };
+        assert_eq!(
+            Action::DeleteBranch.enabled(&Args::Branch("topic".into()), &busy),
+            Err("Wait for the branch checkout to finish.")
+        );
+        assert_eq!(
+            Action::DeleteBranch.enabled(&Args::None, &ctx(&entries, "")),
+            Err("No target for this action")
         );
     }
 
