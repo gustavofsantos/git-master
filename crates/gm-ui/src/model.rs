@@ -694,6 +694,10 @@ impl Model {
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
+            | Event::WorkflowRunsListed { .. }
+            | Event::WorkflowRunLoaded { .. }
+            | Event::WorkflowFileSaved { .. }
+            | Event::WorkflowFileDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. } => None,
         }
@@ -932,7 +936,11 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::HookFailed { id, .. }
         | Event::HookCancelled { id, .. }
         | Event::WorkflowsListed { id, .. }
-        | Event::WorkflowCreated { id, .. } => Some(*id),
+        | Event::WorkflowCreated { id, .. }
+        | Event::WorkflowRunsListed { id, .. }
+        | Event::WorkflowRunLoaded { id, .. }
+        | Event::WorkflowFileSaved { id, .. }
+        | Event::WorkflowFileDeleted { id, .. } => Some(*id),
         Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }
         | Event::WorkflowNotice { .. }

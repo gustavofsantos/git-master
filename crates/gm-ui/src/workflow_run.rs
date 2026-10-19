@@ -277,6 +277,7 @@ mod tests {
             hash: "h".into(),
             error: error.map(str::to_owned),
             warnings: Vec::new(),
+            source: String::new(),
         }
     }
 

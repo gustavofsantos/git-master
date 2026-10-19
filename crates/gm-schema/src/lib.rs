@@ -25,4 +25,7 @@ pub use status::{
     Blocker, BranchEntry, BranchFailure, BranchInfo, Change, MergedBranch, PruneCandidate,
     RepoStatus, StatusEntry, WorktreeEntry, WorktreeInspection,
 };
-pub use workflow::{WorkflowEnd, WorkflowInfo, WorkflowInput, WorkflowRunStatus};
+pub use workflow::{
+    WorkflowEnd, WorkflowInfo, WorkflowInput, WorkflowRunDetail, WorkflowRunStatus,
+    WorkflowRunSummary, WorkflowStepRecord,
+};

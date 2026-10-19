@@ -238,6 +238,7 @@ pub(crate) fn workflow_info(entry: &Entry) -> WorkflowInfo {
         hash: entry.hash.clone(),
         error,
         warnings,
+        source: entry.source.clone(),
     }
 }
 

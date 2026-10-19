@@ -10,7 +10,9 @@ use crate::status::{
     BranchEntry, BranchFailure, MergedBranch, PruneCandidate, RepoStatus, WorktreeEntry,
     WorktreeInspection,
 };
-use crate::workflow::{WorkflowEnd, WorkflowInfo, WorkflowRunStatus};
+use crate::workflow::{
+    WorkflowEnd, WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,
+};
 
 /// The refusal of `DeleteMergedBranches` when the merged list no longer matches
 /// the one the human confirmed. The UI matches it to list the branches again.
@@ -224,6 +226,34 @@ pub enum CommandKind {
     CreateWorkflowFromTemplate {
         template: String,
     },
+    /// Lists the newest `limit` runs of `workflow` in the open repository.
+    /// Answers `WorkflowRunsListed`. A read: never recorded.
+    ListWorkflowRuns {
+        workflow: String,
+        limit: u32,
+    },
+    /// Reads one run: its context and every step. Answers `WorkflowRunLoaded`.
+    /// A read: never recorded.
+    LoadWorkflowRun {
+        run: i64,
+    },
+    /// Writes `source` to the workflow file at `path`, which must be inside
+    /// the user's workflows directories (never a repository). With
+    /// `expected_hash`, refuses when the file on disk no longer hashes to it
+    /// (changed elsewhere). A new file passes `None`. Answers
+    /// `WorkflowFileSaved`. Human only.
+    SaveWorkflowFile {
+        path: String,
+        source: String,
+        expected_hash: Option<String>,
+    },
+    /// Moves the workflow file at `path` to the trash folder of the app's data
+    /// directory, when it still hashes to `expected_hash`. Answers
+    /// `WorkflowFileDeleted`. Human only.
+    DeleteWorkflowFile {
+        path: String,
+        expected_hash: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -411,6 +441,28 @@ pub enum Event {
         user_dir: Option<String>,
         /// Names of the built-in templates `CreateWorkflowFromTemplate` takes.
         templates: Vec<String>,
+    },
+    WorkflowRunsListed {
+        id: OperationId,
+        workflow: String,
+        runs: Vec<WorkflowRunSummary>,
+    },
+    /// Boxed: a run's detail is far larger than any other event.
+    WorkflowRunLoaded {
+        id: OperationId,
+        detail: Box<WorkflowRunDetail>,
+    },
+    /// The file at `path` now holds what was saved; `hash` is its new sha256.
+    WorkflowFileSaved {
+        id: OperationId,
+        path: String,
+        hash: String,
+    },
+    /// The file was moved to `trashed_to`.
+    WorkflowFileDeleted {
+        id: OperationId,
+        path: String,
+        trashed_to: String,
     },
     /// A template was copied to `path`; the workflow inside is named `name`.
     WorkflowCreated {

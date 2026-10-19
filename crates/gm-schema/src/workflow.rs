@@ -23,6 +23,8 @@ pub struct WorkflowInfo {
     pub error: Option<String>,
     /// Every warning of a loaded workflow, as `line N: message`.
     pub warnings: Vec<String>,
+    /// The file as read, for the editor; empty when it could not be read.
+    pub source: String,
 }
 
 /// One declared input of a workflow.
@@ -56,4 +58,59 @@ pub enum WorkflowEnd {
     Done,
     Failed,
     Blocked,
+}
+
+/// One run as the history lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowRunSummary {
+    pub run: i64,
+    pub workflow: String,
+    pub status: WorkflowRunStatus,
+    /// `human`, `event:<name>` or `agent:<client>`.
+    pub started_by: String,
+    /// Milliseconds since the Unix epoch.
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub end_reason: Option<String>,
+    /// The state the run is in, while it has not ended.
+    pub current_state: Option<String>,
+}
+
+/// One visit of a state, as the run log recorded it: observed by the engine,
+/// not reported by the step.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowStepRecord {
+    /// Path of the state (`each/plan` inside a `for_each`).
+    pub state: String,
+    /// 1 for the first visit of the state in the run, then 2, 3…
+    pub visit: u32,
+    /// The action the state ran; `None` for a wait or a `for_each`.
+    pub action: Option<String>,
+    /// What the step received, with every `${...}` already rendered. `None`
+    /// for runs recorded before inputs were kept.
+    pub input: Option<serde_json::Value>,
+    /// What the step answered; `None` while it has not answered.
+    pub output: Option<serde_json::Value>,
+    /// The output was too large and only its head, size and hash are kept.
+    pub truncated: bool,
+    /// The outcome it ended with, and the state or `end.*` the run went to.
+    pub outcome: Option<String>,
+    pub next: Option<String>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+}
+
+/// Everything about one run, for the run view.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowRunDetail {
+    pub summary: WorkflowRunSummary,
+    /// The workflow file as it was when the run started.
+    pub definition: String,
+    /// `inputs`, `trigger` and `repo` as the run saw them; a large
+    /// `repo.staged_diff` is cut to its head.
+    pub inputs: serde_json::Value,
+    pub trigger: serde_json::Value,
+    pub repo: serde_json::Value,
+    /// Every step in the order it ran.
+    pub steps: Vec<WorkflowStepRecord>,
 }
