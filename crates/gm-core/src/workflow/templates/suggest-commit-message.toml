@@ -12,7 +12,7 @@ on = "manual"
 [[state]]
 id = "ask"
 action = "exec"
-with = { argv = ["llm-cli", "-p", "Write a conventional commit message for this diff. Reply with the message only."], stdin = "${repo.staged_diff}", timeout = "60s" }
+with = { argv = ["llm-cli", "-p", "Write a conventional commit message for this diff. Reply with the message only, as plain text, without code fences."], stdin = "${repo.staged_diff}", timeout = "60s" }
 on.done = [
   { if = "len(${states.ask.output.text}) == 0", to = "ask", limit = 2 },
   { to = "suggest" },

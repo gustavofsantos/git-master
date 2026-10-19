@@ -108,6 +108,7 @@ Escolhas feitas no código que a documentação não cobria. Valem até nova dec
 - Nas condições, um nome solto (`a == 1`) é erro de sintaxe: valores se escrevem `${caminho}`. Comparações não se encadeiam.
 - Um item de `for_each` não pode se chamar `inputs`, `trigger`, `repo` nem `states`.
 - O outcome `timeout` (de `exec` ou de uma espera) tem transição padrão para `end.failed`, como `failed`: um `exec` simples não precisa escrever `on.timeout` (decidido na WF1, 2026-10-19).
+- `commit.suggest_message` apara a mensagem e tira um único bloco de código markdown que envolva a mensagem inteira (cerca de três crases na primeira e na última linha), como um LLM costuma devolver; um bloco dentro da mensagem fica (2026-10-19, depois do primeiro uso real).
 
 ## D31: worktrees na v1
 

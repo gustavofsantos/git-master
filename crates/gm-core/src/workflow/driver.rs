@@ -508,9 +508,10 @@ impl Driver {
                 json!({})
             }),
             "commit.suggest_message" => text_field(&call.input, "message").map(|message| {
+                let message = commit_message(message);
                 out.events.push(RunEvent::SuggestMessage {
                     run: id,
-                    message: message.to_owned(),
+                    message: message.clone(),
                 });
                 json!({"message": message})
             }),
@@ -781,6 +782,26 @@ fn branch_create(input: &Value, git: &mut dyn GitActions) -> Result<Value, Strin
             .ok_or_else(|| "input `checkout` must be true or false".to_owned())?,
     };
     git.create_branch(name, checkout).map(|()| json!({}))
+}
+
+/// A suggested commit message as the composer should get it: trimmed, and
+/// without the one markdown code fence an LLM often wraps its whole answer in
+/// (a first line of three backticks, with or without a language, and a last
+/// line of three backticks). A fence inside the message is kept.
+fn commit_message(text: &str) -> String {
+    let trimmed = text.trim();
+    let mut lines: Vec<&str> = trimmed.lines().collect();
+    let fenced = lines.len() >= 2
+        && lines
+            .first()
+            .is_some_and(|line| line.trim_start().starts_with("```"))
+        && lines.last().is_some_and(|line| line.trim() == "```");
+    if !fenced {
+        return trimmed.to_owned();
+    }
+    lines.remove(0);
+    lines.pop();
+    lines.join("\n").trim().to_owned()
 }
 
 #[cfg(test)]
@@ -1256,5 +1277,17 @@ on.timeout = "end.failed"
             outputs[0].output,
             Some(json!({"error": "action `restack.plan` is not available yet"}))
         );
+    }
+
+    #[test]
+    fn a_suggested_message_loses_the_fence_around_it() {
+        assert_eq!(
+            commit_message("```\nfeat: x\n\nbody\n```\n"),
+            "feat: x\n\nbody"
+        );
+        assert_eq!(commit_message("```text\nfix: y\n```"), "fix: y");
+        assert_eq!(commit_message("  feat: plain  "), "feat: plain");
+        let inner = "feat: z\n\n```\ncode\n```";
+        assert_eq!(commit_message(inner), inner);
     }
 }
