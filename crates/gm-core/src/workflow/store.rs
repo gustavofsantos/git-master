@@ -672,7 +672,7 @@ fn stored_output(output: &Value) -> Result<(String, bool), StoreError> {
 }
 
 /// The first `limit` bytes of `text`, cut back to a char boundary.
-fn prefix(text: &str, limit: usize) -> &str {
+pub(crate) fn prefix(text: &str, limit: usize) -> &str {
     let mut end = limit.min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -842,7 +842,9 @@ mod tests {
         let run = start(&mut store, "loop");
 
         for visit in 1..=3 {
-            store.enter_state(run, "a", None, 1000 + visit).expect("enter a");
+            store
+                .enter_state(run, "a", None, 1000 + visit)
+                .expect("enter a");
             assert_eq!(store.open_state(run).expect("open"), Some("a".to_string()));
             store
                 .record_transition(

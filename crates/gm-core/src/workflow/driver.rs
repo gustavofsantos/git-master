@@ -1237,9 +1237,7 @@ on.timeout = "end.failed"
                 1100,
             )
             .expect("record");
-        store
-            .enter_state(run, "commit", None, 1200)
-            .expect("enter");
+        store.enter_state(run, "commit", None, 1200).expect("enter");
 
         let mut driver = Driver::new(store, std::env::temp_dir());
         let mut git = FakeGit::default();
