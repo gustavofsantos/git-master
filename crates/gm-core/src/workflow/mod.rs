@@ -4,10 +4,13 @@
 //! validator and the transition function. No I/O.
 
 pub mod catalog;
+pub mod exec;
 pub mod expr;
+pub mod loader;
 pub mod machine;
 pub mod model;
 pub mod parse;
+pub mod store;
 pub mod validate;
 
 /// One problem found in a workflow file, with the line it points at.

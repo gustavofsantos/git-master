@@ -6,6 +6,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::catalog::{self, Level};
@@ -24,19 +25,21 @@ pub struct Context {
 }
 
 /// A run in progress or ended. Plain data, so the engine can store it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Run {
     pub position: Position,
     /// Latest output of each top-level state, by id.
     pub outputs: BTreeMap<String, Value>,
     /// Times each guarded or limited edge was taken.
+    #[serde(with = "edge_uses")]
     pub edge_uses: BTreeMap<EdgeKey, u32>,
     pub transitions: u32,
     /// Output of the latest `set`, returned by a `transform.*` run.
     pub last_set: Option<Value>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Position {
     /// Running or waiting in a top-level state; `inner` while inside a
     /// `for_each`.
@@ -51,7 +54,7 @@ pub enum Position {
 }
 
 /// Where a `for_each` stands.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Inner {
     /// Index of the current item.
     pub index: usize,
@@ -65,7 +68,7 @@ pub struct Inner {
 
 /// One edge: the state (`each/plan` for a nested one), the outcome, and the
 /// index of the transition in that outcome's list.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EdgeKey {
     pub state: String,
     pub outcome: String,
@@ -644,6 +647,25 @@ fn end_name(end: End) -> &'static str {
         End::Done => "end.done",
         End::Failed => "end.failed",
         End::Blocked => "end.blocked",
+    }
+}
+
+/// `edge_uses` as a list of `(edge, uses)` pairs: JSON maps need string keys.
+mod edge_uses {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::EdgeKey;
+
+    pub fn serialize<S: Serializer>(map: &BTreeMap<EdgeKey, u32>, s: S) -> Result<S::Ok, S::Error> {
+        map.iter().collect::<Vec<_>>().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<BTreeMap<EdgeKey, u32>, D::Error> {
+        Ok(Vec::<(EdgeKey, u32)>::deserialize(d)?.into_iter().collect())
     }
 }
 
