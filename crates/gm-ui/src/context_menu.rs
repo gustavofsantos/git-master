@@ -491,6 +491,7 @@ mod tests {
             current_branch: Some("main"),
             root: Some("/repo"),
             hooks: crate::action_registry::HookCtx::default(),
+            workflows: crate::action_registry::WorkflowCtx::default(),
             worktrees: &[],
             branch_scope: crate::branch_filter::Scope::All,
             user_email_known: false,

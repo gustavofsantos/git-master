@@ -17,7 +17,7 @@ use gpui::{
 };
 
 use crate::action_registry::{
-    self, Action, Args, Context as ActionContext, Effect, HookCtx, Reason,
+    self, Action, Args, Context as ActionContext, Effect, HookCtx, Reason, WorkflowCtx,
 };
 use crate::app_settings::{self, AppSettings};
 use crate::branch_delete::DeleteDialog;
@@ -46,6 +46,7 @@ use crate::theme;
 use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
+use crate::workflow_run::fill_for_message;
 use crate::worktree_create::WorktreeDialog;
 use crate::worktree_prune::PruneDialog;
 use crate::worktree_remove::RemoveDialog;
@@ -356,6 +357,7 @@ impl StatusView {
         let committed = matches!(event, Event::Committed { .. });
         let detail_loaded = matches!(event, Event::CommitDetailLoaded { .. });
         let finished = matches!(event, Event::HookFinished { .. });
+        let workflow_refresh = self.on_workflow_event(&event, cx);
         let remote_ended = matches!(
             &event,
             Event::OperationChanged { id, state, .. }
@@ -406,6 +408,8 @@ impl StatusView {
                     .update(cx, |composer, cx| composer.set_text(&message, cx));
             }
         }
+        // A workflow's message follows the hook rule: an empty composer takes it, otherwise
+        // it waits as the suggestion, which Replace and Discard answer.
         // On the welcome screen the error belongs to the screen, not the status bar.
         if let Some(welcome) = self.welcome.as_mut()
             && let Some(error) = self.model.error.take()
@@ -429,8 +433,8 @@ impl StatusView {
         if let Some(diffs) = shown {
             self.show_diffs(diffs.unstaged, diffs.staged, cx);
         }
-        // The palette's offers come from the status and the branch listing.
-        if self.palette.open && (reload || listed) {
+        // The palette's offers come from the status, the branch and workflow listings.
+        if self.palette.open && (reload || listed || workflow_refresh) {
             self.refresh_palette(cx);
         }
         if reload {
@@ -475,6 +479,46 @@ impl StatusView {
         }
     }
 
+    /// The workflow events the window acts on, before the model takes them. A
+    /// suggested message goes to the composer or waits as a suggestion, and a
+    /// finished run asks for the listing again. Returns whether the palette's
+    /// offers change with the event.
+    fn on_workflow_event(&mut self, event: &Event, cx: &mut Context<Self>) -> bool {
+        match event {
+            Event::WorkflowMessageSuggested { message, .. } => {
+                self.place_workflow_message(message, cx);
+                false
+            }
+            Event::WorkflowRunFinished { .. } => {
+                self.request_workflow_list();
+                true
+            }
+            Event::WorkflowsListed { .. }
+            | Event::WorkflowRunChanged { .. }
+            | Event::WorkflowApprovalRequested { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Puts a message a workflow suggested in the composer when it is empty, and
+    /// otherwise offers it as the hooks' suggestion, which Replace and Discard answer.
+    fn place_workflow_message(&mut self, message: &str, cx: &mut Context<Self>) {
+        let typed = self.composer.read(cx).text(cx);
+        match fill_for_message(&typed, message) {
+            Fill::Apply(text) => self.composer.update(cx, |c, cx| c.set_text(&text, cx)),
+            Fill::Suggest(text) => self.model.hooks.offer(text),
+        }
+    }
+
+    /// Asks the engine for the manual workflows of the open repository. Nothing
+    /// is asked before one is open.
+    pub(crate) fn request_workflow_list(&mut self) {
+        if self.model.status().is_some() {
+            self.engine
+                .dispatch(Actor::Human, CommandKind::ListWorkflows);
+        }
+    }
+
     /// A successful open replaced the repository: the view state of the old
     /// one goes, and the new root joins the recent list.
     fn on_switched(&mut self, switched: Switched, cx: &mut Context<Self>) {
@@ -486,8 +530,10 @@ impl StatusView {
         self.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
         self.model.branches.clear();
         self.model.hooks.reset();
+        self.model.workflows.reset();
         self.request_branch_list();
         self.request_hook_list();
+        self.request_workflow_list();
         if self.screen == Screen::History {
             self.refresh_history();
         }
@@ -816,6 +862,11 @@ impl StatusView {
                     .hooks
                     .pending_approval()
                     .map(|hook| (hook.name.as_str(), hook.command_hash.as_str())),
+            },
+            workflows: WorkflowCtx {
+                listed: self.model.workflows.listed.as_deref(),
+                awaiting: self.model.workflows.awaiting_approval(),
+                active: self.model.workflows.active(),
             },
         }
     }

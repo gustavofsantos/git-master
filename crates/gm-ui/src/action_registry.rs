@@ -7,10 +7,12 @@
 // `from_id` has no caller outside the tests yet.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use gm_schema::{
-    CommandKind, DiffSide, HunkId, OperationId, StageTarget, StatusEntry, WorktreeEntry,
+    CommandKind, DiffSide, HunkId, OperationId, StageTarget, StatusEntry, WorkflowInfo,
+    WorktreeEntry,
 };
 
 use crate::branch_filter::Scope;
@@ -27,6 +29,7 @@ pub enum Category {
     Remote,
     Worktrees,
     Repository,
+    Workflows,
 }
 
 impl Category {
@@ -38,6 +41,7 @@ impl Category {
             Category::Remote => "Remote",
             Category::Worktrees => "Worktrees",
             Category::Repository => "Repository",
+            Category::Workflows => "Workflows",
         }
     }
 }
@@ -53,6 +57,8 @@ pub enum ArgKind {
     Chunk,
     Worktree,
     Commit,
+    /// A manual workflow, as the engine listed it.
+    Workflow,
 }
 
 /// The target of one run. Its kind must match the action's `ArgKind`.
@@ -72,6 +78,8 @@ pub enum Args {
     Worktree(String),
     /// The text to copy from a commit of the history page: its id, or its message.
     Commit(String),
+    /// The name of a listed manual workflow.
+    Workflow(String),
 }
 
 /// Static description of an action.
@@ -146,6 +154,17 @@ pub struct HookCtx<'a> {
     pub pending_approval: Option<(&'a str, &'a str)>,
 }
 
+/// What the window knows of the manual workflows, for the rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkflowCtx<'a> {
+    /// The workflows the engine listed; `None` until the first listing.
+    pub listed: Option<&'a [WorkflowInfo]>,
+    /// The newest run waiting for an approval, and the run's id.
+    pub awaiting: Option<(i64, &'a str)>,
+    /// The newest run that has not ended.
+    pub active: Option<i64>,
+}
+
 /// The window state an action's rule reads. Built by the window for each run.
 #[derive(Clone, Copy, Debug)]
 pub struct Context<'a> {
@@ -163,6 +182,7 @@ pub struct Context<'a> {
     /// The repository's working tree root; `None` when no repository is open.
     pub root: Option<&'a str>,
     pub hooks: HookCtx<'a>,
+    pub workflows: WorkflowCtx<'a>,
     /// The worktrees listed for the open repository, main checkout first.
     pub worktrees: &'a [WorktreeEntry],
     /// The scope in effect for the sidebar's branches now (D53).
@@ -174,7 +194,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 42] = [
+const SPECS: [Spec; 46] = [
     spec(
         "file.stage",
         "Stage File",
@@ -365,6 +385,34 @@ const SPECS: [Spec; 42] = [
         Category::Repository,
     ),
     spec(
+        "workflow.run",
+        "Run Workflow…",
+        None,
+        ArgKind::Workflow,
+        Category::Workflows,
+    ),
+    spec(
+        "workflow.approve",
+        "Approve Workflow Step",
+        None,
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
+        "workflow.reject",
+        "Reject Workflow Step",
+        None,
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
+        "workflow.cancel",
+        "Cancel Workflow Run",
+        None,
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
         "remote.fetch",
         "Fetch",
         None,
@@ -512,6 +560,10 @@ pub enum Action {
     CancelHook,
     ApproveHook,
     DenyHook,
+    RunWorkflow,
+    ApproveWorkflowStep,
+    RejectWorkflowStep,
+    CancelWorkflowRun,
     Fetch,
     Pull,
     OpenWorktree,
@@ -622,7 +674,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 42] = [
+    pub const ALL: [Action; 46] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -650,6 +702,10 @@ impl Action {
         Action::CancelHook,
         Action::ApproveHook,
         Action::DenyHook,
+        Action::RunWorkflow,
+        Action::ApproveWorkflowStep,
+        Action::RejectWorkflowStep,
+        Action::CancelWorkflowRun,
         Action::Fetch,
         Action::Pull,
         Action::OpenWorktree,
@@ -847,6 +903,10 @@ impl Action {
             | Action::DiscardSuggestion
             | Action::ApproveHook
             | Action::DenyHook => hook_rule(self, ctx),
+            Action::RunWorkflow
+            | Action::ApproveWorkflowStep
+            | Action::RejectWorkflowStep
+            | Action::CancelWorkflowRun => workflow_rule(self, args, ctx),
             // The placeholders, refused above by `available`.
             _ => Err(NOT_AVAILABLE),
         }
@@ -946,6 +1006,13 @@ impl Action {
                 | Action::DenyHook,
                 _,
             ) => hook_effect(self, ctx)?,
+            (
+                Action::RunWorkflow
+                | Action::ApproveWorkflowStep
+                | Action::RejectWorkflowStep
+                | Action::CancelWorkflowRun,
+                _,
+            ) => workflow_effect(self, args, ctx)?,
             // Only reached when `enabled` said Ok, which no placeholder does.
             _ => return Err(NOT_AVAILABLE),
         })
@@ -962,6 +1029,7 @@ impl Action {
                 | (ArgKind::Chunk, Args::Chunk { .. })
                 | (ArgKind::Worktree, Args::Worktree(_))
                 | (ArgKind::Commit, Args::Commit(_))
+                | (ArgKind::Workflow, Args::Workflow(_))
         )
     }
 }
@@ -1012,6 +1080,76 @@ fn hook_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
             .ok_or("No repository hook waits for approval."),
         _ => Err(NOT_AVAILABLE),
     }
+}
+
+/// The rules of the manual workflow actions.
+fn workflow_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    match action {
+        Action::RunWorkflow => workflow_run_rule(args, ctx).map(|_| ()),
+        Action::ApproveWorkflowStep | Action::RejectWorkflowStep => ctx
+            .workflows
+            .awaiting
+            .map(|_| ())
+            .ok_or("No workflow run waits for approval."),
+        _ => ctx
+            .workflows
+            .active
+            .map(|_| ())
+            .ok_or("No workflow run is active."),
+    }
+}
+
+/// What a manual workflow action sends, given the workflow state in `ctx`.
+fn workflow_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
+    Ok(match (action, args) {
+        (Action::RunWorkflow, Args::Workflow(name)) => {
+            Effect::Send(vec![CommandKind::RunWorkflow {
+                name: name.clone(),
+                inputs: BTreeMap::new(),
+            }])
+        }
+        (Action::ApproveWorkflowStep | Action::RejectWorkflowStep, _) => {
+            let Some((run, _)) = ctx.workflows.awaiting else {
+                return Err("No workflow run waits for approval.");
+            };
+            Effect::Send(vec![CommandKind::ApproveWorkflowStep {
+                run,
+                approved: action == Action::ApproveWorkflowStep,
+            }])
+        }
+        (Action::CancelWorkflowRun, _) => match ctx.workflows.active {
+            Some(run) => Effect::Send(vec![CommandKind::CancelWorkflowRun { run }]),
+            None => return Err("No workflow run is active."),
+        },
+        _ => return Err(NOT_AVAILABLE),
+    })
+}
+
+/// The rule of Run Workflow: a repository is open and the named workflow is
+/// listed, loads, asks for no inputs and is triggered by hand.
+fn workflow_run_rule<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorkflowInfo, Reason> {
+    repository_open(ctx)?;
+    let Args::Workflow(name) = args else {
+        return Err("No target for this action");
+    };
+    let listed = ctx
+        .workflows
+        .listed
+        .ok_or("Workflows are still being read.")?;
+    let workflow = listed
+        .iter()
+        .find(|workflow| workflow.name == *name)
+        .ok_or("No workflow has that name.")?;
+    if workflow.error.is_some() {
+        return Err("This workflow does not load: fix its file first.");
+    }
+    if !workflow.inputs.is_empty() {
+        return Err("This workflow asks for inputs; run it from the Workflows page (coming next).");
+    }
+    if workflow.trigger != "manual" {
+        return Err("Only manual workflows can be run from here.");
+    }
+    Ok(workflow)
 }
 
 /// The action the Space key runs on a file: stage what is unstaged, otherwise
@@ -1117,7 +1255,7 @@ fn hook_effect(action: Action, ctx: &Context<'_>) -> Result<Effect, Reason> {
 mod tests {
     use std::collections::HashSet;
 
-    use gm_schema::Change;
+    use gm_schema::{Change, WorkflowInfo, WorkflowInput};
 
     use super::*;
 
@@ -1149,6 +1287,7 @@ mod tests {
             current_branch: Some("main"),
             root: Some("/repo"),
             hooks: crate::action_registry::HookCtx::default(),
+            workflows: WorkflowCtx::default(),
             worktrees: &[],
             branch_scope: Scope::All,
             user_email_known: false,
@@ -2141,6 +2280,150 @@ mod tests {
         assert_eq!(
             Action::ApproveHook.enabled(&Args::None, &with_hooks(HookCtx::default())),
             Err("No repository hook waits for approval.")
+        );
+    }
+
+    fn workflow(name: &str, trigger: &str, inputs: &[&str], error: Option<&str>) -> WorkflowInfo {
+        WorkflowInfo {
+            name: name.into(),
+            path: format!("/w/{name}.yml"),
+            trigger: trigger.into(),
+            key: None,
+            inputs: inputs
+                .iter()
+                .map(|input| WorkflowInput {
+                    name: (*input).into(),
+                    prompt: None,
+                })
+                .collect(),
+            hash: "h".into(),
+            error: error.map(str::to_owned),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn with_workflows(workflows: WorkflowCtx<'_>) -> Context<'_> {
+        Context {
+            workflows,
+            ..ctx(&[], "")
+        }
+    }
+
+    #[test]
+    fn the_workflow_actions_have_their_ids_and_category() {
+        assert_eq!(Action::RunWorkflow.id(), "workflow.run");
+        assert_eq!(Action::RunWorkflow.spec().title, "Run Workflow…");
+        assert_eq!(Action::ApproveWorkflowStep.id(), "workflow.approve");
+        assert_eq!(Action::RejectWorkflowStep.id(), "workflow.reject");
+        assert_eq!(Action::CancelWorkflowRun.id(), "workflow.cancel");
+        assert_eq!(Category::Workflows.label(), "Workflows");
+        assert_eq!(Action::RunWorkflow.spec().args, ArgKind::Workflow);
+    }
+
+    #[test]
+    fn run_needs_an_open_repository_and_a_listing() {
+        let target = Args::Workflow("w".into());
+        assert_eq!(
+            Action::RunWorkflow.enabled(&target, &with_workflows(WorkflowCtx::default())),
+            Err("Workflows are still being read.")
+        );
+        let closed = Context {
+            repo_open: false,
+            ..with_workflows(WorkflowCtx::default())
+        };
+        assert_eq!(
+            Action::RunWorkflow.enabled(&target, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn run_says_why_a_listed_workflow_cannot_run() {
+        let listed = [
+            workflow("broken", "manual", &[], Some("line 3: bad key")),
+            workflow("asks", "manual", &["ticket"], None),
+            workflow("auto", "commit", &[], None),
+        ];
+        let ctx = with_workflows(WorkflowCtx {
+            listed: Some(&listed),
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::RunWorkflow.enabled(&Args::Workflow("broken".into()), &ctx),
+            Err("This workflow does not load: fix its file first.")
+        );
+        assert_eq!(
+            Action::RunWorkflow.enabled(&Args::Workflow("asks".into()), &ctx),
+            Err("This workflow asks for inputs; run it from the Workflows page (coming next).")
+        );
+        assert_eq!(
+            Action::RunWorkflow.enabled(&Args::Workflow("auto".into()), &ctx),
+            Err("Only manual workflows can be run from here.")
+        );
+        assert_eq!(
+            Action::RunWorkflow.enabled(&Args::Workflow("missing".into()), &ctx),
+            Err("No workflow has that name.")
+        );
+    }
+
+    #[test]
+    fn run_sends_the_manual_workflow_with_no_inputs() {
+        let listed = [workflow("suggest-commit-message", "manual", &[], None)];
+        let ctx = with_workflows(WorkflowCtx {
+            listed: Some(&listed),
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::RunWorkflow.plan(&Args::Workflow("suggest-commit-message".into()), &ctx),
+            Ok(Effect::Send(vec![CommandKind::RunWorkflow {
+                name: "suggest-commit-message".into(),
+                inputs: BTreeMap::new(),
+            }]))
+        );
+    }
+
+    #[test]
+    fn approve_and_reject_need_a_run_waiting_and_send_its_answer() {
+        let idle = with_workflows(WorkflowCtx::default());
+        assert_eq!(
+            Action::ApproveWorkflowStep.enabled(&Args::None, &idle),
+            Err("No workflow run waits for approval.")
+        );
+        let waiting = with_workflows(WorkflowCtx {
+            awaiting: Some((4, "Create branch x?")),
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::ApproveWorkflowStep.plan(&Args::None, &waiting),
+            Ok(Effect::Send(vec![CommandKind::ApproveWorkflowStep {
+                run: 4,
+                approved: true,
+            }]))
+        );
+        assert_eq!(
+            Action::RejectWorkflowStep.plan(&Args::None, &waiting),
+            Ok(Effect::Send(vec![CommandKind::ApproveWorkflowStep {
+                run: 4,
+                approved: false,
+            }]))
+        );
+    }
+
+    #[test]
+    fn cancel_needs_an_active_run_and_names_it() {
+        assert_eq!(
+            Action::CancelWorkflowRun.enabled(&Args::None, &with_workflows(WorkflowCtx::default())),
+            Err("No workflow run is active.")
+        );
+        let running = with_workflows(WorkflowCtx {
+            active: Some(7),
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::CancelWorkflowRun.plan(&Args::None, &running),
+            Ok(Effect::Send(vec![CommandKind::CancelWorkflowRun {
+                run: 7
+            }]))
         );
     }
 }

@@ -21,6 +21,8 @@ const NO_FILE: Reason = "No file in the working copy.";
 const NEEDS_CHUNK: Reason = "Pick a chunk in the diff first.";
 const NEEDS_COMMIT: Reason = "Pick a commit in the history first.";
 const NO_WORKTREE: Reason = "No worktree to choose from.";
+const NO_WORKFLOW: Reason = "No workflow to choose from.";
+const NOT_LISTED: Reason = "Workflows are still being read.";
 
 /// The groups the palette shows, in the order they appear.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -28,6 +30,7 @@ pub(crate) enum Section {
     Actions,
     Worktrees,
     Branches,
+    Workflows,
     Files,
 }
 
@@ -37,6 +40,7 @@ impl Section {
             Self::Actions => "Actions",
             Self::Worktrees => "Worktrees",
             Self::Branches => "Branches",
+            Self::Workflows => "Workflows",
             Self::Files => "Files",
         }
     }
@@ -361,6 +365,18 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
                 pick_state(action, &targets, ctx, NO_WORKTREE),
             )
         }
+        ArgKind::Workflow => {
+            let targets = workflow_targets(ctx);
+            let nothing = if ctx.workflows.listed.is_none() {
+                NOT_LISTED
+            } else {
+                NO_WORKFLOW
+            };
+            (
+                Choice::Pick(action),
+                pick_state(action, &targets, ctx, nothing),
+            )
+        }
         // A chunk exists only in the diff pane, so the palette lists it disabled.
         ArgKind::Chunk => (
             Choice::Run {
@@ -413,6 +429,16 @@ fn pick_state(
     Err(first.unwrap_or(nothing))
 }
 
+/// The listed workflows the palette can pick, in the order the engine gave them.
+fn workflow_targets(ctx: &ActionContext<'_>) -> Vec<Args> {
+    ctx.workflows
+        .listed
+        .unwrap_or_default()
+        .iter()
+        .map(|workflow| Args::Workflow(workflow.name.clone()))
+        .collect()
+}
+
 /// The worktrees the palette can pick, as the sidebar lists them: the name and
 /// the folder of each, main checkout first, bare entries left out.
 fn listed_worktrees(ctx: &ActionContext<'_>) -> Vec<(String, String)> {
@@ -446,6 +472,16 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
             .map(|(name, path)| {
                 let args = Args::Worktree(path);
                 target_row(action, Section::Worktrees, name, args, ctx)
+            })
+            .collect(),
+        ArgKind::Workflow => ctx
+            .workflows
+            .listed
+            .unwrap_or_default()
+            .iter()
+            .map(|workflow| {
+                let args = Args::Workflow(workflow.name.clone());
+                target_row(action, Section::Workflows, workflow.name.clone(), args, ctx)
             })
             .collect(),
         ArgKind::None | ArgKind::OptionalBranch | ArgKind::Chunk | ArgKind::Commit => Vec::new(),
@@ -525,6 +561,7 @@ mod tests {
             current_branch: Some("main"),
             root: Some("/repo"),
             hooks: crate::action_registry::HookCtx::default(),
+            workflows: crate::action_registry::WorkflowCtx::default(),
             worktrees: &[],
             branch_scope: crate::branch_filter::Scope::All,
             user_email_known: false,
@@ -981,6 +1018,91 @@ mod tests {
         assert_eq!(
             palette.highlighted().map(|c| c.label.as_str()),
             Some("feature")
+        );
+    }
+
+    fn workflow(name: &str, trigger: &str, error: Option<&str>) -> gm_schema::WorkflowInfo {
+        gm_schema::WorkflowInfo {
+            name: name.into(),
+            path: format!("/w/{name}.yml"),
+            trigger: trigger.into(),
+            key: None,
+            inputs: Vec::new(),
+            hash: "h".into(),
+            error: error.map(str::to_owned),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn run_workflow_is_a_pick_of_the_listed_workflows_with_their_reasons() {
+        let listed = [
+            workflow("suggest-commit-message", "manual", None),
+            workflow("broken", "manual", Some("line 2: bad")),
+        ];
+        let ctx = ActionContext {
+            workflows: crate::action_registry::WorkflowCtx {
+                listed: Some(&listed),
+                ..Default::default()
+            },
+            ..ctx_with(&[], "")
+        };
+        let top = build(Stage::Actions, "", &ctx, &[]);
+        let run = find(&top, "Run Workflow…");
+        assert_eq!(run.choice, Choice::Pick(Action::RunWorkflow));
+        assert_eq!(run.state, Ok(()));
+
+        let picks = build(Stage::Pick(Action::RunWorkflow), "", &ctx, &[]);
+        assert_eq!(picks.len(), 2);
+        assert!(picks.iter().all(|c| c.section == Section::Workflows));
+        let ready = find(&picks, "suggest-commit-message");
+        assert_eq!(
+            ready.choice,
+            Choice::Run {
+                action: Action::RunWorkflow,
+                args: Args::Workflow("suggest-commit-message".into()),
+            }
+        );
+        assert_eq!(ready.state, Ok(()));
+        assert_eq!(
+            find(&picks, "broken").state,
+            Err("This workflow does not load: fix its file first.")
+        );
+    }
+
+    #[test]
+    fn run_workflow_with_nothing_listed_says_so() {
+        let ctx = ctx_with(&[], "");
+        let top = build(Stage::Actions, "", &ctx, &[]);
+        assert_eq!(
+            find(&top, "Run Workflow…").state,
+            Err("Workflows are still being read.")
+        );
+        let listed_none = ActionContext {
+            workflows: crate::action_registry::WorkflowCtx {
+                listed: Some(&[]),
+                ..Default::default()
+            },
+            ..ctx_with(&[], "")
+        };
+        let top = build(Stage::Actions, "", &listed_none, &[]);
+        assert_eq!(
+            find(&top, "Run Workflow…").state,
+            Err("No workflow to choose from.")
+        );
+    }
+
+    #[test]
+    fn approve_reject_and_cancel_are_listed_with_their_reasons() {
+        let ctx = ctx_with(&[], "");
+        let top = build(Stage::Actions, "", &ctx, &[]);
+        assert_eq!(
+            find(&top, "Approve Workflow Step").state,
+            Err("No workflow run waits for approval.")
+        );
+        assert_eq!(
+            find(&top, "Cancel Workflow Run").state,
+            Err("No workflow run is active.")
         );
     }
 }

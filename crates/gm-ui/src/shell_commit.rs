@@ -148,6 +148,7 @@ impl StatusView {
                     .text_color(theme::warn_fg())
                     .child(hint.unwrap_or("")),
             )
+            .children(self.workflow_line())
             .children(self.suggestion_row(cx))
             .children(self.approval_row(cx))
             .child(button)
@@ -194,6 +195,21 @@ impl StatusView {
             ));
         }
         row
+    }
+
+    /// The newest manual workflow run in one line: its status, and its notice.
+    /// It is cut short, never wrapped, so the composer does not move.
+    fn workflow_line(&self) -> Option<Div> {
+        let line = self.model.workflows.status_line()?;
+        Some(
+            div()
+                .h(px(18.))
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_color(theme::muted())
+                .child(line),
+        )
     }
 
     /// The message a hook run offered, with Replace and Discard. Replace fills

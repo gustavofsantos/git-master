@@ -189,6 +189,12 @@ impl Hooks {
         Some(fill)
     }
 
+    /// Offers `message` as the suggestion, in place of any one waiting. The
+    /// workflows use it too: a suggested message has one place to wait.
+    pub fn offer(&mut self, message: String) {
+        self.suggestion = Some(message);
+    }
+
     pub fn drop_suggestion(&mut self) {
         self.suggestion = None;
     }

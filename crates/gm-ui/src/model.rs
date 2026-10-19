@@ -15,6 +15,7 @@ use crate::icon::Icon;
 use crate::merged_branches::Merging;
 use crate::new_branch::BranchCreate;
 use crate::remote_op::{Outcome, RemoteOp};
+use crate::workflow_run::Workflows;
 use crate::worktree_create::Creating;
 use crate::worktree_prune::Pruning;
 use crate::worktree_remove::Removal;
@@ -52,6 +53,8 @@ pub struct Model {
     pub branches: Branches,
     /// The prepare-commit hooks: what is listed, the run and its suggestion.
     pub hooks: Hooks,
+    /// The manual workflows: what is listed and the runs the engine reported.
+    pub workflows: Workflows,
     /// The worktrees of the open repository, main checkout first.
     pub worktrees: Vec<WorktreeEntry>,
     /// The fetch, pull or push with lease in flight, if any.
@@ -643,6 +646,37 @@ impl Model {
                 self.hooks.answered(id, message, repo_changed);
                 None
             }
+            Event::WorkflowsListed {
+                workflows, ignored, ..
+            } => {
+                self.workflows.listed(workflows, ignored);
+                None
+            }
+            Event::WorkflowRunChanged {
+                run,
+                workflow,
+                status,
+                state,
+            } => {
+                self.workflows.run_changed(run, workflow, status, state);
+                None
+            }
+            Event::WorkflowApprovalRequested {
+                run,
+                state,
+                summary,
+            } => {
+                self.workflows.approval_requested(run, state, summary);
+                None
+            }
+            Event::WorkflowNotice { run, text } => {
+                self.workflows.notice(run, text);
+                None
+            }
+            Event::WorkflowRunFinished { run, end, reason } => {
+                self.workflows.finished(run, end, reason);
+                None
+            }
             // The failure reason arrives on the operation's own event; a cancel has no text.
             // An inspection nobody asked for is dropped; pruning's preview is shown by its
             // dialog (W6), not here yet.
@@ -652,12 +686,8 @@ impl Model {
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
-            | Event::WorkflowsListed { .. }
-            | Event::WorkflowRunChanged { .. }
-            | Event::WorkflowMessageSuggested { .. }
-            | Event::WorkflowNotice { .. }
-            | Event::WorkflowApprovalRequested { .. }
-            | Event::WorkflowRunFinished { .. } => None,
+            // A suggested message is the composer's to place; the window does that.
+            | Event::WorkflowMessageSuggested { .. } => None,
         }
     }
 
