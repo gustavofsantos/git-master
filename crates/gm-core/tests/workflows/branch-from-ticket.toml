@@ -1,0 +1,26 @@
+schema = 1
+name = "branch-from-ticket"
+
+[inputs]
+ticket = { type = "string", prompt = "Ticket key" }
+
+[trigger]
+on = "manual"
+
+[[state]]
+id = "name"
+action = "exec"
+with = { argv = ["ticket-branch-name", "${inputs.ticket}"] }
+on.timeout = "end.failed"
+
+[[state]]
+id = "confirm"
+action = "approve"
+with = { summary = "Create branch ${states.name.output.text}?" }
+on.approved = "create"
+on.rejected = "end.done"
+
+[[state]]
+id = "create"
+action = "branch.create"
+with = { name = "${states.name.output.text}", checkout = true }

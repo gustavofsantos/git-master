@@ -16,6 +16,7 @@ pub mod remote;
 mod runner;
 pub mod stage_math;
 pub mod watch;
+pub mod workflow;
 pub mod worktree;
 
 pub use engine::{Engine, LogEntry};

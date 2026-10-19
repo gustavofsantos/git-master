@@ -1,0 +1,21 @@
+schema = 1
+name = "restack-stale-stacks-after-fetch"
+description = "Restack every stale stack root after a fetch"
+concurrency = "queue"
+
+[trigger]
+on = "fetch.done"
+
+[[state]]
+id = "roots"
+action = "stack.stale"
+
+[[state]]
+id = "each"
+for_each = "${states.roots.output.roots}"
+as = "root"
+states = [
+  { id = "plan", action = "restack.plan", with = { root = "${root}" } },
+  { id = "apply", action = "restack.apply", with = { plan_id = "${states.plan.output.plan_id}" }, on.done = "end.done", on.stale = { to = "plan", limit = 3 }, on.conflict = "wait_conflict" },
+  { id = "wait_conflict", wait = "restack.resumed", timeout = "24h", on.resumed = "end.done", on.aborted = "end.failed", on.timeout = "end.failed" },
+]

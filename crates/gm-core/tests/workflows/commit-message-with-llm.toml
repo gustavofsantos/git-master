@@ -1,0 +1,17 @@
+schema = 1
+name = "commit-message-with-llm"
+description = "Rewrite the commit message with an LLM command line"
+
+[trigger]
+on = "transform.commit_message"
+
+[[state]]
+id = "llm"
+action = "exec"
+with = { argv = ["llm-cli", "-p", "Write a conventional commit message for this diff. Reply with the message only."], stdin = "${repo.staged_diff}", timeout = "60s" }
+on.timeout = "end.failed"
+
+[[state]]
+id = "out"
+action = "set"
+with = { value = "${states.llm.output.text}" }
