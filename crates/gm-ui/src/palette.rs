@@ -23,6 +23,7 @@ const NEEDS_COMMIT: Reason = "Pick a commit in the history first.";
 const NO_WORKTREE: Reason = "No worktree to choose from.";
 const NO_WORKFLOW: Reason = "No workflow to choose from.";
 const NOT_LISTED: Reason = "Workflows are still being read.";
+const NO_TEMPLATE: Reason = "No templates listed yet";
 
 /// The groups the palette shows, in the order they appear.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -377,6 +378,13 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
                 pick_state(action, &targets, ctx, nothing),
             )
         }
+        ArgKind::Template => {
+            let targets = template_targets(ctx);
+            (
+                Choice::Pick(action),
+                pick_state(action, &targets, ctx, NO_TEMPLATE),
+            )
+        }
         // A chunk exists only in the diff pane, so the palette lists it disabled.
         ArgKind::Chunk => (
             Choice::Run {
@@ -439,6 +447,15 @@ fn workflow_targets(ctx: &ActionContext<'_>) -> Vec<Args> {
         .collect()
 }
 
+/// The built-in templates the palette can pick, in the order the engine gave them.
+fn template_targets(ctx: &ActionContext<'_>) -> Vec<Args> {
+    ctx.workflows
+        .templates
+        .iter()
+        .map(|template| Args::Template(template.clone()))
+        .collect()
+}
+
 /// The worktrees the palette can pick, as the sidebar lists them: the name and
 /// the folder of each, main checkout first, bare entries left out.
 fn listed_worktrees(ctx: &ActionContext<'_>) -> Vec<(String, String)> {
@@ -482,6 +499,15 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
             .map(|workflow| {
                 let args = Args::Workflow(workflow.name.clone());
                 target_row(action, Section::Workflows, workflow.name.clone(), args, ctx)
+            })
+            .collect(),
+        ArgKind::Template => ctx
+            .workflows
+            .templates
+            .iter()
+            .map(|template| {
+                let args = Args::Template(template.clone());
+                target_row(action, Section::Workflows, template.clone(), args, ctx)
             })
             .collect(),
         ArgKind::None | ArgKind::OptionalBranch | ArgKind::Chunk | ArgKind::Commit => Vec::new(),
@@ -1089,6 +1115,41 @@ mod tests {
         assert_eq!(
             find(&top, "Run Workflow…").state,
             Err("No workflow to choose from.")
+        );
+    }
+
+    #[test]
+    fn new_from_template_is_a_pick_of_the_listed_templates() {
+        let templates = ["commit-message".to_owned(), "branch-from-ticket".to_owned()];
+        let ctx = ActionContext {
+            workflows: crate::action_registry::WorkflowCtx {
+                templates: &templates,
+                ..Default::default()
+            },
+            ..ctx_with(&[], "")
+        };
+        let top = build(Stage::Actions, "", &ctx, &[]);
+        let new = find(&top, "New Workflow from Template…");
+        assert_eq!(new.choice, Choice::Pick(Action::NewWorkflowFromTemplate));
+        assert_eq!(new.state, Ok(()));
+        let picks = build(Stage::Pick(Action::NewWorkflowFromTemplate), "", &ctx, &[]);
+        assert_eq!(picks.len(), 2);
+        assert_eq!(
+            find(&picks, "commit-message").choice,
+            Choice::Run {
+                action: Action::NewWorkflowFromTemplate,
+                args: Args::Template("commit-message".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn new_from_template_with_no_listing_says_so() {
+        let ctx = ctx_with(&[], "");
+        let top = build(Stage::Actions, "", &ctx, &[]);
+        assert_eq!(
+            find(&top, "New Workflow from Template…").state,
+            Err("No templates listed yet")
         );
     }
 

@@ -297,6 +297,7 @@ impl StatusView {
                     ArgKind::File => "a file",
                     ArgKind::Worktree => "a worktree",
                     ArgKind::Workflow => "a workflow",
+                    ArgKind::Template => "a template",
                     _ => "a branch",
                 };
                 (

@@ -647,9 +647,17 @@ impl Model {
                 None
             }
             Event::WorkflowsListed {
-                workflows, ignored, ..
+                workflows,
+                ignored,
+                user_dir,
+                templates,
+                ..
             } => {
-                self.workflows.listed(workflows, ignored);
+                self.workflows.listed(workflows, ignored, user_dir, templates);
+                None
+            }
+            Event::WorkflowCreated { path, .. } => {
+                self.workflows.created(path);
                 None
             }
             Event::WorkflowRunChanged {

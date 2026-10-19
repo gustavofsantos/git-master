@@ -46,6 +46,7 @@ use crate::theme;
 use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
+use crate::workflow_inputs::WorkflowInputsDialog;
 use crate::workflow_run::fill_for_message;
 use crate::worktree_create::WorktreeDialog;
 use crate::worktree_prune::PruneDialog;
@@ -120,6 +121,8 @@ pub struct StatusView {
     pub(crate) prune_dialog: Option<PruneDialog>,
     /// The new-branch dialog, while it is open.
     pub(crate) new_branch_dialog: Option<NewBranchDialog>,
+    /// The inputs dialog of a workflow that declares inputs, while it is open.
+    pub(crate) workflow_inputs_dialog: Option<WorkflowInputsDialog>,
     /// The delete-branch dialog, while it is open.
     pub(crate) delete_dialog: Option<DeleteDialog>,
     /// The delete-merged-branches dialog, while it is open.
@@ -280,6 +283,7 @@ impl StatusView {
             removal_dialog: None,
             prune_dialog: None,
             new_branch_dialog: None,
+            workflow_inputs_dialog: None,
             delete_dialog: None,
             merged_dialog: None,
             recents,
@@ -492,6 +496,14 @@ impl StatusView {
             Event::WorkflowRunFinished { .. } => {
                 self.request_workflow_list();
                 true
+            }
+            // The new file joins the listing, and its folder opens so the user can edit it.
+            Event::WorkflowCreated { path, .. } => {
+                self.request_workflow_list();
+                if let Some(folder) = std::path::Path::new(path).parent() {
+                    cx.reveal_path(folder);
+                }
+                false
             }
             Event::WorkflowsListed { .. }
             | Event::WorkflowRunChanged { .. }
@@ -795,7 +807,10 @@ impl StatusView {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.notify_user("Copied commit message", cx);
             }
-            Ok(Effect::Reveal(path)) => cx.reveal_path(&path),
+            Ok(Effect::Reveal(path)) => self.reveal(action, &path, cx),
+            Ok(Effect::OpenWorkflowInputs { workflow, inputs }) => {
+                self.open_workflow_inputs_dialog(&workflow, &inputs, window, cx);
+            }
             Ok(Effect::FocusCommitMessage) => self.focus_commit_message(window, cx),
             Ok(Effect::UseSuggestion(text)) => {
                 self.composer
@@ -821,6 +836,19 @@ impl StatusView {
             Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
         }
         cx.notify();
+    }
+
+    /// Opens `path` in the file manager. The workflows folder is made first, so a
+    /// fresh machine without one still opens something.
+    fn reveal(&mut self, action: Action, path: &std::path::Path, cx: &mut Context<Self>) {
+        if action == Action::OpenWorkflowsFolder
+            && let Err(error) = std::fs::create_dir_all(path)
+        {
+            let text = format!("Could not create {}: {error}", path.display());
+            self.notify_user(&text, cx);
+            return;
+        }
+        cx.reveal_path(path);
     }
 
     /// Copy Branch Name on the checked-out branch: the `⌥⌘C` shortcut.
@@ -867,6 +895,8 @@ impl StatusView {
                 listed: self.model.workflows.listed.as_deref(),
                 awaiting: self.model.workflows.awaiting_approval(),
                 active: self.model.workflows.active(),
+                user_dir: self.model.workflows.user_dir.as_deref(),
+                templates: &self.model.workflows.templates,
             },
         }
     }
@@ -1137,11 +1167,8 @@ impl Render for StatusView {
                     .is_some()
                     .then(|| self.prune_layer(window, cx)),
             )
-            .children(
-                self.new_branch_dialog
-                    .is_some()
-                    .then(|| self.new_branch_layer(window, cx)),
-            )
+            .children(self.new_branch_layer(window, cx))
+            .children(self.workflow_inputs_layer(window, cx))
             .children(
                 self.delete_dialog
                     .is_some()

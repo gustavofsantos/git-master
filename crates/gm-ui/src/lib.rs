@@ -44,6 +44,7 @@ mod title_bar;
 mod view;
 mod welcome;
 mod window_chrome;
+mod workflow_inputs;
 mod workflow_run;
 mod worktree_create;
 mod worktree_list;

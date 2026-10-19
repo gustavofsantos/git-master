@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use gm_schema::{
     CommandKind, DiffSide, HunkId, OperationId, StageTarget, StatusEntry, WorkflowInfo,
-    WorktreeEntry,
+    WorkflowInput, WorktreeEntry,
 };
 
 use crate::branch_filter::Scope;
@@ -59,6 +59,8 @@ pub enum ArgKind {
     Commit,
     /// A manual workflow, as the engine listed it.
     Workflow,
+    /// A built-in workflow template, as the engine listed it.
+    Template,
 }
 
 /// The target of one run. Its kind must match the action's `ArgKind`.
@@ -80,6 +82,8 @@ pub enum Args {
     Commit(String),
     /// The name of a listed manual workflow.
     Workflow(String),
+    /// The name of a listed built-in template.
+    Template(String),
 }
 
 /// Static description of an action.
@@ -132,6 +136,11 @@ pub enum Effect {
     },
     /// Opens the delete-branch dialog, which asks before the branch goes.
     OpenDeleteBranchDialog(String),
+    /// Opens the inputs dialog of a workflow that declares inputs; Run there sends it.
+    OpenWorkflowInputs {
+        workflow: String,
+        inputs: Vec<WorkflowInput>,
+    },
     /// Opens the delete-merged-branches dialog, which lists what Git would
     /// delete and asks before anything goes.
     OpenMergedBranchesDialog,
@@ -163,6 +172,10 @@ pub struct WorkflowCtx<'a> {
     pub awaiting: Option<(i64, &'a str)>,
     /// The newest run that has not ended.
     pub active: Option<i64>,
+    /// The user's workflows folder, when the listing gave one.
+    pub user_dir: Option<&'a str>,
+    /// The built-in templates the listing gave, by name.
+    pub templates: &'a [String],
 }
 
 /// The window state an action's rule reads. Built by the window for each run.
@@ -194,7 +207,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 46] = [
+const SPECS: [Spec; 49] = [
     spec(
         "file.stage",
         "Stage File",
@@ -413,6 +426,27 @@ const SPECS: [Spec; 46] = [
         Category::Workflows,
     ),
     spec(
+        "workflow.new",
+        "New Workflow from Template…",
+        None,
+        ArgKind::Template,
+        Category::Workflows,
+    ),
+    spec(
+        "workflow.reload",
+        "Reload Workflows",
+        None,
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
+        "workflow.open_folder",
+        "Open Workflows Folder",
+        None,
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
         "remote.fetch",
         "Fetch",
         None,
@@ -564,6 +598,9 @@ pub enum Action {
     ApproveWorkflowStep,
     RejectWorkflowStep,
     CancelWorkflowRun,
+    NewWorkflowFromTemplate,
+    ReloadWorkflows,
+    OpenWorkflowsFolder,
     Fetch,
     Pull,
     OpenWorktree,
@@ -674,7 +711,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 46] = [
+    pub const ALL: [Action; 49] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -706,6 +743,9 @@ impl Action {
         Action::ApproveWorkflowStep,
         Action::RejectWorkflowStep,
         Action::CancelWorkflowRun,
+        Action::NewWorkflowFromTemplate,
+        Action::ReloadWorkflows,
+        Action::OpenWorkflowsFolder,
         Action::Fetch,
         Action::Pull,
         Action::OpenWorktree,
@@ -784,6 +824,20 @@ impl Action {
                 | Action::RemoveWorktree
                 | Action::LockWorktree
                 | Action::UnlockWorktree
+        )
+    }
+
+    /// Whether the rules of `workflow_rule` and `workflow_effect` decide the action.
+    fn is_workflow_rule(self) -> bool {
+        matches!(
+            self,
+            Action::RunWorkflow
+                | Action::ApproveWorkflowStep
+                | Action::RejectWorkflowStep
+                | Action::CancelWorkflowRun
+                | Action::NewWorkflowFromTemplate
+                | Action::ReloadWorkflows
+                | Action::OpenWorkflowsFolder
         )
     }
 
@@ -903,10 +957,7 @@ impl Action {
             | Action::DiscardSuggestion
             | Action::ApproveHook
             | Action::DenyHook => hook_rule(self, ctx),
-            Action::RunWorkflow
-            | Action::ApproveWorkflowStep
-            | Action::RejectWorkflowStep
-            | Action::CancelWorkflowRun => workflow_rule(self, args, ctx),
+            _ if self.is_workflow_rule() => workflow_rule(self, args, ctx),
             // The placeholders, refused above by `available`.
             _ => Err(NOT_AVAILABLE),
         }
@@ -1006,13 +1057,7 @@ impl Action {
                 | Action::DenyHook,
                 _,
             ) => hook_effect(self, ctx)?,
-            (
-                Action::RunWorkflow
-                | Action::ApproveWorkflowStep
-                | Action::RejectWorkflowStep
-                | Action::CancelWorkflowRun,
-                _,
-            ) => workflow_effect(self, args, ctx)?,
+            (action, _) if action.is_workflow_rule() => workflow_effect(action, args, ctx)?,
             // Only reached when `enabled` said Ok, which no placeholder does.
             _ => return Err(NOT_AVAILABLE),
         })
@@ -1030,6 +1075,7 @@ impl Action {
                 | (ArgKind::Worktree, Args::Worktree(_))
                 | (ArgKind::Commit, Args::Commit(_))
                 | (ArgKind::Workflow, Args::Workflow(_))
+                | (ArgKind::Template, Args::Template(_))
         )
     }
 }
@@ -1091,6 +1137,9 @@ fn workflow_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), R
             .awaiting
             .map(|_| ())
             .ok_or("No workflow run waits for approval."),
+        Action::NewWorkflowFromTemplate => template_rule(args, ctx),
+        Action::ReloadWorkflows => repository_open(ctx),
+        Action::OpenWorkflowsFolder => workflows_folder(ctx).map(|_| ()),
         _ => ctx
             .workflows
             .active
@@ -1103,11 +1152,26 @@ fn workflow_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), R
 fn workflow_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
     Ok(match (action, args) {
         (Action::RunWorkflow, Args::Workflow(name)) => {
-            Effect::Send(vec![CommandKind::RunWorkflow {
-                name: name.clone(),
-                inputs: BTreeMap::new(),
+            let workflow = workflow_run_rule(args, ctx)?;
+            if workflow.inputs.is_empty() {
+                Effect::Send(vec![CommandKind::RunWorkflow {
+                    name: name.clone(),
+                    inputs: BTreeMap::new(),
+                }])
+            } else {
+                Effect::OpenWorkflowInputs {
+                    workflow: name.clone(),
+                    inputs: workflow.inputs.clone(),
+                }
+            }
+        }
+        (Action::NewWorkflowFromTemplate, Args::Template(name)) => {
+            Effect::Send(vec![CommandKind::CreateWorkflowFromTemplate {
+                template: name.clone(),
             }])
         }
+        (Action::ReloadWorkflows, _) => Effect::Send(vec![CommandKind::ListWorkflows]),
+        (Action::OpenWorkflowsFolder, _) => Effect::Reveal(PathBuf::from(workflows_folder(ctx)?)),
         (Action::ApproveWorkflowStep | Action::RejectWorkflowStep, _) => {
             let Some((run, _)) = ctx.workflows.awaiting else {
                 return Err("No workflow run waits for approval.");
@@ -1125,8 +1189,33 @@ fn workflow_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Eff
     })
 }
 
+/// The reason of the workflows folder when the engine has no folder to give.
+const NO_WORKFLOWS_FOLDER: Reason = "No workflows folder: HOME is not set";
+
+/// The rule of Open Workflows Folder: the listing gave a folder to open.
+fn workflows_folder<'a>(ctx: &Context<'a>) -> Result<&'a str, Reason> {
+    ctx.workflows.user_dir.ok_or(NO_WORKFLOWS_FOLDER)
+}
+
+/// The rule of New Workflow from Template: the listing named the template.
+fn template_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    let Args::Template(name) = args else {
+        return Err("No target for this action");
+    };
+    let templates = ctx.workflows.templates;
+    if templates.is_empty() {
+        return Err("No templates listed yet");
+    }
+    if templates.iter().any(|template| template == name) {
+        Ok(())
+    } else {
+        Err("No template has that name.")
+    }
+}
+
 /// The rule of Run Workflow: a repository is open and the named workflow is
-/// listed, loads, asks for no inputs and is triggered by hand.
+/// listed, loads and is triggered by hand. A workflow with inputs may run: its
+/// run asks for them first.
 fn workflow_run_rule<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorkflowInfo, Reason> {
     repository_open(ctx)?;
     let Args::Workflow(name) = args else {
@@ -1142,9 +1231,6 @@ fn workflow_run_rule<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorkflowI
         .ok_or("No workflow has that name.")?;
     if workflow.error.is_some() {
         return Err("This workflow does not load: fix its file first.");
-    }
-    if !workflow.inputs.is_empty() {
-        return Err("This workflow asks for inputs; run it from the Workflows page (coming next).");
     }
     if workflow.trigger != "manual" {
         return Err("Only manual workflows can be run from here.");
@@ -2354,7 +2440,7 @@ mod tests {
         );
         assert_eq!(
             Action::RunWorkflow.enabled(&Args::Workflow("asks".into()), &ctx),
-            Err("This workflow asks for inputs; run it from the Workflows page (coming next).")
+            Ok(())
         );
         assert_eq!(
             Action::RunWorkflow.enabled(&Args::Workflow("auto".into()), &ctx),
@@ -2379,6 +2465,129 @@ mod tests {
                 name: "suggest-commit-message".into(),
                 inputs: BTreeMap::new(),
             }]))
+        );
+    }
+
+    #[test]
+    fn run_with_inputs_opens_the_inputs_dialog_instead_of_sending() {
+        let listed = [workflow("asks", "manual", &["ticket", "title"], None)];
+        let ctx = with_workflows(WorkflowCtx {
+            listed: Some(&listed),
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::RunWorkflow.plan(&Args::Workflow("asks".into()), &ctx),
+            Ok(Effect::OpenWorkflowInputs {
+                workflow: "asks".into(),
+                inputs: vec![
+                    WorkflowInput {
+                        name: "ticket".into(),
+                        prompt: None,
+                    },
+                    WorkflowInput {
+                        name: "title".into(),
+                        prompt: None,
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn the_new_workflow_actions_have_their_ids_titles_and_category() {
+        assert_eq!(Action::NewWorkflowFromTemplate.id(), "workflow.new");
+        assert_eq!(
+            Action::NewWorkflowFromTemplate.spec().title,
+            "New Workflow from Template…"
+        );
+        assert_eq!(
+            Action::NewWorkflowFromTemplate.spec().args,
+            ArgKind::Template
+        );
+        assert_eq!(Action::ReloadWorkflows.id(), "workflow.reload");
+        assert_eq!(Action::ReloadWorkflows.spec().title, "Reload Workflows");
+        assert_eq!(Action::OpenWorkflowsFolder.id(), "workflow.open_folder");
+        assert_eq!(
+            Action::OpenWorkflowsFolder.spec().title,
+            "Open Workflows Folder"
+        );
+        for action in [
+            Action::NewWorkflowFromTemplate,
+            Action::ReloadWorkflows,
+            Action::OpenWorkflowsFolder,
+        ] {
+            assert_eq!(action.spec().category, Category::Workflows, "{action:?}");
+        }
+    }
+
+    #[test]
+    fn a_template_is_picked_from_the_listed_ones() {
+        let names = ["commit-message".to_owned()];
+        let none: &[String] = &[];
+        let unlisted = with_workflows(WorkflowCtx::default());
+        assert_eq!(
+            Action::NewWorkflowFromTemplate
+                .enabled(&Args::Template("commit-message".into()), &unlisted),
+            Err("No templates listed yet")
+        );
+        let listed = with_workflows(WorkflowCtx {
+            templates: &names,
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::NewWorkflowFromTemplate.plan(&Args::Template("commit-message".into()), &listed),
+            Ok(Effect::Send(vec![
+                CommandKind::CreateWorkflowFromTemplate {
+                    template: "commit-message".into(),
+                }
+            ]))
+        );
+        assert_eq!(
+            Action::NewWorkflowFromTemplate.enabled(&Args::Template("nope".into()), &listed),
+            Err("No template has that name.")
+        );
+        let empty = with_workflows(WorkflowCtx {
+            templates: none,
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::NewWorkflowFromTemplate.enabled(&Args::Template("x".into()), &empty),
+            Err("No templates listed yet")
+        );
+    }
+
+    #[test]
+    fn reload_needs_an_open_repository_and_asks_for_the_listing() {
+        assert_eq!(
+            Action::ReloadWorkflows.plan(&Args::None, &with_workflows(WorkflowCtx::default())),
+            Ok(Effect::Send(vec![CommandKind::ListWorkflows]))
+        );
+        let closed = Context {
+            repo_open: false,
+            ..with_workflows(WorkflowCtx::default())
+        };
+        assert_eq!(
+            Action::ReloadWorkflows.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn open_folder_reveals_the_listed_folder_or_says_why_there_is_none() {
+        let known = with_workflows(WorkflowCtx {
+            user_dir: Some("/home/u/.config/gitmaster/workflows"),
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::OpenWorkflowsFolder.plan(&Args::None, &known),
+            Ok(Effect::Reveal(PathBuf::from(
+                "/home/u/.config/gitmaster/workflows"
+            )))
+        );
+        assert_eq!(
+            Action::OpenWorkflowsFolder
+                .enabled(&Args::None, &with_workflows(WorkflowCtx::default())),
+            Err("No workflows folder: HOME is not set")
         );
     }
 
