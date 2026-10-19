@@ -487,7 +487,7 @@ impl Driver {
         out: &mut Outcome,
     ) -> Result<Option<(&'static str, Value)>, String> {
         self.store
-            .enter_state(id, &call.state, now)
+            .enter_state(id, &call.state, Some(&call.input), now)
             .map_err(|e| e.to_string())?;
         out.events
             .push(self.changed(id, RunStatus::Running, Some(&call.state)));
@@ -1237,7 +1237,7 @@ on.timeout = "end.failed"
                 1100,
             )
             .expect("record");
-        store.enter_state(run, "commit", 1200).expect("enter");
+        store.enter_state(run, "commit", None, 1200).expect("enter");
 
         let mut driver = Driver::new(store, std::env::temp_dir());
         let mut git = FakeGit::default();

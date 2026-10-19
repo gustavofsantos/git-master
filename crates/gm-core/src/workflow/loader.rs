@@ -212,7 +212,7 @@ fn stem(path: &Path) -> String {
 }
 
 /// Lowercase hex sha256 of `bytes`.
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 

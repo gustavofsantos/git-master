@@ -4,14 +4,17 @@
 //! each report goes back, as the runner does on its threads.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
 use gm_core::Engine;
 use gm_core::git::SubprocessGit;
 use gm_schema::{
     Actor, Command, CommandKind, Event, OperationId, OperationState, WorkflowEnd, WorkflowInfo,
+    WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,
 };
+use serde_json::json;
+use sha2::{Digest, Sha256};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let output = Process::new("git")
@@ -566,4 +569,464 @@ fn without_a_user_directory_a_template_is_refused() {
         failure(&refused).as_deref(),
         Some("there is no user workflows directory (HOME is not set)")
     );
+}
+
+fn list_runs(workflow: &str, limit: u32) -> CommandKind {
+    CommandKind::ListWorkflowRuns {
+        workflow: workflow.to_owned(),
+        limit,
+    }
+}
+
+fn load_run(run: i64) -> CommandKind {
+    CommandKind::LoadWorkflowRun { run }
+}
+
+fn save(path: &Path, source: &str, expected_hash: Option<&str>) -> CommandKind {
+    CommandKind::SaveWorkflowFile {
+        path: path.display().to_string(),
+        source: source.to_owned(),
+        expected_hash: expected_hash.map(str::to_owned),
+    }
+}
+
+fn delete(path: &Path, expected_hash: &str) -> CommandKind {
+    CommandKind::DeleteWorkflowFile {
+        path: path.display().to_string(),
+        expected_hash: expected_hash.to_owned(),
+    }
+}
+
+fn runs_listed(events: &[Event]) -> Vec<WorkflowRunSummary> {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::WorkflowRunsListed { runs, .. } => Some(runs.clone()),
+            _ => None,
+        })
+        .expect("a runs listing")
+}
+
+fn run_loaded(events: &[Event]) -> WorkflowRunDetail {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::WorkflowRunLoaded { detail, .. } => Some((**detail).clone()),
+            _ => None,
+        })
+        .expect("a loaded run")
+}
+
+/// The path and hash a `WorkflowFileSaved` answer names.
+fn file_saved(events: &[Event]) -> (String, String) {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::WorkflowFileSaved { path, hash, .. } => Some((path.clone(), hash.clone())),
+            _ => None,
+        })
+        .expect("a saved event")
+}
+
+/// The path and trash location a `WorkflowFileDeleted` answer names.
+fn file_deleted(events: &[Event]) -> (String, String) {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::WorkflowFileDeleted {
+                path, trashed_to, ..
+            } => Some((path.clone(), trashed_to.clone())),
+            _ => None,
+        })
+        .expect("a deleted event")
+}
+
+/// The hash the listing gives the workflow file `name`.
+fn hash_listed(events: &[Event], name: &str) -> String {
+    listing(events)
+        .0
+        .iter()
+        .find(|workflow| workflow.name == name)
+        .expect("the file is listed")
+        .hash
+        .clone()
+}
+
+fn is_failure_containing(events: &[Event], text: &str) -> bool {
+    failure(events).is_some_and(|detail| detail.contains(text))
+}
+
+#[test]
+fn a_run_view_lists_each_step_with_its_rendered_input_output_and_outcome() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write(flows.path(), "suggest.toml", SUGGEST);
+    let mut harness = Harness::open(repo.path(), flows.path());
+    let run = run_id(&harness.send(run("suggest")));
+    harness.run_jobs();
+
+    let detail = run_loaded(&harness.send(load_run(run)));
+
+    let summary = &detail.summary;
+    assert_eq!(summary.run, run);
+    assert_eq!(summary.workflow, "suggest");
+    assert_eq!(summary.status, WorkflowRunStatus::Done);
+    assert_eq!(summary.started_by, "human");
+    assert!(summary.ended_at.is_some());
+    assert_eq!(summary.end_reason, None);
+    assert_eq!(summary.current_state, None);
+    assert_eq!(detail.definition, SUGGEST);
+    assert_eq!(detail.inputs, json!({}));
+    assert_eq!(detail.trigger, json!({"on": "manual"}));
+    assert_eq!(
+        Path::new(detail.repo["root"].as_str().expect("the root")),
+        repo.path()
+    );
+
+    assert_eq!(detail.steps.len(), 2);
+    let ask = &detail.steps[0];
+    assert_eq!(ask.state, "ask");
+    assert_eq!(ask.visit, 1);
+    assert_eq!(ask.action.as_deref(), Some("exec"));
+    assert_eq!(
+        ask.input,
+        Some(json!({"argv": ["printf", "feat: from workflow"]}))
+    );
+    assert_eq!(
+        ask.output.as_ref().and_then(|output| output.get("text")),
+        Some(&json!("feat: from workflow"))
+    );
+    assert!(!ask.truncated);
+    assert_eq!(ask.outcome.as_deref(), Some("done"));
+    assert_eq!(ask.next.as_deref(), Some("suggest"));
+    assert!(ask.ended_at.is_some());
+
+    let suggest = &detail.steps[1];
+    assert_eq!(suggest.state, "suggest");
+    assert_eq!(suggest.action.as_deref(), Some("commit.suggest_message"));
+    assert_eq!(
+        suggest.input,
+        Some(json!({"message": "feat: from workflow"}))
+    );
+    assert_eq!(
+        suggest.output,
+        Some(json!({"message": "feat: from workflow"}))
+    );
+    assert_eq!(suggest.outcome.as_deref(), Some("done"));
+    assert_eq!(suggest.next.as_deref(), Some("end.done"));
+
+    // A read is not in the command log (D28).
+    assert!(
+        !harness
+            .engine
+            .log()
+            .iter()
+            .any(|entry| matches!(entry.kind, CommandKind::LoadWorkflowRun { .. }))
+    );
+}
+
+#[test]
+fn a_run_that_does_not_exist_fails_to_load() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let mut harness = Harness::open(repo.path(), flows.path());
+
+    let refused = harness.send(load_run(999));
+
+    assert_eq!(last_state(&refused), OperationState::Failed);
+    assert_eq!(failure(&refused).as_deref(), Some("no run 999"));
+}
+
+#[test]
+fn runs_are_listed_newest_first_and_only_those_of_the_named_workflow() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write(repo.path(), "a.txt", "two\n");
+    write(flows.path(), "suggest.toml", SUGGEST);
+    write(flows.path(), "commit-all.toml", COMMIT_ALL);
+    let mut harness = Harness::open(repo.path(), flows.path());
+    let first = run_id(&harness.send(run("suggest")));
+    harness.run_jobs();
+    let other = run_id(&harness.send(run("commit-all")));
+    let second = run_id(&harness.send(run("suggest")));
+    harness.run_jobs();
+
+    let listed = runs_listed(&harness.send(list_runs("suggest", 10)));
+
+    let ids: Vec<i64> = listed.iter().map(|summary| summary.run).collect();
+    assert_eq!(ids, [second, first]);
+    assert!(!ids.contains(&other));
+    assert!(listed.iter().all(|summary| summary.workflow == "suggest"));
+    assert!(
+        listed
+            .iter()
+            .all(|summary| summary.status == WorkflowRunStatus::Done)
+    );
+
+    let newest = runs_listed(&harness.send(list_runs("suggest", 1)));
+    assert_eq!(newest.len(), 1);
+    assert_eq!(newest[0].run, second);
+    assert!(runs_listed(&harness.send(list_runs("nobody", 10))).is_empty());
+    assert!(
+        !harness
+            .engine
+            .log()
+            .iter()
+            .any(|entry| matches!(entry.kind, CommandKind::ListWorkflowRuns { .. }))
+    );
+}
+
+#[test]
+fn a_staged_diff_over_4_kib_is_cut_in_the_run_view() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write(repo.path(), "big.txt", &"a line of text\n".repeat(600));
+    git(repo.path(), &["add", "big.txt"]);
+    write(flows.path(), "suggest.toml", SUGGEST);
+    let mut harness = Harness::open(repo.path(), flows.path());
+    let run = run_id(&harness.send(run("suggest")));
+    harness.run_jobs();
+
+    let detail = run_loaded(&harness.send(load_run(run)));
+
+    let full = git(
+        repo.path(),
+        &[
+            "diff",
+            "--cached",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+        ],
+    );
+    let diff = detail.repo["staged_diff"].as_str().expect("the diff");
+    let (head, rest) = diff.split_once("\n… (").expect("the cut marker");
+    let size: usize = rest
+        .strip_suffix(" bytes)")
+        .and_then(|size| size.parse().ok())
+        .expect("the size");
+    assert_eq!(head.len(), 4 * 1024);
+    assert!(full.starts_with(head));
+    assert_eq!(size, full.len());
+}
+
+#[test]
+fn a_saved_file_with_the_hash_it_was_read_at_is_rewritten_and_relisted() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write(flows.path(), "suggest.toml", SUGGEST);
+    let path = flows.path().join("suggest.toml");
+    let mut harness = Harness::open(repo.path(), flows.path());
+    let hash = hash_listed(&harness.send(CommandKind::ListWorkflows), "suggest");
+    let edited = format!("{SUGGEST}\n# edited\n");
+
+    let answer = harness.send(save(&path, &edited, Some(&hash)));
+
+    assert_eq!(last_state(&answer), OperationState::Done);
+    let (saved_path, new_hash) = file_saved(&answer);
+    assert_eq!(saved_path, path.display().to_string());
+    assert_eq!(new_hash, format!("{:x}", Sha256::digest(edited.as_bytes())));
+    assert_ne!(new_hash, hash);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+    assert_eq!(hash_listed(&answer, "suggest"), new_hash);
+    // A save writes no Git state: it is not in the command log.
+    assert!(
+        !harness
+            .engine
+            .log()
+            .iter()
+            .any(|entry| matches!(entry.kind, CommandKind::SaveWorkflowFile { .. }))
+    );
+}
+
+#[test]
+fn a_save_against_a_file_that_changed_on_disk_is_refused() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write(flows.path(), "suggest.toml", SUGGEST);
+    let path = flows.path().join("suggest.toml");
+    let mut harness = Harness::open(repo.path(), flows.path());
+    let hash = hash_listed(&harness.send(CommandKind::ListWorkflows), "suggest");
+    let elsewhere = "schema = 1\n# changed by someone else\n";
+    write(flows.path(), "suggest.toml", elsewhere);
+
+    let refused = harness.send(save(&path, "mine", Some(&hash)));
+
+    assert_eq!(last_state(&refused), OperationState::Failed);
+    assert_eq!(
+        failure(&refused).as_deref(),
+        Some("the file changed on disk; reload it")
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), elsewhere);
+}
+
+#[test]
+fn a_save_outside_the_workflow_directories_or_not_as_toml_is_refused() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let mut harness = Harness::open(repo.path(), flows.path());
+    let inside = repo.path().join("flow.toml");
+    let outside = elsewhere.path().join("flow.toml");
+    let not_toml = flows.path().join("notes.txt");
+
+    let in_repo = harness.send(save(&inside, SUGGEST, None));
+    let not_listed = harness.send(save(&outside, SUGGEST, None));
+    let wrong_name = harness.send(save(&not_toml, SUGGEST, None));
+
+    assert!(is_failure_containing(&in_repo, "is inside the repository"));
+    assert!(is_failure_containing(
+        &not_listed,
+        "is not a workflows directory"
+    ));
+    assert!(is_failure_containing(&wrong_name, "must end in .toml"));
+    assert!(!inside.exists());
+    assert!(!outside.exists());
+    assert!(!not_toml.exists());
+}
+
+#[test]
+fn a_new_file_is_created_in_the_user_directory_and_not_overwritten_without_a_hash() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    // The user directory does not exist yet: the first save creates it.
+    let user_dir = flows.path().join("not-yet-there");
+    let mut harness = Harness::open(repo.path(), &user_dir);
+    let path = user_dir.join("new.toml");
+
+    let created = harness.send(save(&path, SUGGEST, None));
+
+    assert_eq!(last_state(&created), OperationState::Done);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), SUGGEST);
+    assert!(
+        listing(&created)
+            .0
+            .iter()
+            .any(|workflow| workflow.name == "suggest")
+    );
+
+    let again = harness.send(save(&path, "schema = 1\n", None));
+
+    assert_eq!(last_state(&again), OperationState::Failed);
+    assert_eq!(
+        failure(&again),
+        Some(format!("a file already exists at {}", path.display()))
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), SUGGEST);
+}
+
+#[test]
+fn a_deleted_file_is_moved_to_the_trash_and_no_longer_listed() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write(flows.path(), "suggest.toml", SUGGEST);
+    let path = flows.path().join("suggest.toml");
+    let trash = data.path().join("gitmaster").join("workflow-trash");
+    let mut harness = Harness::open(repo.path(), flows.path());
+    harness.engine.set_workflow_trash_dir(Some(trash.clone()));
+    let hash = hash_listed(&harness.send(CommandKind::ListWorkflows), "suggest");
+
+    let answer = harness.send(delete(&path, &hash));
+
+    assert_eq!(last_state(&answer), OperationState::Done);
+    let (deleted_path, trashed_to) = file_deleted(&answer);
+    assert_eq!(deleted_path, path.display().to_string());
+    let trashed = PathBuf::from(&trashed_to);
+    assert_eq!(trashed.parent(), Some(trash.as_path()));
+    let name = trashed.file_name().unwrap().to_str().unwrap();
+    let (stamp, original) = name.split_once('-').expect("a time stamp first");
+    assert!(stamp.parse::<u64>().is_ok());
+    assert_eq!(original, "suggest.toml");
+    assert_eq!(std::fs::read_to_string(&trashed).unwrap(), SUGGEST);
+    assert!(!path.exists());
+    assert!(
+        !listing(&answer)
+            .0
+            .iter()
+            .any(|workflow| workflow.name == "suggest")
+    );
+}
+
+#[test]
+fn a_delete_against_a_file_that_changed_on_disk_is_refused() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write(flows.path(), "suggest.toml", SUGGEST);
+    let path = flows.path().join("suggest.toml");
+    let mut harness = Harness::open(repo.path(), flows.path());
+    harness
+        .engine
+        .set_workflow_trash_dir(Some(data.path().join("trash")));
+    let hash = hash_listed(&harness.send(CommandKind::ListWorkflows), "suggest");
+    write(
+        flows.path(),
+        "suggest.toml",
+        "schema = 1\n# edited elsewhere\n",
+    );
+
+    let refused = harness.send(delete(&path, &hash));
+
+    assert_eq!(last_state(&refused), OperationState::Failed);
+    assert_eq!(
+        failure(&refused).as_deref(),
+        Some("the file changed on disk; reload it")
+    );
+    assert!(path.exists());
+    assert!(!data.path().join("trash").exists());
+}
+
+#[test]
+fn an_agent_cannot_save_or_delete_a_workflow_file() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write(flows.path(), "suggest.toml", SUGGEST);
+    let path = flows.path().join("suggest.toml");
+    let mut harness = Harness::open(repo.path(), flows.path());
+    harness
+        .engine
+        .set_workflow_trash_dir(Some(data.path().join("trash")));
+    let hash = hash_listed(&harness.send(CommandKind::ListWorkflows), "suggest");
+    let agent = Actor::Agent {
+        name: "agent".into(),
+    };
+
+    let saved = harness.engine.handle(
+        OperationId(100),
+        &Command {
+            actor: agent.clone(),
+            kind: save(&path, "agent wrote this", Some(&hash)),
+        },
+    );
+    let deleted = harness.engine.handle(
+        OperationId(101),
+        &Command {
+            actor: agent,
+            kind: delete(&path, &hash),
+        },
+    );
+
+    assert_eq!(
+        failure(&saved).as_deref(),
+        Some("only a human can save a workflow file")
+    );
+    assert_eq!(
+        failure(&deleted).as_deref(),
+        Some("only a human can delete a workflow file")
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), SUGGEST);
+    assert!(!data.path().join("trash").exists());
 }

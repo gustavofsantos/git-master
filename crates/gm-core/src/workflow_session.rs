@@ -8,20 +8,24 @@ use std::path::{Path, PathBuf};
 
 use gm_schema::{
     Actor, CommandKind, Event, OperationId, RepoStatus, WorkflowEnd, WorkflowInfo, WorkflowInput,
-    WorkflowRunStatus,
+    WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary, WorkflowStepRecord,
 };
 use serde_json::{Value, json};
 
 use crate::branch;
 use crate::workflow::Severity;
 use crate::workflow::driver::{Driver, ExecJob, GitActions, Outcome, RunEvent};
-use crate::workflow::loader::{Entry, Ignored, Loaded};
-use crate::workflow::model::End;
-use crate::workflow::store::{RunId, RunStatus, Store};
+use crate::workflow::loader::{Entry, Ignored, Loaded, sha256_hex};
+use crate::workflow::model::{Definition, End, StateKind};
+use crate::workflow::parse;
+use crate::workflow::store::{OutputRow, RunId, RunRow, RunStatus, Store, TransitionRow, prefix};
 use crate::{GitError, GitPort, LogEntry};
 
 /// The `gitmaster.workflowPath` key: extra directories of workflow files (D61).
 const WORKFLOW_PATH_KEY: &str = "gitmaster.workflowPath";
+
+/// A run's `repo.staged_diff` is kept to this many bytes in the run view.
+const STAGED_DIFF_HEAD: usize = 4 * 1024;
 
 /// The workflow session of one open repository: created on the first workflow
 /// command, and replaced when another repository opens.
@@ -240,6 +244,205 @@ pub(crate) fn workflow_info(entry: &Entry) -> WorkflowInfo {
         warnings,
         source: entry.source.clone(),
     }
+}
+
+/// One run as the history lists it.
+pub(crate) fn run_summary(row: &RunRow) -> WorkflowRunSummary {
+    WorkflowRunSummary {
+        run: row.id,
+        workflow: row.workflow.clone(),
+        status: run_status(row.status),
+        started_by: row.started_by.clone(),
+        started_at: row.started_at,
+        ended_at: row.ended_at,
+        end_reason: row.end_reason.clone(),
+        current_state: row.current_state.clone(),
+    }
+}
+
+/// Everything about one run, for the run view. `inputs`, `trigger` and `repo`
+/// are the context the run stored when it started. A definition that no longer
+/// parses leaves every step without its action; the history still shows.
+pub(crate) fn run_detail(store: &Store, run: RunId) -> Result<WorkflowRunDetail, String> {
+    let row = store
+        .run(run)
+        .map_err(|e| e.0)?
+        .ok_or_else(|| format!("no run {run}"))?;
+    let definition = parse::parse(&row.definition_text).ok();
+    let outputs = store.outputs(run).map_err(|e| e.0)?;
+    let transitions = store.transitions(run).map_err(|e| e.0)?;
+    let field = |name: &str| row.trigger.get(name).cloned().unwrap_or(Value::Null);
+    let mut repo = field("repo");
+    cut_staged_diff(&mut repo);
+    Ok(WorkflowRunDetail {
+        summary: run_summary(&row),
+        definition: row.definition_text.clone(),
+        inputs: field("inputs"),
+        trigger: field("trigger"),
+        repo,
+        steps: steps(&outputs, &transitions, definition.as_ref()),
+    })
+}
+
+/// One record per output row, in the order the rows hold. The k-th visit of a
+/// state is paired with the k-th transition out of it.
+fn steps(
+    outputs: &[OutputRow],
+    transitions: &[TransitionRow],
+    definition: Option<&Definition>,
+) -> Vec<WorkflowStepRecord> {
+    let mut out_of: BTreeMap<&str, Vec<&TransitionRow>> = BTreeMap::new();
+    for transition in transitions {
+        out_of
+            .entry(transition.from_state.as_str())
+            .or_default()
+            .push(transition);
+    }
+    outputs
+        .iter()
+        .map(|row| {
+            let taken = out_of.get(row.state.as_str()).and_then(|list| {
+                list.get(usize::try_from(row.visit.saturating_sub(1)).ok()?)
+                    .copied()
+            });
+            WorkflowStepRecord {
+                state: row.state.clone(),
+                visit: row.visit,
+                action: definition.and_then(|definition| action_of(definition, &row.state)),
+                input: row.input.clone(),
+                output: row.output.clone(),
+                truncated: row.truncated,
+                outcome: taken.map(|t| t.outcome.clone()),
+                next: taken.map(|t| t.to_state.clone()),
+                started_at: row.started_at,
+                ended_at: row.ended_at,
+            }
+        })
+        .collect()
+}
+
+/// The action of the state at `path` (`each/plan` inside a `for_each`); `None`
+/// for a wait, a `for_each`, or a state the definition does not have.
+fn action_of(definition: &Definition, path: &str) -> Option<String> {
+    let (top, inner) = match path.split_once('/') {
+        Some((outer, inner)) => (outer, Some(inner)),
+        None => (path, None),
+    };
+    let state = definition.state(top)?;
+    let state = match (&state.kind, inner) {
+        (StateKind::ForEach { states, .. }, Some(inner)) => {
+            states.iter().find(|nested| nested.id == inner)?
+        }
+        (_, None) => state,
+        _ => return None,
+    };
+    match &state.kind {
+        StateKind::Action { action, .. } => Some(action.clone()),
+        _ => None,
+    }
+}
+
+/// Cuts a string `repo.staged_diff` to its head, saying how large it was.
+fn cut_staged_diff(repo: &mut Value) {
+    let Some(Value::String(diff)) = repo.get_mut("staged_diff") else {
+        return;
+    };
+    if diff.len() <= STAGED_DIFF_HEAD {
+        return;
+    }
+    let size = diff.len();
+    let head = prefix(diff, STAGED_DIFF_HEAD);
+    *diff = format!("{head}\n… ({size} bytes)");
+}
+
+/// The workflow file `path` names, when its folder is one of `dirs` and is not
+/// inside the repository (D73). The result holds the folder canonicalized.
+pub(crate) fn workflow_file(root: &Path, dirs: &[PathBuf], path: &str) -> Result<PathBuf, String> {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return Err(format!("{} is not an absolute path", path.display()));
+    }
+    // The loader reads `*.toml` by extension, so the same test applies here.
+    let name = path
+        .file_name()
+        .filter(|_| path.extension().is_some_and(|ext| ext == "toml"))
+        .ok_or_else(|| {
+            format!(
+                "{} is not a workflow file: its name must end in .toml",
+                path.display()
+            )
+        })?;
+    let parent = path.parent().unwrap_or(path);
+    let folder = std::fs::canonicalize(parent)
+        .map_err(|_| format!("the folder {} does not exist", parent.display()))?;
+    if let Ok(repo) = std::fs::canonicalize(root)
+        && folder.starts_with(&repo)
+    {
+        return Err(format!(
+            "{} is inside the repository; workflows are only read from your own config (D73)",
+            folder.display()
+        ));
+    }
+    let listed = dirs
+        .iter()
+        .any(|dir| std::fs::canonicalize(dir).is_ok_and(|real| real == folder));
+    if !listed {
+        return Err(format!(
+            "{} is not a workflows directory; save only into your workflows directory or a gitmaster.workflowPath directory",
+            folder.display()
+        ));
+    }
+    Ok(folder.join(name))
+}
+
+/// The sha256 of the file as it is on disk; `None` when it cannot be read.
+pub(crate) fn file_hash(file: &Path) -> Option<String> {
+    std::fs::read(file).ok().map(|bytes| sha256_hex(&bytes))
+}
+
+/// Writes `source` to `file` through a hidden temporary file in the same
+/// folder, then renames it over `file`: a reader sees the old file or the new.
+pub(crate) fn write_atomically(file: &Path, source: &str) -> Result<(), String> {
+    let name = file
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    let temp = file.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    std::fs::write(&temp, source)
+        .map_err(|e| format!("could not write {}: {e}", temp.display()))?;
+    std::fs::rename(&temp, file).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("could not replace {}: {e}", file.display())
+    })
+}
+
+/// Moves `file` into `dir` as `<stamp>-<file name>`, creating `dir`. A rename
+/// that fails (another device, usually) is a copy and a removal. Returns the
+/// new path.
+pub(crate) fn trash_file(file: &Path, dir: &Path, stamp: i64) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    let name = file
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    let mut stamp = stamp;
+    let target = loop {
+        let candidate = dir.join(format!("{stamp}-{name}"));
+        if std::fs::symlink_metadata(&candidate).is_err() {
+            break candidate;
+        }
+        stamp += 1;
+    };
+    if std::fs::rename(file, &target).is_err() {
+        std::fs::copy(file, &target)
+            .map_err(|e| format!("could not move {} to the trash: {e}", file.display()))?;
+        std::fs::remove_file(file).map_err(|e| {
+            format!(
+                "copied {} to {} but could not remove it: {e}",
+                file.display(),
+                target.display()
+            )
+        })?;
+    }
+    Ok(target)
 }
 
 /// The listing's `ignored` lines: `<path>: <reason>`.

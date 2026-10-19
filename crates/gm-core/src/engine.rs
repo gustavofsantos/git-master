@@ -18,7 +18,7 @@ use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, Histo
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::remote::{RemoteJob, RemoteReport};
 use crate::workflow::driver::{ExecJob, ExecReport};
-use crate::workflow::store::Store;
+use crate::workflow::store::{RETAINED_RUNS, Store};
 use crate::workflow::templates;
 use crate::workflow_session::{self, Actions, Session};
 use crate::worktree;
@@ -63,6 +63,8 @@ pub struct Engine {
     remote_jobs: Vec<RemoteJob>,
     /// The user's workflow directory, read before `gitmaster.workflowPath`.
     workflow_user_dir: Option<PathBuf>,
+    /// The folder a deleted workflow file is moved to; see `delete_workflow_file`.
+    workflow_trash_dir: Option<PathBuf>,
     /// The workflow runs of the open repository; see `workflow_session`.
     workflow: Option<Session>,
 }
@@ -152,6 +154,8 @@ impl Engine {
             remote: None,
             remote_jobs: Vec::new(),
             workflow_user_dir: crate::workflow::loader::default_user_dir(),
+            workflow_trash_dir: crate::hook::approval::default_file()
+                .and_then(|file| file.parent().map(|data| data.join("workflow-trash"))),
             workflow: None,
         }
     }
@@ -160,6 +164,12 @@ impl Engine {
     /// `None` reads none. The default is the user's config directory.
     pub fn set_workflow_user_dir(&mut self, dir: Option<PathBuf>) {
         self.workflow_user_dir = dir;
+    }
+
+    /// Sets the folder deleted workflow files are moved to. `None` refuses
+    /// deletes. The default is `workflow-trash` in the app's data directory.
+    pub fn set_workflow_trash_dir(&mut self, dir: Option<PathBuf>) {
+        self.workflow_trash_dir = dir;
     }
 
     pub fn log(&self) -> &[LogEntry] {
@@ -652,9 +662,11 @@ impl Engine {
             | CommandKind::RunWorkflow { .. }
             | CommandKind::ApproveWorkflowStep { .. }
             | CommandKind::CancelWorkflowRun { .. }
-            | CommandKind::CreateWorkflowFromTemplate { .. } => {
-                self.workflow_command(id, actor, kind)
-            }
+            | CommandKind::CreateWorkflowFromTemplate { .. }
+            | CommandKind::ListWorkflowRuns { .. }
+            | CommandKind::LoadWorkflowRun { .. }
+            | CommandKind::SaveWorkflowFile { .. }
+            | CommandKind::DeleteWorkflowFile { .. } => self.workflow_command(id, actor, kind),
             // The worktree and branch commands that `execute` does not list above.
             _ => self.manage_worktree(id, actor, kind),
         }
@@ -1453,6 +1465,19 @@ impl Engine {
             CommandKind::CreateWorkflowFromTemplate { template } => {
                 self.create_workflow_from_template(id, actor, template)
             }
+            CommandKind::ListWorkflowRuns { workflow, limit } => {
+                self.list_workflow_runs(id, workflow, *limit)
+            }
+            CommandKind::LoadWorkflowRun { run } => self.load_workflow_run(id, *run),
+            CommandKind::SaveWorkflowFile {
+                path,
+                source,
+                expected_hash,
+            } => self.save_workflow_file(id, actor, path, source, expected_hash.as_deref()),
+            CommandKind::DeleteWorkflowFile {
+                path,
+                expected_hash,
+            } => self.delete_workflow_file(id, actor, path, expected_hash),
             _ => Err("not a workflow command".to_owned()),
         }
     }
@@ -1484,9 +1509,15 @@ impl Engine {
     fn list_workflows(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
         let mut events = self.ensure_workflows(id)?;
         let root = self.open_root()?;
+        events.push(self.workflows_listed(id, &root)?);
+        Ok(events)
+    }
+
+    /// The listing of the workflow files, as `ListWorkflows` answers it.
+    fn workflows_listed(&self, id: OperationId, root: &Path) -> Result<Event, String> {
         let loaded =
-            workflow_session::load(self.git.as_ref(), &root, self.workflow_user_dir.as_deref())?;
-        events.push(Event::WorkflowsListed {
+            workflow_session::load(self.git.as_ref(), root, self.workflow_user_dir.as_deref())?;
+        Ok(Event::WorkflowsListed {
             id,
             workflows: loaded
                 .entries
@@ -1502,8 +1533,129 @@ impl Engine {
                 .iter()
                 .map(|template| template.name.to_owned())
                 .collect(),
+        })
+    }
+
+    /// The newest `limit` runs of `workflow` in the open repository. Reads only.
+    fn list_workflow_runs(
+        &mut self,
+        id: OperationId,
+        workflow: &str,
+        limit: u32,
+    ) -> Result<Vec<Event>, String> {
+        let mut events = self.ensure_workflows(id)?;
+        let session = self
+            .workflow
+            .as_ref()
+            .ok_or_else(|| "the workflow session is not open".to_owned())?;
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let rows = session
+            .driver
+            .store()
+            .runs(workflow, limit.min(RETAINED_RUNS))
+            .map_err(|e| e.0)?;
+        events.push(Event::WorkflowRunsListed {
+            id,
+            workflow: workflow.to_owned(),
+            runs: rows.iter().map(workflow_session::run_summary).collect(),
         });
         Ok(events)
+    }
+
+    /// One run with every step it took. Reads only.
+    fn load_workflow_run(&mut self, id: OperationId, run: i64) -> Result<Vec<Event>, String> {
+        let mut events = self.ensure_workflows(id)?;
+        let session = self
+            .workflow
+            .as_ref()
+            .ok_or_else(|| "the workflow session is not open".to_owned())?;
+        let detail = workflow_session::run_detail(session.driver.store(), run)?;
+        events.push(Event::WorkflowRunLoaded {
+            id,
+            detail: Box::new(detail),
+        });
+        Ok(events)
+    }
+
+    /// Writes the workflow file at `path`, which must be in a workflows directory
+    /// (never a repository). With `expected_hash` the file on disk must still hash
+    /// to it; without, the file must not exist. Human only. It writes no Git
+    /// state, so it is not in the command log.
+    fn save_workflow_file(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        path: &str,
+        source: &str,
+        expected_hash: Option<&str>,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "save a workflow file")?;
+        let root = self.open_root()?;
+        let dirs = workflow_session::workflow_dirs(
+            self.git.as_ref(),
+            &root,
+            self.workflow_user_dir.as_deref(),
+        )?;
+        if let Some(user) = self.workflow_user_dir.as_deref()
+            && Path::new(path).parent() == Some(user)
+            && !user.exists()
+        {
+            std::fs::create_dir_all(user)
+                .map_err(|e| format!("could not create {}: {e}", user.display()))?;
+        }
+        let file = workflow_session::workflow_file(&root, &dirs, path)?;
+        if u64::try_from(source.len()).unwrap_or(u64::MAX) > crate::workflow::loader::MAX_FILE {
+            return Err("the workflow is larger than 256 KiB".to_owned());
+        }
+        match expected_hash {
+            Some(hash) => check_hash(&file, hash)?,
+            None if std::fs::symlink_metadata(&file).is_ok() => {
+                return Err(format!("a file already exists at {}", file.display()));
+            }
+            None => {}
+        }
+        workflow_session::write_atomically(&file, source)?;
+        Ok(vec![
+            Event::WorkflowFileSaved {
+                id,
+                path: path.to_owned(),
+                hash: crate::workflow::loader::sha256_hex(source.as_bytes()),
+            },
+            self.workflows_listed(id, &root)?,
+        ])
+    }
+
+    /// Moves the workflow file at `path` to the trash folder, when it still hashes
+    /// to `expected_hash`. Human only. Like a save, it is not in the command log.
+    fn delete_workflow_file(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        path: &str,
+        expected_hash: &str,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "delete a workflow file")?;
+        let root = self.open_root()?;
+        let dirs = workflow_session::workflow_dirs(
+            self.git.as_ref(),
+            &root,
+            self.workflow_user_dir.as_deref(),
+        )?;
+        let file = workflow_session::workflow_file(&root, &dirs, path)?;
+        check_hash(&file, expected_hash)?;
+        let trash = self
+            .workflow_trash_dir
+            .as_deref()
+            .ok_or_else(|| "there is no trash folder for workflow files".to_owned())?;
+        let trashed_to = workflow_session::trash_file(&file, trash, now_ms())?;
+        Ok(vec![
+            Event::WorkflowFileDeleted {
+                id,
+                path: path.to_owned(),
+                trashed_to: trashed_to.display().to_string(),
+            },
+            self.workflows_listed(id, &root)?,
+        ])
     }
 
     /// Copies a built-in template into the user's workflows directory. It writes
@@ -1646,11 +1798,16 @@ impl Engine {
     }
 
     fn record(&mut self, op: &Op, detail: Option<String>, events: &mut Vec<Event>) {
-        // A workflow listing is a read (D28), and a template copy writes no Git state:
-        // neither is logged.
+        // A workflow listing or run read is a read (D28), and a template copy or a
+        // workflow file save or delete writes no Git state: none is logged.
         if !matches!(
             op.command.kind,
-            CommandKind::ListWorkflows | CommandKind::CreateWorkflowFromTemplate { .. }
+            CommandKind::ListWorkflows
+                | CommandKind::ListWorkflowRuns { .. }
+                | CommandKind::LoadWorkflowRun { .. }
+                | CommandKind::CreateWorkflowFromTemplate { .. }
+                | CommandKind::SaveWorkflowFile { .. }
+                | CommandKind::DeleteWorkflowFile { .. }
         ) {
             self.log.push(LogEntry {
                 id: op.id,
@@ -1690,6 +1847,17 @@ fn now_ms() -> i64 {
         .map_or(0, |elapsed| {
             i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
         })
+}
+
+/// What a save or delete answers when the file moved on since it was read.
+const CHANGED_ON_DISK: &str = "the file changed on disk; reload it";
+
+/// Refuses unless the file at `file` still hashes to `expected`.
+fn check_hash(file: &Path, expected: &str) -> Result<(), String> {
+    match workflow_session::file_hash(file) {
+        Some(actual) if actual == expected => Ok(()),
+        _ => Err(CHANGED_ON_DISK.to_owned()),
+    }
 }
 
 /// Worktree changes are human decisions (D31, Q12): an agent may not make one.
