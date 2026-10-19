@@ -652,6 +652,7 @@ impl Model {
                 self.workflows.listed(workflows, ignored);
                 None
             }
+            Event::WorkflowCreated { .. } => None,
             Event::WorkflowRunChanged {
                 run,
                 workflow,
@@ -923,7 +924,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::HookFinished { id, .. }
         | Event::HookFailed { id, .. }
         | Event::HookCancelled { id, .. }
-        | Event::WorkflowsListed { id, .. } => Some(*id),
+        | Event::WorkflowsListed { id, .. }
+        | Event::WorkflowCreated { id, .. } => Some(*id),
         Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }
         | Event::WorkflowNotice { .. }

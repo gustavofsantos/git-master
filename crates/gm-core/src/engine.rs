@@ -1486,6 +1486,11 @@ impl Engine {
                 .map(workflow_session::workflow_info)
                 .collect(),
             ignored: workflow_session::ignored_lines(&loaded.ignored),
+            user_dir: self
+                .workflow_user_dir
+                .as_ref()
+                .map(|dir| dir.display().to_string()),
+            templates: Vec::new(),
         });
         Ok(events)
     }

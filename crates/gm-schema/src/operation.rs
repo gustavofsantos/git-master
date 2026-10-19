@@ -218,6 +218,12 @@ pub enum CommandKind {
     CancelWorkflowRun {
         run: i64,
     },
+    /// Copies the built-in template `template` into the user's workflows
+    /// directory under a file name not taken yet; never into a repository.
+    /// Answers `WorkflowCreated`. Human only.
+    CreateWorkflowFromTemplate {
+        template: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -401,6 +407,16 @@ pub enum Event {
         id: OperationId,
         workflows: Vec<WorkflowInfo>,
         ignored: Vec<String>,
+        /// The user's workflows directory, whether or not it exists yet.
+        user_dir: Option<String>,
+        /// Names of the built-in templates `CreateWorkflowFromTemplate` takes.
+        templates: Vec<String>,
+    },
+    /// A template was copied to `path`; the workflow inside is named `name`.
+    WorkflowCreated {
+        id: OperationId,
+        path: String,
+        name: String,
     },
     /// A workflow run moved: its status, and the state it is in when it has one.
     WorkflowRunChanged {
