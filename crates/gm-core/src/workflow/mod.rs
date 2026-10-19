@@ -12,6 +12,7 @@ pub mod machine;
 pub mod model;
 pub mod parse;
 pub mod store;
+pub mod templates;
 pub mod validate;
 
 /// One problem found in a workflow file, with the line it points at.

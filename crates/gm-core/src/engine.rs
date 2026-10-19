@@ -19,6 +19,7 @@ use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Pla
 use crate::remote::{RemoteJob, RemoteReport};
 use crate::workflow::driver::{ExecJob, ExecReport};
 use crate::workflow::store::Store;
+use crate::workflow::templates;
 use crate::workflow_session::{self, Actions, Session};
 use crate::worktree;
 
@@ -650,7 +651,10 @@ impl Engine {
             CommandKind::ListWorkflows
             | CommandKind::RunWorkflow { .. }
             | CommandKind::ApproveWorkflowStep { .. }
-            | CommandKind::CancelWorkflowRun { .. } => self.workflow_command(id, actor, kind),
+            | CommandKind::CancelWorkflowRun { .. }
+            | CommandKind::CreateWorkflowFromTemplate { .. } => {
+                self.workflow_command(id, actor, kind)
+            }
             // The worktree and branch commands that `execute` does not list above.
             _ => self.manage_worktree(id, actor, kind),
         }
@@ -1446,6 +1450,9 @@ impl Engine {
             }
             CommandKind::CancelWorkflowRun { run } => self.cancel_workflow_run(id, actor, *run),
             CommandKind::ListWorkflows => self.list_workflows(id),
+            CommandKind::CreateWorkflowFromTemplate { template } => {
+                self.create_workflow_from_template(id, actor, template)
+            }
             _ => Err("not a workflow command".to_owned()),
         }
     }
@@ -1490,9 +1497,39 @@ impl Engine {
                 .workflow_user_dir
                 .as_ref()
                 .map(|dir| dir.display().to_string()),
-            templates: Vec::new(),
+            templates: templates::all()
+                .iter()
+                .map(|template| template.name.to_owned())
+                .collect(),
         });
         Ok(events)
+    }
+
+    /// Copies a built-in template into the user's workflows directory. It writes
+    /// no Git state, so it is not in the command log. Human only.
+    fn create_workflow_from_template(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        template_name: &str,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "create a workflow from a template")?;
+        let template = templates::all()
+            .iter()
+            .find(|template| template.name == template_name)
+            .ok_or_else(|| format!("no template named `{template_name}`"))?;
+        let dir = self
+            .workflow_user_dir
+            .as_deref()
+            .ok_or_else(|| "there is no user workflows directory (HOME is not set)".to_owned())?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        let created = templates::create(dir, template)?;
+        Ok(vec![Event::WorkflowCreated {
+            id,
+            path: created.path.display().to_string(),
+            name: created.name,
+        }])
     }
 
     /// Starts a manual workflow run for a human. The run's own events follow;
@@ -1608,8 +1645,12 @@ impl Engine {
     }
 
     fn record(&mut self, op: &Op, detail: Option<String>, events: &mut Vec<Event>) {
-        // A workflow listing is a read (D28): it changes nothing, so it is not logged.
-        if !matches!(op.command.kind, CommandKind::ListWorkflows) {
+        // A workflow listing is a read (D28), and a template copy writes no Git state:
+        // neither is logged.
+        if !matches!(
+            op.command.kind,
+            CommandKind::ListWorkflows | CommandKind::CreateWorkflowFromTemplate { .. }
+        ) {
             self.log.push(LogEntry {
                 id: op.id,
                 actor: op.command.actor.clone(),
