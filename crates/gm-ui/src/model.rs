@@ -652,7 +652,6 @@ impl Model {
                 self.workflows.listed(workflows, ignored);
                 None
             }
-            Event::WorkflowCreated { .. } => None,
             Event::WorkflowRunChanged {
                 run,
                 workflow,
@@ -687,6 +686,7 @@ impl Model {
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
+            | Event::WorkflowCreated { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. } => None,
         }
