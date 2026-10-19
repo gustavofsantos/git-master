@@ -31,6 +31,10 @@ pub type DetailRead = Box<dyn FnOnce(&AtomicBool) -> Result<CommitDetail, GitErr
 /// It stops the same way a `DetailRead` does (H4c).
 pub type StackRead = Box<dyn FnOnce(&AtomicBool) -> Result<Vec<FileDiff>, GitError> + Send>;
 
+/// A remote operation the adapter has checked: the Git run that is left. It
+/// runs on a thread of its own, and its error is Git's own text.
+pub type RemoteRun = Box<dyn FnOnce() -> Result<(), GitError> + Send>;
+
 /// What the core needs from Git. Adapters implement it; the core tests with fakes.
 pub trait GitPort: Send {
     /// The working tree root that contains `path`.
@@ -202,6 +206,27 @@ pub trait GitPort: Send {
     fn delete_branch(&self, _root: &Path, _name: &str, _force: bool) -> Result<(), GitError> {
         Err(GitError(
             "delete branch is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Checks a `git fetch --all --prune` of the repository at `root` and returns
+    /// the run that does it. Starts no process itself. Human only (the engine checks).
+    fn fetch(&self, _root: &Path) -> Result<RemoteRun, GitError> {
+        Err(GitError("fetch is not supported by this adapter".into()))
+    }
+
+    /// Checks a `git pull --ff-only` of the current branch and returns the run.
+    /// Refuses a detached HEAD and a branch without an upstream, before Git runs.
+    fn pull(&self, _root: &Path) -> Result<RemoteRun, GitError> {
+        Err(GitError("pull is not supported by this adapter".into()))
+    }
+
+    /// Checks a `git push --force-with-lease` of the current branch alone and
+    /// returns the run. Refuses a detached HEAD, and a branch with no upstream
+    /// when there is no remote or more than one.
+    fn push_with_lease(&self, _root: &Path) -> Result<RemoteRun, GitError> {
+        Err(GitError(
+            "push with lease is not supported by this adapter".into(),
         ))
     }
 

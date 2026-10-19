@@ -21,7 +21,8 @@ use crate::commit_diff;
 use crate::diff::{hunk_patch, parse_unified};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
-use crate::port::{DetailRead, StackRead};
+use crate::port::{DetailRead, RemoteRun, StackRead};
+use crate::remote;
 use crate::stage_math;
 use crate::worktree;
 use crate::{GitError, GitPort};
@@ -170,6 +171,22 @@ impl SubprocessGit {
                 String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             ))
         }
+    }
+
+    /// The run of one remote command. It is built here and started on its own
+    /// thread. Git never prompts: a credential or host question fails the run
+    /// with Git's text instead of waiting for an answer nobody can give.
+    fn remote_run(&self, root: &Path, args: Vec<String>) -> RemoteRun {
+        let git = self.clone();
+        let root = root.to_path_buf();
+        Box::new(move || {
+            let mut command = git.git(&root);
+            command
+                .args(&args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::null());
+            git.logged(command, None).map(drop)
+        })
     }
 
     /// Whether the index differs from HEAD (from the empty tree on an unborn branch).
@@ -819,6 +836,40 @@ impl GitPort for SubprocessGit {
         self.logged(command, None).map(drop)
     }
 
+    fn fetch(&self, root: &Path) -> Result<RemoteRun, GitError> {
+        Ok(self.remote_run(root, remote::fetch_args()))
+    }
+
+    fn pull(&self, root: &Path) -> Result<RemoteRun, GitError> {
+        let repo = open(root)?;
+        let branch = current_branch(&repo)?;
+        let upstream = match &branch {
+            Some(branch) => upstream_of(&repo, branch)?,
+            None => None,
+        };
+        let args = remote::pull_args(branch.as_deref(), upstream.is_some()).map_err(GitError)?;
+        Ok(self.remote_run(root, args))
+    }
+
+    fn push_with_lease(&self, root: &Path) -> Result<RemoteRun, GitError> {
+        let repo = open(root)?;
+        let branch = current_branch(&repo)?;
+        let upstream = match &branch {
+            Some(branch) => upstream_of(&repo, branch)?,
+            None => None,
+        };
+        let names = remote_names(&repo)?;
+        let args = remote::push_args(
+            branch.as_deref(),
+            upstream
+                .as_ref()
+                .map(|(remote, merge)| (remote.as_str(), merge.as_str())),
+            &names,
+        )
+        .map_err(GitError)?;
+        Ok(self.remote_run(root, args))
+    }
+
     fn hook_config(&self, root: &Path, scope: HookScope) -> Result<Vec<ConfigValue>, GitError> {
         // `--includes` follows `includeIf` and `include`: for the user scope
         // that is the point (D17), and for the repo scope it is why such hooks
@@ -928,6 +979,20 @@ fn clean_email(raw: &str) -> Option<String> {
         .unwrap_or(trimmed)
         .trim();
     (!inner.is_empty()).then(|| inner.to_owned())
+}
+
+/// The remote and the full name of the remote branch that `branch` tracks, when
+/// both `branch.<name>.remote` and `branch.<name>.merge` are set.
+fn upstream_of(repo: &Repository, branch: &str) -> Result<Option<(String, String)>, GitError> {
+    let config = repo.config().map_err(|e| git_err(&e))?;
+    let remote = config.get_string(&format!("branch.{branch}.remote")).ok();
+    let merge = config.get_string(&format!("branch.{branch}.merge")).ok();
+    Ok(remote.zip(merge))
+}
+
+fn remote_names(repo: &Repository) -> Result<Vec<String>, GitError> {
+    let names = repo.remotes().map_err(|e| git_err(&e))?;
+    Ok(names.iter().flatten().map(str::to_owned).collect())
 }
 
 fn has_ref(repo: &Repository, name: &str) -> bool {

@@ -102,6 +102,17 @@ pub enum CommandKind {
         name: String,
         force: bool,
     },
+    /// `git fetch --all --prune`: every remote is fetched, and the remote-tracking
+    /// branches a remote has deleted are removed. Human only. Runs off the
+    /// engine thread; the status and the branches follow.
+    Fetch,
+    /// `git pull --ff-only` on the current branch, against its upstream. It only
+    /// fast-forwards, so it never makes a merge commit or a rebase. Human only.
+    Pull,
+    /// `git push --force-with-lease` of the current branch alone: to its upstream
+    /// when it has one, otherwise to the only remote, which becomes its upstream.
+    /// Never pushes tags or other branches. Human only.
+    PushWithLease,
     /// Lists the worktrees of the repository, the main checkout first. Never
     /// records anything.
     ListWorktrees,
@@ -361,6 +372,16 @@ mod tests {
         .unwrap();
         assert_eq!(delete["type"], "delete_branch");
         assert_eq!(delete["force"], false);
+    }
+
+    #[test]
+    fn remote_commands_wire_format_is_tagged() {
+        let fetch = serde_json::to_value(CommandKind::Fetch).unwrap();
+        assert_eq!(fetch["type"], "fetch");
+        let pull = serde_json::to_value(CommandKind::Pull).unwrap();
+        assert_eq!(pull["type"], "pull");
+        let push = serde_json::to_value(CommandKind::PushWithLease).unwrap();
+        assert_eq!(push["type"], "push_with_lease");
     }
 
     #[test]

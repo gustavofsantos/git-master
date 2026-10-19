@@ -15,6 +15,7 @@ use crate::commit_detail::{DetailJob, DetailReport};
 use crate::commit_diff::{StackJob, StackReport};
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
+use crate::remote::{RemoteJob, RemoteReport};
 use crate::worktree;
 
 /// One state change of one operation. The log is audit, and the base for undo
@@ -51,6 +52,10 @@ pub struct Engine {
     stack: Option<ActiveDetail>,
     /// Commit stack reads accepted since the last call; see `take_stack_jobs`.
     stack_jobs: Vec<StackJob>,
+    /// The remote operation in flight, if any. Only one runs at a time.
+    remote: Option<ActiveRemote>,
+    /// Remote operations accepted since the last call; see `take_remote_jobs`.
+    remote_jobs: Vec<RemoteJob>,
 }
 
 /// The walk behind the history list: the stream while no job reads it, how to
@@ -75,6 +80,13 @@ struct ActiveHistory {
 struct ActiveDetail {
     op: ActiveHistory,
     stop: Arc<AtomicBool>,
+}
+
+/// A fetch, pull or push with lease that has not answered yet, and the
+/// repository it runs in.
+struct ActiveRemote {
+    op: ActiveHistory,
+    root: PathBuf,
 }
 
 /// What the engine keeps of a `RunPrepareCommit` until it answers.
@@ -128,6 +140,8 @@ impl Engine {
             detail_jobs: Vec::new(),
             stack: None,
             stack_jobs: Vec::new(),
+            remote: None,
+            remote_jobs: Vec::new(),
         }
     }
 
@@ -162,6 +176,53 @@ impl Engine {
     /// thread and passes its report to `stack_report`.
     pub fn take_stack_jobs(&mut self) -> Vec<StackJob> {
         std::mem::take(&mut self.stack_jobs)
+    }
+
+    /// The remote operations accepted since the last call. The caller runs each
+    /// on a thread and passes its report to `remote_report`.
+    pub fn take_remote_jobs(&mut self) -> Vec<RemoteJob> {
+        std::mem::take(&mut self.remote_jobs)
+    }
+
+    /// Turns the answer of a remote operation into events: the operation ends
+    /// (with Git's text on failure, or the success message), then the status and
+    /// the branches are read again, since ahead and behind may have moved. A report
+    /// for an operation that is not in flight is dropped.
+    pub fn remote_report(&mut self, report: RemoteReport) -> Vec<Event> {
+        let active = match self.remote.take() {
+            Some(active) if active.op.id == report.id => active,
+            other => {
+                self.remote = other;
+                return Vec::new();
+            }
+        };
+        let (state, detail) = match report.outcome {
+            Ok(()) => (
+                OperationState::Done,
+                Some(success_message(&active.op.kind).to_owned()),
+            ),
+            Err(message) => (OperationState::Failed, Some(message)),
+        };
+        let mut events = vec![self.finish_op(&active.op, state, detail)];
+        // The status is read for the repository the operation ran in, and only while
+        // it is still the open one. A read that fails leaves the last shown state.
+        if self.root.as_deref() == Some(active.root.as_path()) {
+            if let Ok(status) = self.git.status(&active.root) {
+                events.push(Event::StatusLoaded {
+                    id: report.id,
+                    status,
+                });
+            }
+            if let Ok(branches) = self.git.branches(&active.root) {
+                let user_email = self.git.user_email(&active.root).unwrap_or_default();
+                events.push(Event::BranchesLoaded {
+                    id: report.id,
+                    branches,
+                    user_email,
+                });
+            }
+        }
+        events
     }
 
     /// Turns the answer of a file diff read into events. A report for a read that
@@ -419,6 +480,18 @@ impl Engine {
             }
             return events;
         }
+        if matches!(
+            command.kind,
+            CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease
+        ) {
+            match self.start_remote(id, &command.actor, &command.kind) {
+                Ok(()) => self.advance(&mut op, OperationState::Executing, &mut events),
+                Err(message) => {
+                    self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
+                }
+            }
+            return events;
+        }
         if let CommandKind::RunPrepareCommit { message } = &command.kind {
             match self.prepare_run(id, command, message) {
                 Ok(accepted) => {
@@ -501,6 +574,9 @@ impl Engine {
             }
             CommandKind::LoadCommitDetail { .. } | CommandKind::LoadCommitStack { .. } => {
                 Err("commit reads are started by handle".to_owned())
+            }
+            CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease => {
+                Err("remote operations are started by handle".to_owned())
             }
             CommandKind::CreateWorktree { .. } => self.add_worktree(id, actor, kind),
             CommandKind::Checkout { branch } => {
@@ -691,6 +767,43 @@ impl Engine {
         });
         self.history_jobs.push(HistoryJob { id, stream, after });
         Ok(superseded)
+    }
+
+    /// Checks a fetch, pull or push with lease and queues its run. The run starts
+    /// on a thread after this returns, so the operation is `Executing` until its
+    /// report. Refused for an agent, and while another remote operation runs.
+    fn start_remote(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<(), String> {
+        let what = match kind {
+            CommandKind::Fetch => "fetch",
+            CommandKind::Pull => "pull",
+            _ => "push with lease",
+        };
+        only_a_human(actor, what)?;
+        if self.remote.is_some() {
+            return Err("a remote operation is already running".to_owned());
+        }
+        let root = self.open_root()?;
+        let run = match kind {
+            CommandKind::Fetch => self.git.fetch(&root),
+            CommandKind::Pull => self.git.pull(&root),
+            _ => self.git.push_with_lease(&root),
+        }
+        .map_err(|e| e.0)?;
+        self.remote = Some(ActiveRemote {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            root,
+        });
+        self.remote_jobs.push(RemoteJob { id, run });
+        Ok(())
     }
 
     /// Starts the read of commit `oid`. A read in flight is superseded: it is
@@ -1167,6 +1280,15 @@ impl Engine {
             state: op.state,
             detail,
         });
+    }
+}
+
+/// What a finished remote operation says in its `Done` event.
+fn success_message(kind: &CommandKind) -> &'static str {
+    match kind {
+        CommandKind::Fetch => "Fetched",
+        CommandKind::Pull => "Pulled",
+        _ => "Pushed",
     }
 }
 

@@ -13,6 +13,7 @@ use crate::commit_detail::DetailReport;
 use crate::commit_diff::StackReport;
 use crate::history::HistoryReport;
 use crate::hook::{ApprovalStore, Report};
+use crate::remote::RemoteReport;
 use crate::{Engine, GitPort};
 
 enum Message {
@@ -25,6 +26,7 @@ enum Message {
     History(HistoryReport),
     Detail(DetailReport),
     Stack(StackReport),
+    Remote(RemoteReport),
 }
 
 /// Cloneable front door to the engine thread. The thread stops when every
@@ -141,6 +143,16 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                         })
                         .expect("spawn a stack thread");
                 }
+                for job in engine.take_remote_jobs() {
+                    let reports = reports.clone();
+                    std::thread::Builder::new()
+                        .name("gm-remote".into())
+                        .spawn(move || {
+                            let report = job.run();
+                            let _ = reports.send_blocking(Message::Remote(report));
+                        })
+                        .expect("spawn a remote thread");
+                }
                 for plan in engine.take_jobs() {
                     let reports = reports.clone();
                     std::thread::Builder::new()
@@ -167,6 +179,10 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
             }
             Message::Stack(report) => {
                 let events = engine.stack_report(report);
+                broadcast(events, &mut subscribers);
+            }
+            Message::Remote(report) => {
+                let events = engine.remote_report(report);
                 broadcast(events, &mut subscribers);
             }
         }
