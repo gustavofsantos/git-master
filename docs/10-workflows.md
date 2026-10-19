@@ -2,6 +2,18 @@
 
 Última atualização: 2026-10-19. Status de cada decisão em `01`. D73 e D74 estão decididas; D75 está decidida na direção, com detalhes propostos. D78 (workflow como máquina de estados limitada) e D79 (definição em texto, execução em SQLite) foram decididas em princípio em 2026-10-19, com detalhes propostos. D76, D77 e D80 são propostas. O restante do modelo (D61–D72) segue proposto.
 
+## Como experimentar (estado de 2026-10-19)
+
+O que já roda: workflows **manuais**, pela paleta de comandos. Gatilhos por evento, fases `before`/`transform`/`after`, ações de stack e a página de Workflows vêm nas próximas sub-fatias (`07`, fatia 3w).
+
+1. Compile e abra o app: `make run ARGS=<repositório>` (ou `make install`).
+2. Na paleta (Ctrl+K / ⌘K), rode **New Workflow from Template…** e escolha um modelo: `suggest-commit-message`, `branch-from-ticket` ou `commit-staged`. O arquivo vai para `~/.config/gitmaster/workflows/` (no macOS, `~/Library/Application Support/gitmaster/workflows/`), nunca para o repositório. **Open Workflows Folder** abre a pasta.
+3. Edite o arquivo no seu editor. No `suggest-commit-message`, troque `llm-cli` pelo CLI de LLM que você usa; o `argv` roda sem shell e o diff staged chega pelo stdin. Para usar outra pasta (por exemplo, a dos seus dotfiles), adicione-a com `git config --global --add gitmaster.workflowPath <pasta>`.
+4. **Reload Workflows** relê os arquivos. Um arquivo com erro não roda; a linha de estado, abaixo do composer, mostra o erro com a linha.
+5. **Run Workflow…** escolhe o workflow; se ele declara `inputs`, um diálogo pede os valores. **Approve Workflow Step** / **Reject Workflow Step** respondem a um estado `approve`; **Cancel Workflow Run** para o run.
+
+Ações disponíveis agora: `noop`, `notify`, `approve`, `exec`, `commit.suggest_message`, `stage.all`, `commit.create`, `branch.create`, `branch.checkout` e `set`. As demais do catálogo falham com "is not available yet". Os runs ficam em `.git/gitmaster/state.db` do repositório; o arquivo do workflow guarda só a definição.
+
 ## Ideia central
 
 Workflow é uma máquina de estados explícita e limitada: tem um `start`, estados, pelo menos um fim (`end.done`, `end.failed`, `end.blocked`) e transições entre eles. Cada transição é disparada por um resultado (`outcome`) de uma ação. A definição é texto simples, em um arquivo TOML que pode ir para os dotfiles. A execução (runs, transições, saídas, esperas) vive em SQLite (D79). O que vale versionar é o workflow, não a execução.
