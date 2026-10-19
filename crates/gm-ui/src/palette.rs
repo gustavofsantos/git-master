@@ -752,6 +752,22 @@ mod tests {
     }
 
     #[test]
+    fn typing_merged_finds_delete_merged_branches_as_an_action() {
+        let entries: [StatusEntry; 0] = [];
+        let candidates = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
+        for query in ["merged", "delete merged"] {
+            let hits = rank(query, &candidates);
+            let row = hits
+                .iter()
+                .map(|hit| &candidates[hit.index])
+                .find(|candidate| candidate.label == "Delete Merged Branches…")
+                .unwrap_or_else(|| panic!("{query:?} does not find the action"));
+            assert_eq!(row.section, Section::Actions, "{query:?}");
+            assert_eq!(row.state, Ok(()), "{query:?}");
+        }
+    }
+
+    #[test]
     fn an_empty_query_keeps_the_registry_order() {
         let entries: [StatusEntry; 0] = [];
         let candidates = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);

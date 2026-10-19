@@ -19,6 +19,7 @@ mod editor;
 mod fuzzy;
 mod hook_run;
 mod icon;
+mod merged_branches;
 mod model;
 mod name_fit;
 mod new_branch;

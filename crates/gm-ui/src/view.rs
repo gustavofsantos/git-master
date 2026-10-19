@@ -29,6 +29,7 @@ use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::diff_rows::Layout;
 use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
+use crate::merged_branches::MergedDialog;
 use crate::model::{Model, Switched};
 use crate::name_fit::name_label;
 use crate::new_branch::NewBranchDialog;
@@ -120,6 +121,8 @@ pub struct StatusView {
     pub(crate) new_branch_dialog: Option<NewBranchDialog>,
     /// The delete-branch dialog, while it is open.
     pub(crate) delete_dialog: Option<DeleteDialog>,
+    /// The delete-merged-branches dialog, while it is open.
+    pub(crate) merged_dialog: Option<MergedDialog>,
     /// The recent repositories, newest first, as last saved or loaded.
     pub(crate) recents: Recents,
     /// Where the list is kept; `None` when there is no home directory.
@@ -277,6 +280,7 @@ impl StatusView {
             prune_dialog: None,
             new_branch_dialog: None,
             delete_dialog: None,
+            merged_dialog: None,
             recents,
             recent_store,
             recent_generation: 0,
@@ -389,6 +393,9 @@ impl StatusView {
         }
         if let Some(outcome) = self.model.branch_delete.take() {
             self.on_branch_delete_settled(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.merging.take_outcome() {
+            self.on_merged_settled(outcome, window, cx);
         }
         // A finished hook run fills the composer only while it still holds what the run was
         // started from; otherwise the answer waits as a suggestion (see hook_run).
@@ -763,6 +770,7 @@ impl StatusView {
             Ok(Effect::OpenDeleteBranchDialog(branch)) => {
                 self.open_delete_branch_dialog(&branch, window, cx);
             }
+            Ok(Effect::OpenMergedBranchesDialog) => self.open_merged_dialog(window, cx),
             Ok(Effect::ShowHistory) => self.show_history(cx),
             Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
         }
@@ -1087,6 +1095,11 @@ impl Render for StatusView {
                 self.delete_dialog
                     .is_some()
                     .then(|| self.delete_branch_layer(window, cx)),
+            )
+            .children(
+                self.merged_dialog
+                    .is_some()
+                    .then(|| self.merged_layer(window, cx)),
             );
         window_chrome::framed(window, app)
     }

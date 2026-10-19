@@ -124,6 +124,9 @@ pub enum Effect {
     },
     /// Opens the delete-branch dialog, which asks before the branch goes.
     OpenDeleteBranchDialog(String),
+    /// Opens the delete-merged-branches dialog, which lists what Git would
+    /// delete and asks before anything goes.
+    OpenMergedBranchesDialog,
     /// Opens the history page and asks the engine for the commits of HEAD.
     ShowHistory,
     /// Sets the sidebar's branches to the scope the window names (D53).
@@ -171,7 +174,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 41] = [
+const SPECS: [Spec; 42] = [
     spec(
         "file.stage",
         "Stage File",
@@ -453,6 +456,13 @@ const SPECS: [Spec; 41] = [
         ArgKind::Commit,
         Category::Commit,
     ),
+    spec(
+        "branch.delete_merged",
+        "Delete Merged Branches…",
+        None,
+        ArgKind::None,
+        Category::Branches,
+    ),
 ];
 
 const fn spec(
@@ -516,6 +526,7 @@ pub enum Action {
     ShowAllBranches,
     CopyCommitHash,
     CopyCommitMessage,
+    DeleteMergedBranches,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -611,7 +622,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 41] = [
+    pub const ALL: [Action; 42] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -653,6 +664,7 @@ impl Action {
         Action::ShowAllBranches,
         Action::CopyCommitHash,
         Action::CopyCommitMessage,
+        Action::DeleteMergedBranches,
     ];
 
     #[must_use]
@@ -689,6 +701,7 @@ impl Action {
             Action::DiscardChunk
                 | Action::DiscardFile
                 | Action::DeleteBranch
+                | Action::DeleteMergedBranches
                 | Action::RemoveWorktree
         )
     }
@@ -730,6 +743,7 @@ impl Action {
                 | Action::PruneWorktrees
                 | Action::NewBranch
                 | Action::DeleteBranch
+                | Action::DeleteMergedBranches
         )
     }
 
@@ -822,6 +836,7 @@ impl Action {
                 }
             }
             Action::NewBranch | Action::DeleteBranch => branch_rule(self, args, ctx),
+            Action::DeleteMergedBranches => idle(ctx),
             Action::RevealFile => reveal_rule(args, ctx),
             Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
             _ if self.copies_its_target() => Ok(()),
@@ -921,6 +936,7 @@ impl Action {
             (Action::DeleteBranch, Args::Branch(name)) => {
                 Effect::OpenDeleteBranchDialog(name.clone())
             }
+            (Action::DeleteMergedBranches, _) => Effect::OpenMergedBranchesDialog,
             (
                 Action::SuggestMessage
                 | Action::CancelHook
@@ -1679,8 +1695,41 @@ mod tests {
                 Action::DiscardChunk,
                 Action::DeleteBranch,
                 Action::DiscardFile,
-                Action::RemoveWorktree
+                Action::RemoveWorktree,
+                Action::DeleteMergedBranches
             ]
+        );
+    }
+
+    #[test]
+    fn delete_merged_branches_opens_its_dialog_and_needs_an_idle_repository() {
+        let action = Action::DeleteMergedBranches;
+        assert_eq!(action.id(), "branch.delete_merged");
+        assert_eq!(action.spec().title, "Delete Merged Branches…");
+        assert_eq!(action.spec().category, Category::Branches);
+        assert_eq!(action.spec().args, ArgKind::None);
+        assert_eq!(action.spec().shortcut, None);
+        assert!(action.opens_dialog());
+        assert!(action.destructive());
+        assert_eq!(
+            action.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::OpenMergedBranchesDialog)
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            action.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        let busy = Context {
+            busy: Some("Wait for the branch checkout to finish."),
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            action.enabled(&Args::None, &busy),
+            Err("Wait for the branch checkout to finish.")
         );
     }
 

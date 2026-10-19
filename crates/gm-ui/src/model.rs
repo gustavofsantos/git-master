@@ -12,6 +12,7 @@ use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
+use crate::merged_branches::Merging;
 use crate::new_branch::BranchCreate;
 use crate::remote_op::{Outcome, RemoteOp};
 use crate::worktree_create::Creating;
@@ -71,6 +72,8 @@ pub struct Model {
     pub branch_create: BranchCreate,
     /// The delete-branch dialog's delete in flight, and its outcome.
     pub branch_delete: Deleting,
+    /// The delete-merged-branches dialog's listing, delete in flight and outcome.
+    pub merging: Merging,
 }
 
 /// The stacked diff of the open commit (H4c): every file's diff, shown in one
@@ -494,6 +497,24 @@ impl Model {
             }
             Event::PrunableListed { id, candidates } if self.pruning.owns(id) => {
                 self.pruning.listed(candidates);
+                None
+            }
+            Event::MergedBranchesListed { id, base, branches } if self.merging.owns(id) => {
+                self.merging.listed(base, branches);
+                None
+            }
+            Event::MergedBranchesDeleted {
+                id,
+                deleted,
+                failures,
+            } if self.merging.owns(id) => {
+                self.merging.reported(deleted.len(), failures);
+                None
+            }
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.merging.owns(id) => {
+                self.merging.settle(state, detail);
                 None
             }
             Event::OperationChanged {
