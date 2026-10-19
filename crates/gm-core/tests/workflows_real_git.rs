@@ -382,3 +382,188 @@ fn a_run_waiting_on_an_exec_step_is_resumed_by_the_next_engine() {
     assert!(repo.path().join(".git/gitmaster/state.db").exists());
     assert_eq!(status(repo.path()), "");
 }
+
+fn create(template: &str) -> CommandKind {
+    CommandKind::CreateWorkflowFromTemplate {
+        template: template.to_owned(),
+    }
+}
+
+/// The workflow file a `WorkflowCreated` answer names, and its name.
+fn created(events: &[Event]) -> (String, String) {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::WorkflowCreated { path, name, .. } => Some((path.clone(), name.clone())),
+            _ => None,
+        })
+        .expect("a workflow created event")
+}
+
+fn templates_listed(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::WorkflowsListed { templates, .. } => Some(templates.clone()),
+            _ => None,
+        })
+        .expect("a listing")
+}
+
+fn template_source(name: &str) -> &'static str {
+    gm_core::workflow::templates::all()
+        .iter()
+        .find(|template| template.name == name)
+        .expect("a built-in template")
+        .source
+}
+
+#[test]
+fn a_template_is_copied_into_the_user_directory_and_listed() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let user_dir = flows.path().join("not-yet-there");
+    let mut harness = Harness::open(repo.path(), &user_dir);
+
+    let answer = harness.send(create("commit-staged"));
+    let operation = OperationId(harness.last);
+
+    assert_eq!(last_state(&answer), OperationState::Done);
+    let (path, name) = created(&answer);
+    assert_eq!(name, "commit-staged");
+    assert_eq!(Path::new(&path), user_dir.join("commit-staged.toml"));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        template_source("commit-staged")
+    );
+    // Creating a file is not a Git operation: it is not in the command log.
+    assert!(
+        !harness
+            .engine
+            .log()
+            .iter()
+            .any(|entry| entry.id == operation)
+    );
+
+    let listed = harness.send(CommandKind::ListWorkflows);
+    let (workflows, _) = listing(&listed);
+    let copy = workflows
+        .iter()
+        .find(|workflow| workflow.name == "commit-staged")
+        .expect("the copy is listed");
+    assert_eq!(copy.error, None);
+    assert_eq!(
+        templates_listed(&listed),
+        [
+            "suggest-commit-message",
+            "branch-from-ticket",
+            "commit-staged"
+        ]
+    );
+}
+
+#[test]
+fn a_second_copy_gets_a_suffixed_file_and_a_suffixed_name() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let mut harness = Harness::open(repo.path(), flows.path());
+
+    let first = harness.send(create("branch-from-ticket"));
+    let second = harness.send(create("branch-from-ticket"));
+
+    assert_eq!(created(&first).1, "branch-from-ticket");
+    let (path, name) = created(&second);
+    assert_eq!(name, "branch-from-ticket-2");
+    assert_eq!(
+        Path::new(&path),
+        flows.path().join("branch-from-ticket-2.toml")
+    );
+    let copy = std::fs::read_to_string(&path).unwrap();
+    assert!(copy.contains("name = \"branch-from-ticket-2\"\n"));
+    assert!(!copy.contains("name = \"branch-from-ticket\"\n"));
+    // The first copy is untouched.
+    assert_eq!(
+        std::fs::read_to_string(flows.path().join("branch-from-ticket.toml")).unwrap(),
+        template_source("branch-from-ticket")
+    );
+
+    let (workflows, _) = listing(&harness.send(CommandKind::ListWorkflows));
+    let names: Vec<&str> = workflows.iter().map(|w| w.name.as_str()).collect();
+    assert!(names.contains(&"branch-from-ticket"));
+    assert!(names.contains(&"branch-from-ticket-2"));
+    assert!(workflows.iter().all(|w| w.error.is_none()));
+}
+
+#[test]
+fn an_agent_cannot_create_a_workflow_from_a_template() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let mut harness = Harness::open(repo.path(), flows.path());
+
+    let refused = harness.engine.handle(
+        OperationId(100),
+        &Command {
+            actor: Actor::Agent {
+                name: "agent".into(),
+            },
+            kind: create("commit-staged"),
+        },
+    );
+
+    assert_eq!(last_state(&refused), OperationState::Failed);
+    assert_eq!(
+        failure(&refused).as_deref(),
+        Some("only a human can create a workflow from a template")
+    );
+    assert_eq!(std::fs::read_dir(flows.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn an_unknown_template_fails_and_writes_nothing() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let mut harness = Harness::open(repo.path(), flows.path());
+
+    let refused = harness.send(create("nope"));
+
+    assert_eq!(last_state(&refused), OperationState::Failed);
+    assert_eq!(
+        failure(&refused).as_deref(),
+        Some("no template named `nope`")
+    );
+    assert_eq!(std::fs::read_dir(flows.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn without_a_user_directory_a_template_is_refused() {
+    let repo = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let mut engine = Engine::new(Box::new(SubprocessGit::default()));
+    engine.set_workflow_user_dir(None);
+    engine.handle(
+        OperationId(1),
+        &Command {
+            actor: Actor::Human,
+            kind: CommandKind::OpenRepo {
+                path: repo.path().display().to_string(),
+            },
+        },
+    );
+
+    let refused = engine.handle(
+        OperationId(2),
+        &Command {
+            actor: Actor::Human,
+            kind: create("commit-staged"),
+        },
+    );
+
+    assert_eq!(
+        failure(&refused).as_deref(),
+        Some("there is no user workflows directory (HOME is not set)")
+    );
+}

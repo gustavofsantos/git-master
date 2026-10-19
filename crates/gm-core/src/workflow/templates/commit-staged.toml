@@ -1,0 +1,24 @@
+# Commit the staged changes with a message you type when you run it.
+# Edit: nothing is required. Change the approval summary to show what you want
+# to see before the commit is made.
+schema = 1
+name = "commit-staged"
+description = "Commit the staged changes with the message you give"
+
+[inputs]
+message = { type = "string", prompt = "Commit message" }
+
+[trigger]
+on = "manual"
+
+[[state]]
+id = "confirm"
+action = "approve"
+with = { summary = "Commit the staged changes with message: ${inputs.message}" }
+on.approved = "commit"
+on.rejected = "end.done"
+
+[[state]]
+id = "commit"
+action = "commit.create"
+with = { message = "${inputs.message}" }
