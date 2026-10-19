@@ -60,6 +60,12 @@ pub struct Workflows {
     pub listed: Option<Vec<WorkflowInfo>>,
     /// Each directory the listing did not read, as `<path>: <reason>`.
     pub ignored: Vec<String>,
+    /// The user's workflows directory, when the engine knows where it is.
+    pub user_dir: Option<String>,
+    /// The built-in templates `CreateWorkflowFromTemplate` takes, by name.
+    pub templates: Vec<String>,
+    /// The file the last `WorkflowCreated` named, until a run starts.
+    pub created: Option<String>,
     /// The last runs, keyed by run id. Ids grow, so the last key is the newest.
     pub runs: BTreeMap<i64, RunView>,
 }
@@ -70,9 +76,22 @@ impl Workflows {
         *self = Self::default();
     }
 
-    pub fn listed(&mut self, workflows: Vec<WorkflowInfo>, ignored: Vec<String>) {
+    pub fn listed(
+        &mut self,
+        workflows: Vec<WorkflowInfo>,
+        ignored: Vec<String>,
+        user_dir: Option<String>,
+        templates: Vec<String>,
+    ) {
         self.listed = Some(workflows);
         self.ignored = ignored;
+        self.user_dir = user_dir;
+        self.templates = templates;
+    }
+
+    /// A template was copied to `path`. The status says so until a run starts.
+    pub fn created(&mut self, path: String) {
+        self.created = Some(path);
     }
 
     /// A run moved. Leaving `AwaitingApproval` clears the approval it waited on.
@@ -120,6 +139,10 @@ impl Workflows {
     /// The view of `run`, made when it is new, with `workflow` as its name.
     /// Keeps only the newest runs.
     fn entry(&mut self, run: i64, workflow: String) -> &mut RunView {
+        if !self.runs.contains_key(&run) {
+            // A run that starts replaces the note about the template just created.
+            self.created = None;
+        }
         self.runs
             .entry(run)
             .or_insert_with(|| RunView::new(workflow, WorkflowRunStatus::Running));
@@ -148,17 +171,47 @@ impl Workflows {
             .map(|(run, _)| *run)
     }
 
-    /// The one line the composer shows: the active run, or else the newest one.
+    /// The one line the composer shows. An active run comes first; then the
+    /// note about a template just created; then the first workflow that does not
+    /// load; then the newest run.
     #[must_use]
     pub fn status_line(&self) -> Option<String> {
-        let run = self
-            .active()
-            .or_else(|| self.runs.keys().next_back().copied())?;
+        if let Some(run) = self.active() {
+            return self.run_line(run);
+        }
+        if let Some(path) = &self.created {
+            return Some(format!("Created {path}; edit it, then Reload Workflows"));
+        }
+        if let Some(line) = self.broken_line() {
+            return Some(line);
+        }
+        let run = self.runs.keys().next_back().copied()?;
+        self.run_line(run)
+    }
+
+    fn run_line(&self, run: i64) -> Option<String> {
         let view = self.runs.get(&run)?;
         let head = status_text(view);
         Some(match &view.notice {
             Some(notice) => format!("{head} - {notice}"),
             None => head,
+        })
+    }
+
+    /// The first listed workflow that does not load, with how many more do not.
+    fn broken_line(&self) -> Option<String> {
+        let listed = self.listed.as_deref()?;
+        let mut broken = listed.iter().filter_map(|workflow| {
+            workflow
+                .error
+                .as_deref()
+                .map(|error| (&workflow.name, error))
+        });
+        let (name, error) = broken.next()?;
+        let more = broken.count();
+        Some(match more {
+            0 => format!("{name} does not load: {error}"),
+            _ => format!("{name} does not load: {error} (+{more} more)"),
         })
     }
 }
@@ -235,9 +288,117 @@ mod tests {
     fn the_listing_keeps_the_workflows_and_what_was_ignored() {
         let mut workflows = Workflows::default();
         assert_eq!(workflows.listed, None);
-        workflows.listed(vec![info("a", "manual", None)], vec!["/x: no file".into()]);
+        workflows.listed(
+            vec![info("a", "manual", None)],
+            vec!["/x: no file".into()],
+            Some("/home/u/.config/gitmaster/workflows".into()),
+            vec!["commit-message".into()],
+        );
         assert_eq!(workflows.listed.as_ref().map(Vec::len), Some(1));
         assert_eq!(workflows.ignored, ["/x: no file"]);
+        assert_eq!(
+            workflows.user_dir.as_deref(),
+            Some("/home/u/.config/gitmaster/workflows")
+        );
+        assert_eq!(workflows.templates, ["commit-message"]);
+    }
+
+    #[test]
+    fn a_broken_workflow_is_named_when_no_run_is_active() {
+        let mut workflows = Workflows::default();
+        workflows.listed(
+            vec![
+                info("ok", "manual", None),
+                info("broken", "manual", Some("line 3: bad key")),
+                info("worse", "manual", Some("line 1: nope")),
+                info("worst", "manual", Some("x")),
+            ],
+            Vec::new(),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(
+            workflows.status_line().as_deref(),
+            Some("broken does not load: line 3: bad key (+2 more)")
+        );
+    }
+
+    #[test]
+    fn one_broken_workflow_has_no_more_suffix() {
+        let mut workflows = Workflows::default();
+        workflows.listed(
+            vec![info("broken", "manual", Some("bad"))],
+            Vec::new(),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(
+            workflows.status_line().as_deref(),
+            Some("broken does not load: bad")
+        );
+    }
+
+    #[test]
+    fn an_active_run_hides_the_broken_workflow_line() {
+        let mut workflows = Workflows::default();
+        workflows.listed(
+            vec![info("broken", "manual", Some("bad"))],
+            Vec::new(),
+            None,
+            Vec::new(),
+        );
+        started(&mut workflows, 1, "w");
+        assert_eq!(workflows.status_line().as_deref(), Some("w: running ask"));
+    }
+
+    #[test]
+    fn a_created_template_is_named_until_a_run_starts() {
+        let mut workflows = Workflows::default();
+        workflows.created("/home/u/workflows/commit.yml".into());
+        assert_eq!(
+            workflows.status_line().as_deref(),
+            Some("Created /home/u/workflows/commit.yml; edit it, then Reload Workflows")
+        );
+        started(&mut workflows, 1, "commit");
+        assert_eq!(workflows.created, None);
+        assert_eq!(
+            workflows.status_line().as_deref(),
+            Some("commit: running ask")
+        );
+    }
+
+    #[test]
+    fn a_created_template_shows_before_a_broken_workflow() {
+        let mut workflows = Workflows::default();
+        workflows.listed(
+            vec![info("broken", "manual", Some("bad"))],
+            Vec::new(),
+            None,
+            Vec::new(),
+        );
+        workflows.created("/w/new.yml".into());
+        assert_eq!(
+            workflows.status_line().as_deref(),
+            Some("Created /w/new.yml; edit it, then Reload Workflows")
+        );
+    }
+
+    #[test]
+    fn a_finished_run_shows_once_nothing_is_broken() {
+        let mut workflows = Workflows::default();
+        started(&mut workflows, 1, "w");
+        workflows.finished(1, WorkflowEnd::Done, None);
+        assert_eq!(workflows.status_line().as_deref(), Some("w: done"));
+        workflows.listed(Vec::new(), Vec::new(), None, Vec::new());
+        assert_eq!(workflows.status_line().as_deref(), Some("w: done"));
+    }
+
+    #[test]
+    fn a_reset_forgets_the_created_template() {
+        let mut workflows = Workflows::default();
+        workflows.created("/w/new.yml".into());
+        workflows.reset();
+        assert_eq!(workflows.created, None);
     }
 
     #[test]
@@ -359,7 +520,7 @@ mod tests {
     #[test]
     fn a_reset_forgets_the_listing_and_the_runs() {
         let mut workflows = Workflows::default();
-        workflows.listed(Vec::new(), Vec::new());
+        workflows.listed(Vec::new(), Vec::new(), None, Vec::new());
         started(&mut workflows, 1, "w");
         workflows.reset();
         assert_eq!(workflows, Workflows::default());

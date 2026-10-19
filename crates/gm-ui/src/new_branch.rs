@@ -309,10 +309,9 @@ impl StatusView {
         fields[(current + 1) % fields.len()].update(cx, |area, cx| area.focus(window, cx));
     }
 
-    pub(crate) fn new_branch_layer(&self, window: &Window, cx: &Context<Self>) -> Div {
-        let Some(dialog) = self.new_branch_dialog.as_ref() else {
-            return div();
-        };
+    /// The dialog's layer, or nothing while the dialog is closed.
+    pub(crate) fn new_branch_layer(&self, window: &Window, cx: &Context<Self>) -> Option<Div> {
+        let dialog = self.new_branch_dialog.as_ref()?;
         let outside = div().absolute().size_full().occlude().on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -325,16 +324,18 @@ impl StatusView {
         let view = cx.entity().downgrade();
         let tab = view.clone();
         let enter = view;
-        div().absolute().inset_0().child(outside).child(
-            panel
-                .capture_action(move |_: &FocusNext, window, cx| {
-                    let _ = tab.update(cx, |this, cx| this.next_new_branch_field(window, cx));
-                    cx.stop_propagation();
-                })
-                .capture_action(move |_: &Newline, _, cx| {
-                    let _ = enter.update(cx, StatusView::submit_new_branch);
-                    cx.stop_propagation();
-                }),
+        Some(
+            div().absolute().inset_0().child(outside).child(
+                panel
+                    .capture_action(move |_: &FocusNext, window, cx| {
+                        let _ = tab.update(cx, |this, cx| this.next_new_branch_field(window, cx));
+                        cx.stop_propagation();
+                    })
+                    .capture_action(move |_: &Newline, _, cx| {
+                        let _ = enter.update(cx, StatusView::submit_new_branch);
+                        cx.stop_propagation();
+                    }),
+            ),
         )
     }
 
