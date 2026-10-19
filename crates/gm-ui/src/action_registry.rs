@@ -16,6 +16,7 @@ use gm_schema::{
 };
 
 use crate::branch_filter::Scope;
+use crate::workflows_page::PageState;
 
 /// Why an action is not enabled, as a short English sentence for the user.
 pub type Reason = &'static str;
@@ -146,6 +147,14 @@ pub enum Effect {
     OpenMergedBranchesDialog,
     /// Opens the history page and asks the engine for the commits of HEAD.
     ShowHistory,
+    /// Opens the Workflows page and asks the engine for the workflow files.
+    ShowWorkflows,
+    /// Writes the open workflow's buffer to its file.
+    SaveWorkflow,
+    /// Drops the open workflow's unsaved changes.
+    RevertWorkflow,
+    /// Opens the confirmation that moves the open workflow's file to the trash.
+    OpenDeleteWorkflow,
     /// Sets the sidebar's branches to the scope the window names (D53).
     SetBranchScope(Scope),
 }
@@ -176,6 +185,8 @@ pub struct WorkflowCtx<'a> {
     pub user_dir: Option<&'a str>,
     /// The built-in templates the listing gave, by name.
     pub templates: &'a [String],
+    /// The Workflows page: whether it is the screen, what is open, its changes.
+    pub page: PageState<'a>,
 }
 
 /// The window state an action's rule reads. Built by the window for each run.
@@ -207,7 +218,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 49] = [
+const SPECS: [Spec; 53] = [
     spec(
         "file.stage",
         "Stage File",
@@ -447,6 +458,34 @@ const SPECS: [Spec; 49] = [
         Category::Workflows,
     ),
     spec(
+        "workflow.show",
+        "Show Workflows",
+        None,
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
+        "workflow.save",
+        "Save Workflow",
+        Some("⌘S"),
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
+        "workflow.revert",
+        "Revert Workflow",
+        None,
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
+        "workflow.delete",
+        "Delete Workflow…",
+        None,
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
         "remote.fetch",
         "Fetch",
         None,
@@ -601,6 +640,10 @@ pub enum Action {
     NewWorkflowFromTemplate,
     ReloadWorkflows,
     OpenWorkflowsFolder,
+    ShowWorkflows,
+    SaveWorkflow,
+    RevertWorkflow,
+    DeleteWorkflow,
     Fetch,
     Pull,
     OpenWorktree,
@@ -711,7 +754,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 49] = [
+    pub const ALL: [Action; 53] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -746,6 +789,10 @@ impl Action {
         Action::NewWorkflowFromTemplate,
         Action::ReloadWorkflows,
         Action::OpenWorkflowsFolder,
+        Action::ShowWorkflows,
+        Action::SaveWorkflow,
+        Action::RevertWorkflow,
+        Action::DeleteWorkflow,
         Action::Fetch,
         Action::Pull,
         Action::OpenWorktree,
@@ -838,6 +885,9 @@ impl Action {
                 | Action::NewWorkflowFromTemplate
                 | Action::ReloadWorkflows
                 | Action::OpenWorkflowsFolder
+                | Action::SaveWorkflow
+                | Action::RevertWorkflow
+                | Action::DeleteWorkflow
         )
     }
 
@@ -935,7 +985,8 @@ impl Action {
             | Action::CreateWorktree
             | Action::NewWorktree
             | Action::PruneWorktrees
-            | Action::ShowHistory => repository_open(ctx),
+            | Action::ShowHistory
+            | Action::ShowWorkflows => repository_open(ctx),
             Action::CheckoutBranch => {
                 idle(ctx)?;
                 match args {
@@ -1037,6 +1088,7 @@ impl Action {
             }
             (Action::PruneWorktrees, _) => Effect::OpenPruneDialog,
             (Action::ShowHistory, _) => Effect::ShowHistory,
+            (Action::ShowWorkflows, _) => Effect::ShowWorkflows,
             (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
             (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
             (Action::CopyCommitMessage, Args::Commit(text)) => Effect::CopyMessage(text.clone()),
@@ -1140,6 +1192,21 @@ fn workflow_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), R
         Action::NewWorkflowFromTemplate => template_rule(args, ctx),
         Action::ReloadWorkflows => repository_open(ctx),
         Action::OpenWorkflowsFolder => workflows_folder(ctx).map(|_| ()),
+        Action::SaveWorkflow => {
+            if page_open(ctx)?.dirty {
+                Ok(())
+            } else {
+                Err("Nothing to save: the file has no changes.")
+            }
+        }
+        Action::RevertWorkflow => {
+            if page_open(ctx)?.dirty {
+                Ok(())
+            } else {
+                Err("Nothing to revert: the file has no changes.")
+            }
+        }
+        Action::DeleteWorkflow => page_open(ctx).map(|_| ()),
         _ => ctx
             .workflows
             .active
@@ -1171,6 +1238,9 @@ fn workflow_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Eff
             }])
         }
         (Action::ReloadWorkflows, _) => Effect::Send(vec![CommandKind::ListWorkflows]),
+        (Action::SaveWorkflow, _) => Effect::SaveWorkflow,
+        (Action::RevertWorkflow, _) => Effect::RevertWorkflow,
+        (Action::DeleteWorkflow, _) => Effect::OpenDeleteWorkflow,
         (Action::OpenWorkflowsFolder, _) => Effect::Reveal(PathBuf::from(workflows_folder(ctx)?)),
         (Action::ApproveWorkflowStep | Action::RejectWorkflowStep, _) => {
             let Some((run, _)) = ctx.workflows.awaiting else {
@@ -1187,6 +1257,22 @@ fn workflow_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Eff
         },
         _ => return Err(NOT_AVAILABLE),
     })
+}
+
+/// The open workflow of the Workflows page, when the page is the screen and a
+/// workflow is open. Otherwise the reason the page cannot act.
+fn page_open<'a>(ctx: &Context<'a>) -> Result<PageState<'a>, Reason> {
+    let page = ctx.workflows.page;
+    if !page.shown {
+        return Err("Open the Workflows page first.");
+    }
+    if page.name.is_none() {
+        return Err("No workflow is open.");
+    }
+    if page.saving {
+        return Err("Wait for the save to finish.");
+    }
+    Ok(page)
 }
 
 /// The reason of the workflows folder when the engine has no folder to give.
@@ -1234,6 +1320,10 @@ fn workflow_run_rule<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorkflowI
     }
     if workflow.trigger != "manual" {
         return Err("Only manual workflows can be run from here.");
+    }
+    // The run reads the file on disk, so the edit in the page must be saved first.
+    if ctx.workflows.page.dirty && ctx.workflows.page.name == Some(workflow.name.as_str()) {
+        return Err("Save first");
     }
     Ok(workflow)
 }
@@ -2394,6 +2484,94 @@ mod tests {
             workflows,
             ..ctx(&[], "")
         }
+    }
+
+    #[test]
+    fn the_page_actions_need_the_page_with_an_open_file() {
+        let page = |shown, name, dirty, saving| PageState {
+            shown,
+            name,
+            dirty,
+            saving,
+        };
+        let closed = with_workflows(WorkflowCtx::default());
+        assert_eq!(
+            Action::SaveWorkflow.enabled(&Args::None, &closed),
+            Err("Open the Workflows page first.")
+        );
+        let clean = with_workflows(WorkflowCtx {
+            page: page(true, Some("w"), false, false),
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::SaveWorkflow.enabled(&Args::None, &clean),
+            Err("Nothing to save: the file has no changes.")
+        );
+        assert_eq!(
+            Action::RevertWorkflow.enabled(&Args::None, &clean),
+            Err("Nothing to revert: the file has no changes.")
+        );
+        assert_eq!(
+            Action::DeleteWorkflow.plan(&Args::None, &clean),
+            Ok(Effect::OpenDeleteWorkflow)
+        );
+        let dirty = with_workflows(WorkflowCtx {
+            page: page(true, Some("w"), true, false),
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::SaveWorkflow.plan(&Args::None, &dirty),
+            Ok(Effect::SaveWorkflow)
+        );
+        assert_eq!(
+            Action::RevertWorkflow.plan(&Args::None, &dirty),
+            Ok(Effect::RevertWorkflow)
+        );
+        let saving = with_workflows(WorkflowCtx {
+            page: page(true, Some("w"), true, true),
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::SaveWorkflow.enabled(&Args::None, &saving),
+            Err("Wait for the save to finish.")
+        );
+    }
+
+    #[test]
+    fn run_waits_for_the_save_of_the_open_workflow_only() {
+        let listed = [
+            workflow("w", "manual", &[], None),
+            workflow("other", "manual", &[], None),
+        ];
+        let dirty_w = with_workflows(WorkflowCtx {
+            listed: Some(&listed),
+            page: PageState {
+                shown: true,
+                name: Some("w"),
+                dirty: true,
+                saving: false,
+            },
+            ..WorkflowCtx::default()
+        });
+        assert_eq!(
+            Action::RunWorkflow.enabled(&Args::Workflow("w".into()), &dirty_w),
+            Err("Save first")
+        );
+        assert_eq!(
+            Action::RunWorkflow.enabled(&Args::Workflow("other".into()), &dirty_w),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn show_workflows_needs_a_repository_and_opens_the_page() {
+        let open = ctx(&[], "");
+        assert_eq!(
+            Action::ShowWorkflows.plan(&Args::None, &open),
+            Ok(Effect::ShowWorkflows)
+        );
+        assert_eq!(Action::ShowWorkflows.id(), "workflow.show");
+        assert_eq!(Action::SaveWorkflow.spec().shortcut, Some("⌘S"));
     }
 
     #[test]

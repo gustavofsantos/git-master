@@ -35,6 +35,7 @@ mod shell_commit;
 mod shell_history;
 mod shell_list;
 mod shell_sidebar;
+mod shell_workflows;
 mod sidebar;
 mod text_area;
 mod text_area_element;
@@ -46,6 +47,7 @@ mod welcome;
 mod window_chrome;
 mod workflow_inputs;
 mod workflow_run;
+mod workflows_page;
 mod worktree_create;
 mod worktree_list;
 mod worktree_prune;
@@ -75,6 +77,7 @@ actions!(
         FocusPrev,
         OpenPalette,
         CopyCurrentBranch,
+        SaveWorkflow,
     ]
 );
 
@@ -167,6 +170,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("secondary-k", OpenPalette, None),
         KeyBinding::new("alt-secondary-c", CopyCurrentBranch, None),
+        KeyBinding::new("secondary-s", SaveWorkflow, None),
     ]);
     composer::bind_keys(cx);
     diff_pane::bind_keys(cx);
@@ -208,6 +212,7 @@ mod tests {
             "secondary-q",
             "secondary-k",
             "alt-secondary-c",
+            "secondary-s",
         ] {
             let binding = KeyBinding::new(keys, Refresh, Some(KEY_CONTEXT));
             assert_eq!(binding.keystrokes().len(), 1, "{keys}");
