@@ -65,26 +65,28 @@ Referência: resolvedores de conflito de IDEs. Três painéis: esquerda, resulta
 - Diff e stage dos arquivos gerados: recolher via atributos do `.gitattributes` (somente leitura).
 - Comentários de review em linha, com o antes/depois do agente (ver `04`).
 
-## Workflows (D76, proposto)
+## Workflows (D76, D78, proposto)
 
 Página para ver, criar e editar workflows (`10`) na UI. Revisa D72, que deixava a edição só no editor do próprio usuário. Lista à esquerda, detalhe à direita.
 
 - **Lista** (esquerda): nome, gatilho, habilitado neste repositório, última execução e badge de erro. Botão **New workflow**: em branco ou a partir de template.
-- **Detalhe** (direita), com abas **Steps**, **TOML** e **Runs**.
-- **Steps** (editor estruturado):
-  - seletor de gatilho (fase, operação ou evento, campo `match`) e tabela de inputs;
-  - cards de passo ordenados, com add, remove, duplicate e reorder (arrastar e teclado);
-  - seletor de ação agrupado por domínio, com badge de efeito (read, propose, apply);
+- **Detalhe** (direita), com abas **Flow**, **TOML** e **Runs**.
+- **Flow** (editor estruturado), duas vistas do mesmo `[[state]]` ordenado:
+  - **grafo de estados**: nós são estados, com ação e badge de efeito (read, propose, apply); arestas são desfechos, com os rótulos `if` e `limit`; os términos são `end.done`, `end.failed` e `end.blocked`;
+  - **lista ordenada** dos mesmos estados, para edição pelo teclado: add, remove, duplicate e reorder;
+  - cabeçalho do fluxo: seletor de gatilho (fase, operação ou evento, campo `match`), tabela de inputs e estado `start`;
+  - em cada estado: tipo (ação, espera, `for_each` como grupo aninhado), `approval` nos de `apply`, `timeout` nos de espera;
+  - ligar um desfecho a um estado ou a um término por um seletor (picker);
   - campos tipados gerados do JSON Schema da ação;
-  - campos de expressão com completar só `inputs.*`, `trigger.*`, `repo.*` e saídas de passos anteriores;
-  - `if`, `approval`, `on_error`; `for_each` como grupo de cards aninhado;
-  - validação inline, com o mesmo validador do carregador (D63).
+  - campos de expressão completam só `inputs.*`, `trigger.*`, `repo.*` e `states.<id>.output` de estados anteriores;
+  - desfecho sem tratamento aparece como aresta vermelha pendente (dangling);
+  - erros do validador (D63, D78) aparecem no nó ou na aresta afetada.
 - **TOML**: o mesmo modelo em texto. Edição em uma aba atualiza a outra; erro de parse mantém a aba TOML, com o erro visível.
-- **Runs**: histórico de execuções com os chips por passo (D72).
-- **Dry run**: avalia o gatilho com o estado atual do repositório e roda só passos `read`. Mostra a lista de passos resolvida e o que cada passo `propose` ou `apply` receberia. `exec` não roda: mostra o argv e o stdin que seriam enviados.
+- **Runs**: execuções lidas do SQLite (D79). Selecionar uma execução destaca o seu caminho no grafo do Flow e mostra a saída e os fingerprints de cada estado. Uma execução em espera mostra "Waiting for <event>" com **Cancel**.
+- **Dry run**: avalia o gatilho com o estado atual do repositório e roda só estados `read`. Mostra o caminho de estados resolvido no grafo e o que cada estado `propose` ou `apply` receberia. `exec` não roda: mostra o argv e o stdin que seriam enviados.
 - **Save**: grava no diretório de workflows do usuário, nunca em repositório, de forma atômica (temp + rename), preservando comentários e formatação (`toml_edit`). Se o arquivo mudou em disco (hash do conteúdo), para com "Changed on disk: Reload / Overwrite". Antes de salvar, a página avisa que salvar revoga aprovações automáticas (D64(b)).
 - **Delete**: move o arquivo para a lixeira do diretório de dados do app (recuperável), nunca `rm`.
-- **Teclado**: toda ação tem entrada no registro de ações e na paleta (`workflow.new`, `workflow.save`, `workflow.dry_run`, `workflow.run`, `workflow.add_step`…).
+- **Teclado**: toda ação tem entrada no registro de ações e na paleta (`workflow.new`, `workflow.save`, `workflow.dry_run`, `workflow.run`, `workflow.add_state`…).
 
 ## Tela de configurações (Settings modal, D38)
 

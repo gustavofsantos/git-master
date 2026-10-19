@@ -118,7 +118,7 @@ Escrever JSON em one-liners de shell exige `jq`. Decisão do autor (2026-10-16):
 
 As classes de hook viram fases de workflow (`10`):
 
-- Gate → `before.<operação>`: a operação espera (assíncrono, sem travar a UI, D05); o workflow veta com a ação `block` (`with = { reason = "..." }`). Falha em fase `before` veta (fail-closed).
+- Gate → `before.<operação>`: a operação espera (assíncrono, sem travar a UI, D05); o workflow veta chegando a `end.blocked` (D78), com o `reason` na transição. Falha em fase `before` veta (fail-closed).
 - Transform → `transform.<campo>`: o último passo chama `set` com o novo valor do campo (ex.: `transform.commit_message`). Vale a seção Reconciliação deste documento: se o usuário mudou o campo enquanto isso, o valor vira sugestão.
 - Observe → `after.<operação>`: roda depois; falha só avisa.
 

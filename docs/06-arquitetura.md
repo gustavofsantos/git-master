@@ -37,6 +37,9 @@ O core define traits (`GitPort`, `HookPort`, `StorePort`) e os adaptadores as im
 - Catálogo de ações em `gm-schema`, com JSON Schema da entrada e da saída de cada ação. O validador checa o workflow inteiro antes de rodar (D63).
 - Cada passo despacha um `Command` existente. Workflow não tem caminho de lógica próprio.
 - Cada execução é uma operação (`OperationId`), persistida em `state.db`.
+- O interpretador é uma função de transição pura: `next(definição, run, evento) -> (transição, efeitos)`, sem I/O. O engine executa os efeitos e registra o resultado (D80).
+- Cada transição é gravada em uma transação SQLite antes do efeito ("entrando em X") e depois dele ("X → desfecho"). Após um crash, a retomada lê `current_state`.
+- Um `apply` interrompido recebe o desfecho `interrupted`, que vai para `end.failed` se não for tratado. Nunca é reexecutado às cegas (D80).
 - Eventos produzidos por uma execução carregam o id da execução e nunca disparam gatilhos (sem cascata).
 - Salvar pela UI edita o TOML com `toml_edit`, para preservar os comentários e a formatação do usuário; a escrita é atômica (D76).
 - `exec` executa `argv` diretamente, nunca por shell (D74).
@@ -44,13 +47,16 @@ O core define traits (`GitPort`, `HookPort`, `StorePort`) e os adaptadores as im
 
 ## Persistência
 
-- Arquivos de workflow: fora do repositório, em `~/.config/gitmaster/workflows/` (macOS: `Library/Application Support/gitmaster/workflows/`) e nos diretórios de `gitmaster.workflowPath`. Nada é lido nem escrito no working tree (D61).
-- Estado habilitado por repositório e aprovações automáticas: diretório de dados do app, não no arquivo do workflow.
-- Execuções de workflow: `state.db`.
+- Arquivos de workflow: fora do repositório, em `~/.config/gitmaster/workflows/` (macOS: `Library/Application Support/gitmaster/workflows/`) e nos diretórios de `gitmaster.workflowPath`. Nada é lido nem escrito no working tree (D61). O arquivo guarda só a definição (D79): nada de execução, como `enabled`, última execução ou aprovações.
+- Por repositório, em `state.db` (no diretório comum do Git): runs, transições, saídas, esperas e gatilhos pendentes. Acompanha o repositório e funciona com worktrees.
+- Por usuário, em `~/.local/share/gitmaster/gitmaster.db` (diretório de dados do app): workflow habilitado em cada repositório, aprovações automáticas por hash da definição e cache das definições validadas.
+- SQLite via `rusqlite` com SQLite embutido (bundled): compilado no binário, sem dependência externa.
+- Retenção: 200 execuções por workflow e por repositório, podadas ao iniciar uma execução. Saídas maiores que 64 KiB são guardadas como hash, tamanho e os primeiros 4 KiB.
 - Pais de stack: git config do repositório.
 - Operation log, comentários de review, aprovações: SQLite no diretório comum do Git (`git rev-parse --git-common-dir`), em `gitmaster/state.db`. Funciona com worktrees.
 - Snapshots: refs privadas dentro de `.git`.
 - O operation log é auditoria e base do undo (por snapshots de refs). **Não é event sourcing**: reconstruir estado por replay é armadilha, porque o Git muda por fora.
+- O log de execuções de um workflow é o registro que o próprio engine guarda da execução, não uma reconstrução do estado do repositório. O Git continua sendo a fonte da verdade, e cada efeito revalida fingerprints (D66).
 
 ## Testes
 
@@ -58,6 +64,8 @@ O core define traits (`GitPort`, `HookPort`, `StorePort`) e os adaptadores as im
 - Determinismo: a mesma sequência de comandos sobre o mesmo repositório gera o mesmo operation log.
 - Core testado com fakes das ports, sem GPUI (ciclos de teste rápidos).
 - Propriedade de workflows: mesmo workflow + mesmo estado do repositório + mesmas entradas → mesmos comandos (D09, D66).
+- Propriedade: a função de transição é determinística e toda execução termina (D78).
+- Teste de crash: matar o engine entre "entrando em X" e o desfecho, reiniciar e verificar o tratamento de `interrupted` (D80).
 
 ## Estrutura de crates (D27)
 

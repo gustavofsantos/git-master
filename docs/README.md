@@ -5,7 +5,7 @@ Design documents (Portuguese), exported verbatim on 2026-10-16 from the author's
 | File | Content |
 |---|---|
 | `00-visao-e-principios.md` | Vision, benchmarks, differentiators, principles, non-goals |
-| `01-decisoes-e-questoes-abertas.md` | Decision log D01-D77 (Decidido / Proposto) and open questions Q1-Q21 |
+| `01-decisoes-e-questoes-abertas.md` | Decision log D01-D80 (Decidido / Proposto) and open questions Q1-Q21 |
 | `02-stacks-e-restack.md` | Branch stacks, metadata, restack plan and execution |
 | `03-hooks.md` | Hook classes, `.gitconfig` format, JSON contract, reconciliation |
 | `04-mcp-e-review-local.md` | MCP tiers and tools, local review loop |
