@@ -1,6 +1,7 @@
 //! The engine: commands in, events out, no UI and no real repository needed.
 //! Git is reached through `GitPort`; `git::SubprocessGit` is the first adapter.
 
+pub mod branch;
 pub mod command_log;
 pub mod commit_detail;
 pub mod commit_diff;
