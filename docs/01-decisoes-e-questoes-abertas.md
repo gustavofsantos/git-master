@@ -93,6 +93,18 @@
 | D79 | A definição fica em texto (TOML, só a definição, sem campo de execução) e a execução fica em SQLite com `rusqlite` embutido: `state.db` em `.git/gitmaster/` para runs, transições, saídas e esperas (por repositório); `gitmaster.db` no diretório de dados do app para ativação e aprovações (por usuário). **Princípio decidido (2026-10-19); tabelas e chaves propostas** | Decidido (2026-10-19) | 10, 06 |
 | D80 | Consequências da separação, propostas: interpretador como função pura `next(definição, run, evento)`; cada transição numa transação, antes e depois do efeito, e passo `apply` interrompido vai a `interrupted` sem reexecutar; run executa a versão gravada ao iniciar; aprovação presa ao hash da definição; `queue`, `replace` e `skip` como chave única no banco; esperas como linhas com prazo; histórico e aba Flow como consultas, com retenção de 200 runs por workflow e repositório e saídas acima de 64 KiB guardadas como hash, tamanho e 4 KiB iniciais; dry run em SQLite em memória, sem efeitos. Git segue como fonte da verdade, sem event sourcing do repositório | Proposto | 10, 06 |
 
+## Escolhas de implementação da WF0 (2026-10-19)
+
+Escolhas feitas no código que a documentação não cobria. Valem até nova decisão do autor.
+
+- `reason` vale em qualquer transição para `end.*`, não só em `end.blocked`: um `end.failed` também pode explicar o motivo.
+- O parser checa só a forma (chaves conhecidas, tipos, um único tipo por estado, `timeout` como `<inteiro><s|m|h>`, `for_each` com `states` não vazio); regras de grafo e de referência ficam no validador.
+- Uma ação ou evento de espera desconhecido gera só o próprio erro; o validador trata o estado como terminal para não repetir o erro como "sem caminho até um `end`".
+- A função de transição distingue mau uso de falha da execução: chamar `next` numa execução encerrada, ou com um outcome fora do conjunto do estado, é erro de quem chama (`MachineError`); um erro de expressão, uma lista de `for_each` que não é lista ou um guard que falha encerram a execução em `end.failed`, com o erro como motivo.
+- O outcome `timeout` de uma espera só existe quando o estado define `timeout`.
+- Nas condições, um nome solto (`a == 1`) é erro de sintaxe: valores se escrevem `${caminho}`. Comparações não se encadeiam.
+- Um item de `for_each` não pode se chamar `inputs`, `trigger`, `repo` nem `states`.
+
 ## D31: worktrees na v1
 
 O autor decidiu em 2026-10-17 que worktrees entram na v1, por serem parte central do fluxo dele. Os padrões abaixo ficam registrados como decididos; mudam só por nova decisão do autor. Alteração decidida pelo autor em 2026-10-17: a confirmação da remoção forçada passou de digitar o nome para marcar uma caixa de confirmação (ver o item "Remoção segura").
