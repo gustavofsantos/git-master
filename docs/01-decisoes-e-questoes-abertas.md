@@ -110,6 +110,7 @@ Escolhas feitas no código que a documentação não cobria. Valem até nova dec
 - Um item de `for_each` não pode se chamar `inputs`, `trigger`, `repo` nem `states`.
 - O outcome `timeout` (de `exec` ou de uma espera) tem transição padrão para `end.failed`, como `failed`: um `exec` simples não precisa escrever `on.timeout` (decidido na WF1, 2026-10-19).
 - `commit.suggest_message` apara a mensagem e tira um único bloco de código markdown que envolva a mensagem inteira (cerca de três crases na primeira e na última linha), como um LLM costuma devolver; um bloco dentro da mensagem fica (2026-10-19, depois do primeiro uso real).
+- Página de Workflows (2026-10-19): rodar um workflow com alterações não salvas é recusado ("Save first"); salvar e apagar arquivos de workflow não entram no log de comandos (não mexem no Git); salvar recusa arquivo fora dos diretórios de workflows do usuário ou dentro do repositório (D73) e recusa quando o hash em disco mudou; apagar move o arquivo para `<dados>/gitmaster/workflow-trash/`. O Flow mostra os estados mesmo com erro de validação (usa `parse` e `validate` separados).
 
 ## D31: worktrees na v1
 
