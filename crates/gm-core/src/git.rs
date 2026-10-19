@@ -857,6 +857,17 @@ impl GitPort for SubprocessGit {
             "--format=%(refname:short)%00%(objectname:short)%00%(contents:subject)",
         ]);
         let out = Self::run(command)?;
+        // `git branch -d` checks a branch against HEAD, not against the base, so
+        // a branch merged only into the base would be listed and then refused.
+        // Only the branches merged into HEAD as well are offered. An unborn HEAD
+        // merges nothing.
+        let mut into_head = self.git(root);
+        into_head.args(["branch", "--merged", "HEAD", "--format=%(refname:short)"]);
+        let head_out = Self::run(into_head).unwrap_or_default();
+        let head_merged: Vec<String> = String::from_utf8_lossy(&head_out)
+            .lines()
+            .map(str::to_owned)
+            .collect();
         Ok(String::from_utf8_lossy(&out)
             .lines()
             .filter_map(|line| {
@@ -866,6 +877,7 @@ impl GitPort for SubprocessGit {
                 let subject = fields.next().unwrap_or_default().to_owned();
                 Some(MergedBranch { name, tip, subject })
             })
+            .filter(|merged| head_merged.contains(&merged.name))
             .collect())
     }
 

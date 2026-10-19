@@ -247,7 +247,8 @@ fn origin_head_chooses_the_base_and_without_it_main_does() {
     let base = tempfile::tempdir().unwrap();
     let main = repo(base.path());
     // develop is one commit ahead of main; dev-work sits on that commit, so it is
-    // merged into develop only; old sits on the first commit, merged into both.
+    // merged into develop only, and `git branch -d` from main would refuse it, so
+    // it is not offered; old sits on the first commit, merged into both.
     git_in(&main, &["branch", "old"]);
     git_in(&main, &["checkout", "-q", "-b", "develop"]);
     commit(&main, "ahead");
@@ -269,7 +270,7 @@ fn origin_head_chooses_the_base_and_without_it_main_does() {
     let (base_used, names) = listed(&list(&mut engine, 2));
 
     assert_eq!(base_used.as_deref(), Some("develop"));
-    assert_eq!(names, ["dev-work", "old"]);
+    assert_eq!(names, ["old"]);
 
     git_in(&main, &["remote", "set-head", "origin", "--delete"]);
     let (base_used, names) = listed(&list(&mut engine, 3));
@@ -402,10 +403,11 @@ fn an_unmerged_branch_is_never_deleted_even_when_it_is_named() {
 }
 
 #[test]
-fn a_branch_git_refuses_is_reported_and_the_others_still_go() {
+fn a_branch_merged_only_into_the_base_is_not_offered() {
     let base = tempfile::tempdir().unwrap();
     // main moves on to c2; x sits on c2, so it is merged into main, but HEAD is
-    // a side branch from c1 that does not contain c2, so `git branch -d x` refuses.
+    // a side branch from c1 that does not contain c2, so `git branch -d x`
+    // would refuse it. Only y, merged into both, is offered.
     let main = repo(base.path());
     commit(&main, "second");
     git_in(&main, &["branch", "x"]);
@@ -415,24 +417,20 @@ fn a_branch_git_refuses_is_reported_and_the_others_still_go() {
     let mut engine = logged_engine(&main, &CommandLog::default());
     let (base_used, names) = listed(&list(&mut engine, 2));
     assert_eq!(base_used.as_deref(), Some("main"));
-    assert_eq!(names, ["x", "y"]);
+    assert_eq!(names, ["y"]);
 
-    let events = engine.handle(OperationId(3), &human(delete_merged(&["x", "y"])));
+    let refused = engine.handle(OperationId(3), &human(delete_merged(&["x", "y"])));
+    assert_eq!(refusal(&refused).as_deref(), Some(MERGED_LIST_CHANGED));
+    assert!(branch_exists(&main, "x"));
+    assert!(branch_exists(&main, "y"));
 
-    assert!(
-        done(&events),
-        "a refused branch is a report, not a failed run"
-    );
+    let events = engine.handle(OperationId(4), &human(delete_merged(&["y"])));
+    assert!(done(&events), "{events:?}");
     assert!(!branch_exists(&main, "y"));
     assert!(branch_exists(&main, "x"));
     let (deleted, failures) = report(&events);
     assert_eq!(deleted, ["y"]);
-    assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].name, "x");
-    assert!(
-        failures[0].message.contains("not fully merged"),
-        "{failures:?}"
-    );
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 #[test]
