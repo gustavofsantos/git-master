@@ -169,6 +169,17 @@ impl TextArea {
         cx.notify();
     }
 
+    /// Replaces the whole content as one undoable edit, keeping the undo history.
+    pub fn replace_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.editor.replace_text(text);
+        self.marked_range = None;
+        self.shaped = None;
+        self.preferred_x = None;
+        self.reveal = true;
+        self.caret_visible = true;
+        cx.notify();
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.set_text("", cx);
     }

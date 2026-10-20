@@ -127,6 +127,20 @@ impl Editor {
         self.redo.clear();
     }
 
+    /// Replaces the whole text as one undoable edit: undo brings the old text
+    /// back, and the history before it is kept. The cursor keeps its offset,
+    /// moved back to the text's end when the new text is shorter.
+    pub fn replace_text(&mut self, text: &str) {
+        let text = normalize_newlines(text);
+        if text == self.text {
+            return;
+        }
+        self.begin_edit(None);
+        self.text = text;
+        let cursor = self.clamp(self.cursor);
+        self.place(cursor, false);
+    }
+
     /// Moves the cursor to `offset`. With `extend`, the anchor stays put.
     pub fn set_cursor(&mut self, offset: usize, extend: bool) {
         let offset = self.clamp(offset);
@@ -537,6 +551,30 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_whole_text_replace_is_one_undo_step_that_keeps_earlier_history() {
+        let mut e = Editor::from_text("one");
+        e.insert("!");
+        e.replace_text("two\nthree");
+        assert_eq!(e.text(), "two\nthree");
+        assert!(e.undo());
+        assert_eq!(e.text(), "one!");
+        assert!(e.undo());
+        assert_eq!(e.text(), "one");
+        assert!(!e.undo());
+    }
+
+    #[test]
+    fn a_whole_text_replace_keeps_the_cursor_inside_the_text() {
+        let mut e = Editor::from_text("abcdef");
+        e.set_cursor(5, false);
+        e.replace_text("é");
+        assert!(e.cursor() <= e.len());
+        assert!(e.text().is_char_boundary(e.cursor()));
+        e.replace_text("é");
+        assert_eq!(e.text(), "é");
+    }
 
     fn typed(s: &str) -> Editor {
         let mut e = Editor::new();
