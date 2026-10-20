@@ -5,12 +5,15 @@
 //! small arrow head at each target; the labels are small text at their anchors.
 
 use gpui::{
-    Div, FontWeight, Hsla, IntoElement, PathBuilder, Pixels, Stateful, Window, canvas, div, point,
-    prelude::*, px,
+    Context, Div, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, PathBuilder, Pixels,
+    Stateful, Window, canvas, div, point, prelude::*, px,
 };
 
-use crate::flow_graph::{Geometry, Graph, Metrics, Node, NodeKind, Point, Rect, Route};
+use crate::flow_graph::{
+    Geometry, Graph, LABEL_HEIGHT, LABEL_OFFSET, Metrics, Node, NodeKind, Point, Rect, Route,
+};
 use crate::theme;
+use crate::view::StatusView;
 use crate::workflows_page::FlowRow;
 
 /// The sizes of the cards, the terminal pills and the gaps, in pixels.
@@ -18,7 +21,7 @@ pub const METRICS: Metrics = Metrics {
     node_width: 200.0,
     node_height: 64.0,
     terminal_height: 28.0,
-    layer_gap: 56.0,
+    layer_gap: 72.0,
     slot_gap: 40.0,
 };
 
@@ -30,12 +33,6 @@ const ARROW_LENGTH: f32 = 7.0;
 const ARROW_HALF: f32 = 4.0;
 /// The dash of a defaulted edge: the stroke, then the gap.
 const DASH: [f32; 2] = [4.0, 3.0];
-/// A label starts this far right of its anchor, and is this tall.
-const LABEL_OFFSET: f32 = 6.0;
-const LABEL_HEIGHT: f32 = 16.0;
-/// The width of one character of the code font at the label size, for the
-/// canvas to reach the end of the longest label.
-const CHAR_WIDTH: f32 = 7.2;
 
 /// One edge ready to paint.
 struct Stroke {
@@ -46,10 +43,16 @@ struct Stroke {
 }
 
 /// The state graph: the cards, the edges and their labels, in a box as large
-/// as the geometry, scrolling both ways.
+/// as the geometry, scrolling both ways. A click on a state's card selects it,
+/// as a click on its card in the list does; `selected` is drawn with the accent.
 #[must_use]
-pub fn flow_graph(graph: &Graph, geometry: &Geometry, rows: &[FlowRow]) -> Stateful<Div> {
-    let mut width = geometry.width;
+pub fn flow_graph(
+    graph: &Graph,
+    geometry: &Geometry,
+    rows: &[FlowRow],
+    selected: Option<&str>,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
     let mut strokes = Vec::with_capacity(graph.edges.len());
     let mut labels = Vec::with_capacity(graph.edges.len());
     for (edge, route) in graph.edges.iter().zip(&geometry.edges) {
@@ -59,7 +62,6 @@ pub fn flow_graph(graph: &Graph, geometry: &Geometry, rows: &[FlowRow]) -> State
             edge.to.is_some(),
             route,
         ));
-        width = width.max(label_right(&edge.label, route));
         labels.push(label(edge.dangling, edge.defaulted, &edge.label, route));
     }
     let cards = graph
@@ -67,7 +69,7 @@ pub fn flow_graph(graph: &Graph, geometry: &Geometry, rows: &[FlowRow]) -> State
         .iter()
         .zip(&geometry.nodes)
         .map(|(node, rect)| match node.kind {
-            NodeKind::State => card(node, *rect, rows),
+            NodeKind::State => card(node, *rect, rows, selected == Some(node.id.as_str()), cx),
             NodeKind::End => terminal(node, *rect),
         });
     div()
@@ -79,7 +81,7 @@ pub fn flow_graph(graph: &Graph, geometry: &Geometry, rows: &[FlowRow]) -> State
         .child(
             div()
                 .relative()
-                .w(px(width))
+                .w(px(geometry.width))
                 .h(px(geometry.height))
                 .child(edges(strokes))
                 .children(cards)
@@ -186,9 +188,17 @@ fn paint(window: &mut Window, origin: gpui::Point<Pixels>, stroke: &Stroke) {
 }
 
 /// A state's card: its id in bold, its effect badge, the number of its
-/// diagnostics in red, and its action.
-fn card(node: &Node, rect: Rect, rows: &[FlowRow]) -> Div {
+/// diagnostics in red, and its action. A click selects the state, and the
+/// selected card has the accent border, as the card in the list has.
+fn card(
+    node: &Node,
+    rect: Rect,
+    rows: &[FlowRow],
+    selected: bool,
+    cx: &Context<StatusView>,
+) -> Div {
     let problems = diagnostic_count(node, rows);
+    let state = node.id.clone();
     div()
         .absolute()
         .left(px(rect.x))
@@ -198,12 +208,23 @@ fn card(node: &Node, rect: Rect, rows: &[FlowRow]) -> Div {
         .p_2()
         .rounded_md()
         .border_1()
-        .border_color(theme::hairline())
+        .border_color(if selected {
+            theme::accent()
+        } else {
+            theme::hairline()
+        })
         .bg(theme::panel())
         .flex()
         .flex_col()
         .gap_1()
         .overflow_hidden()
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.select_flow_state(&state, cx);
+            }),
+        )
         .child(
             div()
                 .flex()
@@ -317,12 +338,6 @@ fn label(dangling: bool, defaulted: bool, text: &str, route: &Route) -> Div {
         .child(text.to_owned())
 }
 
-/// The right edge of a label, so the canvas reaches it.
-fn label_right(text: &str, route: &Route) -> f32 {
-    let chars = f32::from(u16::try_from(text.chars().count()).unwrap_or(u16::MAX));
-    route.label.x + LABEL_OFFSET + chars * CHAR_WIDTH + 8.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,16 +369,5 @@ mod tests {
         assert!(arrow_head(&[]).is_none());
         assert!(arrow_head(&[at(1.0, 1.0)]).is_none());
         assert!(arrow_head(&[at(1.0, 1.0), at(1.0, 1.0)]).is_none());
-    }
-
-    #[test]
-    fn a_label_reaches_past_its_anchor_by_its_length() {
-        let route = Route {
-            points: vec![at(0.0, 0.0), at(0.0, 10.0)],
-            label: at(100.0, 50.0),
-        };
-        let right = label_right("abcd", &route);
-        assert!(right > 100.0 + 4.0 * CHAR_WIDTH);
-        assert!(label_right("abcdefgh", &route) > right);
     }
 }

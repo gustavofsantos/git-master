@@ -1886,6 +1886,15 @@ states = [
     }
 
     #[test]
+    fn a_terminal_of_the_graph_cannot_be_selected() {
+        let mut page = flow_page(FLOW);
+        page.select_state("a");
+        page.select_state("end.done");
+        page.select_state("end.failed");
+        assert_eq!(page.selected(), Some("a"));
+    }
+
+    #[test]
     fn an_add_goes_after_the_selected_state_and_selects_the_new_one() {
         let mut page = flow_page(FLOW);
         page.select_state("a");
