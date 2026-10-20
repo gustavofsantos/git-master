@@ -7,18 +7,22 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gm_schema::{
-    Actor, CommandKind, Event, OperationId, RepoStatus, WorkflowEnd, WorkflowInfo, WorkflowInput,
-    WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary, WorkflowStepRecord,
+    Actor, CommandKind, Event, OperationId, RepoStatus, WorkflowDryRun, WorkflowDryStep,
+    WorkflowEnd, WorkflowInfo, WorkflowInput, WorkflowRunDetail, WorkflowRunStatus,
+    WorkflowRunSummary, WorkflowStepRecord,
 };
 use serde_json::{Value, json};
 
 use crate::branch;
-use crate::workflow::Severity;
+use crate::workflow::catalog::Level;
 use crate::workflow::driver::{Driver, ExecJob, GitActions, Outcome, RunEvent};
+use crate::workflow::dry_run::{self, DryStep, DryStop, MAX_STEPS};
 use crate::workflow::loader::{Entry, Ignored, Loaded, sha256_hex};
+use crate::workflow::machine::Context;
 use crate::workflow::model::{Definition, End, StateKind};
 use crate::workflow::parse;
 use crate::workflow::store::{OutputRow, RunId, RunRow, RunStatus, Store, TransitionRow, prefix};
+use crate::workflow::{Diagnostic, Severity};
 use crate::{GitError, GitPort, LogEntry};
 
 /// The `gitmaster.workflowPath` key: extra directories of workflow files (D61).
@@ -198,6 +202,99 @@ pub(crate) fn repo_snapshot(git: &dyn GitPort, root: &Path) -> Value {
         "head": head,
         "staged_diff": git.staged_diff(root).ok(),
     })
+}
+
+/// A dry run of `definition` for the editor: the repository snapshot a manual
+/// run reads, and `given` inputs with each declared input it does not give set
+/// to `""`. Nothing runs.
+pub(crate) fn dry_run(
+    git: &dyn GitPort,
+    root: &Path,
+    definition: &Definition,
+    given: &Value,
+) -> WorkflowDryRun {
+    let mut inputs = match given {
+        Value::Object(map) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    let mut missing_inputs = Vec::new();
+    for input in &definition.inputs {
+        if !inputs.contains_key(&input.name) {
+            inputs.insert(input.name.clone(), json!(""));
+            missing_inputs.push(input.name.clone());
+        }
+    }
+    let context = Context {
+        inputs: Value::Object(inputs),
+        trigger: json!({"on": definition.trigger.on}),
+        repo: repo_snapshot(git, root),
+    };
+    let walk = dry_run::dry_run(definition, &context);
+    WorkflowDryRun {
+        error: None,
+        missing_inputs,
+        steps: walk.steps.iter().map(dry_step).collect(),
+        stop: dry_stop(&walk.stop),
+    }
+}
+
+/// The dry run of a text that does not load: its errors, and no steps.
+pub(crate) fn dry_run_error(diagnostics: &[Diagnostic]) -> WorkflowDryRun {
+    let text = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    WorkflowDryRun {
+        error: Some(text),
+        missing_inputs: Vec::new(),
+        steps: Vec::new(),
+        stop: String::new(),
+    }
+}
+
+fn dry_step(step: &DryStep) -> WorkflowDryStep {
+    WorkflowDryStep {
+        state: step.state.clone(),
+        action: step.action.clone(),
+        level: level_name(step.level).to_owned(),
+        input: step.input.clone(),
+        executed: step.executed,
+        assumed: step.assumed,
+        outcome: step.outcome.clone(),
+        output: step.output.clone(),
+    }
+}
+
+fn level_name(level: Level) -> &'static str {
+    match level {
+        Level::Read => "read",
+        Level::Propose => "propose",
+        Level::Apply => "apply",
+        Level::Pause => "approve",
+    }
+}
+
+/// Why a dry run stopped, in words (see `WorkflowDryRun::stop`).
+fn dry_stop(stop: &DryStop) -> String {
+    match stop {
+        DryStop::Ended { end, reason } => {
+            let end = match end {
+                End::Done => "end.done",
+                End::Failed => "end.failed",
+                End::Blocked => "end.blocked",
+            };
+            match reason {
+                Some(reason) => format!("{end}: {reason}"),
+                None => end.to_owned(),
+            }
+        }
+        DryStop::Waiting { event } => format!("would wait for {event}"),
+        DryStop::Unavailable { action } => format!("`{action}` is not available yet"),
+        DryStop::Error(message) => message.clone(),
+        DryStop::StepLimit => format!("stopped after {MAX_STEPS} steps"),
+    }
 }
 
 /// What `ListWorkflows` shows for one file.

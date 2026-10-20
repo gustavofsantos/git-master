@@ -17,6 +17,7 @@ use crate::commit_diff::{StackJob, StackReport};
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::remote::{RemoteJob, RemoteReport};
+use crate::workflow;
 use crate::workflow::driver::{ExecJob, ExecReport};
 use crate::workflow::store::{RETAINED_RUNS, Store};
 use crate::workflow::templates;
@@ -665,6 +666,7 @@ impl Engine {
             | CommandKind::CreateWorkflowFromTemplate { .. }
             | CommandKind::ListWorkflowRuns { .. }
             | CommandKind::LoadWorkflowRun { .. }
+            | CommandKind::DryRunWorkflow { .. }
             | CommandKind::SaveWorkflowFile { .. }
             | CommandKind::DeleteWorkflowFile { .. } => self.workflow_command(id, actor, kind),
             // The worktree and branch commands that `execute` does not list above.
@@ -1469,6 +1471,9 @@ impl Engine {
                 self.list_workflow_runs(id, workflow, *limit)
             }
             CommandKind::LoadWorkflowRun { run } => self.load_workflow_run(id, *run),
+            CommandKind::DryRunWorkflow { source, inputs } => {
+                self.dry_run_workflow(id, source, inputs)
+            }
             CommandKind::SaveWorkflowFile {
                 path,
                 source,
@@ -1575,6 +1580,28 @@ impl Engine {
             detail: Box::new(detail),
         });
         Ok(events)
+    }
+
+    /// Dry run of the workflow text `source` (the editor's, not a saved file):
+    /// walks it without running a step. Reads only. The workflow session is not
+    /// opened, so nothing is resumed and the store is not touched.
+    fn dry_run_workflow(
+        &self,
+        id: OperationId,
+        source: &str,
+        inputs: &serde_json::Value,
+    ) -> Result<Vec<Event>, String> {
+        let dry_run = match workflow::load(source) {
+            Ok((definition, _)) => {
+                let root = self.open_root()?;
+                workflow_session::dry_run(self.git.as_ref(), &root, &definition, inputs)
+            }
+            Err(diagnostics) => workflow_session::dry_run_error(&diagnostics),
+        };
+        Ok(vec![Event::WorkflowDryRun {
+            id,
+            dry_run: Box::new(dry_run),
+        }])
     }
 
     /// Writes the workflow file at `path`, which must be in a workflows directory
@@ -1805,6 +1832,7 @@ impl Engine {
             CommandKind::ListWorkflows
                 | CommandKind::ListWorkflowRuns { .. }
                 | CommandKind::LoadWorkflowRun { .. }
+                | CommandKind::DryRunWorkflow { .. }
                 | CommandKind::CreateWorkflowFromTemplate { .. }
                 | CommandKind::SaveWorkflowFile { .. }
                 | CommandKind::DeleteWorkflowFile { .. }

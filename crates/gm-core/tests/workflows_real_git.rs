@@ -1030,3 +1030,157 @@ fn an_agent_cannot_save_or_delete_a_workflow_file() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), SUGGEST);
     assert!(!data.path().join("trash").exists());
 }
+
+/// Stages, runs an `exec` and commits. The commit message is a literal: an
+/// assumed `exec` output would not render in a dry run.
+const DRY_COMMIT: &str = r#"
+schema = 1
+name = "dry-commit"
+
+[trigger]
+on = "manual"
+
+[[state]]
+id = "stage"
+action = "stage.all"
+with = {}
+
+[[state]]
+id = "say"
+action = "exec"
+with = { argv = ["printf", "%s", "feat: dry"] }
+on.timeout = "end.failed"
+
+[[state]]
+id = "commit"
+action = "commit.create"
+with = { message = "wf: dry" }
+"#;
+
+fn dry_run_of(source: &str, inputs: serde_json::Value) -> CommandKind {
+    CommandKind::DryRunWorkflow {
+        source: source.to_owned(),
+        inputs,
+    }
+}
+
+fn dry_run_listed(events: &[Event]) -> gm_schema::WorkflowDryRun {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::WorkflowDryRun { dry_run, .. } => Some((**dry_run).clone()),
+            _ => None,
+        })
+        .expect("a dry run")
+}
+
+#[test]
+fn a_dry_run_shows_each_step_and_performs_none_of_them() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write(repo.path(), "a.txt", "two\n");
+    let mut harness = Harness::open(repo.path(), flows.path());
+    let before = status(repo.path());
+    assert_eq!(before, " M a.txt\n");
+
+    let events = harness.send(dry_run_of(DRY_COMMIT, json!({})));
+    let dry = dry_run_listed(&events);
+
+    assert_eq!(last_state(&events), OperationState::Done);
+    assert_eq!(dry.error, None);
+    assert!(dry.missing_inputs.is_empty());
+    assert_eq!(dry.stop, "end.done");
+    let names: Vec<(&str, &str)> = dry
+        .steps
+        .iter()
+        .map(|step| (step.state.as_str(), step.action.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("stage", "stage.all"),
+            ("say", "exec"),
+            ("commit", "commit.create"),
+        ]
+    );
+    let say = &dry.steps[1];
+    assert_eq!(say.input, json!({"argv": ["printf", "%s", "feat: dry"]}));
+    assert_eq!(say.level, "read");
+    assert!(!say.executed);
+    assert!(say.assumed);
+    let commit = &dry.steps[2];
+    assert_eq!(commit.input, json!({"message": "wf: dry"}));
+    assert_eq!(commit.level, "apply");
+    assert!(!commit.executed);
+    assert!(commit.assumed);
+
+    // Nothing was done: the working tree, the history and the store are as they were.
+    assert_eq!(status(repo.path()), before);
+    assert_eq!(
+        git(repo.path(), &["log", "-1", "--format=%s"]).trim(),
+        "init"
+    );
+    assert!(!repo.path().join(".git/gitmaster/state.db").exists());
+    assert!(runs_listed(&harness.send(list_runs("dry-commit", 10))).is_empty());
+    assert!(
+        !harness
+            .engine
+            .log()
+            .iter()
+            .any(|entry| matches!(entry.kind, CommandKind::DryRunWorkflow { .. }))
+    );
+}
+
+#[test]
+fn a_dry_run_fills_a_missing_input_with_an_empty_string_and_lists_it() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let mut harness = Harness::open(repo.path(), flows.path());
+    let source = r#"
+schema = 1
+name = "named"
+
+[inputs]
+ticket = { prompt = "Ticket key" }
+title = {}
+
+[trigger]
+on = "manual"
+
+[[state]]
+id = "say"
+action = "exec"
+with = { argv = ["printf", "%s", "${inputs.ticket}"] }
+on.timeout = "end.failed"
+"#;
+
+    let events = harness.send(dry_run_of(source, json!({"ticket": "GM-7"})));
+    let dry = dry_run_listed(&events);
+
+    assert_eq!(dry.missing_inputs, ["title"]);
+    assert_eq!(
+        dry.steps[0].input,
+        json!({"argv": ["printf", "%s", "GM-7"]})
+    );
+    assert_eq!(dry.stop, "end.done");
+}
+
+#[test]
+fn a_dry_run_of_a_text_that_does_not_load_reports_its_errors() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let mut harness = Harness::open(repo.path(), flows.path());
+    let source = DRY_COMMIT.replace("action = \"commit.create\"", "action = \"commit.nope\"");
+
+    let events = harness.send(dry_run_of(&source, json!({})));
+    let dry = dry_run_listed(&events);
+
+    assert_eq!(last_state(&events), OperationState::Done);
+    let error = dry.error.expect("the text does not load");
+    assert!(error.contains("unknown action `commit.nope`"), "{error}");
+    assert!(dry.steps.is_empty());
+    assert_eq!(dry.stop, "");
+}

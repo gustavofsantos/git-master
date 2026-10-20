@@ -11,7 +11,8 @@ use crate::status::{
     WorktreeInspection,
 };
 use crate::workflow::{
-    WorkflowEnd, WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,
+    WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus,
+    WorkflowRunSummary,
 };
 
 /// The refusal of `DeleteMergedBranches` when the merged list no longer matches
@@ -237,6 +238,14 @@ pub enum CommandKind {
     LoadWorkflowRun {
         run: i64,
     },
+    /// Dry run of `source`, the workflow text the editor holds (not a saved
+    /// file): walks it without performing any step, and answers
+    /// `WorkflowDryRun`. `inputs` is an object of input values; a declared input
+    /// it does not give is `""`. Writes nothing, and is never recorded.
+    DryRunWorkflow {
+        source: String,
+        inputs: serde_json::Value,
+    },
     /// Writes `source` to the workflow file at `path`, which must be inside
     /// the user's workflows directories (never a repository). With
     /// `expected_hash`, refuses when the file on disk no longer hashes to it
@@ -451,6 +460,12 @@ pub enum Event {
     WorkflowRunLoaded {
         id: OperationId,
         detail: Box<WorkflowRunDetail>,
+    },
+    /// Answers `DryRunWorkflow`: the steps the workflow would take, and why the
+    /// walk stopped. Boxed, like `WorkflowRunLoaded`.
+    WorkflowDryRun {
+        id: OperationId,
+        dry_run: Box<WorkflowDryRun>,
     },
     /// The file at `path` now holds what was saved; `hash` is its new sha256.
     WorkflowFileSaved {

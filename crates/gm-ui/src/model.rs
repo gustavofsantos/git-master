@@ -723,7 +723,9 @@ impl Model {
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
-            | Event::WorkflowMessageSuggested { .. } => None,
+            // A dry run has no view yet (the editor's dry-run button comes later).
+            | Event::WorkflowMessageSuggested { .. }
+            | Event::WorkflowDryRun { .. } => None,
         }
     }
 
@@ -963,6 +965,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkflowCreated { id, .. }
         | Event::WorkflowRunsListed { id, .. }
         | Event::WorkflowRunLoaded { id, .. }
+        | Event::WorkflowDryRun { id, .. }
         | Event::WorkflowFileSaved { id, .. }
         | Event::WorkflowFileDeleted { id, .. } => Some(*id),
         Event::WorkflowRunChanged { .. }
