@@ -32,6 +32,9 @@ use crate::workflows_page::{FlowEdit, Tab, flow_rows};
 const PICKER_WIDTH: f32 = 260.;
 const ROW_HEIGHT: f32 = 24.;
 const PICKER_MAX_HEIGHT: f32 = 480.;
+/// Where a picker opened from the keyboard hangs: this far from the right edge, and this far down.
+const KEYBOARD_PICKER_INSET: f32 = 300.;
+const KEYBOARD_PICKER_TOP: f32 = 140.;
 
 /// The text field of one value of the inspector, keyed by what it edits.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -683,6 +686,25 @@ impl StatusView {
     fn open_inspector_picker(&mut self, kind: PickerKind, at: (f32, f32), cx: &mut Context<Self>) {
         self.flow_inspector.picker = Some(OpenPicker { kind, at });
         cx.notify();
+    }
+
+    /// Opens a picker from the keyboard, near the inspector's column.
+    pub(crate) fn open_inspector_picker_from_keyboard(
+        &mut self,
+        kind: PickerKind,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let width = f32::from(window.viewport_size().width);
+        let at = (width - KEYBOARD_PICKER_INSET, KEYBOARD_PICKER_TOP);
+        self.open_inspector_picker(kind, at, cx);
+    }
+
+    /// Moves the keyboard to the field that adds an input.
+    pub(crate) fn focus_new_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(field) = self.flow_inspector.fields.get(&Slot::NewInput) {
+            field.area.update(cx, |area, cx| area.focus(window, cx));
+        }
     }
 
     fn close_inspector_picker(&mut self, cx: &mut Context<Self>) {

@@ -103,6 +103,8 @@ pub struct FlowPosition {
     pub states: usize,
     /// The index of the selected top-level state.
     pub selected: Option<usize>,
+    /// Whether the Flow tab is the one shown, where the inspector is.
+    pub shown: bool,
 }
 
 /// The target picker open over one edge of the selected state.
@@ -355,6 +357,7 @@ impl WorkflowsPage {
                 .selected
                 .as_deref()
                 .and_then(|id| ids.iter().position(|known| *known == id)),
+            shown: self.tab == Tab::Flow,
         }
     }
 
@@ -2230,6 +2233,7 @@ states = [
                 parses: true,
                 states: 3,
                 selected: Some(1),
+                shown: true,
             }
         );
         let (rows, _) = flow_rows(page.definition().expect("parses"), &[]);

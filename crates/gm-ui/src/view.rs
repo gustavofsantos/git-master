@@ -877,6 +877,10 @@ impl StatusView {
             Ok(Effect::OpenDeleteWorkflow) => self.ask_delete_workflow(cx),
             Ok(Effect::EditFlow(edit)) => self.apply_flow_edit(edit, cx),
             Ok(Effect::DryRunWorkflow) => self.dry_run_workflow(cx),
+            Ok(Effect::OpenInspectorPicker(kind)) => {
+                self.open_inspector_picker_from_keyboard(kind, window, cx);
+            }
+            Ok(Effect::FocusWorkflowInput) => self.focus_new_input(window, cx),
             Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
         }
         cx.notify();
