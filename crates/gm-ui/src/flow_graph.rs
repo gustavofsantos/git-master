@@ -18,8 +18,6 @@
 //! - Inside a layer, nodes are ordered by the barycenter of their forward
 //!   predecessors' slots, ties by file order. Layer 0 keeps file order.
 
-#![cfg_attr(not(test), allow(dead_code))] // the view does not draw the graph yet
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::workflows_page::{Edge as RowEdge, FlowRow};
@@ -95,6 +93,8 @@ pub struct Graph {
 pub struct Metrics {
     pub node_width: f32,
     pub node_height: f32,
+    /// The height of a terminal, which is drawn as a small pill.
+    pub terminal_height: f32,
     /// The vertical gap between two layers.
     pub layer_gap: f32,
     /// The horizontal gap between two nodes of one layer.
@@ -467,6 +467,7 @@ pub fn geometry(graph: &Graph, metrics: &Metrics) -> Geometry {
 }
 
 /// The rectangle of every node: the layers stacked, each centred on the widest.
+/// A terminal is `terminal_height` tall and hangs from the top of its layer.
 fn node_rects(graph: &Graph, metrics: &Metrics) -> Vec<Rect> {
     let depth = graph
         .nodes
@@ -486,11 +487,15 @@ fn node_rects(graph: &Graph, metrics: &Metrics) -> Vec<Rect> {
         .iter()
         .map(|node| {
             let inset = px(widest - widths[node.layer]) * step_x / 2.0;
+            let h = match node.kind {
+                NodeKind::State => metrics.node_height,
+                NodeKind::End => metrics.terminal_height,
+            };
             Rect {
                 x: MARGIN + inset + px(node.slot) * step_x,
                 y: MARGIN + px(node.layer) * step_y,
                 w: metrics.node_width,
-                h: metrics.node_height,
+                h,
             }
         })
         .collect()
@@ -631,6 +636,7 @@ mod tests {
     const METRICS: Metrics = Metrics {
         node_width: 200.0,
         node_height: 96.0,
+        terminal_height: 28.0,
         layer_gap: 48.0,
         slot_gap: 32.0,
     };

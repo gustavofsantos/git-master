@@ -17,6 +17,7 @@ mod diff_pane;
 mod diff_rows;
 mod editor;
 mod flow_graph;
+mod flow_graph_view;
 mod fuzzy;
 mod hook_run;
 mod icon;

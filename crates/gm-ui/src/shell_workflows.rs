@@ -19,6 +19,8 @@ use gpui::{
 
 use crate::SaveWorkflow;
 use crate::action_registry::{Action, Args};
+use crate::flow_graph;
+use crate::flow_graph_view;
 use crate::shell_history::{now_secs, relative_time};
 use crate::theme;
 use crate::view::{Screen, StatusView};
@@ -492,7 +494,7 @@ impl StatusView {
         banners
     }
 
-    /// The Flow tab: each state as a card, in file order.
+    /// The Flow tab: the state graph, then each state as a card, in file order.
     fn flow_body(&self, _cx: &Context<Self>) -> AnyElement {
         let page = &self.model.workflows_page;
         let Some(definition) = page.definition() else {
@@ -506,9 +508,22 @@ impl StatusView {
                 .into_any_element();
         };
         let (rows, unplaced) = flow_rows(definition, page.diagnostics());
-        scroll_body()
-            .children(unplaced.iter().map(diagnostic_line))
-            .children(rows.iter().map(flow_card))
+        let start = rows.first().map_or("", |row| row.id.as_str());
+        let graph = flow_graph::layout(&rows, start);
+        let geometry = flow_graph::geometry(&graph, &flow_graph_view::METRICS);
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .flex_row()
+            .child(flow_graph_view::flow_graph(&graph, &geometry, &rows))
+            .child(
+                scroll_body()
+                    .w(px(320.))
+                    .flex_none()
+                    .children(unplaced.iter().map(diagnostic_line))
+                    .children(rows.iter().map(flow_card)),
+            )
             .into_any_element()
     }
 
