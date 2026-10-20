@@ -10,11 +10,11 @@ use gpui::{
 };
 
 use crate::flow_graph::{
-    Geometry, Graph, LABEL_HEIGHT, LABEL_OFFSET, Metrics, Node, NodeKind, Point, Rect, Route,
+    Edge, Geometry, Graph, LABEL_HEIGHT, LABEL_OFFSET, Metrics, Node, NodeKind, Point, Rect, Route,
 };
 use crate::theme;
 use crate::view::StatusView;
-use crate::workflows_page::FlowRow;
+use crate::workflows_page::{FlowRow, RunPath};
 
 /// The sizes of the cards, the terminal pills and the gaps, in pixels.
 pub const METRICS: Metrics = Metrics {
@@ -28,6 +28,8 @@ pub const METRICS: Metrics = Metrics {
 /// The width of a terminal pill, centred on its slot.
 const TERMINAL_WIDTH: f32 = 132.0;
 const EDGE_WIDTH: f32 = 1.5;
+/// The width of an edge the shown run took.
+const TAKEN_EDGE_WIDTH: f32 = 3.0;
 /// The arrow head at a target: its length along the edge and its half width.
 const ARROW_LENGTH: f32 = 7.0;
 const ARROW_HALF: f32 = 4.0;
@@ -38,6 +40,7 @@ const DASH: [f32; 2] = [4.0, 3.0];
 struct Stroke {
     points: Vec<Point>,
     color: Hsla,
+    width: f32,
     dashed: bool,
     arrow: Option<[Point; 3]>,
 }
@@ -45,33 +48,41 @@ struct Stroke {
 /// The state graph: the cards, the edges and their labels, in a box as large
 /// as the geometry, scrolling both ways. A click on a state's card selects it,
 /// as a click on its card in the list does; `selected` is drawn with the accent.
+/// With `path`, the states the shown run visited and the edges it took are
+/// drawn with the accent too.
 #[must_use]
 pub fn flow_graph(
     graph: &Graph,
     geometry: &Geometry,
     rows: &[FlowRow],
     selected: Option<&str>,
+    path: Option<&RunPath>,
     cx: &Context<StatusView>,
 ) -> Stateful<Div> {
     let mut strokes = Vec::with_capacity(graph.edges.len());
     let mut labels = Vec::with_capacity(graph.edges.len());
     for (edge, route) in graph.edges.iter().zip(&geometry.edges) {
-        strokes.push(stroke(
-            edge.dangling,
-            edge.defaulted,
-            edge.to.is_some(),
-            route,
-        ));
+        let taken = match (path, edge.to.as_deref()) {
+            (Some(path), Some(to)) => path.takes(&edge.from, to),
+            _ => false,
+        };
+        strokes.push(stroke(edge, taken, route));
         labels.push(label(edge.dangling, edge.defaulted, &edge.label, route));
     }
-    let cards = graph
-        .nodes
-        .iter()
-        .zip(&geometry.nodes)
-        .map(|(node, rect)| match node.kind {
-            NodeKind::State => card(node, *rect, rows, selected == Some(node.id.as_str()), cx),
-            NodeKind::End => terminal(node, *rect),
-        });
+    let cards = graph.nodes.iter().zip(&geometry.nodes).map(|(node, rect)| {
+        let visited = path.is_some_and(|path| path.visits(&node.id));
+        match node.kind {
+            NodeKind::State => card(
+                node,
+                *rect,
+                rows,
+                selected == Some(node.id.as_str()),
+                visited,
+                cx,
+            ),
+            NodeKind::End => terminal(node, *rect, visited),
+        }
+    });
     div()
         .id("workflow-flow-graph")
         .flex_1()
@@ -103,13 +114,22 @@ fn edges(strokes: Vec<Stroke>) -> impl IntoElement {
     .size_full()
 }
 
-fn stroke(dangling: bool, defaulted: bool, has_target: bool, route: &Route) -> Stroke {
-    let color = edge_color(dangling, defaulted);
+fn stroke(edge: &Edge, taken: bool, route: &Route) -> Stroke {
+    let (color, width) = if taken {
+        (theme::accent(), TAKEN_EDGE_WIDTH)
+    } else {
+        (edge_color(edge.dangling, edge.defaulted), EDGE_WIDTH)
+    };
     Stroke {
         points: route.points.clone(),
         color,
-        dashed: defaulted,
-        arrow: has_target.then(|| arrow_head(&route.points)).flatten(),
+        width,
+        dashed: edge.defaulted,
+        arrow: edge
+            .to
+            .is_some()
+            .then(|| arrow_head(&route.points))
+            .flatten(),
     }
 }
 
@@ -161,7 +181,7 @@ fn arrow_head(points: &[Point]) -> Option<[Point; 3]> {
 /// Paints one edge: its polyline, its dash, and its arrow head.
 fn paint(window: &mut Window, origin: gpui::Point<Pixels>, stroke: &Stroke) {
     let at = |p: &Point| point(origin.x + px(p.x), origin.y + px(p.y));
-    let mut line = PathBuilder::stroke(px(EDGE_WIDTH));
+    let mut line = PathBuilder::stroke(px(stroke.width));
     if stroke.dashed {
         line = line.dash_array(&[px(DASH[0]), px(DASH[1])]);
     }
@@ -195,6 +215,7 @@ fn card(
     rect: Rect,
     rows: &[FlowRow],
     selected: bool,
+    visited: bool,
     cx: &Context<StatusView>,
 ) -> Div {
     let problems = diagnostic_count(node, rows);
@@ -208,12 +229,16 @@ fn card(
         .p_2()
         .rounded_md()
         .border_1()
-        .border_color(if selected {
+        .border_color(if selected || visited {
             theme::accent()
         } else {
             theme::hairline()
         })
-        .bg(theme::panel())
+        .bg(if visited {
+            theme::selection()
+        } else {
+            theme::panel()
+        })
         .flex()
         .flex_col()
         .gap_1()
@@ -255,8 +280,8 @@ fn card(
 }
 
 /// A terminal: a small pill centred on its slot. A failed one is red and a
-/// blocked one amber.
-fn terminal(node: &Node, rect: Rect) -> Div {
+/// blocked one amber; one the shown run reached has the accent border.
+fn terminal(node: &Node, rect: Rect, visited: bool) -> Div {
     let width = rect.w.min(TERMINAL_WIDTH);
     let color = match node.id.as_str() {
         "end.failed" => theme::error(),
@@ -271,7 +296,11 @@ fn terminal(node: &Node, rect: Rect) -> Div {
         .h(px(rect.h))
         .rounded_full()
         .border_1()
-        .border_color(theme::hairline())
+        .border_color(if visited {
+            theme::accent()
+        } else {
+            theme::hairline()
+        })
         .bg(theme::panel())
         .flex()
         .items_center()

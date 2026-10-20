@@ -230,6 +230,18 @@ impl StatusView {
         cx.notify();
     }
 
+    /// Shows the open run's path in the Flow tab.
+    pub(crate) fn show_run_in_flow(&mut self, cx: &mut Context<Self>) {
+        self.model.workflows_page.show_run_in_flow();
+        cx.notify();
+    }
+
+    /// Stops showing a run's path in the Flow tab.
+    pub(crate) fn clear_run_path(&mut self, cx: &mut Context<Self>) {
+        self.model.workflows_page.clear_run_path();
+        cx.notify();
+    }
+
     /// A run finished: the Runs list is read again, and the shown run's steps too.
     pub(crate) fn workflow_run_ended(&mut self, run: i64, cx: &mut Context<Self>) {
         let ended_workflow = self
@@ -395,6 +407,11 @@ impl StatusView {
             .children(self.workflow_banners(cx))
             .child(tab_bar(page.tab(), cx))
             .children((page.tab() == Tab::Flow).then(|| self.flow_toolbar(cx)))
+            .children(
+                (page.tab() == Tab::Flow)
+                    .then(|| self.path_banner(cx))
+                    .flatten(),
+            )
             .child(match page.tab() {
                 Tab::Flow => self.flow_body(cx),
                 Tab::Toml => self.toml_body(),
@@ -573,6 +590,38 @@ impl StatusView {
         banners
     }
 
+    /// The line above the Flow while a run's path is shown: which run, and
+    /// whether the file changed since that run started.
+    fn path_banner(&self, cx: &Context<Self>) -> Option<Div> {
+        let page = &self.model.workflows_page;
+        let (run, _) = page.shown_path()?;
+        let mut text = format!("Showing the path of run #{run}");
+        if page.shown_path_file_changed() {
+            text.push_str(" · the file changed since this run");
+        }
+        Some(
+            div()
+                .px_4()
+                .py_1()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .text_sm()
+                .text_color(theme::muted())
+                .child(text)
+                .child(text_button(
+                    "workflow-clear-run-path",
+                    "Clear",
+                    cx,
+                    |this, cx| {
+                        this.clear_run_path(cx);
+                    },
+                )),
+        )
+    }
+
     /// The Flow tab: the state graph, then each state as a card, in file order.
     fn flow_body(&self, cx: &Context<Self>) -> AnyElement {
         let page = &self.model.workflows_page;
@@ -588,6 +637,8 @@ impl StatusView {
         };
         let (rows, unplaced) = flow_rows(definition, page.diagnostics());
         let selected = page.selected();
+        let shown = page.shown_path();
+        let path = shown.as_ref().map(|(_, path)| path);
         let graph = flow_graph::layout(&rows, &definition.start);
         let geometry = flow_graph::geometry(&graph, &flow_graph_view::METRICS);
         div()
@@ -596,7 +647,7 @@ impl StatusView {
             .flex()
             .flex_row()
             .child(flow_graph_view::flow_graph(
-                &graph, &geometry, &rows, selected, cx,
+                &graph, &geometry, &rows, selected, path, cx,
             ))
             .child(
                 scroll_body()
@@ -740,7 +791,15 @@ impl StatusView {
                                     .text_sm()
                                     .text_color(theme::muted())
                                     .child(summary.workflow.clone()),
-                            ),
+                            )
+                            .child(text_button(
+                                "workflow-show-run-in-flow",
+                                "Show in Flow",
+                                cx,
+                                |this, cx| {
+                                    this.show_run_in_flow(cx);
+                                },
+                            )),
                     )
                     .child(
                         div()

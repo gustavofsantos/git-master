@@ -151,6 +151,9 @@ pub struct WorkflowsPage {
     run_op: Option<OperationId>,
     /// The JSON blocks the user expanded with "Show all", by `expand_key`.
     expanded: BTreeSet<String>,
+    /// The run whose path the Flow highlights, once the user chose to show it.
+    /// It follows the run open in the Runs view while it is shown.
+    flow_run: Option<i64>,
     /// The top-level state the Flow's controls act on.
     selected: Option<String>,
     /// Why the last Flow edit was refused; the buffer is unchanged then.
@@ -615,12 +618,51 @@ impl WorkflowsPage {
         self.runs = Some(runs);
     }
 
-    /// Selects a run of the Runs list and returns the read of its detail.
+    /// Selects a run of the Runs list and returns the read of its detail. A
+    /// path the Flow is showing moves to this run.
     pub fn open_run(&mut self, run: i64) -> Option<CommandKind> {
         self.open.as_ref()?;
         self.run = Some(run);
         self.detail = None;
+        if self.flow_run.is_some() {
+            self.flow_run = Some(run);
+        }
         Some(CommandKind::LoadWorkflowRun { run })
+    }
+
+    /// Shows the open run's path in the Flow, and switches to the Flow tab.
+    pub fn show_run_in_flow(&mut self) {
+        if self.run.is_some() {
+            self.flow_run = self.run;
+            self.tab = Tab::Flow;
+        }
+    }
+
+    /// Stops showing a run's path in the Flow.
+    pub fn clear_run_path(&mut self) {
+        self.flow_run = None;
+    }
+
+    /// The run whose path the Flow highlights, and its path. `None` when no
+    /// path is shown, or its run's detail is not loaded yet.
+    #[must_use]
+    pub fn shown_path(&self) -> Option<(i64, RunPath)> {
+        let run = self.flow_run?;
+        let detail = self
+            .detail
+            .as_ref()
+            .filter(|detail| detail.summary.run == run)?;
+        Some((run, run_path(detail)))
+    }
+
+    /// Whether the file changed since the shown run started, so its path may
+    /// name edges the file no longer has.
+    #[must_use]
+    pub fn shown_path_file_changed(&self) -> bool {
+        match (self.detail.as_ref(), self.open.as_ref()) {
+            (Some(detail), Some(open)) => detail.definition != open.disk_source,
+            _ => false,
+        }
     }
 
     /// Records the operation that answers a run's detail read.
@@ -1180,6 +1222,72 @@ pub fn output_text(step: &WorkflowStepRecord) -> String {
         Some(value) => pretty_json(value),
         None => "No output yet".to_owned(),
     }
+}
+
+/// The way one run went through the Flow: the top-level states it was in and
+/// the transitions it took between them. Read from the run's step records.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunPath {
+    /// The top-level states the run visited, or is in.
+    pub states: BTreeSet<String>,
+    /// The transitions taken, as `(from, to)` top-level states; `to` may be an
+    /// `end.*`. A transition between two states nested under the same
+    /// `for_each` is not an edge of the Flow, so it is not here.
+    pub edges: BTreeSet<(String, String)>,
+}
+
+impl RunPath {
+    /// Whether the run was in the top-level state `id`, or went to it: a state
+    /// or an `end.*` of the Flow.
+    #[must_use]
+    pub fn visits(&self, id: &str) -> bool {
+        self.states.contains(id) || self.edges.iter().any(|(_, to)| to == id)
+    }
+
+    /// Whether the run went from the top-level state `from` straight to `to`.
+    #[must_use]
+    pub fn takes(&self, from: &str, to: &str) -> bool {
+        self.edges.iter().any(|(a, b)| a == from && b == to)
+    }
+}
+
+/// The top-level state a state path belongs to: `each` for `each/plan`.
+fn top_level(path: &str) -> &str {
+    path.split_once('/').map_or(path, |(top, _)| top)
+}
+
+/// Whether two state paths are nested under the same `for_each`.
+fn same_parent(a: &str, b: &str) -> bool {
+    matches!((a.split_once('/'), b.split_once('/')), (Some((x, _)), Some((y, _))) if x == y)
+}
+
+/// The states and transitions a run took, for the Flow to highlight. Every step
+/// record names the state it left (`state`) and the place the run went to
+/// (`next`, a state path or an `end.*`); the state the run is in is in the
+/// summary while it has not ended.
+#[must_use]
+pub fn run_path(detail: &WorkflowRunDetail) -> RunPath {
+    let mut path = RunPath::default();
+    if let Some(current) = detail.summary.current_state.as_deref() {
+        path.states.insert(top_level(current).to_owned());
+    }
+    for step in &detail.steps {
+        path.states.insert(top_level(&step.state).to_owned());
+        let Some(next) = step.next.as_deref() else {
+            continue;
+        };
+        if !next.starts_with("end.") {
+            path.states.insert(top_level(next).to_owned());
+            if same_parent(&step.state, next) {
+                continue;
+            }
+        }
+        path.edges.insert((
+            top_level(&step.state).to_owned(),
+            top_level(next).to_owned(),
+        ));
+    }
+    path
 }
 
 #[cfg(test)]
@@ -2126,5 +2234,228 @@ states = [
                 ("failed → end.failed".to_owned(), 0),
             ]
         );
+    }
+
+    fn step(state: &str, outcome: &str, next: &str) -> WorkflowStepRecord {
+        WorkflowStepRecord {
+            state: state.into(),
+            visit: 1,
+            action: None,
+            input: None,
+            output: None,
+            truncated: false,
+            outcome: Some(outcome.into()),
+            next: Some(next.into()),
+            started_at: 0,
+            ended_at: Some(1),
+        }
+    }
+
+    fn run_with(
+        status: WorkflowRunStatus,
+        current: Option<&str>,
+        steps: Vec<WorkflowStepRecord>,
+    ) -> WorkflowRunDetail {
+        let mut summary = summary(7, status);
+        summary.current_state = current.map(str::to_owned);
+        WorkflowRunDetail {
+            summary,
+            definition: SAMPLE.to_owned(),
+            inputs: json!({}),
+            trigger: json!({}),
+            repo: json!({}),
+            steps,
+        }
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> BTreeSet<(String, String)> {
+        list.iter()
+            .map(|(from, to)| ((*from).to_owned(), (*to).to_owned()))
+            .collect()
+    }
+
+    fn names(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_linear_run_visits_each_state_and_takes_each_transition_once() {
+        let detail = run_with(
+            WorkflowRunStatus::Done,
+            None,
+            vec![
+                step("a", "done", "b"),
+                step("b", "done", "c"),
+                step("c", "done", "end.done"),
+            ],
+        );
+        let path = run_path(&detail);
+        assert_eq!(path.states, names(&["a", "b", "c"]));
+        assert_eq!(
+            path.edges,
+            pairs(&[("a", "b"), ("b", "c"), ("c", "end.done")])
+        );
+    }
+
+    #[test]
+    fn a_retry_loop_draws_its_edge_once() {
+        let detail = run_with(
+            WorkflowRunStatus::Done,
+            None,
+            vec![
+                step("a", "done", "b"),
+                step("b", "retry", "a"),
+                step("a", "done", "b"),
+                step("b", "retry", "a"),
+                step("a", "done", "b"),
+                step("b", "done", "end.done"),
+            ],
+        );
+        let path = run_path(&detail);
+        assert_eq!(path.states, names(&["a", "b"]));
+        assert_eq!(
+            path.edges,
+            pairs(&[("a", "b"), ("b", "a"), ("b", "end.done")])
+        );
+    }
+
+    #[test]
+    fn a_run_that_failed_ends_its_path_at_end_failed() {
+        let detail = run_with(
+            WorkflowRunStatus::Failed,
+            None,
+            vec![step("a", "done", "b"), step("b", "failed", "end.failed")],
+        );
+        let path = run_path(&detail);
+        assert_eq!(path.states, names(&["a", "b"]));
+        assert_eq!(path.edges, pairs(&[("a", "b"), ("b", "end.failed")]));
+    }
+
+    #[test]
+    fn a_running_run_shows_the_state_it_is_in() {
+        let detail = run_with(
+            WorkflowRunStatus::Waiting,
+            Some("confirm"),
+            vec![step("a", "done", "confirm")],
+        );
+        let path = run_path(&detail);
+        assert_eq!(path.states, names(&["a", "confirm"]));
+        assert_eq!(path.edges, pairs(&[("a", "confirm")]));
+    }
+
+    #[test]
+    fn a_nested_run_maps_its_states_to_the_for_each_and_skips_inner_moves() {
+        let detail = run_with(
+            WorkflowRunStatus::Done,
+            None,
+            vec![
+                step("prep", "done", "each/plan"),
+                step("each/plan", "retry", "each/plan"),
+                step("each/plan", "done", "each/apply"),
+                step("each/apply", "done", "each/plan"),
+                step("each/plan", "done", "after"),
+                step("after", "done", "end.done"),
+            ],
+        );
+        let path = run_path(&detail);
+        assert_eq!(path.states, names(&["prep", "each", "after"]));
+        assert_eq!(
+            path.edges,
+            pairs(&[("prep", "each"), ("each", "after"), ("after", "end.done"),])
+        );
+    }
+
+    #[test]
+    fn a_nested_state_that_fails_the_run_leaves_from_its_for_each() {
+        let detail = run_with(
+            WorkflowRunStatus::Failed,
+            None,
+            vec![step("each/plan", "failed", "end.failed")],
+        );
+        let path = run_path(&detail);
+        assert_eq!(path.states, names(&["each"]));
+        assert_eq!(path.edges, pairs(&[("each", "end.failed")]));
+    }
+
+    #[test]
+    fn a_path_says_which_states_and_ends_it_visits_and_which_moves_it_took() {
+        let path = run_path(&run_with(
+            WorkflowRunStatus::Done,
+            None,
+            vec![step("a", "retry", "a"), step("a", "done", "end.done")],
+        ));
+        assert!(path.visits("a"));
+        assert!(path.visits("end.done"));
+        assert!(!path.visits("b"));
+        assert!(path.takes("a", "a"));
+        assert!(path.takes("a", "end.done"));
+        assert!(!path.takes("end.done", "a"));
+    }
+
+    #[test]
+    fn a_run_with_no_steps_has_no_path() {
+        let path = run_path(&run_with(WorkflowRunStatus::Running, None, Vec::new()));
+        assert_eq!(path, RunPath::default());
+    }
+
+    #[test]
+    fn showing_a_run_path_needs_the_run_loaded_and_follows_the_open_run() {
+        let (mut page, _) = opened();
+        page.open_run(7);
+        page.track_run(id(1));
+        page.run_loaded(
+            id(1),
+            run_with(
+                WorkflowRunStatus::Done,
+                None,
+                vec![step("ticket", "done", "end.done")],
+            ),
+        );
+        assert_eq!(page.shown_path(), None, "no path until one is shown");
+        page.show_run_in_flow();
+        assert_eq!(page.tab(), Tab::Flow);
+        let (run, path) = page.shown_path().expect("the loaded run is shown");
+        assert_eq!(run, 7);
+        assert_eq!(path.edges, pairs(&[("ticket", "end.done")]));
+        assert!(!page.shown_path_file_changed());
+
+        page.open_run(8);
+        assert_eq!(page.shown_path(), None, "the new run has not loaded");
+        page.track_run(id(2));
+        let mut other = run_with(WorkflowRunStatus::Done, None, Vec::new());
+        other.summary.run = 8;
+        page.run_loaded(id(2), other);
+        assert_eq!(page.shown_path().map(|(run, _)| run), Some(8));
+    }
+
+    #[test]
+    fn clear_and_another_workflow_both_drop_the_shown_path() {
+        let (mut page, listed) = opened();
+        page.open_run(7);
+        page.track_run(id(1));
+        page.run_loaded(id(1), run_with(WorkflowRunStatus::Done, None, Vec::new()));
+        page.show_run_in_flow();
+        assert!(page.shown_path().is_some());
+        page.clear_run_path();
+        assert_eq!(page.shown_path(), None);
+
+        page.show_run_in_flow();
+        let mut other = listed.clone();
+        other.push(info("/w/other.toml", "other", SAMPLE, "h2"));
+        assert!(page.select("/w/other.toml", &other));
+        assert_eq!(page.shown_path(), None, "another workflow drops the path");
+    }
+
+    #[test]
+    fn a_path_of_a_run_of_an_older_file_says_the_file_changed() {
+        let (mut page, _) = opened();
+        page.open_run(7);
+        page.track_run(id(1));
+        let mut detail = run_with(WorkflowRunStatus::Done, None, Vec::new());
+        detail.definition = "an older text".to_owned();
+        page.run_loaded(id(1), detail);
+        page.show_run_in_flow();
+        assert!(page.shown_path().is_some(), "the path is still shown");
+        assert!(page.shown_path_file_changed());
     }
 }
