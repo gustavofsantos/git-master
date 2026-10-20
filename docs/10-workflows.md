@@ -416,7 +416,7 @@ workflow_approval(definition_hash, state_id, granted_at)
 5. **Concorrência em uma transação**: `queue`, `replace` e `skip` (D65) viram uma chave única de execução ativa por workflow, junto da linha em `workflow_pending`. Não há trava em memória entre threads.
 6. **Esperas são linhas**: um evento do motor é casado com `workflow_wait` em uma consulta. O prazo de `timeout` é a coluna `deadline`, verificada pelo motor enquanto o app roda. Isso não é gatilho por tempo: Q17 continua fechada.
 7. **Histórico e aba Flow são consultas**: o caminho que a execução percorreu são as suas transições, e a UI o destaca no grafo. Retenção: as últimas 200 execuções por workflow e por repositório (configurável depois, em Settings), podadas no início de cada execução. Saídas maiores que 64 KiB ficam como hash, tamanho e os primeiros 4 KiB (diffs e textos de LLM não são guardados inteiros). Apagar um workflow mantém as execuções até a poda.
-8. **Dry run continua somente leitura**: roda a função pura contra um SQLite em memória, descartável, sem efeitos para `propose`, `apply` e `exec` (D76, Q21).
+8. **Dry run continua somente leitura**: percorre a função pura sem banco e sem efeitos para `propose`, `apply` e `exec` (D76, D85, Q21).
 
 Ressalva a registrar: isto é um **log da execução**, mantido pelo motor. Não é event sourcing do estado do repositório (`06` alerta contra isso, e continua valendo). Git continua sendo a fonte da verdade, e todo efeito revalida os fingerprints antes de agir (D66).
 
