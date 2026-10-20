@@ -439,7 +439,10 @@ fn new_field(
     let handle = area.read(cx).focus_handle(cx);
     let on_blur = slot.clone();
     let blur = cx.on_blur(&handle, window, move |this, _, cx| {
-        this.commit_flow_field(&on_blur, cx);
+        // A new input is added on Enter only; a stray blur must not add one.
+        if on_blur != Slot::NewInput {
+            this.commit_flow_field(&on_blur, cx);
+        }
     });
     FlowField {
         area,
@@ -661,13 +664,16 @@ impl StatusView {
     }
 
     /// Commits the text field the keyboard is in, so typed text is not lost when
-    /// the selection or the picker moves on from it.
+    /// the selection or the picker moves on from it. The new-input field is left
+    /// alone: it is added on Enter only.
     pub(crate) fn commit_focused_flow_field(&mut self, window: &Window, cx: &mut Context<Self>) {
         let focused = self
             .flow_inspector
             .fields
             .iter()
-            .find(|(_, field)| field.area.read(cx).is_focused(window))
+            .find(|(slot, field)| {
+                *slot != &Slot::NewInput && field.area.read(cx).is_focused(window)
+            })
             .map(|(slot, _)| slot.clone());
         if let Some(slot) = focused {
             self.commit_flow_field(&slot, cx);
