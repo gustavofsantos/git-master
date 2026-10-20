@@ -152,8 +152,28 @@ fn answer(action: &str, input: &Value) -> (bool, bool, String, Value) {
         "set" => (true, false, "done".to_owned(), input.clone()),
         // The human's approval is assumed: the dry run shows what follows it.
         "approve" => (false, true, "approved".to_owned(), json!({})),
+        "exec" => (false, true, "done".to_owned(), exec_placeholder(input)),
         other => (false, true, assumed_outcome(other), json!({})),
     }
+}
+
+/// What a dry run shows in place of an `exec` answer it never got.
+pub const EXEC_PLACEHOLDER: &str = "<output of exec>";
+
+/// An `exec` output with the shape the driver gives (`exec::run`), so a later
+/// state that reads `output.text` renders instead of failing: the text is
+/// `EXEC_PLACEHOLDER`, and `format = "json"` adds an empty `json`.
+fn exec_placeholder(input: &Value) -> Value {
+    let mut output = json!({
+        "text": EXEC_PLACEHOLDER,
+        "exit_code": 0,
+        "stderr": "",
+        "truncated": false,
+    });
+    if input.get("format").and_then(Value::as_str) == Some("json") {
+        output["json"] = json!({});
+    }
+    output
 }
 
 /// `done` when the action can end with it, else the first outcome the catalog
@@ -258,7 +278,8 @@ with = { message = "${states.msg.output.value}" }
         );
         assert!(!ask.executed);
         assert!(ask.assumed);
-        assert_eq!((ask.outcome.as_str(), &ask.output), ("done", &json!({})));
+        assert_eq!(ask.outcome, "done");
+        assert_eq!(ask.output["text"], EXEC_PLACEHOLDER);
 
         let commit = &dry.steps[2];
         assert_eq!(commit.action, "commit.create");
@@ -266,6 +287,25 @@ with = { message = "${states.msg.output.value}" }
         assert_eq!(commit.input, json!({"message": "feat: x"}));
         assert!(!commit.executed);
         assert!(commit.assumed);
+    }
+
+    #[test]
+    fn a_state_that_reads_exec_text_renders_the_placeholder() {
+        let def = loaded(include_str!(
+            "../../tests/workflows/suggest-commit-message.toml"
+        ));
+
+        let dry = dry_run(&def, &context(json!({})));
+
+        assert_eq!(
+            dry.stop,
+            DryStop::Ended {
+                end: End::Done,
+                reason: None
+            }
+        );
+        assert_eq!(dry.steps.len(), 2);
+        assert_eq!(dry.steps[1].input, json!({"message": EXEC_PLACEHOLDER}));
     }
 
     #[test]
