@@ -18,6 +18,7 @@ use gm_schema::{
 use gm_core::workflow::edit::Direction;
 
 use crate::branch_filter::Scope;
+use crate::flow_inspector::PickerKind;
 use crate::workflows_page::{FlowEdit, PageState};
 
 /// Why an action is not enabled, as a short English sentence for the user.
@@ -161,6 +162,10 @@ pub enum Effect {
     EditFlow(FlowEdit),
     /// Asks the engine for a dry run of the open workflow's buffer.
     DryRunWorkflow,
+    /// Opens a popover of the Flow's inspector: the actions or the triggers.
+    OpenInspectorPicker(PickerKind),
+    /// Moves the keyboard to the field that adds an input.
+    FocusWorkflowInput,
     /// Sets the sidebar's branches to the scope the window names (D53).
     SetBranchScope(Scope),
 }
@@ -224,7 +229,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 58] = [
+const SPECS: [Spec; 61] = [
     spec(
         "file.stage",
         "Stage File",
@@ -527,6 +532,27 @@ const SPECS: [Spec; 58] = [
         Category::Workflows,
     ),
     spec(
+        "workflow.set_action",
+        "Set Workflow State Action",
+        None,
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
+        "workflow.set_trigger",
+        "Set Workflow Trigger",
+        None,
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
+        "workflow.add_input",
+        "Add Workflow Input",
+        None,
+        ArgKind::None,
+        Category::Workflows,
+    ),
+    spec(
         "remote.fetch",
         "Fetch",
         None,
@@ -690,6 +716,9 @@ pub enum Action {
     MoveWorkflowStateUp,
     MoveWorkflowStateDown,
     DryRunWorkflow,
+    SetWorkflowStateCall,
+    SetWorkflowTrigger,
+    AddWorkflowInput,
     Fetch,
     Pull,
     OpenWorktree,
@@ -800,7 +829,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 58] = [
+    pub const ALL: [Action; 61] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -844,6 +873,9 @@ impl Action {
         Action::MoveWorkflowStateUp,
         Action::MoveWorkflowStateDown,
         Action::DryRunWorkflow,
+        Action::SetWorkflowStateCall,
+        Action::SetWorkflowTrigger,
+        Action::AddWorkflowInput,
         Action::Fetch,
         Action::Pull,
         Action::OpenWorktree,
@@ -944,6 +976,9 @@ impl Action {
                 | Action::MoveWorkflowStateUp
                 | Action::MoveWorkflowStateDown
                 | Action::DryRunWorkflow
+                | Action::SetWorkflowStateCall
+                | Action::SetWorkflowTrigger
+                | Action::AddWorkflowInput
         )
     }
 
@@ -1268,6 +1303,14 @@ fn workflow_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), R
         | Action::MoveWorkflowStateUp
         | Action::MoveWorkflowStateDown => flow_edit_rule(action, ctx),
         Action::DryRunWorkflow => dry_run_rule(ctx),
+        Action::SetWorkflowStateCall => {
+            inspector_rule(ctx)?;
+            match page_open(ctx)?.flow.selected {
+                Some(_) => Ok(()),
+                None => Err("Select a state in the Flow first."),
+            }
+        }
+        Action::SetWorkflowTrigger | Action::AddWorkflowInput => inspector_rule(ctx),
         _ => ctx
             .workflows
             .active
@@ -1307,6 +1350,9 @@ fn workflow_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Eff
         (Action::MoveWorkflowStateUp, _) => Effect::EditFlow(FlowEdit::Move(Direction::Up)),
         (Action::MoveWorkflowStateDown, _) => Effect::EditFlow(FlowEdit::Move(Direction::Down)),
         (Action::DryRunWorkflow, _) => Effect::DryRunWorkflow,
+        (Action::SetWorkflowStateCall, _) => Effect::OpenInspectorPicker(PickerKind::Action),
+        (Action::SetWorkflowTrigger, _) => Effect::OpenInspectorPicker(PickerKind::Trigger),
+        (Action::AddWorkflowInput, _) => Effect::FocusWorkflowInput,
         (Action::OpenWorkflowsFolder, _) => Effect::Reveal(PathBuf::from(workflows_folder(ctx)?)),
         (Action::ApproveWorkflowStep | Action::RejectWorkflowStep, _) => {
             let Some((run, _)) = ctx.workflows.awaiting else {
@@ -1348,6 +1394,19 @@ fn flow_edit_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
         }
         _ => Ok(()),
     }
+}
+
+/// The rule of the inspector's pickers and its new-input field: the Flow tab
+/// shows, and the file parses so the inspector has its values.
+fn inspector_rule(ctx: &Context<'_>) -> Result<(), Reason> {
+    let page = page_open(ctx)?;
+    if !page.flow.shown {
+        return Err("Open the Flow tab first.");
+    }
+    if !page.flow.parses {
+        return Err("Fix the file in the TOML tab first.");
+    }
+    Ok(())
 }
 
 /// The rule of Dry Run: the page has an open file that parses. A save in flight
@@ -2679,6 +2738,7 @@ mod tests {
             parses,
             states,
             selected,
+            shown: true,
         };
         let page = |flow| {
             with_workflows(WorkflowCtx {
@@ -2741,6 +2801,7 @@ mod tests {
                         parses,
                         states: 1,
                         selected: None,
+                        shown: true,
                     },
                     ..PageState::default()
                 },
@@ -2770,6 +2831,70 @@ mod tests {
             Action::DryRunWorkflow.enabled(&Args::None, &no_file),
             Err("No workflow is open.")
         );
+    }
+
+    #[test]
+    fn the_inspector_actions_need_the_flow_tab_a_parsing_file_and_a_state_for_the_action() {
+        let page = |shown, parses, selected| {
+            with_workflows(WorkflowCtx {
+                page: PageState {
+                    shown: true,
+                    name: Some("w"),
+                    flow: FlowPosition {
+                        parses,
+                        states: 2,
+                        selected,
+                        shown,
+                    },
+                    ..PageState::default()
+                },
+                ..WorkflowCtx::default()
+            })
+        };
+        let on_toml = page(false, true, Some(0));
+        assert_eq!(
+            Action::SetWorkflowTrigger.enabled(&Args::None, &on_toml),
+            Err("Open the Flow tab first.")
+        );
+        let broken = page(true, false, Some(0));
+        assert_eq!(
+            Action::AddWorkflowInput.enabled(&Args::None, &broken),
+            Err("Fix the file in the TOML tab first.")
+        );
+        let unselected = page(true, true, None);
+        assert_eq!(
+            Action::SetWorkflowStateCall.enabled(&Args::None, &unselected),
+            Err("Select a state in the Flow first.")
+        );
+        assert_eq!(
+            Action::SetWorkflowStateCall.plan(&Args::None, &page(true, true, Some(0))),
+            Ok(Effect::OpenInspectorPicker(PickerKind::Action))
+        );
+        assert_eq!(
+            Action::SetWorkflowTrigger.plan(&Args::None, &page(true, true, None)),
+            Ok(Effect::OpenInspectorPicker(PickerKind::Trigger))
+        );
+        assert_eq!(
+            Action::AddWorkflowInput.plan(&Args::None, &page(true, true, None)),
+            Ok(Effect::FocusWorkflowInput)
+        );
+    }
+
+    #[test]
+    fn the_inspector_actions_have_their_ids_titles_and_no_keys() {
+        assert_eq!(Action::SetWorkflowStateCall.id(), "workflow.set_action");
+        assert_eq!(Action::SetWorkflowTrigger.id(), "workflow.set_trigger");
+        assert_eq!(Action::AddWorkflowInput.id(), "workflow.add_input");
+        assert_eq!(Action::AddWorkflowInput.spec().title, "Add Workflow Input");
+        for action in [
+            Action::SetWorkflowStateCall,
+            Action::SetWorkflowTrigger,
+            Action::AddWorkflowInput,
+        ] {
+            assert_eq!(action.spec().shortcut, None, "{action:?}");
+            assert_eq!(action.spec().category, Category::Workflows, "{action:?}");
+            assert_eq!(action.spec().args, ArgKind::None, "{action:?}");
+        }
     }
 
     #[test]

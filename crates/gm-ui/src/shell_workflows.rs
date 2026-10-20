@@ -653,6 +653,7 @@ impl StatusView {
                 scroll_body()
                     .w(px(320.))
                     .flex_none()
+                    .child(self.inspector_panel(cx))
                     .children(unplaced.iter().map(diagnostic_line))
                     .children(
                         rows.iter()
@@ -1377,7 +1378,8 @@ fn flow_card(row: &FlowRow, selected: bool, cx: &Context<StatusView>) -> Div {
     if editable {
         card = card.cursor_pointer().on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.commit_focused_flow_field(window, cx);
                 this.select_flow_state(&state, cx);
             }),
         );
@@ -1470,7 +1472,7 @@ fn flow_edge(
 }
 
 /// One diagnostic, in its colour: errors red, warnings amber.
-fn diagnostic_line(diagnostic: &Diagnostic) -> Div {
+pub(crate) fn diagnostic_line(diagnostic: &Diagnostic) -> Div {
     let color = match diagnostic.severity {
         Severity::Error => theme::error(),
         Severity::Warning => theme::warn_fg(),

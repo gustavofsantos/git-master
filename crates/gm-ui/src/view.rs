@@ -27,6 +27,7 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::context_menu::ContextMenu;
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::diff_rows::Layout;
+use crate::flow_inspector::FlowInspector;
 use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
 use crate::merged_branches::MergedDialog;
@@ -128,6 +129,8 @@ pub struct StatusView {
     pub(crate) workflow_inputs_dialog: Option<WorkflowInputsDialog>,
     /// The editor of the Workflows page's TOML tab; its text is the page's buffer.
     pub(crate) workflow_source: Entity<TextArea>,
+    /// The Flow's inspector: its text fields and the popover open over it.
+    pub(crate) flow_inspector: FlowInspector,
     /// The delete-branch dialog, while it is open.
     pub(crate) delete_dialog: Option<DeleteDialog>,
     /// The delete-merged-branches dialog, while it is open.
@@ -295,6 +298,7 @@ impl StatusView {
             new_branch_dialog: None,
             workflow_inputs_dialog: None,
             workflow_source,
+            flow_inspector: FlowInspector::default(),
             delete_dialog: None,
             merged_dialog: None,
             recents,
@@ -873,6 +877,10 @@ impl StatusView {
             Ok(Effect::OpenDeleteWorkflow) => self.ask_delete_workflow(cx),
             Ok(Effect::EditFlow(edit)) => self.apply_flow_edit(edit, cx),
             Ok(Effect::DryRunWorkflow) => self.dry_run_workflow(cx),
+            Ok(Effect::OpenInspectorPicker(kind)) => {
+                self.open_inspector_picker_from_keyboard(kind, window, cx);
+            }
+            Ok(Effect::FocusWorkflowInput) => self.focus_new_input(window, cx),
             Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
         }
         cx.notify();
@@ -1121,16 +1129,25 @@ impl StatusView {
     }
 }
 
-impl Render for StatusView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The stored sizes are clamped again here, because a window resized
-        // after a drag may have moved the limits. The left column is fitted
-        // beside the sidebar's clamped width, so the main area keeps its room.
+impl StatusView {
+    /// The stored sizes of the sidebar, the left column and the commit area,
+    /// clamped again at each frame: a window resized after a drag may have moved
+    /// the limits. The left column is fitted beside the sidebar's clamped width,
+    /// so the main area keeps its room.
+    fn fitted_sizes(&self, window: &Window) -> (f32, f32, f32) {
         let viewport = window.viewport_size();
         let sidebar_width = resize::SIDEBAR.clamp(self.sidebar_width, f32::from(viewport.width));
         let left_width =
             resize::left_beside_sidebar(self.left_width, sidebar_width, f32::from(viewport.width));
         let commit_height = resize::COMMIT.clamp(self.commit_height, f32::from(viewport.height));
+        (sidebar_width, left_width, commit_height)
+    }
+}
+
+impl Render for StatusView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_flow_inspector(window, cx);
+        let (sidebar_width, left_width, commit_height) = self.fitted_sizes(window);
         window_chrome::sync_client_inset(window);
         let app = div()
             .size_full()
@@ -1199,6 +1216,7 @@ impl Render for StatusView {
             )
             .children(self.palette.open.then(|| self.palette_layer(window, cx)))
             .children(self.workflow_picker_layer(window, cx))
+            .children(self.inspector_picker_layer(window, cx))
             .children(
                 self.worktree_dialog
                     .is_some()

@@ -29,6 +29,13 @@ const IMPLEMENTED: &[&str] = &[
     "branch.checkout",
 ];
 
+/// Whether the driver carries out `action`. A dry run stops at any other one
+/// with `Unavailable`, and a picker of actions marks it as not available yet.
+#[must_use]
+pub fn is_implemented(action: &str) -> bool {
+    IMPLEMENTED.contains(&action)
+}
+
 /// The walk of one workflow: the steps it records and why it stopped.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DryRun {

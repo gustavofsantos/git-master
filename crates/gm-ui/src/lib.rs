@@ -18,6 +18,7 @@ mod diff_rows;
 mod editor;
 mod flow_graph;
 mod flow_graph_view;
+mod flow_inspector;
 mod fuzzy;
 mod hook_run;
 mod icon;
