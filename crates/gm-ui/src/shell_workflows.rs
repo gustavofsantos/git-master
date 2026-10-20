@@ -637,6 +637,8 @@ impl StatusView {
         };
         let (rows, unplaced) = flow_rows(definition, page.diagnostics());
         let selected = page.selected();
+        let shown = page.shown_path();
+        let path = shown.as_ref().map(|(_, path)| path);
         let graph = flow_graph::layout(&rows, &definition.start);
         let geometry = flow_graph::geometry(&graph, &flow_graph_view::METRICS);
         div()
@@ -645,7 +647,7 @@ impl StatusView {
             .flex()
             .flex_row()
             .child(flow_graph_view::flow_graph(
-                &graph, &geometry, &rows, selected, cx,
+                &graph, &geometry, &rows, selected, path, cx,
             ))
             .child(
                 scroll_body()

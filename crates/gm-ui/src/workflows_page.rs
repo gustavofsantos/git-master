@@ -1236,6 +1236,21 @@ pub struct RunPath {
     pub edges: BTreeSet<(String, String)>,
 }
 
+impl RunPath {
+    /// Whether the run was in the top-level state `id`, or went to it: a state
+    /// or an `end.*` of the Flow.
+    #[must_use]
+    pub fn visits(&self, id: &str) -> bool {
+        self.states.contains(id) || self.edges.iter().any(|(_, to)| to == id)
+    }
+
+    /// Whether the run went from the top-level state `from` straight to `to`.
+    #[must_use]
+    pub fn takes(&self, from: &str, to: &str) -> bool {
+        self.edges.iter().any(|(a, b)| a == from && b == to)
+    }
+}
+
 /// The top-level state a state path belongs to: `each` for `each/plan`.
 fn top_level(path: &str) -> &str {
     path.split_once('/').map_or(path, |(top, _)| top)
@@ -2360,6 +2375,21 @@ states = [
         let path = run_path(&detail);
         assert_eq!(path.states, names(&["each"]));
         assert_eq!(path.edges, pairs(&[("each", "end.failed")]));
+    }
+
+    #[test]
+    fn a_path_says_which_states_and_ends_it_visits_and_which_moves_it_took() {
+        let path = run_path(&run_with(
+            WorkflowRunStatus::Done,
+            None,
+            vec![step("a", "retry", "a"), step("a", "done", "end.done")],
+        ));
+        assert!(path.visits("a"));
+        assert!(path.visits("end.done"));
+        assert!(!path.visits("b"));
+        assert!(path.takes("a", "a"));
+        assert!(path.takes("a", "end.done"));
+        assert!(!path.takes("end.done", "a"));
     }
 
     #[test]
