@@ -30,8 +30,6 @@ const MARGIN: f32 = 24.0;
 const LANE: f32 = 16.0;
 /// The length of a dangling stub below its source.
 const STUB: f32 = 28.0;
-/// The horizontal distance between parallel edges of one pair of nodes.
-const PARALLEL: f32 = 12.0;
 
 /// Whether a node is a state of the workflow or one of its terminals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,25 +55,22 @@ pub struct Node {
     pub slot: usize,
 }
 
-/// One outcome of a state, drawn between two nodes.
+/// One drawn edge: the outcomes that go from one node to the same node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Edge {
-    /// The id of the state the outcome leaves from.
+    /// The id of the state the outcomes leave from.
     pub from: String,
-    /// The id of the node it reaches. `None` for a dangling outcome, and for a
+    /// The id of the node they reach. `None` for a dangling outcome, and for a
     /// target the graph does not hold; both are drawn as stubs.
     pub to: Option<String>,
-    /// The outcome, then `if` and `limit` when the rule has them, as
-    /// [`RowEdge::label`] writes it.
+    /// Each outcome as the graph writes it, in file order, joined with `, `. A
+    /// stub also names its target, since it has no arrow to point at one.
     pub label: String,
     /// The edge goes against the layers: a retry or a loop back to an earlier state.
     pub back: bool,
+    /// Every outcome on the edge is defaulted.
     pub defaulted: bool,
     pub dangling: bool,
-    /// The place of this edge among the edges with the same `from` and `to`.
-    pub parallel_index: usize,
-    /// How many edges share that `from` and `to`, this one included.
-    pub parallel_count: usize,
 }
 
 /// The layered state graph of one workflow.
@@ -384,41 +379,65 @@ fn barycenter(preds: &[usize], slot: &[usize]) -> (usize, usize) {
     )
 }
 
-/// The graph's edges, with the back flags and the parallel positions.
+/// The graph's edges. The outcomes that share a `from` and a `to` are one edge,
+/// in the order of the file. A stub is keyed by its target too, so two stubs
+/// from one state to different targets stay apart.
 fn edges_of(nodes: &[Node], outcomes: &[Outcome], back: &[bool]) -> Vec<Edge> {
-    let mut totals: BTreeMap<(usize, Option<usize>), usize> = BTreeMap::new();
-    for outcome in outcomes {
-        *totals.entry((outcome.from, outcome.to)).or_insert(0) += 1;
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut groups: Vec<(Vec<String>, &str)> = Vec::new();
+    let mut positions: BTreeMap<(usize, Option<usize>, &str), usize> = BTreeMap::new();
+    for (index, outcome) in outcomes.iter().enumerate() {
+        let stub = if outcome.to.is_none() {
+            outcome.edge.target.as_str()
+        } else {
+            ""
+        };
+        let position = *positions
+            .entry((outcome.from, outcome.to, stub))
+            .or_insert_with(|| {
+                edges.push(Edge {
+                    from: nodes[outcome.from].id.clone(),
+                    to: outcome.to.map(|to| nodes[to].id.clone()),
+                    label: String::new(),
+                    back: false,
+                    defaulted: outcome.edge.defaulted,
+                    dangling: outcome.edge.dangling,
+                });
+                groups.push((Vec::new(), stub));
+                edges.len() - 1
+            });
+        let edge = &mut edges[position];
+        edge.back |= back[index];
+        edge.defaulted &= outcome.edge.defaulted;
+        groups[position].0.push(outcome_label(outcome.edge));
     }
-    let mut seen: BTreeMap<(usize, Option<usize>), usize> = BTreeMap::new();
-    outcomes
-        .iter()
-        .enumerate()
-        .map(|(index, outcome)| {
-            let key = (outcome.from, outcome.to);
-            let counter = seen.entry(key).or_insert(0);
-            let parallel_index = *counter;
-            *counter += 1;
-            Edge {
-                from: nodes[outcome.from].id.clone(),
-                to: outcome.to.map(|to| nodes[to].id.clone()),
-                label: outcome.edge.label(),
-                back: back[index],
-                defaulted: outcome.edge.defaulted,
-                dangling: outcome.edge.dangling,
-                parallel_index,
-                parallel_count: totals[&key],
-            }
-        })
-        .collect()
+    for (edge, (parts, stub)) in edges.iter_mut().zip(groups) {
+        edge.label = parts.join(", ");
+        if edge.to.is_none() {
+            edge.label = format!("{} → {stub}", edge.label);
+        }
+    }
+    edges
+}
+
+/// The text an outcome carries in the graph: the outcome, then `if` and `limit`
+/// when the rule has them. The arrow already shows the target, so it is left out.
+fn outcome_label(edge: &RowEdge) -> String {
+    let mut text = edge.outcome.clone();
+    if let Some(guard) = &edge.guard {
+        text = format!("{text} if {guard}");
+    }
+    if let Some(limit) = edge.limit {
+        text = format!("{text} (limit {limit})");
+    }
+    text
 }
 
 /// Positions the graph in pixels. Each layer is centred on the widest one.
 /// Forward edges to the next layer run down, across and down. Back edges, and
 /// forward edges that skip a layer, run through the gaps between layers and out
 /// to a lane beyond the widest layer, each on its own lane. A dangling outcome
-/// is a short stub below its source. Parallel edges of one pair are spread
-/// horizontally.
+/// is a short stub below its source.
 #[must_use]
 pub fn geometry(graph: &Graph, metrics: &Metrics) -> Geometry {
     let rects = node_rects(graph, metrics);
@@ -437,9 +456,8 @@ pub fn geometry(graph: &Graph, metrics: &Metrics) -> Geometry {
     let mut routes = Vec::with_capacity(graph.edges.len());
     for edge in &graph.edges {
         let source = rects[index[edge.from.as_str()]];
-        let spread = spread(edge.parallel_index, edge.parallel_count);
         let route = match edge.to.as_deref() {
-            None => stub(source, spread),
+            None => stub(source),
             // A back edge, or a forward edge that skips a layer: its middle
             // would cross the cards in between, so it takes a lane instead.
             Some(to)
@@ -452,10 +470,10 @@ pub fn geometry(graph: &Graph, metrics: &Metrics) -> Geometry {
                 if to == edge.from {
                     loop_route(source, lane_x)
                 } else {
-                    lane_route(source, rects[index[to]], lane_x, spread, metrics.layer_gap)
+                    lane_route(source, rects[index[to]], lane_x, metrics.layer_gap)
                 }
             }
-            Some(to) => forward_route(source, rects[index[to]], spread),
+            Some(to) => forward_route(source, rects[index[to]]),
         };
         routes.push(route);
     }
@@ -514,9 +532,9 @@ fn node_rects(graph: &Graph, metrics: &Metrics) -> Vec<Rect> {
         .collect()
 }
 
-fn forward_route(source: Rect, target: Rect, spread: f32) -> Route {
-    let start_x = source.center_x() + spread;
-    let end_x = target.center_x() + spread;
+fn forward_route(source: Rect, target: Rect) -> Route {
+    let start_x = source.center_x();
+    let end_x = target.center_x();
     let start_y = source.bottom();
     let end_y = target.y;
     let middle = start_y.midpoint(end_y);
@@ -548,9 +566,9 @@ fn forward_route(source: Rect, target: Rect, spread: f32) -> Route {
 /// beyond the widest layer, to the gap above the target, left to the target's
 /// top centre and down into it. Used by back edges and by forward edges that
 /// skip a layer.
-fn lane_route(source: Rect, target: Rect, lane_x: f32, spread: f32, layer_gap: f32) -> Route {
-    let start_x = source.center_x() + spread;
-    let end_x = target.center_x() + spread;
+fn lane_route(source: Rect, target: Rect, lane_x: f32, layer_gap: f32) -> Route {
+    let start_x = source.center_x();
+    let end_x = target.center_x();
     let below = source.bottom() + layer_gap / 2.0;
     let above = target.y - layer_gap / 2.0;
     Route {
@@ -611,8 +629,8 @@ fn loop_route(rect: Rect, lane_x: f32) -> Route {
     }
 }
 
-fn stub(source: Rect, spread: f32) -> Route {
-    let x = source.center_x() + spread;
+fn stub(source: Rect) -> Route {
+    let x = source.center_x();
     let end = source.bottom() + STUB;
     let end_point = Point { x, y: end };
     Route {
@@ -625,12 +643,6 @@ fn stub(source: Rect, spread: f32) -> Route {
         ],
         label: end_point,
     }
-}
-
-/// The horizontal offset of the edge at `index` among `count` parallel edges,
-/// centred on zero.
-fn spread(index: usize, count: usize) -> f32 {
-    (px(index) - (px(count) - 1.0) / 2.0) * PARALLEL
 }
 
 /// A count or a slot as a float. Layers and slots are far below `u16::MAX`;
@@ -785,7 +797,7 @@ with = { argv = ["true"] }
         assert_eq!(layer_of(&graph, "end.done"), 2);
         assert!(graph.nodes.iter().all(|node| node.id != "end.failed"));
         let approved = edges_between(&graph, "decide", "left");
-        assert_eq!(approved[0].label, "approved → left");
+        assert_eq!(approved[0].label, "approved");
     }
 
     #[test]
@@ -866,7 +878,7 @@ on.done = "end.done"
         assert_eq!(retry.len(), 1);
         assert!(retry[0].back);
         assert!(!retry[0].defaulted);
-        assert_eq!(retry[0].label, "failed → prepare (limit 3)");
+        assert_eq!(retry[0].label, "failed (limit 3)");
         let forward = edges_between(&graph, "prepare", "push");
         assert!(!forward[0].back);
 
@@ -1013,41 +1025,31 @@ on.approved = "end.done"
     }
 
     #[test]
-    fn parallel_edges_of_one_pair_are_kept_apart_and_spread() {
+    fn outcomes_that_reach_one_target_are_one_edge_with_each_outcome() {
         let source = workflow(
             r#"
 [[state]]
-id = "decide"
-action = "approve"
-with = { summary = "Go?" }
-on.approved = [
-  { if = "${trigger.root} == 'main'", to = "end.done" },
+id = "check"
+action = "exec"
+with = { argv = ["true"] }
+on.failed = "end.failed"
+on.timeout = "end.failed"
+on.done = [
+  { if = "${trigger.root} == 'main'", to = "end.failed" },
   { to = "end.done" },
 ]
-on.rejected = "end.failed"
 "#,
         );
-        let graph = layout(&rows(&source), "decide");
-        let pair = edges_between(&graph, "decide", "end.done");
-        assert_eq!(pair.len(), 2);
+        let graph = layout(&rows(&source), "check");
+        let to_failed = edges_between(&graph, "check", "end.failed");
+        assert_eq!(to_failed.len(), 1);
+        // Outcomes join in the order the state declares them: done, failed, timeout.
         assert_eq!(
-            pair.iter()
-                .map(|e| (e.parallel_index, e.parallel_count))
-                .collect::<Vec<_>>(),
-            [(0, 2), (1, 2)]
+            to_failed[0].label,
+            "done if ${trigger.root} == 'main', failed, timeout"
         );
-        let geometry = geometry(&graph, &METRICS);
-        let first = graph
-            .edges
-            .iter()
-            .position(|e| std::ptr::eq(e, pair[0]))
-            .unwrap();
-        let second = graph
-            .edges
-            .iter()
-            .position(|e| std::ptr::eq(e, pair[1]))
-            .unwrap();
-        assert!(geometry.edges[first].points[0].x < geometry.edges[second].points[0].x);
+        assert!(!to_failed[0].defaulted);
+        assert_eq!(edges_between(&graph, "check", "end.done").len(), 1);
     }
 
     #[test]
