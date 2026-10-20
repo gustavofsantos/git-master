@@ -14,6 +14,12 @@ pub struct Template {
 }
 
 static TEMPLATES: &[Template] = &[
+    // The name is the workflow's own `name`, so a copy is named like it.
+    Template {
+        name: "new-workflow",
+        description: "An empty workflow to build in the Flow tab",
+        source: include_str!("templates/blank.toml"),
+    },
     Template {
         name: "suggest-commit-message",
         description: "Suggest a commit message from the staged diff",
@@ -153,7 +159,10 @@ mod tests {
 
     #[test]
     fn renaming_changes_only_the_name_line() {
-        let source = &all()[0];
+        let source = all()
+            .iter()
+            .find(|t| t.name == "suggest-commit-message")
+            .expect("template exists");
         let text = renamed(source.source, source.name, "suggest-commit-message-2");
         let (definition, _) = load(&text).unwrap();
         assert_eq!(definition.name, "suggest-commit-message-2");
