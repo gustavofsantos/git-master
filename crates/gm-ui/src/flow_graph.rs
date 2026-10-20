@@ -18,8 +18,6 @@
 //! - Inside a layer, nodes are ordered by the barycenter of their forward
 //!   predecessors' slots, ties by file order. Layer 0 keeps file order.
 
-#![cfg_attr(not(test), allow(dead_code))] // the view does not draw the graph yet
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::workflows_page::{Edge as RowEdge, FlowRow};
@@ -95,6 +93,8 @@ pub struct Graph {
 pub struct Metrics {
     pub node_width: f32,
     pub node_height: f32,
+    /// The height of a terminal, which is drawn as a small pill.
+    pub terminal_height: f32,
     /// The vertical gap between two layers.
     pub layer_gap: f32,
     /// The horizontal gap between two nodes of one layer.
@@ -401,10 +401,11 @@ fn edges_of(nodes: &[Node], outcomes: &[Outcome], back: &[bool]) -> Vec<Edge> {
 }
 
 /// Positions the graph in pixels. Each layer is centred on the widest one.
-/// Forward edges run down, across and down. Back edges leave on the right of
-/// their source, each on its own lane further right, and enter the target on
-/// its right. A dangling outcome is a short stub below its source. Parallel
-/// edges of one pair are spread horizontally.
+/// Forward edges to the next layer run down, across and down. Back edges, and
+/// forward edges that skip a layer, run through the gaps between layers and out
+/// to a lane beyond the widest layer, each on its own lane. A dangling outcome
+/// is a short stub below its source. Parallel edges of one pair are spread
+/// horizontally.
 #[must_use]
 pub fn geometry(graph: &Graph, metrics: &Metrics) -> Geometry {
     let rects = node_rects(graph, metrics);
@@ -426,13 +427,19 @@ pub fn geometry(graph: &Graph, metrics: &Metrics) -> Geometry {
         let spread = spread(edge.parallel_index, edge.parallel_count);
         let route = match edge.to.as_deref() {
             None => stub(source, spread),
-            Some(to) if edge.back => {
+            // A back edge, or a forward edge that skips a layer: its middle
+            // would cross the cards in between, so it takes a lane instead.
+            Some(to)
+                if edge.back
+                    || graph.nodes[index[to]].layer
+                        > graph.nodes[index[edge.from.as_str()]].layer + 1 =>
+            {
                 lanes += 1;
                 let lane_x = body_right + LANE * px(lanes);
                 if to == edge.from {
                     loop_route(source, lane_x)
                 } else {
-                    back_route(source, rects[index[to]], lane_x)
+                    lane_route(source, rects[index[to]], lane_x, spread, metrics.layer_gap)
                 }
             }
             Some(to) => forward_route(source, rects[index[to]], spread),
@@ -460,6 +467,7 @@ pub fn geometry(graph: &Graph, metrics: &Metrics) -> Geometry {
 }
 
 /// The rectangle of every node: the layers stacked, each centred on the widest.
+/// A terminal is `terminal_height` tall and hangs from the top of its layer.
 fn node_rects(graph: &Graph, metrics: &Metrics) -> Vec<Rect> {
     let depth = graph
         .nodes
@@ -479,11 +487,15 @@ fn node_rects(graph: &Graph, metrics: &Metrics) -> Vec<Rect> {
         .iter()
         .map(|node| {
             let inset = px(widest - widths[node.layer]) * step_x / 2.0;
+            let h = match node.kind {
+                NodeKind::State => metrics.node_height,
+                NodeKind::End => metrics.terminal_height,
+            };
             Rect {
                 x: MARGIN + inset + px(node.slot) * step_x,
                 y: MARGIN + px(node.layer) * step_y,
                 w: metrics.node_width,
-                h: metrics.node_height,
+                h,
             }
         })
         .collect()
@@ -518,28 +530,43 @@ fn forward_route(source: Rect, target: Rect, spread: f32) -> Route {
     }
 }
 
-fn back_route(source: Rect, target: Rect, lane_x: f32) -> Route {
-    let from_y = source.center_y();
-    let to_y = target.center_y();
+/// A lane route runs through the gaps between layers, which hold no cards: down
+/// from the source's bottom centre into the gap below it, right to its lane
+/// beyond the widest layer, to the gap above the target, left to the target's
+/// top centre and down into it. Used by back edges and by forward edges that
+/// skip a layer.
+fn lane_route(source: Rect, target: Rect, lane_x: f32, spread: f32, layer_gap: f32) -> Route {
+    let start_x = source.center_x() + spread;
+    let end_x = target.center_x() + spread;
+    let below = source.bottom() + layer_gap / 2.0;
+    let above = target.y - layer_gap / 2.0;
     Route {
         points: vec![
             Point {
-                x: source.right(),
-                y: from_y,
+                x: start_x,
+                y: source.bottom(),
+            },
+            Point {
+                x: start_x,
+                y: below,
             },
             Point {
                 x: lane_x,
-                y: from_y,
+                y: below,
             },
-            Point { x: lane_x, y: to_y },
             Point {
-                x: target.right(),
-                y: to_y,
+                x: lane_x,
+                y: above,
+            },
+            Point { x: end_x, y: above },
+            Point {
+                x: end_x,
+                y: target.y,
             },
         ],
         label: Point {
             x: lane_x,
-            y: from_y.midpoint(to_y),
+            y: below.midpoint(above),
         },
     }
 }
@@ -609,6 +636,7 @@ mod tests {
     const METRICS: Metrics = Metrics {
         node_width: 200.0,
         node_height: 96.0,
+        terminal_height: 28.0,
         layer_gap: 48.0,
         slot_gap: 32.0,
     };
@@ -801,8 +829,9 @@ on.done = "end.done"
         let geometry = geometry(&graph, &METRICS);
         let push = geometry.nodes[graph.nodes.iter().position(|n| n.id == "push").unwrap()];
         let route = &geometry.edges[graph.edges.iter().position(|e| e.back).unwrap()];
-        let lane = route.points[1].x;
-        assert_eq!(route.points[0].x, push.right());
+        let lane = route.points[2].x;
+        assert_eq!(route.points[0].x, push.center_x());
+        assert_eq!(route.points[0].y, push.bottom());
         assert!(lane > push.right());
         assert!(geometry.nodes.iter().all(|rect| rect.right() < lane));
     }
@@ -842,8 +871,8 @@ on.failed = { to = "a", limit = 2 }
             .collect();
         assert_eq!(back.len(), 2);
         let geometry = geometry(&graph, &METRICS);
-        let first = geometry.edges[back[0]].points[1].x;
-        let second = geometry.edges[back[1]].points[1].x;
+        let first = geometry.edges[back[0]].points[2].x;
+        let second = geometry.edges[back[1]].points[2].x;
         assert!(first < second, "the first back edge is the nearer lane");
         let body_right = geometry
             .nodes
@@ -990,6 +1019,49 @@ on.rejected = "end.failed"
             let second = layout(&flow, "roots");
             assert_eq!(first, second);
             assert_eq!(geometry(&first, &METRICS), geometry(&second, &METRICS));
+        }
+    }
+
+    /// Whether an axis-aligned segment passes through the interior of `rect`.
+    /// Touching an edge or a corner does not count.
+    fn crosses_interior(rect: Rect, a: Point, b: Point) -> bool {
+        let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+        let (y0, y1) = (a.y.min(b.y), a.y.max(b.y));
+        x0 < rect.right() && x1 > rect.x && y0 < rect.bottom() && y1 > rect.y
+    }
+
+    #[test]
+    fn no_route_segment_crosses_the_interior_of_a_node() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gm-core/tests/workflows");
+        let mut paths: Vec<_> = fs::read_dir(&dir)
+            .expect("the workflow examples")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let name = path.display().to_string();
+            let source = fs::read_to_string(&path).expect("readable example");
+            let (definition, diagnostics) = analyse(&source);
+            let definition = definition.unwrap_or_else(|| panic!("{name} does not parse"));
+            let (rows, _) = flow_rows(&definition, &diagnostics);
+            let start = rows[0].id.clone();
+            let graph = layout(&rows, &start);
+            let geometry = geometry(&graph, &METRICS);
+            for (edge, route) in graph.edges.iter().zip(&geometry.edges) {
+                for pair in route.points.windows(2) {
+                    for (node, rect) in graph.nodes.iter().zip(&geometry.nodes) {
+                        assert!(
+                            !crosses_interior(*rect, pair[0], pair[1]),
+                            "{name}: the route {} → {:?} crosses node {}",
+                            edge.from,
+                            edge.to,
+                            node.id
+                        );
+                    }
+                }
+            }
         }
     }
 
