@@ -1311,6 +1311,7 @@ fn flow_card(row: &FlowRow, selected: bool, cx: &Context<StatusView>) -> Div {
             theme::hairline()
         })
         .bg(theme::panel())
+        .overflow_hidden()
         .flex()
         .flex_col()
         .gap_1p5();
@@ -1326,6 +1327,7 @@ fn flow_card(row: &FlowRow, selected: bool, cx: &Context<StatusView>) -> Div {
         div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap_2()
             .child(
@@ -1386,6 +1388,8 @@ fn flow_edge(
         .gap_2()
         .child(
             div()
+                .flex_1()
+                .min_w(px(0.))
                 .font_family(theme::code_font())
                 .text_xs()
                 .text_color(color)
