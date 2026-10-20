@@ -9,7 +9,10 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::flow_graph::{Geometry, Graph, Metrics, Node, NodeKind, Point, Rect, Route};
+use crate::flow_graph::{
+    CHAR_WIDTH, Geometry, Graph, LABEL_HEIGHT, LABEL_OFFSET, Metrics, Node, NodeKind, Point, Rect,
+    Route, label_width,
+};
 use crate::theme;
 use crate::workflows_page::FlowRow;
 
@@ -18,7 +21,7 @@ pub const METRICS: Metrics = Metrics {
     node_width: 200.0,
     node_height: 64.0,
     terminal_height: 28.0,
-    layer_gap: 56.0,
+    layer_gap: 72.0,
     slot_gap: 40.0,
 };
 
@@ -30,12 +33,6 @@ const ARROW_LENGTH: f32 = 7.0;
 const ARROW_HALF: f32 = 4.0;
 /// The dash of a defaulted edge: the stroke, then the gap.
 const DASH: [f32; 2] = [4.0, 3.0];
-/// A label starts this far right of its anchor, and is this tall.
-const LABEL_OFFSET: f32 = 6.0;
-const LABEL_HEIGHT: f32 = 16.0;
-/// The width of one character of the code font at the label size, for the
-/// canvas to reach the end of the longest label.
-const CHAR_WIDTH: f32 = 7.2;
 
 /// One edge ready to paint.
 struct Stroke {
@@ -319,8 +316,7 @@ fn label(dangling: bool, defaulted: bool, text: &str, route: &Route) -> Div {
 
 /// The right edge of a label, so the canvas reaches it.
 fn label_right(text: &str, route: &Route) -> f32 {
-    let chars = f32::from(u16::try_from(text.chars().count()).unwrap_or(u16::MAX));
-    route.label.x + LABEL_OFFSET + chars * CHAR_WIDTH + 8.0
+    route.label.x + label_width(text)
 }
 
 #[cfg(test)]
@@ -363,7 +359,7 @@ mod tests {
             label: at(100.0, 50.0),
         };
         let right = label_right("abcd", &route);
-        assert!(right > 100.0 + 4.0 * CHAR_WIDTH);
+        assert!(right > 100.0 + LABEL_OFFSET + 4.0 * CHAR_WIDTH);
         assert!(label_right("abcdefgh", &route) > right);
     }
 }

@@ -30,6 +30,16 @@ const MARGIN: f32 = 24.0;
 const LANE: f32 = 16.0;
 /// The length of a dangling stub below its source.
 const STUB: f32 = 28.0;
+/// A label starts this far right of the line it is beside, and is this tall.
+/// Its text is set in the code font, at `CHAR_WIDTH` per character.
+pub const LABEL_OFFSET: f32 = 6.0;
+pub const LABEL_HEIGHT: f32 = 16.0;
+pub const CHAR_WIDTH: f32 = 7.2;
+/// The padding on both sides of a label's text.
+const LABEL_PADDING: f32 = 8.0;
+/// Where a label's anchor sits below its source. It is on the first vertical
+/// segment of its edge, which runs from the source down into the gap below it.
+const LABEL_DROP: f32 = 10.0;
 
 /// Whether a node is a state of the workflow or one of its terminals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -452,12 +462,13 @@ pub fn geometry(graph: &Graph, metrics: &Metrics) -> Geometry {
         .iter()
         .map(|rect| rect.right())
         .fold(0.0_f32, f32::max);
+    let departures = departures(graph, &rects, &index);
     let mut lanes = 0;
     let mut routes = Vec::with_capacity(graph.edges.len());
-    for edge in &graph.edges {
+    for (edge, &start_x) in graph.edges.iter().zip(&departures) {
         let source = rects[index[edge.from.as_str()]];
         let route = match edge.to.as_deref() {
-            None => stub(source),
+            None => stub(source, start_x),
             // A back edge, or a forward edge that skips a layer: its middle
             // would cross the cards in between, so it takes a lane instead.
             Some(to)
@@ -470,13 +481,14 @@ pub fn geometry(graph: &Graph, metrics: &Metrics) -> Geometry {
                 if to == edge.from {
                     loop_route(source, lane_x)
                 } else {
-                    lane_route(source, rects[index[to]], lane_x, metrics.layer_gap)
+                    lane_route(source, rects[index[to]], start_x, lane_x, metrics.layer_gap)
                 }
             }
-            Some(to) => forward_route(source, rects[index[to]]),
+            Some(to) => forward_route(source, rects[index[to]], start_x),
         };
         routes.push(route);
     }
+    stagger_labels(&mut routes, &graph.edges);
     let mut right = 0.0_f32;
     let mut bottom = 0.0_f32;
     for rect in &rects {
@@ -532,8 +544,51 @@ fn node_rects(graph: &Graph, metrics: &Metrics) -> Vec<Rect> {
         .collect()
 }
 
-fn forward_route(source: Rect, target: Rect) -> Route {
-    let start_x = source.center_x();
+/// Moves a label one row down when it would meet a label already placed on its
+/// row, so the labels of the edges that leave one state do not overlap. A loop
+/// is drawn sideways first, and its label stays on its lane.
+fn stagger_labels(routes: &mut [Route], edges: &[Edge]) {
+    let mut placed: Vec<(f32, f32, f32)> = Vec::with_capacity(routes.len());
+    for (route, edge) in routes.iter_mut().zip(edges) {
+        let looped = route.points[0].y == route.points[1].y;
+        let start = route.label.x + LABEL_OFFSET;
+        let end = route.label.x + label_width(&edge.label);
+        let clashes = |y: f32| {
+            placed.iter().any(|&(other_y, other_start, other_end)| {
+                (other_y - y).abs() < LABEL_HEIGHT && start < other_end && other_start < end
+            })
+        };
+        if !looped && clashes(route.label.y) {
+            route.label.y += LABEL_HEIGHT;
+        }
+        placed.push((route.label.y, start, end));
+    }
+}
+
+/// The x where each edge leaves its source, in the order of the edges. The
+/// edges that leave one state share its bottom side, evenly spaced in file
+/// order, so each one has its own first segment and its own label.
+fn departures(graph: &Graph, rects: &[Rect], index: &BTreeMap<&str, usize>) -> Vec<f32> {
+    let mut count: BTreeMap<&str, usize> = BTreeMap::new();
+    for edge in &graph.edges {
+        *count.entry(edge.from.as_str()).or_insert(0) += 1;
+    }
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    graph
+        .edges
+        .iter()
+        .map(|edge| {
+            let from = edge.from.as_str();
+            let place = seen.entry(from).or_insert(0);
+            let position = *place;
+            *place += 1;
+            let source = rects[index[from]];
+            source.x + source.w * px(position + 1) / px(count[from] + 1)
+        })
+        .collect()
+}
+
+fn forward_route(source: Rect, target: Rect, start_x: f32) -> Route {
     let end_x = target.center_x();
     let start_y = source.bottom();
     let end_y = target.y;
@@ -555,8 +610,8 @@ fn forward_route(source: Rect, target: Rect) -> Route {
             Point { x: end_x, y: end_y },
         ],
         label: Point {
-            x: start_x.midpoint(end_x),
-            y: middle,
+            x: start_x,
+            y: start_y + LABEL_DROP,
         },
     }
 }
@@ -566,8 +621,7 @@ fn forward_route(source: Rect, target: Rect) -> Route {
 /// beyond the widest layer, to the gap above the target, left to the target's
 /// top centre and down into it. Used by back edges and by forward edges that
 /// skip a layer.
-fn lane_route(source: Rect, target: Rect, lane_x: f32, layer_gap: f32) -> Route {
-    let start_x = source.center_x();
+fn lane_route(source: Rect, target: Rect, start_x: f32, lane_x: f32, layer_gap: f32) -> Route {
     let end_x = target.center_x();
     let below = source.bottom() + layer_gap / 2.0;
     let above = target.y - layer_gap / 2.0;
@@ -596,8 +650,8 @@ fn lane_route(source: Rect, target: Rect, lane_x: f32, layer_gap: f32) -> Route 
             },
         ],
         label: Point {
-            x: lane_x,
-            y: below.midpoint(above),
+            x: start_x,
+            y: source.bottom() + LABEL_DROP,
         },
     }
 }
@@ -629,20 +683,30 @@ fn loop_route(rect: Rect, lane_x: f32) -> Route {
     }
 }
 
-fn stub(source: Rect) -> Route {
-    let x = source.center_x();
-    let end = source.bottom() + STUB;
-    let end_point = Point { x, y: end };
+fn stub(source: Rect, x: f32) -> Route {
     Route {
         points: vec![
             Point {
                 x,
                 y: source.bottom(),
             },
-            end_point,
+            Point {
+                x,
+                y: source.bottom() + STUB,
+            },
         ],
-        label: end_point,
+        label: Point {
+            x,
+            y: source.bottom() + LABEL_DROP,
+        },
     }
+}
+
+/// The width a label takes, from its anchor's offset to its right side.
+#[must_use]
+pub fn label_width(text: &str) -> f32 {
+    let chars = f32::from(u16::try_from(text.chars().count()).unwrap_or(u16::MAX));
+    LABEL_OFFSET + chars * CHAR_WIDTH + LABEL_PADDING
 }
 
 /// A count or a slot as a float. Layers and slots are far below `u16::MAX`;
@@ -658,12 +722,13 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    /// The sizes the view draws with, so the tests check the drawn layout.
     const METRICS: Metrics = Metrics {
         node_width: 200.0,
-        node_height: 96.0,
+        node_height: 64.0,
         terminal_height: 28.0,
-        layer_gap: 48.0,
-        slot_gap: 32.0,
+        layer_gap: 72.0,
+        slot_gap: 40.0,
     };
 
     fn workflow(states: &str) -> String {
@@ -886,7 +951,8 @@ on.done = "end.done"
         let push = geometry.nodes[graph.nodes.iter().position(|n| n.id == "push").unwrap()];
         let route = &geometry.edges[graph.edges.iter().position(|e| e.back).unwrap()];
         let lane = route.points[2].x;
-        assert_eq!(route.points[0].x, push.center_x());
+        // `push` has two outcomes, so the retry leaves its bottom side, not its centre.
+        assert!(route.points[0].x > push.x && route.points[0].x < push.right());
         assert_eq!(route.points[0].y, push.bottom());
         assert!(lane > push.right());
         assert!(geometry.nodes.iter().all(|rect| rect.right() < lane));
@@ -990,7 +1056,86 @@ on.approved = "end.done"
         assert_eq!(route.points.len(), 2);
         assert_eq!(route.points[0].y, source_rect.bottom());
         assert!(route.points[1].y > route.points[0].y);
-        assert_eq!(route.label, route.points[1]);
+        assert_eq!(route.label.x, route.points[0].x);
+        assert!(route.label.y > route.points[0].y && route.label.y < route.points[1].y);
+    }
+
+    /// The graphs of the example workflows, laid out as the Flow lays them out.
+    fn example_graphs() -> Vec<(String, Graph)> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gm-core/tests/workflows");
+        let mut paths: Vec<_> = fs::read_dir(&dir)
+            .expect("the workflow examples")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let name = path.display().to_string();
+                let source = fs::read_to_string(&path).expect("readable example");
+                let (definition, diagnostics) = analyse(&source);
+                let definition = definition.unwrap_or_else(|| panic!("{name} does not parse"));
+                let (rows, _) = flow_rows(&definition, &diagnostics);
+                let start = rows[0].id.clone();
+                (name, layout(&rows, &start))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_label_sits_beside_the_first_segment_just_below_its_source() {
+        for (name, graph) in example_graphs() {
+            let geometry = geometry(&graph, &METRICS);
+            for (edge, route) in graph.edges.iter().zip(&geometry.edges) {
+                let (first, second) = (route.points[0], route.points[1]);
+                // A loop leaves its card sideways, and its label sits on its lane.
+                if first.y == second.y {
+                    continue;
+                }
+                assert_eq!(route.label.x, first.x, "{name}: {} label", edge.from);
+                assert!(
+                    route.label.y > first.y && route.label.y < second.y,
+                    "{name}: the label of {} is off its first segment",
+                    edge.from
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_two_labels_of_the_examples_overlap_on_one_row() {
+        for (name, graph) in example_graphs() {
+            let geometry = geometry(&graph, &METRICS);
+            let labels: Vec<(Point, &str)> = geometry
+                .edges
+                .iter()
+                .zip(&graph.edges)
+                .map(|(route, edge)| (route.label, edge.label.as_str()))
+                .collect();
+            for (index, &(first, first_text)) in labels.iter().enumerate() {
+                for &(second, second_text) in &labels[index + 1..] {
+                    if (first.y - second.y).abs() >= LABEL_HEIGHT {
+                        continue;
+                    }
+                    let (left, left_text, right) = if first.x <= second.x {
+                        (first, first_text, second)
+                    } else {
+                        (second, second_text, first)
+                    };
+                    assert!(
+                        right.x + LABEL_OFFSET >= left.x + label_width(left_text),
+                        "{name}: the labels {left_text:?} and {:?} overlap",
+                        if first.x <= second.x {
+                            second_text
+                        } else {
+                            first_text
+                        },
+                    );
+                }
+            }
+        }
     }
 
     #[test]
