@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use gm_core::workflow::catalog::{self, DEFAULTED, Level};
-use gm_core::workflow::edit::{self, Direction, EditError};
+use gm_core::workflow::edit::{self, Direction, EditError, FieldValue};
 use gm_core::workflow::model::{Definition, End, State, StateKind, Target};
 use gm_core::workflow::{Diagnostic, Severity, parse, validate};
 use gm_schema::{
@@ -60,13 +60,38 @@ pub enum SaveState {
 const CONFLICT_TEXT: &str = "changed on disk";
 
 /// A structural change the Flow's controls ask for. It is applied to the buffer
-/// through `gm_core::workflow::edit`, after the selected state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// through `gm_core::workflow::edit`. The state edits act on the selected state;
+/// the rest act on the workflow.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FlowEdit {
     /// A new state after the selected one, or at the end when none is selected.
     Add,
     Remove,
     Move(Direction),
+    /// The selected state's action; its `with` keys the new action does not know go.
+    SetAction(String),
+    /// One `with` key of the selected state.
+    SetField {
+        field: String,
+        value: FieldValue,
+    },
+    RemoveField(String),
+    /// `[trigger] on`, and `match` (`None` removes it).
+    SetTrigger {
+        on: String,
+        matcher: Option<String>,
+    },
+    /// An input's prompt; `None` removes the prompt and an unknown name adds the input.
+    SetInput {
+        name: String,
+        prompt: Option<String>,
+    },
+    RemoveInput(String),
+    /// The workflow's name and description (`None` removes the description).
+    SetMeta {
+        name: Option<String>,
+        description: Option<String>,
+    },
 }
 
 /// Where the Flow's selection stands, for the action rules.
@@ -352,25 +377,56 @@ impl WorkflowsPage {
             return false;
         };
         let selected = self.selected.clone();
-        let result = match (edit, selected.as_deref()) {
-            (FlowEdit::Add, _) => edit::fresh_id(&text, "step").and_then(|id| {
-                let edited = edit::add_state(&text, selected.as_deref(), &id, "noop")?;
-                Ok((edited, Some(id)))
-            }),
-            (FlowEdit::Remove, Some(id)) => {
-                let ids: Vec<String> = self
-                    .top_level_ids()
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect();
-                edit::remove_state(&text, id)
-                    .map(|edited| (edited, neighbour_after_removal(&ids, id)))
-            }
-            (FlowEdit::Move(direction), Some(id)) => {
-                edit::move_state(&text, id, direction).map(|edited| (edited, Some(id.to_owned())))
-            }
-            (FlowEdit::Remove | FlowEdit::Move(_), None) => Err(no_selection()),
-        };
+        let result =
+            match (edit, selected.as_deref()) {
+                (FlowEdit::Add, _) => edit::fresh_id(&text, "step").and_then(|id| {
+                    let edited = edit::add_state(&text, selected.as_deref(), &id, "noop")?;
+                    Ok((edited, Some(id)))
+                }),
+                (FlowEdit::Remove, Some(id)) => {
+                    let ids: Vec<String> = self
+                        .top_level_ids()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect();
+                    edit::remove_state(&text, id)
+                        .map(|edited| (edited, neighbour_after_removal(&ids, id)))
+                }
+                (FlowEdit::Move(direction), Some(id)) => edit::move_state(&text, id, direction)
+                    .map(|edited| (edited, Some(id.to_owned()))),
+                (FlowEdit::SetAction(action), Some(id)) => {
+                    edit::set_action(&text, id, &action).map(|edited| (edited, Some(id.to_owned())))
+                }
+                (FlowEdit::SetField { field, value }, Some(id)) => {
+                    edit::set_field(&text, id, &field, &value)
+                        .map(|edited| (edited, Some(id.to_owned())))
+                }
+                (FlowEdit::RemoveField(field), Some(id)) => edit::remove_field(&text, id, &field)
+                    .map(|edited| (edited, Some(id.to_owned()))),
+                (FlowEdit::SetTrigger { on, matcher }, _) => {
+                    edit::set_trigger(&text, &on, matcher.as_deref())
+                        .map(|edited| (edited, selected.clone()))
+                }
+                (FlowEdit::SetInput { name, prompt }, _) => {
+                    edit::set_input(&text, &name, prompt.as_deref())
+                        .map(|edited| (edited, selected.clone()))
+                }
+                (FlowEdit::RemoveInput(name), _) => {
+                    edit::remove_input(&text, &name).map(|edited| (edited, selected.clone()))
+                }
+                (FlowEdit::SetMeta { name, description }, _) => {
+                    edit::set_meta(&text, name.as_deref(), description.as_deref())
+                        .map(|edited| (edited, selected.clone()))
+                }
+                (
+                    FlowEdit::Remove
+                    | FlowEdit::Move(_)
+                    | FlowEdit::SetAction(_)
+                    | FlowEdit::SetField { .. }
+                    | FlowEdit::RemoveField(_),
+                    None,
+                ) => Err(no_selection()),
+            };
         self.commit(result)
     }
 
@@ -2098,6 +2154,70 @@ states = [
         page.track_dry_run(id(7));
         page.operation_ended(id(7), OperationState::Failed, Some("no"));
         assert!(!page.dry_run_pending());
+    }
+
+    #[test]
+    fn the_workflow_edits_need_no_selection_and_change_the_file_once_each() {
+        let mut page = flow_page(FLOW);
+        assert!(page.apply_flow_edit(FlowEdit::SetMeta {
+            name: Some("renamed".to_owned()),
+            description: Some("Does a thing".to_owned()),
+        }));
+        assert!(
+            page.text()
+                .contains("name = \"renamed\"\ndescription = \"Does a thing\"\n")
+        );
+        assert!(page.apply_flow_edit(FlowEdit::SetTrigger {
+            on: "before.restack".to_owned(),
+            matcher: Some("branch:feat/*".to_owned()),
+        }));
+        let definition = page.definition().expect("parses");
+        assert_eq!(definition.trigger.on, "before.restack");
+        assert_eq!(definition.trigger.matcher.as_deref(), Some("branch:feat/*"));
+        assert!(page.apply_flow_edit(FlowEdit::SetInput {
+            name: "ticket".to_owned(),
+            prompt: Some("Ticket".to_owned()),
+        }));
+        assert_eq!(page.definition().expect("parses").inputs.len(), 1);
+        assert!(page.apply_flow_edit(FlowEdit::RemoveInput("ticket".to_owned())));
+        assert!(page.definition().expect("parses").inputs.is_empty());
+        assert_eq!(page.flow_error(), None);
+    }
+
+    #[test]
+    fn the_state_edits_act_on_the_selected_state_and_refuse_without_one() {
+        let mut page = flow_page(FLOW);
+        let before = page.text().to_owned();
+        assert!(!page.apply_flow_edit(FlowEdit::SetAction("notify".to_owned())));
+        assert_eq!(page.flow_error(), Some("Select a state in the Flow first."));
+        assert_eq!(page.text(), before);
+
+        page.select_state("a");
+        assert!(page.apply_flow_edit(FlowEdit::SetAction("notify".to_owned())));
+        assert_eq!(page.flow_error(), None);
+        assert_eq!(page.selected(), Some("a"));
+        assert!(page.apply_flow_edit(FlowEdit::SetField {
+            field: "text".to_owned(),
+            value: FieldValue::Text("hi".to_owned()),
+        }));
+        assert!(page.text().contains("with = { text = \"hi\" }"));
+        assert!(page.apply_flow_edit(FlowEdit::RemoveField("text".to_owned())));
+        assert!(!page.text().contains("text = \"hi\""));
+
+        let typed = page.text().to_owned();
+        assert!(!page.apply_flow_edit(FlowEdit::SetField {
+            field: "text".to_owned(),
+            value: FieldValue::Bool(true),
+        }));
+        assert!(
+            page.flow_error()
+                .is_some_and(|error| error.contains("`with.text` must be a string"))
+        );
+        assert_eq!(
+            page.text(),
+            typed,
+            "a refused edit leaves the text as it was"
+        );
     }
 
     #[test]

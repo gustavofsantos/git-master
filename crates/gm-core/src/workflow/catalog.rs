@@ -303,21 +303,40 @@ pub fn wait_outcomes(event: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+/// The events a workflow may name as `trigger.on` without a phase or a field.
+const EVENTS: &[&str] = &[
+    "manual",
+    "repo.opened",
+    "refs.changed",
+    "commit.created",
+    "checkout.done",
+    "fetch.done",
+    "restack.done",
+    "stack.parent_moved",
+    "stack.parent_merged",
+    "composer.opened",
+];
+
+/// Every trigger a workflow may name, in the order a picker lists them: the
+/// events, then `before.<op>` and `after.<op>` for each phase, then
+/// `transform.<field>` for each field.
+#[must_use]
+pub fn triggers() -> Vec<String> {
+    let mut all: Vec<String> = EVENTS.iter().map(|on| (*on).to_owned()).collect();
+    for prefix in ["before", "after"] {
+        all.extend(PHASE_OPS.iter().map(|op| format!("{prefix}.{op}")));
+    }
+    all.extend(
+        TRANSFORM_FIELDS
+            .iter()
+            .map(|field| format!("transform.{field}")),
+    );
+    all
+}
+
 /// Whether a workflow may use this as `trigger.on`.
 pub fn is_known_trigger(on: &str) -> bool {
-    if matches!(
-        on,
-        "manual"
-            | "repo.opened"
-            | "refs.changed"
-            | "commit.created"
-            | "checkout.done"
-            | "fetch.done"
-            | "restack.done"
-            | "stack.parent_moved"
-            | "stack.parent_merged"
-            | "composer.opened"
-    ) {
+    if EVENTS.contains(&on) {
         return true;
     }
     if let Some(op) = on
@@ -500,6 +519,17 @@ mod tests {
             assert!(is_known_trigger(&format!("after.{op}")), "after.{op}");
         }
         assert!(is_known_trigger("before.restack"));
+    }
+
+    #[test]
+    fn every_listed_trigger_is_known_and_the_list_is_complete() {
+        let all = triggers();
+        assert_eq!(all.first().map(String::as_str), Some("manual"));
+        // Ten events, four phase ops twice, three fields.
+        assert_eq!(all.len(), 10 + 2 * 4 + 3);
+        for on in &all {
+            assert!(is_known_trigger(on), "{on} should be known");
+        }
     }
 
     #[test]
