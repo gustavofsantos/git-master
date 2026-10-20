@@ -1,0 +1,12 @@
+# An empty workflow: one state that does nothing. Add states in the Flow tab.
+# Each state runs one action and names the state that comes next in `on.<outcome>`.
+schema = 1
+name = "new-workflow"
+description = "An empty workflow to build in the Flow tab"
+
+[trigger]
+on = "manual"
+
+[[state]]
+id = "start"
+action = "noop"

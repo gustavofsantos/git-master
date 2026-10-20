@@ -459,6 +459,7 @@ fn a_template_is_copied_into_the_user_directory_and_listed() {
     assert_eq!(
         templates_listed(&listed),
         [
+            "new-workflow",
             "suggest-commit-message",
             "branch-from-ticket",
             "commit-staged"

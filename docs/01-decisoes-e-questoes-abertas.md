@@ -114,6 +114,17 @@ Escolhas feitas no código que a documentação não cobria. Valem até nova dec
 - `commit.suggest_message` apara a mensagem e tira um único bloco de código markdown que envolva a mensagem inteira (cerca de três crases na primeira e na última linha), como um LLM costuma devolver; um bloco dentro da mensagem fica (2026-10-19, depois do primeiro uso real).
 - Página de Workflows (2026-10-19): rodar um workflow com alterações não salvas é recusado ("Save first"); salvar e apagar arquivos de workflow não entram no log de comandos (não mexem no Git); salvar recusa arquivo fora dos diretórios de workflows do usuário ou dentro do repositório (D73) e recusa quando o hash em disco mudou; apagar move o arquivo para `<dados>/gitmaster/workflow-trash/`. O Flow mostra os estados mesmo com erro de validação (usa `parse` e `validate` separados).
 
+## Escolhas do editor de Flow, núcleo (2026-10-20)
+
+Escolhas feitas no código do `gm-core` que a documentação não cobria (campos tipados do catálogo, validação de `with` e edições de `edit.rs`). Valem até nova decisão do autor.
+
+- Os campos de cada ação são os que o driver lê hoje. `exec.format` aceita só `json`, como o driver (a lista de exemplo do Flow tinha também `text`, que o driver recusa). `approve.summary` é opcional, como no driver. `set` tem um campo `value` do tipo `Any`; o validador não checa `set`, que devolve a tabela inteira.
+- Um valor com `${...}` num campo `duration` ou `choice` só tem a forma checada na execução; o validador não o recusa. Textos (`argv`, `stdin`, `text` e os demais) aceitam templates normalmente.
+- Chave desconhecida em ação com campos gera aviso, não erro. Ação sem campos (`noop`, `stage.all` e as que o driver ainda não roda) não é checada, como no contrato do validador.
+- `set_field` recusa uma chave que a ação não tem (ação sem campos e `set` aceitam qualquer chave). Texto vazio num campo opcional remove a chave. Um `with` que fica vazio por uma edição é removido.
+- `set_meta` deixa o `name` como está quando recebe `None`, porque o nome é obrigatório.
+- O modelo `new-workflow` (`templates/blank.toml`) vem primeiro na lista. Seu nome é o próprio `name` do arquivo, para que uma cópia se chame `new-workflow`, `new-workflow-2` e assim por diante.
+
 ## D31: worktrees na v1
 
 O autor decidiu em 2026-10-17 que worktrees entram na v1, por serem parte central do fluxo dele. Os padrões abaixo ficam registrados como decididos; mudam só por nova decisão do autor. Alteração decidida pelo autor em 2026-10-17: a confirmação da remoção forçada passou de digitar o nome para marcar uma caixa de confirmação (ver o item "Remoção segura").

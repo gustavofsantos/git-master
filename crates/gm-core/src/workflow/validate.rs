@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use serde_json::Value;
 
 use super::Diagnostic;
-use super::catalog::{self, DEFAULTED, Level};
+use super::catalog::{self, DEFAULTED, FieldKind, FieldSpec, Level};
 use super::expr;
 use super::model::{Approval, Definition, End, State, StateKind, Target, Transition};
 
@@ -148,6 +148,7 @@ impl<'a> Checker<'a> {
                 approval,
             } => {
                 self.check_action(state, action, *approval);
+                self.check_with(state, action, with);
                 let mut texts = Vec::new();
                 strings(with, &mut texts);
                 for text in texts {
@@ -207,6 +208,49 @@ impl<'a> Checker<'a> {
                     spec.name
                 ),
             );
+        }
+    }
+
+    /// The `with` keys of an action against its catalog fields: an unknown key
+    /// warns; a missing required key, or a value of the wrong type, is an
+    /// error. `set` takes any table, and an action with no fields is not checked.
+    fn check_with(&mut self, state: &State, action: &str, with: &Value) {
+        let Some(spec) = catalog::action(action) else {
+            return;
+        };
+        let Some(keys) = with.as_object() else {
+            return;
+        };
+        if spec.fields.is_empty() || action == "set" {
+            return;
+        }
+        let id = state.id.as_str();
+        let line = state.line;
+        for field in spec
+            .fields
+            .iter()
+            .filter(|field| field.required && !keys.contains_key(field.name))
+        {
+            self.error(
+                line,
+                format!(
+                    "state `{id}` is missing `with.{}`, which action `{action}` needs",
+                    field.name
+                ),
+            );
+        }
+        for (key, value) in keys {
+            match spec.fields.iter().find(|field| field.name == key.as_str()) {
+                None => self.warning(
+                    line,
+                    format!("state `{id}`: `with.{key}` is not a field of action `{action}`"),
+                ),
+                Some(field) => {
+                    if let Some(problem) = field_problem(field, value) {
+                        self.error(line, format!("state `{id}`: `with.{key}` {problem}"));
+                    }
+                }
+            }
         }
     }
 
@@ -534,6 +578,52 @@ fn outcomes_of(kind: &StateKind) -> Option<Vec<&'static str>> {
             Some(outcomes)
         }
         StateKind::ForEach { .. } => Some(vec!["done", "failed"]),
+    }
+}
+
+/// Why a `with` value does not fit its catalog field, or `None` when it does.
+/// A string that holds a `${...}` template is only checked for its shape: the
+/// run renders it later, so a duration or a choice is not known here.
+#[must_use]
+pub fn field_problem(field: &FieldSpec, value: &Value) -> Option<String> {
+    let templated = value.as_str().is_some_and(|text| text.contains("${"));
+    match field.kind {
+        FieldKind::Any => None,
+        FieldKind::Text if value.is_string() => None,
+        FieldKind::Text => Some("must be a string".to_owned()),
+        FieldKind::TextList
+            if value
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string)) =>
+        {
+            None
+        }
+        FieldKind::TextList => Some("must be an array of strings".to_owned()),
+        FieldKind::Bool if value.is_boolean() => None,
+        FieldKind::Bool => Some("must be true or false".to_owned()),
+        FieldKind::Duration | FieldKind::Choice(_) if templated => None,
+        FieldKind::Duration
+            if value
+                .as_str()
+                .is_some_and(|text| super::parse::parse_timeout(0, text).is_ok()) =>
+        {
+            None
+        }
+        FieldKind::Duration => Some(
+            "must be a positive whole number followed by s, m or h, such as \"30s\"".to_owned(),
+        ),
+        FieldKind::Choice(choices)
+            if value.as_str().is_some_and(|text| choices.contains(&text)) =>
+        {
+            None
+        }
+        FieldKind::Choice(choices) => {
+            let quoted: Vec<String> = choices
+                .iter()
+                .map(|choice| format!("\"{choice}\""))
+                .collect();
+            Some(format!("must be one of {}", quoted.join(", ")))
+        }
     }
 }
 
@@ -1251,9 +1341,129 @@ mod tests {
         let source = file(
             "",
             "manual",
-            "[[state]]\nid = \"ask\"\naction = \"exec\"\nwith = { argv = [\"x\"], note = \"${states.ask.output.text}\" }\non.done = [ { if = \"len(${states.ask.output.text}) == 0\", to = \"ask\", limit = 2 }, { to = \"end.done\" } ]\non.timeout = \"end.failed\"\n",
+            "[[state]]\nid = \"ask\"\naction = \"exec\"\nwith = { argv = [\"x\"], stdin = \"${states.ask.output.text}\" }\non.done = [ { if = \"len(${states.ask.output.text}) == 0\", to = \"ask\", limit = 2 }, { to = \"end.done\" } ]\non.timeout = \"end.failed\"\n",
         );
         assert_only(&source, &[]);
+    }
+
+    /// A manual workflow with one state that runs `with` as its action's input.
+    fn one_action(action: &str, with: &str) -> String {
+        file(
+            "",
+            "manual",
+            &format!("[[state]]\nid = \"a\"\naction = \"{action}\"\nwith = {{ {with} }}\n"),
+        )
+    }
+
+    #[test]
+    fn a_missing_required_field_is_an_error() {
+        assert_only(
+            &one_action("notify", ""),
+            &[(
+                Severity::Error,
+                8,
+                "state `a` is missing `with.text`, which action `notify` needs",
+            )],
+        );
+    }
+
+    #[test]
+    fn an_unknown_field_warns() {
+        assert_only(
+            &one_action("notify", "text = \"x\", colour = \"red\""),
+            &[(
+                Severity::Warning,
+                8,
+                "state `a`: `with.colour` is not a field of action `notify`",
+            )],
+        );
+    }
+
+    #[test]
+    fn a_field_of_the_wrong_type_is_an_error() {
+        assert_only(
+            &one_action("exec", "argv = \"git\""),
+            &[(
+                Severity::Error,
+                8,
+                "state `a`: `with.argv` must be an array of strings",
+            )],
+        );
+        assert_only(
+            &one_action("branch.create", "name = \"x\", checkout = \"yes\""),
+            &[(
+                Severity::Error,
+                8,
+                "state `a`: `with.checkout` must be true or false",
+            )],
+        );
+        assert_only(
+            &one_action("notify", "text = 3"),
+            &[(
+                Severity::Error,
+                8,
+                "state `a`: `with.text` must be a string",
+            )],
+        );
+    }
+
+    #[test]
+    fn a_duration_and_a_choice_must_have_their_shape() {
+        assert_only(
+            &one_action("exec", "argv = [\"x\"], timeout = \"10x\""),
+            &[(
+                Severity::Error,
+                8,
+                "state `a`: `with.timeout` must be a positive whole number followed by s, m or h, such as \"30s\"",
+            )],
+        );
+        assert_only(
+            &one_action("exec", "argv = [\"x\"], format = \"yaml\""),
+            &[(
+                Severity::Error,
+                8,
+                "state `a`: `with.format` must be one of \"json\"",
+            )],
+        );
+        assert_only(
+            &one_action(
+                "exec",
+                "argv = [\"x\"], timeout = \"2m\", format = \"json\"",
+            ),
+            &[],
+        );
+    }
+
+    #[test]
+    fn a_template_in_a_duration_or_choice_is_not_checked_here() {
+        assert_only(
+            &one_action(
+                "exec",
+                "argv = [\"x\"], timeout = \"${trigger.t}\", format = \"${trigger.f}\"",
+            ),
+            &[],
+        );
+    }
+
+    #[test]
+    fn set_and_actions_without_fields_are_not_checked() {
+        let transform = file(
+            "",
+            "transform.commit_message",
+            "[[state]]\nid = \"a\"\naction = \"set\"\nwith = { value = \"x\", anything = 3 }\n",
+        );
+        assert_only(&transform, &[]);
+        assert_only(&one_action("stage.all", "colour = \"red\""), &[]);
+    }
+
+    #[test]
+    fn an_optional_field_may_be_left_out() {
+        let approve = file(
+            "",
+            "manual",
+            "[[state]]\nid = \"a\"\naction = \"approve\"\non.approved = \"end.done\"\non.rejected = \"end.done\"\n",
+        );
+        assert_only(&approve, &[]);
     }
 
     #[test]

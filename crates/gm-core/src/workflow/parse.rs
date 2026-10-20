@@ -315,7 +315,7 @@ fn reject(line: usize, present: bool, key: &str, owner: &str) -> Result<(), Diag
 }
 
 /// `"<positive integer><s|m|h>"`, such as `60s` or `24h`.
-fn parse_timeout(line: usize, text: &str) -> Result<Duration, Diagnostic> {
+pub(super) fn parse_timeout(line: usize, text: &str) -> Result<Duration, Diagnostic> {
     let invalid = || {
         Diagnostic::error(
             line,
