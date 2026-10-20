@@ -5,14 +5,15 @@
 //! small arrow head at each target; the labels are small text at their anchors.
 
 use gpui::{
-    Div, FontWeight, Hsla, IntoElement, PathBuilder, Pixels, Stateful, Window, canvas, div, point,
-    prelude::*, px,
+    Context, Div, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, PathBuilder, Pixels,
+    Stateful, Window, canvas, div, point, prelude::*, px,
 };
 
 use crate::flow_graph::{
     Geometry, Graph, LABEL_HEIGHT, LABEL_OFFSET, Metrics, Node, NodeKind, Point, Rect, Route,
 };
 use crate::theme;
+use crate::view::StatusView;
 use crate::workflows_page::FlowRow;
 
 /// The sizes of the cards, the terminal pills and the gaps, in pixels.
@@ -42,9 +43,16 @@ struct Stroke {
 }
 
 /// The state graph: the cards, the edges and their labels, in a box as large
-/// as the geometry, scrolling both ways.
+/// as the geometry, scrolling both ways. A click on a state's card selects it,
+/// as a click on its card in the list does; `selected` is drawn with the accent.
 #[must_use]
-pub fn flow_graph(graph: &Graph, geometry: &Geometry, rows: &[FlowRow]) -> Stateful<Div> {
+pub fn flow_graph(
+    graph: &Graph,
+    geometry: &Geometry,
+    rows: &[FlowRow],
+    selected: Option<&str>,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
     let mut strokes = Vec::with_capacity(graph.edges.len());
     let mut labels = Vec::with_capacity(graph.edges.len());
     for (edge, route) in graph.edges.iter().zip(&geometry.edges) {
@@ -61,7 +69,7 @@ pub fn flow_graph(graph: &Graph, geometry: &Geometry, rows: &[FlowRow]) -> State
         .iter()
         .zip(&geometry.nodes)
         .map(|(node, rect)| match node.kind {
-            NodeKind::State => card(node, *rect, rows),
+            NodeKind::State => card(node, *rect, rows, selected == Some(node.id.as_str()), cx),
             NodeKind::End => terminal(node, *rect),
         });
     div()
@@ -180,9 +188,17 @@ fn paint(window: &mut Window, origin: gpui::Point<Pixels>, stroke: &Stroke) {
 }
 
 /// A state's card: its id in bold, its effect badge, the number of its
-/// diagnostics in red, and its action.
-fn card(node: &Node, rect: Rect, rows: &[FlowRow]) -> Div {
+/// diagnostics in red, and its action. A click selects the state, and the
+/// selected card has the accent border, as the card in the list has.
+fn card(
+    node: &Node,
+    rect: Rect,
+    rows: &[FlowRow],
+    selected: bool,
+    cx: &Context<StatusView>,
+) -> Div {
     let problems = diagnostic_count(node, rows);
+    let state = node.id.clone();
     div()
         .absolute()
         .left(px(rect.x))
@@ -192,12 +208,23 @@ fn card(node: &Node, rect: Rect, rows: &[FlowRow]) -> Div {
         .p_2()
         .rounded_md()
         .border_1()
-        .border_color(theme::hairline())
+        .border_color(if selected {
+            theme::accent()
+        } else {
+            theme::hairline()
+        })
         .bg(theme::panel())
         .flex()
         .flex_col()
         .gap_1()
         .overflow_hidden()
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.select_flow_state(&state, cx);
+            }),
+        )
         .child(
             div()
                 .flex()

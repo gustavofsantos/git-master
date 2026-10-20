@@ -600,7 +600,7 @@ fn node_rects(graph: &Graph, metrics: &Metrics) -> Vec<Rect> {
 fn stagger_labels(routes: &mut [Route], edges: &[Edge]) {
     let mut placed: Vec<(f32, f32, f32)> = Vec::with_capacity(routes.len());
     for (route, edge) in routes.iter_mut().zip(edges) {
-        let looped = route.points[0].y == route.points[1].y;
+        let looped = route.points[0].y.total_cmp(&route.points[1].y).is_eq();
         let start = route.label.x + LABEL_OFFSET;
         let end = route.label.x + label_width(&edge.label);
         let clashes = |y: f32| {
@@ -1204,7 +1204,7 @@ on.approved = "end.done"
             for (edge, route) in graph.edges.iter().zip(&geometry.edges) {
                 let (first, second) = (route.points[0], route.points[1]);
                 // A loop leaves its card sideways, and its label sits on its lane.
-                if first.y == second.y {
+                if first.y.total_cmp(&second.y).is_eq() {
                     continue;
                 }
                 assert_eq!(route.label.x, first.x, "{name}: {} label", edge.from);

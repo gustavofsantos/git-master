@@ -595,7 +595,9 @@ impl StatusView {
             .min_h(px(0.))
             .flex()
             .flex_row()
-            .child(flow_graph_view::flow_graph(&graph, &geometry, &rows))
+            .child(flow_graph_view::flow_graph(
+                &graph, &geometry, &rows, selected, cx,
+            ))
             .child(
                 scroll_body()
                     .w(px(320.))
