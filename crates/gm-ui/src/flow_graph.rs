@@ -15,6 +15,8 @@
 //! - Each terminal (`end.done`, `end.failed`, `end.blocked`) sits one layer
 //!   below the deepest node that targets it. Terminals do not share one bottom
 //!   layer.
+//! - A state no path from `start` reaches is laid out below the reached ones,
+//!   in layers of its own. Its outcomes into the reached part are stubs.
 //! - Inside a layer, nodes are ordered by the barycenter of their forward
 //!   predecessors' slots, ties by file order. Layer 0 keeps file order.
 
@@ -185,7 +187,7 @@ pub fn layout(rows: &[FlowRow], start: &str) -> Graph {
     }
     let start = states.get(start).copied().unwrap_or(0);
     let mut terminals = BTreeMap::new();
-    let outcomes: Vec<Outcome> = row_outcomes
+    let mut outcomes: Vec<Outcome> = row_outcomes
         .into_iter()
         .map(|(from, edge)| Outcome {
             from,
@@ -194,8 +196,17 @@ pub fn layout(rows: &[FlowRow], start: &str) -> Graph {
         })
         .collect();
     let out = adjacency(nodes.len(), &outcomes);
+    let reached = reached(start, &out, &outcomes);
+    // An outcome of a state no path reaches, into the reached part, is a stub:
+    // drawn as an arrow it would pull the main flow out of its layers.
+    for outcome in &mut outcomes {
+        if !reached[outcome.from] && outcome.to.is_some_and(|to| reached[to]) {
+            outcome.to = None;
+        }
+    }
+    let out = adjacency(nodes.len(), &outcomes);
     let back = back_edges(start, &out, &outcomes);
-    let (layer, slot) = place(&out, &outcomes, &back);
+    let (layer, slot) = place(&out, &outcomes, &back, &reached);
     for (index, node) in nodes.iter_mut().enumerate() {
         node.layer = layer[index];
         node.slot = slot[index];
@@ -295,6 +306,25 @@ fn adjacency(count: usize, outcomes: &[Outcome]) -> Vec<Vec<usize>> {
     out
 }
 
+/// The nodes a path from `start` reaches, over the outcomes that have a target.
+fn reached(start: usize, out: &[Vec<usize>], outcomes: &[Outcome]) -> Vec<bool> {
+    let mut seen = vec![false; out.len()];
+    let mut queue = VecDeque::from([start]);
+    seen[start] = true;
+    while let Some(node) = queue.pop_front() {
+        for &index in &out[node] {
+            let Some(to) = outcomes[index].to else {
+                continue;
+            };
+            if !seen[to] {
+                seen[to] = true;
+                queue.push_back(to);
+            }
+        }
+    }
+    seen
+}
+
 /// Marks the back edges: the depth-first search starts at `start`, then at
 /// each unvisited node in order, and follows outcomes in order.
 fn back_edges(start: usize, out: &[Vec<usize>], outcomes: &[Outcome]) -> Vec<bool> {
@@ -330,7 +360,12 @@ fn visit(
 }
 
 /// The layer and the slot of every node.
-fn place(out: &[Vec<usize>], outcomes: &[Outcome], back: &[bool]) -> (Vec<usize>, Vec<usize>) {
+fn place(
+    out: &[Vec<usize>],
+    outcomes: &[Outcome],
+    back: &[bool],
+    reached: &[bool],
+) -> (Vec<usize>, Vec<usize>) {
     let count = out.len();
     let mut indegree = vec![0usize; count];
     let mut preds: Vec<Vec<usize>> = vec![Vec::new(); count];
@@ -358,6 +393,16 @@ fn place(out: &[Vec<usize>], outcomes: &[Outcome], back: &[bool]) -> (Vec<usize>
                 queue.push_back(to);
             }
         }
+    }
+    // The states no path reaches go below the reached ones, in their own layers,
+    // so their edges cannot move the main flow.
+    let below = (0..count)
+        .filter(|&node| reached[node])
+        .map(|node| layer[node] + 1)
+        .max()
+        .unwrap_or(0);
+    for node in (0..count).filter(|&node| !reached[node]) {
+        layer[node] += below;
     }
     let depth = layer.iter().max().map_or(0, |deepest| deepest + 1);
     let mut layers: Vec<Vec<usize>> = vec![Vec::new(); depth];
@@ -898,18 +943,27 @@ with = { argv = ["git", "push"] }
 
     #[test]
     fn a_layer_is_ordered_by_the_barycenter_of_its_predecessors() {
-        // `b` follows the first state and `a` follows the second, so `b` goes
-        // first even though `a` comes first in the file.
+        // `P` and `Q` share layer 1 in file order. `b` follows `P` and `a`
+        // follows `Q`, so `b` goes first even though `a` comes first in the file.
         let source = workflow(
             r#"
 [[state]]
 id = "start"
 action = "exec"
 with = { argv = ["true"] }
+on.done = [
+  { if = "${trigger.root} == 'x'", to = "P" },
+  { to = "Q" },
+]
+
+[[state]]
+id = "P"
+action = "exec"
+with = { argv = ["true"] }
 on.done = "b"
 
 [[state]]
-id = "other"
+id = "Q"
 action = "exec"
 with = { argv = ["true"] }
 on.done = "a"
@@ -928,8 +982,8 @@ on.done = "end.done"
 "#,
         );
         let graph = layout(&rows(&source), "start");
-        assert_eq!(layer_of(&graph, "a"), 1);
-        assert_eq!(layer_of(&graph, "b"), 1);
+        assert_eq!(layer_of(&graph, "a"), 2);
+        assert_eq!(layer_of(&graph, "b"), 2);
         assert_eq!(node(&graph, "b").slot, 0);
         assert_eq!(node(&graph, "a").slot, 1);
     }
@@ -1025,6 +1079,60 @@ on.timeout = "end.done"
         let ids: Vec<&str> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
         assert_eq!(ids, ["check", "end.blocked", "end.done"]);
         assert!(graph.nodes.iter().skip(1).all(|n| n.kind == NodeKind::End));
+    }
+
+    #[test]
+    fn states_no_path_from_the_start_reaches_sit_below_the_main_flow() {
+        let main = r#"
+[[state]]
+id = "fetch"
+action = "exec"
+with = { argv = ["git", "fetch"] }
+on.done = "push"
+
+[[state]]
+id = "push"
+action = "exec"
+with = { argv = ["git", "push"] }
+on.done = "end.done"
+"#;
+        let with_strays = format!(
+            "{main}{}",
+            r#"
+[[state]]
+id = "stray"
+action = "exec"
+with = { argv = ["true"] }
+on.done = "cleanup"
+
+[[state]]
+id = "cleanup"
+action = "exec"
+with = { argv = ["true"] }
+on.done = "push"
+"#
+        );
+        let alone = layout(&rows(&workflow(main)), "fetch");
+        let graph = layout(&rows(&workflow(&with_strays)), "fetch");
+        // The main flow lays out as if the stray states were not there.
+        for id in ["fetch", "push", "end.done"] {
+            assert_eq!(node(&graph, id).layer, node(&alone, id).layer, "{id}");
+            assert_eq!(node(&graph, id).slot, node(&alone, id).slot, "{id}");
+        }
+        let flow_depth = layer_of(&graph, "end.done");
+        assert!(layer_of(&graph, "stray") > flow_depth);
+        assert_eq!(
+            layer_of(&graph, "cleanup"),
+            layer_of(&graph, "stray") + 1,
+            "the stray states keep their own order"
+        );
+        // Their edge into the main flow is a stub, and the edge between them is drawn.
+        let into_main = edges_between(&graph, "cleanup", "push");
+        assert!(into_main.is_empty());
+        assert!(graph.edges.iter().any(|edge| edge.from == "cleanup"
+            && edge.to.is_none()
+            && edge.label == "done → push"));
+        assert_eq!(edges_between(&graph, "stray", "cleanup").len(), 1);
     }
 
     #[test]
