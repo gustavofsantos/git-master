@@ -65,3 +65,25 @@ Choices that deviate from the docs or fill gaps, to confirm:
 - `notify` watcher deferred; refresh by key and on window activation.
 - The git adapter lives in `gm-core` (D27 says extract `gm-git` later), so "UI never imports `gm-git`" is a convention until that extraction.
 - Spikes A-D are separate from the skeleton and still to do.
+
+## Lessons from the WF2 slice (2026-10-20)
+
+GPUI:
+
+- `on_blur` fires only when focus moves to another focusable element. A click on a button, a label or a tab leaves the focus where it was, so a field that commits on blur loses typed text. Commit pending fields explicitly before tab changes, Save and similar actions (`commit_pending_flow_fields`).
+- A fixed-width column in a flex row (`w(px(320.)).flex_none()`) still narrowed when its content changed. Pin `min_w` and `max_w` as well.
+- Iterate a `HashMap` of UI fields in a sorted order when the order reaches the file (two new `with` keys must land in a fixed order).
+
+Headless runs (Linux cloud container):
+
+- Besides the dev packages above, the smoke run needs `xvfb xdotool scrot imagemagick mesa-vulkan-drivers` (the last one provides lavapipe, `/usr/share/vulkan/icd.d/lvp_icd.json`). `scripts/setup-dev.sh` installs them.
+- `scripts/ui-smoke.sh` builds into `CARGO_TARGET_DIR` when it is set, and runs the binary from there.
+- Coordinates in the smoke script move with the content: the "Unsaved changes / Run is off" line pushes the tabs down 23 px, and "Show in Flow" sits after the workflow's name. Read a screenshot before changing a constant.
+
+Working with agents (orchestrator plus Haiku workers, each in its own git worktree):
+
+- Workers committed in their worktree branches; the orchestrator reviewed each diff, merged with `--no-ff`, resolved conflicts and ran clippy and the tests on the merge. This worked; parallel workers on the same view file (`shell_workflows.rs`) only conflicted in one function.
+- Disk: every worktree builds its own `target/` (2 to 5 GB each with GPUI). Point workers at one shared, warm `CARGO_TARGET_DIR` and remove merged worktrees.
+- The worktree guard refuses compound shell commands that name git (`cd … && git …`, pipes into git) and app launches that set `XDG_CONFIG_HOME`. Tell workers to read with the file tools, to run plain separate commands as the guard suggests, and to stop and report when a plain command is refused; never to wrap or disguise a command. Windows are checked by the orchestrator, not by workers.
+- A worker that stops with no changes loses its worktree; resuming it then fails. Start a new worker instead.
+- Haiku workers did well on pure modules with exact signatures and tests (layout, edits, dry run) and on GPUI views with a named pattern to copy. Every view still needed a look in a window: column width, focus and blur, and click coordinates were only found there.

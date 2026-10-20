@@ -125,6 +125,20 @@ Escolhas feitas no código do `gm-core` que a documentação não cobria (campos
 - `set_meta` deixa o `name` como está quando recebe `None`, porque o nome é obrigatório.
 - O modelo `new-workflow` (`templates/blank.toml`) vem primeiro na lista. Seu nome é o próprio `name` do arquivo, para que uma cópia se chame `new-workflow`, `new-workflow-2` e assim por diante.
 
+## Escolhas da interface da WF2 (2026-10-20)
+
+Escolhas feitas no código do `gm-ui` que a documentação não cobria (grafo, inspetor, caminho do run). Valem até nova decisão do autor.
+
+- Grafo da aba Flow: camadas de cima para baixo, pelo caminho mais longo a partir de `start`; ordem dentro da camada pelo baricentro dos predecessores, empate pela ordem do arquivo. Determinístico (sem iteração de `HashMap`).
+- As falhas implícitas (`failed`, `interrupted` e `timeout` sem regra, que vão para `end.failed` pelo padrão de D78) não são desenhadas no grafo: poluíam o desenho com linhas longas. Os cartões e o inspetor continuam listando todas. `end.failed` só aparece no grafo quando uma regra escrita leva a ele.
+- Uma aresta desenhada por par de estados; o rótulo junta os outcomes com ", " e mostra só o outcome, com ` if` e ` (limit N)`, porque a seta já mostra o alvo. Os cartões mantêm o texto completo `outcome → alvo`.
+- Ciclos (arestas de volta) passam pelos vãos entre camadas e por raias à direita do grafo, sem cruzar cartões. Estados inalcançáveis a partir de `start` ficam em camadas abaixo do fluxo principal, que não muda de forma por causa deles.
+- Clicar num nó ou num cartão seleciona o estado; terminais não são selecionáveis.
+- O inspetor fica na coluna da direita (320 px fixos), acima dos cartões: seção Workflow sempre; seção State para o estado de topo selecionado. Estados de `for_each`, estados `wait` e os valores de `set` só se editam na aba TOML.
+- Um campo do inspetor é gravado com Enter ou quando o foco vai para outro campo, e também antes de trocar de aba, salvar ou fazer o dry run (clicar num botão ou num rótulo não tira o foco no GPUI, então não haveria "blur"). Esc volta ao valor do arquivo. Um novo input só é criado com Enter. Uma edição recusada mantém o texto digitado e mostra o motivo na barra do Flow.
+- O seletor de ação mostra o catálogo inteiro agrupado por domínio; ações que o driver ainda não executa aparecem desabilitadas com "not available yet", e `set` fora de `transform.*` com "only in a transform trigger".
+- Caminho do run: aparece pelo botão "Show in Flow" de um run aberto na aba Runs (não a cada clique num run) e segue o run aberto até "Clear" ou até outro workflow ser aberto. Se o texto do run difere do arquivo, o caminho aparece assim mesmo, com o aviso "the file changed since this run"; arestas que não existem mais não são desenhadas. Estados aninhados contam como o `for_each` de topo.
+
 ## D31: worktrees na v1
 
 O autor decidiu em 2026-10-17 que worktrees entram na v1, por serem parte central do fluxo dele. Os padrões abaixo ficam registrados como decididos; mudam só por nova decisão do autor. Alteração decidida pelo autor em 2026-10-17: a confirmação da remoção forçada passou de digitar o nome para marcar uma caixa de confirmação (ver o item "Remoção segura").

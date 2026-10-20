@@ -31,17 +31,19 @@ O core define traits (`GitPort`, `HookPort`, `StorePort`) e os adaptadores as im
 7. **Um binário `gitmaster`** com subcomandos: abre o app por padrão; `gitmaster mcp` é o shim.
 8. **Extensão por processo**, não por biblioteca dinâmica (ABI do Rust não é estável; segurança).
 
-## Workflows (proposto, D60, D63, D65)
+## Workflows (D60, D63, D65; WF0 a WF2 implementadas)
 
 - Interpretador em `gm-core`: modelo puro (TOML para modelo tipado), avaliador de expressões e validador, sem I/O. Testável sem janela.
-- Catálogo de ações em `gm-schema`, com JSON Schema da entrada e da saída de cada ação. O validador checa o workflow inteiro antes de rodar (D63).
+- Catálogo de ações em `gm-core` (`workflow/catalog.rs`): nível de efeito, outcomes, fase e os campos tipados de `with` (`FieldSpec`) de cada ação. O validador checa o workflow inteiro, inclusive `with`, antes de rodar (D63). O JSON Schema da entrada e da saída, previsto no D63, ainda não existe; os campos tipados cumprem esse papel no editor e no validador.
+- Módulos em `gm-core/src/workflow/`: `model`, `parse`, `expr`, `catalog`, `validate` e `machine` (núcleo puro); `dry_run` (passeio pela função de transição sem efeitos, D85); `edit` (edições estruturais com `toml_edit`, D86); `templates`; `loader`, `store` (SQLite), `exec` e `driver` (I/O). A sessão por repositório fica em `gm-core/src/workflow_session.rs`.
+- Em `gm-ui`: `workflows_page` (modelo puro da página: arquivo aberto, abas, seleção, edições, dry run, caminho do run), `flow_graph` (layout puro do grafo), `flow_graph_view` (desenho), `flow_inspector` (inspetor da aba Flow), `shell_workflows` (a página em GPUI), `workflow_run` e `workflow_inputs`.
 - Cada passo despacha um `Command` existente. Workflow não tem caminho de lógica próprio.
 - Cada execução é uma operação (`OperationId`), persistida em `state.db`.
 - O interpretador é uma função de transição pura: `next(definição, run, evento) -> (transição, efeitos)`, sem I/O. O engine executa os efeitos e registra o resultado (D80).
 - Cada transição é gravada em uma transação SQLite antes do efeito ("entrando em X") e depois dele ("X → desfecho"). Após um crash, a retomada lê `current_state`.
 - Um `apply` interrompido recebe o desfecho `interrupted`, que vai para `end.failed` se não for tratado. Nunca é reexecutado às cegas (D80).
 - Eventos produzidos por uma execução carregam o id da execução e nunca disparam gatilhos (sem cascata).
-- Salvar pela UI edita o TOML com `toml_edit`, para preservar os comentários e a formatação do usuário; a escrita é atômica (D76).
+- A aba TOML e a aba Flow editam um só texto. A aba Flow edita esse texto com `toml_edit`, para preservar os comentários e a formatação do usuário, e cada edição é um só passo de desfazer no editor TOML (D86). Salvar grava o texto de forma atômica (D76).
 - `exec` executa `argv` diretamente, nunca por shell (D74).
 - `HookPort` continua até a migração em WF3 (D75).
 
