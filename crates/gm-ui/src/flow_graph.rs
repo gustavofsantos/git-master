@@ -199,6 +199,13 @@ pub fn layout(rows: &[FlowRow], start: &str) -> Graph {
     Graph { nodes, edges }
 }
 
+/// Whether an outcome is drawn. A defaulted outcome that goes to `end.failed` is
+/// the implicit failure of its state: the cards list it, the graph leaves it out,
+/// so `end.failed` is drawn only when the file writes an outcome to it.
+fn drawn(edge: &RowEdge) -> bool {
+    !(edge.defaulted && edge.target == "end.failed")
+}
+
 /// The top-level states, and the outcomes that belong to each of them. The
 /// outcomes of a nested state stay on its `for_each`, except those that go to
 /// another nested state: those are inside the loop and are not drawn.
@@ -212,7 +219,12 @@ fn collect(rows: &[FlowRow]) -> (Vec<Node>, Vec<(usize, &RowEdge)>) {
     let mut outcomes = Vec::new();
     for row in rows {
         if row.depth == 0 {
-            outcomes.extend(row.edges.iter().map(|edge| (nodes.len(), edge)));
+            outcomes.extend(
+                row.edges
+                    .iter()
+                    .filter(|edge| drawn(edge))
+                    .map(|edge| (nodes.len(), edge)),
+            );
             nodes.push(Node {
                 id: row.id.clone(),
                 kind: NodeKind::State,
@@ -227,6 +239,7 @@ fn collect(rows: &[FlowRow]) -> (Vec<Node>, Vec<(usize, &RowEdge)>) {
             outcomes.extend(
                 row.edges
                     .iter()
+                    .filter(|edge| drawn(edge))
                     .filter(|edge| edge.dangling || !nested.contains(edge.target.as_str()))
                     .map(|edge| (owner, edge)),
             );
@@ -753,8 +766,9 @@ with = { argv = ["true"] }
         assert_eq!(layer_of(&graph, "rebase"), 1);
         assert_eq!(layer_of(&graph, "push"), 2);
         assert_eq!(layer_of(&graph, "end.done"), 3);
-        assert_eq!(layer_of(&graph, "end.failed"), 3);
-        assert_eq!(graph.nodes.len(), 5);
+        // The implicit failure of each state is not drawn, so no end.failed.
+        assert!(graph.nodes.iter().all(|node| node.id != "end.failed"));
+        assert_eq!(graph.nodes.len(), 4);
         assert!(graph.edges.iter().all(|edge| !edge.back && !edge.dangling));
         assert_eq!(edges_between(&graph, "fetch", "rebase").len(), 1);
         assert!(edges_between(&graph, "fetch", "rebase")[0].defaulted);
@@ -769,10 +783,40 @@ with = { argv = ["true"] }
         assert_eq!(node(&graph, "left").slot, 0);
         assert_eq!(node(&graph, "right").slot, 1);
         assert_eq!(layer_of(&graph, "end.done"), 2);
-        // The deepest node reaching end.failed is a branch target, on layer 1.
-        assert_eq!(layer_of(&graph, "end.failed"), 2);
+        assert!(graph.nodes.iter().all(|node| node.id != "end.failed"));
         let approved = edges_between(&graph, "decide", "left");
         assert_eq!(approved[0].label, "approved → left");
+    }
+
+    #[test]
+    fn a_defaulted_failure_to_end_failed_is_not_drawn_but_a_written_one_is() {
+        // The `failed` of `push` is the implicit one; the `failed` of `build`
+        // is written, so only it draws an edge to end.failed.
+        let source = workflow(
+            r#"
+[[state]]
+id = "build"
+action = "exec"
+with = { argv = ["make"] }
+on.failed = "end.failed"
+
+[[state]]
+id = "push"
+action = "exec"
+with = { argv = ["git", "push"] }
+"#,
+        );
+        let graph = layout(&rows(&source), "build");
+        let written = edges_between(&graph, "build", "end.failed");
+        assert_eq!(written.len(), 1);
+        assert!(!written[0].defaulted);
+        assert!(
+            graph
+                .edges
+                .iter()
+                .all(|edge| edge.from != "push" || edge.to.as_deref() != Some("end.failed"))
+        );
+        assert_eq!(edges_between(&graph, "push", "end.done").len(), 1);
     }
 
     #[test]
