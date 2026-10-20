@@ -5,6 +5,7 @@
 
 pub mod catalog;
 pub mod driver;
+pub mod dry_run;
 pub mod exec;
 pub mod expr;
 pub mod loader;
