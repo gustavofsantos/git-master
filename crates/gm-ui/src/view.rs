@@ -871,6 +871,8 @@ impl StatusView {
             Ok(Effect::SaveWorkflow) => self.save_workflow(false, cx),
             Ok(Effect::RevertWorkflow) => self.revert_workflow(cx),
             Ok(Effect::OpenDeleteWorkflow) => self.ask_delete_workflow(cx),
+            Ok(Effect::EditFlow(edit)) => self.apply_flow_edit(edit, cx),
+            Ok(Effect::DryRunWorkflow) => self.dry_run_workflow(cx),
             Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
         }
         cx.notify();
@@ -1196,6 +1198,7 @@ impl Render for StatusView {
                     .then(|| self.context_menu_layer(window, cx)),
             )
             .children(self.palette.open.then(|| self.palette_layer(window, cx)))
+            .children(self.workflow_picker_layer(window, cx))
             .children(
                 self.worktree_dialog
                     .is_some()

@@ -160,7 +160,7 @@ pub(crate) fn sections(items: &[Item]) -> Vec<&[Item]> {
 
 /// Where a menu of `size` opened at `at` sits in a window of `viewport`: under
 /// the pointer, pulled back in when it would run past the right or bottom edge.
-fn clamp_origin(at: (f32, f32), size: (f32, f32), viewport: (f32, f32)) -> (f32, f32) {
+pub(crate) fn clamp_origin(at: (f32, f32), size: (f32, f32), viewport: (f32, f32)) -> (f32, f32) {
     let x = at.0.min(viewport.0 - size.0 - MARGIN).max(0.);
     let y = at.1.min(viewport.1 - size.1 - MARGIN).max(0.);
     (x, y)

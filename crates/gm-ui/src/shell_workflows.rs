@@ -9,29 +9,35 @@ use std::path::Path;
 
 use gm_core::workflow::{Diagnostic, Severity};
 use gm_schema::{
-    Actor, WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,
-    WorkflowStepRecord,
+    Actor, WorkflowDryRun, WorkflowDryStep, WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus,
+    WorkflowRunSummary, WorkflowStepRecord,
 };
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    SharedString, Stateful, Window, div, prelude::*, px,
+    AnyElement, Context, Div, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, Pixels,
+    Point, SharedString, Stateful, Window, div, prelude::*, px,
 };
 
 use crate::SaveWorkflow;
 use crate::action_registry::{Action, Args};
+use crate::context_menu::clamp_origin;
 use crate::shell_history::{now_secs, relative_time};
 use crate::theme;
 use crate::view::{Screen, StatusView};
 use crate::workflows_page::{
-    FlowRow, Preview, SaveState, Tab, context_blocks, context_key, diagnostic_text, duration_label,
-    expand_key, flow_rows, input_text, outcome_line, output_text, preview, run_duration,
-    status_label, step_duration, visit_label,
+    Choice, Edge, FlowEdit, FlowRow, Preview, SaveState, Tab, context_blocks, context_key,
+    diagnostic_text, duration_label, expand_key, flow_rows, input_text, outcome_line, output_text,
+    pretty_json, preview, run_duration, status_label, step_duration, visit_label,
 };
 
 /// The width of the workflow list on the left.
 const LIST_WIDTH: f32 = 260.;
 /// The height of the runs list above a run's view.
 const RUNS_LIST_HEIGHT: f32 = 220.;
+/// The most of the dry run panel shown; it scrolls past this.
+const DRY_RUN_HEIGHT: f32 = 260.;
+/// The target picker's width and the height of its rows.
+const PICKER_WIDTH: f32 = 240.;
+const PICKER_ROW_HEIGHT: f32 = 24.;
 
 impl StatusView {
     /// Ctrl or ⌘ S: the registry's Save Workflow.
@@ -145,6 +151,72 @@ impl StatusView {
     pub(crate) fn keep_workflow_editing(&mut self, cx: &mut Context<Self>) {
         self.model.workflows_page.keep_editing();
         cx.notify();
+    }
+
+    /// A Flow control: the page applies the edit and the editor takes the new text.
+    pub(crate) fn apply_flow_edit(&mut self, edit: FlowEdit, cx: &mut Context<Self>) {
+        self.model.workflows_page.apply_flow_edit(edit);
+        self.sync_workflow_edit(cx);
+        cx.notify();
+    }
+
+    /// Selects a state of the Flow.
+    pub(crate) fn select_flow_state(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.model.workflows_page.select_state(id);
+        cx.notify();
+    }
+
+    /// Opens the target picker over one edge of the selected state, under the pointer.
+    fn open_flow_picker(
+        &mut self,
+        state: &str,
+        outcome: &str,
+        index: usize,
+        at: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let at = (f32::from(at.x), f32::from(at.y));
+        self.model
+            .workflows_page
+            .open_picker(state, outcome, index, at);
+        cx.notify();
+    }
+
+    fn close_flow_picker(&mut self, cx: &mut Context<Self>) {
+        self.model.workflows_page.close_picker();
+        cx.notify();
+    }
+
+    /// The picker's choice: the edge is set and the editor takes the new text.
+    fn pick_flow_target(&mut self, choice: &Choice, cx: &mut Context<Self>) {
+        self.model.workflows_page.pick_target(choice);
+        self.sync_workflow_edit(cx);
+        cx.notify();
+    }
+
+    /// Dry Run: the engine walks the buffer and answers into the Flow's panel.
+    pub(crate) fn dry_run_workflow(&mut self, cx: &mut Context<Self>) {
+        if let Some(kind) = self.model.workflows_page.dry_run_request() {
+            let id = self.engine.dispatch(Actor::Human, kind);
+            self.model.workflows_page.track_dry_run(id);
+        }
+        cx.notify();
+    }
+
+    fn hide_dry_run(&mut self, cx: &mut Context<Self>) {
+        self.model.workflows_page.dismiss_dry_run();
+        cx.notify();
+    }
+
+    /// Puts the buffer in the editor as one undoable change, so the editor's undo
+    /// takes back a Flow edit. Opening, switching and reloading keep `sync_workflow_source`.
+    fn sync_workflow_edit(&mut self, cx: &mut Context<Self>) {
+        let text = self.model.workflows_page.text().to_owned();
+        self.workflow_source.update(cx, |area, cx| {
+            if area.text() != text {
+                area.replace_text(&text, cx);
+            }
+        });
     }
 
     /// Shows a run of the Runs list: asks the engine for its steps.
@@ -320,11 +392,17 @@ impl StatusView {
             .child(self.workflow_header(name, cx))
             .children(self.workflow_banners(cx))
             .child(tab_bar(page.tab(), cx))
+            .children((page.tab() == Tab::Flow).then(|| self.flow_toolbar(cx)))
             .child(match page.tab() {
                 Tab::Flow => self.flow_body(cx),
                 Tab::Toml => self.toml_body(),
                 Tab::Runs => self.runs_body(cx),
             })
+            .children(
+                (page.tab() == Tab::Flow)
+                    .then(|| self.dry_run_panel(cx))
+                    .flatten(),
+            )
     }
 
     fn workflow_header(&self, name: &str, cx: &Context<Self>) -> Div {
@@ -387,6 +465,7 @@ impl StatusView {
                                 run_reason.is_some(),
                                 cx,
                             ))
+                            .child(self.dry_run_button(cx))
                             .child(action_button(
                                 "workflow-save",
                                 "Save",
@@ -493,7 +572,7 @@ impl StatusView {
     }
 
     /// The Flow tab: each state as a card, in file order.
-    fn flow_body(&self, _cx: &Context<Self>) -> AnyElement {
+    fn flow_body(&self, cx: &Context<Self>) -> AnyElement {
         let page = &self.model.workflows_page;
         let Some(definition) = page.definition() else {
             return scroll_body()
@@ -506,9 +585,13 @@ impl StatusView {
                 .into_any_element();
         };
         let (rows, unplaced) = flow_rows(definition, page.diagnostics());
+        let selected = page.selected();
         scroll_body()
             .children(unplaced.iter().map(diagnostic_line))
-            .children(rows.iter().map(flow_card))
+            .children(
+                rows.iter()
+                    .map(|row| flow_card(row, selected == Some(row.id.as_str()), cx)),
+            )
             .into_any_element()
     }
 
@@ -870,10 +953,335 @@ fn tab_bar(current: Tab, cx: &Context<StatusView>) -> Div {
         }))
 }
 
-/// One card of the Flow: the state, its kind and effect level, its outcomes,
-/// and the diagnostics on its lines.
-fn flow_card(row: &FlowRow) -> Div {
+impl StatusView {
+    /// Dry Run, in the page header: faded while the file does not parse.
+    fn dry_run_button(&self, cx: &Context<Self>) -> Stateful<Div> {
+        let disabled = Action::DryRunWorkflow
+            .enabled(&Args::None, &self.action_context(""))
+            .is_err();
+        action_button(
+            "workflow-dry-run",
+            "Dry Run",
+            Action::DryRunWorkflow,
+            Args::None,
+            disabled,
+            cx,
+        )
+    }
+
+    /// The Flow's controls above the cards: add, remove and move the selected
+    /// state. A refused edit says why in red beside them.
+    fn flow_toolbar(&self, cx: &Context<Self>) -> Div {
+        let page = &self.model.workflows_page;
+        let ctx = self.action_context("");
+        let disabled = |action: Action| action.enabled(&Args::None, &ctx).is_err();
+        div()
+            .px_4()
+            .py_2()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .border_b_1()
+            .border_color(theme::hairline())
+            .child(action_button(
+                "workflow-flow-add",
+                "Add State",
+                Action::AddWorkflowState,
+                Args::None,
+                disabled(Action::AddWorkflowState),
+                cx,
+            ))
+            .child(action_button(
+                "workflow-flow-remove",
+                "Remove",
+                Action::RemoveWorkflowState,
+                Args::None,
+                disabled(Action::RemoveWorkflowState),
+                cx,
+            ))
+            .child(action_button(
+                "workflow-flow-up",
+                "Move Up",
+                Action::MoveWorkflowStateUp,
+                Args::None,
+                disabled(Action::MoveWorkflowStateUp),
+                cx,
+            ))
+            .child(action_button(
+                "workflow-flow-down",
+                "Move Down",
+                Action::MoveWorkflowStateDown,
+                Args::None,
+                disabled(Action::MoveWorkflowStateDown),
+                cx,
+            ))
+            .children(page.selected().is_none().then(|| {
+                div()
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .child("Select a state to remove or move it.")
+            }))
+            .children(page.flow_error().map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(theme::error())
+                    .child(error.to_owned())
+            }))
+    }
+
+    /// The target picker over an edge of the selected state: the states it can
+    /// go to, then Default. A click outside closes it, as the context menu does.
+    pub(crate) fn workflow_picker_layer(&self, window: &Window, cx: &Context<Self>) -> Option<Div> {
+        let page = &self.model.workflows_page;
+        let picker = page.picker()?;
+        let options = page.target_options(&picker.state);
+        let viewport = window.viewport_size();
+        // The heading, the options, Default and the padding.
+        let rows = options.len() + 2;
+        let height = f32::from(u16::try_from(rows).unwrap_or(u16::MAX)) * PICKER_ROW_HEIGHT + 8.;
+        let (left, top) = clamp_origin(
+            picker.at,
+            (PICKER_WIDTH, height),
+            (f32::from(viewport.width), f32::from(viewport.height)),
+        );
+        let outside = div()
+            .absolute()
+            .size_full()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.close_flow_picker(cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.close_flow_picker(cx)),
+            );
+        let mut list = div().flex().flex_col().py_1().child(
+            div()
+                .px_3()
+                .h(px(PICKER_ROW_HEIGHT))
+                .flex()
+                .items_center()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(format!("Target of {}", picker.outcome)),
+        );
+        for (index, option) in options.iter().enumerate() {
+            let choice = Choice::Target(option.clone());
+            list = list.child(picker_row(index, option, None, choice, cx));
+        }
+        list = list
+            .child(div().my_1().h(px(1.)).bg(theme::hairline()))
+            .child(picker_row(
+                options.len(),
+                "Default",
+                Some("short form"),
+                Choice::Default,
+                cx,
+            ));
+        Some(
+            div().absolute().inset_0().child(outside).child(
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(PICKER_WIDTH))
+                    .bg(theme::panel())
+                    .border_1()
+                    .border_color(theme::hairline_strong())
+                    .rounded_md()
+                    .shadow_lg()
+                    .occlude()
+                    .child(list),
+            ),
+        )
+    }
+
+    /// The dry run at the foot of the Flow: the stop line, the inputs the walk
+    /// left blank, then one card per step. A stale or running dry run says so.
+    fn dry_run_panel(&self, cx: &Context<Self>) -> Option<Stateful<Div>> {
+        let page = &self.model.workflows_page;
+        let result = page.dry_run_result();
+        if result.is_none() && !page.dry_run_pending() && !page.dry_run_stale() {
+            return None;
+        }
+        let body = if page.dry_run_pending() {
+            vec![message_line("Walking the file…")]
+        } else if let Some(dry) = result {
+            self.dry_run_body(dry, cx)
+        } else {
+            vec![message_line(
+                "The file changed since the last dry run. Dry Run again to walk it.",
+            )]
+        };
+        Some(
+            div()
+                .id("workflow-dry-run")
+                .flex_none()
+                .max_h(px(DRY_RUN_HEIGHT))
+                .overflow_y_scroll()
+                .px_4()
+                .py_2()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .border_t_1()
+                .border_color(theme::hairline())
+                .bg(theme::panel())
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(section_label("Dry run"))
+                        .child(text_button("workflow-dry-hide", "Hide", cx, |this, cx| {
+                            this.hide_dry_run(cx);
+                        })),
+                )
+                .children(body),
+        )
+    }
+
+    fn dry_run_body(&self, dry: &WorkflowDryRun, cx: &Context<Self>) -> Vec<Div> {
+        let mut lines = Vec::new();
+        if let Some(error) = &dry.error {
+            lines.push(
+                div()
+                    .text_sm()
+                    .text_color(theme::error())
+                    .child(error.clone()),
+            );
+        }
+        if !dry.stop.is_empty() {
+            lines.push(div().text_sm().child(format!("Stop: {}", dry.stop)));
+        }
+        if !dry.missing_inputs.is_empty() {
+            lines.push(message_line(&format!(
+                "Missing inputs, empty in this walk: {}",
+                dry.missing_inputs.join(", ")
+            )));
+        }
+        lines.extend(
+            dry.steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| self.dry_step_card(index, step, cx)),
+        );
+        lines
+    }
+
+    /// One step of a dry run: its state, action and level, whether the answer
+    /// was computed or assumed, and the input it would receive.
+    fn dry_step_card(&self, index: usize, step: &WorkflowDryStep, cx: &Context<Self>) -> Div {
+        let page = &self.model.workflows_page;
+        let key = format!("dry-run-step-{index}-input");
+        let answer = if step.executed {
+            "computed".to_owned()
+        } else if step.assumed {
+            format!("not run (assumed {})", step.outcome)
+        } else {
+            "not run".to_owned()
+        };
+        div()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(theme::hairline())
+            .bg(theme::ground())
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_family(theme::code_font())
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(step.state.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .child(step.action.clone()),
+                    )
+                    .child(
+                        div()
+                            .px_1p5()
+                            .rounded_sm()
+                            .text_xs()
+                            .bg(theme::selection())
+                            .text_color(theme::text())
+                            .child(step.level.clone()),
+                    ),
+            )
+            .child(div().text_xs().text_color(theme::muted()).child(answer))
+            .child(json_block(
+                "Input",
+                &pretty_json(&step.input),
+                &key,
+                page.is_expanded(&key),
+                cx,
+            ))
+    }
+}
+
+/// One choice of the target picker: its label, a note, and what it sets.
+fn picker_row(
+    index: usize,
+    label: &str,
+    note: Option<&str>,
+    choice: Choice,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
     div()
+        .id(("workflow-picker", index))
+        .h(px(PICKER_ROW_HEIGHT))
+        .px_3()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .cursor_pointer()
+        .hover(|style| style.bg(theme::selected_row()))
+        .child(
+            div()
+                .font_family(theme::code_font())
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(label.to_owned()),
+        )
+        .children(note.map(|note| {
+            div()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(note.to_owned())
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.pick_flow_target(&choice, cx);
+            }),
+        )
+}
+
+/// One card of the Flow: the state, its kind and effect level, its outcomes,
+/// and the diagnostics on its lines. A top-level card is clicked to select it;
+/// the outcomes of the selected card open the target picker. Nested states of
+/// a `for_each` have no controls: they are edited in the TOML tab.
+fn flow_card(row: &FlowRow, selected: bool, cx: &Context<StatusView>) -> Div {
+    let editable = row.depth == 0;
+    let state = row.id.clone();
+    let mut card = div()
         .ml(px(
             f32::from(u16::try_from(row.depth).unwrap_or(u16::MAX)) * 24.
         ))
@@ -881,54 +1289,105 @@ fn flow_card(row: &FlowRow) -> Div {
         .p_3()
         .rounded_md()
         .border_1()
-        .border_color(theme::hairline())
+        .border_color(if selected && editable {
+            theme::accent()
+        } else {
+            theme::hairline()
+        })
         .bg(theme::panel())
         .flex()
         .flex_col()
-        .gap_1p5()
+        .gap_1p5();
+    if editable {
+        card = card.cursor_pointer().on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.select_flow_state(&state, cx);
+            }),
+        );
+    }
+    card.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .font_family(theme::code_font())
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(row.id.clone()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .child(row.kind.clone()),
+            )
+            .children(row.level.map(|level| {
+                div()
+                    .px_1p5()
+                    .rounded_sm()
+                    .text_xs()
+                    .bg(theme::selection())
+                    .text_color(theme::text())
+                    .child(level)
+            })),
+    )
+    .children(
+        row.edges
+            .iter()
+            .enumerate()
+            .map(|(position, edge)| flow_edge(row, edge, position, selected && editable, cx)),
+    )
+    .children(row.diagnostics.iter().map(diagnostic_line))
+}
+
+/// One outcome line of a card. On the selected card it opens the target picker
+/// for that transition, under the pointer.
+fn flow_edge(
+    row: &FlowRow,
+    edge: &Edge,
+    position: usize,
+    pickable: bool,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    let color = if edge.dangling {
+        theme::error()
+    } else if edge.defaulted {
+        theme::faint()
+    } else {
+        theme::text()
+    };
+    let line = div()
+        .id(SharedString::from(format!(
+            "flow-edge-{}-{position}",
+            row.line
+        )))
+        .flex()
+        .flex_row()
+        .justify_between()
+        .gap_2()
         .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .font_family(theme::code_font())
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(row.id.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme::muted())
-                        .child(row.kind.clone()),
-                )
-                .children(row.level.map(|level| {
-                    div()
-                        .px_1p5()
-                        .rounded_sm()
-                        .text_xs()
-                        .bg(theme::selection())
-                        .text_color(theme::text())
-                        .child(level)
-                })),
-        )
-        .children(row.edges.iter().map(|edge| {
-            let color = if edge.dangling {
-                theme::error()
-            } else if edge.defaulted {
-                theme::faint()
-            } else {
-                theme::text()
-            };
             div()
                 .font_family(theme::code_font())
                 .text_xs()
                 .text_color(color)
-                .child(edge.label())
-        }))
-        .children(row.diagnostics.iter().map(diagnostic_line))
+                .child(edge.label()),
+        );
+    if !pickable {
+        return line;
+    }
+    let (state, outcome, index) = (row.id.clone(), edge.outcome.clone(), edge.index);
+    line.cursor_pointer()
+        .hover(|style| style.bg(theme::selected_row()))
+        .child(div().text_xs().text_color(theme::muted()).child("▾"))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                this.open_flow_picker(&state, &outcome, index, ev.position, cx);
+            }),
+        )
 }
 
 /// One diagnostic, in its colour: errors red, warnings amber.

@@ -8,13 +8,14 @@
 use std::collections::BTreeSet;
 
 use gm_core::workflow::catalog::{self, DEFAULTED, Level};
+use gm_core::workflow::edit::{self, Direction, EditError};
 use gm_core::workflow::model::{Definition, End, State, StateKind, Target};
 use gm_core::workflow::{Diagnostic, Severity, parse, validate};
 use gm_schema::{
-    CommandKind, OperationId, OperationState, WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus,
-    WorkflowRunSummary, WorkflowStepRecord,
+    CommandKind, OperationId, OperationState, WorkflowDryRun, WorkflowInfo, WorkflowRunDetail,
+    WorkflowRunStatus, WorkflowRunSummary, WorkflowStepRecord,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// How many runs the Runs tab asks the engine for.
 pub const RUN_LIMIT: u32 = 50;
@@ -57,6 +58,54 @@ pub enum SaveState {
 
 /// The engine's words for a save that found the file changed.
 const CONFLICT_TEXT: &str = "changed on disk";
+
+/// A structural change the Flow's controls ask for. It is applied to the buffer
+/// through `gm_core::workflow::edit`, after the selected state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlowEdit {
+    /// A new state after the selected one, or at the end when none is selected.
+    Add,
+    Remove,
+    Move(Direction),
+}
+
+/// Where the Flow's selection stands, for the action rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlowPosition {
+    /// The buffer parses, so the Flow's controls can edit it.
+    pub parses: bool,
+    /// How many top-level states the file has.
+    pub states: usize,
+    /// The index of the selected top-level state.
+    pub selected: Option<usize>,
+}
+
+/// The target picker open over one edge of the selected state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picker {
+    pub state: String,
+    pub outcome: String,
+    /// The transition of `on.<outcome>` the choice sets.
+    pub index: usize,
+    /// The pointer's position in window pixels, where the panel opens.
+    pub at: (f32, f32),
+}
+
+/// What the picker sets on its edge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// A state or an end, as the file writes it.
+    Target(String),
+    /// The outcome goes back to its default: its rule is removed (D78).
+    Default,
+}
+
+/// The last dry run answered: the text it walked and what it found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DryRunAnswer {
+    source: String,
+    result: WorkflowDryRun,
+}
 
 /// The workflow open on the page: its file, the buffer and what the file held.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +151,18 @@ pub struct WorkflowsPage {
     run_op: Option<OperationId>,
     /// The JSON blocks the user expanded with "Show all", by `expand_key`.
     expanded: BTreeSet<String>,
+    /// The top-level state the Flow's controls act on.
+    selected: Option<String>,
+    /// Why the last Flow edit was refused; the buffer is unchanged then.
+    flow_error: Option<String>,
+    /// The target picker open over an edge of the selected state.
+    picker: Option<Picker>,
+    /// The dry run asked for and not sent yet: the text it walks.
+    pending_dry_run: Option<String>,
+    /// The dry run the engine is computing: its operation and the text it walks.
+    dry_running: Option<(OperationId, String)>,
+    /// The last dry run answered.
+    dry_run: Option<DryRunAnswer>,
 }
 
 /// What the window's action rules need to know of the page.
@@ -113,6 +174,8 @@ pub struct PageState<'a> {
     pub name: Option<&'a str>,
     pub dirty: bool,
     pub saving: bool,
+    /// The Flow's selection and the file's states.
+    pub flow: FlowPosition,
 }
 
 impl WorkflowsPage {
@@ -224,7 +287,212 @@ impl WorkflowsPage {
             name: self.name(),
             dirty: self.dirty(),
             saving: self.is_saving(),
+            flow: self.flow_position(),
         }
+    }
+
+    /// The top-level state the Flow's controls act on.
+    #[must_use]
+    pub fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
+
+    /// Why the last Flow edit was refused, as the engine's parser or editor words it.
+    #[must_use]
+    pub fn flow_error(&self) -> Option<&str> {
+        self.flow_error.as_deref()
+    }
+
+    #[must_use]
+    pub fn picker(&self) -> Option<&Picker> {
+        self.picker.as_ref()
+    }
+
+    /// The top-level state ids of the parsed file, in file order.
+    fn top_level_ids(&self) -> Vec<&str> {
+        self.definition
+            .as_ref()
+            .map_or_else(Vec::new, |definition| {
+                definition
+                    .states
+                    .iter()
+                    .map(|state| state.id.as_str())
+                    .collect()
+            })
+    }
+
+    fn flow_position(&self) -> FlowPosition {
+        let ids = self.top_level_ids();
+        FlowPosition {
+            parses: self.definition.is_some(),
+            states: ids.len(),
+            selected: self
+                .selected
+                .as_deref()
+                .and_then(|id| ids.iter().position(|known| *known == id)),
+        }
+    }
+
+    /// Selects the top-level state `id`. Another state than the selected one
+    /// closes the picker; a click on the selected state leaves it open.
+    pub fn select_state(&mut self, id: &str) {
+        if self.selected() == Some(id) || !self.top_level_ids().contains(&id) {
+            return;
+        }
+        self.selected = Some(id.to_owned());
+        self.picker = None;
+    }
+
+    /// Applies a Flow edit to the buffer as one change, and selects what the
+    /// edit leaves selected: the new state after an add, the neighbour after a
+    /// remove. A refused edit keeps the buffer and sets `flow_error`. Returns
+    /// whether the buffer changed.
+    pub fn apply_flow_edit(&mut self, edit: FlowEdit) -> bool {
+        let Some(text) = self.open.as_ref().map(|open| open.text.clone()) else {
+            return false;
+        };
+        let selected = self.selected.clone();
+        let result = match (edit, selected.as_deref()) {
+            (FlowEdit::Add, _) => edit::fresh_id(&text, "step").and_then(|id| {
+                let edited = edit::add_state(&text, selected.as_deref(), &id, "noop")?;
+                Ok((edited, Some(id)))
+            }),
+            (FlowEdit::Remove, Some(id)) => {
+                let ids: Vec<String> = self
+                    .top_level_ids()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                edit::remove_state(&text, id)
+                    .map(|edited| (edited, neighbour_after_removal(&ids, id)))
+            }
+            (FlowEdit::Move(direction), Some(id)) => {
+                edit::move_state(&text, id, direction).map(|edited| (edited, Some(id.to_owned())))
+            }
+            (FlowEdit::Remove | FlowEdit::Move(_), None) => Err(no_selection()),
+        };
+        self.commit(result)
+    }
+
+    /// Opens the target picker over transition `index` of `on.<outcome>` in the
+    /// selected state `state`, under the pointer. Only the selected state has one.
+    pub fn open_picker(&mut self, state: &str, outcome: &str, index: usize, at: (f32, f32)) {
+        if self.selected() != Some(state) {
+            return;
+        }
+        self.picker = Some(Picker {
+            state: state.to_owned(),
+            outcome: outcome.to_owned(),
+            index,
+            at,
+        });
+    }
+
+    pub fn close_picker(&mut self) {
+        self.picker = None;
+    }
+
+    /// The targets the picker of `state` offers; see `target_options`.
+    #[must_use]
+    pub fn target_options(&self, state: &str) -> Vec<String> {
+        self.definition
+            .as_ref()
+            .map_or_else(Vec::new, |definition| target_options(definition, state))
+    }
+
+    /// Sets the picker's edge to `choice` as one change, and closes the picker.
+    /// Returns whether the buffer changed.
+    pub fn pick_target(&mut self, choice: &Choice) -> bool {
+        let Some(picker) = self.picker.take() else {
+            return false;
+        };
+        let Some(text) = self.open.as_ref().map(|open| open.text.clone()) else {
+            return false;
+        };
+        let result = match choice {
+            Choice::Target(target) => {
+                edit::set_target(&text, &picker.state, &picker.outcome, picker.index, target)
+            }
+            Choice::Default => edit::clear_outcome(&text, &picker.state, &picker.outcome),
+        };
+        let selection = self.selected.clone();
+        self.commit(result.map(|edited| (edited, selection)))
+    }
+
+    /// Takes an edit's text: the buffer becomes it and the selection it names.
+    /// A refused edit only sets `flow_error`. Returns whether the buffer changed.
+    fn commit(&mut self, result: Result<(String, Option<String>), EditError>) -> bool {
+        match result {
+            Ok((text, selection)) => {
+                self.flow_error = None;
+                self.selected = selection;
+                self.picker = None;
+                let changed = self.open.as_ref().is_some_and(|open| open.text != text);
+                if let Some(open) = self.open.as_mut() {
+                    open.text = text;
+                }
+                self.analyse();
+                changed
+            }
+            Err(EditError(message)) => {
+                self.flow_error = Some(message);
+                false
+            }
+        }
+    }
+
+    /// Asks for a dry run of the buffer, which must parse. The request is
+    /// tracked by `track_dry_run` once the window has sent it.
+    pub fn dry_run_request(&mut self) -> Option<CommandKind> {
+        let open = self.open.as_ref()?;
+        self.definition.as_ref()?;
+        self.pending_dry_run = Some(open.text.clone());
+        Some(CommandKind::DryRunWorkflow {
+            source: open.text.clone(),
+            inputs: json!({}),
+        })
+    }
+
+    /// Records the operation of the dry run the last request sent.
+    pub fn track_dry_run(&mut self, id: OperationId) {
+        if let Some(source) = self.pending_dry_run.take() {
+            self.dry_running = Some((id, source));
+        }
+    }
+
+    /// The dry run answer, when it answers the one in flight. Another
+    /// operation's answer is dropped.
+    pub fn dry_run_answered(&mut self, id: OperationId, result: WorkflowDryRun) {
+        match self.dry_running.take() {
+            Some((op, source)) if op == id => {
+                self.dry_run = Some(DryRunAnswer { source, result });
+            }
+            other => self.dry_running = other,
+        }
+    }
+
+    /// The last dry run, when it walked the buffer as it is now.
+    #[must_use]
+    pub fn dry_run_result(&self) -> Option<&WorkflowDryRun> {
+        let answer = self.dry_run.as_ref()?;
+        (self.open.as_ref().map(|open| open.text.as_str()) == Some(answer.source.as_str()))
+            .then_some(&answer.result)
+    }
+
+    /// Whether a dry run answered before the buffer changed.
+    #[must_use]
+    pub fn dry_run_stale(&self) -> bool {
+        self.dry_run.is_some() && self.dry_run_result().is_none()
+    }
+
+    #[must_use]
+    pub fn dry_run_pending(&self) -> bool {
+        self.dry_running.is_some()
+    }
+
+    /// Closes the dry run panel.
+    pub fn dismiss_dry_run(&mut self) {
+        self.dry_run = None;
     }
 
     /// Follows the engine's listing. The open file takes the listed hash and
@@ -440,6 +708,11 @@ impl WorkflowsPage {
         if self.run_op == Some(id) {
             self.run_op = None;
         }
+        // A done dry run may still have its answer to come, so only a failure clears it.
+        if state != OperationState::Done && self.dry_running.as_ref().map(|(op, _)| *op) == Some(id)
+        {
+            self.dry_running = None;
+        }
         // A done save waits for its `WorkflowFileSaved`, which carries the new hash.
         if state == OperationState::Done || self.saving.as_ref().map(|(op, _)| *op) != Some(id) {
             return;
@@ -510,13 +783,57 @@ impl WorkflowsPage {
         self.tab = tab;
     }
 
-    /// Parses the buffer and keeps its diagnostics.
+    /// Parses the buffer and keeps its diagnostics. A file that parses no longer
+    /// has the selected state, or none, drops the selection and the picker; a
+    /// file that does not parse keeps them, so a typo does not lose the place.
     fn analyse(&mut self) {
         let text = self.text().to_owned();
         let (definition, diagnostics) = analyse(&text);
         self.definition = definition;
         self.diagnostics = diagnostics;
+        if self.definition.is_some() {
+            let known = self
+                .selected
+                .as_deref()
+                .is_some_and(|id| self.top_level_ids().contains(&id));
+            if !known {
+                self.selected = None;
+                self.picker = None;
+            }
+        }
     }
+}
+
+/// The state the Flow selects after `removed` goes: the one after it, or the
+/// one before it when it was last.
+fn neighbour_after_removal(ids: &[String], removed: &str) -> Option<String> {
+    let index = ids.iter().position(|id| id == removed)?;
+    ids.get(index + 1)
+        .or_else(|| index.checked_sub(1).and_then(|before| ids.get(before)))
+        .cloned()
+}
+
+fn no_selection() -> EditError {
+    EditError("Select a state in the Flow first.".to_owned())
+}
+
+/// The targets a state's picker offers: the other top-level states, then
+/// `end.done` and `end.failed`, and `end.blocked` only in a `before.*` phase,
+/// where a run can veto.
+#[must_use]
+pub fn target_options(definition: &Definition, state: &str) -> Vec<String> {
+    let mut options: Vec<String> = definition
+        .states
+        .iter()
+        .map(|known| known.id.clone())
+        .filter(|id| id != state)
+        .collect();
+    options.push("end.done".to_owned());
+    options.push("end.failed".to_owned());
+    if definition.trigger.is_before() {
+        options.push("end.blocked".to_owned());
+    }
+    options
 }
 
 /// Whether a save's failure text is the engine's conflict answer.
@@ -572,6 +889,9 @@ pub struct FlowRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Edge {
     pub outcome: String,
+    /// The transition's place in `on.<outcome>`, for the picker; zero for a
+    /// default or an unhandled outcome.
+    pub index: usize,
     pub target: String,
     pub guard: Option<String>,
     pub limit: Option<u32>,
@@ -673,9 +993,10 @@ fn edges(state: &State, declared: &[&str], next: &str) -> Vec<Edge> {
     for outcome in outcomes {
         match state.rule(outcome) {
             Some(rule) if !rule.transitions.is_empty() => {
-                for transition in &rule.transitions {
+                for (index, transition) in rule.transitions.iter().enumerate() {
                     edges.push(Edge {
                         outcome: outcome.to_owned(),
+                        index,
                         target: target_text(&transition.to),
                         guard: transition.guard.clone(),
                         limit: transition.limit,
@@ -692,6 +1013,7 @@ fn edges(state: &State, declared: &[&str], next: &str) -> Vec<Edge> {
                 };
                 edges.push(Edge {
                     outcome: outcome.to_owned(),
+                    index: 0,
                     target: target.to_owned(),
                     guard: None,
                     limit: None,
@@ -701,6 +1023,7 @@ fn edges(state: &State, declared: &[&str], next: &str) -> Vec<Edge> {
             }
             _ => edges.push(Edge {
                 outcome: outcome.to_owned(),
+                index: 0,
                 target: "unhandled".to_owned(),
                 guard: None,
                 limit: None,
@@ -1532,5 +1855,267 @@ states = [
         let labels: Vec<&str> = blocks.iter().map(|(label, _)| *label).collect();
         assert_eq!(labels, ["Inputs", "Trigger", "Repository"]);
         assert!(blocks[0].1.contains("ENG-1"));
+    }
+
+    /// Three top-level states; `b` has two transitions on `done`.
+    const FLOW: &str = "schema = 1\n# The header note stays.\nname = \"flow\"\n\n[trigger]\non = \"manual\"\n\n# First.\n[[state]]\nid = \"a\"\naction = \"noop\"\non.done = \"b\"\n\n[[state]]\nid = \"b\"\naction = \"noop\"\non.done = [\n  { to = \"end.done\" },\n  { to = \"a\", limit = 2 },\n]\n\n[[state]]\nid = \"c\"\naction = \"noop\"\n";
+
+    fn flow_page(source: &str) -> WorkflowsPage {
+        let listed = vec![info("/w/flow.toml", "flow", source, "h1")];
+        let mut page = WorkflowsPage::default();
+        assert!(page.select("/w/flow.toml", &listed));
+        page
+    }
+
+    fn state_ids(page: &WorkflowsPage) -> Vec<String> {
+        page.definition()
+            .expect("the file parses")
+            .states
+            .iter()
+            .map(|state| state.id.clone())
+            .collect()
+    }
+
+    fn answer() -> WorkflowDryRun {
+        WorkflowDryRun {
+            error: None,
+            missing_inputs: Vec::new(),
+            steps: Vec::new(),
+            stop: "end.done".into(),
+        }
+    }
+
+    #[test]
+    fn an_add_goes_after_the_selected_state_and_selects_the_new_one() {
+        let mut page = flow_page(FLOW);
+        page.select_state("a");
+        assert!(page.apply_flow_edit(FlowEdit::Add));
+        assert_eq!(state_ids(&page), ["a", "step", "b", "c"]);
+        assert_eq!(page.selected(), Some("step"));
+        assert!(page.dirty());
+        assert!(page.text().contains("# The header note stays."));
+    }
+
+    #[test]
+    fn an_add_with_no_selection_goes_to_the_end() {
+        let mut page = flow_page(FLOW);
+        assert!(page.apply_flow_edit(FlowEdit::Add));
+        assert_eq!(state_ids(&page), ["a", "b", "c", "step"]);
+        assert_eq!(page.selected(), Some("step"));
+    }
+
+    #[test]
+    fn a_remove_selects_the_next_state_or_the_one_before_the_last() {
+        let mut page = flow_page(FLOW);
+        page.select_state("b");
+        assert!(page.apply_flow_edit(FlowEdit::Remove));
+        assert_eq!(state_ids(&page), ["a", "c"]);
+        assert_eq!(page.selected(), Some("c"));
+        page.select_state("c");
+        assert!(page.apply_flow_edit(FlowEdit::Remove));
+        assert_eq!(state_ids(&page), ["a"]);
+        assert_eq!(page.selected(), Some("a"));
+    }
+
+    #[test]
+    fn a_refused_edit_keeps_the_buffer_and_says_why() {
+        let mut page = flow_page(FLOW);
+        assert!(!page.apply_flow_edit(FlowEdit::Move(Direction::Up)));
+        assert_eq!(page.flow_error(), Some("Select a state in the Flow first."));
+        assert!(!page.dirty());
+        assert_eq!(page.text(), FLOW);
+
+        let mut single = flow_page(
+            "schema = 1\nname = \"w\"\n\n[trigger]\non = \"manual\"\n\n[[state]]\nid = \"a\"\naction = \"noop\"\n",
+        );
+        single.select_state("a");
+        assert!(!single.apply_flow_edit(FlowEdit::Remove));
+        assert!(
+            single
+                .flow_error()
+                .is_some_and(|error| error.contains("only state"))
+        );
+        assert!(!single.dirty());
+    }
+
+    #[test]
+    fn a_move_keeps_the_selection_and_an_edge_move_is_refused() {
+        let mut page = flow_page(FLOW);
+        page.select_state("a");
+        assert!(!page.apply_flow_edit(FlowEdit::Move(Direction::Up)));
+        assert!(
+            page.flow_error()
+                .is_some_and(|error| error.contains("already the first"))
+        );
+        assert!(page.apply_flow_edit(FlowEdit::Move(Direction::Down)));
+        assert_eq!(state_ids(&page), ["b", "a", "c"]);
+        assert_eq!(page.selected(), Some("a"));
+        assert_eq!(page.flow_error(), None);
+    }
+
+    #[test]
+    fn a_flow_edit_is_one_change_that_revert_takes_back() {
+        let mut page = flow_page(FLOW);
+        page.select_state("a");
+        assert!(page.apply_flow_edit(FlowEdit::Add));
+        assert!(page.dirty());
+        page.revert();
+        assert!(!page.dirty());
+        assert_eq!(page.text(), FLOW);
+    }
+
+    #[test]
+    fn a_picked_target_sets_its_edge_and_default_clears_the_outcome() {
+        let mut page = flow_page(FLOW);
+        page.select_state("a");
+        page.open_picker("a", "done", 0, (10., 20.));
+        assert!(page.picker().is_some());
+        assert!(page.pick_target(&Choice::Target("c".into())));
+        assert!(page.picker().is_none());
+        assert!(page.text().contains("on.done = \"c\""));
+
+        page.select_state("b");
+        page.open_picker("b", "done", 1, (0., 0.));
+        assert!(page.pick_target(&Choice::Target("c".into())));
+        let (rows, _) = flow_rows(page.definition().expect("parses"), &[]);
+        let labels: Vec<String> = rows[1].edges.iter().map(Edge::label).collect();
+        assert_eq!(
+            labels,
+            [
+                "done → end.done",
+                "done → c (limit 2)",
+                "failed → end.failed"
+            ]
+        );
+
+        page.open_picker("b", "done", 0, (0., 0.));
+        assert!(page.pick_target(&Choice::Default));
+        assert!(!page.text().contains("on.done = ["));
+    }
+
+    #[test]
+    fn the_picker_opens_only_over_the_selected_state_and_another_state_closes_it() {
+        let mut page = flow_page(FLOW);
+        page.select_state("a");
+        page.open_picker("b", "done", 0, (0., 0.));
+        assert!(page.picker().is_none());
+
+        page.open_picker("a", "done", 0, (1., 2.));
+        page.select_state("a");
+        assert!(
+            page.picker().is_some(),
+            "a click on the selected state keeps it"
+        );
+        page.select_state("b");
+        assert!(page.picker().is_none());
+        page.select_state("zz");
+        assert_eq!(page.selected(), Some("b"), "an unknown state is ignored");
+    }
+
+    #[test]
+    fn the_selection_survives_typing_and_a_broken_file_but_not_its_state_going() {
+        let mut page = flow_page(FLOW);
+        page.select_state("b");
+        page.edit(&format!("{FLOW}# note\n"));
+        assert_eq!(page.selected(), Some("b"));
+        page.edit("schema = ");
+        assert_eq!(
+            page.selected(),
+            Some("b"),
+            "a file that does not parse keeps the place"
+        );
+        page.edit(&edit::remove_state(FLOW, "b").expect("b can go"));
+        assert_eq!(page.selected(), None);
+    }
+
+    #[test]
+    fn the_picker_offers_the_other_states_and_end_blocked_only_before_a_veto() {
+        let definition = analyse(FLOW).0.expect("parses");
+        assert_eq!(
+            target_options(&definition, "a"),
+            ["b", "c", "end.done", "end.failed"]
+        );
+        let before = analyse(&FLOW.replace("on = \"manual\"", "on = \"before.restack\""))
+            .0
+            .expect("parses");
+        assert!(target_options(&before, "a").contains(&"end.blocked".to_owned()));
+    }
+
+    #[test]
+    fn a_dry_run_is_asked_only_for_a_file_that_parses() {
+        let mut broken = flow_page(FLOW);
+        broken.edit("schema = ");
+        assert_eq!(broken.dry_run_request(), None);
+
+        let mut page = flow_page(FLOW);
+        assert_eq!(
+            page.dry_run_request(),
+            Some(CommandKind::DryRunWorkflow {
+                source: FLOW.into(),
+                inputs: json!({}),
+            })
+        );
+    }
+
+    #[test]
+    fn a_dry_run_answer_is_kept_for_its_request_and_stale_after_an_edit() {
+        let mut page = flow_page(FLOW);
+        let _ = page.dry_run_request();
+        page.track_dry_run(id(5));
+        assert!(page.dry_run_pending());
+        page.dry_run_answered(id(4), answer());
+        assert_eq!(
+            page.dry_run_result(),
+            None,
+            "another operation's answer is dropped"
+        );
+        assert!(page.dry_run_pending());
+        page.dry_run_answered(id(5), answer());
+        assert_eq!(page.dry_run_result(), Some(&answer()));
+        assert!(!page.dry_run_pending());
+        assert!(!page.dry_run_stale());
+
+        page.edit(&format!("{FLOW}# note\n"));
+        assert_eq!(page.dry_run_result(), None);
+        assert!(page.dry_run_stale());
+        page.dismiss_dry_run();
+        assert!(!page.dry_run_stale());
+    }
+
+    #[test]
+    fn a_failed_dry_run_is_no_longer_pending() {
+        let mut page = flow_page(FLOW);
+        let _ = page.dry_run_request();
+        page.track_dry_run(id(7));
+        page.operation_ended(id(7), OperationState::Failed, Some("no"));
+        assert!(!page.dry_run_pending());
+    }
+
+    #[test]
+    fn the_flow_position_and_the_edge_places_follow_the_file() {
+        let mut page = flow_page(FLOW);
+        page.select_state("b");
+        assert_eq!(
+            page.state(true).flow,
+            FlowPosition {
+                parses: true,
+                states: 3,
+                selected: Some(1),
+            }
+        );
+        let (rows, _) = flow_rows(page.definition().expect("parses"), &[]);
+        let places: Vec<(String, usize)> = rows[1]
+            .edges
+            .iter()
+            .map(|edge| (edge.label(), edge.index))
+            .collect();
+        assert_eq!(
+            places,
+            [
+                ("done → end.done".to_owned(), 0),
+                ("done → a (limit 2)".to_owned(), 1),
+                ("failed → end.failed".to_owned(), 0),
+            ]
+        );
     }
 }

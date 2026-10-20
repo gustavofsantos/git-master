@@ -676,6 +676,10 @@ impl Model {
                 self.workflows_page.run_loaded(id, *detail);
                 None
             }
+            Event::WorkflowDryRun { id, dry_run } => {
+                self.workflows_page.dry_run_answered(id, *dry_run);
+                None
+            }
             Event::WorkflowFileSaved { id, hash, .. } => {
                 self.workflows_page.saved(id, &hash);
                 None
@@ -723,9 +727,7 @@ impl Model {
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
-            // A dry run has no view yet (the editor's dry-run button comes later).
-            | Event::WorkflowMessageSuggested { .. }
-            | Event::WorkflowDryRun { .. } => None,
+            | Event::WorkflowMessageSuggested { .. } => None,
         }
     }
 
