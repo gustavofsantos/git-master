@@ -153,7 +153,8 @@ pub struct Route {
 pub struct Geometry {
     pub nodes: Vec<Rect>,
     pub edges: Vec<Route>,
-    /// The size the scroll area needs, margins included.
+    /// The size the scroll area needs: every card, corner and label, lanes
+    /// included, and the margin.
     pub width: f32,
     pub height: f32,
 }
@@ -545,6 +546,10 @@ pub fn geometry(graph: &Graph, metrics: &Metrics) -> Geometry {
             right = right.max(point.x);
             bottom = bottom.max(point.y);
         }
+    }
+    for (edge, route) in graph.edges.iter().zip(&routes) {
+        right = right.max(route.label.x + label_width(&edge.label));
+        bottom = bottom.max(route.label.y + LABEL_HEIGHT / 2.0);
     }
     Geometry {
         nodes: rects,
@@ -1206,6 +1211,38 @@ on.approved = "end.done"
                 assert!(
                     route.label.y > first.y && route.label.y < second.y,
                     "{name}: the label of {} is off its first segment",
+                    edge.from
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_scroll_area_holds_every_card_route_and_label_of_the_examples() {
+        for (name, graph) in example_graphs() {
+            let geometry = geometry(&graph, &METRICS);
+            for rect in &geometry.nodes {
+                assert!(
+                    rect.right() <= geometry.width,
+                    "{name}: a card leaves the area"
+                );
+                assert!(
+                    rect.bottom() <= geometry.height,
+                    "{name}: a card leaves the area"
+                );
+            }
+            for (edge, route) in graph.edges.iter().zip(&geometry.edges) {
+                for point in &route.points {
+                    assert!(
+                        point.x <= geometry.width && point.y <= geometry.height,
+                        "{name}: {} route",
+                        edge.from
+                    );
+                }
+                let label_right = route.label.x + label_width(&edge.label);
+                assert!(
+                    label_right <= geometry.width,
+                    "{name}: the label of {} leaves the area",
                     edge.from
                 );
             }

@@ -10,8 +10,7 @@ use gpui::{
 };
 
 use crate::flow_graph::{
-    CHAR_WIDTH, Geometry, Graph, LABEL_HEIGHT, LABEL_OFFSET, Metrics, Node, NodeKind, Point, Rect,
-    Route, label_width,
+    Geometry, Graph, LABEL_HEIGHT, LABEL_OFFSET, Metrics, Node, NodeKind, Point, Rect, Route,
 };
 use crate::theme;
 use crate::workflows_page::FlowRow;
@@ -46,7 +45,6 @@ struct Stroke {
 /// as the geometry, scrolling both ways.
 #[must_use]
 pub fn flow_graph(graph: &Graph, geometry: &Geometry, rows: &[FlowRow]) -> Stateful<Div> {
-    let mut width = geometry.width;
     let mut strokes = Vec::with_capacity(graph.edges.len());
     let mut labels = Vec::with_capacity(graph.edges.len());
     for (edge, route) in graph.edges.iter().zip(&geometry.edges) {
@@ -56,7 +54,6 @@ pub fn flow_graph(graph: &Graph, geometry: &Geometry, rows: &[FlowRow]) -> State
             edge.to.is_some(),
             route,
         ));
-        width = width.max(label_right(&edge.label, route));
         labels.push(label(edge.dangling, edge.defaulted, &edge.label, route));
     }
     let cards = graph
@@ -76,7 +73,7 @@ pub fn flow_graph(graph: &Graph, geometry: &Geometry, rows: &[FlowRow]) -> State
         .child(
             div()
                 .relative()
-                .w(px(width))
+                .w(px(geometry.width))
                 .h(px(geometry.height))
                 .child(edges(strokes))
                 .children(cards)
@@ -314,11 +311,6 @@ fn label(dangling: bool, defaulted: bool, text: &str, route: &Route) -> Div {
         .child(text.to_owned())
 }
 
-/// The right edge of a label, so the canvas reaches it.
-fn label_right(text: &str, route: &Route) -> f32 {
-    route.label.x + label_width(text)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,16 +342,5 @@ mod tests {
         assert!(arrow_head(&[]).is_none());
         assert!(arrow_head(&[at(1.0, 1.0)]).is_none());
         assert!(arrow_head(&[at(1.0, 1.0), at(1.0, 1.0)]).is_none());
-    }
-
-    #[test]
-    fn a_label_reaches_past_its_anchor_by_its_length() {
-        let route = Route {
-            points: vec![at(0.0, 0.0), at(0.0, 10.0)],
-            label: at(100.0, 50.0),
-        };
-        let right = label_right("abcd", &route);
-        assert!(right > 100.0 + LABEL_OFFSET + 4.0 * CHAR_WIDTH);
-        assert!(label_right("abcdefgh", &route) > right);
     }
 }
