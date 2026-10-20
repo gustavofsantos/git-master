@@ -114,3 +114,41 @@ pub struct WorkflowRunDetail {
     /// Every step in the order it ran.
     pub steps: Vec<WorkflowStepRecord>,
 }
+
+/// A dry run of a workflow's text: the steps it would take, read without
+/// performing any of them. Nothing is written and no run is recorded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowDryRun {
+    /// Every error of the text, one per line as `line N: error: message`, when
+    /// it does not load. Then `steps` and `stop` are empty.
+    pub error: Option<String>,
+    /// Declared inputs the request did not give. Each is `""` in the walk.
+    pub missing_inputs: Vec<String>,
+    /// Every state the walk visited, in order. Steps that are not run are
+    /// marked `assumed`.
+    pub steps: Vec<WorkflowDryStep>,
+    /// Why the walk stopped, in words: `end.done`, `end.failed: <reason>`,
+    /// `would wait for <event>`, `` `<action>` is not available yet``, a
+    /// machine error, or `stopped after 200 steps`. Empty when `error` is set.
+    pub stop: String,
+}
+
+/// One state of a dry run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowDryStep {
+    /// Path of the state (`each/plan` inside a `for_each`).
+    pub state: String,
+    pub action: String,
+    /// `read`, `propose`, `apply` or `approve`: the action's effect level.
+    pub level: String,
+    /// What the step would receive, with every `${...}` rendered. For `exec`,
+    /// this is the argv and stdin it would send.
+    pub input: serde_json::Value,
+    /// The answer was computed as the driver computes it (`noop`, `set`);
+    /// nothing ran in any case.
+    pub executed: bool,
+    /// The outcome and output were assumed, because the step was not run.
+    pub assumed: bool,
+    pub outcome: String,
+    pub output: serde_json::Value,
+}
