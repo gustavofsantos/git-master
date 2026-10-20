@@ -15,7 +15,8 @@ if command -v apt-get >/dev/null; then
   $sudo apt-get update -qq
   $sudo apt-get install -y -qq --no-install-recommends \
     build-essential pkg-config curl ca-certificates git \
-    libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig-dev
+    libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig-dev \
+    xvfb xdotool scrot imagemagick mesa-vulkan-drivers
 fi
 
 if ! command -v rustup >/dev/null; then
