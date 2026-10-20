@@ -140,7 +140,9 @@ fn parse_path(inner: &str) -> Result<Vec<String>, ExprError> {
     Ok(path)
 }
 
-fn is_ident(text: &str) -> bool {
+/// A name a `${...}` path can hold: letters, digits and `_`, not starting
+/// with a digit. State ids follow it, so every state can be referenced.
+pub(crate) fn is_ident(text: &str) -> bool {
     let mut chars = text.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')

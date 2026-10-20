@@ -298,9 +298,7 @@ fn table_id(table: &Table) -> Option<&str> {
 /// references are parsed with (`expr`), so every id can be referenced: letters,
 /// digits and `_`, starting with a letter or `_`.
 fn check_id(id: &str) -> Result<(), EditError> {
-    let mut chars = id.chars();
-    let starts_well = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_');
-    if starts_well && chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    if super::expr::is_ident(id) {
         Ok(())
     } else {
         Err(EditError(format!(
