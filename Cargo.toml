@@ -21,6 +21,7 @@ sha2 = "0.10"
 tempfile = "3"
 notify = "8.2"
 toml = { version = "0.9", features = ["preserve_order"] }
+toml_edit = "0.25"
 rusqlite = { version = "0.40", features = ["bundled"] }
 gm-schema = { path = "crates/gm-schema" }
 gm-core = { path = "crates/gm-core" }
