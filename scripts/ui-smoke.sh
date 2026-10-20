@@ -14,12 +14,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/target/release/gitmaster"
+BIN="${CARGO_TARGET_DIR:-$ROOT/target}/release/gitmaster"
 DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split w-flow-editor)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -63,6 +63,16 @@ STACK_LIST_CROP="1040x520+322+222"           # the stacked diff's list, screen c
 WORK_LAYOUT_SPLIT_X=1320; WORK_LAYOUT_Y=120               # "Split" in the Working Copy diff header
 SPLIT_OLD_CHECK_X=797; SPLIT_NEW_CHECK_X=1107             # gutter checkboxes of the split cells (old, new)
 MOD_ENTRY_Y=217                                           # src/ledger/mod.rs: the -/+ pair row (entry, ledger)
+WORKFLOWS_X=133; WORKFLOWS_Y=202             # "Workflows" row under Workspace in the sidebar
+WF_START_NODE_X=700; WF_START_NODE_Y=290     # the first state's node in the Flow graph
+WF_ACTION_X=1200; WF_ACTION_Y=775            # the inspector's Action picker, a state selected
+WF_PICK_NOTIFY_X=1127; WF_PICK_NOTIFY_Y=424  # "notify" in the action picker opened there
+WF_FIELD_X=1200; WF_FIELD_Y=687              # the last field (notify's text), column scrolled to its end
+WF_ADD_STATE_X=643; WF_ADD_STATE_Y=209       # "Add State" in the Flow toolbar
+WF_RUN_X=999; WF_DRY_RUN_X=1072; WF_SAVE_X=1149; WF_HEADER_Y=122   # page header buttons
+WF_RUNS_TAB_X=754; WF_TABS_Y=170             # "Runs" tab
+WF_RUN_ROW_X=660; WF_RUN_ROW_Y=215           # the newest run in the Runs list
+WF_SHOW_IN_FLOW_X=797; WF_SHOW_IN_FLOW_Y=436 # "Show in Flow", after the name "new-workflow" in the open run's header
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -1112,6 +1122,11 @@ run_scenario() {
     git -C "$RUN_DIR/repo" commit -q --allow-empty -m "smoke: history one"
     git -C "$RUN_DIR/repo" commit -q --allow-empty -m "smoke: history two"
   fi
+  if [ "$base" = w-flow-editor ]; then
+    mkdir -p "$RUN_DIR/xdg-config/gitmaster/workflows"
+    cp "$ROOT/crates/gm-core/src/workflow/templates/blank.toml" \
+      "$RUN_DIR/xdg-config/gitmaster/workflows/new-workflow.toml"
+  fi
   if [ "$base" = h-history-unborn ]; then
     scenario_history_unborn "$theme"
     echo "PASS  $LABEL"
@@ -1181,10 +1196,48 @@ run_scenario() {
     u-remove-worktree) scenario_u "$theme" ;;
     v-lock-prune-worktree) scenario_v "$theme" ;;
     h-history) scenario_history "$theme" ;;
+    w-flow-editor) scenario_flow_editor "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app
   echo "PASS  $LABEL"
+}
+
+# --- 3w. A workflow is built in the Flow tab, saved, dry run and run ---------
+# Starts from the blank template copied to the user's workflows: the action is
+# picked and its field typed in the inspector, a state is added, and the saved
+# file keeps the template's comments. Then a run's path is shown in the graph.
+scenario_flow_editor() {
+  local theme="$1" file="$RUN_DIR/xdg-config/gitmaster/workflows/new-workflow.toml"
+  xdotool mousemove "$WORKFLOWS_X" "$WORKFLOWS_Y" click 1; sleep 1.5
+  xdotool mousemove "$WF_START_NODE_X" "$WF_START_NODE_Y" click 1; sleep 1
+  xdotool mousemove "$WF_ACTION_X" "$WF_ACTION_Y" click 1; sleep 1
+  xdotool mousemove "$WF_PICK_NOTIFY_X" "$WF_PICK_NOTIFY_Y" click 1; sleep 1
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do xdotool mousemove 1200 600 click 5; done
+  sleep 1
+  xdotool mousemove "$WF_FIELD_X" "$WF_FIELD_Y" click 1; sleep 0.5
+  xdotool type --delay 20 -- "smoke hello"; sleep 0.5
+  shoot "$SMOKE_OUT/w-flow-editor-inspector-$theme.png"
+  # Save commits the typed field first: a click on a button keeps the focus.
+  xdotool mousemove "$WF_SAVE_X" "$WF_HEADER_Y" click 1; sleep 1.5
+  grep -q '^action = "notify"$' "$file" || fail "the action was not saved: $(cat "$file")"
+  grep -q 'text = "smoke hello"' "$file" || fail "the typed field was not saved: $(cat "$file")"
+  grep -q '^# An empty workflow' "$file" || fail "the template's comment was lost: $(cat "$file")"
+
+  xdotool mousemove "$WF_ADD_STATE_X" "$WF_ADD_STATE_Y" click 1; sleep 1
+  xdotool mousemove "$WF_SAVE_X" "$WF_HEADER_Y" click 1; sleep 1.5
+  grep -q '^id = "step"$' "$file" || fail "the added state was not saved: $(cat "$file")"
+
+  xdotool mousemove "$WF_DRY_RUN_X" "$WF_HEADER_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/w-flow-editor-dry-run-$theme.png"
+
+  xdotool mousemove "$WF_RUN_X" "$WF_HEADER_Y" click 1; sleep 2
+  [ -s "$RUN_DIR/repo/.git/gitmaster/state.db" ] || fail "the run left no state.db"
+  xdotool mousemove "$WF_RUNS_TAB_X" "$WF_TABS_Y" click 1; sleep 1.5
+  xdotool mousemove "$WF_RUN_ROW_X" "$WF_RUN_ROW_Y" click 1; sleep 1.5
+  xdotool mousemove "$WF_SHOW_IN_FLOW_X" "$WF_SHOW_IN_FLOW_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/w-flow-editor-run-path-$theme.png"
 }
 
 # --- 3j. An unborn HEAD says so on the history page ----------------------------
