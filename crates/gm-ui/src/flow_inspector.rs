@@ -37,7 +37,7 @@ const KEYBOARD_PICKER_INSET: f32 = 300.;
 const KEYBOARD_PICKER_TOP: f32 = 140.;
 
 /// The text field of one value of the inspector, keyed by what it edits.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Slot {
     Name,
     Description,
@@ -676,6 +676,24 @@ impl StatusView {
             })
             .map(|(slot, _)| slot.clone());
         if let Some(slot) = focused {
+            self.commit_flow_field(&slot, cx);
+        }
+    }
+
+    /// Commits every text field whose text differs from the file. Run before
+    /// Save, Dry Run and a tab change: a click on a label or a button does not
+    /// move the keyboard focus, so no blur would commit the typed text.
+    pub(crate) fn commit_pending_flow_fields(&mut self, cx: &mut Context<Self>) {
+        let mut slots: Vec<Slot> = self
+            .flow_inspector
+            .fields
+            .keys()
+            .filter(|slot| **slot != Slot::NewInput)
+            .cloned()
+            .collect();
+        // Sorted, so two new `with` keys land in the file in a fixed order.
+        slots.sort();
+        for slot in slots {
             self.commit_flow_field(&slot, cx);
         }
     }

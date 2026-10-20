@@ -89,6 +89,7 @@ impl StatusView {
 
     /// Shows a tab. The Runs tab asks the engine for the open workflow's runs.
     pub(crate) fn show_workflow_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.commit_pending_flow_fields(cx);
         if let Some(kind) = self.model.workflows_page.show_tab(tab) {
             let id = self.engine.dispatch(Actor::Human, kind);
             self.model.workflows_page.track_runs(id);
@@ -98,6 +99,7 @@ impl StatusView {
 
     /// Writes the buffer. `overwrite` writes over a file that changed on disk.
     pub(crate) fn save_workflow(&mut self, overwrite: bool, cx: &mut Context<Self>) {
+        self.commit_pending_flow_fields(cx);
         if let Some(kind) = self.model.workflows_page.save_request(overwrite) {
             let id = self.engine.dispatch(Actor::Human, kind);
             self.model.workflows_page.track_save(id);
@@ -198,6 +200,7 @@ impl StatusView {
 
     /// Dry Run: the engine walks the buffer and answers into the Flow's panel.
     pub(crate) fn dry_run_workflow(&mut self, cx: &mut Context<Self>) {
+        self.commit_pending_flow_fields(cx);
         if let Some(kind) = self.model.workflows_page.dry_run_request() {
             let id = self.engine.dispatch(Actor::Human, kind);
             self.model.workflows_page.track_dry_run(id);
@@ -652,6 +655,8 @@ impl StatusView {
             .child(
                 scroll_body()
                     .w(px(320.))
+                    .min_w(px(320.))
+                    .max_w(px(320.))
                     .flex_none()
                     .child(self.inspector_panel(cx))
                     .children(unplaced.iter().map(diagnostic_line))
