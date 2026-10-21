@@ -1491,6 +1491,7 @@ mod history_list_tests {
     fn commit(oid: &str) -> CommitSummary {
         CommitSummary {
             oid: oid.into(),
+            parents: Vec::new(),
             short: oid.chars().take(7).collect(),
             subject: oid.into(),
             refs: Vec::new(),

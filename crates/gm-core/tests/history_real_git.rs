@@ -186,6 +186,65 @@ fn shows_a_merge_with_both_parents_in_the_list() {
     assert_eq!(history.commits[0].refs[0].kind, RefKind::Head);
 }
 
+/// `git rev-list --parents --topo-order HEAD`: each line is a commit and its
+/// parents, the answer the walk's parents must match (H5).
+fn rev_list_parents(dir: &Path) -> Vec<Vec<String>> {
+    let out = Command::new("git")
+        .args(["rev-list", "--parents", "--topo-order", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| line.split(' ').map(str::to_owned).collect())
+        .collect()
+}
+
+#[test]
+fn parents_are_those_of_rev_list_with_the_first_parent_first() {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    commit(dir.path(), "2024-01-01T10:00:00+00:00", "a", "base");
+    for (day, branch) in [(2, "one"), (3, "two"), (4, "three")] {
+        git(dir.path(), &["checkout", "-q", "-b", branch, "main"]);
+        commit(
+            dir.path(),
+            &format!("2024-01-0{day}T10:00:00+00:00"),
+            branch,
+            branch,
+        );
+    }
+    git(dir.path(), &["checkout", "-q", "main"]);
+    commit(dir.path(), "2024-01-05T10:00:00+00:00", "m", "on main");
+    // An octopus merge: the first parent is main, then the three branches.
+    git_at(
+        dir.path(),
+        "2024-01-06T10:00:00+00:00",
+        &[
+            "merge", "-q", "--no-ff", "-m", "octopus", "one", "two", "three",
+        ],
+    );
+
+    let history = history_of(dir.path());
+
+    let walked: Vec<Vec<String>> = history
+        .commits
+        .iter()
+        .map(|c| std::iter::once(c.oid.clone()).chain(c.parents.clone()).collect())
+        .collect();
+    assert_eq!(walked, rev_list_parents(dir.path()));
+    assert_eq!(history.commits[0].subject, "octopus");
+    assert_eq!(history.commits[0].parents.len(), 4);
+    let first_parent = &history.commits[0].parents[0];
+    let first = history.commits.iter().find(|c| &c.oid == first_parent);
+    assert_eq!(first.unwrap().subject, "on main");
+    let root = history.commits.last().unwrap();
+    assert_eq!(root.subject, "base");
+    assert!(root.parents.is_empty());
+}
+
 #[test]
 fn a_root_commit_is_listed_last() {
     let dir = tempfile::tempdir().unwrap();

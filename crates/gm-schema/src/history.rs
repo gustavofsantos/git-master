@@ -30,6 +30,9 @@ pub enum RefKind {
 pub struct CommitSummary {
     /// Full object id.
     pub oid: String,
+    /// Full object ids of the parents, first parent first. Empty for a root
+    /// commit. Feeds the graph lanes (H5).
+    pub parents: Vec<String>,
     /// The abbreviated id Git prints for the commit.
     pub short: String,
     /// The first line of the message, as Git gives it (`%s`).

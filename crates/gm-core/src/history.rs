@@ -171,18 +171,19 @@ fn read_job(mut stream: Box<dyn HistoryStream>, after: Option<&str>) -> HistoryO
     }
 }
 
-/// The format `git log` is asked for: five fields per commit, separated by
+/// The format `git log` is asked for: six fields per commit, separated by
 /// the unit separator (0x1f), and each commit ended by the record separator
 /// (0x1e). Git writes a newline after each record, which the parser drops.
-pub const FORMAT: &str = "--format=%H%x1f%h%x1f%at%x1f%D%x1f%s%x1e";
+/// `%P` lists the parents, separated by spaces.
+pub const FORMAT: &str = "--format=%H%x1f%P%x1f%h%x1f%at%x1f%D%x1f%s%x1e";
 
 const FIELD_SEP: char = '\u{1f}';
 const RECORD_END: char = '\u{1e}';
-const FIELDS: usize = 5;
+const FIELDS: usize = 6;
 
 fn parse_record(record: &str) -> Result<CommitSummary, GitError> {
     let fields: Vec<&str> = record.splitn(FIELDS, FIELD_SEP).collect();
-    let [oid, short, time, decoration, subject] = fields[..] else {
+    let [oid, parents, short, time, decoration, subject] = fields[..] else {
         return Err(GitError(format!(
             "history record has no fields: {record:?}"
         )));
@@ -195,6 +196,7 @@ fn parse_record(record: &str) -> Result<CommitSummary, GitError> {
         .map_err(|_| GitError(format!("history record has a bad time: {time:?}")))?;
     Ok(CommitSummary {
         oid: oid.to_owned(),
+        parents: parents.split_whitespace().map(str::to_owned).collect(),
         short: short.to_owned(),
         subject: subject.to_owned(),
         refs: parse_decoration(decoration),
@@ -246,8 +248,8 @@ mod tests {
     #[test]
     fn parses_each_record_in_order() {
         let raw = [
-            record(&["aaa", "aa", "100", "HEAD -> main", "second"]),
-            record(&["bbb", "bb", "90", "", "first"]),
+            record(&["aaa", "bbb", "aa", "100", "HEAD -> main", "second"]),
+            record(&["bbb", "", "bb", "90", "", "first"]),
         ]
         .concat();
 
@@ -261,8 +263,24 @@ mod tests {
     }
 
     #[test]
+    fn parents_come_first_parent_first_and_a_root_has_none() {
+        let raw = [
+            record(&["mmm", "aaa bbb ccc", "mm", "3", "", "octopus"]),
+            record(&["aaa", "rrr", "aa", "2", "", "child"]),
+            record(&["rrr", "", "rr", "1", "", "root"]),
+        ]
+        .concat();
+
+        let commits = parse_log(raw.as_bytes()).unwrap();
+
+        assert_eq!(commits[0].parents, ["aaa", "bbb", "ccc"]);
+        assert_eq!(commits[1].parents, ["rrr"]);
+        assert!(commits[2].parents.is_empty());
+    }
+
+    #[test]
     fn a_trailing_newline_is_not_a_truncation() {
-        let raw = format!("{}\n", record(&["aaa", "aa", "1", "", "x"]));
+        let raw = format!("{}\n", record(&["aaa", "", "aa", "1", "", "x"]));
         assert_eq!(parse_log(raw.as_bytes()).unwrap().len(), 1);
     }
 
@@ -273,7 +291,7 @@ mod tests {
 
     #[test]
     fn a_subject_may_hold_the_field_separator() {
-        let raw = record(&["aaa", "aa", "1", "", "a\u{1f}b"]);
+        let raw = record(&["aaa", "", "aa", "1", "", "a\u{1f}b"]);
         let commits = parse_log(raw.as_bytes()).unwrap();
         assert_eq!(commits[0].subject, "a\u{1f}b");
     }
@@ -281,15 +299,15 @@ mod tests {
     #[test]
     fn a_truncated_record_is_an_error_not_a_panic() {
         // No record terminator: the output was cut.
-        assert!(parse_log("\naaa\u{1f}aa\u{1f}1".as_bytes()).is_err());
-        assert!(parse_log("\naaa\u{1f}aa\u{1f}1\u{1f}\u{1f}subject".as_bytes()).is_err());
+        assert!(parse_log("\naaa\u{1f}\u{1f}aa\u{1f}1".as_bytes()).is_err());
+        assert!(parse_log("\naaa\u{1f}\u{1f}aa\u{1f}1\u{1f}\u{1f}subject".as_bytes()).is_err());
         // Terminated, but missing the subject field.
-        assert!(parse_log("\naaa\u{1f}aa\u{1f}1\u{1f}\u{1e}".as_bytes()).is_err());
+        assert!(parse_log("\naaa\u{1f}\u{1f}aa\u{1f}1\u{1f}\u{1e}".as_bytes()).is_err());
     }
 
     #[test]
     fn a_bad_time_is_an_error() {
-        let raw = record(&["aaa", "aa", "soon", "", "x"]);
+        let raw = record(&["aaa", "", "aa", "soon", "", "x"]);
         assert!(parse_log(raw.as_bytes()).is_err());
     }
 

@@ -2005,6 +2005,7 @@ mod tests {
     fn commit_of(oid: &str) -> gm_schema::CommitSummary {
         gm_schema::CommitSummary {
             oid: oid.into(),
+            parents: Vec::new(),
             short: oid.chars().take(7).collect(),
             subject: oid.into(),
             refs: Vec::new(),
