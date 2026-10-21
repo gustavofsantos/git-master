@@ -86,7 +86,7 @@ pub fn name_label(name: &str, matches: &[Range<usize>]) -> Div {
 }
 
 /// A text run with its matches highlighted. Empty text draws nothing.
-fn name_text(text: &str, matches: &[Range<usize>]) -> StyledText {
+pub fn name_text(text: &str, matches: &[Range<usize>]) -> StyledText {
     let highlight = HighlightStyle {
         color: Some(theme::accent()),
         font_weight: Some(FontWeight::SEMIBOLD),

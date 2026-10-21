@@ -37,8 +37,10 @@ use crate::new_branch::NewBranchDialog;
 use crate::palette::Palette;
 use crate::palette_view::{self, PaletteView};
 use crate::project_menu::ProjectMenu;
+use crate::quick_open_view::{self, QuickOpenView};
 use crate::recent::{self, Recents};
 use crate::resize;
+use crate::shell_code::CodeView;
 use crate::shell_history::CommitTexts;
 use crate::shell_sidebar;
 use crate::sidebar::Grouping;
@@ -53,7 +55,7 @@ use crate::workflows_page::is_conflict;
 use crate::worktree_create::WorktreeDialog;
 use crate::worktree_prune::PruneDialog;
 use crate::worktree_remove::RemoveDialog;
-use crate::{CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, StartPath};
+use crate::{CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, OpenQuickOpen, StartPath};
 
 /// The key context of the change list. Its keys work only while the list has
 /// focus, so typing into the message is never taken as a key.
@@ -67,14 +69,16 @@ const UPDATING_DELAY: Duration = Duration::from_millis(300);
 
 const WATCH_LIMITED: &str = "Watching is limited; refreshing when the window gains focus.";
 
-/// What the main area shows: the Working Copy, the history page (H1), or the
-/// Workflows page (D76).
+/// What the main area shows: the Working Copy, the history page (H1), the
+/// Workflows page (D76), or the Code page (N2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Screen {
     #[default]
     WorkingCopy,
     History,
     Workflows,
+    /// The folder tree and the file viewer (N2).
+    Code,
 }
 
 pub struct StatusView {
@@ -117,6 +121,10 @@ pub struct StatusView {
     /// The command palette's state: its query, its step and its ranked rows.
     pub(crate) palette: Palette,
     pub(crate) palette_view: PaletteView,
+    /// Quick Open's input and list scroll; its state is `model.quick_open`.
+    pub(crate) quick_open_view: QuickOpenView,
+    /// The Code page's scrolls; its state is `model.code`.
+    pub(crate) code_view: CodeView,
     /// The create-worktree dialog, while it is open.
     pub(crate) worktree_dialog: Option<WorktreeDialog>,
     /// The remove-worktree dialog, while it is open.
@@ -196,6 +204,9 @@ impl StatusView {
         let branch_menu = BranchMenu::new(branch_filter.clone());
         let palette_filter =
             cx.new(|cx| TextArea::new("Type a command, branch or file", cx).with_lines(1, 1));
+        let quick_open_input = cx.new(|cx| {
+            TextArea::new("Find a file by name  (name:line opens at a line)", cx).with_lines(1, 1)
+        });
         let sidebar_input = cx.new(|cx| TextArea::new("Find a branch", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
@@ -264,6 +275,11 @@ impl StatusView {
             }),
         ];
         subscriptions.extend(palette_view::subscriptions(&palette_filter, window, cx));
+        subscriptions.extend(quick_open_view::subscriptions(
+            &quick_open_input,
+            window,
+            cx,
+        ));
         subscriptions.extend(shell_sidebar::subscriptions(&sidebar_input, window, cx));
         let mut model = Model::default();
         model.request_open(open);
@@ -292,6 +308,8 @@ impl StatusView {
             context_menu: ContextMenu::default(),
             palette: Palette::default(),
             palette_view: PaletteView::new(palette_filter),
+            quick_open_view: QuickOpenView::new(quick_open_input),
+            code_view: CodeView::new(),
             worktree_dialog: None,
             removal_dialog: None,
             prune_dialog: None,
@@ -375,6 +393,13 @@ impl StatusView {
         let listed = matches!(event, Event::BranchesLoaded { .. });
         let committed = matches!(event, Event::Committed { .. });
         let detail_loaded = matches!(event, Event::CommitDetailLoaded { .. });
+        let file_event = matches!(
+            event,
+            Event::FilesFound { .. }
+                | Event::DirectoryListed { .. }
+                | Event::FileRead { .. }
+                | Event::FilesIndexed { .. }
+        );
         let finished = matches!(event, Event::HookFinished { .. });
         let workflow_refresh = self.on_workflow_event(&event, cx);
         let workflows_listed = matches!(event, Event::WorkflowsListed { .. });
@@ -389,6 +414,9 @@ impl StatusView {
         if detail_loaded {
             self.show_commit_texts(cx);
         }
+        if file_event {
+            self.after_file_event(cx);
+        }
         if let Some(fresh) = self.model.commit_stack.take_fresh() {
             self.commit_diff_pane.update(cx, |pane, cx| {
                 pane.show_stack(
@@ -401,24 +429,7 @@ impl StatusView {
                 );
             });
         }
-        if let Some(outcome) = self.model.creating.take() {
-            self.on_worktree_created(outcome, window, cx);
-        }
-        if let Some(outcome) = self.model.removal.take_outcome() {
-            self.on_worktree_removal_settled(outcome, window, cx);
-        }
-        if let Some(outcome) = self.model.pruning.take_outcome() {
-            self.on_worktrees_pruned(outcome, window, cx);
-        }
-        if let Some(outcome) = self.model.branch_create.take() {
-            self.on_branch_created(outcome, window, cx);
-        }
-        if let Some(outcome) = self.model.branch_delete.take() {
-            self.on_branch_delete_settled(outcome, window, cx);
-        }
-        if let Some(outcome) = self.model.merging.take_outcome() {
-            self.on_merged_settled(outcome, window, cx);
-        }
+        self.settle_dialogs(window, cx);
         // A finished hook run fills the composer only while it still holds what the run was
         // started from; otherwise the answer waits as a suggestion (see hook_run).
         if finished {
@@ -472,6 +483,58 @@ impl StatusView {
             self.refresh_history();
         }
         cx.notify();
+    }
+
+    /// Shows the outcome of each dialog's operation that the model settled.
+    fn settle_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(outcome) = self.model.creating.take() {
+            self.on_worktree_created(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.removal.take_outcome() {
+            self.on_worktree_removal_settled(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.pruning.take_outcome() {
+            self.on_worktrees_pruned(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.branch_create.take() {
+            self.on_branch_created(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.branch_delete.take() {
+            self.on_branch_delete_settled(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.merging.take_outcome() {
+            self.on_merged_settled(outcome, window, cx);
+        }
+    }
+
+    /// The row under the top bar: the sidebar and the page the screen names.
+    fn main_area(
+        &self,
+        sidebar_width: f32,
+        left_width: f32,
+        commit_height: f32,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .flex_row()
+            .child(self.sidebar(sidebar_width, cx))
+            .children(
+                (self.screen == Screen::WorkingCopy)
+                    .then(|| self.left_column(left_width, commit_height, cx)),
+            )
+            .children((self.screen == Screen::WorkingCopy).then(|| {
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .min_h(px(0.))
+                    .child(self.diff_pane.clone())
+            }))
+            .children((self.screen == Screen::History).then(|| self.history_page(cx)))
+            .children((self.screen == Screen::Workflows).then(|| self.workflows_page(cx)))
+            .children((self.screen == Screen::Code).then(|| self.code_page(cx)))
     }
 
     fn head_name(&self) -> Option<String> {
@@ -586,6 +649,9 @@ impl StatusView {
         self.request_workflow_list();
         if self.screen == Screen::History {
             self.refresh_history();
+        }
+        if self.screen == Screen::Code {
+            self.show_code(cx);
         }
         self.remember(PathBuf::from(switched.root), cx);
     }
@@ -872,6 +938,9 @@ impl StatusView {
             Ok(Effect::OpenMergedBranchesDialog) => self.open_merged_dialog(window, cx),
             Ok(Effect::ShowHistory) => self.show_history(cx),
             Ok(Effect::ShowWorkflows) => self.show_workflows(cx),
+            Ok(Effect::OpenQuickOpen) => self.open_quick_open(window, cx),
+            Ok(Effect::ShowCode) => self.show_code(cx),
+            Ok(Effect::ViewFile { path, line }) => self.view_file(&path, line, cx),
             Ok(Effect::SaveWorkflow) => self.save_workflow(false, cx),
             Ok(Effect::RevertWorkflow) => self.revert_workflow(cx),
             Ok(Effect::OpenDeleteWorkflow) => self.ask_delete_workflow(cx),
@@ -1167,6 +1236,13 @@ impl Render for StatusView {
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.toggle_palette(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenQuickOpen, window, cx| {
+                if this.model.quick_open.open {
+                    this.close_quick_open(window, cx);
+                } else {
+                    this.run_action(Action::QuickOpen, &Args::None, window, cx);
+                }
+            }))
             .on_action(cx.listener(Self::save_workflow_action))
             .on_action(cx.listener(|this, _: &CopyCurrentBranch, window, cx| {
                 this.copy_current_branch(window, cx);
@@ -1178,27 +1254,11 @@ impl Render for StatusView {
                     .then(|| welcome::header(window))
                     .flatten(),
             )
-            .children(self.welcome.is_none().then(|| {
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .flex()
-                    .flex_row()
-                    .child(self.sidebar(sidebar_width, cx))
-                    .children(
-                        (self.screen == Screen::WorkingCopy)
-                            .then(|| self.left_column(left_width, commit_height, cx)),
-                    )
-                    .children((self.screen == Screen::WorkingCopy).then(|| {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .child(self.diff_pane.clone())
-                    }))
-                    .children((self.screen == Screen::History).then(|| self.history_page(cx)))
-                    .children((self.screen == Screen::Workflows).then(|| self.workflows_page(cx)))
-            }))
+            .children(
+                self.welcome
+                    .is_none()
+                    .then(|| self.main_area(sidebar_width, left_width, commit_height, cx)),
+            )
             .children(self.welcome.is_none().then(|| self.status_bar(window, cx)))
             .children(
                 self.welcome
@@ -1215,6 +1275,12 @@ impl Render for StatusView {
                     .then(|| self.context_menu_layer(window, cx)),
             )
             .children(self.palette.open.then(|| self.palette_layer(window, cx)))
+            .children(
+                self.model
+                    .quick_open
+                    .open
+                    .then(|| self.quick_open_layer(window, cx)),
+            )
             .children(self.workflow_picker_layer(window, cx))
             .children(self.inspector_picker_layer(window, cx))
             .children(

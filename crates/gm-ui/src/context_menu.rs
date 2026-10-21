@@ -95,6 +95,7 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         item(Action::StageFile, 0),
         item(Action::UnstageFile, 0),
         item(Action::DiscardFile, 1),
+        item(Action::ViewFile, 2),
         item(Action::CopyFilePath, 2),
         item(Action::RevealFile, 2),
     ]
@@ -747,8 +748,9 @@ mod tests {
         let items = file_items("a.txt", &ctx(&entries));
         assert_eq!(find(&items, Action::CopyFilePath).state, Ok(()));
         assert_eq!(find(&items, Action::RevealFile).state, Ok(()));
+        assert_eq!(find(&items, Action::ViewFile).state, Ok(()));
         let sizes: Vec<usize> = sections(&items).iter().map(|s| s.len()).collect();
-        assert_eq!(sizes, [2, 1, 2]);
+        assert_eq!(sizes, [2, 1, 3]);
     }
 
     #[test]

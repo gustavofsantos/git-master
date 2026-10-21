@@ -130,6 +130,12 @@ impl StatusView {
                     }),
                 ),
             )
+            .child(item_row("Code", self.screen == Screen::Code).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.run_action(Action::ShowCode, &Args::None, window, cx);
+                }),
+            ))
             .child(
                 item_row("Workflows", self.screen == Screen::Workflows).on_mouse_down(
                     MouseButton::Left,

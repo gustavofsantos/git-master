@@ -5,6 +5,8 @@
 //! superseded is dropped, so an answer never lands under a query it was not
 //! made for.
 
+use std::ops::Range;
+
 use gm_schema::{FileHit, FileSearch, OperationId};
 
 /// What Enter does on the highlighted file: open `path`, at `line` if the query
@@ -79,12 +81,6 @@ impl QuickOpen {
         if self.request == Some(id) {
             self.request = None;
         }
-    }
-
-    /// Whether `id` is the search in flight.
-    #[must_use]
-    pub fn owns(&self, id: OperationId) -> bool {
-        self.request == Some(id)
     }
 
     #[must_use]
@@ -165,32 +161,10 @@ fn count(n: usize, noun: &str) -> String {
     format!("{digits} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
-/// Splits `path` into the segments to draw: each is text and whether it is
-/// highlighted. `ranges` are byte ranges of `path`, in order, as the engine
-/// gives them; one that does not fall on character boundaries is ignored.
+/// `n` files, with thousands grouped: `12,345 files`.
 #[must_use]
-pub fn segments<'a>(path: &'a str, ranges: &[(usize, usize)]) -> Vec<(&'a str, bool)> {
-    let mut out = Vec::new();
-    let mut at = 0;
-    for &(start, end) in ranges {
-        if start < at
-            || end <= start
-            || end > path.len()
-            || !path.is_char_boundary(start)
-            || !path.is_char_boundary(end)
-        {
-            continue;
-        }
-        if start > at {
-            out.push((&path[at..start], false));
-        }
-        out.push((&path[start..end], true));
-        at = end;
-    }
-    if at < path.len() {
-        out.push((&path[at..], false));
-    }
-    out
+pub fn file_count(n: usize) -> String {
+    count(n, "file")
 }
 
 /// The path split into the folder and the file name, for a row that shows the
@@ -201,6 +175,32 @@ pub fn split_name(path: &str) -> (&str, &str) {
         Some(at) => path.split_at(at + 1),
         None => ("", path),
     }
+}
+
+/// The highlight of a path for a row that shows the file name first and its
+/// folder after it, fainter: the ranges that fall in the folder (without its
+/// trailing `/`) and the ranges that fall in the name, each relative to its own
+/// text. A range across the `/` is cut there.
+#[must_use]
+pub fn split_ranges(
+    path: &str,
+    ranges: &[(usize, usize)],
+) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    let (folder, name) = split_name(path);
+    let folder_len = folder.len().saturating_sub(1);
+    let clip = |from: usize, to: usize| -> Vec<Range<usize>> {
+        ranges
+            .iter()
+            .filter_map(|&(start, end)| {
+                let (start, end) = (start.max(from), end.min(to));
+                (start < end).then(|| start - from..end - from)
+            })
+            .collect()
+    };
+    (
+        clip(0, folder_len),
+        clip(path.len() - name.len(), path.len()),
+    )
 }
 
 #[cfg(test)]
@@ -245,7 +245,9 @@ mod tests {
         quick.requested(OperationId(2));
         quick.close();
         assert!(!quick.open);
-        assert!(!quick.owns(OperationId(2)));
+        // The search in flight is forgotten: its answer is not shown.
+        assert!(!quick.received(OperationId(2), search("x", &["z.rs"], 1, 1)));
+        assert!(quick.hits().is_empty());
     }
 
     #[test]
@@ -343,9 +345,10 @@ mod tests {
         quick.open();
         quick.requested(OperationId(1));
         quick.failed(OperationId(2));
-        assert!(quick.owns(OperationId(1)));
+        assert_eq!(quick.status(), "Reading the file list…", "still waiting");
         quick.failed(OperationId(1));
-        assert!(!quick.owns(OperationId(1)));
+        assert_eq!(quick.status(), "", "no longer waiting");
+        assert!(!quick.received(OperationId(1), search("x", &["a.rs"], 1, 1)));
     }
 
     #[test]
@@ -383,32 +386,26 @@ mod tests {
     }
 
     #[test]
-    fn segments_alternate_plain_and_highlighted_text() {
-        assert_eq!(
-            segments("src/diff_pane.rs", &[(4, 5), (9, 13)]),
-            [
-                ("src/", false),
-                ("d", true),
-                ("iff_", false),
-                ("pane", true),
-                (".rs", false)
-            ]
-        );
-        assert_eq!(segments("a.rs", &[]), [("a.rs", false)]);
-        assert_eq!(segments("", &[]), []);
+    fn highlights_are_split_between_the_folder_and_the_name() {
+        // "src/diff_pane.rs": "d" at 4, "pane" at 9..13.
+        let (folder, name) = split_ranges("src/diff_pane.rs", &[(0, 1), (4, 5), (9, 13)]);
+        assert_eq!(folder.len(), 1);
+        assert_eq!(folder[0], 0..1);
+        assert_eq!(name, [0..1, 5..9]);
     }
 
     #[test]
-    fn segments_ignore_ranges_that_would_cut_a_character_or_run_past_the_end() {
-        // "ç" is two bytes: 1..2 cuts it.
-        assert_eq!(segments("aço", &[(1, 2)]), [("aço", false)]);
-        assert_eq!(segments("abc", &[(2, 9)]), [("abc", false)]);
-        assert_eq!(segments("abc", &[(2, 2)]), [("abc", false)]);
-        // Overlapping or out-of-order ranges do not repeat text.
-        assert_eq!(
-            segments("abcdef", &[(2, 4), (1, 3)]),
-            [("ab", false), ("cd", true), ("ef", false)]
-        );
+    fn a_highlight_across_the_slash_is_cut_there_and_the_slash_is_not_shown() {
+        let (folder, name) = split_ranges("ab/cd", &[(1, 4)]);
+        assert_eq!(folder.len(), 1);
+        assert_eq!(folder[0], 1..2);
+        assert_eq!(name.len(), 1);
+        assert_eq!(name[0], 0..1);
+        // A file with no folder has none to highlight.
+        let (folder, name) = split_ranges("cd", &[(0, 2)]);
+        assert!(folder.is_empty());
+        assert_eq!(name.len(), 1);
+        assert_eq!(name[0], 0..2);
     }
 
     #[test]

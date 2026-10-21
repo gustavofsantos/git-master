@@ -150,6 +150,15 @@ pub enum Effect {
     OpenMergedBranchesDialog,
     /// Opens the history page and asks the engine for the commits of HEAD.
     ShowHistory,
+    /// Opens Quick Open, which finds a file by part of its path (N1).
+    OpenQuickOpen,
+    /// Opens the Code page (N2).
+    ShowCode,
+    /// Opens the Code page on a file of the worktree, at a line if given.
+    ViewFile {
+        path: String,
+        line: Option<u32>,
+    },
     /// Opens the Workflows page and asks the engine for the workflow files.
     ShowWorkflows,
     /// Writes the open workflow's buffer to its file.
@@ -229,7 +238,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 61] = [
+const SPECS: [Spec; 64] = [
     spec(
         "file.stage",
         "Stage File",
@@ -651,6 +660,27 @@ const SPECS: [Spec; 61] = [
         ArgKind::None,
         Category::Branches,
     ),
+    spec(
+        "files.quick_open",
+        "Quick Open…",
+        Some("⌘P"),
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "code.show",
+        "Show Code",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "file.view",
+        "View File",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
+    ),
 ];
 
 const fn spec(
@@ -734,6 +764,9 @@ pub enum Action {
     CopyCommitHash,
     CopyCommitMessage,
     DeleteMergedBranches,
+    QuickOpen,
+    ShowCode,
+    ViewFile,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -829,7 +862,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 61] = [
+    pub const ALL: [Action; 64] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -891,6 +924,9 @@ impl Action {
         Action::CopyCommitHash,
         Action::CopyCommitMessage,
         Action::DeleteMergedBranches,
+        Action::QuickOpen,
+        Action::ShowCode,
+        Action::ViewFile,
     ];
 
     #[must_use]
@@ -1077,6 +1113,8 @@ impl Action {
             | Action::NewWorktree
             | Action::PruneWorktrees
             | Action::ShowHistory
+            | Action::QuickOpen
+            | Action::ShowCode
             | Action::ShowWorkflows => repository_open(ctx),
             Action::CheckoutBranch => {
                 idle(ctx)?;
@@ -1089,7 +1127,7 @@ impl Action {
             }
             Action::NewBranch | Action::DeleteBranch => branch_rule(self, args, ctx),
             Action::DeleteMergedBranches => idle(ctx),
-            Action::RevealFile => reveal_rule(args, ctx),
+            Action::RevealFile | Action::ViewFile => reveal_rule(args, ctx),
             Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
             _ if self.copies_its_target() => Ok(()),
             Action::Fetch | Action::Pull | Action::PushWithLease => remote_rule(self, args, ctx),
@@ -1179,6 +1217,12 @@ impl Action {
             }
             (Action::PruneWorktrees, _) => Effect::OpenPruneDialog,
             (Action::ShowHistory, _) => Effect::ShowHistory,
+            (Action::QuickOpen, _) => Effect::OpenQuickOpen,
+            (Action::ShowCode, _) => Effect::ShowCode,
+            (Action::ViewFile, Args::File(path)) => Effect::ViewFile {
+                path: path.clone(),
+                line: None,
+            },
             (Action::ShowWorkflows, _) => Effect::ShowWorkflows,
             (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
             (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
@@ -2163,6 +2207,59 @@ mod tests {
             Action::RevealFile.enabled(&Args::File("gone.txt".into()), &ctx(&entries, "")),
             Err("That file is not in the working copy")
         );
+    }
+
+    #[test]
+    fn view_file_opens_the_viewer_on_a_listed_file_and_refuses_the_rest() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let file = Args::File("a.txt".into());
+        assert_eq!(
+            Action::ViewFile.plan(&file, &ctx(&entries, "")),
+            Ok(Effect::ViewFile {
+                path: "a.txt".into(),
+                line: None
+            })
+        );
+        assert_eq!(
+            Action::ViewFile.enabled(&Args::File("gone.txt".into()), &ctx(&entries, "")),
+            Err("That file is not in the working copy")
+        );
+        let closed = Context {
+            repo_open: false,
+            root: None,
+            ..ctx(&entries, "")
+        };
+        assert_eq!(
+            Action::ViewFile.enabled(&file, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(Action::ViewFile.id(), "file.view");
+    }
+
+    #[test]
+    fn quick_open_and_show_code_need_a_repository_and_open_their_screens() {
+        assert_eq!(
+            Action::QuickOpen.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::OpenQuickOpen)
+        );
+        assert_eq!(
+            Action::ShowCode.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::ShowCode)
+        );
+        let closed = Context {
+            repo_open: false,
+            root: None,
+            ..ctx(&[], "")
+        };
+        for action in [Action::QuickOpen, Action::ShowCode] {
+            assert_eq!(
+                action.enabled(&Args::None, &closed),
+                Err("No repository is open.")
+            );
+        }
+        assert_eq!(Action::QuickOpen.id(), "files.quick_open");
+        assert_eq!(Action::QuickOpen.spec().shortcut, Some("⌘P"));
+        assert_eq!(Action::ShowCode.id(), "code.show");
     }
 
     #[test]

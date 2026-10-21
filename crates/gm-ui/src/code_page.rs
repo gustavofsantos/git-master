@@ -26,7 +26,7 @@ pub struct TreeRow {
 /// without splitting the whole file again.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Text {
-    text: String,
+    source: String,
     /// Where each line starts in `text`.
     starts: Vec<usize>,
     /// The widest line, in columns, with a tab at four.
@@ -50,7 +50,7 @@ impl Text {
             }
         }
         let mut shown = Self {
-            text,
+            source: text,
             starts,
             columns: 0,
         };
@@ -76,8 +76,8 @@ impl Text {
             .starts
             .get(index + 1)
             .copied()
-            .unwrap_or(self.text.len());
-        self.text[start..end]
+            .unwrap_or(self.source.len());
+        self.source[start..end]
             .trim_end_matches('\n')
             .trim_end_matches('\r')
     }
@@ -104,6 +104,37 @@ pub fn columns_of(line: &str) -> usize {
         }
     }
     column
+}
+
+/// `line` as it is drawn when the view is scrolled `from` columns to the right:
+/// tabs become spaces up to the next stop, then the first `from` columns are
+/// dropped. A wide character cut in two leaves a space for its second half.
+#[must_use]
+pub fn visible(line: &str, from: usize) -> String {
+    let mut out = String::new();
+    let mut column = 0;
+    for ch in line.chars() {
+        let width = if ch == '\t' {
+            TAB - column % TAB
+        } else {
+            unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+        };
+        let end = column + width;
+        if end <= from {
+            column = end;
+            continue;
+        }
+        if column < from {
+            // Only the right half of this character is in view.
+            out.extend(std::iter::repeat_n(' ', end - from));
+        } else if ch == '\t' {
+            out.extend(std::iter::repeat_n(' ', width));
+        } else {
+            out.push(ch);
+        }
+        column = end;
+    }
+    out
 }
 
 /// What the viewer shows of a file.
@@ -274,12 +305,6 @@ impl CodePage {
         self.reveal_step()
     }
 
-    /// Whether `id` is a folder listing of ours in flight.
-    #[must_use]
-    pub fn owns_listing(&self, id: OperationId) -> bool {
-        self.requests.contains_key(&id)
-    }
-
     /// A listing request ended with no answer.
     pub fn listing_failed(&mut self, id: OperationId) {
         self.requests.remove(&id);
@@ -312,16 +337,12 @@ impl CodePage {
                 let joined = join(&dir, &entry.name);
                 (entry.is_dir && path.starts_with(&format!("{joined}/"))).then_some(joined)
             });
-            match next {
-                Some(folder) => {
-                    self.expanded.insert(folder.clone());
-                    dir = folder;
-                }
-                None => {
-                    self.pending_reveal = None;
-                    return Vec::new();
-                }
-            }
+            let Some(folder) = next else {
+                self.pending_reveal = None;
+                return Vec::new();
+            };
+            self.expanded.insert(folder.clone());
+            dir = folder;
         }
     }
 
@@ -366,12 +387,6 @@ impl CodePage {
         if matches!(&self.viewer, Viewer::Loading { id: waiting, .. } if *waiting == id) {
             self.viewer = self.shown.clone().map_or(Viewer::Empty, Viewer::Shown);
         }
-    }
-
-    /// Whether `id` is the file read in flight.
-    #[must_use]
-    pub fn owns_file(&self, id: OperationId) -> bool {
-        matches!(&self.viewer, Viewer::Loading { id: waiting, .. } if *waiting == id)
     }
 
     /// The file to draw: the one just read, or the previous one while the next
@@ -477,7 +492,6 @@ mod tests {
     fn a_listing_that_is_not_ours_or_was_answered_twice_is_ignored() {
         let mut page = CodePage::default();
         page.listing_requested(OperationId(1), "");
-        assert!(page.owns_listing(OperationId(1)));
         page.listed(OperationId(7), listing("", &[entry("a", false)]));
         assert!(!page.has_root());
         page.listed(OperationId(1), listing("", &[entry("a", false)]));
@@ -580,7 +594,6 @@ mod tests {
     fn a_file_is_shown_when_its_read_answers_and_not_before() {
         let mut page = CodePage::default();
         page.file_requested(OperationId(1), "a.rs", None);
-        assert!(page.owns_file(OperationId(1)));
         assert_eq!(page.selected.as_deref(), Some("a.rs"));
         assert!(page.on_screen().is_none());
 
@@ -622,7 +635,13 @@ mod tests {
         page.file_requested(OperationId(3), "c.rs", None);
         page.file_cancelled(OperationId(2));
         assert!(
-            page.owns_file(OperationId(3)),
+            matches!(
+                page.viewer,
+                Viewer::Loading {
+                    id: OperationId(3),
+                    ..
+                }
+            ),
             "an older cancel changes nothing"
         );
         page.file_cancelled(OperationId(3));
@@ -699,6 +718,28 @@ mod tests {
         assert_eq!(Text::new(String::new()).line_count(), 0);
         assert_eq!(Text::new("\n".into()).line_count(), 1);
         assert_eq!(Text::new("\n".into()).line(0), "");
+    }
+
+    #[test]
+    fn a_line_scrolled_sideways_drops_its_first_columns() {
+        assert_eq!(visible("abcdef", 0), "abcdef");
+        assert_eq!(visible("abcdef", 2), "cdef");
+        assert_eq!(visible("abcdef", 6), "");
+        assert_eq!(visible("abcdef", 99), "");
+    }
+
+    #[test]
+    fn tabs_are_drawn_as_spaces_to_the_next_stop_before_columns_are_dropped() {
+        assert_eq!(visible("\tx", 0), "    x");
+        assert_eq!(visible("\tx", 2), "  x");
+        assert_eq!(visible("ab\tx", 0), "ab  x");
+        assert_eq!(visible("\tx", 4), "x");
+    }
+
+    #[test]
+    fn a_wide_character_cut_by_the_scroll_leaves_a_space() {
+        assert_eq!(visible("日本", 1), " 本");
+        assert_eq!(visible("日本", 2), "本");
     }
 
     #[test]

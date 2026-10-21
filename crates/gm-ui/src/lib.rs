@@ -33,10 +33,12 @@ mod palette;
 mod palette_view;
 mod project_menu;
 mod quick_open;
+mod quick_open_view;
 mod recent;
 mod remote_op;
 mod resize;
 mod resize_handle;
+mod shell_code;
 mod shell_commit;
 mod shell_history;
 mod shell_list;
@@ -82,6 +84,7 @@ actions!(
         FocusNext,
         FocusPrev,
         OpenPalette,
+        OpenQuickOpen,
         CopyCurrentBranch,
         SaveWorkflow,
     ]
@@ -175,6 +178,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-tab", FocusPrev, None),
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("secondary-k", OpenPalette, None),
+        KeyBinding::new("secondary-p", OpenQuickOpen, None),
         KeyBinding::new("alt-secondary-c", CopyCurrentBranch, None),
         KeyBinding::new("secondary-s", SaveWorkflow, None),
     ]);
@@ -217,6 +221,7 @@ mod tests {
             "shift-tab",
             "secondary-q",
             "secondary-k",
+            "secondary-p",
             "alt-secondary-c",
             "secondary-s",
         ] {
