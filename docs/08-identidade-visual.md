@@ -40,6 +40,7 @@ Regras do tema: tinta primeiro (código é quase todo `fg`), oito acentos com a 
 - Superfícies: `bg` no editor e nos painéis, `bg_hl` no fundo e na barra lateral, `border` nas linhas.
 - Estados: verde = ok/resolvido, amarelo = aviso/defasado, vermelho = conflito/erro, azul = seleção e ação primária.
 - Lanes do grafo: base = violet, ui = cyan, api = orange, main = fg_faint. Aresta de stack defasado = yellow tracejado.
+  - Implementado no grafo do histórico (D87): cinco acentos que não são cores de estado (blue, violet, cyan, magenta, orange) escolhidos pelo hash do nome, e `main`, `master` e `trunk` em `fg_comment`/`faint`. Papéis `graph_lanes` e `faint` em `theme.rs`.
 - Tintas de fundo: acento misturado sobre `bg` (9 a 13%), texto sobre a tinta = acento escurecido 20 a 45% em direção a `fg_emph`.
 - Bolinhas da janela usam os acentos da variante escura.
 
