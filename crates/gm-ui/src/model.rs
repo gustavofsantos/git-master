@@ -3,13 +3,14 @@
 //! renders it and forwards keys to it.
 
 use gm_schema::{
-    CommitFile, DiffSide, Event, FileDiff, History, OperationId, OperationState, RepoStatus,
-    StatusEntry, WorktreeEntry,
+    CommitFile, CommitSummary, DiffSide, Event, FileDiff, History, OperationId, OperationState,
+    RepoStatus, StatusEntry, WorktreeEntry,
 };
 
 use crate::branch_delete::Deleting;
 use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
+use crate::history_graph::GraphLayout;
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
 use crate::merged_branches::Merging;
@@ -257,6 +258,9 @@ impl CommitPane {
 pub struct Listing {
     /// The commits read so far, newest first.
     pub history: History,
+    /// The graph lanes of `history.commits`: one row per commit, in step with
+    /// them (H5).
+    pub graph: GraphLayout,
     /// Whether the first page has been read. A refresh keeps the list until
     /// its answer comes.
     pub loaded: bool,
@@ -335,6 +339,7 @@ impl HistoryList {
         if listing.top == Some(id) {
             listing.top = None;
             listing.loaded = true;
+            listing.graph = GraphLayout::from_commits(&history.commits);
             listing.history = history;
         } else if listing.page == Some(id) {
             listing.page = None;
@@ -345,12 +350,13 @@ impl HistoryList {
                 .map(|c| c.oid.clone())
                 .collect();
             listing.history.more = history.more;
-            listing.history.commits.extend(
-                history
-                    .commits
-                    .into_iter()
-                    .filter(|commit| !held.contains(&commit.oid)),
-            );
+            let added: Vec<CommitSummary> = history
+                .commits
+                .into_iter()
+                .filter(|commit| !held.contains(&commit.oid))
+                .collect();
+            listing.graph.extend(&added);
+            listing.history.commits.extend(added);
         }
     }
 
@@ -1486,7 +1492,6 @@ mod tests {
 #[cfg(test)]
 mod history_list_tests {
     use super::*;
-    use gm_schema::CommitSummary;
 
     fn commit(oid: &str) -> CommitSummary {
         CommitSummary {
@@ -1531,6 +1536,25 @@ mod history_list_tests {
         assert_eq!(oids(&list), ["c", "b"]);
         assert!(shown(&list).loaded);
         assert!(list.can_page());
+    }
+
+    #[test]
+    fn the_graph_has_one_row_per_commit_across_pages_and_refreshes() {
+        let mut list = HistoryList::default();
+        list.request_top(OperationId(1));
+        list.received(OperationId(1), page(&["c", "b"], true));
+        assert_eq!(shown(&list).graph.len(), 2);
+
+        // A page that repeats a commit adds only the ones the list lacks.
+        list.request_page(OperationId(2));
+        list.received(OperationId(2), page(&["b", "a"], false));
+        assert_eq!(oids(&list), ["c", "b", "a"]);
+        assert_eq!(shown(&list).graph.len(), 3);
+
+        // A refresh replaces the commits, and the graph with them.
+        list.request_top(OperationId(3));
+        list.received(OperationId(3), page(&["d", "c"], true));
+        assert_eq!(shown(&list).graph.len(), 2);
     }
 
     #[test]

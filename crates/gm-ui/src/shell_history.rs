@@ -11,11 +11,12 @@ use gm_schema::{
     Actor, Change, CommandKind, CommitDetail, CommitFile, CommitSummary, RefKind, RefLabel,
 };
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, Stateful,
-    Window, div, prelude::*, px, uniform_list,
+    App, ClickEvent, Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    PathBuilder, Pixels, Stateful, Window, canvas, div, point, prelude::*, px, uniform_list,
 };
 
 use crate::action_registry::{Action, Args};
+use crate::history_graph::{self, Drawing, GraphRow, Tint};
 use crate::model::{CommitPane, HistoryList};
 use crate::shell_list::change_letter;
 use crate::text_area::{TextArea, TextStyle};
@@ -24,6 +25,12 @@ use crate::view::StatusView;
 
 const ROW_HEIGHT: f32 = 48.;
 const TIME_WIDTH: f32 = 96.;
+/// The row's side padding (`px_4`), where the graph column starts.
+const ROW_PADDING: f32 = 16.;
+/// The stroke of a graph line, the radius of a node and of the ring around HEAD's.
+const LINE_WIDTH: f32 = 1.5;
+const NODE_RADIUS: f32 = 3.5;
+const HEAD_RING_RADIUS: f32 = 6.;
 const DETAIL_WIDTH: f32 = 360.;
 /// The label column of the detail's fields, and the row height of their text.
 const FIELD_LABEL_WIDTH: f32 = 56.;
@@ -127,6 +134,7 @@ fn history_list(count: usize, cx: &mut Context<StatusView>) -> Div {
                     };
                     let now = now_secs();
                     let selected = listing.selected.as_deref();
+                    let graph_width = history_graph::graph_width(&listing.graph);
                     listing
                         .history
                         .commits
@@ -136,7 +144,8 @@ fn history_list(count: usize, cx: &mut Context<StatusView>) -> Div {
                         .zip(range)
                         .map(|(commit, index)| {
                             let is_selected = selected == Some(commit.oid.as_str());
-                            commit_row(commit, index, now, is_selected, cx)
+                            let graph = listing.graph.row(index);
+                            commit_row(commit, index, now, is_selected, graph, graph_width, cx)
                         })
                         .collect()
                 },
@@ -152,11 +161,15 @@ fn commit_row(
     index: usize,
     now: i64,
     selected: bool,
+    graph: Option<&GraphRow>,
+    graph_width: f32,
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
     let oid = commit.oid.clone();
+    let is_head = commit.refs.iter().any(|label| label.kind == RefKind::Head);
     div()
         .id(index)
+        .relative()
         .w_full()
         .h(px(ROW_HEIGHT))
         .px_4()
@@ -173,6 +186,12 @@ fn commit_row(
                 this.select_commit(&oid, cx);
             }),
         )
+        .when(graph_width > 0., |row| {
+            row.child(div().flex_none().w(px(graph_width)))
+                .when_some(graph, |row, graph| {
+                    row.child(graph_cell(graph, graph_width, is_head))
+                })
+        })
         .child(
             div()
                 .flex_1()
@@ -210,6 +229,110 @@ fn commit_row(
                 .text_right()
                 .child(relative_time(now, commit.author_time)),
         )
+}
+
+/// The graph column of a row, laid over the row's whole height (borders
+/// included) so a lane reaches the rows above and below it. The layout is
+/// `history_graph::drawing`; this paints it.
+fn graph_cell(row: &GraphRow, width: f32, is_head: bool) -> Div {
+    let drawn = history_graph::drawing(row, ROW_HEIGHT);
+    let node_tint = row.tint;
+    let overflow = history_graph::overflow_label(row);
+    div()
+        .absolute()
+        .top_0()
+        .left(px(ROW_PADDING))
+        .w(px(width))
+        .h(px(ROW_HEIGHT))
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, (), window, _cx| {
+                    paint_graph(window, bounds.origin, &drawn, node_tint, is_head);
+                },
+            )
+            .absolute()
+            .size_full(),
+        )
+        .when_some(overflow, |cell, label| {
+            cell.child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top(px(ROW_HEIGHT / 2. - 8.))
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .child(label),
+            )
+        })
+}
+
+fn tint_color(tint: Tint) -> Hsla {
+    match tint {
+        Tint::Trunk => theme::graph_trunk(),
+        Tint::Slot(slot) => theme::graph_lane(slot),
+    }
+}
+
+/// Paints the lines, then the node over them. HEAD's node has a ring, so it
+/// does not rely on colour alone.
+fn paint_graph(
+    window: &mut Window,
+    origin: gpui::Point<Pixels>,
+    drawn: &Drawing,
+    node_tint: Tint,
+    is_head: bool,
+) {
+    let at = |(x, y): (f32, f32)| point(origin.x + px(x), origin.y + px(y));
+    for line in &drawn.lines {
+        let mut path = PathBuilder::stroke(px(LINE_WIDTH));
+        path.move_to(at(line.from));
+        if (line.from.0 - line.to.0).abs() < f32::EPSILON {
+            path.line_to(at(line.to));
+        } else {
+            let bend = f32::midpoint(line.from.1, line.to.1);
+            path.cubic_bezier_to(at(line.to), at((line.from.0, bend)), at((line.to.0, bend)));
+        }
+        if let Ok(path) = path.build() {
+            window.paint_path(path, tint_color(line.tint));
+        }
+    }
+    let Some(center) = drawn.node else {
+        return;
+    };
+    let color = tint_color(node_tint);
+    paint_circle(window, at(center), NODE_RADIUS, None, color);
+    if is_head {
+        paint_circle(
+            window,
+            at(center),
+            HEAD_RING_RADIUS,
+            Some(LINE_WIDTH),
+            color,
+        );
+    }
+}
+
+/// A circle at `center`: filled, or a ring of the given stroke width.
+fn paint_circle(
+    window: &mut Window,
+    center: gpui::Point<Pixels>,
+    radius: f32,
+    ring: Option<f32>,
+    color: Hsla,
+) {
+    let mut path = ring.map_or_else(PathBuilder::fill, |width| PathBuilder::stroke(px(width)));
+    let r = px(radius);
+    let left = point(center.x - r, center.y);
+    let right = point(center.x + r, center.y);
+    let radii = point(r, r);
+    path.move_to(left);
+    path.arc_to(radii, px(0.), false, true, right);
+    path.arc_to(radii, px(0.), false, true, left);
+    path.close();
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
 }
 
 /// A ref as a small chip: HEAD in the accent colour, branches in the selection

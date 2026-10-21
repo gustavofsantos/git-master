@@ -232,7 +232,11 @@ fn parents_are_those_of_rev_list_with_the_first_parent_first() {
     let walked: Vec<Vec<String>> = history
         .commits
         .iter()
-        .map(|c| std::iter::once(c.oid.clone()).chain(c.parents.clone()).collect())
+        .map(|c| {
+            std::iter::once(c.oid.clone())
+                .chain(c.parents.clone())
+                .collect()
+        })
         .collect();
     assert_eq!(walked, rev_list_parents(dir.path()));
     assert_eq!(history.commits[0].subject, "octopus");

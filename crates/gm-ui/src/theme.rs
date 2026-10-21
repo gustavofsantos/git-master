@@ -74,10 +74,16 @@ pub struct Palette {
     pub error: u32,
     /// The colours a worktree takes from its name (`LANE_COUNT` of them).
     pub lanes: [u32; LANE_COUNT],
+    /// The colours of the history graph's lanes (`GRAPH_SLOTS` of them): the
+    /// accents of docs/08 that are not state colours (not red, yellow, green).
+    pub graph_lanes: [u32; GRAPH_SLOTS],
 }
 
 /// How many colours `lane` picks from.
 pub const LANE_COUNT: usize = 6;
+
+/// How many colours `graph_lane` picks from.
+pub const GRAPH_SLOTS: usize = 5;
 
 pub const LIGHT: Palette = Palette {
     ground: 0xee_ede7,
@@ -113,6 +119,7 @@ pub const LIGHT: Palette = Palette {
     lanes: [
         0x00_6cbc, 0x78_56c0, 0x00_7b2f, 0x8a_8882, 0x84_6600, 0xba_3e4b,
     ],
+    graph_lanes: [0x00_6cbc, 0x78_56c0, 0x00_7677, 0xa9_438d, 0xaa_5100],
 };
 
 pub const DARK: Palette = Palette {
@@ -149,6 +156,7 @@ pub const DARK: Palette = Palette {
     lanes: [
         0x64_b2ff, 0xb9_9cf0, 0x82_cc8e, 0x9d_9b92, 0xdb_b855, 0xfe_a1a4,
     ],
+    graph_lanes: [0x64_b2ff, 0xb8_9fff, 0x00_c0c0, 0xed_8ecf, 0xf6_9557],
 };
 
 /// The setting the user chose. `System` follows the OS appearance.
@@ -275,6 +283,18 @@ accessors!(
 #[must_use]
 pub fn lane(index: usize) -> Hsla {
     color(palette().lanes[index % LANE_COUNT])
+}
+
+/// The colour of graph slot `slot` (taken modulo `GRAPH_SLOTS`).
+#[must_use]
+pub fn graph_lane(slot: usize) -> Hsla {
+    color(palette().graph_lanes[slot % GRAPH_SLOTS])
+}
+
+/// The colour of the trunk lane (`main`, `master`, `trunk`) in the graph.
+#[must_use]
+pub fn graph_trunk() -> Hsla {
+    color(palette().faint)
 }
 
 #[must_use]
@@ -415,6 +435,21 @@ mod tests {
                     ratio >= 3.0,
                     "{name}: {mark:06x} on {bg:06x} is {ratio:.2}:1"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn every_graph_lane_is_a_visible_mark_on_the_list() {
+        for (name, p) in [("light", LIGHT), ("dark", DARK)] {
+            for lane in p.graph_lanes.into_iter().chain([p.faint]) {
+                for bg in [p.editor, p.selected_row] {
+                    let ratio = contrast(lane, bg);
+                    assert!(
+                        ratio >= 3.0,
+                        "{name}: graph lane {lane:06x} on {bg:06x} is {ratio:.2}:1"
+                    );
+                }
             }
         }
     }

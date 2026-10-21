@@ -20,6 +20,7 @@ mod flow_graph;
 mod flow_graph_view;
 mod flow_inspector;
 mod fuzzy;
+mod history_graph;
 mod hook_run;
 mod icon;
 mod merged_branches;
