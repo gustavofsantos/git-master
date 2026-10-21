@@ -20,9 +20,10 @@ use crate::command_log::{CommandLog, CommandRecord, Source, bounded_text};
 use crate::commit_detail;
 use crate::commit_diff;
 use crate::diff::{hunk_patch, parse_unified};
+use crate::file_index::FileIndex;
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
-use crate::port::{DetailRead, RemoteRun, StackRead};
+use crate::port::{DetailRead, FileListRead, RemoteRun, StackRead};
 use crate::remote;
 use crate::stage_math;
 use crate::worktree;
@@ -600,6 +601,30 @@ impl GitPort for SubprocessGit {
             detail.files = files;
             detail.more_files = more;
             Ok(detail)
+        }))
+    }
+
+    /// The files of the worktree, from one `git ls-files`: tracked (`--cached`)
+    /// and untracked-not-ignored (`--others --exclude-standard`). `-v` tags each
+    /// path so the files a sparse checkout leaves out can be dropped. Stoppable
+    /// and not logged (D28).
+    fn file_list(&self, root: &Path) -> Result<FileListRead, GitError> {
+        let git = self.clone();
+        let root = root.to_path_buf();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            let raw = git.run_stoppable(
+                &root,
+                &[
+                    "ls-files",
+                    "-z",
+                    "-v",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                ],
+                stop,
+            )?;
+            Ok(FileIndex::from_ls_files(raw))
         }))
     }
 

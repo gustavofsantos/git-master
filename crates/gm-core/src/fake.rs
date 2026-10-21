@@ -8,8 +8,9 @@ use gm_schema::{
     WorktreeEntry, WorktreeMode,
 };
 
+use crate::file_index::FileIndex;
 use crate::history::{Canceller, HistoryPage, HistoryStream};
-use crate::port::{DetailRead, StackRead};
+use crate::port::{DetailRead, FileListRead, StackRead};
 use crate::{GitError, GitPort};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -29,6 +30,9 @@ pub struct FakeGit {
     history: Arc<Mutex<Result<History, GitError>>>,
     detail: Arc<Mutex<Result<CommitDetail, GitError>>>,
     stack: Arc<Mutex<Result<Vec<FileDiff>, GitError>>>,
+    files: Arc<Mutex<Result<Vec<String>, GitError>>>,
+    /// How many times the file list was asked for.
+    file_reads: Arc<Mutex<usize>>,
     /// Every write git was asked for (stage, unstage, discard, commit), by name.
     writes: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -47,6 +51,8 @@ impl FakeGit {
             history: Arc::new(Mutex::new(Ok(History::default()))),
             detail: Arc::new(Mutex::new(Ok(CommitDetail::default()))),
             stack: Arc::new(Mutex::new(Ok(Vec::new()))),
+            files: Arc::new(Mutex::new(Ok(Vec::new()))),
+            file_reads: Arc::new(Mutex::new(0)),
             writes: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -86,6 +92,25 @@ impl FakeGit {
     /// If another thread panicked while holding the detail lock.
     pub fn set_detail(&self, detail: Result<CommitDetail, GitError>) {
         *self.detail.lock().unwrap() = detail;
+    }
+
+    /// What the next file list read answers: the paths of the worktree.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the files lock.
+    pub fn set_files(&self, files: Result<Vec<String>, GitError>) {
+        *self.files.lock().unwrap() = files;
+    }
+
+    /// How many file list reads were started.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the file reads lock.
+    #[must_use]
+    pub fn file_reads(&self) -> usize {
+        *self.file_reads.lock().unwrap()
     }
 
     /// What the next commit stack read answers: one diff per listed file.
@@ -239,6 +264,17 @@ impl GitPort for FakeGit {
 
     fn checkout(&self, _root: &Path, _branch: &str) -> Result<(), GitError> {
         self.checkout.lock().unwrap().clone()
+    }
+
+    fn file_list(&self, _root: &Path) -> Result<FileListRead, GitError> {
+        *self.file_reads.lock().unwrap() += 1;
+        let files = self.files.lock().unwrap().clone();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            if stop.load(Ordering::SeqCst) {
+                return Err(GitError("the file list read was superseded".into()));
+            }
+            files.map(FileIndex::from_paths)
+        }))
     }
 
     fn commit_detail(&self, _root: &Path, _oid: &str) -> Result<DetailRead, GitError> {

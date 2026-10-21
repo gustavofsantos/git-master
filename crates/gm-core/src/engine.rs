@@ -5,15 +5,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gm_schema::{
-    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, Event, History, HookFailure,
-    HookScope, MERGED_LIST_CHANGED, MergedBranch, OperationId, OperationState, WorktreeEntry,
-    WorktreeInspection,
+    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event, History,
+    HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch, OperationId, OperationState,
+    WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
 use crate::branch;
 use crate::commit_detail::{DetailJob, DetailReport};
 use crate::commit_diff::{StackJob, StackReport};
+use crate::files::{
+    Building, FilesSession, IndexJob, IndexReport, ReadJob, ReadReport, SearchJob, SearchReport,
+};
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::remote::{RemoteJob, RemoteReport};
@@ -58,6 +61,20 @@ pub struct Engine {
     stack: Option<ActiveDetail>,
     /// Commit stack reads accepted since the last call; see `take_stack_jobs`.
     stack_jobs: Vec<StackJob>,
+    /// The file list of the open repository (N1, N2).
+    files: Option<FilesSession>,
+    /// Reads of the file list accepted since the last call; see `take_index_jobs`.
+    index_jobs: Vec<IndexJob>,
+    /// The file search in flight, if any. A new request supersedes it.
+    files_search: Option<ActiveDetail>,
+    /// The query of `files_search` while it waits for the first file list.
+    files_waiting: Option<String>,
+    /// File searches accepted since the last call; see `take_search_jobs`.
+    search_jobs: Vec<SearchJob>,
+    /// The file read in flight, if any. A new request supersedes it.
+    files_read: Option<ActiveDetail>,
+    /// File reads accepted since the last call; see `take_read_jobs`.
+    read_jobs: Vec<ReadJob>,
     /// The remote operation in flight, if any. Only one runs at a time.
     remote: Option<ActiveRemote>,
     /// Remote operations accepted since the last call; see `take_remote_jobs`.
@@ -152,6 +169,13 @@ impl Engine {
             detail_jobs: Vec::new(),
             stack: None,
             stack_jobs: Vec::new(),
+            files: None,
+            index_jobs: Vec::new(),
+            files_search: None,
+            files_waiting: None,
+            search_jobs: Vec::new(),
+            files_read: None,
+            read_jobs: Vec::new(),
             remote: None,
             remote_jobs: Vec::new(),
             workflow_user_dir: crate::workflow::loader::default_user_dir(),
@@ -192,6 +216,24 @@ impl Engine {
     /// a thread and passes its report to `history_report`.
     pub fn take_history_jobs(&mut self) -> Vec<HistoryJob> {
         std::mem::take(&mut self.history_jobs)
+    }
+
+    /// The reads of the file list accepted since the last call. The caller runs
+    /// each on a thread and passes its report to `index_report`.
+    pub fn take_index_jobs(&mut self) -> Vec<IndexJob> {
+        std::mem::take(&mut self.index_jobs)
+    }
+
+    /// The file searches accepted since the last call. The caller runs each on
+    /// a thread and passes its report to `search_report`.
+    pub fn take_search_jobs(&mut self) -> Vec<SearchJob> {
+        std::mem::take(&mut self.search_jobs)
+    }
+
+    /// The file reads accepted since the last call. The caller runs each on a
+    /// thread and passes its report to `read_report`.
+    pub fn take_read_jobs(&mut self) -> Vec<ReadJob> {
+        std::mem::take(&mut self.read_jobs)
     }
 
     /// The commit detail reads accepted since the last call. The caller runs
@@ -300,6 +342,100 @@ impl Engine {
             }
             other => {
                 self.stack = other;
+                Vec::new()
+            }
+        }
+    }
+
+    /// Turns the answer of a read of the file list into events: `FilesIndexed`,
+    /// and the search that was waiting for the list starts. A report for a read
+    /// that was replaced, or for a repository that was left, is dropped.
+    pub fn index_report(&mut self, report: IndexReport) -> Vec<Event> {
+        let Some(session) = self.files.as_mut() else {
+            return Vec::new();
+        };
+        let building = match session.building.take() {
+            Some(building) if building.token == report.token => building,
+            other => {
+                session.building = other;
+                return Vec::new();
+            }
+        };
+        match report.outcome {
+            Ok(index) => {
+                let index = Arc::new(index);
+                session.index = Some(Arc::clone(&index));
+                let files = index.len();
+                if let (Some(active), Some(query)) = (&self.files_search, self.files_waiting.take())
+                {
+                    self.search_jobs.push(SearchJob {
+                        id: active.op.id,
+                        index,
+                        query,
+                        indexing: false,
+                        stop: Arc::clone(&active.stop),
+                    });
+                }
+                vec![Event::FilesIndexed {
+                    id: building.id,
+                    files,
+                }]
+            }
+            // A search that waited for the list fails with Git's message. With
+            // none waiting the failure is silent: the next request reads again.
+            Err(message) => {
+                if self.files_waiting.take().is_none() {
+                    return Vec::new();
+                }
+                match self.files_search.take() {
+                    Some(active) => {
+                        vec![self.finish_op(&active.op, OperationState::Failed, Some(message))]
+                    }
+                    None => Vec::new(),
+                }
+            }
+        }
+    }
+
+    /// Turns the answer of a file search into events. A report for a search
+    /// that was superseded, or for a repository that was left, is dropped.
+    pub fn search_report(&mut self, report: SearchReport) -> Vec<Event> {
+        match self.files_search.take() {
+            Some(active) if active.op.id == report.id => match report.outcome {
+                Some(search) => vec![
+                    self.finish_op(&active.op, OperationState::Done, None),
+                    Event::FilesFound {
+                        id: report.id,
+                        search,
+                    },
+                ],
+                None => vec![self.finish_op(&active.op, OperationState::Cancelled, None)],
+            },
+            other => {
+                self.files_search = other;
+                Vec::new()
+            }
+        }
+    }
+
+    /// Turns the answer of a file read into events. A report for a read that
+    /// was superseded, or for a repository that was left, is dropped.
+    pub fn read_report(&mut self, report: ReadReport) -> Vec<Event> {
+        match self.files_read.take() {
+            Some(active) if active.op.id == report.id => match report.outcome {
+                Ok(file) => vec![
+                    self.finish_op(&active.op, OperationState::Done, None),
+                    Event::FileRead {
+                        id: report.id,
+                        file,
+                    },
+                ],
+                Err(message) => {
+                    vec![self.finish_op(&active.op, OperationState::Failed, Some(message))]
+                }
+            },
+            other => {
+                self.files_read = other;
                 Vec::new()
             }
         }
@@ -481,6 +617,32 @@ impl Engine {
         events
     }
 
+    /// Starts the read a command asks for when it is one of the reads that run
+    /// on a thread and answer later: the history, a commit, a stack of file
+    /// diffs, a file search or a file. `None` for any other command. A read in
+    /// flight of the same kind is superseded; the result carries the events of
+    /// that cancellation.
+    fn start_read(
+        &mut self,
+        id: OperationId,
+        command: &Command,
+    ) -> Option<Result<Vec<Event>, String>> {
+        let (actor, kind) = (&command.actor, &command.kind);
+        Some(match kind {
+            CommandKind::LoadHistory => self.start_history(id, actor, kind, None),
+            CommandKind::LoadHistoryPage { after } => {
+                self.start_history(id, actor, kind, Some(after.clone()))
+            }
+            CommandKind::LoadCommitStack { oid, files } => {
+                self.start_stack(id, actor, kind, oid, files)
+            }
+            CommandKind::LoadCommitDetail { oid } => self.start_detail(id, actor, kind, oid),
+            CommandKind::SearchFiles { query } => self.start_files_search(id, actor, kind, query),
+            CommandKind::ReadFile { path } => self.start_file_read(id, actor, kind, path),
+            _ => return None,
+        })
+    }
+
     /// Runs one command to a terminal state and returns the events, in order.
     /// A `RunPrepareCommit` returns at `Executing`; it ends in `hook_report`.
     pub fn handle(&mut self, id: OperationId, command: &Command) -> Vec<Event> {
@@ -492,39 +654,8 @@ impl Engine {
         };
         self.record(&op, None, &mut events);
         self.advance(&mut op, OperationState::Gating, &mut events);
-        if matches!(
-            command.kind,
-            CommandKind::LoadHistory | CommandKind::LoadHistoryPage { .. }
-        ) {
-            let after = match &command.kind {
-                CommandKind::LoadHistoryPage { after } => Some(after.clone()),
-                _ => None,
-            };
-            match self.start_history(id, &command.actor, &command.kind, after) {
-                Ok(superseded) => {
-                    events.extend(superseded);
-                    self.advance(&mut op, OperationState::Executing, &mut events);
-                }
-                Err(message) => {
-                    self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
-                }
-            }
-            return events;
-        }
-        if let CommandKind::LoadCommitStack { oid, files } = &command.kind {
-            match self.start_stack(id, &command.actor, &command.kind, oid, files) {
-                Ok(superseded) => {
-                    events.extend(superseded);
-                    self.advance(&mut op, OperationState::Executing, &mut events);
-                }
-                Err(message) => {
-                    self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
-                }
-            }
-            return events;
-        }
-        if let CommandKind::LoadCommitDetail { oid } = &command.kind {
-            match self.start_detail(id, &command.actor, &command.kind, oid) {
+        if let Some(started) = self.start_read(id, command) {
+            match started {
                 Ok(superseded) => {
                     events.extend(superseded);
                     self.advance(&mut op, OperationState::Executing, &mut events);
@@ -624,6 +755,14 @@ impl Engine {
                 Ok(events)
             }
             CommandKind::ListBranches => self.list_branches(id),
+            CommandKind::IndexFiles => {
+                self.start_index(id)?;
+                Ok(Vec::new())
+            }
+            CommandKind::ListDirectory { dir } => self.list_directory(id, dir),
+            CommandKind::SearchFiles { .. } | CommandKind::ReadFile { .. } => {
+                Err("file reads are started by handle".to_owned())
+            }
             CommandKind::LoadHistory | CommandKind::LoadHistoryPage { .. } => {
                 Err("history is started by handle".to_owned())
             }
@@ -914,6 +1053,160 @@ impl Engine {
         };
         active.stop.store(true, Ordering::SeqCst);
         vec![self.finish_op(&active.op, OperationState::Cancelled, None)]
+    }
+
+    /// The file list of the open repository, started afresh when `root` is not
+    /// the repository it was made for.
+    fn files_session(&mut self, root: &Path) -> &mut FilesSession {
+        if !matches!(&self.files, Some(session) if session.root == root) {
+            self.drop_files();
+        }
+        self.files
+            .get_or_insert_with(|| FilesSession::new(root.to_path_buf()))
+    }
+
+    /// Reads the file list, unless a read is already in flight. `id` is the
+    /// command that asked; `FilesIndexed` carries it.
+    fn start_index(&mut self, id: OperationId) -> Result<(), String> {
+        let root = self.open_root()?;
+        if self.files_session(&root).building.is_some() {
+            return Ok(());
+        }
+        let read = self.git.file_list(&root).map_err(|e| e.0)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = self.files_session(&root);
+        let token = session.next_token();
+        session.building = Some(Building {
+            token,
+            id,
+            stop: Arc::clone(&stop),
+        });
+        self.index_jobs.push(IndexJob { token, read, stop });
+        Ok(())
+    }
+
+    /// The first read of the list, when none was made and none is in flight.
+    fn ensure_index(&mut self, id: OperationId) -> Result<(), String> {
+        let root = self.open_root()?;
+        let session = self.files_session(&root);
+        if session.index.is_none() && session.building.is_none() {
+            self.start_index(id)?;
+        }
+        Ok(())
+    }
+
+    /// One folder of the file tree, from the list in memory. With no list yet
+    /// the listing is empty and says it is being read.
+    fn list_directory(&mut self, id: OperationId, dir: &str) -> Result<Vec<Event>, String> {
+        self.ensure_index(id)?;
+        let root = self.open_root()?;
+        let session = self.files_session(&root);
+        let indexing = session.indexing();
+        let listing = match &session.index {
+            Some(index) => index.list_dir(dir, indexing),
+            None => DirListing {
+                dir: dir.trim_matches('/').to_owned(),
+                indexing,
+                ..DirListing::default()
+            },
+        };
+        Ok(vec![Event::DirectoryListed { id, listing }])
+    }
+
+    /// Starts a search of the file list. A search in flight is superseded:
+    /// stopped and cancelled. With no list yet the search waits for the first
+    /// read. Returns the events of the cancellation.
+    fn start_files_search(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        query: &str,
+    ) -> Result<Vec<Event>, String> {
+        self.ensure_index(id)?;
+        let root = self.open_root()?;
+        let session = self.files_session(&root);
+        let index = session.index.clone();
+        let indexing = session.indexing();
+        let superseded = self.drop_files_search();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.files_search = Some(ActiveDetail {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            stop: Arc::clone(&stop),
+        });
+        match index {
+            Some(index) => self.search_jobs.push(SearchJob {
+                id,
+                index,
+                query: query.to_owned(),
+                indexing,
+                stop,
+            }),
+            None => self.files_waiting = Some(query.to_owned()),
+        }
+        Ok(superseded)
+    }
+
+    /// Starts the read of file `path` for the viewer. A read in flight is
+    /// superseded. Returns the events of the cancellation.
+    fn start_file_read(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        path: &str,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let superseded = self.drop_files_read();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.files_read = Some(ActiveDetail {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            stop: Arc::clone(&stop),
+        });
+        self.read_jobs.push(ReadJob {
+            id,
+            root,
+            path: path.to_owned(),
+            stop,
+        });
+        Ok(superseded)
+    }
+
+    /// Ends the file search: it is stopped, and a request in flight is cancelled.
+    fn drop_files_search(&mut self) -> Vec<Event> {
+        self.files_waiting = None;
+        let Some(active) = self.files_search.take() else {
+            return Vec::new();
+        };
+        active.stop.store(true, Ordering::SeqCst);
+        vec![self.finish_op(&active.op, OperationState::Cancelled, None)]
+    }
+
+    /// Ends the file read: it is stopped, and a request in flight is cancelled.
+    fn drop_files_read(&mut self) -> Vec<Event> {
+        let Some(active) = self.files_read.take() else {
+            return Vec::new();
+        };
+        active.stop.store(true, Ordering::SeqCst);
+        vec![self.finish_op(&active.op, OperationState::Cancelled, None)]
+    }
+
+    /// Forgets the file list and ends everything that reads it or the files.
+    fn drop_files(&mut self) -> Vec<Event> {
+        if let Some(building) = self.files.take().and_then(|session| session.building) {
+            building.stop.store(true, Ordering::SeqCst);
+        }
+        let mut events = self.drop_files_search();
+        events.extend(self.drop_files_read());
+        events
     }
 
     /// Ends the commit detail read: it is stopped, and a request still in flight
@@ -1383,6 +1676,7 @@ impl Engine {
         events.extend(self.drop_history());
         events.extend(self.drop_detail());
         events.extend(self.drop_stack());
+        events.extend(self.drop_files());
         self.root = Some(root);
         Ok(events)
     }

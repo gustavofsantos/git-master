@@ -2,6 +2,7 @@
 //! events coming out, and the repository status they carry.
 
 mod diff;
+mod files;
 mod history;
 mod hook;
 mod operation;
@@ -9,6 +10,9 @@ mod status;
 mod workflow;
 
 pub use diff::{DiffLine, DiffSide, FileDiff, Hunk, HunkId, LineKind, StageTarget};
+pub use files::{
+    DirEntry, DirListing, FILE_HIT_LIMIT, FILE_VIEW_LIMIT, FileBody, FileHit, FileSearch, FileView,
+};
 pub use history::{
     CommitDetail, CommitFile, CommitSummary, DETAIL_FILE_LIMIT, HISTORY_PAGE, History, RefKind,
     RefLabel,

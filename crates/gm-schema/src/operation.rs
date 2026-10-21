@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
+use crate::files::{DirListing, FileSearch, FileView};
 use crate::history::{CommitDetail, CommitFile, History};
 use crate::hook::{HookFailure, HookInfo};
 use crate::status::{
@@ -98,6 +99,30 @@ pub enum CommandKind {
     LoadCommitStack {
         oid: String,
         files: Vec<CommitFile>,
+    },
+    /// Reads the file list of the worktree again (N1): `git ls-files` with the
+    /// untracked files `.gitignore` does not hide, minus what a sparse checkout
+    /// leaves out. The list the last read made keeps answering until the new one
+    /// is ready, then `FilesIndexed` follows. Never recorded in the command log
+    /// (D28). Quick Open and the Code page ask for it when they open.
+    IndexFiles,
+    /// Finds the files whose path the `query` matches (N1), best first, over
+    /// the file list in memory. A `:line` suffix is parsed, not matched. Never
+    /// recorded in the command log (D28). A request in flight is superseded by
+    /// the next one.
+    SearchFiles {
+        query: String,
+    },
+    /// Lists the entries of folder `dir` (`""` for the root) from the file list
+    /// in memory, for the file tree (N2). Never recorded in the command log (D28).
+    ListDirectory {
+        dir: String,
+    },
+    /// Reads the file `path` of the worktree from disk for the viewer (N2). Never
+    /// recorded in the command log (D28). A request in flight is superseded by
+    /// the next one.
+    ReadFile {
+        path: String,
     },
     /// A local branch, or a remote branch such as `origin/feature` (a local
     /// tracking branch is created for it when none exists).
@@ -370,6 +395,27 @@ pub enum Event {
     HistoryLoaded {
         id: OperationId,
         history: History,
+    },
+    /// Answers `SearchFiles`.
+    FilesFound {
+        id: OperationId,
+        search: FileSearch,
+    },
+    /// Answers `ListDirectory`.
+    DirectoryListed {
+        id: OperationId,
+        listing: DirListing,
+    },
+    /// Answers `ReadFile`.
+    FileRead {
+        id: OperationId,
+        file: FileView,
+    },
+    /// The file list was (re)read: `files` paths now. Asked for by `IndexFiles`;
+    /// whoever shows a search or a folder listing asks again.
+    FilesIndexed {
+        id: OperationId,
+        files: usize,
     },
     /// Answers `LoadCommitDetail`.
     CommitDetailLoaded {

@@ -10,11 +10,13 @@ use gm_schema::{
 use crate::branch_delete::Deleting;
 use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
+use crate::code_page::CodePage;
 use crate::history_graph::GraphLayout;
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
 use crate::merged_branches::Merging;
 use crate::new_branch::BranchCreate;
+use crate::quick_open::QuickOpen;
 use crate::remote_op::{Outcome, RemoteOp};
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
@@ -70,6 +72,14 @@ pub struct Model {
     pub commit: CommitPane,
     /// The stacked diff of the open commit, which replaces the commit view (H4c).
     pub commit_stack: OpenStack,
+    /// Quick Open: its query, the search in flight and the last answer (N1).
+    pub quick_open: QuickOpen,
+    /// The Code page: the folder tree and the file viewer (N2).
+    pub code: CodePage,
+    /// Folders the Code page needs listed next; the window asks the engine.
+    wanted_listings: Vec<String>,
+    /// The engine finished reading the file list since the window last looked.
+    files_indexed: bool,
     /// The create-worktree dialog's operation in flight, and its outcome.
     pub creating: Creating,
     /// The remove-worktree dialog's inspection, removal in flight and outcome.
@@ -621,6 +631,23 @@ impl Model {
                 self.commit_stack.received(id, diffs);
                 None
             }
+            Event::FilesFound { id, search } => {
+                self.quick_open.received(id, search);
+                None
+            }
+            Event::DirectoryListed { id, listing } => {
+                let wanted = self.code.listed(id, listing);
+                self.wanted_listings.extend(wanted);
+                None
+            }
+            Event::FileRead { id, file } => {
+                self.code.file_received(id, file);
+                None
+            }
+            Event::FilesIndexed { .. } => {
+                self.files_indexed = true;
+                None
+            }
             // An operation that ends without a status (vetoed, cancelled) ends its checkout too.
             Event::OperationChanged {
                 id,
@@ -641,9 +668,16 @@ impl Model {
                     OperationState::Failed | OperationState::Vetoed | OperationState::Cancelled
                 ) {
                     self.history.failed(id);
+                    self.quick_open.failed(id);
+                    self.code.listing_failed(id);
+                }
+                if state == OperationState::Failed {
+                    self.code
+                        .file_failed(id, detail.as_deref().unwrap_or("the file could not be read"));
                 }
                 if state == OperationState::Cancelled {
                     self.commit.cancelled(id);
+                    self.code.file_cancelled(id);
                 }
                 None
             }
@@ -765,6 +799,21 @@ impl Model {
         self.notice_icon = None;
         self.history = HistoryList::default();
         self.commit = CommitPane::Empty;
+        self.quick_open = QuickOpen::default();
+        self.code.reset();
+        self.wanted_listings.clear();
+        self.files_indexed = false;
+    }
+
+    /// The folders the Code page needs listed, once: the window asks for each.
+    pub fn take_wanted_listings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.wanted_listings)
+    }
+
+    /// Whether the file list was read again since the last call: whoever shows
+    /// a search or a folder asks the engine again.
+    pub fn take_files_indexed(&mut self) -> bool {
+        std::mem::take(&mut self.files_indexed)
     }
 
     /// Resolves the diff side waiting for `id`. A `DiffLoaded` must name the
@@ -959,6 +1008,10 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::HistoryLoaded { id, .. }
         | Event::CommitDetailLoaded { id, .. }
         | Event::CommitStackLoaded { id, .. }
+        | Event::FilesFound { id, .. }
+        | Event::DirectoryListed { id, .. }
+        | Event::FileRead { id, .. }
+        | Event::FilesIndexed { id, .. }
         | Event::WorktreesLoaded { id, .. }
         | Event::WorktreeInspected { id, .. }
         | Event::PrunableListed { id, .. }

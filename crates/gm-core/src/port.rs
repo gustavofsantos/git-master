@@ -8,6 +8,7 @@ use gm_schema::{
 };
 
 use crate::command_log::CommandLog;
+use crate::file_index::FileIndex;
 use crate::history::HistoryStream;
 use crate::hook::ConfigValue;
 
@@ -30,6 +31,10 @@ pub type DetailRead = Box<dyn FnOnce(&AtomicBool) -> Result<CommitDetail, GitErr
 /// The read of every file's diff in a commit, started by `GitPort::commit_stack`.
 /// It stops the same way a `DetailRead` does (H4c).
 pub type StackRead = Box<dyn FnOnce(&AtomicBool) -> Result<Vec<FileDiff>, GitError> + Send>;
+
+/// The read of the worktree's file list, started by `GitPort::file_list`. It
+/// runs on a thread of its own and stops like a `DetailRead` (N1).
+pub type FileListRead = Box<dyn FnOnce(&AtomicBool) -> Result<FileIndex, GitError> + Send>;
 
 /// A remote operation the adapter has checked: the Git run that is left. It
 /// runs on a thread of its own, and its error is Git's own text.
@@ -127,6 +132,16 @@ pub trait GitPort: Send {
     fn commit_detail(&self, _root: &Path, _oid: &str) -> Result<DetailRead, GitError> {
         Err(GitError(
             "commit detail is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Starts the read of the file list of the worktree at `root`: the tracked
+    /// files, and the untracked ones `.gitignore` does not hide, minus what a
+    /// sparse checkout leaves out. Starts nothing but the returned read. Never
+    /// records anything (D28).
+    fn file_list(&self, _root: &Path) -> Result<FileListRead, GitError> {
+        Err(GitError(
+            "the file list is not supported by this adapter".into(),
         ))
     }
 

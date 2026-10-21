@@ -11,6 +11,7 @@ use gm_schema::{Actor, Command, CommandKind, Event, OperationId};
 
 use crate::commit_detail::DetailReport;
 use crate::commit_diff::StackReport;
+use crate::files::{IndexJob, IndexReport, ReadJob, ReadReport, SearchJob, SearchReport};
 use crate::history::HistoryReport;
 use crate::hook::{ApprovalStore, Report};
 use crate::remote::RemoteReport;
@@ -30,6 +31,10 @@ enum Message {
     Remote(RemoteReport),
     /// A workflow `exec` step's report, with the sender for the next step's thread.
     Workflow(ExecReport, Sender<Message>),
+    /// The file list was read. The sender is for the search that waited for it.
+    Index(IndexReport, Sender<Message>),
+    Search(SearchReport),
+    Read(ReadReport),
 }
 
 /// Cloneable front door to the engine thread. The thread stops when every
@@ -116,46 +121,8 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                 let events = engine.handle(id, &command);
                 broadcast(events, &mut subscribers);
                 busy.store(false, Ordering::SeqCst);
-                for job in engine.take_history_jobs() {
-                    let reports = reports.clone();
-                    std::thread::Builder::new()
-                        .name("gm-history".into())
-                        .spawn(move || {
-                            let report = job.run();
-                            let _ = reports.send_blocking(Message::History(report));
-                        })
-                        .expect("spawn a history thread");
-                }
-                for job in engine.take_detail_jobs() {
-                    let reports = reports.clone();
-                    std::thread::Builder::new()
-                        .name("gm-detail".into())
-                        .spawn(move || {
-                            let report = job.run();
-                            let _ = reports.send_blocking(Message::Detail(report));
-                        })
-                        .expect("spawn a detail thread");
-                }
-                for job in engine.take_stack_jobs() {
-                    let reports = reports.clone();
-                    std::thread::Builder::new()
-                        .name("gm-stack".into())
-                        .spawn(move || {
-                            let report = job.run();
-                            let _ = reports.send_blocking(Message::Stack(report));
-                        })
-                        .expect("spawn a stack thread");
-                }
-                for job in engine.take_remote_jobs() {
-                    let reports = reports.clone();
-                    std::thread::Builder::new()
-                        .name("gm-remote".into())
-                        .spawn(move || {
-                            let report = job.run();
-                            let _ = reports.send_blocking(Message::Remote(report));
-                        })
-                        .expect("spawn a remote thread");
-                }
+                spawn_read_jobs(&mut engine, &reports);
+                spawn_file_jobs(&mut engine, &reports);
                 for job in engine.take_workflow_jobs() {
                     spawn_workflow(job, reports.clone());
                 }
@@ -191,6 +158,19 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                 let events = engine.remote_report(report);
                 broadcast(events, &mut subscribers);
             }
+            Message::Index(report, reports) => {
+                let events = engine.index_report(report);
+                broadcast(events, &mut subscribers);
+                spawn_file_jobs(&mut engine, &reports);
+            }
+            Message::Search(report) => {
+                let events = engine.search_report(report);
+                broadcast(events, &mut subscribers);
+            }
+            Message::Read(report) => {
+                let events = engine.read_report(report);
+                broadcast(events, &mut subscribers);
+            }
             Message::Workflow(report, reports) => {
                 let events = engine.workflow_report(report);
                 broadcast(events, &mut subscribers);
@@ -200,6 +180,96 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
             }
         }
     }
+}
+
+/// Runs the reads the engine accepted that walk or inspect history, the remote
+/// operations: each on a thread of its own, reporting back over `reports`.
+fn spawn_read_jobs(engine: &mut Engine, reports: &Sender<Message>) {
+    for job in engine.take_history_jobs() {
+        let reports = reports.clone();
+        std::thread::Builder::new()
+            .name("gm-history".into())
+            .spawn(move || {
+                let report = job.run();
+                let _ = reports.send_blocking(Message::History(report));
+            })
+            .expect("spawn a history thread");
+    }
+    for job in engine.take_detail_jobs() {
+        let reports = reports.clone();
+        std::thread::Builder::new()
+            .name("gm-detail".into())
+            .spawn(move || {
+                let report = job.run();
+                let _ = reports.send_blocking(Message::Detail(report));
+            })
+            .expect("spawn a detail thread");
+    }
+    for job in engine.take_stack_jobs() {
+        let reports = reports.clone();
+        std::thread::Builder::new()
+            .name("gm-stack".into())
+            .spawn(move || {
+                let report = job.run();
+                let _ = reports.send_blocking(Message::Stack(report));
+            })
+            .expect("spawn a stack thread");
+    }
+    for job in engine.take_remote_jobs() {
+        let reports = reports.clone();
+        std::thread::Builder::new()
+            .name("gm-remote".into())
+            .spawn(move || {
+                let report = job.run();
+                let _ = reports.send_blocking(Message::Remote(report));
+            })
+            .expect("spawn a remote thread");
+    }
+}
+
+/// Runs the file jobs the engine accepted, each on a thread of its own: the
+/// read of the file list, the searches of it and the reads of one file.
+fn spawn_file_jobs(engine: &mut Engine, reports: &Sender<Message>) {
+    for job in engine.take_index_jobs() {
+        spawn_index(job, reports.clone());
+    }
+    for job in engine.take_search_jobs() {
+        spawn_search(job, reports.clone());
+    }
+    for job in engine.take_read_jobs() {
+        spawn_read(job, reports.clone());
+    }
+}
+
+fn spawn_index(job: IndexJob, reports: Sender<Message>) {
+    std::thread::Builder::new()
+        .name("gm-files".into())
+        .spawn(move || {
+            let report = job.run();
+            let next = reports.clone();
+            let _ = reports.send_blocking(Message::Index(report, next));
+        })
+        .expect("spawn a file list thread");
+}
+
+fn spawn_search(job: SearchJob, reports: Sender<Message>) {
+    std::thread::Builder::new()
+        .name("gm-search".into())
+        .spawn(move || {
+            let report = job.run();
+            let _ = reports.send_blocking(Message::Search(report));
+        })
+        .expect("spawn a file search thread");
+}
+
+fn spawn_read(job: ReadJob, reports: Sender<Message>) {
+    std::thread::Builder::new()
+        .name("gm-read".into())
+        .spawn(move || {
+            let report = job.run();
+            let _ = reports.send_blocking(Message::Read(report));
+        })
+        .expect("spawn a file read thread");
 }
 
 /// Runs one workflow `exec` step on its own thread. Its report goes back with
