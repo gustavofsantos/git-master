@@ -1,6 +1,6 @@
 # Navegação no código
 
-Última atualização: 2026-10-18. Status: escopo decidido (D43); motores e ordem como **proposta** (D43 a D51 em `01` estão como Proposto; nada aqui é compromisso até o autor confirmar).
+Última atualização: 2026-10-21. Status: escopo decidido (D43). S-A, S-C, N1 e N2 estão feitos (`07`, D89, D90); D44 e D46 foram sustentadas pelos spikes. O resto (S-B, N3 a N6, D45, D47 a D51) segue como **proposta** em `01`.
 
 ## Por que
 
@@ -132,7 +132,7 @@ Cada uma é vertical, usável sozinha e tem "pronto quando" com Git real, como a
    - **S-B, tree-sitter:** custo de compilação e tamanho do binário em Linux e macOS com 4 gramáticas; qualidade de `tags.scm` em repositórios reais; tempo para indexar 100 mil arquivos; onde guardar o índice.
    - **S-C, casador de caminhos:** a variante do fuzzy sobre 1 milhão de caminhos, com top-K paralelo.
    Resultado de cada spike vira linha em `01` (confirma ou derruba D44 e D45).
-1. **N1, Quick Open.** Lista do worktree, casador de caminhos, `arquivo:linha`, atualização pelo watcher. *Pronto quando:* testes do casador (ordem, desempate, Unicode), lista idêntica à de `git ls-files` em repositório com ignorados, renomeados e sparse-checkout, pedido superado descartado, cenário do smoke nos dois temas. Ainda sem destino de clique: abre o visualizador do N2; até lá, o N1 só mostra o caminho.
+1. **N1, Quick Open.** Lista do worktree, casador de caminhos, `arquivo:linha`, atualização pelo watcher. *Pronto quando:* testes do casador (ordem, desempate, Unicode), lista idêntica à de `git ls-files` em repositório com ignorados, renomeados e sparse-checkout, pedido superado descartado, cenário do smoke nos dois temas. Entregue junto com o N2 (2026-10-21): o clique abre o arquivo no visualizador.
 2. **N2, visualizador e árvore.** Página Code, árvore, leitura do worktree, limites de arquivo grande e binário, "View file" a partir do diff e do detalhe do commit. *Pronto quando:* arquivo UTF-8, fora de UTF-8, binário, vazio, sem newline final e muito grande se comportam sem travar; rolagem fluida em 100 mil linhas.
 3. **N3, grep.** `git grep` com as opções acima, limites, cancelamento, resultado agrupado, clique que abre o N2 na linha. *Pronto quando:* testes com Git real de nomes estranhos, padrão que parece opção (`-v`, `--help`), regex inválida, binários, limites e ordem determinística; benchmark do S-A repetido no app.
 4. **N4, destaque de sintaxe** (depende do S-B). Quatro linguagens primeiro. *Pronto quando:* destaque só do intervalo visível, sem tocar o tempo de rolagem; arquivo de linguagem desconhecida segue sem cor.
