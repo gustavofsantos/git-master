@@ -159,7 +159,7 @@ Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem 
 
 ## Fatia 3: histórico e branches (visão por nome) (em andamento: H1 a H5 feitas, com H4b-A, H4b-B e H4c)
 
-**Próximo passo (decisão do autor, 2026-10-20):** a ordem do roadmap segue: H6, H7, H8, depois WF3. A H5 está feita (abaixo). A WF2 foi fechada antes dela.
+**Próximo passo (decisão do autor, 2026-10-21):** a Fatia 3c (navegação no código, abaixo) vem agora, com N1 e N2 entregues juntos; H6, H7 e H8 ficam adiados e depois vem a WF3. A H5 está feita (abaixo). A WF2 foi fechada antes dela.
 
 Ordem definida pelo autor em 2026-10-16: esta fatia, junto com a visão de diff (abaixo), é o próximo trabalho depois de terminar a 1c (incluindo a atualização automática) e a interface da fatia 2. Decisões do autor de 2026-10-17 em D32 a D37 (`01`); a fatia é dividida em sub-fatias H1 a H8, cada uma com o próprio "pronto quando". A leitura do histórico é `git log` como subprocess, sem escrever commit-graph (D32).
 
@@ -272,11 +272,11 @@ Proposta de 2026-10-19, detalhada em `10-workflows.md`, com as decisões D60 a D
 - **WF4, ações de stack e templates (com as fatias 4 e 5).** `stack.*`, `restack.*`, `reparent.*`, `push.lease`, eventos `stack.parent_moved` e `stack.parent_merged`, e três templates embutidos. Pronto quando: ativar "Restack children when parent moves" faz o restack da subárvore após um commit no pai, com plano, undo e pausa em conflito, sem código específico dessa política.
 - **WF5, MCP (com a fatia 7).** `workflow_list` e `workflow_run`. Pronto quando: um agente lista os workflows e dispara um; os passos `apply` do run esperam a aprovação do humano na UI (D64(c)).
 
-## Fatia 3c: navegação no código (proposta, depende de Q13)
+## Fatia 3c: navegação no código (em andamento: S-A e S-C feitos; N1 e N2 em seguida)
 
-Detalhes, motores e riscos em `09-navegacao-no-codigo.md`; decisões D43 a D51 em `01`, todas Proposto. Página Code com Quick Open de arquivos, grep e símbolos, sobre um visualizador somente leitura. Sub-fatias, cada uma com o "pronto quando" em `09`:
+Detalhes, motores e riscos em `09-navegacao-no-codigo.md`; decisões D43 a D51 em `01` (D43 decidida; D44 a D51 propostas, com D44 e D46 sustentadas pelos spikes, D89). Página Code com Quick Open de arquivos, grep e símbolos, sobre um visualizador somente leitura. Sub-fatias, cada uma com o "pronto quando" em `09`:
 
-- **Spikes S-A, S-B e S-C** (listas e grep em escala, tree-sitter, casador de caminhos), antes de construir.
+- **Spikes S-A, S-B e S-C** (listas e grep em escala, tree-sitter, casador de caminhos), antes de construir. **S-A e S-C feitos em 2026-10-21** (`spikes/nav-a-lists/FINDINGS.md`, `spikes/nav-c-match/FINDINGS.md`, D89): confirmam D44 e D46 em 100 mil arquivos e no casador até 1 milhão. Ficam por medir no Mac o `--threads` do grep e o grep no worktree de 1 milhão. S-B segue para antes do N4.
 - **N1, Quick Open** de arquivos do worktree ativo.
 - **N2, visualizador e árvore**, com "View file" a partir do diff e do detalhe do commit.
 - **N3, grep** com `git grep`.

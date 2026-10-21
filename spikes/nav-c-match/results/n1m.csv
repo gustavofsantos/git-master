@@ -1,0 +1,12 @@
+loaded 1000000 paths, 37514 KiB buffer + 3906 KiB offsets in 81 ms; threads=4
+query,matches,baseline_ms,bytes1_ms,bytesN_ms,same_top_as_1thread,same_top_baseline
+file_0500,15850,1349.4,51.4,24.8,true,0/10
+corsrc,23338,1057.3,47.0,23.3,true,0/10
+docsmd,131667,1173.5,47.7,18.3,true,10/10
+ui/sr,16670,1039.2,42.9,19.7,true,0/10
+auth,101669,1021.7,42.9,21.4,true,0/10
+rs,611678,974.3,41.6,24.9,true,10/10
+x,99996,928.5,40.5,17.1,true,0/10
+mod12,193627,1207.4,55.7,16.0,true,0/10
+crates/ui/src/file,3334,1317.1,42.9,20.6,true,10/10
+zzzzqq,0,1079.5,62.1,16.1,true,0/10
