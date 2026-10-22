@@ -1,6 +1,6 @@
 ---
 title: Worktrees
-description: Work on several branches at once with worktrees, each in its own window. The Worktrees section, creating, opening, removing safely, locking, pruning and the actions for them.
+description: Work on several branches at once with worktrees, each in its own window, and create, open, remove, lock and prune them safely from the sidebar, the menus and the command palette.
 status: partial
 order: 50
 ---

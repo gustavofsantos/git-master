@@ -98,7 +98,7 @@ Press `Ctrl+K` (`⌘K` on macOS) to open the command palette. Type part of an ac
 
 ## Choose a theme
 
-GitMaster has a dark theme and a light theme. The dark theme is the default. Set the `GITMASTER_THEME` environment variable to `dark` or `light` before you start the app:
+GitMaster has a dark theme and a light theme, and follows your system appearance by default. Set the `GITMASTER_THEME` environment variable to `dark`, `light` or `system` before you start the app:
 
 ```sh
 GITMASTER_THEME=light gitmaster ~/src/my-project

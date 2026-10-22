@@ -70,7 +70,7 @@ Body rules:
 | `partial` | Part of the page works. Every part that does not has a `Planned` marker. |
 | `planned` | Nothing on the page works yet. The page starts with a `Planned` marker. |
 
-The `Planned` marker is a blockquote that starts with exactly `> **Planned.**` followed by one sentence saying what is missing. Put it directly under the heading (or the lead paragraph, for a whole page) it applies to:
+The `Planned` marker is a blockquote that starts with exactly `> **Planned.**` followed by one sentence saying what is missing. Put it directly under the heading it applies to. For a whole page, put it immediately after the front matter:
 
 ```markdown
 ## Restack

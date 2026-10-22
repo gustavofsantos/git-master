@@ -15,6 +15,9 @@ Actions without a shortcut on this page can be run from the [command palette](..
 
 | Action | Linux and Windows | macOS | Status |
 |---|---|---|---|
+| Open the command palette | `Ctrl+K` | `⌘K` | Implemented |
+| Quit | `Ctrl+Q` | `⌘Q` | Implemented |
+| Open the context menu of the selected file | `Shift+F10` | `Shift+F10` | Implemented |
 | Refresh | `R` | `R` | Implemented |
 
 `R` does not work while you type in the message box or in a diff.

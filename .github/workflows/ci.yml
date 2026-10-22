@@ -33,6 +33,12 @@ jobs:
       - run: cargo install cargo-audit --locked --version 0.22.2 # same as the Makefile
       - run: cargo audit
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/docs-status.sh --check
+
   msrv:
     runs-on: ubuntu-latest
     steps:

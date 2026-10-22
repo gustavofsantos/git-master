@@ -3,7 +3,7 @@
 CARGO_AUDIT_VERSION := 0.22.2
 CARGO_AUDIT := target/tools/bin/cargo-audit
 
-.PHONY: build run install uninstall test lint fmt audit check hooks clean
+.PHONY: build run install uninstall test lint fmt audit docs check hooks clean
 
 build:
 	cargo build --release -p gitmaster
@@ -62,7 +62,12 @@ $(CARGO_AUDIT):
 audit: $(CARGO_AUDIT)
 	$(CARGO_AUDIT) audit
 
-check: lint audit test
+# The docs are the desired state (docs/README.md): every page keeps its front matter
+# and its status in step with its Planned markers.
+docs:
+	scripts/docs-status.sh --check >/dev/null
+
+check: lint audit docs test
 
 hooks:
 	git config core.hooksPath .githooks

@@ -60,7 +60,7 @@ The user types what they want, with no syntax. A **deterministic classifier** (r
 
 - **List:** `git ls-files -z` of the active worktree (tracked files) and, optionally, `--others --exclude-standard` (untracked files that are not ignored). For a revision, `git ls-tree -r -z --name-only <rev>`.
 - **Structure:** a single byte buffer with offsets, sorted, with no `String` per path. A monorepo of 1 million files with 60-byte paths costs about 60 MB, not hundreds.
-- **Invalidation:** the existing watcher (`gm-core/src/watch`) reports changes to the index, HEAD and refs. The list is rebuilt in the background, and the old one serves until the new one is ready. The rebuild is streamed, with "indexando…" visible, because `ls-files` in a large repository takes seconds.
+- **Invalidation:** the existing watcher (`gm-core/src/watch`) reports changes to the index, HEAD and refs. The list is rebuilt in the background, and the old one serves until the new one is ready. The rebuild is streamed, with "indexing…" visible, because `ls-files` in a large repository takes seconds.
 - **Ranking:** the current `fuzzy.rs` serves actions and branches (hundreds of items). Paths need a variant: a bonus for the file name over the directory, for the start of a segment and for the extension, `/` as a word separator, and parallel search with a top-K heap instead of sorting everything. `fuzzy_match` allocates a `Vec<char>` per call, which does not scale to 1 million candidates. The variant works on bytes (falling back to Unicode only when the query is not ASCII).
 - **UI:** reuses `palette_view` (virtualized list, matched fragment highlighted) with a results provider that differs from the actions provider. The choice between "palette mode" and "own overlay" is left to N1, after reading `palette.rs`.
 - **Useful filters:** `foo.rs:120` opens at line 120; a folder prefix (`gm-ui/ diff`) narrows the search.
@@ -74,8 +74,8 @@ git grep -I -n --column -z --no-color [-i] [-w] [-F|-E|-P] [--untracked] -e <pat
 ```
 
 - `-I` ignores binaries; `-z` makes the output safe for names with unusual characters; `--column` requires Git 2.19+ (check the app's minimum version).
-- **Options in the UI:** match case, whole word, regex (`-E`; `-P` only if Git was built with PCRE), and a pathspec field ("incluir" and "excluir" with `:(exclude)`), as in hosting services.
-- **Limits:** for example 1000 lines in total and 100 per file, with an explicit "N mais". The search stops when it hits the limit (it kills the process). Long lines are truncated around the matched fragment.
+- **Options in the UI:** match case, whole word, regex (`-E`; `-P` only if Git was built with PCRE), and a pathspec field ("include" and "exclude" with `:(exclude)`), as in hosting services.
+- **Limits:** for example 1000 lines in total and 100 per file, with an explicit "N more". The search stops when it hits the limit (it kills the process). Long lines are truncated around the matched fragment.
 - **Result:** grouped by file, with a count, the matched fragment highlighted, and a click that opens the viewer at the line. Deterministic order: by path, then by line. The output of `git grep` is parallel, so it is re-sorted before display, or the search runs with `--threads=1` if the cost stays low.
 - **Built-in alternative:** if the N3 benchmark shows that `git grep` is not enough, the way out is an in-process search (Rust crates `regex` and `ignore`, compiled into the binary), never an external program (D51).
 - **Safety:** the pattern always goes after `-e`, and the pathspec after `--`, so that typed text is never read as an option.
@@ -97,8 +97,8 @@ This is the hard part and the one with the highest risk. Four paths:
 
 - **Content-addressed index.** The key is the blob OID (or the content hash, for a file modified in the worktree). The same blob on another branch, or in history, reuses the result, and nothing goes stale: the index is derived and disposable (Principle 3). Losing the file only costs a rebuild.
 - **Where to store it:** SQLite in `.git/gitmaster/` (aligned with the `gm-store` planned in `design/architecture.md`) or in the app's data directory. Decide in the spike; both respect Principle 5.
-- **Built in the background**, at low priority, with a thread limit and visible progress ("símbolos: 12 340 / 98 000 arquivos"). Symbol search works with the partial index and says that it is partial.
-- **Search:** fuzzy over the name, with a filter by kind (`fn`, `struct`, `class`, `trait`…), file name, and line alongside. The "visão geral do arquivo" (outline) uses the same table, filtered by file.
+- **Built in the background**, at low priority, with a thread limit and visible progress ("symbols: 12,340 / 98,000 files"). Symbol search works with the partial index and says that it is partial.
+- **Search:** fuzzy over the name, with a filter by kind (`fn`, `struct`, `class`, `trait`…), file name, and line alongside. The "file overview" (outline) uses the same table, filtered by file.
 - **Go to definition** (click, or a shortcut on an identifier in the viewer): looks up the name in the index. One candidate opens directly; several are all listed. No semantic scope resolution.
 - **Usages:** "Find usages" is `git grep -w <name>`, and the interface says these are text occurrences, not semantic references. A language without a grammar can still be found by name and by text. We will not pretend to a precision the approach does not have; precise references need LSP, which is out of scope (D47).
 - **Languages, in waves:** Rust, TypeScript/JavaScript, Python, Go; then Java, C/C++, C#, Kotlin, Ruby, Swift. A file in a language without a grammar can still be found by name and by text; it just has no symbols.
@@ -117,7 +117,7 @@ Details and numbers are in `spikes/nav-b-treesitter/FINDINGS.md`; decision propo
 ## Viewer
 
 - Read-only: shows a file from the worktree (read from disk) or a blob from a revision (`git cat-file --batch`, a long-running process, or a libgit2 blob). No editing (Q7 covers the conflict resolver's editable text, not this). "Open in editor" uses `core.editor`, as already planned in `design/screens.md`.
-- Virtualized by line, reusing what `diff_pane` has already solved (width measurement, horizontal scrolling, 4-column tabs). Line number, "ir para a linha", copy `path:line`.
+- Virtualized by line, reusing what `diff_pane` has already solved (width measurement, horizontal scrolling, 4-column tabs). Line number, "go to line", copy `path:line`.
 - Guards: a binary becomes "Binary file"; a file above a limit (order of magnitude: 2 MB) opens truncated with a warning, and never freezes; content that is not UTF-8 shows replacement characters, as in the diff.
 - **Syntax highlighting** (N4) comes from the same tree-sitter, with `highlights.scm`, and only for the visible range. The diff gets highlighting for free later, but that is a separate decision.
 - **Folder tree:** generated from the file list, collapsed by default, with single-child folder paths compacted (`a/b/c`), as in hosting services.
@@ -130,7 +130,7 @@ The targets are massive repositories (`docs/concepts/principles.md`). Therefore:
 - No list grows without limit on screen: everything is virtualized, and results have a ceiling.
 - No search runs without cancellation; changing the query kills the previous process.
 - Sparse checkout: the worktree file list has only what exists; search in a revision may have more. The interface must say which of the two the user is looking at.
-- **Performance gate (D49)**, in the style of H8: ignored benchmarks, run on repositories generated with `git fast-import` of 100 thousand and 1 million files. Initial targets, to be calibrated in the spike: first usable file list in seconds, with "indexando…"; a keystroke in Quick Open responds in under 50 ms with the list ready; first grep result in under 1 s on 100 thousand files; the symbol index never raises CPU enough to hurt the UI.
+- **Performance gate (D49)**, in the style of H8: ignored benchmarks, run on repositories generated with `git fast-import` of 100 thousand and 1 million files. Initial targets, to be calibrated in the spike: first usable file list in seconds, with "indexing…"; a keystroke in Quick Open responds in under 50 ms with the list ready; first grep result in under 1 s on 100 thousand files; the symbol index never raises CPU enough to hurt the UI.
 
 ## MCP
 
@@ -172,5 +172,5 @@ Proposal: **Slice 3c**, after H5 to H8 and before the stacks. It reuses what Sli
 | Tree-sitter grammars weigh on compilation and on the binary, on two OSes | Spike S-B before deciding; languages behind Cargo features; fallback to regex via `git grep` |
 | `git grep` slow in a huge monorepo | Required pathspec suggested in the UI, limits, benchmark; in-process search (D51); own index as last resort |
 | A list of 1 million paths chokes the matcher | Contiguous buffer, parallel top-K, spike S-C |
-| A symbol index creates an expectation of semantic precision | Honest interface text ("ocorrências de texto"), candidates listed, no guessing |
+| A symbol index creates an expectation of semantic precision | Honest interface text ("text occurrences"), candidates listed, no guessing |
 | Scope grows into an IDE | The viewer is read-only by decision; editing and LSP stay in D47 |

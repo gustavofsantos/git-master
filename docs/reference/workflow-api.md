@@ -70,13 +70,15 @@ Every call has an effect level. The level tells you what the call can change.
 
 Calls with named arguments take one table, with the names shown in the Arguments column, such as `ctx.branch.create({ name = "fix/login", checkout = true })`. The calls `ctx.notify`, `ctx.approve`, `ctx.exec` and `ctx.wait` take their arguments positionally, as shown.
 
+A dash (—) in the Result column means the call returns no fields that scripts rely on.
+
 Outcomes are the values a call can end with, as listed in the action catalog. A value other than `done` raises an error unless the call runs inside `ctx.try`. The section Outcomes and errors below gives the rules.
 
 ### Interaction
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.notify(text)` | `text`: the line the notification shows. | Not declared. | read | `done`, `failed` |
+| `ctx.notify(text)` | `text`: the line the notification shows. | — | read | `done`, `failed` |
 | `ctx.approve(summary)` | `summary` (optional): what you are asked to approve. | `true` when you approve, `false` when you reject. | pauses for a human | `approved`, `rejected`, `failed` |
 | `ctx.wait(event, opts)` | `event`: the event to wait for. `opts.timeout`: a duration such as `"24h"`. | A table whose `outcome` field is `resumed`, `aborted` or `timeout`. | pauses until an event | `resumed`, `aborted`, `timeout` |
 
@@ -107,38 +109,38 @@ local r = ctx.exec({ "llm-cli", "-p", "Write a conventional commit message for t
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.stage.all()` | None. | Not declared. | apply | `done`, `failed`, `interrupted` |
-| `ctx.commit.suggest_message({ message })` | `message`: the suggested commit message, text. Required. | Not declared. | propose | `done`, `failed` |
-| `ctx.commit.create({ message })` | `message`: the commit message, text. Required. | Not declared. | apply | `done`, `failed`, `interrupted` |
+| `ctx.stage.all()` | None. | — | apply | `done`, `failed`, `interrupted` |
+| `ctx.commit.suggest_message({ message })` | `message`: the suggested commit message, text. Required. | — | propose | `done`, `failed` |
+| `ctx.commit.create({ message })` | `message`: the commit message, text. Required. | — | apply | `done`, `failed`, `interrupted` |
 
 ### Branches
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.branch.create({ name, checkout })` | `name`: the name of the new branch, text. Required. `checkout`: `true` to check out the new branch. Default `false`. | Not declared. | apply | `done`, `failed`, `interrupted` |
-| `ctx.branch.checkout({ branch })` | `branch`: the branch to check out, text. Required. | Not declared. | apply | `done`, `failed`, `interrupted` |
+| `ctx.branch.create({ name, checkout })` | `name`: the name of the new branch, text. Required. `checkout`: `true` to check out the new branch. Default `false`. | — | apply | `done`, `failed`, `interrupted` |
+| `ctx.branch.checkout({ branch })` | `branch`: the branch to check out, text. Required. | — | apply | `done`, `failed`, `interrupted` |
 
 ### Remote
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.fetch()` | Not yet declared. | Not declared. | apply | `done`, `failed`, `interrupted` |
-| `ctx.push.lease(...)` | Not yet declared. | Not declared. | apply, always asks for your approval | `done`, `failed`, `interrupted` |
+| `ctx.fetch()` | — | — | apply | `done`, `failed`, `interrupted` |
+| `ctx.push.lease(...)` | — | — | apply, always asks for your approval | `done`, `failed`, `interrupted` |
 
 ### Stacks
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.stack.tree()` | Not yet declared. | Not declared. | read | `done`, `failed` |
-| `ctx.stack.stale()` | Not yet declared. | Not declared. | read | `done`, `failed` |
+| `ctx.stack.tree()` | — | — | read | `done`, `failed` |
+| `ctx.stack.stale()` | — | — | read | `done`, `failed` |
 
 ### Restack
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.restack.plan(...)` | Not yet declared. | `plan_id` and `branch_count`. | propose | `done`, `failed` |
-| `ctx.restack.apply(...)` | Not yet declared. | Not declared. The outcome is available through `ctx.try`. | apply | `done`, `conflict`, `stale`, `failed` |
-| `ctx.restack.undo(...)` | Not yet declared. | Not declared. | apply | `done`, `failed`, `interrupted` |
+| `ctx.restack.plan({ root })` | `root`: the branch at the top of the subtree to restack, text. Required. | `plan_id` and `branch_count`. | propose | `done`, `failed` |
+| `ctx.restack.apply({ plan_id })` | `plan_id`: the id returned by `ctx.restack.plan`, text. Required. | — The outcome is available through `ctx.try`. | apply | `done`, `conflict`, `stale`, `failed` |
+| `ctx.restack.undo(...)` | — | — | apply | `done`, `failed`, `interrupted` |
 
 A plan's `plan_id` is tied to the commits of the branches when the plan was made. If a branch has moved since then, `ctx.restack.apply` ends with `stale`. A restack conflict ends `ctx.restack.apply` with `conflict`. `ctx.restack.apply` has no `interrupted` outcome, because restack has its own recovery steps.
 
@@ -146,8 +148,8 @@ A plan's `plan_id` is tied to the commits of the branches when the plan was made
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.reparent.plan(...)` | Not yet declared. | Not declared. | propose | `done`, `failed` |
-| `ctx.reparent.apply(...)` | Not yet declared. | Not declared. | apply | `done`, `failed`, `interrupted` |
+| `ctx.reparent.plan(...)` | — | — | propose | `done`, `failed` |
+| `ctx.reparent.apply(...)` | — | — | apply | `done`, `failed`, `interrupted` |
 
 ### Helpers
 

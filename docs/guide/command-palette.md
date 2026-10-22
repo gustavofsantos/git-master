@@ -1,6 +1,6 @@
 ---
 title: Command palette
-description: Run any action by name from the command palette, opened with Ctrl+K. Sections, fuzzy search, choosing a target, disabled actions, and the context menus that run the same actions.
+description: Run any action by name from the command palette, opened with Ctrl+K, and use the context menus that run the same actions.
 status: partial
 order: 70
 ---
@@ -60,11 +60,11 @@ The rules are the same for every menu:
 
 ### Branch menu
 
+> **Planned.** The branch menu cannot be opened from the keyboard yet, and **New Child Branch**, **Restack This Stack** and **Rename Branch** are not available yet.
+
 The branch menu has **Checkout Branch**, **New Child Branch**, **Create Worktree**, **Restack This Stack**, **Push With Lease**, **Copy Branch Name**, **Rename Branch** and **Delete Branch**. **Delete Branch** is in red.
 
 For a branch that is checked out in a linked worktree, the menu shows the worktree actions instead. See [Worktrees](worktrees.md).
-
-> **Planned.** The branch menu cannot be opened from the keyboard yet, and **New Child Branch**, **Restack This Stack** and **Rename Branch** are not available yet.
 
 ### File menu
 

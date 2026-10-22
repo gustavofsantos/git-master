@@ -31,7 +31,7 @@ The full principles (determinism, human approves and agent proposes, Git is the 
 2. Mark whatever the app does not do yet: `status:` in the page's front matter and a `> **Planned.**` marker on each missing part.
 3. Implement until the marker can be removed, then update the page's `status`.
 
-`scripts/docs-status.sh` is the diff between the docs and the app: it lists every page with its status and the number of `Planned` markers left. Run `scripts/docs-status.sh --check` after editing docs. The authoring rules (front matter, markers, tone, no history in the docs) are in `docs/README.md`. Before go-live every page is `implemented`.
+`scripts/docs-status.sh` is the diff between the docs and the app: it lists every page with its status and the number of `Planned` markers left. `make docs` (part of `make check`) runs `scripts/docs-status.sh --check`; run it after editing docs. The authoring rules (front matter, markers, tone, no history in the docs) are in `docs/README.md`. Before go-live every page is `implemented`.
 
 ## Where things live
 
@@ -82,7 +82,7 @@ Rules that matter day to day:
 ## Working in the repository
 
 - Toolchain: stable Rust from `rust-toolchain.toml`; `~/.cargo/bin` must come before any distro `rustc` on `PATH`. Linux needs the dev packages listed in `design/lessons.md`. `scripts/setup-dev.sh` sets up a machine.
-- `make build`, `make run`, `make test` (`cargo test --workspace`), `make lint` (clippy with `-D warnings`, then `cargo fmt --check`), `make fmt`, `make check` (lint, audit, tests). Run `make check` before declaring work done; CI runs the same.
+- `make build`, `make run`, `make test` (`cargo test --workspace`), `make lint` (clippy with `-D warnings`, then `cargo fmt --check`), `make fmt`, `make check` (lint, audit, docs, tests). Run `make check` before declaring work done; CI runs the same.
 - Clippy pedantic is on for the whole workspace. Fix the warning instead of adding an `allow`, unless the workspace table already documents it.
 - Tests: pure unit and property tests for logic; **real Git in temporary repositories** for anything that touches Git behaviour (`crates/gm-core/tests/*_real_git.rs`); the UI smoke below for what the user sees. Do not mock Git where a real repository is cheap.
 - Commits: conventional (`feat:`, `fix:`, `test:`, `docs:`, `build:`, `refactor:`, `ci:`, `chore:`), one logical change each.
