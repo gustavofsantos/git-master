@@ -403,11 +403,12 @@ mod with_a_script_for_git {
 
     #[test]
     fn git_is_killed_when_the_result_is_full_not_waited_for() {
-        // 55 files of 20 lines, then Git "keeps working" for a minute.
+        // 55 files of 20 lines, then Git "keeps working" for a minute. `exec` makes the sleep the
+        // process that is killed: a child of the shell would outlive it and hold the pipe open.
         let (_bin, git) = fake_git(
             "i=0; while [ $i -lt 1100 ]; do \
              printf 'f%03d.rs\\000%d\\0001\\000x\\n' $((i / 20)) $((i % 20 + 1)); i=$((i + 1)); done; \
-             sleep 60",
+             exec sleep 60",
         );
         let dir = tempfile::tempdir().unwrap();
         let read = git.grep_text(dir.path(), &request()).unwrap();
@@ -426,7 +427,7 @@ mod with_a_script_for_git {
 
     #[test]
     fn a_stop_request_kills_git_and_ends_the_search() {
-        let (_bin, git) = fake_git("printf 'a.rs\\0001\\0001\\000x\\n'; sleep 60");
+        let (_bin, git) = fake_git("printf 'a.rs\\0001\\0001\\000x\\n'; exec sleep 60");
         let dir = tempfile::tempdir().unwrap();
         let read = git.grep_text(dir.path(), &request()).unwrap();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
