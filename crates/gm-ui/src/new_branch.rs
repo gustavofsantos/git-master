@@ -368,7 +368,13 @@ impl StatusView {
             .child(field_row("NAME", dialog.name.clone()))
             .children(live.map(|message| div().text_sm().text_color(theme::error()).child(message)))
             .child(field_row("STARTS FROM", dialog.start.clone()))
-            .child(checkout_row(dialog.checkout, cx))
+            .child(checkbox(
+                "new-branch-checkout",
+                "Check out the new branch",
+                dialog.checkout,
+                StatusView::toggle_new_branch_checkout,
+                cx,
+            ))
             .child(command_block(&command_line(&form)))
             .children(dialog.error.as_ref().map(|error| {
                 div()
@@ -382,29 +388,30 @@ impl StatusView {
     }
 }
 
-/// The checkbox that checks out the new branch. Clicking it ticks or unticks it.
-fn checkout_row(checked: bool, cx: &Context<StatusView>) -> Stateful<Div> {
+/// A checkbox row: the mark, then its label. A click runs `on_click` on the window.
+pub(crate) fn checkbox(
+    id: &'static str,
+    label: &'static str,
+    checked: bool,
+    on_click: fn(&mut StatusView, &mut Context<StatusView>),
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
     let mark = if checked {
         icon::filled(Icon::CheckSquare, icon::SMALL, theme::accent())
     } else {
         icon::view(Icon::Square, icon::SMALL, theme::muted())
     };
     div()
-        .id("new-branch-checkout")
+        .id(id)
         .flex()
         .flex_row()
         .items_center()
         .gap_2()
         .cursor_pointer()
         .child(mark)
-        .child(
-            div()
-                .text_sm()
-                .text_color(theme::text())
-                .child("Check out the new branch"),
-        )
-        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-            this.toggle_new_branch_checkout(cx);
+        .child(div().text_sm().text_color(theme::text()).child(label))
+        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+            on_click(this, cx);
         }))
 }
 

@@ -17,8 +17,10 @@ use crate::hook_run::Hooks;
 use crate::icon::Icon;
 use crate::merged_branches::Merging;
 use crate::new_branch::BranchCreate;
+use crate::new_stash::StashCreate;
 use crate::quick_open::QuickOpen;
 use crate::remote_op::{Outcome, RemoteOp};
+use crate::stashes::StashList;
 use crate::text_search::TextSearch;
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
@@ -74,6 +76,12 @@ pub struct Model {
     pub commit: CommitPane,
     /// The stacked diff of the open commit, which replaces the commit view (H4c).
     pub commit_stack: OpenStack,
+    /// The Stashes page's detail panel: the read in flight, or the selected stash's answer (B2).
+    pub stash_commit: CommitPane,
+    /// The Stashes page's stacked diff of the selected stash (B2).
+    pub stash_stack: OpenStack,
+    /// The Stashes page's list: the read in flight, what answered it and the selection (B2).
+    pub stashes: StashList,
     /// Quick Open: its query, the search in flight and the last answer (N1).
     pub quick_open: QuickOpen,
     /// The Code page: the folder tree and the file viewer (N2).
@@ -96,8 +104,18 @@ pub struct Model {
     pub branch_delete: Deleting,
     /// The discard dialog's discard in flight, and its outcome.
     pub discarding: Discarding,
+    /// The stash dialog's create in flight, and its outcome (B2).
+    pub stash_create: StashCreate,
     /// The delete-merged-branches dialog's listing, delete in flight and outcome.
     pub merging: Merging,
+}
+
+/// The page a commit read belongs to: the history (H3, H4) or the Stashes page
+/// (B2). Each keeps its own detail panel and stacked diff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitPage {
+    History,
+    Stashes,
 }
 
 /// The stacked diff of the open commit (H4c): every file's diff, shown in one
@@ -213,6 +231,12 @@ impl OpenStack {
             self.view = StackView::Failed { message };
         }
     }
+
+    /// Whether the request in flight is `id`.
+    #[must_use]
+    pub fn awaits(&self, id: OperationId) -> bool {
+        matches!(self.view, StackView::Loading { id: wanted, .. } if wanted == id)
+    }
 }
 
 /// The history page's listing. A reply to a request that was superseded is
@@ -266,6 +290,12 @@ impl CommitPane {
         if *self == Self::Loading(id) {
             *self = Self::Empty;
         }
+    }
+
+    /// Whether the read in flight is `id`.
+    #[must_use]
+    pub fn awaits(&self, id: OperationId) -> bool {
+        *self == Self::Loading(id)
     }
 }
 
@@ -456,6 +486,31 @@ impl DiffSlots {
 }
 
 impl Model {
+    /// The detail panel of `page`.
+    #[must_use]
+    pub fn commit_pane(&self, page: CommitPage) -> &CommitPane {
+        match page {
+            CommitPage::History => &self.commit,
+            CommitPage::Stashes => &self.stash_commit,
+        }
+    }
+
+    /// The stacked diff of `page`.
+    #[must_use]
+    pub fn commit_stack(&self, page: CommitPage) -> &OpenStack {
+        match page {
+            CommitPage::History => &self.commit_stack,
+            CommitPage::Stashes => &self.stash_stack,
+        }
+    }
+
+    pub fn commit_stack_mut(&mut self, page: CommitPage) -> &mut OpenStack {
+        match page {
+            CommitPage::History => &mut self.commit_stack,
+            CommitPage::Stashes => &mut self.stash_stack,
+        }
+    }
+
     /// Folds one engine event into the state. Returns both diffs once the
     /// selected file's two loads have both finished (succeeded or failed).
     #[must_use]
@@ -534,6 +589,20 @@ impl Model {
                 self.discarding.settle(state, detail);
                 None
             }
+            // A stash create's outcome belongs to its dialog, not to the status bar (B2).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.stash_create.owns(id) => {
+                self.stash_create.settle(state, detail);
+                None
+            }
+            // A failed list read belongs to the Stashes page, which shows it there.
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.stashes.owns(id) => {
+                self.stashes.ended(id, state, detail);
+                None
+            }
             Event::PrunableListed { id, candidates } if self.pruning.owns(id) => {
                 self.pruning.listed(candidates);
                 None
@@ -588,18 +657,16 @@ impl Model {
                 detail,
                 ..
             } => {
-                self.commit.failed(
-                    id,
-                    detail
-                        .clone()
-                        .unwrap_or_else(|| "git could not read the commit".to_owned()),
-                );
-                self.commit_stack.failed(
-                    id,
-                    detail
-                        .clone()
-                        .unwrap_or_else(|| "git could not read the commit's diff".to_owned()),
-                );
+                let text = detail
+                    .clone()
+                    .unwrap_or_else(|| "git could not read the commit".to_owned());
+                self.commit.failed(id, text.clone());
+                self.stash_commit.failed(id, text);
+                let diff = detail
+                    .clone()
+                    .unwrap_or_else(|| "git could not read the commit's diff".to_owned());
+                self.commit_stack.failed(id, diff.clone());
+                self.stash_stack.failed(id, diff);
                 // A refused checkout keeps the branch; git's reason, first line only, is the notice.
                 if self.branches.finish_checkout(id) {
                     self.error = Some(checkout_message(detail.as_deref()));
@@ -637,11 +704,23 @@ impl Model {
                 None
             }
             Event::CommitDetailLoaded { id, detail } => {
-                self.commit.received(id, detail);
+                if self.stash_commit.awaits(id) {
+                    self.stash_commit.received(id, detail);
+                } else {
+                    self.commit.received(id, detail);
+                }
                 None
             }
             Event::CommitStackLoaded { id, diffs } => {
-                self.commit_stack.received(id, diffs);
+                if self.stash_stack.awaits(id) {
+                    self.stash_stack.received(id, diffs);
+                } else {
+                    self.commit_stack.received(id, diffs);
+                }
+                None
+            }
+            Event::StashesListed { id, stashes } => {
+                self.list_stashes(id, stashes);
                 None
             }
             Event::FilesFound { id, search } => {
@@ -698,6 +777,7 @@ impl Model {
                 }
                 if state == OperationState::Cancelled {
                     self.commit.cancelled(id);
+                    self.stash_commit.cancelled(id);
                     self.code.file_cancelled(id);
                     self.text_search.cancelled(id);
                 }
@@ -788,10 +868,18 @@ impl Model {
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
-            // The stash page (B2) is not wired yet; its list is read again when it is.
-            | Event::StashesListed { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. } => None,
+        }
+    }
+
+    /// Applies a stash listing. When the selected stash is gone, its detail and
+    /// diff go with it, so the panel never shows a stash the list does not have.
+    fn list_stashes(&mut self, id: OperationId, stashes: Vec<gm_schema::StashEntry>) {
+        let had_selection = self.stashes.selected().is_some();
+        if self.stashes.listed(id, stashes) && had_selection && self.stashes.selected().is_none() {
+            self.stash_commit = CommitPane::Empty;
+            self.stash_stack.close();
         }
     }
 
@@ -823,6 +911,9 @@ impl Model {
         self.notice_icon = None;
         self.history = HistoryList::default();
         self.commit = CommitPane::Empty;
+        self.stashes = StashList::default();
+        self.stash_commit = CommitPane::Empty;
+        self.stash_stack = OpenStack::default();
         self.quick_open = QuickOpen::default();
         self.code.reset();
         self.text_search = TextSearch::default();
@@ -1940,5 +2031,151 @@ mod commit_stack_tests {
             detail: Some("fatal: bad object".into()),
         });
         assert_eq!(model.commit_stack.failure(), Some("fatal: bad object"));
+    }
+}
+
+#[cfg(test)]
+mod stash_tests {
+    use super::*;
+    use gm_schema::{Actor, CommitDetail, FileDiff, StashEntry};
+
+    fn stash(index: u32, oid: &str) -> StashEntry {
+        StashEntry {
+            index,
+            oid: oid.repeat(40),
+            message: format!("On main: {index}"),
+            branch: Some("main".into()),
+            time: 0,
+        }
+    }
+
+    fn detail(oid: &str) -> CommitDetail {
+        CommitDetail {
+            oid: oid.repeat(40),
+            subject: format!("stash {oid}"),
+            ..CommitDetail::default()
+        }
+    }
+
+    fn changed(id: u64, state: OperationState, detail: Option<&str>) -> Event {
+        Event::OperationChanged {
+            id: OperationId(id),
+            actor: Actor::Human,
+            state,
+            detail: detail.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_stash_listing_reaches_the_list_and_its_count() {
+        let mut model = Model::default();
+        model.stashes.request(OperationId(3));
+        let _ = model.apply(Event::StashesListed {
+            id: OperationId(3),
+            stashes: vec![stash(0, "a"), stash(1, "b")],
+        });
+        assert_eq!(model.stashes.count(), Some(2));
+    }
+
+    #[test]
+    fn a_failed_stash_read_belongs_to_the_page_and_not_the_status_bar() {
+        let mut model = Model::default();
+        model.stashes.request(OperationId(3));
+        let _ = model.apply(changed(3, OperationState::Failed, Some("fatal: no stash")));
+        assert_eq!(model.stashes.failure(), Some("fatal: no stash"));
+        assert_eq!(model.error, None);
+    }
+
+    #[test]
+    fn a_stash_detail_fills_the_stash_panel_and_leaves_the_history_one() {
+        let mut model = Model::default();
+        model.stash_commit.request(OperationId(7));
+        model.commit.request(OperationId(8));
+        let _ = model.apply(Event::CommitDetailLoaded {
+            id: OperationId(7),
+            detail: detail("a"),
+        });
+        assert!(matches!(model.stash_commit, CommitPane::Shown(_)));
+        assert_eq!(model.commit, CommitPane::Loading(OperationId(8)));
+        assert_eq!(model.commit_pane(CommitPage::Stashes), &model.stash_commit);
+        assert_eq!(model.commit_pane(CommitPage::History), &model.commit);
+    }
+
+    #[test]
+    fn a_stash_stack_answer_goes_to_the_stash_stack() {
+        let mut model = Model::default();
+        model.stash_stack.request(OperationId(4), 0, Vec::new(), 0);
+        model.commit_stack.request(OperationId(5), 0, Vec::new(), 0);
+        let _ = model.apply(Event::CommitStackLoaded {
+            id: OperationId(4),
+            diffs: vec![FileDiff {
+                path: "a.txt".into(),
+                old_path: None,
+                binary: false,
+                hunks: Vec::new(),
+            }],
+        });
+        assert!(model.stash_stack.is_shown());
+        assert!(model.commit_stack.is_open());
+        assert!(!model.commit_stack.is_shown());
+    }
+
+    #[test]
+    fn a_selected_stash_that_is_gone_takes_its_panel_with_it() {
+        let mut model = Model::default();
+        model.stashes.request(OperationId(3));
+        let _ = model.apply(Event::StashesListed {
+            id: OperationId(3),
+            stashes: vec![stash(0, "a")],
+        });
+        assert!(model.stashes.select(&stash(0, "a").oid));
+        model.stash_commit.request(OperationId(4));
+        let _ = model.apply(Event::CommitDetailLoaded {
+            id: OperationId(4),
+            detail: detail("a"),
+        });
+        // The stash was popped: the list no longer has it.
+        model.stashes.request(OperationId(5));
+        let _ = model.apply(Event::StashesListed {
+            id: OperationId(5),
+            stashes: Vec::new(),
+        });
+        assert_eq!(model.stashes.selected(), None);
+        assert_eq!(model.stash_commit, CommitPane::Empty);
+    }
+
+    #[test]
+    fn a_new_repository_starts_with_no_stash_list_and_no_stash_panel() {
+        let mut model = Model::default();
+        model.stashes.request(OperationId(3));
+        let _ = model.apply(Event::StashesListed {
+            id: OperationId(3),
+            stashes: vec![stash(0, "a")],
+        });
+        model.stash_commit.request(OperationId(4));
+        model.request_open(OperationId(9));
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(9),
+            status: RepoStatus {
+                root: "/other".into(),
+                ..RepoStatus::default()
+            },
+        });
+        assert_eq!(model.stashes, StashList::default());
+        assert_eq!(model.stash_commit, CommitPane::Empty);
+    }
+
+    #[test]
+    fn a_stash_create_settles_on_its_own_operation_only() {
+        let mut model = Model::default();
+        model.stash_create.start(OperationId(6));
+        let _ = model.apply(changed(5, OperationState::Done, None));
+        assert!(model.stash_create.is_pending());
+        let _ = model.apply(changed(6, OperationState::Failed, Some("No local changes")));
+        assert_eq!(
+            model.stash_create.take(),
+            Some(Err("No local changes".to_owned()))
+        );
+        assert_eq!(model.error, None);
     }
 }

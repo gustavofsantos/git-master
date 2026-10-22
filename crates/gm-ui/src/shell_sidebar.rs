@@ -32,12 +32,8 @@ const ROW_HEIGHT: f32 = 28.;
 const WORKTREE_ROWS_SHOWN: f32 = 6.;
 
 /// The destinations under "Workspace" that do not exist yet, and the slice
-/// that brings each one. Working Copy and History are rows of their own.
-const PLACEHOLDERS: [(&str, &str); 3] = [
-    ("Stashes", "Stashes"),
-    ("Local review", "Local review"),
-    ("Reflog", "Reflog"),
-];
+/// that brings each one. Working Copy, History and Stashes are rows of their own.
+const PLACEHOLDERS: [(&str, &str); 2] = [("Local review", "Local review"), ("Reflog", "Reflog")];
 
 impl StatusView {
     /// The sidebar at `width`. Its right edge is the strip that resizes it.
@@ -151,6 +147,25 @@ impl StatusView {
                         this.run_action(Action::ShowWorkflows, &Args::None, window, cx);
                     }),
                 ),
+            )
+            .child(
+                item_row("Stashes", self.screen == Screen::Stashes)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            this.run_action(Action::ShowStashes, &Args::None, window, cx);
+                        }),
+                    )
+                    .children(self.model.stashes.count().map(|count| {
+                        div()
+                            .flex_none()
+                            .px_2()
+                            .rounded_full()
+                            .bg(theme::selection())
+                            .text_color(theme::accent())
+                            .text_xs()
+                            .child(count.to_string())
+                    })),
             )
             .children(PLACEHOLDERS.iter().map(|&(label, name)| {
                 item_row(label, false).on_mouse_down(

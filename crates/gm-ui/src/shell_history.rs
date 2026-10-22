@@ -17,11 +17,12 @@ use gpui::{
 
 use crate::action_registry::{Action, Args};
 use crate::history_graph::{self, Drawing, GraphRow, Tint};
-use crate::model::{CommitPane, HistoryList};
+use crate::model::{CommitPage, CommitPane, HistoryList};
 use crate::shell_list::change_letter;
+use crate::stashes;
 use crate::text_area::{TextArea, TextStyle};
 use crate::theme;
-use crate::view::StatusView;
+use crate::view::{Screen, StatusView};
 
 const ROW_HEIGHT: f32 = 48.;
 const TIME_WIDTH: f32 = 96.;
@@ -99,7 +100,12 @@ impl StatusView {
                             .flex_col()
                             .child(list),
                     )
-                    .child(commit_panel(&self.model.commit, &self.commit_texts, cx))
+                    .child(commit_panel(
+                        &self.model.commit,
+                        &self.commit_texts,
+                        Panel::Commit,
+                        cx,
+                    ))
             })
     }
 }
@@ -415,22 +421,50 @@ fn show_text(area: &Entity<TextArea>, text: &str, cx: &mut Context<StatusView>) 
     }
 }
 
+/// What the detail panel shows: a commit of the history, or a stash of the
+/// Stashes page (B2), which is named `stash@{n}` and has no author or parents
+/// to show. A stash's index is `None` only while none is selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Panel {
+    Commit,
+    Stash(Option<u32>),
+}
+
+impl Panel {
+    fn title(self) -> String {
+        match self {
+            Self::Commit => "SELECTED COMMIT".to_owned(),
+            Self::Stash(Some(index)) => stashes::label(index),
+            Self::Stash(None) => "SELECTED STASH".to_owned(),
+        }
+    }
+
+    fn empty_text(self) -> &'static str {
+        match self {
+            Self::Commit => "Select a commit to see its details.",
+            Self::Stash(_) => "Select a stash to see its details.",
+        }
+    }
+}
+
 /// The detail panel (H3): the selected commit's subject, body, hash, author,
 /// date, parents and files. Its text is selectable; the Copy controls copy the
-/// hash and the whole message. A file row opens its diff (H4).
-fn commit_panel(
+/// hash and the whole message. A file row opens its diff (H4). A stash shows
+/// the same, without the author and the parents (B2).
+pub(crate) fn commit_panel(
     pane: &CommitPane,
     texts: &CommitTexts,
+    panel: Panel,
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
     let content = match pane {
-        CommitPane::Empty => message_text("Select a commit to see its details.").into_any_element(),
+        CommitPane::Empty => message_text(panel.empty_text()).into_any_element(),
         CommitPane::Loading(_) => message_text("Loading commit…").into_any_element(),
         CommitPane::Failed(text) => div()
             .text_color(theme::error())
             .child(text.clone())
             .into_any_element(),
-        CommitPane::Shown(detail) => commit_detail(detail, texts, cx).into_any_element(),
+        CommitPane::Shown(detail) => commit_detail(detail, texts, panel, cx).into_any_element(),
     };
     div()
         .id("commit-detail")
@@ -454,7 +488,12 @@ fn message_text(text: &'static str) -> Div {
     div().text_color(theme::muted()).child(text)
 }
 
-fn commit_detail(detail: &CommitDetail, texts: &CommitTexts, cx: &mut Context<StatusView>) -> Div {
+fn commit_detail(
+    detail: &CommitDetail,
+    texts: &CommitTexts,
+    panel: Panel,
+    cx: &mut Context<StatusView>,
+) -> Div {
     let copy_message = copy_button(
         "commit-copy-message",
         "Copy message",
@@ -470,7 +509,7 @@ fn commit_detail(detail: &CommitDetail, texts: &CommitTexts, cx: &mut Context<St
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .child(section_label("SELECTED COMMIT"))
+                .child(section_label(&panel.title()))
                 .child(copy_message),
         )
         .child(texts.subject.clone());
@@ -490,9 +529,13 @@ fn commit_detail(detail: &CommitDetail, texts: &CommitTexts, cx: &mut Context<St
                 .gap_2()
                 .text_xs()
                 .child(field("Hash", texts.hash.clone(), Some(copy_hash)))
-                .child(field("Author", texts.author.clone(), None))
+                .children(
+                    (panel == Panel::Commit).then(|| field("Author", texts.author.clone(), None)),
+                )
                 .child(field("Date", texts.date.clone(), None))
-                .child(field("Parents", texts.parents.clone(), None)),
+                .children(
+                    (panel == Panel::Commit).then(|| field("Parents", texts.parents.clone(), None)),
+                ),
         )
         .child(section_label(&format!(
             "FILES ({})",
@@ -693,16 +736,26 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Fills the detail panel's text areas with the shown commit.
+    /// The page whose commit the detail panel and the stacked diff show: the
+    /// Stashes page while it is on screen, else the history.
+    pub(crate) fn commit_page(&self) -> CommitPage {
+        if self.screen == Screen::Stashes {
+            CommitPage::Stashes
+        } else {
+            CommitPage::History
+        }
+    }
+
+    /// Fills the detail panel's text areas with the shown commit of the page on screen.
     pub(crate) fn show_commit_texts(&self, cx: &mut Context<Self>) {
-        if let CommitPane::Shown(detail) = &self.model.commit {
+        if let CommitPane::Shown(detail) = self.model.commit_pane(self.commit_page()) {
             self.commit_texts.show(detail, cx);
         }
     }
 
     /// The Copy control by the hash: copies the full commit id.
     pub(crate) fn copy_commit_hash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let oid = match &self.model.commit {
+        let oid = match self.model.commit_pane(self.commit_page()) {
             CommitPane::Shown(detail) => detail.oid.clone(),
             _ => return,
         };
@@ -711,7 +764,7 @@ impl StatusView {
 
     /// The Copy control by the message: copies the subject and the body.
     pub(crate) fn copy_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let message = match &self.model.commit {
+        let message = match self.model.commit_pane(self.commit_page()) {
             CommitPane::Shown(detail) => full_message(&detail.subject, &detail.body),
             _ => return,
         };
@@ -726,7 +779,8 @@ impl StatusView {
     /// Opens the stacked diff of the selected commit, with file `focus` at the top
     /// (H4c). The read is the whole commit's patch, against its first parent.
     pub(crate) fn select_commit_file(&mut self, focus: usize, cx: &mut Context<Self>) {
-        let (oid, files, more) = match &self.model.commit {
+        let page = self.commit_page();
+        let (oid, files, more) = match self.model.commit_pane(page) {
             CommitPane::Shown(detail) if focus < detail.files.len() => {
                 (detail.oid.clone(), detail.files.clone(), detail.more_files)
             }
@@ -739,7 +793,9 @@ impl StatusView {
                 files: files.clone(),
             },
         );
-        self.model.commit_stack.request(id, focus, files, more);
+        self.model
+            .commit_stack_mut(page)
+            .request(id, focus, files, more);
         cx.notify();
     }
 
@@ -757,7 +813,8 @@ impl StatusView {
 
     /// Back to the commit view, from its button or Escape.
     pub(crate) fn close_commit_file(&mut self, cx: &mut Context<Self>) {
-        self.model.commit_stack.close();
+        let page = self.commit_page();
+        self.model.commit_stack_mut(page).close();
         cx.notify();
     }
 
@@ -765,9 +822,14 @@ impl StatusView {
     /// header with the way back, the commit, then the diff of every file, a
     /// loading line or git's message.
     pub(crate) fn commit_file_view(&self, cx: &mut Context<Self>) -> Div {
-        let (short, subject) = match &self.model.commit {
+        let owner = self.commit_page();
+        let (short, subject) = match self.model.commit_pane(owner) {
             CommitPane::Shown(detail) => (detail.short.clone(), detail.subject.clone()),
             _ => (String::new(), String::new()),
+        };
+        let back_label = match owner {
+            CommitPage::History => "Back to commit",
+            CommitPage::Stashes => "Back to stash",
         };
         let back = div()
             .id("commit-file-back")
@@ -779,7 +841,7 @@ impl StatusView {
             .border_1()
             .border_color(theme::button_border())
             .cursor_pointer()
-            .child("Back to commit")
+            .child(back_label)
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_commit_file(cx)));
         let header = div()
             .h(px(36.))
@@ -808,7 +870,8 @@ impl StatusView {
                     .text_ellipsis()
                     .child(subject),
             );
-        let body = if let Some(message) = self.model.commit_stack.failure() {
+        let stack = self.model.commit_stack(owner);
+        let body = if let Some(message) = stack.failure() {
             div()
                 .px_4()
                 .py_3()
@@ -817,7 +880,7 @@ impl StatusView {
         } else {
             // The pane stays in the tree while the diffs load, so it keeps the
             // keys. Its box is empty until the stack is shown.
-            let loading = !self.model.commit_stack.is_shown();
+            let loading = !stack.is_shown();
             let pane = div()
                 .min_h(px(0.))
                 .flex()
@@ -1022,6 +1085,21 @@ mod tests {
     #[test]
     fn a_message_without_a_body_copies_only_the_subject() {
         assert_eq!(full_message("fix: typo", ""), "fix: typo");
+    }
+
+    #[test]
+    fn a_stash_panel_is_named_by_its_index_and_a_commit_panel_is_not() {
+        assert_eq!(Panel::Commit.title(), "SELECTED COMMIT");
+        assert_eq!(Panel::Stash(Some(2)).title(), "stash@{2}");
+        assert_eq!(Panel::Stash(None).title(), "SELECTED STASH");
+        assert_eq!(
+            Panel::Stash(None).empty_text(),
+            "Select a stash to see its details."
+        );
+        assert_eq!(
+            Panel::Commit.empty_text(),
+            "Select a commit to see its details."
+        );
     }
 
     #[test]

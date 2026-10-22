@@ -170,6 +170,10 @@ pub enum Effect {
     },
     /// Opens the Workflows page and asks the engine for the workflow files.
     ShowWorkflows,
+    /// Opens the Stashes page and asks the engine for the stashes (B2).
+    ShowStashes,
+    /// Opens the dialog that stashes the working copy's changes (B2, D94).
+    OpenNewStashDialog,
     /// Writes the open workflow's buffer to its file.
     SaveWorkflow,
     /// Drops the open workflow's unsaved changes.
@@ -247,7 +251,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 66] = [
+const SPECS: [Spec; 68] = [
     spec(
         "file.stage",
         "Stage File",
@@ -704,6 +708,20 @@ const SPECS: [Spec; 66] = [
         ArgKind::File,
         Category::WorkingCopy,
     ),
+    spec(
+        "stash.show",
+        "Show Stashes",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "stash.new",
+        "Stash Changes…",
+        None,
+        ArgKind::None,
+        Category::WorkingCopy,
+    ),
 ];
 
 const fn spec(
@@ -792,6 +810,8 @@ pub enum Action {
     ViewFile,
     SearchText,
     DiscardAllChanges,
+    ShowStashes,
+    NewStash,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -832,6 +852,7 @@ fn navigation_effect(action: Action, args: &Args) -> Effect {
             line: None,
         },
         (Action::ShowWorkflows, _) => Effect::ShowWorkflows,
+        (Action::ShowStashes, _) => Effect::ShowStashes,
         _ => Effect::ShowHistory,
     }
 }
@@ -902,7 +923,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 66] = [
+    pub const ALL: [Action; 68] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -969,6 +990,8 @@ impl Action {
         Action::ViewFile,
         Action::SearchText,
         Action::DiscardAllChanges,
+        Action::ShowStashes,
+        Action::NewStash,
     ];
 
     #[must_use]
@@ -1021,6 +1044,7 @@ impl Action {
                 | Action::SearchText
                 | Action::ViewFile
                 | Action::ShowWorkflows
+                | Action::ShowStashes
         )
     }
 
@@ -1047,6 +1071,11 @@ impl Action {
                 | Action::LockWorktree
                 | Action::UnlockWorktree
         )
+    }
+
+    /// Whether the rule of `stash_rule` decides the action.
+    fn is_stash_rule(self) -> bool {
+        matches!(self, Action::ShowStashes | Action::NewStash)
     }
 
     /// Whether the rules of `workflow_rule` and `workflow_effect` decide the action.
@@ -1089,6 +1118,7 @@ impl Action {
                 | Action::DeleteMergedBranches
                 | Action::DiscardFile
                 | Action::DiscardAllChanges
+                | Action::NewStash
         )
     }
 
@@ -1099,6 +1129,7 @@ impl Action {
     }
 
     /// Whether the action can run now with `args`; the reason when it cannot.
+    #[allow(clippy::too_many_lines)] // one arm per action; the stash rule adds one more
     pub fn enabled(self, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
         if !self.takes(args) {
             return Err("No target for this action");
@@ -1198,6 +1229,7 @@ impl Action {
             | Action::ApproveHook
             | Action::DenyHook => hook_rule(self, ctx),
             _ if self.is_workflow_rule() => workflow_rule(self, args, ctx),
+            _ if self.is_stash_rule() => stash_rule(self, ctx),
             // The placeholders, refused above by `available`.
             _ => Err(NOT_AVAILABLE),
         }
@@ -1276,6 +1308,7 @@ impl Action {
                 Effect::Send(vec![CommandKind::UnlockWorktree { path: path.clone() }])
             }
             (Action::PruneWorktrees, _) => Effect::OpenPruneDialog,
+            (Action::NewStash, _) => Effect::OpenNewStashDialog,
             (action, _) if action.opens_a_page() => navigation_effect(action, args),
             (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
             (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
@@ -1634,6 +1667,22 @@ pub fn has_unstaged(entry: &StatusEntry) -> bool {
 }
 
 /// Refuses while no repository is open.
+/// The rules of the Stashes page and of Stash Changes. The page needs a
+/// repository; stashing needs an idle one with something to stash.
+fn stash_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
+    match action {
+        Action::NewStash => {
+            idle(ctx)?;
+            if ctx.entries.is_empty() {
+                Err("No local changes to stash.")
+            } else {
+                Ok(())
+            }
+        }
+        _ => repository_open(ctx),
+    }
+}
+
 fn repository_open(ctx: &Context<'_>) -> Result<(), Reason> {
     if ctx.repo_open {
         Ok(())
@@ -2767,6 +2816,62 @@ mod tests {
             Err("No repository is open.")
         );
         assert_eq!(Action::ShowHistory.id(), "history.show");
+    }
+
+    #[test]
+    fn show_stashes_needs_an_open_repository_and_plans_the_page() {
+        assert_eq!(
+            Action::ShowStashes.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::ShowStashes)
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowStashes.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(Action::ShowStashes.id(), "stash.show");
+        assert_eq!(Action::ShowStashes.spec().title, "Show Stashes");
+        assert_eq!(Action::ShowStashes.spec().category, Category::Repository);
+        assert_eq!(Action::ShowStashes.spec().shortcut, None);
+        assert!(!Action::ShowStashes.opens_dialog());
+    }
+
+    #[test]
+    fn stash_changes_opens_its_dialog_and_needs_changes_to_stash() {
+        let modified = [entry("a.txt", None, Some(Change::Modified))];
+        assert_eq!(
+            Action::NewStash.plan(&Args::None, &ctx(&modified, "")),
+            Ok(Effect::OpenNewStashDialog)
+        );
+        assert_eq!(Action::NewStash.id(), "stash.new");
+        assert_eq!(Action::NewStash.spec().title, "Stash Changes…");
+        assert_eq!(Action::NewStash.spec().category, Category::WorkingCopy);
+        assert_eq!(Action::NewStash.spec().shortcut, None);
+        assert!(Action::NewStash.opens_dialog());
+        assert!(!Action::NewStash.destructive());
+        assert_eq!(
+            Action::NewStash.enabled(&Args::None, &ctx(&[], "")),
+            Err("No local changes to stash.")
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&modified, "")
+        };
+        assert_eq!(
+            Action::NewStash.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        let busy = Context {
+            busy: Some("Wait for the branch checkout to finish."),
+            ..ctx(&modified, "")
+        };
+        assert_eq!(
+            Action::NewStash.enabled(&Args::None, &busy),
+            Err("Wait for the branch checkout to finish.")
+        );
     }
 
     #[test]

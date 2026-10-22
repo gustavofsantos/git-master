@@ -32,9 +32,10 @@ use crate::flow_inspector::FlowInspector;
 use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
 use crate::merged_branches::MergedDialog;
-use crate::model::{Model, Switched};
+use crate::model::{CommitPage, Model, Switched};
 use crate::name_fit::name_label;
 use crate::new_branch::NewBranchDialog;
+use crate::new_stash::NewStashDialog;
 use crate::palette::Palette;
 use crate::palette_view::{self, PaletteView};
 use crate::project_menu::ProjectMenu;
@@ -74,7 +75,7 @@ const UPDATING_DELAY: Duration = Duration::from_millis(300);
 const WATCH_LIMITED: &str = "Watching is limited; refreshing when the window gains focus.";
 
 /// What the main area shows: the Working Copy, the history page (H1), the
-/// Workflows page (D76), or the Code page (N2).
+/// Workflows page (D76), the Code page (N2), the text search (N3) or the Stashes page (B2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Screen {
     #[default]
@@ -85,6 +86,8 @@ pub(crate) enum Screen {
     Code,
     /// The text search (N3).
     Search,
+    /// The stashes of the repository, with the selected stash's files and diffs (B2).
+    Stashes,
 }
 
 pub struct StatusView {
@@ -141,6 +144,8 @@ pub struct StatusView {
     pub(crate) prune_dialog: Option<PruneDialog>,
     /// The new-branch dialog, while it is open.
     pub(crate) new_branch_dialog: Option<NewBranchDialog>,
+    /// The stash dialog, while it is open (B2).
+    pub(crate) new_stash_dialog: Option<NewStashDialog>,
     /// The inputs dialog of a workflow that declares inputs, while it is open.
     pub(crate) workflow_inputs_dialog: Option<WorkflowInputsDialog>,
     /// The editor of the Workflows page's TOML tab; its text is the page's buffer.
@@ -335,6 +340,7 @@ impl StatusView {
             removal_dialog: None,
             prune_dialog: None,
             new_branch_dialog: None,
+            new_stash_dialog: None,
             workflow_inputs_dialog: None,
             workflow_source,
             flow_inspector: FlowInspector::default(),
@@ -439,17 +445,19 @@ impl StatusView {
         if file_event {
             self.after_file_event(cx);
         }
-        if let Some(fresh) = self.model.commit_stack.take_fresh() {
-            self.commit_diff_pane.update(cx, |pane, cx| {
-                pane.show_stack(
-                    fresh.files,
-                    fresh.more,
-                    fresh.diffs,
-                    fresh.focus,
-                    window,
-                    cx,
-                );
-            });
+        for page in [CommitPage::History, CommitPage::Stashes] {
+            if let Some(fresh) = self.model.commit_stack_mut(page).take_fresh() {
+                self.commit_diff_pane.update(cx, |pane, cx| {
+                    pane.show_stack(
+                        fresh.files,
+                        fresh.more,
+                        fresh.diffs,
+                        fresh.focus,
+                        window,
+                        cx,
+                    );
+                });
+            }
         }
         self.settle_dialogs(window, cx);
         // A finished hook run fills the composer only while it still holds what the run was
@@ -504,6 +512,11 @@ impl StatusView {
         if reload && self.screen == Screen::History && self.model.history.can_refresh() {
             self.refresh_history();
         }
+        // The Stashes page reads its list again after every status refresh (B2). A
+        // repository open ends with a status too, so it reads the list then.
+        if reload && self.screen == Screen::Stashes {
+            self.request_stash_list();
+        }
         cx.notify();
     }
 
@@ -529,6 +542,9 @@ impl StatusView {
         }
         if let Some(outcome) = self.model.merging.take_outcome() {
             self.on_merged_settled(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.stash_create.take() {
+            self.on_stash_created(outcome, window, cx);
         }
     }
 
@@ -561,6 +577,7 @@ impl StatusView {
             .children((self.screen == Screen::Workflows).then(|| self.workflows_page(cx)))
             .children((self.screen == Screen::Code).then(|| self.code_page(cx)))
             .children((self.screen == Screen::Search).then(|| self.search_page(cx)))
+            .children((self.screen == Screen::Stashes).then(|| self.stashes_page(cx)))
     }
 
     fn head_name(&self) -> Option<String> {
@@ -661,6 +678,7 @@ impl StatusView {
     /// one goes, and the new root joins the recent list.
     fn on_switched(&mut self, switched: Switched, cx: &mut Context<Self>) {
         self.model.commit_stack.close();
+        self.model.stash_stack.close();
         if !switched.same_root {
             self.composer.update(cx, |composer, cx| composer.clear(cx));
         }
@@ -686,9 +704,12 @@ impl StatusView {
         self.remember(PathBuf::from(switched.root), cx);
     }
 
-    /// Opens the history page and asks for the commits of HEAD.
+    /// Opens the history page and asks for the commits of HEAD. The Stashes
+    /// page's stacked diff closes, since the diff pane is shared.
     pub(crate) fn show_history(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::History;
+        self.model.stash_stack.close();
+        self.show_commit_texts(cx);
         self.refresh_history();
         cx.notify();
     }
@@ -971,6 +992,8 @@ impl StatusView {
                 include_staged,
             }) => self.open_discard_file_dialog(&path, include_staged, window, cx),
             Ok(Effect::ShowHistory) => self.show_history(cx),
+            Ok(Effect::ShowStashes) => self.show_stashes(cx),
+            Ok(Effect::OpenNewStashDialog) => self.open_new_stash_dialog(window, cx),
             Ok(Effect::ShowWorkflows) => self.show_workflows(cx),
             Ok(Effect::OpenQuickOpen) => self.open_quick_open(window, cx),
             Ok(Effect::ShowCode) => self.show_code(cx),
@@ -1337,6 +1360,7 @@ impl Render for StatusView {
                     .then(|| self.prune_layer(window, cx)),
             )
             .children(self.new_branch_layer(window, cx))
+            .children(self.new_stash_layer(window, cx))
             .children(self.workflow_inputs_layer(window, cx))
             .children(
                 self.delete_dialog
