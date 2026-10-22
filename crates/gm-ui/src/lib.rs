@@ -69,6 +69,7 @@ mod view;
 mod welcome;
 mod window_chrome;
 mod workflow_inputs;
+mod workflow_review;
 mod workflow_run;
 mod workflows_page;
 mod worktree_create;

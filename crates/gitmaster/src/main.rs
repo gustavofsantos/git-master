@@ -1,5 +1,6 @@
 //! `gitmaster [PATH]` opens the window on the repository at PATH, or on the
-//! working directory. `gitmaster --version` prints the version.
+//! working directory. `gitmaster --version` prints the version. `gitmaster workflow …` runs one
+//! of the one-shot workflow commands and exits; it opens no window and keeps no process.
 
 mod shell_env;
 
@@ -14,6 +15,10 @@ fn main() {
     if first.as_deref() == Some("--version") {
         println!("gitmaster {}", env!("CARGO_PKG_VERSION"));
         return;
+    }
+    if first.as_deref() == Some("workflow") {
+        let words: Vec<String> = args.collect();
+        std::process::exit(workflow_command(&words));
     }
     if args.next().is_some() {
         eprintln!("usage: gitmaster [PATH]");
@@ -55,6 +60,21 @@ fn main() {
         from_argument,
     };
     gm_ui::run(engine, command_log, watch, start);
+}
+
+/// `gitmaster workflow check | dry-run | test` (docs/reference/cli.md). Never applies an effect.
+fn workflow_command(words: &[String]) -> i32 {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("gitmaster: {error}");
+            return 1;
+        }
+    };
+    let result = gm_core::script::cli::run(words, &gm_core::script::luau::LuauEngine::new(), &cwd);
+    print!("{}", result.out);
+    eprint!("{}", result.err);
+    result.code
 }
 
 #[cfg(test)]

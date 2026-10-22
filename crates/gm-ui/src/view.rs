@@ -60,6 +60,7 @@ use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
 use crate::workflow_inputs::WorkflowInputsDialog;
+use crate::workflow_review::WorkflowReviewDialog;
 use crate::workflow_run::fill_for_message;
 use crate::workflows_page::is_conflict;
 use crate::worktree_create::WorktreeDialog;
@@ -164,6 +165,8 @@ pub struct StatusView {
     pub(crate) review_dialog: Option<ReviewDialog>,
     /// The inputs dialog of a workflow that declares inputs, while it is open.
     pub(crate) workflow_inputs_dialog: Option<WorkflowInputsDialog>,
+    /// The "Run this version?" dialog, while the engine waits for a review of a script.
+    pub(crate) workflow_review_dialog: Option<WorkflowReviewDialog>,
     /// The editor of the Workflows page's TOML tab; its text is the page's buffer.
     pub(crate) workflow_source: Entity<TextArea>,
     /// The Flow's inspector: its text fields and the popover open over it.
@@ -363,6 +366,7 @@ impl StatusView {
             new_stash_dialog: None,
             review_dialog: None,
             workflow_inputs_dialog: None,
+            workflow_review_dialog: None,
             workflow_source,
             flow_inspector: FlowInspector::default(),
             delete_dialog: None,
@@ -571,6 +575,7 @@ impl StatusView {
 
     /// Shows the outcome of each dialog's operation that the model settled.
     fn settle_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_pending_workflow_review(window, cx);
         if let Some(outcome) = self.model.creating.take() {
             self.on_worktree_created(outcome, window, cx);
         }
@@ -1495,6 +1500,7 @@ impl StatusView {
         layers.extend(self.stash_layers(window, cx));
         layers.extend(self.review_composer_layer(window, cx));
         layers.extend(self.workflow_inputs_layer(window, cx));
+        layers.extend(self.workflow_review_layer(window, cx));
         if self.delete_dialog.is_some() {
             layers.push(self.delete_branch_layer(window, cx));
         }
