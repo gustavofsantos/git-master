@@ -2,6 +2,8 @@
 
 Última atualização: 2026-10-19. Status de cada decisão em `01`. D73 e D74 estão decididas; D75 está decidida na direção, com detalhes propostos. D78 (workflow como máquina de estados limitada) e D79 (definição em texto, execução em SQLite) foram decididas em princípio em 2026-10-19, com detalhes propostos. D76, D77 e D80 são propostas. O restante do modelo (D61–D72) segue proposto.
 
+> **Mudança de direção (2026-10-22, D93 a D97).** Workflows passam a ser scripts Lua em um sandbox embutido, com execução efêmera por ora. O desenho novo está em `11-workflows-em-script.md` e substitui, para o que ainda não foi construído, as seções Formato e localização, Máquina de estados, Linguagem de expressão, Validação, LLM e scripts (a forma do TOML), a forma dos exemplos de hooks, Execução em SQLite (esperas e retomada) e Interface (aba Flow). Valem sem mudança: ideia de ator e níveis (com o ajuste de D96), gatilhos, fases, concorrência, reconciliação (D66), stacks como workflows e MCP (sem ferramenta de escrita, D97). O texto abaixo descreve o que foi construído na WF0 a WF2 e fica como registro até a remoção do motor TOML (WS2).
+
 ## Como experimentar (estado de 2026-10-19)
 
 O que já roda: workflows **manuais**, pela paleta de comandos. Gatilhos por evento, fases `before`/`transform`/`after`, ações de stack e a página de Workflows vêm nas próximas sub-fatias (`07`, fatia 3w).

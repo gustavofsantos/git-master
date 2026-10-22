@@ -29,7 +29,7 @@ The full principles (determinism, human approves and agent proposes, Git is the 
 |---|---|
 | Why the product exists, principles, non-goals | `docs/00-visao-e-principios.md` |
 | What has been decided, what is open | `docs/01-decisoes-e-questoes-abertas.md` (D = decision, Q = open question) |
-| Feature design | `02` stacks, `03` hooks, `04` MCP and review, `05` screens, `09` code navigation, `10` workflows |
+| Feature design | `02` stacks, `03` hooks, `04` MCP and review, `05` screens, `09` code navigation, `10` workflows (TOML, being replaced), `11` workflow scripts |
 | How it is built | `docs/06-arquitetura.md` |
 | What to build next, and what is done | `docs/07-roadmap.md` (the only place that tracks status) |
 | Visual identity | `docs/08-identidade-visual.md`, icons in `assets/icons/` |

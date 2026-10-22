@@ -5,7 +5,7 @@ Design documents (Portuguese), exported verbatim on 2026-10-16 from the author's
 | File | Content |
 |---|---|
 | `00-visao-e-principios.md` | Vision, benchmarks, differentiators, principles, non-goals |
-| `01-decisoes-e-questoes-abertas.md` | Decision log D01-D80 (Decidido / Proposto) and open questions Q1-Q21 |
+| `01-decisoes-e-questoes-abertas.md` | Decision log D01-D97 (Decidido / Proposto) and open questions Q1-Q23 |
 | `02-stacks-e-restack.md` | Branch stacks, metadata, restack plan and execution |
 | `03-hooks.md` | Hook classes, `.gitconfig` format, JSON contract, reconciliation |
 | `04-mcp-e-review-local.md` | MCP tiers and tools, local review loop |
@@ -15,6 +15,7 @@ Design documents (Portuguese), exported verbatim on 2026-10-16 from the author's
 | `08-identidade-visual.md` | Visual identity: palette, Divisa icon decisions and geometry, files in `assets/icons/` |
 | `09-navegacao-no-codigo.md` | Proposal: Quick Open, grep and symbol search over a read-only code viewer (slice 3c) |
 | `10-workflows.md` | Proposal: Workflows, sequences of typed actions bound to triggers, in TOML; stack policies and LLM commit message as workflows (slice 3w) |
+| `11-workflows-em-script.md` | Decided 2026-10-22: workflows as Lua scripts in an embedded sandbox (`ctx` as the only effect boundary), ephemeral runs, hash-based review, agent-authored scripts and the `check`/`dry-run`/`test` subcommands; replaces the TOML state machine of `10` (slice 3w) |
 | `rvw-lessons.md` | Lessons from `~/Projects/rvw` (English) and the slice 0 bootstrap plan (done) |
 
 ## Design canvas

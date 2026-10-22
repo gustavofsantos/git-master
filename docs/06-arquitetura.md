@@ -33,6 +33,8 @@ O core define traits (`GitPort`, `HookPort`, `StorePort`) e os adaptadores as im
 
 ## Workflows (D60, D63, D65; WF0 a WF2 implementadas)
 
+> **Mudança de direção (2026-10-22, D93 a D97).** O interpretador de máquina de estados descrito abaixo será substituído por uma VM de script em sandbox, com `ctx` como única fronteira de efeito e execução efêmera. Ver `11-workflows-em-script.md`. A lista de módulos abaixo é o estado atual, até a WS2.
+
 - Interpretador em `gm-core`: modelo puro (TOML para modelo tipado), avaliador de expressões e validador, sem I/O. Testável sem janela.
 - Catálogo de ações em `gm-core` (`workflow/catalog.rs`): nível de efeito, outcomes, fase e os campos tipados de `with` (`FieldSpec`) de cada ação. O validador checa o workflow inteiro, inclusive `with`, antes de rodar (D63). O JSON Schema da entrada e da saída, previsto no D63, ainda não existe; os campos tipados cumprem esse papel no editor e no validador.
 - Módulos em `gm-core/src/workflow/`: `model`, `parse`, `expr`, `catalog`, `validate` e `machine` (núcleo puro); `dry_run` (passeio pela função de transição sem efeitos, D85); `edit` (edições estruturais com `toml_edit`, D86); `templates`; `loader`, `store` (SQLite), `exec` e `driver` (I/O). A sessão por repositório fica em `gm-core/src/workflow_session.rs`.
