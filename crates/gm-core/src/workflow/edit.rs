@@ -1056,10 +1056,10 @@ with = { name = \"feat/a\", checkout = true }
 
     #[test]
     fn set_action_keeps_with_for_an_action_with_no_fields() {
-        let out = ok(set_action(FLOW, "ask", "fetch"));
+        let out = ok(set_action(FLOW, "ask", "stage.all"));
         assert_eq!(
             out,
-            FLOW.replacen("action = \"exec\"", "action = \"fetch\"", 1)
+            FLOW.replacen("action = \"exec\"", "action = \"stage.all\"", 1)
         );
     }
 
