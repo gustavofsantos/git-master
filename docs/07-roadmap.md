@@ -134,6 +134,24 @@ Pedido do autor em 2026-10-19. Decisões D54 a D59 em `01`. Nada disto foi visto
 
 Pronto quando: as cinco queixas do autor (copiar, criar e apagar branch e worktree, redimensionar a lateral, apagar mescladas, Fetch/Pull/Push) funcionam na janela real. Falta conferir isso à mão.
 
+## Fatia 1e: o básico que ainda falta (em andamento)
+
+Pedido do autor em 2026-10-22, antes da H5: fechar o que um cliente Git precisa no dia a dia e ainda é placeholder. Decisões D93 a D96 em `01`. Ordem: B1, B2, B3, B4; cada sub-fatia é usável sozinha e habilita no registro só as ações dela.
+ Sem cenário de smoke nesta fatia, por D88.
+- **B1, descartar mudanças de um arquivo** (a fazer, D93). Habilita `file.discard` ("Discard Changes"), hoje desabilitada.
+  - Arquivo rastreado: volta ao conteúdo do índice (`git restore --worktree`); o staged fica. Arquivo não rastreado: apagado. Uma segunda ação, "Discard All Changes", descarta também o staged (`git restore --source=HEAD --staged --worktree`); em arquivo novo e staged remove do índice e do disco.
+  - Comando `DiscardFile { path, include_staged }` em `gm-schema`; `GitPort::discard_file`; só `Actor::Human`; entra no log de comandos (D28). Sem rede de segurança: a perda é definitiva, por isso a confirmação lista o que vai embora (D87).
+  - Pronto quando: testes com Git real (modificado, apagado, novo não rastreado, novo staged, staged mais unstaged, binário, caminho com espaço e Unicode, caminho que não é da working copy recusado, agente recusado); regra e plano no registro; diálogo de confirmação com o resumo; menu de arquivo e paleta.
+- **B2, Stashes** (a fazer, D94). Página "Stashes" da sidebar.
+  - Lista (`stash@{n}`, mensagem, branch de origem, tempo), detalhe com arquivos e diff somente leitura (reusa o painel do histórico, H3 e H4), criar (com mensagem; opção de incluir não rastreados), aplicar, pop e apagar, com menu de contexto e paleta. Aplicar com conflito mostra o erro do Git, sem tentar resolver (Q11).
+  - Pronto quando: testes com Git real para cada ação, incluindo `-u`, índice, conflito ao aplicar e stash numerado depois de um apagado; a lista atualiza sozinha pelo watcher (`refs/stash`).
+- **B3, Reflog** (a fazer, D95). Página "Reflog" da sidebar.
+  - Lista paginada de HEAD (`git reflog`), com índice, ação (checkout, commit, reset, rebase...), hash curto e tempo; detalhe e diff pelo painel do histórico. Ações: criar branch a partir da entrada e checkout (destacado). Sem `reset --hard` nesta tela.
+  - Pronto quando: testes com Git real (commit, checkout, reset, rebase, amend); paginação com cursor como a H2.
+- **B4, Review local sem MCP** (a fazer, D96; confirmar Q3 antes de começar). Página "Local review".
+  - Comentários em linha no diff do commit e da Working Copy, estados `aberto` e `resolvido` (o `tratado` do agente vem com a Fatia 7), âncora sem adivinhar (texto exato uma vez; senão `desatualizado`), snapshot do working tree no momento do comentário (`git stash create` numa ref privada), seletor Antes/Depois. Tools MCP ficam para a Fatia 7.
+  - Pronto quando: âncora e estados em módulo puro com testes de propriedade; testes com Git real do snapshot (sem mexer em refs públicas nem no working tree).
+
 ## Fatia 2: hook `prepare-commit` (feita)
 
 Backend (`gm-core/src/hook`, `gm-schema/src/hook.rs`; comandos `ListHooks`, `ApproveHook`, `RunPrepareCommit`, `CancelHook`; aprovações em `~/.local/share/gitmaster/hook-approvals.json`, por repositório) e interface prontos. Revisada em 2026-10-16 (D29, D30): só o que o Git não tem vira hook do GitMaster. O `pre-commit` e os demais hooks nativos ficam com o Git (D18, D29).
