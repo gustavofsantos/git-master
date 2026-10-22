@@ -1129,7 +1129,6 @@ impl Action {
     }
 
     /// Whether the action can run now with `args`; the reason when it cannot.
-    #[allow(clippy::too_many_lines)] // one arm per action; the stash rule adds one more
     pub fn enabled(self, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
         if !self.takes(args) {
             return Err("No target for this action");
@@ -1138,64 +1137,12 @@ impl Action {
             return Err(NOT_AVAILABLE);
         }
         match self {
-            Action::StageFile => {
-                idle(ctx)?;
-                let entry = file_entry(args, ctx)?;
-                if has_unstaged(entry) {
-                    Ok(())
-                } else {
-                    Err("Nothing unstaged in this file")
-                }
-            }
-            Action::UnstageFile => {
-                idle(ctx)?;
-                let entry = file_entry(args, ctx)?;
-                if entry.staged.is_some() {
-                    Ok(())
-                } else {
-                    Err("Nothing staged in this file")
-                }
-            }
-            Action::StageChunk => {
-                idle(ctx)?;
-                match args {
-                    Args::Chunk {
-                        side: DiffSide::Unstaged,
-                        ..
-                    } => Ok(()),
-                    _ => Err("This chunk is already staged"),
-                }
-            }
-            Action::UnstageChunk => {
-                idle(ctx)?;
-                match args {
-                    Args::Chunk {
-                        side: DiffSide::Staged,
-                        ..
-                    } => Ok(()),
-                    _ => Err("This chunk is not staged"),
-                }
-            }
-            Action::DiscardChunk => {
-                idle(ctx)?;
-                match args {
-                    Args::Chunk {
-                        side: DiffSide::Unstaged,
-                        ..
-                    } => Ok(()),
-                    _ => Err("Only unstaged chunks can be discarded"),
-                }
-            }
-            Action::Commit => {
-                idle(ctx)?;
-                if ctx.message.trim().is_empty() {
-                    Err("Nothing to commit: the message is empty.")
-                } else if ctx.staged_count == 0 {
-                    Err("Nothing is staged.")
-                } else {
-                    Ok(())
-                }
-            }
+            Action::StageFile
+            | Action::UnstageFile
+            | Action::StageChunk
+            | Action::UnstageChunk
+            | Action::DiscardChunk
+            | Action::Commit => change_rule(self, args, ctx),
             _ if self.is_worktree_rule() => worktree_rule(self, args, ctx),
             Action::Refresh
             | Action::CreateWorktree
@@ -1376,6 +1323,64 @@ fn branch_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Rea
         Action::DeleteBranch if current => Err("Cannot delete the checked-out branch"),
         Action::DeleteBranch if elsewhere => Err("Checked out in another worktree"),
         _ => Ok(()),
+    }
+}
+
+/// The rules of the working copy's changes: staging and unstaging a file or a
+/// hunk, discarding a hunk and committing. Each needs an idle repository.
+fn change_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    idle(ctx)?;
+    match (action, args) {
+        (Action::StageFile, _) => {
+            let entry = file_entry(args, ctx)?;
+            if has_unstaged(entry) {
+                Ok(())
+            } else {
+                Err("Nothing unstaged in this file")
+            }
+        }
+        (Action::UnstageFile, _) => {
+            let entry = file_entry(args, ctx)?;
+            if entry.staged.is_some() {
+                Ok(())
+            } else {
+                Err("Nothing staged in this file")
+            }
+        }
+        (
+            Action::StageChunk,
+            Args::Chunk {
+                side: DiffSide::Unstaged,
+                ..
+            },
+        )
+        | (
+            Action::DiscardChunk,
+            Args::Chunk {
+                side: DiffSide::Unstaged,
+                ..
+            },
+        )
+        | (
+            Action::UnstageChunk,
+            Args::Chunk {
+                side: DiffSide::Staged,
+                ..
+            },
+        ) => Ok(()),
+        (Action::StageChunk, _) => Err("This chunk is already staged"),
+        (Action::UnstageChunk, _) => Err("This chunk is not staged"),
+        (Action::DiscardChunk, _) => Err("Only unstaged chunks can be discarded"),
+        // Commit, the only action left.
+        _ => {
+            if ctx.message.trim().is_empty() {
+                Err("Nothing to commit: the message is empty.")
+            } else if ctx.staged_count == 0 {
+                Err("Nothing is staged.")
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 
