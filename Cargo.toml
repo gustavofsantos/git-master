@@ -8,7 +8,8 @@ version = "0.0.0"
 edition = "2024"
 # Checked in CI for the non-GUI crates (see .github/workflows/ci.yml).
 rust-version = "1.99"
-license = "MIT"
+# No license is granted (LICENSE, D98). Nothing here may be published to a registry.
+publish = false
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

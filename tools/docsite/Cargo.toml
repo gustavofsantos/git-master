@@ -8,7 +8,6 @@ name = "docsite"
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.99"
-license = "MIT"
 publish = false
 description = "Builds the GitMaster documentation website from docs/"
 

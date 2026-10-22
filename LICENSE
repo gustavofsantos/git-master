@@ -1,0 +1,15 @@
+GitMaster is unlicensed.
+
+Copyright (c) 2026 The GitMaster author. All rights reserved.
+
+No license is granted for this software. Without the written permission of
+the copyright holder you may not use, copy, modify, merge, publish,
+distribute, sublicense or sell it, or any part of it.
+
+This is not an open source license, and it is not the Unlicense, which would
+place the work in the public domain. This notice stays until the author
+chooses a license (design/decisions.md, D98 and Q10).
+
+Third-party components keep their own licenses. The Phosphor icons in
+crates/gm-ui/assets/icons are under the license in LICENSE-phosphor; the
+dependencies listed in Cargo.lock carry their own.
