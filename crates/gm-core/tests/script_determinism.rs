@@ -3,6 +3,7 @@
 //! what makes the journal a faithful record and keeps replay possible later (Q23). Property tests
 //! over generated scripts, with the real Luau sandbox.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -59,14 +60,20 @@ fn script(ops: &[Op]) -> String {
     let mut body = String::from("local last = 0\n");
     for op in ops {
         match op {
-            Op::Notify(text) => body += &format!("ctx.notify(\"{text}\")\n"),
+            Op::Notify(text) => {
+                let _ = writeln!(body, "ctx.notify(\"{text}\")");
+            }
             Op::Now => body += "last = ctx.now()\n",
             Op::Random => body += "last = ctx.random()\n",
-            Op::Branch(name) => body += &format!("ctx.branch.create({{ name = \"{name}\" }})\n"),
+            Op::Branch(name) => {
+                let _ = writeln!(body, "ctx.branch.create({{ name = \"{name}\" }})");
+            }
             Op::TryRestack => {
                 body += "local t = ctx.try(function() return ctx.restack.apply({ plan_id = \"p\" }) end)\nctx.notify(t.outcome)\n";
             }
-            Op::Loop(n) => body += &format!("for i = 1, {n} do ctx.notify(\"loop\" .. i) end\n"),
+            Op::Loop(n) => {
+                let _ = writeln!(body, "for i = 1, {n} do ctx.notify(\"loop\" .. i) end");
+            }
             Op::IfEven => {
                 body += "if type(last) == \"number\" and last % 2 == 0 then ctx.notify(\"even\") else ctx.notify(\"odd\") end\n";
             }
