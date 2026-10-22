@@ -13,9 +13,9 @@ use gpui::{
     prelude::*, px, uniform_list,
 };
 
-use crate::action_registry::{Action, Args, Context as ActionContext, stash_args};
+use crate::action_registry::{Action, Args, stash_args};
 use crate::model::CommitPage;
-use crate::shell_history::{Panel, commit_panel, now_secs, relative_time};
+use crate::shell_history::{Panel, action_button, commit_panel, now_secs, relative_time};
 use crate::stashes::{self, StashList};
 use crate::theme;
 use crate::view::{Screen, StatusView};
@@ -145,7 +145,7 @@ impl StatusView {
         self.new_stash_layer(window, cx)
             .into_iter()
             .chain(self.drop_stash_layer(window, cx))
-            .chain(self.stash_failure_layer(window, cx))
+            .chain(self.message_layer(window, cx))
             .collect()
     }
 
@@ -159,7 +159,7 @@ impl StatusView {
                 (Action::StashPop, "stash-pop", "Pop"),
                 (Action::StashDrop, "stash-drop", "Drop"),
             ]
-            .map(|(action, id, label)| stash_action_button(action, id, label, &target, &ctx, cx)),
+            .map(|(action, id, label)| action_button(action, id, label, &target, &ctx, cx)),
         )
     }
 
@@ -198,47 +198,6 @@ impl StatusView {
         );
         self.model.stash_commit.request(id);
         cx.notify();
-    }
-}
-
-/// One of the detail panel's stash buttons. Its rule is the registry's: a refused
-/// button is muted and its reason is its tooltip; a click on it says the reason.
-fn stash_action_button(
-    action: Action,
-    id: &'static str,
-    label: &'static str,
-    target: &Args,
-    ctx: &ActionContext<'_>,
-    cx: &Context<StatusView>,
-) -> Stateful<Div> {
-    let refusal = action.enabled(target, ctx).err();
-    let colour = match refusal {
-        Some(_) => theme::muted(),
-        None if action == Action::StashDrop => theme::removed_fg(),
-        None => theme::text(),
-    };
-    let button = div()
-        .id(id)
-        .flex_none()
-        .px_2()
-        .h(px(24.))
-        .flex()
-        .items_center()
-        .rounded_sm()
-        .border_1()
-        .border_color(theme::button_border())
-        .text_xs()
-        .text_color(colour)
-        .child(label)
-        .on_mouse_down(MouseButton::Left, {
-            let target = target.clone();
-            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                this.run_action(action, &target, window, cx);
-            })
-        });
-    match refusal {
-        None => button.cursor_pointer(),
-        Some(reason) => button.tooltip(window_chrome::hint(reason)),
     }
 }
 

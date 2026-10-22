@@ -26,6 +26,7 @@ mod history_graph;
 mod hook_run;
 mod icon;
 mod merged_branches;
+mod message_dialog;
 mod model;
 mod name_fit;
 mod new_branch;

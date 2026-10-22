@@ -15,7 +15,7 @@ use gpui::{
     PathBuilder, Pixels, Stateful, Window, canvas, div, point, prelude::*, px, uniform_list,
 };
 
-use crate::action_registry::{Action, Args};
+use crate::action_registry::{Action, Args, Context as ActionContext};
 use crate::history_graph::{self, Drawing, GraphRow, Tint};
 use crate::model::{CommitPage, CommitPane, HistoryList};
 use crate::shell_list::change_letter;
@@ -23,6 +23,7 @@ use crate::stashes;
 use crate::text_area::{TextArea, TextStyle};
 use crate::theme;
 use crate::view::{Screen, StatusView};
+use crate::window_chrome;
 
 const ROW_HEIGHT: f32 = 48.;
 const TIME_WIDTH: f32 = 96.;
@@ -358,6 +359,48 @@ fn ref_chip(label: &RefLabel) -> Div {
         .bg(background)
         .text_color(text)
         .child(label.name.clone())
+}
+
+/// One of the detail panel's action buttons. Its rule is the registry's: a refused
+/// button is muted and its reason is its tooltip; a click on it runs the action
+/// through `run_action`, which says the reason when it is refused.
+pub(crate) fn action_button(
+    action: Action,
+    id: &'static str,
+    label: &'static str,
+    target: &Args,
+    ctx: &ActionContext<'_>,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    let refusal = action.enabled(target, ctx).err();
+    let colour = match refusal {
+        Some(_) => theme::muted(),
+        None if action.destructive() => theme::removed_fg(),
+        None => theme::text(),
+    };
+    let button = div()
+        .id(id)
+        .flex_none()
+        .px_2()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::button_border())
+        .text_xs()
+        .text_color(colour)
+        .child(label)
+        .on_mouse_down(MouseButton::Left, {
+            let target = target.clone();
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.run_action(action, &target, window, cx);
+            })
+        });
+    match refusal {
+        None => button.cursor_pointer(),
+        Some(reason) => button.tooltip(window_chrome::hint(reason)),
+    }
 }
 
 /// The read-only text areas of the detail panel: one per field of the selected

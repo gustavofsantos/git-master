@@ -32,6 +32,7 @@ use crate::flow_inspector::FlowInspector;
 use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
 use crate::merged_branches::MergedDialog;
+use crate::message_dialog::MessageDialog;
 use crate::model::{CommitPage, Model, Switched};
 use crate::name_fit::name_label;
 use crate::new_branch::NewBranchDialog;
@@ -47,7 +48,7 @@ use crate::shell_history::CommitTexts;
 use crate::shell_search::{self, SearchView};
 use crate::shell_sidebar;
 use crate::sidebar::Grouping;
-use crate::stash_apply::{self, FailureDialog};
+use crate::stash_apply;
 use crate::stash_drop::DropStashDialog;
 use crate::stashes;
 use crate::text_area::{TextArea, TextAreaEvent};
@@ -164,8 +165,8 @@ pub struct StatusView {
     pub(crate) discard_dialog: Option<DiscardDialog>,
     /// The drop dialog of a stash, while it is open (B2).
     pub(crate) drop_stash_dialog: Option<DropStashDialog>,
-    /// The message that an apply or a pop was not done, while it is open (B2).
-    pub(crate) stash_failure: Option<FailureDialog>,
+    /// The message shown when a stash apply or pop, or a detached checkout, was not done.
+    pub(crate) message_dialog: Option<MessageDialog>,
     /// The delete-merged-branches dialog, while it is open.
     pub(crate) merged_dialog: Option<MergedDialog>,
     /// The recent repositories, newest first, as last saved or loaded.
@@ -357,7 +358,7 @@ impl StatusView {
             delete_dialog: None,
             discard_dialog: None,
             drop_stash_dialog: None,
-            stash_failure: None,
+            message_dialog: None,
             merged_dialog: None,
             recents,
             recent_store,
