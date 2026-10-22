@@ -145,7 +145,7 @@ return M
 
 **Invariant:** the script is untrusted logic, and the host is the only actor. The script has no authority of its own. Everything it does goes through `ctx`.
 
-- Engine: a Lua VM compiled into the binary (self-contained). The default candidate is **Luau via `mlua`** (sandbox mode, interrupt hook, memory limit, hardened for untrusted code). Alternatives: Lua 5.4 (needs a manual allow list) and Rhai (pure Rust, but not Lua). The decision belongs to spike S-D (Q22).
+- Engine: a Lua VM compiled into the binary (self-contained). The engine is **Luau via `mlua`** (sandbox mode, interrupt hook, memory limit, hardened for untrusted code), chosen by spike S-D (D104, `spikes/script-engine/FINDINGS.md`). The alternatives measured were Lua 5.4 (needs a manual allow list and four guards) and Rhai (pure Rust, but not Lua).
 - Removed from the environment: `io`, `os`, `debug`, `package`/`require`, `load`/`loadstring`/`dofile`, and `string.dump`. The sources of nondeterminism (`os.time`, `os.clock`, `math.random`) are removed too. `ctx.now()` and `ctx.random()` replace them, and they pass through the journal. The global environment is read-only and new on each run, so that one run does not affect the next.
 - **Budgets per run:** instructions, total wall-clock time, memory, string size, stack depth, and the number of `ctx` calls. The number of calls replaces the 1000-transition ceiling of D78. Exceeding a budget ends the run as `failed`, with the reason. The values are to be defined in the spike.
 - **Cancellation:** the VM's interrupt hook checks a signal. A blocked call (`approve`, `wait`, `exec`) is woken by the cancellation, and `exec` kills its process (D65).
@@ -377,5 +377,5 @@ Rules:
 
 ## Open questions
 
-- **Q22. Script engine.** Luau (`mlua`), Lua 5.4 or Rhai. Decide with the numbers from spike S-D (see `design/roadmap.md`): sandbox escape attempts, budgets and cancellation latency, binary size, and the build on the three platforms. Luau is C++, which requires a C++ compiler in CI. Today the bundled `rusqlite` already requires C.
+- **Q22. Script engine (resolved by D104).** Luau via `mlua` was chosen from the S-D numbers (`spikes/script-engine/FINDINGS.md`). Luau is C++, so CI and releases need a C++ compiler.
 - **Q23. Durable execution.** Re-execution from the journal, as Temporal does, is postponed by D100. Reopen it when losing runs at app close becomes a problem.
