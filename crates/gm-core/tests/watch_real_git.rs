@@ -188,6 +188,23 @@ fn worktrees_until(
 }
 
 #[test]
+fn a_stash_dropped_from_the_cli_refreshes_the_status() {
+    // The drop changes only `refs/stash` (its reflog is not a status input): the
+    // worktree is already clean, so the ref alone must bring the refresh.
+    let dir = repo();
+    let s = session(CONFIG);
+    open(&s, dir.path());
+    watching(&s.notices);
+    std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+    git(dir.path(), &["stash", "push", "-q"]);
+    settle(&s.notices, QUIET);
+
+    git(dir.path(), &["stash", "drop", "-q"]);
+    let dropped = settle(&s.notices, QUIET);
+    assert_eq!(refreshes(&dropped), 1, "notices: {dropped:?}");
+}
+
+#[test]
 fn a_worktree_added_and_removed_from_the_cli_refreshes_the_list() {
     let dir = repo();
     let base = tempfile::tempdir().unwrap();

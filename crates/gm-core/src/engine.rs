@@ -7,7 +7,7 @@ use std::time::Duration;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event,
     GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch, OperationId,
-    OperationState, WorktreeEntry, WorktreeInspection,
+    OperationState, STASH_LIST_CHANGED, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -1335,7 +1335,8 @@ impl Engine {
         }
     }
 
-    /// The branch commands: create and delete. Human only.
+    /// The branch and stash commands: create and delete a branch, and the stashes
+    /// (B2). Human only where a command writes.
     fn branch_command(
         &self,
         id: OperationId,
@@ -1355,6 +1356,11 @@ impl Engine {
             CommandKind::DeleteMergedBranches { branches } => {
                 self.delete_merged(id, actor, branches)
             }
+            CommandKind::ListStashes => self.list_stashes(id),
+            CommandKind::CreateStash { .. }
+            | CommandKind::ApplyStash { .. }
+            | CommandKind::PopStash { .. }
+            | CommandKind::DropStash { .. } => self.stash_command(id, actor, kind),
             _ => Err("not a worktree or branch command".to_owned()),
         }
     }
@@ -1767,6 +1773,79 @@ impl Engine {
         self.root
             .clone()
             .ok_or_else(|| "no repository is open".to_owned())
+    }
+
+    /// The stash list, newest first. Reads only.
+    fn list_stashes(&self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let stashes = self.git.stashes(&root).map_err(|e| e.0)?;
+        Ok(vec![Event::StashesListed { id, stashes }])
+    }
+
+    /// The stash writes (B2, D94). Human only. An apply, a pop or a drop first
+    /// checks that `stash@{index}` still is the stash the human listed, so a
+    /// stale index never acts on another stash.
+    fn stash_command(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        match kind {
+            CommandKind::CreateStash {
+                message,
+                include_untracked,
+            } => {
+                only_a_human(actor, "create a stash")?;
+                let root = self.open_root()?;
+                let message = message
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty());
+                self.git
+                    .create_stash(&root, message, *include_untracked)
+                    .map_err(|e| e.0)?;
+                self.stashes_changed(id, &root)
+            }
+            CommandKind::ApplyStash { index, oid } => {
+                only_a_human(actor, "apply a stash")?;
+                let root = self.open_root()?;
+                self.ensure_stash_listed(&root, *index, oid)?;
+                self.git.apply_stash(&root, *index).map_err(|e| e.0)?;
+                self.stashes_changed(id, &root)
+            }
+            CommandKind::PopStash { index, oid } => {
+                only_a_human(actor, "pop a stash")?;
+                let root = self.open_root()?;
+                self.ensure_stash_listed(&root, *index, oid)?;
+                self.git.pop_stash(&root, *index).map_err(|e| e.0)?;
+                self.stashes_changed(id, &root)
+            }
+            CommandKind::DropStash { index, oid } => {
+                only_a_human(actor, "drop a stash")?;
+                let root = self.open_root()?;
+                self.ensure_stash_listed(&root, *index, oid)?;
+                self.git.drop_stash(&root, *index).map_err(|e| e.0)?;
+                self.stashes_changed(id, &root)
+            }
+            _ => Err("not a stash command".to_owned()),
+        }
+    }
+
+    /// Refuses unless `stash@{index}` still is the stash `oid` the human listed.
+    fn ensure_stash_listed(&self, root: &Path, index: u32, oid: &str) -> Result<(), String> {
+        match self.git.resolve_stash(root, index).map_err(|e| e.0)? {
+            Some(now) if now == oid => Ok(()),
+            _ => Err(STASH_LIST_CHANGED.to_owned()),
+        }
+    }
+
+    /// The status and the stash list after a stash write, so no front-end asks.
+    fn stashes_changed(&self, id: OperationId, root: &Path) -> Result<Vec<Event>, String> {
+        let mut events = self.reload_status(id, root)?;
+        let stashes = self.git.stashes(root).map_err(|e| e.0)?;
+        events.push(Event::StashesListed { id, stashes });
+        Ok(events)
     }
 
     /// Discards every change of one file (B1, D93). Human only: the loss is
@@ -2224,11 +2303,13 @@ impl Engine {
     }
 
     fn record(&mut self, op: &Op, detail: Option<String>, events: &mut Vec<Event>) {
-        // A workflow listing or run read is a read (D28), and a template copy or a
-        // workflow file save or delete writes no Git state: none is logged.
+        // A workflow listing or run read is a read (D28), as is the stash list, and a
+        // template copy or a workflow file save or delete writes no Git state: none
+        // is logged.
         if !matches!(
             op.command.kind,
-            CommandKind::ListWorkflows
+            CommandKind::ListStashes
+                | CommandKind::ListWorkflows
                 | CommandKind::ListWorkflowRuns { .. }
                 | CommandKind::LoadWorkflowRun { .. }
                 | CommandKind::DryRunWorkflow { .. }
@@ -3198,6 +3279,162 @@ mod tests {
             failure(&events).as_deref(),
             Some("only a human can delete a branch")
         );
+    }
+
+    fn stash(index: u32, oid: &str, message: &str) -> gm_schema::StashEntry {
+        gm_schema::StashEntry {
+            index,
+            oid: oid.into(),
+            message: message.into(),
+            branch: Some("main".into()),
+            time: 0,
+        }
+    }
+
+    /// An engine over a fake whose stash list holds one stash, `a` at index 0.
+    fn stash_engine() -> (Engine, FakeGit) {
+        let status = RepoStatus {
+            root: "/r".into(),
+            ..RepoStatus::default()
+        };
+        let fake = FakeGit::new("/r", status);
+        fake.set_stashes(Ok(vec![stash(0, &"a".repeat(40), "On main: x")]));
+        let mut engine = Engine::new(Box::new(fake.clone()));
+        engine.handle(OperationId(1), &open());
+        (engine, fake)
+    }
+
+    #[test]
+    fn an_agent_cannot_change_a_stash_and_a_human_can() {
+        let (mut engine, fake) = stash_engine();
+        let agent = Actor::Agent {
+            name: "agent".into(),
+        };
+        let oid = "a".repeat(40);
+        let writes = [
+            (
+                CommandKind::CreateStash {
+                    message: None,
+                    include_untracked: true,
+                },
+                "only a human can create a stash",
+            ),
+            (
+                CommandKind::ApplyStash {
+                    index: 0,
+                    oid: oid.clone(),
+                },
+                "only a human can apply a stash",
+            ),
+            (
+                CommandKind::PopStash {
+                    index: 0,
+                    oid: oid.clone(),
+                },
+                "only a human can pop a stash",
+            ),
+            (
+                CommandKind::DropStash {
+                    index: 0,
+                    oid: oid.clone(),
+                },
+                "only a human can drop a stash",
+            ),
+        ];
+        for (n, (kind, refused)) in writes.iter().enumerate() {
+            let events = engine.handle(
+                OperationId(2 + n as u64),
+                &Command {
+                    actor: agent.clone(),
+                    kind: kind.clone(),
+                },
+            );
+            assert_eq!(failure(&events).as_deref(), Some(*refused));
+        }
+        assert!(fake.writes().is_empty());
+
+        let events = engine.handle(
+            OperationId(10),
+            &command(CommandKind::DropStash { index: 0, oid }),
+        );
+        assert_eq!(failure(&events), None);
+        assert_eq!(fake.writes(), ["drop_stash"]);
+        let listed = events.iter().find_map(|e| match e {
+            Event::StashesListed { stashes, .. } => Some(stashes.len()),
+            _ => None,
+        });
+        assert_eq!(listed, Some(1));
+    }
+
+    #[test]
+    fn an_agent_may_list_the_stashes() {
+        let (mut engine, fake) = stash_engine();
+        let events = engine.handle(
+            OperationId(2),
+            &Command {
+                actor: Actor::Agent {
+                    name: "agent".into(),
+                },
+                kind: CommandKind::ListStashes,
+            },
+        );
+        assert_eq!(failure(&events), None);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::StashesListed { stashes, .. } if stashes.len() == 1
+        )));
+        assert!(fake.writes().is_empty());
+    }
+
+    #[test]
+    fn a_stale_stash_is_refused_before_git_writes() {
+        let (mut engine, fake) = stash_engine();
+        // The list changed: `stash@{0}` is now another stash.
+        fake.set_stashes(Ok(vec![stash(0, &"b".repeat(40), "On main: y")]));
+        let stale = "a".repeat(40);
+        for (n, kind) in [
+            CommandKind::ApplyStash {
+                index: 0,
+                oid: stale.clone(),
+            },
+            CommandKind::PopStash {
+                index: 0,
+                oid: stale.clone(),
+            },
+            CommandKind::DropStash {
+                index: 0,
+                oid: stale.clone(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let events = engine.handle(OperationId(2 + n as u64), &command(kind));
+            assert_eq!(failure(&events).as_deref(), Some(STASH_LIST_CHANGED));
+        }
+        assert!(fake.writes().is_empty());
+    }
+
+    #[test]
+    fn stash_writes_are_logged_and_the_list_is_not() {
+        let (mut engine, _fake) = stash_engine();
+        engine.handle(OperationId(2), &command(CommandKind::ListStashes));
+        assert!(
+            engine
+                .log()
+                .iter()
+                .all(|entry| entry.kind != CommandKind::ListStashes)
+        );
+        engine.handle(
+            OperationId(3),
+            &command(CommandKind::CreateStash {
+                message: Some("note".into()),
+                include_untracked: false,
+            }),
+        );
+        assert!(engine.log().iter().any(|entry| {
+            entry.id == OperationId(3) && matches!(entry.kind, CommandKind::CreateStash { .. })
+        }));
     }
 
     #[test]

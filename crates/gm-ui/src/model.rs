@@ -788,6 +788,8 @@ impl Model {
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
+            // The stash page (B2) is not wired yet; its list is read again when it is.
+            | Event::StashesListed { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. } => None,
         }
@@ -1041,6 +1043,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::PrunableListed { id, .. }
         | Event::MergedBranchesListed { id, .. }
         | Event::MergedBranchesDeleted { id, .. }
+        | Event::StashesListed { id, .. }
         | Event::HooksListed { id, .. }
         | Event::HookStarted { id, .. }
         | Event::HookFinished { id, .. }

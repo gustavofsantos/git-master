@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, CommitFile, DiffSide, FileDiff, HookScope, Hunk, HunkId,
-    MergedBranch, PruneCandidate, RepoStatus, StageTarget, StatusEntry, WorktreeEntry,
+    MergedBranch, PruneCandidate, RepoStatus, StageTarget, StashEntry, StatusEntry, WorktreeEntry,
     WorktreeMode,
 };
 
@@ -27,6 +27,7 @@ use crate::hook::ConfigValue;
 use crate::port::{DetailRead, FileListRead, GrepRead, RemoteRun, StackRead};
 use crate::remote;
 use crate::stage_math;
+use crate::stash;
 use crate::worktree;
 use crate::{GitError, GitPort};
 
@@ -222,8 +223,13 @@ impl SubprocessGit {
         })
     }
 
-    /// Runs a command that changes the repository and records it in the log.
-    fn logged(&self, mut command: Command, input: Option<&[u8]>) -> Result<Vec<u8>, GitError> {
+    /// Runs a command that changes the repository and records it in the log,
+    /// whatever its exit code. The caller decides what a failure means.
+    fn logged_output(
+        &self,
+        mut command: Command,
+        input: Option<&[u8]>,
+    ) -> Result<Output, GitError> {
         let started = Instant::now();
         let output = Self::execute(&mut command, input)
             .map_err(|e| GitError(format!("cannot run git: {e}")))?;
@@ -247,6 +253,12 @@ impl SubprocessGit {
                 took: started.elapsed(),
             });
         }
+        Ok(output)
+    }
+
+    /// Runs a command that changes the repository and records it in the log.
+    fn logged(&self, command: Command, input: Option<&[u8]>) -> Result<Vec<u8>, GitError> {
+        let output = self.logged_output(command, input)?;
         Self::checked(output, &[0])
     }
 
@@ -300,6 +312,18 @@ impl SubprocessGit {
             &["clean", "-f"]
         };
         self.discard_run(root, args, path)
+    }
+
+    /// One logged `git stash` write of `stash@{index}`: `apply`, `pop` or `drop`.
+    fn stash_command(&self, root: &Path, verb: &str, index: u32) -> Result<(), GitError> {
+        let mut command = self.git(root);
+        command.args(["stash", verb, &stash_ref(index)]);
+        let output = self.logged_output(command, None)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(stash_failure(&output))
+        }
     }
 
     /// Whether the index differs from HEAD (from the empty tree on an unborn branch).
@@ -606,6 +630,69 @@ impl GitPort for SubprocessGit {
         let mut command = self.git(root);
         command.args(["add", "-A"]);
         self.logged(command, None).map(drop)
+    }
+
+    fn stashes(&self, root: &Path) -> Result<Vec<StashEntry>, GitError> {
+        let mut command = self.git(root);
+        command.args(["stash", "list", stash::LIST_FORMAT]);
+        stash::parse_list(&Self::run(command)?)
+    }
+
+    fn resolve_stash(&self, root: &Path, index: u32) -> Result<Option<String>, GitError> {
+        let mut command = self.git(root);
+        command.args(["rev-parse", "--verify", "-q", &stash_ref(index)]);
+        // Exit 1 is git's answer for a stash that is not there.
+        let out = Self::run_allowing(command, &[0, 1])?;
+        let text = String::from_utf8_lossy(&out).trim().to_owned();
+        Ok((!text.is_empty()).then_some(text))
+    }
+
+    fn create_stash(
+        &self,
+        root: &Path,
+        message: Option<&str>,
+        include_untracked: bool,
+    ) -> Result<(), GitError> {
+        check_index_lock(&open(root)?)?;
+        // Git exits 0 and says so on stdout when nothing is stashed. That is
+        // checked here first, so a refusal is not recorded as a write.
+        let changed = self.status(root)?.entries.iter().any(|entry| {
+            entry.staged.is_some()
+                || entry.unstaged.is_some()
+                || (include_untracked && entry.untracked)
+        });
+        if !changed {
+            return Err(GitError(NOTHING_TO_STASH.into()));
+        }
+        let mut command = self.git(root);
+        command.args(["stash", "push"]);
+        if include_untracked {
+            command.arg("--include-untracked");
+        }
+        if let Some(message) = message {
+            command.args(["-m", message]);
+        }
+        let out = self.logged(command, None)?;
+        // A change the status did not show (a file that only looked modified) is
+        // still nothing to stash.
+        if String::from_utf8_lossy(&out).trim() == NOTHING_TO_STASH {
+            return Err(GitError(NOTHING_TO_STASH.into()));
+        }
+        Ok(())
+    }
+
+    fn apply_stash(&self, root: &Path, index: u32) -> Result<(), GitError> {
+        check_index_lock(&open(root)?)?;
+        self.stash_command(root, "apply", index)
+    }
+
+    fn pop_stash(&self, root: &Path, index: u32) -> Result<(), GitError> {
+        check_index_lock(&open(root)?)?;
+        self.stash_command(root, "pop", index)
+    }
+
+    fn drop_stash(&self, root: &Path, index: u32) -> Result<(), GitError> {
+        self.stash_command(root, "drop", index)
     }
 
     fn common_dir(&self, root: &Path) -> Result<PathBuf, GitError> {
@@ -1200,6 +1287,31 @@ pub fn parse_null_config(bytes: &[u8]) -> Vec<ConfigValue> {
             }
         })
         .collect()
+}
+
+/// What `git stash push` says when there is nothing to stash (English: the
+/// commands run with `LC_ALL=C`).
+const NOTHING_TO_STASH: &str = "No local changes to save";
+
+/// The revision of `stash@{index}`.
+fn stash_ref(index: u32) -> String {
+    format!("stash@{{{index}}}")
+}
+
+/// Git's text for a failed stash apply or pop. A conflict is printed on stdout
+/// (the `CONFLICT` lines, and the note that the stash is kept), so those lines
+/// are the message; any other refusal is on stderr.
+fn stash_failure(output: &Output) -> GitError {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let conflicts: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("CONFLICT ") || line.starts_with("The stash entry is kept"))
+        .collect();
+    if conflicts.is_empty() {
+        GitError(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+    } else {
+        GitError(conflicts.join("\n"))
+    }
 }
 
 fn git_err(error: &git2::Error) -> GitError {

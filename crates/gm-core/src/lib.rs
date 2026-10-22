@@ -19,6 +19,7 @@ mod port;
 pub mod remote;
 mod runner;
 pub mod stage_math;
+mod stash;
 pub mod watch;
 pub mod workflow;
 mod workflow_session;

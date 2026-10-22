@@ -8,6 +8,7 @@ use crate::files::{DirListing, FileSearch, FileView};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History};
 use crate::hook::{HookFailure, HookInfo};
+use crate::stash::StashEntry;
 use crate::status::{
     BranchEntry, BranchFailure, MergedBranch, PruneCandidate, RepoStatus, WorktreeEntry,
     WorktreeInspection,
@@ -21,6 +22,10 @@ use crate::workflow::{
 /// the one the human confirmed. The UI matches it to list the branches again.
 pub const MERGED_LIST_CHANGED: &str =
     "the merged branches changed since they were listed; list them again";
+
+/// The refusal of an apply, pop or drop whose `stash@{index}` no longer names the
+/// stash the human picked. The UI matches it to list the stashes again.
+pub const STASH_LIST_CHANGED: &str = "the stashes changed since they were listed; list them again";
 
 /// Sequential, so the operation log is deterministic.
 #[derive(
@@ -230,6 +235,35 @@ pub enum CommandKind {
     /// Human only.
     DeleteMergedBranches {
         branches: Vec<String>,
+    },
+    /// Lists the stashes, newest first (B2, D94). Answers `StashesListed`. A
+    /// read: never recorded in the command log (D28).
+    ListStashes,
+    /// Stashes the local changes (`git stash push`), with `message` when it is
+    /// not blank, and the untracked files too when `include_untracked` is set.
+    /// Refused, with Git's text, when there is nothing to stash. Human only.
+    CreateStash {
+        message: Option<String>,
+        include_untracked: bool,
+    },
+    /// Applies `stash@{index}` without `--index`, which must still be the stash
+    /// `oid` the last `StashesListed` showed; otherwise `STASH_LIST_CHANGED`. The
+    /// stash stays in the list. A conflict is Git's error. Human only.
+    ApplyStash {
+        index: u32,
+        oid: String,
+    },
+    /// Applies `stash@{index}` (as `ApplyStash`) and drops it when Git applied it
+    /// cleanly. A conflict keeps the stash in the list. Human only.
+    PopStash {
+        index: u32,
+        oid: String,
+    },
+    /// Drops `stash@{index}`, the stash `oid` the last `StashesListed` showed.
+    /// Human only.
+    DropStash {
+        index: u32,
+        oid: String,
     },
     /// Lists the hooks read from config, with their state (docs/03).
     ListHooks,
@@ -477,6 +511,12 @@ pub enum Event {
         base: Option<String>,
         branches: Vec<MergedBranch>,
     },
+    /// Answers `ListStashes`, and follows each stash write (after the status), so
+    /// the list is as fresh as the status.
+    StashesListed {
+        id: OperationId,
+        stashes: Vec<StashEntry>,
+    },
     /// Answers `DeleteMergedBranches` with what was removed and what Git refused,
     /// before the operation's own terminal event.
     MergedBranchesDeleted {
@@ -656,6 +696,34 @@ mod tests {
                 include_staged: true,
             }
         );
+    }
+
+    #[test]
+    fn stash_commands_wire_format_is_tagged() {
+        let create = serde_json::to_value(CommandKind::CreateStash {
+            message: Some("wip".into()),
+            include_untracked: true,
+        })
+        .unwrap();
+        assert_eq!(create["type"], "create_stash");
+        assert_eq!(create["include_untracked"], true);
+        let pop = serde_json::to_value(CommandKind::PopStash {
+            index: 2,
+            oid: "a".repeat(40),
+        })
+        .unwrap();
+        assert_eq!(pop["type"], "pop_stash");
+        assert_eq!(pop["index"], 2);
+        let back: CommandKind = serde_json::from_value(pop).unwrap();
+        assert_eq!(
+            back,
+            CommandKind::PopStash {
+                index: 2,
+                oid: "a".repeat(40),
+            }
+        );
+        let list = serde_json::to_value(CommandKind::ListStashes).unwrap();
+        assert_eq!(list["type"], "list_stashes");
     }
 
     #[test]

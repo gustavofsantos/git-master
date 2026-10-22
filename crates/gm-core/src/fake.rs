@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use gm_schema::{
     BranchEntry, CommitDetail, CommitFile, CommitSummary, FileDiff, GrepResult, History,
-    RepoStatus, WorktreeEntry, WorktreeMode,
+    RepoStatus, StashEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::file_index::FileIndex;
@@ -39,6 +39,7 @@ pub struct FakeGit {
     file_reads: Arc<Mutex<usize>>,
     /// Every write git was asked for (stage, unstage, discard, commit), by name.
     writes: Arc<Mutex<Vec<&'static str>>>,
+    stashes: Arc<Mutex<Result<Vec<StashEntry>, GitError>>>,
 }
 
 impl FakeGit {
@@ -60,6 +61,7 @@ impl FakeGit {
             greps: Arc::new(Mutex::new(Vec::new())),
             file_reads: Arc::new(Mutex::new(0)),
             writes: Arc::new(Mutex::new(Vec::new())),
+            stashes: Arc::new(Mutex::new(Ok(Vec::new()))),
         }
     }
 
@@ -98,6 +100,15 @@ impl FakeGit {
     /// If another thread panicked while holding the detail lock.
     pub fn set_detail(&self, detail: Result<CommitDetail, GitError>) {
         *self.detail.lock().unwrap() = detail;
+    }
+
+    /// What the next stash list read answers.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the stashes lock.
+    pub fn set_stashes(&self, stashes: Result<Vec<StashEntry>, GitError>) {
+        *self.stashes.lock().unwrap() = stashes;
     }
 
     /// What the next file list read answers: the paths of the worktree.
@@ -220,6 +231,44 @@ impl GitPort for FakeGit {
     ) -> Result<(), GitError> {
         self.writes.lock().unwrap().push("discard_file");
         Ok(())
+    }
+
+    /// The stash writes succeed and change nothing: the list is what the test set.
+    fn create_stash(
+        &self,
+        _root: &Path,
+        _message: Option<&str>,
+        _include_untracked: bool,
+    ) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("create_stash");
+        Ok(())
+    }
+
+    fn apply_stash(&self, _root: &Path, _index: u32) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("apply_stash");
+        Ok(())
+    }
+
+    fn pop_stash(&self, _root: &Path, _index: u32) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("pop_stash");
+        Ok(())
+    }
+
+    fn drop_stash(&self, _root: &Path, _index: u32) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("drop_stash");
+        Ok(())
+    }
+
+    fn stashes(&self, _root: &Path) -> Result<Vec<StashEntry>, GitError> {
+        self.stashes.lock().unwrap().clone()
+    }
+
+    fn resolve_stash(&self, _root: &Path, index: u32) -> Result<Option<String>, GitError> {
+        let stashes = self.stashes.lock().unwrap().clone()?;
+        Ok(stashes
+            .into_iter()
+            .find(|entry| entry.index == index)
+            .map(|entry| entry.oid))
     }
 
     fn commit(&self, _root: &Path, _message: &str) -> Result<String, GitError> {

@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
     BranchEntry, CommitDetail, CommitFile, DiffSide, FileDiff, GrepResult, HookScope, HunkId,
-    MergedBranch, PruneCandidate, RepoStatus, StageTarget, WorktreeEntry, WorktreeMode,
+    MergedBranch, PruneCandidate, RepoStatus, StageTarget, StashEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::CommandLog;
@@ -87,6 +87,47 @@ pub trait GitPort: Send {
         _include_staged: bool,
     ) -> Result<(), GitError> {
         Err(GitError("discard is not supported by this adapter".into()))
+    }
+
+    /// The stashes, newest first, as `git stash list` has them (B2, D94). Never
+    /// records anything (D28).
+    fn stashes(&self, _root: &Path) -> Result<Vec<StashEntry>, GitError> {
+        Err(GitError("stashes are not supported by this adapter".into()))
+    }
+
+    /// The full id of the commit `stash@{index}` names, or `None` when there is
+    /// no such stash. Never records anything (D28).
+    fn resolve_stash(&self, _root: &Path, _index: u32) -> Result<Option<String>, GitError> {
+        Err(GitError("stashes are not supported by this adapter".into()))
+    }
+
+    /// Stashes the local changes (`git stash push`), with `message` when given
+    /// and the untracked files too when `include_untracked`. Nothing to stash is
+    /// refused with Git's text.
+    fn create_stash(
+        &self,
+        _root: &Path,
+        _message: Option<&str>,
+        _include_untracked: bool,
+    ) -> Result<(), GitError> {
+        Err(GitError("stash is not supported by this adapter".into()))
+    }
+
+    /// Applies `stash@{index}` without `--index`; the stash stays in the list. A
+    /// conflict is Git's own text.
+    fn apply_stash(&self, _root: &Path, _index: u32) -> Result<(), GitError> {
+        Err(GitError("stash is not supported by this adapter".into()))
+    }
+
+    /// Applies `stash@{index}` and drops it when Git applied it cleanly. A
+    /// conflict leaves the stash in the list, and Git's text is the error.
+    fn pop_stash(&self, _root: &Path, _index: u32) -> Result<(), GitError> {
+        Err(GitError("stash is not supported by this adapter".into()))
+    }
+
+    /// Drops `stash@{index}`; the stashes after it are renumbered.
+    fn drop_stash(&self, _root: &Path, _index: u32) -> Result<(), GitError> {
+        Err(GitError("stash is not supported by this adapter".into()))
     }
 
     /// Commits the index; returns the new commit id.
