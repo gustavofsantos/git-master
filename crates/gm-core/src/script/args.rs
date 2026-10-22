@@ -81,19 +81,19 @@ mod tests {
     use super::*;
     use crate::script::surface::CtxSurface;
 
-    fn check(func: &str, args: Value) -> Result<(), String> {
+    fn check(func: &str, args: &Value) -> Result<(), String> {
         let surface = CtxSurface::from_catalog();
-        validate(func, surface.get(func).unwrap().fields, &args)
+        validate(func, surface.get(func).unwrap().fields, args)
     }
 
     #[test]
     fn a_complete_call_passes() {
-        assert!(check("branch.create", json!({ "name": "x", "checkout": true })).is_ok());
-        assert!(check("stage.all", json!({})).is_ok());
+        assert!(check("branch.create", &json!({ "name": "x", "checkout": true })).is_ok());
+        assert!(check("stage.all", &json!({})).is_ok());
         assert!(
             check(
                 "exec",
-                json!({ "argv": ["git"], "timeout": "30s", "format": "json" })
+                &json!({ "argv": ["git"], "timeout": "30s", "format": "json" })
             )
             .is_ok()
         );
@@ -101,23 +101,23 @@ mod tests {
 
     #[test]
     fn a_missing_required_field_names_it() {
-        let error = check("branch.create", json!({})).unwrap_err();
+        let error = check("branch.create", &json!({})).unwrap_err();
         assert!(error.contains("`name` is required"), "{error}");
     }
 
     #[test]
     fn an_unknown_field_lists_the_valid_ones() {
-        let error = check("branch.create", json!({ "name": "x", "force": true })).unwrap_err();
+        let error = check("branch.create", &json!({ "name": "x", "force": true })).unwrap_err();
         assert!(error.contains("unknown field `force`"), "{error}");
         assert!(error.contains("Valid fields: name, checkout"), "{error}");
     }
 
     #[test]
     fn wrong_types_are_refused() {
-        assert!(check("branch.create", json!({ "name": 3 })).is_err());
-        assert!(check("exec", json!({ "argv": "git status" })).is_err());
-        assert!(check("exec", json!({ "argv": ["git"], "timeout": "soon" })).is_err());
-        assert!(check("exec", json!({ "argv": ["git"], "format": "yaml" })).is_err());
-        assert!(check("branch.create", json!([1])).is_err());
+        assert!(check("branch.create", &json!({ "name": 3 })).is_err());
+        assert!(check("exec", &json!({ "argv": "git status" })).is_err());
+        assert!(check("exec", &json!({ "argv": ["git"], "timeout": "soon" })).is_err());
+        assert!(check("exec", &json!({ "argv": ["git"], "format": "yaml" })).is_err());
+        assert!(check("branch.create", &json!([1])).is_err());
     }
 }

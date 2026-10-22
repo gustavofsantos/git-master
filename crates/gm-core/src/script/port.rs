@@ -5,6 +5,7 @@
 //!
 //! Values cross the boundary as `serde_json::Value`, so the host never sees a VM type.
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
@@ -170,7 +171,7 @@ pub struct RunRequest<'a> {
     pub budgets: Budgets,
     /// Set from another thread to cancel the run. The VM checks it at every interrupt point. A
     /// host call that blocks has to wake on its own (see `run`).
-    pub cancel: &'a AtomicBool,
+    pub cancel: Arc<AtomicBool>,
 }
 
 /// One problem found in a script, with the line it points at.

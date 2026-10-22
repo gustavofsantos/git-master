@@ -397,7 +397,7 @@ fn run_thread(
         input,
         surface: &inner.surface,
         budgets: inner.budgets,
-        cancel,
+        cancel: Arc::clone(cancel),
     };
     let end = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         inner.engine.run(&request, &mut host)
@@ -526,26 +526,23 @@ impl RunHost<'_> {
     /// Blocks until a signal arrives, the deadline passes or the run is cancelled. A cancel sends a
     /// signal, so this wakes at once.
     fn block(&self, deadline: Option<Instant>) -> Blocked {
-        loop {
-            if self.cancelled() {
-                return Blocked::Signal(Signal::Cancel);
-            }
-            let received = match deadline {
-                None => self
-                    .signals
-                    .recv()
-                    .map_err(|_| RecvTimeoutError::Disconnected),
-                Some(deadline) => {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    self.signals.recv_timeout(left)
-                }
-            };
-            match received {
-                Ok(signal) => return Blocked::Signal(signal),
-                Err(RecvTimeoutError::Timeout) => return Blocked::Timeout,
-                // The runtime is gone: nobody can answer, so the run ends.
-                Err(RecvTimeoutError::Disconnected) => return Blocked::Signal(Signal::Cancel),
-            }
+        if self.cancelled() {
+            return Blocked::Signal(Signal::Cancel);
+        }
+        let received = match deadline {
+            None => self
+                .signals
+                .recv()
+                .map_err(|_| RecvTimeoutError::Disconnected),
+            Some(deadline) => self
+                .signals
+                .recv_timeout(deadline.saturating_duration_since(Instant::now())),
+        };
+        match received {
+            Ok(signal) => Blocked::Signal(signal),
+            Err(RecvTimeoutError::Timeout) => Blocked::Timeout,
+            // The runtime is gone: nobody can answer, so the run ends.
+            Err(RecvTimeoutError::Disconnected) => Blocked::Signal(Signal::Cancel),
         }
     }
 

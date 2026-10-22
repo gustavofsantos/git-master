@@ -317,7 +317,10 @@ impl Engine {
                 id,
             )?);
         }
-        let session = self.script.as_mut().expect("opened above");
+        let session = self
+            .script
+            .as_mut()
+            .ok_or_else(|| "the script session is not open".to_owned())?;
         let run = session.runtime.start(spec)?;
         session.note_origin(run, id);
         Ok(run)
