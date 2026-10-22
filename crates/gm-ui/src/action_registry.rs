@@ -154,6 +154,8 @@ pub enum Effect {
     OpenQuickOpen,
     /// Opens the Code page (N2).
     ShowCode,
+    /// Opens the text search page and puts the cursor in its box (N3).
+    ShowSearch,
     /// Opens the Code page on a file of the worktree, at a line if given.
     ViewFile {
         path: String,
@@ -238,7 +240,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 64] = [
+const SPECS: [Spec; 65] = [
     spec(
         "file.stage",
         "Stage File",
@@ -681,6 +683,13 @@ const SPECS: [Spec; 64] = [
         ArgKind::File,
         Category::WorkingCopy,
     ),
+    spec(
+        "search.text",
+        "Search Text…",
+        Some("⇧⌘F"),
+        ArgKind::None,
+        Category::Repository,
+    ),
 ];
 
 const fn spec(
@@ -767,6 +776,7 @@ pub enum Action {
     QuickOpen,
     ShowCode,
     ViewFile,
+    SearchText,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -794,6 +804,21 @@ fn shortcut_words(shortcut: &str, mac: bool) -> String {
     }
     parts.push(key);
     parts.join("+")
+}
+
+/// What the actions that open a page or a viewer do.
+fn navigation_effect(action: Action, args: &Args) -> Effect {
+    match (action, args) {
+        (Action::QuickOpen, _) => Effect::OpenQuickOpen,
+        (Action::ShowCode, _) => Effect::ShowCode,
+        (Action::SearchText, _) => Effect::ShowSearch,
+        (Action::ViewFile, Args::File(path)) => Effect::ViewFile {
+            path: path.clone(),
+            line: None,
+        },
+        (Action::ShowWorkflows, _) => Effect::ShowWorkflows,
+        _ => Effect::ShowHistory,
+    }
 }
 
 /// The rule of Reveal in File Manager: a repository is open and the file is in it.
@@ -862,7 +887,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 64] = [
+    pub const ALL: [Action; 65] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -927,6 +952,7 @@ impl Action {
         Action::QuickOpen,
         Action::ShowCode,
         Action::ViewFile,
+        Action::SearchText,
     ];
 
     #[must_use]
@@ -965,6 +991,19 @@ impl Action {
                 | Action::DeleteBranch
                 | Action::DeleteMergedBranches
                 | Action::RemoveWorktree
+        )
+    }
+
+    /// Whether the action opens a page or a viewer, which `navigation_effect` plans.
+    fn opens_a_page(self) -> bool {
+        matches!(
+            self,
+            Action::ShowHistory
+                | Action::QuickOpen
+                | Action::ShowCode
+                | Action::SearchText
+                | Action::ViewFile
+                | Action::ShowWorkflows
         )
     }
 
@@ -1115,6 +1154,7 @@ impl Action {
             | Action::ShowHistory
             | Action::QuickOpen
             | Action::ShowCode
+            | Action::SearchText
             | Action::ShowWorkflows => repository_open(ctx),
             Action::CheckoutBranch => {
                 idle(ctx)?;
@@ -1216,14 +1256,7 @@ impl Action {
                 Effect::Send(vec![CommandKind::UnlockWorktree { path: path.clone() }])
             }
             (Action::PruneWorktrees, _) => Effect::OpenPruneDialog,
-            (Action::ShowHistory, _) => Effect::ShowHistory,
-            (Action::QuickOpen, _) => Effect::OpenQuickOpen,
-            (Action::ShowCode, _) => Effect::ShowCode,
-            (Action::ViewFile, Args::File(path)) => Effect::ViewFile {
-                path: path.clone(),
-                line: None,
-            },
-            (Action::ShowWorkflows, _) => Effect::ShowWorkflows,
+            (action, _) if action.opens_a_page() => navigation_effect(action, args),
             (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
             (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
             (Action::CopyCommitMessage, Args::Commit(text)) => Effect::CopyMessage(text.clone()),
@@ -2260,6 +2293,16 @@ mod tests {
         assert_eq!(Action::QuickOpen.id(), "files.quick_open");
         assert_eq!(Action::QuickOpen.spec().shortcut, Some("⌘P"));
         assert_eq!(Action::ShowCode.id(), "code.show");
+        assert_eq!(
+            Action::SearchText.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::ShowSearch)
+        );
+        assert_eq!(
+            Action::SearchText.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(Action::SearchText.id(), "search.text");
+        assert_eq!(Action::SearchText.spec().shortcut, Some("⇧⌘F"));
     }
 
     #[test]

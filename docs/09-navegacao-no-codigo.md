@@ -1,6 +1,6 @@
 # Navegação no código
 
-Última atualização: 2026-10-21. Status: escopo decidido (D43). S-A, S-C, N1 e N2 estão feitos (`07`, D89, D90); D44 e D46 foram sustentadas pelos spikes. O resto (S-B, N3 a N6, D45, D47 a D51) segue como **proposta** em `01`.
+Última atualização: 2026-10-22. Status: escopo decidido (D43). S-A, S-C, N1, N2 e N3 estão feitos (`07`, D89 a D91); D44 e D46 foram sustentadas pelos spikes e pelo N3. O resto (S-B, N4 a N6, D45, D47 a D51) segue como **proposta** em `01`.
 
 ## Por que
 

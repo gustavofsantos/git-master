@@ -10,10 +10,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gm_schema::{FILE_VIEW_LIMIT, FileBody, FileSearch, FileView, OperationId};
+use gm_schema::{FILE_VIEW_LIMIT, FileBody, FileSearch, FileView, GrepResult, OperationId};
 
 use crate::file_index::FileIndex;
-use crate::port::FileListRead;
+use crate::port::{FileListRead, GrepRead};
 
 /// How many bytes at the start of a file are looked at for a NUL: Git's own
 /// test for a binary file.
@@ -136,6 +136,31 @@ impl ReadJob {
             read_file(&self.root, &self.path)
         };
         ReadReport {
+            id: self.id,
+            outcome,
+        }
+    }
+}
+
+/// A text search, run on a thread of its own (N3).
+pub struct TextJob {
+    pub id: OperationId,
+    pub read: GrepRead,
+    pub stop: Arc<AtomicBool>,
+}
+
+/// A failure carries Git's own message.
+pub struct TextReport {
+    pub id: OperationId,
+    pub outcome: Result<GrepResult, String>,
+}
+
+impl TextJob {
+    /// Runs the search to its end, to the result limit, or to the stop request.
+    #[must_use]
+    pub fn run(self) -> TextReport {
+        let outcome = (self.read)(&self.stop).map_err(|error| error.0);
+        TextReport {
             id: self.id,
             outcome,
         }

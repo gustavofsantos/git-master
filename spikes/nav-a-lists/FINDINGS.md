@@ -47,3 +47,25 @@ Measured on 2026-10-21 by the agent, in a cloud container (4 vCPU, virtual disk,
 ## Open doubts
 
 No cold cache; no 1M worktree grep; synthetic tiny files; one VM; 2 runs at 1M; no sparse checkout, submodule or very long path case; `LC_ALL=C` assumed.
+
+## Correction (2026-10-22, found while building N3)
+
+The file list timings above are for the tracked files only (`git ls-files -z`). The list Quick Open reads is `git ls-files -z -v --cached --others --exclude-standard`, and finding the untracked files makes Git walk the whole worktree, which is most of the cost:
+
+| Command, 100k files, warm | seconds |
+|---|---|
+| `git ls-files -z --cached` | 0.05 |
+| `git ls-files -z --others --exclude-standard` | 0.76 |
+| `git ls-files -z --cached --others --exclude-standard` | 0.75 to 0.81 |
+| `git status --porcelain -uall` | 0.86 to 1.13 |
+
+So the real list read is about **0.75 s at 100k files**, and the same walk is paid by `git grep --untracked`. It runs in the background and the previous list keeps answering, so nothing blocks, but the first Quick Open of a session in a large repository waits for it, and 1 million files was not measured (that repository has no worktree). The first conclusion above ("no waiting on 100k") holds for the tracked files only.
+
+`git grep` through the app's adapter (`grep_timings` in `crates/gm-core/tests/grep_real_git.rs`, release build, 100k files, one thread, median of 3):
+
+| Scope | common (stops at 1000 lines) | rare | unique | no match |
+|---|---|---|---|---|
+| tracked only | 0.065 s | 0.93 s | 0.85 s | 0.89 s |
+| tracked and new | 1.09 s | 2.06 s | 1.99 s | 2.00 s |
+
+Searching the new files adds about a second at 100k files, even when there are none, and even for a pattern that is found at once. `-i` and `--column` cost nothing measurable. One thread was again faster than the default (0.9 s against 1.5 s with all threads).

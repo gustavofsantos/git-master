@@ -11,6 +11,7 @@ pub mod fake;
 pub mod file_index;
 mod files;
 pub mod git;
+pub mod grep;
 mod history;
 pub mod hook;
 pub mod path_match;
@@ -24,7 +25,9 @@ mod workflow_session;
 pub mod worktree;
 
 pub use engine::{Engine, LogEntry};
-pub use files::{IndexJob, IndexReport, ReadJob, ReadReport, SearchJob, SearchReport};
+pub use files::{
+    IndexJob, IndexReport, ReadJob, ReadReport, SearchJob, SearchReport, TextJob, TextReport,
+};
 pub use history::{HistoryJob, HistoryOutcome, HistoryPage, HistoryReport, HistoryStream};
-pub use port::{DetailRead, FileListRead, GitError, GitPort, RemoteRun};
+pub use port::{DetailRead, FileListRead, GitError, GitPort, GrepRead, RemoteRun};
 pub use runner::{EngineHandle, spawn, spawn_with};

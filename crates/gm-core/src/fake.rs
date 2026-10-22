@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use gm_schema::{
-    BranchEntry, CommitDetail, CommitFile, CommitSummary, FileDiff, History, RepoStatus,
-    WorktreeEntry, WorktreeMode,
+    BranchEntry, CommitDetail, CommitFile, CommitSummary, FileDiff, GrepResult, History,
+    RepoStatus, WorktreeEntry, WorktreeMode,
 };
 
 use crate::file_index::FileIndex;
+use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryPage, HistoryStream};
-use crate::port::{DetailRead, FileListRead, StackRead};
+use crate::port::{DetailRead, FileListRead, GrepRead, StackRead};
 use crate::{GitError, GitPort};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -31,6 +32,9 @@ pub struct FakeGit {
     detail: Arc<Mutex<Result<CommitDetail, GitError>>>,
     stack: Arc<Mutex<Result<Vec<FileDiff>, GitError>>>,
     files: Arc<Mutex<Result<Vec<String>, GitError>>>,
+    grep: Arc<Mutex<Result<GrepResult, GitError>>>,
+    /// The text searches git was asked for, in order.
+    greps: Arc<Mutex<Vec<GrepRequest>>>,
     /// How many times the file list was asked for.
     file_reads: Arc<Mutex<usize>>,
     /// Every write git was asked for (stage, unstage, discard, commit), by name.
@@ -52,6 +56,8 @@ impl FakeGit {
             detail: Arc::new(Mutex::new(Ok(CommitDetail::default()))),
             stack: Arc::new(Mutex::new(Ok(Vec::new()))),
             files: Arc::new(Mutex::new(Ok(Vec::new()))),
+            grep: Arc::new(Mutex::new(Ok(GrepResult::default()))),
+            greps: Arc::new(Mutex::new(Vec::new())),
             file_reads: Arc::new(Mutex::new(0)),
             writes: Arc::new(Mutex::new(Vec::new())),
         }
@@ -101,6 +107,25 @@ impl FakeGit {
     /// If another thread panicked while holding the files lock.
     pub fn set_files(&self, files: Result<Vec<String>, GitError>) {
         *self.files.lock().unwrap() = files;
+    }
+
+    /// What the next text search answers.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the grep lock.
+    pub fn set_grep(&self, result: Result<GrepResult, GitError>) {
+        *self.grep.lock().unwrap() = result;
+    }
+
+    /// The text searches git was asked for, in order.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the greps lock.
+    #[must_use]
+    pub fn greps(&self) -> Vec<GrepRequest> {
+        self.greps.lock().unwrap().clone()
     }
 
     /// How many file list reads were started.
@@ -264,6 +289,17 @@ impl GitPort for FakeGit {
 
     fn checkout(&self, _root: &Path, _branch: &str) -> Result<(), GitError> {
         self.checkout.lock().unwrap().clone()
+    }
+
+    fn grep_text(&self, _root: &Path, request: &GrepRequest) -> Result<GrepRead, GitError> {
+        self.greps.lock().unwrap().push(request.clone());
+        let result = self.grep.lock().unwrap().clone();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            if stop.load(Ordering::SeqCst) {
+                return Err(GitError("the text search was superseded".into()));
+            }
+            result
+        }))
     }
 
     fn file_list(&self, _root: &Path) -> Result<FileListRead, GitError> {

@@ -11,7 +11,9 @@ use gm_schema::{Actor, Command, CommandKind, Event, OperationId};
 
 use crate::commit_detail::DetailReport;
 use crate::commit_diff::StackReport;
-use crate::files::{IndexJob, IndexReport, ReadJob, ReadReport, SearchJob, SearchReport};
+use crate::files::{
+    IndexJob, IndexReport, ReadJob, ReadReport, SearchJob, SearchReport, TextJob, TextReport,
+};
 use crate::history::HistoryReport;
 use crate::hook::{ApprovalStore, Report};
 use crate::remote::RemoteReport;
@@ -35,6 +37,7 @@ enum Message {
     Index(IndexReport, Sender<Message>),
     Search(SearchReport),
     Read(ReadReport),
+    Text(TextReport),
 }
 
 /// Cloneable front door to the engine thread. The thread stops when every
@@ -171,6 +174,10 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                 let events = engine.read_report(report);
                 broadcast(events, &mut subscribers);
             }
+            Message::Text(report) => {
+                let events = engine.text_report(report);
+                broadcast(events, &mut subscribers);
+            }
             Message::Workflow(report, reports) => {
                 let events = engine.workflow_report(report);
                 broadcast(events, &mut subscribers);
@@ -239,6 +246,19 @@ fn spawn_file_jobs(engine: &mut Engine, reports: &Sender<Message>) {
     for job in engine.take_read_jobs() {
         spawn_read(job, reports.clone());
     }
+    for job in engine.take_text_jobs() {
+        spawn_text(job, reports.clone());
+    }
+}
+
+fn spawn_text(job: TextJob, reports: Sender<Message>) {
+    std::thread::Builder::new()
+        .name("gm-grep".into())
+        .spawn(move || {
+            let report = job.run();
+            let _ = reports.send_blocking(Message::Text(report));
+        })
+        .expect("spawn a text search thread");
 }
 
 fn spawn_index(job: IndexJob, reports: Sender<Message>) {

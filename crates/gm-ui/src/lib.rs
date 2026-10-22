@@ -42,12 +42,14 @@ mod shell_code;
 mod shell_commit;
 mod shell_history;
 mod shell_list;
+mod shell_search;
 mod shell_sidebar;
 mod shell_workflows;
 mod sidebar;
 mod text_area;
 mod text_area_element;
 mod text_area_math;
+mod text_search;
 mod theme;
 mod title_bar;
 mod view;
@@ -85,6 +87,7 @@ actions!(
         FocusPrev,
         OpenPalette,
         OpenQuickOpen,
+        OpenSearch,
         CopyCurrentBranch,
         SaveWorkflow,
     ]
@@ -179,6 +182,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("secondary-k", OpenPalette, None),
         KeyBinding::new("secondary-p", OpenQuickOpen, None),
+        KeyBinding::new("secondary-shift-f", OpenSearch, None),
         KeyBinding::new("alt-secondary-c", CopyCurrentBranch, None),
         KeyBinding::new("secondary-s", SaveWorkflow, None),
     ]);
@@ -222,6 +226,7 @@ mod tests {
             "secondary-q",
             "secondary-k",
             "secondary-p",
+            "secondary-shift-f",
             "alt-secondary-c",
             "secondary-s",
         ] {

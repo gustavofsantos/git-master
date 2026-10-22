@@ -3,6 +3,7 @@
 
 mod diff;
 mod files;
+mod grep;
 mod history;
 mod hook;
 mod operation;
@@ -12,6 +13,10 @@ mod workflow;
 pub use diff::{DiffLine, DiffSide, FileDiff, Hunk, HunkId, LineKind, StageTarget};
 pub use files::{
     DirEntry, DirListing, FILE_HIT_LIMIT, FILE_VIEW_LIMIT, FileBody, FileHit, FileSearch, FileView,
+};
+pub use grep::{
+    GREP_FILE_LIMIT, GREP_LINE_LIMIT, GREP_TOTAL_LIMIT, GrepFile, GrepLine, GrepOptions,
+    GrepResult, GrepScope,
 };
 pub use history::{
     CommitDetail, CommitFile, CommitSummary, DETAIL_FILE_LIMIT, HISTORY_PAGE, History, RefKind,

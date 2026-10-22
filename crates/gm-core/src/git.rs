@@ -21,9 +21,10 @@ use crate::commit_detail;
 use crate::commit_diff;
 use crate::diff::{hunk_patch, parse_unified};
 use crate::file_index::FileIndex;
+use crate::grep::{Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
-use crate::port::{DetailRead, FileListRead, RemoteRun, StackRead};
+use crate::port::{DetailRead, FileListRead, GrepRead, RemoteRun, StackRead};
 use crate::remote;
 use crate::stage_math;
 use crate::worktree;
@@ -115,6 +116,90 @@ impl SubprocessGit {
             stderr: err.join().unwrap_or_default(),
         };
         Self::checked(output, &[0])
+    }
+
+    /// Runs `git grep` for `request` and collects its records under the limits.
+    /// The output is read on a thread of its own and handed over a bounded
+    /// channel, so this thread can notice `stop` and a full result while Git is
+    /// still working, and kill it.
+    fn run_grep(
+        &self,
+        root: &Path,
+        request: &GrepRequest,
+        stop: &AtomicBool,
+    ) -> Result<gm_schema::GrepResult, GitError> {
+        use std::io::BufRead;
+        use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+        const POLL: Duration = Duration::from_millis(5);
+        let superseded = || GitError("the text search was superseded".into());
+        if stop.load(Ordering::SeqCst) {
+            return Err(superseded());
+        }
+        let mut command = self.git(root);
+        command
+            .args(request.args())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let (records, arrivals) = sync_channel::<Vec<u8>>(1024);
+        let reader = std::thread::spawn(move || {
+            let mut input = std::io::BufReader::new(stdout);
+            loop {
+                let mut record = Vec::new();
+                match input.read_until(b'\n', &mut record) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if record.last() == Some(&b'\n') {
+                            record.pop();
+                        }
+                        if records.send(record).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let errors = std::thread::spawn(move || read_all(stderr));
+        let mut collector = Collector::new(request);
+        let mut full = false;
+        loop {
+            match arrivals.recv_timeout(POLL) {
+                Ok(record) => {
+                    if collector.push(&record) == Flow::Full {
+                        full = true;
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if stop.load(Ordering::SeqCst) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(superseded());
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        if full {
+            let _ = child.kill();
+        }
+        let status = child
+            .wait()
+            .map_err(|e| GitError(format!("cannot wait for git: {e}")))?;
+        drop(arrivals);
+        let _ = reader.join();
+        let message = errors.join().unwrap_or_default();
+        if !full && !matches!(status.code(), Some(0 | 1)) {
+            let text = String::from_utf8_lossy(&message);
+            let first = text.lines().map(str::trim).find(|line| !line.is_empty());
+            return Err(GitError(first.unwrap_or("git grep failed").to_owned()));
+        }
+        Ok(collector.finish())
     }
 
     /// Runs `command`, with `input` on its stdin when given.
@@ -625,6 +710,18 @@ impl GitPort for SubprocessGit {
                 stop,
             )?;
             Ok(FileIndex::from_ls_files(raw))
+        }))
+    }
+
+    /// A text search of the worktree with `git grep` (N3). Git's records are read
+    /// as they come, and Git is killed as soon as the result limit is passed or
+    /// `stop` is set. Not logged (D28). Exit 1 means no match, not a failure.
+    fn grep_text(&self, root: &Path, request: &GrepRequest) -> Result<GrepRead, GitError> {
+        let git = self.clone();
+        let root = root.to_path_buf();
+        let request = request.clone();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            git.run_grep(&root, &request, stop)
         }))
     }
 

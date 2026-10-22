@@ -3,12 +3,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
-    BranchEntry, CommitDetail, CommitFile, DiffSide, FileDiff, HookScope, HunkId, MergedBranch,
-    PruneCandidate, RepoStatus, StageTarget, WorktreeEntry, WorktreeMode,
+    BranchEntry, CommitDetail, CommitFile, DiffSide, FileDiff, GrepResult, HookScope, HunkId,
+    MergedBranch, PruneCandidate, RepoStatus, StageTarget, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::CommandLog;
 use crate::file_index::FileIndex;
+use crate::grep::GrepRequest;
 use crate::history::HistoryStream;
 use crate::hook::ConfigValue;
 
@@ -35,6 +36,11 @@ pub type StackRead = Box<dyn FnOnce(&AtomicBool) -> Result<Vec<FileDiff>, GitErr
 /// The read of the worktree's file list, started by `GitPort::file_list`. It
 /// runs on a thread of its own and stops like a `DetailRead` (N1).
 pub type FileListRead = Box<dyn FnOnce(&AtomicBool) -> Result<FileIndex, GitError> + Send>;
+
+/// The text search started by `GitPort::grep_text`. It runs on a thread of its
+/// own, stops early at the result limit, and stops like a `DetailRead` once
+/// `stop` is set.
+pub type GrepRead = Box<dyn FnOnce(&AtomicBool) -> Result<GrepResult, GitError> + Send>;
 
 /// A remote operation the adapter has checked: the Git run that is left. It
 /// runs on a thread of its own, and its error is Git's own text.
@@ -142,6 +148,15 @@ pub trait GitPort: Send {
     fn file_list(&self, _root: &Path) -> Result<FileListRead, GitError> {
         Err(GitError(
             "the file list is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Starts a text search of the worktree with `git grep` (N3). Starts nothing
+    /// but the returned read. Git is asked for no more than the result limits
+    /// need. Never records anything (D28).
+    fn grep_text(&self, _root: &Path, _request: &GrepRequest) -> Result<GrepRead, GitError> {
+        Err(GitError(
+            "text search is not supported by this adapter".into(),
         ))
     }
 

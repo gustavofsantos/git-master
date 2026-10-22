@@ -18,6 +18,7 @@ use crate::merged_branches::Merging;
 use crate::new_branch::BranchCreate;
 use crate::quick_open::QuickOpen;
 use crate::remote_op::{Outcome, RemoteOp};
+use crate::text_search::TextSearch;
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
 use crate::worktree_create::Creating;
@@ -76,6 +77,8 @@ pub struct Model {
     pub quick_open: QuickOpen,
     /// The Code page: the folder tree and the file viewer (N2).
     pub code: CodePage,
+    /// The text search page: the query, the options and the last answer (N3).
+    pub text_search: TextSearch,
     /// Folders the Code page needs listed next; the window asks the engine.
     wanted_listings: Vec<String>,
     /// The engine finished reading the file list since the window last looked.
@@ -644,6 +647,10 @@ impl Model {
                 self.code.file_received(id, file);
                 None
             }
+            Event::TextFound { id, result } => {
+                self.text_search.received(id, result);
+                None
+            }
             Event::FilesIndexed { .. } => {
                 self.files_indexed = true;
                 None
@@ -672,12 +679,17 @@ impl Model {
                     self.code.listing_failed(id);
                 }
                 if state == OperationState::Failed {
+                    self.text_search.failed(
+                        id,
+                        detail.as_deref().unwrap_or("the search could not be run"),
+                    );
                     self.code
                         .file_failed(id, detail.as_deref().unwrap_or("the file could not be read"));
                 }
                 if state == OperationState::Cancelled {
                     self.commit.cancelled(id);
                     self.code.file_cancelled(id);
+                    self.text_search.cancelled(id);
                 }
                 None
             }
@@ -801,6 +813,7 @@ impl Model {
         self.commit = CommitPane::Empty;
         self.quick_open = QuickOpen::default();
         self.code.reset();
+        self.text_search = TextSearch::default();
         self.wanted_listings.clear();
         self.files_indexed = false;
     }
@@ -1011,6 +1024,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::FilesFound { id, .. }
         | Event::DirectoryListed { id, .. }
         | Event::FileRead { id, .. }
+        | Event::TextFound { id, .. }
         | Event::FilesIndexed { id, .. }
         | Event::WorktreesLoaded { id, .. }
         | Event::WorktreeInspected { id, .. }

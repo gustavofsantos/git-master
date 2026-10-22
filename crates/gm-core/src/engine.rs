@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gm_schema::{
-    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event, History,
-    HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch, OperationId, OperationState,
-    WorktreeEntry, WorktreeInspection,
+    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event,
+    GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch, OperationId,
+    OperationState, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -16,7 +16,9 @@ use crate::commit_detail::{DetailJob, DetailReport};
 use crate::commit_diff::{StackJob, StackReport};
 use crate::files::{
     Building, FilesSession, IndexJob, IndexReport, ReadJob, ReadReport, SearchJob, SearchReport,
+    TextJob, TextReport,
 };
+use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::remote::{RemoteJob, RemoteReport};
@@ -75,6 +77,10 @@ pub struct Engine {
     files_read: Option<ActiveDetail>,
     /// File reads accepted since the last call; see `take_read_jobs`.
     read_jobs: Vec<ReadJob>,
+    /// The text search in flight, if any. A new request supersedes it.
+    text_search: Option<ActiveDetail>,
+    /// Text searches accepted since the last call; see `take_text_jobs`.
+    text_jobs: Vec<TextJob>,
     /// The remote operation in flight, if any. Only one runs at a time.
     remote: Option<ActiveRemote>,
     /// Remote operations accepted since the last call; see `take_remote_jobs`.
@@ -176,6 +182,8 @@ impl Engine {
             search_jobs: Vec::new(),
             files_read: None,
             read_jobs: Vec::new(),
+            text_search: None,
+            text_jobs: Vec::new(),
             remote: None,
             remote_jobs: Vec::new(),
             workflow_user_dir: crate::workflow::loader::default_user_dir(),
@@ -228,6 +236,12 @@ impl Engine {
     /// a thread and passes its report to `search_report`.
     pub fn take_search_jobs(&mut self) -> Vec<SearchJob> {
         std::mem::take(&mut self.search_jobs)
+    }
+
+    /// The text searches accepted since the last call. The caller runs each on a
+    /// thread and passes its report to `text_report`.
+    pub fn take_text_jobs(&mut self) -> Vec<TextJob> {
+        std::mem::take(&mut self.text_jobs)
     }
 
     /// The file reads accepted since the last call. The caller runs each on a
@@ -413,6 +427,29 @@ impl Engine {
             },
             other => {
                 self.files_search = other;
+                Vec::new()
+            }
+        }
+    }
+
+    /// Turns the answer of a text search into events. A report for a search
+    /// that was superseded, or for a repository that was left, is dropped.
+    pub fn text_report(&mut self, report: TextReport) -> Vec<Event> {
+        match self.text_search.take() {
+            Some(active) if active.op.id == report.id => match report.outcome {
+                Ok(result) => vec![
+                    self.finish_op(&active.op, OperationState::Done, None),
+                    Event::TextFound {
+                        id: report.id,
+                        result,
+                    },
+                ],
+                Err(message) => {
+                    vec![self.finish_op(&active.op, OperationState::Failed, Some(message))]
+                }
+            },
+            other => {
+                self.text_search = other;
                 Vec::new()
             }
         }
@@ -639,6 +676,11 @@ impl Engine {
             CommandKind::LoadCommitDetail { oid } => self.start_detail(id, actor, kind, oid),
             CommandKind::SearchFiles { query } => self.start_files_search(id, actor, kind, query),
             CommandKind::ReadFile { path } => self.start_file_read(id, actor, kind, path),
+            CommandKind::SearchText {
+                query,
+                options,
+                paths,
+            } => self.start_text_search(id, actor, kind, query, *options, paths),
             _ => return None,
         })
     }
@@ -760,9 +802,9 @@ impl Engine {
                 Ok(Vec::new())
             }
             CommandKind::ListDirectory { dir } => self.list_directory(id, dir),
-            CommandKind::SearchFiles { .. } | CommandKind::ReadFile { .. } => {
-                Err("file reads are started by handle".to_owned())
-            }
+            CommandKind::SearchFiles { .. }
+            | CommandKind::ReadFile { .. }
+            | CommandKind::SearchText { .. } => Err("file reads are started by handle".to_owned()),
             CommandKind::LoadHistory | CommandKind::LoadHistoryPage { .. } => {
                 Err("history is started by handle".to_owned())
             }
@@ -1180,6 +1222,44 @@ impl Engine {
         Ok(superseded)
     }
 
+    /// Starts a text search of the worktree. A search in flight is superseded:
+    /// stopped and cancelled. Returns the events of the cancellation. A text
+    /// Git cannot take is refused here, before anything is cancelled.
+    fn start_text_search(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        query: &str,
+        options: GrepOptions,
+        paths: &str,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let request = GrepRequest::new(query, options, paths)?;
+        let read = self.git.grep_text(&root, &request).map_err(|e| e.0)?;
+        let superseded = self.drop_text_search();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.text_search = Some(ActiveDetail {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            stop: Arc::clone(&stop),
+        });
+        self.text_jobs.push(TextJob { id, read, stop });
+        Ok(superseded)
+    }
+
+    /// Ends the text search: it is stopped, and a request in flight is cancelled.
+    fn drop_text_search(&mut self) -> Vec<Event> {
+        let Some(active) = self.text_search.take() else {
+            return Vec::new();
+        };
+        active.stop.store(true, Ordering::SeqCst);
+        vec![self.finish_op(&active.op, OperationState::Cancelled, None)]
+    }
+
     /// Ends the file search: it is stopped, and a request in flight is cancelled.
     fn drop_files_search(&mut self) -> Vec<Event> {
         self.files_waiting = None;
@@ -1206,6 +1286,7 @@ impl Engine {
         }
         let mut events = self.drop_files_search();
         events.extend(self.drop_files_read());
+        events.extend(self.drop_text_search());
         events
     }
 

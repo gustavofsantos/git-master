@@ -2135,6 +2135,7 @@ dependencies = [
  "gm-schema",
  "notify",
  "proptest",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

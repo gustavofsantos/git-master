@@ -42,6 +42,7 @@ use crate::recent::{self, Recents};
 use crate::resize;
 use crate::shell_code::CodeView;
 use crate::shell_history::CommitTexts;
+use crate::shell_search::{self, SearchView};
 use crate::shell_sidebar;
 use crate::sidebar::Grouping;
 use crate::text_area::{TextArea, TextAreaEvent};
@@ -55,7 +56,9 @@ use crate::workflows_page::is_conflict;
 use crate::worktree_create::WorktreeDialog;
 use crate::worktree_prune::PruneDialog;
 use crate::worktree_remove::RemoveDialog;
-use crate::{CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, OpenQuickOpen, StartPath};
+use crate::{
+    CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, OpenQuickOpen, OpenSearch, StartPath,
+};
 
 /// The key context of the change list. Its keys work only while the list has
 /// focus, so typing into the message is never taken as a key.
@@ -79,6 +82,8 @@ pub(crate) enum Screen {
     Workflows,
     /// The folder tree and the file viewer (N2).
     Code,
+    /// The text search (N3).
+    Search,
 }
 
 pub struct StatusView {
@@ -125,6 +130,8 @@ pub struct StatusView {
     pub(crate) quick_open_view: QuickOpenView,
     /// The Code page's scrolls; its state is `model.code`.
     pub(crate) code_view: CodeView,
+    /// The text search page's boxes and scroll; its state is `model.text_search`.
+    pub(crate) search_view: SearchView,
     /// The create-worktree dialog, while it is open.
     pub(crate) worktree_dialog: Option<WorktreeDialog>,
     /// The remove-worktree dialog, while it is open.
@@ -207,6 +214,11 @@ impl StatusView {
         let quick_open_input = cx.new(|cx| {
             TextArea::new("Find a file by name  (name:line opens at a line)", cx).with_lines(1, 1)
         });
+        let search_query =
+            cx.new(|cx| TextArea::new("Search the text of the files", cx).with_lines(1, 1));
+        let search_paths = cx.new(|cx| {
+            TextArea::new("Files to search: src crates/ui !docs  (empty: all)", cx).with_lines(1, 1)
+        });
         let sidebar_input = cx.new(|cx| TextArea::new("Find a branch", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
@@ -280,6 +292,11 @@ impl StatusView {
             window,
             cx,
         ));
+        subscriptions.extend(shell_search::subscriptions(
+            &search_query,
+            &search_paths,
+            cx,
+        ));
         subscriptions.extend(shell_sidebar::subscriptions(&sidebar_input, window, cx));
         let mut model = Model::default();
         model.request_open(open);
@@ -310,6 +327,7 @@ impl StatusView {
             palette_view: PaletteView::new(palette_filter),
             quick_open_view: QuickOpenView::new(quick_open_input),
             code_view: CodeView::new(),
+            search_view: SearchView::new(search_query, search_paths),
             worktree_dialog: None,
             removal_dialog: None,
             prune_dialog: None,
@@ -535,6 +553,7 @@ impl StatusView {
             .children((self.screen == Screen::History).then(|| self.history_page(cx)))
             .children((self.screen == Screen::Workflows).then(|| self.workflows_page(cx)))
             .children((self.screen == Screen::Code).then(|| self.code_page(cx)))
+            .children((self.screen == Screen::Search).then(|| self.search_page(cx)))
     }
 
     fn head_name(&self) -> Option<String> {
@@ -652,6 +671,10 @@ impl StatusView {
         }
         if self.screen == Screen::Code {
             self.show_code(cx);
+        }
+        // The boxes of the search belong to the repository left behind.
+        for area in [&self.search_view.query, &self.search_view.paths] {
+            area.update(cx, |area, cx| area.set_text("", cx));
         }
         self.remember(PathBuf::from(switched.root), cx);
     }
@@ -940,6 +963,7 @@ impl StatusView {
             Ok(Effect::ShowWorkflows) => self.show_workflows(cx),
             Ok(Effect::OpenQuickOpen) => self.open_quick_open(window, cx),
             Ok(Effect::ShowCode) => self.show_code(cx),
+            Ok(Effect::ShowSearch) => self.show_search(window, cx),
             Ok(Effect::ViewFile { path, line }) => self.view_file(&path, line, cx),
             Ok(Effect::SaveWorkflow) => self.save_workflow(false, cx),
             Ok(Effect::RevertWorkflow) => self.revert_workflow(cx),
@@ -1235,6 +1259,9 @@ impl Render for StatusView {
             }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.toggle_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenSearch, window, cx| {
+                this.run_action(Action::SearchText, &Args::None, window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenQuickOpen, window, cx| {
                 if this.model.quick_open.open {

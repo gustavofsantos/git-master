@@ -137,6 +137,14 @@ impl StatusView {
                 }),
             ))
             .child(
+                item_row("Search", self.screen == Screen::Search).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        this.run_action(Action::SearchText, &Args::None, window, cx);
+                    }),
+                ),
+            )
+            .child(
                 item_row("Workflows", self.screen == Screen::Workflows).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, window, cx| {

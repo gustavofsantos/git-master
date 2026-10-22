@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
+use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History};
 use crate::hook::{HookFailure, HookInfo};
 use crate::status::{
@@ -117,6 +118,17 @@ pub enum CommandKind {
     /// in memory, for the file tree (N2). Never recorded in the command log (D28).
     ListDirectory {
         dir: String,
+    },
+    /// Searches the text of the files of the worktree (N3) with `git grep`:
+    /// tracked files and untracked ones `.gitignore` does not hide, never
+    /// binaries. `paths` is a list of pathspecs separated by spaces; a word
+    /// starting with `!` excludes. Stops at `GREP_TOTAL_LIMIT` lines. Never
+    /// recorded in the command log (D28). A request in flight is superseded by
+    /// the next one.
+    SearchText {
+        query: String,
+        options: GrepOptions,
+        paths: String,
     },
     /// Reads the file `path` of the worktree from disk for the viewer (N2). Never
     /// recorded in the command log (D28). A request in flight is superseded by
@@ -405,6 +417,11 @@ pub enum Event {
     DirectoryListed {
         id: OperationId,
         listing: DirListing,
+    },
+    /// Answers `SearchText`.
+    TextFound {
+        id: OperationId,
+        result: GrepResult,
     },
     /// Answers `ReadFile`.
     FileRead {
