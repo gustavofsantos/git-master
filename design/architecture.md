@@ -31,20 +31,20 @@ The core defines the traits (`GitPort`, `HookPort`, `StorePort`), and the adapte
 7. **One `gitmaster` binary** with subcommands: it opens the app by default; `gitmaster mcp` is the shim.
 8. **Extension by process**, not by dynamic library (the Rust ABI is not stable; security).
 
-## Workflows (D60; direction D93 to D97)
+## Workflows (D60; direction D98 to D102)
 
-> **Change of direction (2026-10-22, D93 to D97).** WF0 to WF2 are implemented on a TOML state-machine interpreter. That interpreter is being replaced by a script VM in a sandbox, with `ctx` as the only effect boundary and ephemeral execution. The full design is in `design/workflow-scripts.md`. This section keeps only the architectural direction.
+> **Change of direction (2026-10-22, D98 to D102).** WF0 to WF2 are implemented on a TOML state-machine interpreter. That interpreter is being replaced by a script VM in a sandbox, with `ctx` as the only effect boundary and ephemeral execution. The full design is in `design/workflow-scripts.md`. This section keeps only the architectural direction.
 
 - A workflow is a **Lua script** in one `.lua` file. It runs in a sandbox embedded in the binary. The candidate engine is Luau through `mlua`. The choice between Luau, Lua 5.4 and Rhai is open (Q22) and is decided by spike S-D.
 - The script receives two values: `ctx`, the only way it can act, and `input`, which is data only.
-- **`ctx` is the single effect boundary.** Every call is an engine `Command` (D60) and a journal entry. The host decides approval (D96), not the script. An outcome other than `done` raises an error by default (fail-closed); `ctx.try` returns it to the script instead.
+- **`ctx` is the single effect boundary.** Every call is an engine `Command` (D60) and a journal entry. The host decides approval (D101), not the script. An outcome other than `done` raises an error by default (fail-closed); `ctx.try` returns it to the script instead.
 - The action catalog (`gm-core/src/workflow/catalog.rs`) generates `ctx`. Each action becomes a typed function with the same effect level and outcomes, named `ctx.<domain>.<verb>`.
 - Each step dispatches an existing `Command`. A workflow has no logic path of its own.
 - **Each run is an operation** (`OperationId`). It runs on its own thread, outside the UI. `ctx.approve` and `ctx.wait` block that thread on a channel. No coroutine crosses a host call.
 - Events produced by a run carry the run's id and never fire triggers (no cascade).
 - `exec` runs `argv` directly, never through a shell (D74).
 - **Journal.** The host records each `ctx` call in `state.db`: sequence, function, resolved arguments, result, outcome and duration. The Runs view is built only from the journal. Output that the script writes with `ctx.notify` or `ctx.log` is marked "from the script".
-- **Ephemeral execution (D95).** Closing the app ends the runs in progress. On the next launch, a run that did not finish is marked `interrupted`. An `apply` that started and has no result in the journal shows as interrupted and never runs again (D80, without resume). Waits, timeouts and `concurrency` queues live in memory. The journal is a history, not a recovery mechanism.
+- **Ephemeral execution (D100).** Closing the app ends the runs in progress. On the next launch, a run that did not finish is marked `interrupted`. An `apply` that started and has no result in the journal shows as interrupted and never runs again (D80, without resume). Waits, timeouts and `concurrency` queues live in memory. The journal is a history, not a recovery mechanism.
 - Durable execution in the Temporal style stays open (Q23). The sandbox removes non-determinism, `ctx` is the only effect boundary, and the journal already records `(seq, function, arguments, result)`, so the door stays open.
 - `HookPort` stays until the WF3 migration (D75).
 
@@ -58,8 +58,8 @@ Two formats are never supported at the same time: two interpreters would double 
 
 ## Persistence
 
-- Workflow files: outside the repository, in `~/.config/gitmaster/workflows/` (macOS: `Library/Application Support/gitmaster/workflows/`) and in the directories of `gitmaster.workflowPath`. Nothing is read or written in the working tree (D61, revised by D93). The file holds only the definition (D79): nothing about execution, such as `enabled`, last run or approvals.
-- Per repository, in `state.db` (in the Git common directory): runs, their journal (one entry per `ctx` call, plus outputs), and the retention rules below. It follows the repository and works with worktrees. The journal is history for the Runs view. It is not a recovery mechanism (D95).
+- Workflow files: outside the repository, in `~/.config/gitmaster/workflows/` (macOS: `Library/Application Support/gitmaster/workflows/`) and in the directories of `gitmaster.workflowPath`. Nothing is read or written in the working tree (D61, revised by D98). The file holds only the definition (D79): nothing about execution, such as `enabled`, last run or approvals.
+- Per repository, in `state.db` (in the Git common directory): runs, their journal (one entry per `ctx` call, plus outputs), and the retention rules below. It follows the repository and works with worktrees. The journal is history for the Runs view. It is not a recovery mechanism (D100).
 - Per user, in `~/.local/share/gitmaster/gitmaster.db` (the app data directory): the workflow enabled in each repository, automatic approvals by definition hash, and the cache of validated definitions.
 - SQLite via `rusqlite` with bundled SQLite: compiled into the binary, no external dependency.
 - Retention: 200 runs per workflow and per repository, pruned when a run starts. Outputs larger than 64 KiB are stored as hash, size and the first 4 KiB.

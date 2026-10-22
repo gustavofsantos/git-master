@@ -8,7 +8,7 @@ distribute, sublicense or sell it, or any part of it.
 
 This is not an open source license, and it is not the Unlicense, which would
 place the work in the public domain. This notice stays until the author
-chooses a license (design/decisions.md, D98 and Q10).
+chooses a license (design/decisions.md, D103 and Q10).
 
 Third-party components keep their own licenses. The Phosphor icons in
 crates/gm-ui/assets/icons are under the license in LICENSE-phosphor; the

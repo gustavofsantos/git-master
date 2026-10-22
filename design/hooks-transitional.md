@@ -1,6 +1,6 @@
 # Hooks (transitional)
 
-GitMaster hooks are replaced by workflows (D75, D93). The `prepare-commit` hook keeps working until script workflows reach parity; then GitMaster stops reading the `[gitmaster "<hook>"]` sections and the 'Convert hooks to workflows' action writes equivalent scripts. Native Git hooks always stay with Git (D18, D29).
+GitMaster hooks are replaced by workflows (D75, D98). The `prepare-commit` hook keeps working until script workflows reach parity; then GitMaster stops reading the `[gitmaster "<hook>"]` sections and the 'Convert hooks to workflows' action writes equivalent scripts. Native Git hooks always stay with Git (D18, D29).
 
 Last updated: 2026-10-19. Status of each decision in `design/decisions.md`.
 

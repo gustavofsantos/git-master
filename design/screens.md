@@ -67,7 +67,7 @@ Reference: conflict resolvers in IDEs. Three panes: left, result (editable), rig
 
 ## Workflows page
 
-The page to view, create and edit workflows in the UI (D76, D84, D93, D96). It has two tabs: **Script** and **Runs**.
+The page to view, create and edit workflows in the UI (D76, D84, D98, D101). It has two tabs: **Script** and **Runs**.
 
 - **Script**: the text of the script, with line diagnostics. Saving shows a warning about the unreviewed hash.
 - **Runs**: one entry per `ctx` call, with its resolved arguments, result, outcome and duration. **Cancel** and **Approve** act on the run.

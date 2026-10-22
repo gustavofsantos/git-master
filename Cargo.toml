@@ -8,7 +8,7 @@ version = "0.0.0"
 edition = "2024"
 # Checked in CI for the non-GUI crates (see .github/workflows/ci.yml).
 rust-version = "1.99"
-# No license is granted (LICENSE, D98). Nothing here may be published to a registry.
+# No license is granted (LICENSE, D103). Nothing here may be published to a registry.
 publish = false
 
 [workspace.dependencies]
