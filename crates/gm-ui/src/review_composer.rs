@@ -127,6 +127,27 @@ pub fn bind_keys(cx: &mut App) {
     )]);
 }
 
+/// The pane that gets the keyboard back when a dialog closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FocusReturn {
+    /// The Working Copy file list. The Local review page has no focus handle of
+    /// its own, so a dialog opened there falls back to this too.
+    List,
+    /// The diff pane, when it had the keyboard when the dialog opened.
+    Diff,
+}
+
+/// Where focus goes back to: the diff pane when it had the keyboard when the
+/// dialog opened, the file list otherwise.
+#[must_use]
+pub(crate) fn focus_return(diff_had_focus: bool) -> FocusReturn {
+    if diff_had_focus {
+        FocusReturn::Diff
+    } else {
+        FocusReturn::List
+    }
+}
+
 /// The dialog while it is open: what it writes, the body field and the error it shows.
 pub(crate) struct ReviewDialog {
     pub(crate) target: ReviewTarget,
@@ -136,6 +157,8 @@ pub(crate) struct ReviewDialog {
     /// The text the dialog last saw. The field notifies on every caret blink,
     /// so an error is cleared only when the text really changed.
     seen: String,
+    /// Where the keyboard goes when the dialog closes.
+    return_focus: FocusReturn,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -177,11 +200,17 @@ impl StatusView {
             ),
         ];
         let seen = body.read(cx).text().to_owned();
+        // A dialog already open keeps where focus was when it opened.
+        let return_focus = match self.review_dialog.as_ref() {
+            Some(open) => open.return_focus,
+            None => focus_return(self.diff_pane.read(cx).focus_handle().is_focused(window)),
+        };
         self.review_dialog = Some(ReviewDialog {
             target,
             body: body.clone(),
             error: None,
             seen,
+            return_focus,
             _subscriptions: subscriptions,
         });
         body.update(cx, |area, cx| area.focus(window, cx));
@@ -189,10 +218,18 @@ impl StatusView {
     }
 
     pub(crate) fn close_review_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.review_dialog.take().is_some() {
-            self.list_focus.focus(window);
+        if let Some(dialog) = self.review_dialog.take() {
+            self.restore_review_focus(dialog.return_focus, window, cx);
         }
         cx.notify();
+    }
+
+    /// Gives the keyboard back to the pane the dialog was opened from.
+    fn restore_review_focus(&self, to: FocusReturn, window: &mut Window, cx: &App) {
+        match to {
+            FocusReturn::List => self.list_focus.focus(window),
+            FocusReturn::Diff => window.focus(&self.diff_pane.read(cx).focus_handle()),
+        }
     }
 
     /// The text changed: the error of the last try goes, since it may be about the old text.
@@ -240,8 +277,9 @@ impl StatusView {
     ) {
         match outcome {
             Ok(()) => {
-                self.review_dialog = None;
-                self.list_focus.focus(window);
+                if let Some(dialog) = self.review_dialog.take() {
+                    self.restore_review_focus(dialog.return_focus, window, cx);
+                }
             }
             Err(message) => match self.review_dialog.as_mut() {
                 Some(dialog) => dialog.error = Some(message),
@@ -525,6 +563,12 @@ mod tests {
         // A malformed keystroke panics when bound at startup; this catches it earlier.
         let binding = KeyBinding::new("secondary-enter", SaveReviewComment, Some(KEY_CONTEXT));
         assert_eq!(binding.keystrokes().len(), 1);
+    }
+
+    #[test]
+    fn focus_goes_back_to_the_diff_only_when_the_diff_had_it() {
+        assert_eq!(focus_return(true), FocusReturn::Diff);
+        assert_eq!(focus_return(false), FocusReturn::List);
     }
 
     #[test]
