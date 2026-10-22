@@ -7,7 +7,8 @@ use std::time::Duration;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event,
     GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch, OperationId,
-    OperationState, REFLOG_PAGE, STASH_LIST_CHANGED, WorktreeEntry, WorktreeInspection,
+    OperationState, REFLOG_PAGE, ReviewComment, ReviewStatus, STASH_LIST_CHANGED, WorktreeEntry,
+    WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -23,6 +24,9 @@ use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, Histo
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::reflog;
 use crate::remote::{RemoteJob, RemoteReport};
+use crate::review;
+use crate::review_session::{self, ReviewSession};
+use crate::review_store::ReviewStore;
 use crate::workflow;
 use crate::workflow::driver::{ExecJob, ExecReport};
 use crate::workflow::store::{RETAINED_RUNS, Store};
@@ -92,6 +96,8 @@ pub struct Engine {
     workflow_trash_dir: Option<PathBuf>,
     /// The workflow runs of the open repository; see `workflow_session`.
     workflow: Option<Session>,
+    /// The review comments of the open repository; see `review_session`.
+    review: Option<ReviewSession>,
 }
 
 /// The walk behind the history list: the stream while no job reads it, how to
@@ -191,6 +197,7 @@ impl Engine {
             workflow_trash_dir: crate::hook::approval::default_file()
                 .and_then(|file| file.parent().map(|data| data.join("workflow-trash"))),
             workflow: None,
+            review: None,
         }
     }
 
@@ -852,6 +859,7 @@ impl Engine {
             | CommandKind::DryRunWorkflow { .. }
             | CommandKind::SaveWorkflowFile { .. }
             | CommandKind::DeleteWorkflowFile { .. } => self.workflow_command(id, actor, kind),
+            _ if is_review_command(kind) => self.review_command(id, actor, kind),
             // The worktree and branch commands that `execute` does not list above.
             _ => self.manage_worktree(id, actor, kind),
         }
@@ -1968,6 +1976,169 @@ impl Engine {
         self.reload_status(id, &root)
     }
 
+    /// The review comment commands (B4, D96). The writes are human only; the list
+    /// and a snapshot's text are reads.
+    fn review_command(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        match kind {
+            CommandKind::ListReviewComments => {
+                let root = self.open_root()?;
+                self.review_listed(id, &root)
+            }
+            CommandKind::LoadReviewSnapshotText { id: comment } => {
+                self.load_review_snapshot(id, *comment)
+            }
+            CommandKind::AddReviewComment {
+                path,
+                start_line,
+                end_line,
+                body,
+            } => {
+                only_a_human(actor, "comment on the code")?;
+                self.add_review_comment(id, path, *start_line, *end_line, body)
+            }
+            CommandKind::EditReviewComment { id: comment, body } => {
+                only_a_human(actor, "edit a review comment")?;
+                self.edit_review_comment(id, *comment, body)
+            }
+            CommandKind::ResolveReviewComment { id: comment } => {
+                only_a_human(actor, "resolve a review comment")?;
+                self.set_review_status(id, *comment, ReviewStatus::Resolved)
+            }
+            CommandKind::ReopenReviewComment { id: comment } => {
+                only_a_human(actor, "reopen a review comment")?;
+                self.set_review_status(id, *comment, ReviewStatus::Open)
+            }
+            CommandKind::DeleteReviewComment { id: comment } => {
+                only_a_human(actor, "delete a review comment")?;
+                self.delete_review_comment(id, *comment)
+            }
+            _ => Err("not a review command".to_owned()),
+        }
+    }
+
+    /// Anchors a comment on lines of `path` and keeps a snapshot of the working
+    /// tree for it. The row is stored first, so the private ref is made for a
+    /// comment that exists; a snapshot that fails leaves the comment without one.
+    fn add_review_comment(
+        &mut self,
+        id: OperationId,
+        path: &str,
+        start_line: u32,
+        end_line: u32,
+        body: &str,
+    ) -> Result<Vec<Event>, String> {
+        let body = review_body(body)?;
+        let root = self.open_root()?;
+        let text = review_session::read_text(&root, path)?;
+        let anchor = review::anchor_for(&text, start_line, end_line)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let comment = store.add(path, body, &anchor, now_ms()).map_err(|e| e.0)?;
+        let snapshot = self.git.snapshot_worktree(&root).and_then(|oid| {
+            self.git.set_review_ref(&root, comment, &oid)?;
+            Ok(oid)
+        });
+        if let Ok(oid) = snapshot {
+            store.set_snapshot(comment, &oid).map_err(|e| e.0)?;
+        }
+        self.review_listed(id, &root)
+    }
+
+    fn edit_review_comment(
+        &mut self,
+        id: OperationId,
+        comment: i64,
+        body: &str,
+    ) -> Result<Vec<Event>, String> {
+        let body = review_body(body)?;
+        let root = self.open_root()?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        store.set_body(comment, body).map_err(|e| e.0)?;
+        self.review_listed(id, &root)
+    }
+
+    /// Resolves or reopens comment `comment`; refused when it already has `status`.
+    fn set_review_status(
+        &mut self,
+        id: OperationId,
+        comment: i64,
+        status: ReviewStatus,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        if find_review(store, comment)?.status == status {
+            return Err(match status {
+                ReviewStatus::Resolved => "the comment is already resolved".to_owned(),
+                ReviewStatus::Open => "the comment is not resolved".to_owned(),
+            });
+        }
+        store
+            .set_status(comment, status, now_ms())
+            .map_err(|e| e.0)?;
+        self.review_listed(id, &root)
+    }
+
+    /// Deletes comment `comment` and the private ref that kept its snapshot.
+    fn delete_review_comment(
+        &mut self,
+        id: OperationId,
+        comment: i64,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let current = find_review(store, comment)?;
+        store.delete(comment).map_err(|e| e.0)?;
+        if current.snapshot.is_some() {
+            self.git
+                .delete_review_ref(&root, comment)
+                .map_err(|e| e.0)?;
+        }
+        self.review_listed(id, &root)
+    }
+
+    /// The lines comment `comment` covered in its snapshot, for the Before side.
+    /// Empty when there is no snapshot, the file was not in it, or it is not UTF-8.
+    fn load_review_snapshot(
+        &mut self,
+        id: OperationId,
+        comment: i64,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let current = find_review(store, comment)?;
+        let lines = match &current.snapshot {
+            Some(oid) => match self
+                .git
+                .file_at_commit(&root, oid, &current.path)
+                .map_err(|e| e.0)?
+            {
+                Some(bytes) => String::from_utf8(bytes).map_or_else(
+                    |_| Vec::new(),
+                    |text| review::snapshot_region(&text, &current.anchor),
+                ),
+                None => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        Ok(vec![Event::ReviewSnapshotText {
+            id,
+            comment,
+            path: current.path,
+            lines,
+        }])
+    }
+
+    /// Every comment with its location in the file now, as the front-ends list them.
+    fn review_listed(&mut self, id: OperationId, root: &Path) -> Result<Vec<Event>, String> {
+        let store = review_store(&mut self.review, self.git.as_ref(), root)?;
+        let comments = review_session::listed(store, root)?;
+        Ok(vec![Event::ReviewCommentsListed { id, comments }])
+    }
+
     /// The workflow commands: the listing, and a run's start, approval and cancel.
     fn workflow_command(
         &mut self,
@@ -2357,6 +2528,8 @@ impl Engine {
                 | CommandKind::CreateWorkflowFromTemplate { .. }
                 | CommandKind::SaveWorkflowFile { .. }
                 | CommandKind::DeleteWorkflowFile { .. }
+                | CommandKind::ListReviewComments
+                | CommandKind::LoadReviewSnapshotText { .. }
         ) {
             self.log.push(LogEntry {
                 id: op.id,
@@ -2416,6 +2589,54 @@ fn only_a_human(actor: &Actor, what: &str) -> Result<(), String> {
     } else {
         Err(format!("only a human can {what}"))
     }
+}
+
+/// The store of the open repository: opened on first use, and reopened when
+/// another repository is open.
+fn review_store<'a>(
+    slot: &'a mut Option<ReviewSession>,
+    git: &dyn GitPort,
+    root: &Path,
+) -> Result<&'a ReviewStore, String> {
+    if slot.as_ref().is_none_or(|session| session.root != root) {
+        *slot = Some(ReviewSession::open(git, root)?);
+    }
+    match slot {
+        Some(session) => Ok(&session.store),
+        None => Err("the review store is not open".to_owned()),
+    }
+}
+
+/// The comment `comment` as the store holds it; refused when there is none.
+fn find_review(store: &ReviewStore, comment: i64) -> Result<ReviewComment, String> {
+    store
+        .get(comment)
+        .map_err(|e| e.0)?
+        .ok_or_else(|| format!("no review comment {comment}"))
+}
+
+/// A comment's body without its surrounding blank space; refused when empty.
+fn review_body(body: &str) -> Result<&str, String> {
+    let body = body.trim();
+    if body.is_empty() {
+        Err("the comment is empty".to_owned())
+    } else {
+        Ok(body)
+    }
+}
+
+/// Whether `kind` is one of the review comment commands (B4).
+fn is_review_command(kind: &CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::AddReviewComment { .. }
+            | CommandKind::ListReviewComments
+            | CommandKind::EditReviewComment { .. }
+            | CommandKind::ResolveReviewComment { .. }
+            | CommandKind::ReopenReviewComment { .. }
+            | CommandKind::DeleteReviewComment { .. }
+            | CommandKind::LoadReviewSnapshotText { .. }
+    )
 }
 
 /// Whether two paths name the same folder, through symbolic links when both exist.

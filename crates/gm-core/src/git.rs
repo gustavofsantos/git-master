@@ -327,6 +327,37 @@ impl SubprocessGit {
         }
     }
 
+    /// The commit HEAD names, `None` on an unborn branch. Never records anything.
+    fn head_commit(&self, root: &Path) -> Result<Option<String>, GitError> {
+        let mut command = self.git(root);
+        command.args(["rev-parse", "--verify", "-q", "HEAD"]);
+        // Exit 1 is git's answer for an unborn HEAD.
+        let out = Self::run_allowing(command, &[0, 1])?;
+        let text = String::from_utf8_lossy(&out).trim().to_owned();
+        Ok((!text.is_empty()).then_some(text))
+    }
+
+    /// Starts the snapshot index `index` as a copy of the index of the worktree
+    /// at `root`, or as HEAD's tree when there is no index yet. The real index is
+    /// only read.
+    fn seed_index(&self, root: &Path, index: &Path, head: Option<&str>) -> Result<(), GitError> {
+        let mut command = self.git(root);
+        command.args(["rev-parse", "--path-format=absolute", "--git-path", "index"]);
+        let out = Self::run(command)?;
+        let real = PathBuf::from(String::from_utf8_lossy(&out).trim_end_matches('\n'));
+        if real.is_file() {
+            std::fs::copy(&real, index)
+                .map_err(|e| GitError(format!("cannot copy the index: {e}")))?;
+        } else if let Some(head) = head {
+            let mut command = self.git(root);
+            command
+                .env("GIT_INDEX_FILE", index)
+                .args(["read-tree", head]);
+            self.logged(command, None)?;
+        }
+        Ok(())
+    }
+
     /// Whether the index differs from HEAD (from the empty tree on an unborn branch).
     fn has_staged(&self, root: &Path) -> Result<bool, GitError> {
         let mut command = self.git(root);
@@ -710,6 +741,85 @@ impl GitPort for SubprocessGit {
             .arg(format!("--skip={skip}"))
             .arg("HEAD");
         reflog::parse_list(&Self::run(command)?, skip)
+    }
+
+    fn snapshot_worktree(&self, root: &Path) -> Result<String, GitError> {
+        let common = self.common_dir(root)?;
+        let tmp = common.join("gitmaster").join("tmp");
+        std::fs::create_dir_all(&tmp)
+            .map_err(|e| GitError(format!("cannot create {}: {e}", tmp.display())))?;
+        // The folder and the copy of the index in it go when `scratch` drops, on
+        // every way out of this function.
+        let scratch = tempfile::TempDir::new_in(&tmp)
+            .map_err(|e| GitError(format!("cannot create a snapshot folder: {e}")))?;
+        let index = scratch.path().join("index");
+        let head = self.head_commit(root)?;
+        self.seed_index(root, &index, head.as_deref())?;
+        let mut add = self.git(root);
+        add.env("GIT_INDEX_FILE", &index).args(["add", "-A"]);
+        self.logged(add, None)?;
+        let mut write = self.git(root);
+        write.env("GIT_INDEX_FILE", &index).arg("write-tree");
+        let tree = String::from_utf8_lossy(&self.logged(write, None)?)
+            .trim()
+            .to_owned();
+        let mut commit = self.git(root);
+        commit.args(["-c", "commit.gpgsign=false", "commit-tree", &tree]);
+        if let Some(head) = &head {
+            commit.args(["-p", head]);
+        }
+        commit
+            .args(["-m", "gitmaster review snapshot"])
+            .env("GIT_AUTHOR_NAME", SNAPSHOT_NAME)
+            .env("GIT_AUTHOR_EMAIL", SNAPSHOT_EMAIL)
+            .env("GIT_COMMITTER_NAME", SNAPSHOT_NAME)
+            .env("GIT_COMMITTER_EMAIL", SNAPSHOT_EMAIL);
+        let out = self.logged(commit, None)?;
+        Ok(String::from_utf8_lossy(&out).trim().to_owned())
+    }
+
+    fn set_review_ref(&self, root: &Path, comment: i64, oid: &str) -> Result<(), GitError> {
+        let mut command = self.git(root);
+        command.args(["update-ref", &review_ref(comment), oid]);
+        self.logged(command, None).map(drop)
+    }
+
+    fn delete_review_ref(&self, root: &Path, comment: i64) -> Result<(), GitError> {
+        let mut command = self.git(root);
+        command.args(["update-ref", "-d", &review_ref(comment)]);
+        self.logged(command, None).map(drop)
+    }
+
+    fn file_at_commit(
+        &self,
+        root: &Path,
+        oid: &str,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, GitError> {
+        let mut list = self.git(root);
+        list.args([
+            "--literal-pathspecs",
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            oid,
+            "--",
+            path,
+        ]);
+        let out = Self::run(list)?;
+        // One record: `<mode> SP <type> SP <object> TAB <path>`, then a NUL.
+        let record = out.split(|byte| *byte == 0).next().unwrap_or_default();
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            return Ok(None);
+        };
+        let header = String::from_utf8_lossy(&record[..tab]).into_owned();
+        let mut fields = header.split(' ').skip(1);
+        let (Some("blob"), Some(object)) = (fields.next(), fields.next()) else {
+            return Ok(None);
+        };
+        let mut cat = self.git(root);
+        cat.args(["cat-file", "blob", object]);
+        Self::run(cat).map(Some)
     }
 
     fn common_dir(&self, root: &Path) -> Result<PathBuf, GitError> {
@@ -1323,6 +1433,15 @@ pub fn parse_null_config(bytes: &[u8]) -> Vec<ConfigValue> {
 const NOTHING_TO_STASH: &str = "No local changes to save";
 
 /// The revision of `stash@{index}`.
+/// The private ref that keeps the snapshot of review comment `comment` alive (D97).
+fn review_ref(comment: i64) -> String {
+    format!("refs/gitmaster/review/{comment}/before")
+}
+
+/// The identity of snapshot commits: they are the engine's, not the user's work.
+const SNAPSHOT_NAME: &str = "GitMaster";
+const SNAPSHOT_EMAIL: &str = "gitmaster@localhost";
+
 fn stash_ref(index: u32) -> String {
     format!("stash@{{{index}}}")
 }

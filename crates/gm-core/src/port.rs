@@ -316,6 +316,44 @@ pub trait GitPort: Send {
         ))
     }
 
+    /// Builds a commit of the whole working tree for a review comment (B4, D97):
+    /// untracked files are in it, ignored ones are not. It works on a copy of
+    /// the index, so the real index, HEAD, the working tree and every public ref
+    /// stay as they are. Returns the commit id; nothing points at it yet.
+    fn snapshot_worktree(&self, _root: &Path) -> Result<String, GitError> {
+        Err(GitError(
+            "snapshots are not supported by this adapter".into(),
+        ))
+    }
+
+    /// Points the private ref that keeps comment `comment`'s snapshot alive at
+    /// `oid` (B4, D97).
+    fn set_review_ref(&self, _root: &Path, _comment: i64, _oid: &str) -> Result<(), GitError> {
+        Err(GitError(
+            "snapshots are not supported by this adapter".into(),
+        ))
+    }
+
+    /// Deletes the private ref of comment `comment`, so its snapshot can go.
+    fn delete_review_ref(&self, _root: &Path, _comment: i64) -> Result<(), GitError> {
+        Err(GitError(
+            "snapshots are not supported by this adapter".into(),
+        ))
+    }
+
+    /// The content of `path` in commit `oid`, or `None` when the commit has no
+    /// such file. Never records anything (D28).
+    fn file_at_commit(
+        &self,
+        _root: &Path,
+        _oid: &str,
+        _path: &str,
+    ) -> Result<Option<Vec<u8>>, GitError> {
+        Err(GitError(
+            "snapshots are not supported by this adapter".into(),
+        ))
+    }
+
     /// Creates the local branch `name` at `start_point` (HEAD when `None`), and
     /// checks it out when `checkout` is set. Git's own refusal is the error.
     fn create_branch(

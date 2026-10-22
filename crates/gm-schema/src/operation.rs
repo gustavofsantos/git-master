@@ -9,6 +9,7 @@ use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History};
 use crate::hook::{HookFailure, HookInfo};
 use crate::reflog::ReflogEntry;
+use crate::review::ReviewComment;
 use crate::stash::StashEntry;
 use crate::status::{
     BranchEntry, BranchFailure, MergedBranch, PruneCandidate, RepoStatus, WorktreeEntry,
@@ -357,6 +358,47 @@ pub enum CommandKind {
         path: String,
         expected_hash: String,
     },
+    /// Comments on the lines `start_line` to `end_line` (1-based, inclusive) of
+    /// `path` in the working tree (B4, D96). The file is read from disk and the
+    /// anchor is taken from its text now, so a path outside the worktree, a
+    /// missing or non-UTF-8 file and a blank body are refused. A snapshot of the
+    /// working tree is taken for the comment (D97). Answers
+    /// `ReviewCommentsListed`. Human only.
+    AddReviewComment {
+        path: String,
+        start_line: u32,
+        end_line: u32,
+        body: String,
+    },
+    /// Lists every review comment, with where its anchor is in the file now.
+    /// Answers `ReviewCommentsListed`. A read: never recorded (D28).
+    ListReviewComments,
+    /// Replaces the body of review comment `id`. Human only.
+    EditReviewComment {
+        id: i64,
+        body: String,
+    },
+    /// Marks review comment `id` resolved, which is refused when it already is.
+    /// Human only.
+    ResolveReviewComment {
+        id: i64,
+    },
+    /// Marks review comment `id` open again, which is refused when it is not
+    /// resolved. Human only.
+    ReopenReviewComment {
+        id: i64,
+    },
+    /// Deletes review comment `id` and the private ref that keeps its snapshot.
+    /// Human only.
+    DeleteReviewComment {
+        id: i64,
+    },
+    /// Reads the lines review comment `id` covered in its snapshot, for the
+    /// Before side of the diff. Answers `ReviewSnapshotText`. A read: never
+    /// recorded (D28).
+    LoadReviewSnapshotText {
+        id: i64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -647,6 +689,21 @@ pub enum Event {
         end: WorkflowEnd,
         reason: Option<String>,
     },
+    /// Answers `ListReviewComments`, and follows each review write, so the list
+    /// is as fresh as the write.
+    ReviewCommentsListed {
+        id: OperationId,
+        comments: Vec<ReviewComment>,
+    },
+    /// Answers `LoadReviewSnapshotText` for comment `comment`: the lines it
+    /// covered in the snapshot, empty when there is no snapshot or the file was
+    /// not in it.
+    ReviewSnapshotText {
+        id: OperationId,
+        comment: i64,
+        path: String,
+        lines: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -744,6 +801,24 @@ mod tests {
         );
         let list = serde_json::to_value(CommandKind::ListStashes).unwrap();
         assert_eq!(list["type"], "list_stashes");
+    }
+
+    #[test]
+    fn review_commands_wire_format_is_tagged() {
+        let add = serde_json::to_value(CommandKind::AddReviewComment {
+            path: "src/a.rs".into(),
+            start_line: 3,
+            end_line: 4,
+            body: "rename".into(),
+        })
+        .unwrap();
+        assert_eq!(add["type"], "add_review_comment");
+        assert_eq!(add["end_line"], 4);
+        let resolve = serde_json::to_value(CommandKind::ResolveReviewComment { id: 7 }).unwrap();
+        assert_eq!(resolve["type"], "resolve_review_comment");
+        assert_eq!(resolve["id"], 7);
+        let list = serde_json::to_value(CommandKind::ListReviewComments).unwrap();
+        assert_eq!(list["type"], "list_review_comments");
     }
 
     #[test]

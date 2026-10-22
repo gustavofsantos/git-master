@@ -932,7 +932,10 @@ impl Model {
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
-            | Event::WorkflowMessageSuggested { .. } => None,
+            | Event::WorkflowMessageSuggested { .. }
+            // The review page (B4c, B4d) reads the comments; until it is there they are dropped.
+            | Event::ReviewCommentsListed { .. }
+            | Event::ReviewSnapshotText { .. } => None,
         }
     }
 
@@ -1232,7 +1235,9 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkflowRunLoaded { id, .. }
         | Event::WorkflowDryRun { id, .. }
         | Event::WorkflowFileSaved { id, .. }
-        | Event::WorkflowFileDeleted { id, .. } => Some(*id),
+        | Event::WorkflowFileDeleted { id, .. }
+        | Event::ReviewCommentsListed { id, .. }
+        | Event::ReviewSnapshotText { id, .. } => Some(*id),
         Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }
         | Event::WorkflowNotice { .. }
