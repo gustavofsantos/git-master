@@ -100,6 +100,8 @@ pub(crate) enum Screen {
     Stashes,
     /// The entries of HEAD's reflog, with the selected entry's files and diffs (B3).
     Reflog,
+    /// The review comments of the repository, with one comment's Before and After (B4d).
+    LocalReview,
 }
 
 pub struct StatusView {
@@ -557,6 +559,10 @@ impl StatusView {
     fn follow_review(&mut self, listed: bool, reload: bool, cx: &mut Context<Self>) {
         if listed {
             self.sync_review_comments(cx);
+            // The After text is read from the file, so it follows each new listing (B4d).
+            if self.screen == Screen::LocalReview {
+                self.request_review_texts();
+            }
         }
         if reload {
             self.request_review_list();
@@ -634,6 +640,7 @@ impl StatusView {
             .children((self.screen == Screen::Search).then(|| self.search_page(cx)))
             .children((self.screen == Screen::Stashes).then(|| self.stashes_page(cx)))
             .children((self.screen == Screen::Reflog).then(|| self.reflog_page(cx)))
+            .children((self.screen == Screen::LocalReview).then(|| self.local_review_page(cx)))
     }
 
     fn head_name(&self) -> Option<String> {
@@ -901,7 +908,7 @@ impl StatusView {
 
     /// Reloads the staged and unstaged diffs of the selected file. The pane is
     /// cleared first only when the file changed.
-    fn load_selected(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load_selected(&mut self, cx: &mut Context<Self>) {
         if self.model.is_opening() {
             return;
         }
@@ -1040,6 +1047,10 @@ impl StatusView {
             Ok(Effect::ShowHistory) => self.show_history(cx),
             Ok(Effect::ShowStashes) => self.show_stashes(cx),
             Ok(Effect::ShowReflog) => self.show_reflog(cx),
+            Ok(Effect::ShowLocalReview) => self.show_local_review(cx),
+            Ok(Effect::ShowReviewInDiff { path, line }) => {
+                self.show_review_in_diff(&path, line, cx);
+            }
             Ok(Effect::OpenNewStashDialog) => self.open_new_stash_dialog(window, cx),
             Ok(Effect::OpenDropStashDialog { index, oid, label }) => {
                 self.open_drop_stash_dialog(index, &oid, &label, window, cx);

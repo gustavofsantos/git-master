@@ -383,6 +383,14 @@ pub fn anchor_row(rows: &[Row], diffs: Diffs<'_>, location: ReviewLocation) -> O
         .map(|(_, index)| index)
 }
 
+/// The first unified row that shows working-tree line `line` on the new side, if
+/// any. Used to put the cursor on a comment's first line (B4d).
+#[must_use]
+pub fn row_of_line(rows: &[Row], diffs: Diffs<'_>, line: u32) -> Option<usize> {
+    rows.iter()
+        .position(|row| new_number(*row, diffs) == Some(line))
+}
+
 /// Builds the drawn list of `path` in both layouts. Each comment's card goes under
 /// its anchor row (in the split layout, under the split row that holds it); an
 /// outdated comment, or one outside the hunks, goes to the strip above the file.
@@ -644,6 +652,15 @@ mod tests {
             },
         );
         assert_eq!(at, Some(5));
+    }
+
+    #[test]
+    fn the_row_of_a_working_tree_line_is_found_and_a_removed_or_missing_one_is_not() {
+        let (rows, file, _) = fixture();
+        assert_eq!(row_of_line(&rows, diffs(&file), 1), Some(1));
+        assert_eq!(row_of_line(&rows, diffs(&file), 2), Some(3));
+        assert_eq!(row_of_line(&rows, diffs(&file), 3), Some(4));
+        assert_eq!(row_of_line(&rows, diffs(&file), 40), None);
     }
 
     #[test]

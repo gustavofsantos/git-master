@@ -279,6 +279,15 @@ pub struct DiffPane {
     outdated_open: bool,
     /// The comment whose delete waits for its second click.
     delete_arm: DeleteArm,
+    /// The line to show once the diff of its file is here (B4d).
+    reveal: Option<Reveal>,
+}
+
+/// A working-tree line of a file to put the cursor on (B4d).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Reveal {
+    path: String,
+    line: u32,
 }
 
 impl EventEmitter<DiffPaneEvent> for DiffPane {}
@@ -327,6 +336,7 @@ impl DiffPane {
             opened: BTreeSet::new(),
             outdated_open: false,
             delete_arm: DeleteArm::default(),
+            reveal: None,
         }
     }
 
@@ -388,7 +398,38 @@ impl DiffPane {
         } else {
             self.cursor = next_changed_line(&self.rows, self.diffs(), 0).unwrap_or(0);
         }
+        self.apply_reveal(cx);
         cx.notify();
+    }
+
+    /// Puts the cursor on working-tree line `line` of `path`, on the unstaged side
+    /// (B4d, Open Comment in Diff). When the pane does not show `path` yet, the
+    /// line waits for its diff.
+    pub fn reveal_line(&mut self, path: &str, line: u32, cx: &mut Context<Self>) {
+        self.reveal = Some(Reveal {
+            path: path.to_owned(),
+            line,
+        });
+        self.apply_reveal(cx);
+        cx.notify();
+    }
+
+    /// Applies a waiting reveal when the shown file is its file, and drops it then. A
+    /// line the unstaged side does not have is dropped too, and the cursor stays.
+    fn apply_reveal(&mut self, cx: &mut Context<Self>) {
+        let shown = self.path();
+        let Some(reveal) = self
+            .reveal
+            .take_if(|reveal| shown.as_deref() == Some(reveal.path.as_str()))
+        else {
+            return;
+        };
+        let unstaged = build_rows(self.diffs(), Side::Unstaged);
+        let Some(row) = review::row_of_line(&unstaged, self.diffs(), reveal.line) else {
+            return;
+        };
+        self.select_side(Side::Unstaged, cx);
+        self.move_cursor(row, cx);
     }
 
     /// Shows every file of a commit (H4c) in one list, the first `files.len()`

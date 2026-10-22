@@ -15,6 +15,7 @@ use crate::file_discard::Discarding;
 use crate::history_graph::GraphLayout;
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
+use crate::local_review::LocalReview;
 use crate::merged_branches::Merging;
 use crate::new_branch::BranchCreate;
 use crate::new_stash::StashCreate;
@@ -128,6 +129,8 @@ pub struct Model {
     pub review: ReviewList,
     /// The composer's comment write in flight, and its outcome (B4c).
     pub review_write: ReviewWrite,
+    /// The Local review page: its filter, the selected comment and its texts (B4d).
+    pub local_review: LocalReview,
 }
 
 /// The page a commit read belongs to: the history (H3, H4), the Stashes page
@@ -800,6 +803,21 @@ impl Model {
             }
             Event::ReviewCommentsListed { id, comments } => {
                 let _ = self.review.listed(id, comments);
+                if let Some(listed) = self.review.comments() {
+                    self.local_review.keep_listed(listed);
+                }
+                None
+            }
+            Event::ReviewSnapshotText {
+                id, comment, lines, ..
+            } => {
+                self.local_review.received_before(id, comment, lines);
+                None
+            }
+            Event::ReviewCurrentText {
+                id, comment, lines, ..
+            } => {
+                self.local_review.received_after(id, comment, lines);
                 None
             }
             Event::ReflogLoaded {
@@ -958,10 +976,7 @@ impl Model {
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
-            | Event::WorkflowMessageSuggested { .. }
-            // The Before side of a comment (B4d) is not shown yet, so its text is dropped.
-            | Event::ReviewSnapshotText { .. }
-            | Event::ReviewCurrentText { .. } => None,
+            | Event::WorkflowMessageSuggested { .. } => None,
         }
     }
 
@@ -1026,6 +1041,7 @@ impl Model {
         self.stash_commit = CommitPane::Empty;
         self.stash_stack = OpenStack::default();
         self.review = ReviewList::default();
+        self.local_review = LocalReview::default();
         self.reflog = ReflogList::default();
         self.reflog_commit = CommitPane::Empty;
         self.reflog_stack = OpenStack::default();
@@ -2458,5 +2474,75 @@ mod stash_tests {
         });
         assert_eq!(model.reflog_commit, CommitPane::Empty);
         assert!(!model.reflog.has_selection());
+    }
+
+    fn listed_comment(id: i64, text: &str) -> gm_schema::ReviewComment {
+        gm_schema::ReviewComment {
+            id,
+            path: "a.txt".into(),
+            body: "note".into(),
+            status: gm_schema::ReviewStatus::Open,
+            anchor: gm_schema::ReviewAnchor {
+                text: text.into(),
+                before: Vec::new(),
+                after: Vec::new(),
+                start_line: 2,
+            },
+            created_at: 0,
+            resolved_at: None,
+            snapshot: Some("abc".into()),
+            location: Some(gm_schema::ReviewLocation {
+                start_line: 2,
+                end_line: 2,
+            }),
+            outdated: false,
+        }
+    }
+
+    #[test]
+    fn the_local_review_texts_are_kept_for_the_selection_and_a_listing_without_it_ends_it() {
+        use crate::local_review::Version;
+        let mut model = Model::default();
+        let _ = model.apply(Event::ReviewCommentsListed {
+            id: OperationId(1),
+            comments: vec![listed_comment(7, "b")],
+        });
+        let comment = model.review.comment(7).cloned().expect("listed");
+        assert!(model.local_review.select(&comment));
+        model.local_review.expect(OperationId(5), OperationId(6));
+
+        let _ = model.apply(Event::ReviewSnapshotText {
+            id: OperationId(4),
+            comment: 7,
+            path: "a.txt".into(),
+            lines: vec!["stale".into()],
+        });
+        assert_eq!(model.local_review.lines(Version::Before), None);
+        let _ = model.apply(Event::ReviewSnapshotText {
+            id: OperationId(5),
+            comment: 7,
+            path: "a.txt".into(),
+            lines: vec!["b".into()],
+        });
+        let _ = model.apply(Event::ReviewCurrentText {
+            id: OperationId(6),
+            comment: 7,
+            path: "a.txt".into(),
+            lines: vec!["B".into()],
+        });
+        assert_eq!(
+            model.local_review.lines(Version::Before),
+            Some(["b".to_owned()].as_slice())
+        );
+        assert_eq!(
+            model.local_review.lines(Version::After),
+            Some(["B".to_owned()].as_slice())
+        );
+
+        let _ = model.apply(Event::ReviewCommentsListed {
+            id: OperationId(9),
+            comments: vec![listed_comment(8, "other")],
+        });
+        assert_eq!(model.local_review.selected_id(), None);
     }
 }

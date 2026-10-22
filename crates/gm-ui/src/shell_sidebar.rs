@@ -1,9 +1,8 @@
 //! The sidebar at the window's left: the workspace destinations, the switch
 //! between the two ways of grouping branches, the branch tree and the
-//! worktrees. Only the Working Copy exists; the other destinations and the
-//! stack tree are placeholders until their slices land (docs/07). The
-//! worktrees show their state; a double-click opens one in its own window
-//! (docs/07, W4).
+//! worktrees. Every destination is a row of its own; the stack tree is a
+//! placeholder until its slice lands (docs/07). The worktrees show their state;
+//! a double-click opens one in its own window (docs/07, W4).
 
 use std::ops::Range;
 
@@ -16,6 +15,7 @@ use gpui::{
 use crate::action_registry::{Action, Args};
 use crate::branch_filter::{self, Scope};
 use crate::icon::{self, Icon};
+use crate::local_review;
 use crate::name_fit::{self, name_label};
 use crate::resize::{self, SIDEBAR};
 use crate::resize_handle::{self, Edge};
@@ -30,10 +30,6 @@ const ROW_HEIGHT: f32 = 28.;
 /// The most worktree rows shown at once. The section does not scroll yet,
 /// so the rest are cut off.
 const WORKTREE_ROWS_SHOWN: f32 = 6.;
-
-/// The destinations under "Workspace" that do not exist yet, and the slice
-/// that brings each one. Working Copy, History, Stashes and Reflog are rows of their own.
-const PLACEHOLDERS: [(&str, &str); 1] = [("Local review", "Local review")];
 
 impl StatusView {
     /// The sidebar at `width`. Its right edge is the strip that resizes it.
@@ -156,16 +152,12 @@ impl StatusView {
                             this.run_action(Action::ShowStashes, &Args::None, window, cx);
                         }),
                     )
-                    .children(self.model.stashes.count().map(|count| {
-                        div()
-                            .flex_none()
-                            .px_2()
-                            .rounded_full()
-                            .bg(theme::selection())
-                            .text_color(theme::accent())
-                            .text_xs()
-                            .child(count.to_string())
-                    })),
+                    .children(
+                        self.model
+                            .stashes
+                            .count()
+                            .map(|count| count_pill(count.to_string())),
+                    ),
             )
             .child(
                 item_row("Reflog", self.screen == Screen::Reflog).on_mouse_down(
@@ -175,14 +167,18 @@ impl StatusView {
                     }),
                 ),
             )
-            .children(PLACEHOLDERS.iter().map(|&(label, name)| {
-                item_row(label, false).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        this.notify_user(&format!("{name} is not available yet."), cx);
-                    }),
-                )
-            }))
+            .child(
+                item_row("Local review", self.screen == Screen::LocalReview)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            this.run_action(Action::ShowLocalReview, &Args::None, window, cx);
+                        }),
+                    )
+                    .children(
+                        local_review::open_pill(self.model.review.comments()).map(count_pill),
+                    ),
+            )
     }
 
     /// The two-way switch between "By stack" and "By name".
@@ -400,6 +396,18 @@ impl StatusView {
             .min_h(px(0.)),
         )
     }
+}
+
+/// A count at the end of a row: an accent pill.
+fn count_pill(count: String) -> Div {
+    div()
+        .flex_none()
+        .px_2()
+        .rounded_full()
+        .bg(theme::selection())
+        .text_color(theme::accent())
+        .text_xs()
+        .child(count)
 }
 
 /// The empty state of the branch tree: nothing matches the filter, and a link

@@ -188,6 +188,14 @@ pub enum Effect {
     ShowStashes,
     /// Opens the Reflog page and asks the engine for the first page of HEAD's reflog (B3).
     ShowReflog,
+    /// Opens the Local review page and asks the engine for the review comments (B4d).
+    ShowLocalReview,
+    /// Opens the Working Copy on the unstaged side of `path`, with the cursor on
+    /// working-tree line `line` (B4d).
+    ShowReviewInDiff {
+        path: String,
+        line: u32,
+    },
     /// Opens the dialog that stashes the working copy's changes (B2, D94).
     OpenNewStashDialog,
     /// Opens the composer that comments on the working-tree lines `start_line` to
@@ -313,7 +321,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 79] = [
+const SPECS: [Spec; 81] = [
     spec(
         "file.stage",
         "Stage File",
@@ -861,6 +869,20 @@ const SPECS: [Spec; 79] = [
         ArgKind::ReviewComment,
         Category::WorkingCopy,
     ),
+    spec(
+        "review.show",
+        "Show Local Review",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "review.open",
+        "Open Comment in Diff",
+        None,
+        ArgKind::ReviewComment,
+        Category::WorkingCopy,
+    ),
 ];
 
 const fn spec(
@@ -962,6 +984,8 @@ pub enum Action {
     ReopenReviewComment,
     DeleteReviewComment,
     EditReviewComment,
+    ShowLocalReview,
+    OpenReviewComment,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1004,6 +1028,7 @@ fn navigation_effect(action: Action, args: &Args) -> Effect {
         (Action::ShowWorkflows, _) => Effect::ShowWorkflows,
         (Action::ShowStashes, _) => Effect::ShowStashes,
         (Action::ShowReflog, _) => Effect::ShowReflog,
+        (Action::ShowLocalReview, _) => Effect::ShowLocalReview,
         _ => Effect::ShowHistory,
     }
 }
@@ -1074,7 +1099,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 79] = [
+    pub const ALL: [Action; 81] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1154,6 +1179,8 @@ impl Action {
         Action::ReopenReviewComment,
         Action::DeleteReviewComment,
         Action::EditReviewComment,
+        Action::ShowLocalReview,
+        Action::OpenReviewComment,
     ];
 
     #[must_use]
@@ -1210,6 +1237,7 @@ impl Action {
                 | Action::ShowWorkflows
                 | Action::ShowStashes
                 | Action::ShowReflog
+                | Action::ShowLocalReview
         )
     }
 
@@ -1329,7 +1357,8 @@ impl Action {
             | Action::ShowCode
             | Action::SearchText
             | Action::ShowWorkflows
-            | Action::ShowReflog => repository_open(ctx),
+            | Action::ShowReflog
+            | Action::ShowLocalReview => repository_open(ctx),
             Action::CheckoutBranch => {
                 idle(ctx)?;
                 match args {
@@ -1365,6 +1394,7 @@ impl Action {
             | Action::ReopenReviewComment
             | Action::DeleteReviewComment
             | Action::EditReviewComment => review_entry_rule(self, args, ctx),
+            Action::OpenReviewComment => open_target(args, ctx).map(|_| ()),
             // The placeholders, refused above by `available`.
             _ => Err(NOT_AVAILABLE),
         }
@@ -1426,19 +1456,14 @@ impl Action {
                 stash_effect(self, args)?
             }
             (Action::CommentOnSelection, _) => comment_effect(ctx)?,
-            (Action::EditReviewComment, Args::ReviewComment(id)) => {
-                Effect::OpenReviewEdit { id: *id }
-            }
-            (Action::ResolveReviewComment, Args::ReviewComment(id)) => {
-                Effect::Send(vec![CommandKind::ResolveReviewComment { id: *id }])
-            }
-            (Action::ReopenReviewComment, Args::ReviewComment(id)) => {
-                Effect::Send(vec![CommandKind::ReopenReviewComment { id: *id }])
-            }
-            // The card asks once before it gets here, so the command is sent at once.
-            (Action::DeleteReviewComment, Args::ReviewComment(id)) => {
-                Effect::Send(vec![CommandKind::DeleteReviewComment { id: *id }])
-            }
+            (
+                Action::EditReviewComment
+                | Action::ResolveReviewComment
+                | Action::ReopenReviewComment
+                | Action::DeleteReviewComment
+                | Action::OpenReviewComment,
+                _,
+            ) => review_entry_effect(self, args, ctx)?,
             (action, _) if action.opens_a_page() => navigation_effect(action, args),
             (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
             (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
@@ -2010,17 +2035,7 @@ fn comment_effect(ctx: &Context<'_>) -> Result<Effect, Reason> {
 /// has the comment, and the status the action needs.
 fn review_entry_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
     repository_open(ctx)?;
-    let Args::ReviewComment(id) = args else {
-        return Err("No target for this action");
-    };
-    let listed = ctx
-        .review
-        .comments
-        .ok_or("The comments are still being read.")?;
-    let comment = listed
-        .iter()
-        .find(|comment| comment.id == *id)
-        .ok_or("This comment is no longer listed.")?;
+    let comment = listed_comment(args, ctx)?;
     match action {
         Action::ResolveReviewComment if comment.status == ReviewStatus::Resolved => {
             Err("This comment is already resolved.")
@@ -2030,6 +2045,61 @@ fn review_entry_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(
         }
         _ => Ok(()),
     }
+}
+
+/// The comment the run names, as the listing on screen has it.
+fn listed_comment<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a ReviewComment, Reason> {
+    let Args::ReviewComment(id) = args else {
+        return Err("No target for this action");
+    };
+    let listed: &'a [ReviewComment] = ctx
+        .review
+        .comments
+        .ok_or("The comments are still being read.")?;
+    listed
+        .iter()
+        .find(|comment| comment.id == *id)
+        .ok_or("This comment is no longer listed.")
+}
+
+/// What the comment actions do once their rule has passed: open the editor, send
+/// the write, or open the diff. The card asks once before a delete gets here, so
+/// the command is sent at once.
+fn review_entry_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
+    if action == Action::OpenReviewComment {
+        return open_target(args, ctx);
+    }
+    let Args::ReviewComment(id) = args else {
+        return Err("No target for this action");
+    };
+    Ok(match action {
+        Action::EditReviewComment => Effect::OpenReviewEdit { id: *id },
+        Action::ResolveReviewComment => {
+            Effect::Send(vec![CommandKind::ResolveReviewComment { id: *id }])
+        }
+        Action::ReopenReviewComment => {
+            Effect::Send(vec![CommandKind::ReopenReviewComment { id: *id }])
+        }
+        Action::DeleteReviewComment => {
+            Effect::Send(vec![CommandKind::DeleteReviewComment { id: *id }])
+        }
+        _ => return Err(NOT_AVAILABLE),
+    })
+}
+
+/// The target of Open Comment in Diff: the comment's file and its first line now.
+/// Refused for an outdated comment, and for a file the Working Copy does not list.
+fn open_target(args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
+    repository_open(ctx)?;
+    let comment = listed_comment(args, ctx)?;
+    let location = comment.location.ok_or("This comment is outdated.")?;
+    if !ctx.entries.iter().any(|entry| entry.path == comment.path) {
+        return Err("This file has no changes to show in the Working Copy.");
+    }
+    Ok(Effect::ShowReviewInDiff {
+        path: comment.path.clone(),
+        line: location.start_line,
+    })
 }
 
 fn repository_open(ctx: &Context<'_>) -> Result<(), Reason> {
@@ -4397,5 +4467,111 @@ mod tests {
             assert_eq!(action.spec().args, ArgKind::ReviewComment);
             assert_eq!(action.spec().shortcut, None);
         }
+    }
+
+    fn open_ctx<'a>(
+        entries: &'a [StatusEntry],
+        listed: Option<&'a [ReviewComment]>,
+    ) -> Context<'a> {
+        Context {
+            review: ReviewCtx {
+                comments: listed,
+                spot: CommentSpot::Nothing,
+            },
+            ..ctx(entries, "")
+        }
+    }
+
+    #[test]
+    fn show_local_review_needs_an_open_repository_and_plans_the_page() {
+        assert_eq!(
+            Action::ShowLocalReview.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::ShowLocalReview)
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowLocalReview.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(Action::ShowLocalReview.id(), "review.show");
+        assert_eq!(Action::ShowLocalReview.spec().title, "Show Local Review");
+        assert_eq!(
+            Action::ShowLocalReview.spec().category,
+            Category::Repository
+        );
+        assert_eq!(Action::ShowLocalReview.spec().shortcut, None);
+        assert!(!Action::ShowLocalReview.opens_dialog());
+        assert!(Action::ShowLocalReview.available());
+    }
+
+    #[test]
+    fn open_comment_in_diff_names_the_file_and_the_first_line_of_a_current_comment() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let listed = [comment_with(4, ReviewStatus::Open)];
+        let context = open_ctx(&entries, Some(&listed));
+        assert_eq!(
+            Action::OpenReviewComment.enabled(&Args::ReviewComment(4), &context),
+            Ok(())
+        );
+        assert_eq!(
+            Action::OpenReviewComment.plan(&Args::ReviewComment(4), &context),
+            Ok(Effect::ShowReviewInDiff {
+                path: "a.txt".into(),
+                line: 1,
+            })
+        );
+        assert_eq!(Action::OpenReviewComment.id(), "review.open");
+        assert_eq!(
+            Action::OpenReviewComment.spec().title,
+            "Open Comment in Diff"
+        );
+        assert_eq!(
+            Action::OpenReviewComment.spec().args,
+            ArgKind::ReviewComment
+        );
+        assert!(!Action::OpenReviewComment.destructive());
+    }
+
+    #[test]
+    fn open_comment_in_diff_is_refused_when_the_comment_or_its_file_cannot_be_shown() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let mut outdated = comment_with(4, ReviewStatus::Open);
+        outdated.location = None;
+        outdated.outdated = true;
+        let stale = [outdated];
+        assert_eq!(
+            Action::OpenReviewComment
+                .plan(&Args::ReviewComment(4), &open_ctx(&entries, Some(&stale))),
+            Err("This comment is outdated.")
+        );
+        let current = [comment_with(4, ReviewStatus::Open)];
+        assert_eq!(
+            Action::OpenReviewComment.plan(&Args::ReviewComment(4), &open_ctx(&[], Some(&current))),
+            Err("This file has no changes to show in the Working Copy.")
+        );
+        let closed = Context {
+            repo_open: false,
+            ..open_ctx(&entries, Some(&current))
+        };
+        assert_eq!(
+            Action::OpenReviewComment.enabled(&Args::ReviewComment(4), &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::OpenReviewComment.enabled(&Args::ReviewComment(4), &open_ctx(&entries, None)),
+            Err("The comments are still being read.")
+        );
+        assert_eq!(
+            Action::OpenReviewComment
+                .enabled(&Args::ReviewComment(9), &open_ctx(&entries, Some(&current))),
+            Err("This comment is no longer listed.")
+        );
+        assert_eq!(
+            Action::OpenReviewComment.enabled(&Args::None, &open_ctx(&entries, Some(&current))),
+            Err("No target for this action")
+        );
     }
 }

@@ -24,6 +24,7 @@ const NEEDS_CHUNK: Reason = "Pick a chunk in the diff first.";
 const NEEDS_COMMENT: Reason = "Pick the comment on its card in the diff.";
 const NEEDS_COMMIT: Reason = "Pick a commit in the history first.";
 const NEEDS_REFLOG_COMMIT: Reason = "Pick a commit on the Reflog page first.";
+const NEEDS_LOCAL_REVIEW_COMMENT: Reason = "Pick a comment on the Local review page first.";
 const NO_WORKTREE: Reason = "No worktree to choose from.";
 const NO_WORKFLOW: Reason = "No workflow to choose from.";
 const NOT_LISTED: Reason = "Workflows are still being read.";
@@ -399,7 +400,7 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
         // A chunk exists only in the diff pane, so the palette lists it disabled.
         ArgKind::Chunk => disabled_run(action, NEEDS_CHUNK),
         // A review comment is named by its card in the diff, so the palette lists it disabled.
-        ArgKind::ReviewComment => disabled_run(action, NEEDS_COMMENT),
+        ArgKind::ReviewComment => disabled_run(action, review_reason(action)),
         // A commit is named by the panel it is shown in (the history's or the Reflog's), so
         // the palette lists it disabled. The palette has no picker of commits to offer.
         ArgKind::Commit => disabled_run(action, commit_reason(action)),
@@ -421,6 +422,15 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
 
 /// Why a commit action is listed disabled in the palette: the Reflog's two
 /// actions name an entry of the Reflog page, the copies name one of the history.
+/// Why a comment action is not run from the palette: Open Comment in Diff is
+/// named by the Local review page, the others by their card in the diff.
+fn review_reason(action: Action) -> Reason {
+    match action {
+        Action::OpenReviewComment => NEEDS_LOCAL_REVIEW_COMMENT,
+        _ => NEEDS_COMMENT,
+    }
+}
+
 fn commit_reason(action: Action) -> Reason {
     match action {
         Action::CheckoutCommit | Action::NewBranchFromCommit => NEEDS_REFLOG_COMMIT,
@@ -852,6 +862,21 @@ mod tests {
                 "{title}"
             );
         }
+    }
+
+    #[test]
+    fn local_review_is_offered_and_open_comment_says_to_pick_it_on_its_page() {
+        let entries: [StatusEntry; 0] = [];
+        let top = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
+        assert_eq!(find(&top, "Show Local Review").state, Ok(()));
+        assert_eq!(
+            find(&top, "Open Comment in Diff").state,
+            Err("Pick a comment on the Local review page first.")
+        );
+        assert_eq!(
+            find(&top, "Resolve Comment").state,
+            Err("Pick the comment on its card in the diff.")
+        );
     }
 
     #[test]
