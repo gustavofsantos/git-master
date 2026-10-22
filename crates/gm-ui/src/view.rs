@@ -69,6 +69,9 @@ pub const KEY_CONTEXT: &str = "GitMaster";
 /// How long a notice stays on the status bar.
 const NOTICE_TIME: Duration = Duration::from_secs(4);
 
+/// The widest the status bar's notice may be; a longer one is cut at its end.
+const NOTICE_WIDTH: f32 = 480.;
+
 /// How long a refresh runs before "Updating…" shows. Quicker ones never show it.
 const UPDATING_DELAY: Duration = Duration::from_millis(300);
 
@@ -1222,18 +1225,24 @@ impl StatusView {
             .bg(theme::panel())
             .border_t_1()
             .border_color(theme::hairline())
+            // The path gives way first, cut at its end, so a notice keeps its width.
             .child(
                 div()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .font_family(theme::code_font())
                     .text_color(theme::faint())
                     .child(root),
             )
-            .child(div().text_color(muted).child(counts))
+            .child(div().flex_none().text_color(muted).child(counts))
             .child(div().flex_1())
             // A long message is cut at the end, so the log button stays on the bar.
             .child(
                 div()
-                    .min_w(px(0.))
+                    .flex_none()
+                    .max_w(px(NOTICE_WIDTH))
                     .px_2()
                     .rounded_sm()
                     .bg(tint)
