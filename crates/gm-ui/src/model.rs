@@ -20,6 +20,8 @@ use crate::new_branch::BranchCreate;
 use crate::new_stash::StashCreate;
 use crate::quick_open::QuickOpen;
 use crate::remote_op::{Outcome, RemoteOp};
+use crate::stash_apply::Applying;
+use crate::stash_drop::Dropping;
 use crate::stashes::StashList;
 use crate::text_search::TextSearch;
 use crate::workflow_run::Workflows;
@@ -106,6 +108,10 @@ pub struct Model {
     pub discarding: Discarding,
     /// The stash dialog's create in flight, and its outcome (B2).
     pub stash_create: StashCreate,
+    /// The apply or pop of a stash in flight, and its outcome (B2).
+    pub stash_apply: Applying,
+    /// The drop dialog's drop in flight, and its outcome (B2).
+    pub stash_drop: Dropping,
     /// The delete-merged-branches dialog's listing, delete in flight and outcome.
     pub merging: Merging,
 }
@@ -594,6 +600,20 @@ impl Model {
                 id, state, detail, ..
             } if self.stash_create.owns(id) => {
                 self.stash_create.settle(state, detail);
+                None
+            }
+            // An apply's or a pop's outcome belongs to its message, not to the status bar (B2).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.stash_apply.owns(id) => {
+                self.stash_apply.settle(state, detail);
+                None
+            }
+            // A drop's outcome belongs to its dialog (B2).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.stash_drop.owns(id) => {
+                self.stash_drop.settle(state, detail);
                 None
             }
             // A failed list read belongs to the Stashes page, which shows it there.
@@ -2177,5 +2197,65 @@ mod stash_tests {
             Some(Err("No local changes".to_owned()))
         );
         assert_eq!(model.error, None);
+    }
+
+    #[test]
+    fn a_conflicting_apply_is_its_trackers_outcome_and_not_the_status_bars() {
+        use crate::stash_apply::{Kind, Outcome};
+        let mut model = Model::default();
+        model.stash_apply.start(OperationId(9), Kind::Apply, 1);
+        let text = "CONFLICT (content): Merge conflict in a.txt";
+        let _ = model.apply(changed(9, OperationState::Failed, Some(text)));
+        assert_eq!(model.error, None);
+        assert_eq!(model.notice, None);
+        assert_eq!(
+            model.stash_apply.take(),
+            Some(Outcome::Failed {
+                kind: Kind::Apply,
+                index: 1,
+                text: text.to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_pop_is_announced_by_its_tracker_and_the_listing_after_it_is_shown() {
+        use crate::stash_apply::{Kind, Outcome};
+        let mut model = Model::default();
+        model.stashes.request(OperationId(8));
+        model.stash_apply.start(OperationId(9), Kind::Pop, 0);
+        let _ = model.apply(changed(9, OperationState::Executing, None));
+        assert_eq!(model.stash_apply.take(), None);
+        let _ = model.apply(changed(9, OperationState::Done, None));
+        assert_eq!(
+            model.stash_apply.take(),
+            Some(Outcome::Done {
+                kind: Kind::Pop,
+                index: 0,
+            })
+        );
+        // The stash-write listing comes after the operation and replaces the list.
+        let _ = model.apply(Event::StashesListed {
+            id: OperationId(9),
+            stashes: Vec::new(),
+        });
+        assert_eq!(model.stashes.count(), Some(0));
+    }
+
+    #[test]
+    fn a_drop_outcome_is_its_dialogs_and_a_refused_drop_keeps_the_message() {
+        use crate::stash_drop::Outcome;
+        let mut model = Model::default();
+        model.stash_drop.start(OperationId(12), 2);
+        let _ = model.apply(changed(
+            12,
+            OperationState::Failed,
+            Some(gm_schema::STASH_LIST_CHANGED),
+        ));
+        assert_eq!(model.error, None);
+        assert_eq!(
+            model.stash_drop.take(),
+            Some(Outcome::Failed(gm_schema::STASH_LIST_CHANGED.to_owned()))
+        );
     }
 }

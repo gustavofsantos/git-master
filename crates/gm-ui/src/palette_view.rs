@@ -298,6 +298,7 @@ impl StatusView {
                     ArgKind::Worktree => "a worktree",
                     ArgKind::Workflow => "a workflow",
                     ArgKind::Template => "a template",
+                    ArgKind::Stash => "a stash",
                     _ => "a branch",
                 };
                 (

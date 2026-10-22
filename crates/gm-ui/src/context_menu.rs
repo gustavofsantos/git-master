@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::action_registry::{Action, Args, Context as ActionContext, Reason};
+use crate::stashes;
 use crate::theme;
 use crate::view::StatusView;
 use crate::window_chrome;
@@ -31,6 +32,21 @@ pub(crate) enum Target {
     File(String),
     /// A worktree, by its folder.
     Worktree(String),
+    /// A stash, by its index and commit id, as the Stashes page listed it.
+    Stash {
+        index: u32,
+        oid: String,
+    },
+}
+
+impl Target {
+    /// The name the menu's question uses for what it was opened on.
+    fn subject(&self) -> String {
+        match self {
+            Self::Branch(name) | Self::File(name) | Self::Worktree(name) => name.clone(),
+            Self::Stash { index, .. } => stashes::label(*index),
+        }
+    }
 }
 
 /// One line of a menu: an action, the target it runs on, and whether it runs now.
@@ -99,6 +115,22 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         item(Action::ViewFile, 2),
         item(Action::CopyFilePath, 2),
         item(Action::RevealFile, 2),
+    ]
+}
+
+/// The menu of a stash row: apply and pop, then drop in its own group. Drop
+/// opens its dialog, which is the confirmation.
+pub(crate) fn stash_items(index: u32, oid: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
+    let target = Args::Stash {
+        index,
+        oid: oid.to_owned(),
+        label: stashes::label(index),
+    };
+    let item = |action, group| Item::new(action, target.clone(), group, ctx);
+    vec![
+        item(Action::StashApply, 0),
+        item(Action::StashPop, 0),
+        item(Action::StashDrop, 1),
     ]
 }
 
@@ -204,6 +236,24 @@ impl StatusView {
         self.open_menu(Target::Worktree(path.to_owned()), position, cx);
     }
 
+    /// Opens the menu of the stash `oid` at `index`, under the pointer (B2).
+    pub(crate) fn open_stash_menu(
+        &mut self,
+        index: u32,
+        oid: &str,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_menu(
+            Target::Stash {
+                index,
+                oid: oid.to_owned(),
+            },
+            position,
+            cx,
+        );
+    }
+
     /// Opens the menu of the file row at `index`, which becomes the selection and
     /// takes the list focus, as a left click on it does.
     pub(crate) fn open_file_menu(
@@ -278,6 +328,7 @@ impl StatusView {
             Target::Branch(name) => branch_items(name, &ctx),
             Target::File(path) => file_items(path, &ctx),
             Target::Worktree(path) => worktree_items(path, &ctx),
+            Target::Stash { index, oid } => stash_items(*index, oid, &ctx),
         }
     }
 
@@ -400,7 +451,7 @@ impl StatusView {
     /// The question that replaces the items after a destructive one is chosen:
     /// its name, then Cancel and the item's own title in red.
     fn confirm_panel(item: &Item, target: &Target, cx: &Context<Self>) -> Div {
-        let (Target::Branch(subject) | Target::File(subject) | Target::Worktree(subject)) = target;
+        let subject = target.subject();
         let confirm = item.clone();
         div()
             .px_3()
@@ -468,7 +519,7 @@ fn separator() -> Div {
 
 #[cfg(test)]
 mod tests {
-    use gm_schema::{Change, StatusEntry, WorktreeEntry};
+    use gm_schema::{Change, StashEntry, StatusEntry, WorktreeEntry};
 
     use super::*;
 
@@ -498,6 +549,7 @@ mod tests {
             branch_scope: crate::branch_filter::Scope::All,
             user_email_known: false,
             remote_running: false,
+            stashes: None,
         }
     }
 
@@ -810,6 +862,52 @@ mod tests {
             find(&items, Action::StageFile).state,
             Err("No repository is open.")
         );
+    }
+
+    #[test]
+    fn a_stash_menu_lists_apply_and_pop_then_drop_in_its_own_group() {
+        let stashes = [StashEntry {
+            index: 0,
+            oid: "a".repeat(40),
+            message: "On main: wip".into(),
+            branch: Some("main".into()),
+            time: 1,
+        }];
+        let context = ActionContext {
+            stashes: Some(&stashes[..]),
+            ..ctx(&[])
+        };
+        let items = stash_items(0, &"a".repeat(40), &context);
+        let groups: Vec<Vec<&str>> = sections(&items)
+            .iter()
+            .map(|group| group.iter().map(Item::label).collect())
+            .collect();
+        assert_eq!(
+            groups,
+            [vec!["Apply Stash", "Pop Stash"], vec!["Drop Stash"]]
+        );
+        assert!(items.iter().all(|item| item.state == Ok(())));
+        assert_eq!(
+            items.iter().map(Item::destructive).collect::<Vec<_>>(),
+            [false, false, true]
+        );
+        // Each item runs on the listed stash: its index, commit id and name.
+        assert_eq!(
+            find(&items, Action::StashPop).args,
+            Args::Stash {
+                index: 0,
+                oid: "a".repeat(40),
+                label: "stash@{0}".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_stash_menu_says_why_its_items_cannot_run_before_the_listing() {
+        let items = stash_items(0, &"a".repeat(40), &ctx(&[]));
+        for item in &items {
+            assert_eq!(item.state, Err("Open the Stashes page first."), "{item:?}");
+        }
     }
 
     #[test]

@@ -235,6 +235,7 @@ mod tests {
             hooks: HookCtx::default(),
             workflows: WorkflowCtx::default(),
             remote_running: false,
+            stashes: None,
         };
         for action in [Action::Fetch, Action::Pull, Action::PushWithLease] {
             let args = toolbar_args(action, Some("main"));
@@ -264,6 +265,7 @@ mod tests {
             branch_scope: crate::branch_filter::Scope::All,
             user_email_known: false,
             remote_running: true,
+            stashes: None,
         };
         for action in [Action::Fetch, Action::Pull, Action::PushWithLease] {
             let args = toolbar_args(action, Some("main"));

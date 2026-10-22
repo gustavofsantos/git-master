@@ -49,6 +49,8 @@ mod shell_sidebar;
 mod shell_stashes;
 mod shell_workflows;
 mod sidebar;
+mod stash_apply;
+mod stash_drop;
 mod stashes;
 mod text_area;
 mod text_area_element;

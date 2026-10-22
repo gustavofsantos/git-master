@@ -104,6 +104,7 @@ impl StatusView {
                         &self.model.commit,
                         &self.commit_texts,
                         Panel::Commit,
+                        None,
                         cx,
                     ))
             })
@@ -450,11 +451,13 @@ impl Panel {
 /// The detail panel (H3): the selected commit's subject, body, hash, author,
 /// date, parents and files. Its text is selectable; the Copy controls copy the
 /// hash and the whole message. A file row opens its diff (H4). A stash shows
-/// the same, without the author and the parents (B2).
+/// the same, without the author and the parents (B2), and `actions` (its
+/// Apply, Pop and Drop buttons) above the rest.
 pub(crate) fn commit_panel(
     pane: &CommitPane,
     texts: &CommitTexts,
     panel: Panel,
+    actions: Option<Div>,
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
     let content = match pane {
@@ -481,6 +484,7 @@ pub(crate) fn commit_panel(
         .flex_col()
         .gap_3p5()
         .text_sm()
+        .children(actions)
         .child(content)
 }
 

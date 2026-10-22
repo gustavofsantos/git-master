@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use gm_schema::{
-    CommandKind, DiffSide, HunkId, OperationId, StageTarget, StatusEntry, WorkflowInfo,
+    CommandKind, DiffSide, HunkId, OperationId, StageTarget, StashEntry, StatusEntry, WorkflowInfo,
     WorkflowInput, WorktreeEntry,
 };
 
@@ -19,6 +19,7 @@ use gm_core::workflow::edit::Direction;
 
 use crate::branch_filter::Scope;
 use crate::flow_inspector::PickerKind;
+use crate::stashes;
 use crate::workflows_page::{FlowEdit, PageState};
 
 /// Why an action is not enabled, as a short English sentence for the user.
@@ -65,6 +66,8 @@ pub enum ArgKind {
     Workflow,
     /// A built-in workflow template, as the engine listed it.
     Template,
+    /// A stash of the Stashes page's list.
+    Stash,
 }
 
 /// The target of one run. Its kind must match the action's `ArgKind`.
@@ -88,6 +91,13 @@ pub enum Args {
     Workflow(String),
     /// The name of a listed built-in template.
     Template(String),
+    /// A stash of the list: its index and commit id, which the engine checks,
+    /// and its name `stash@{n}` for the dialogs.
+    Stash {
+        index: u32,
+        oid: String,
+        label: String,
+    },
 }
 
 /// Static description of an action.
@@ -174,6 +184,12 @@ pub enum Effect {
     ShowStashes,
     /// Opens the dialog that stashes the working copy's changes (B2, D94).
     OpenNewStashDialog,
+    /// Opens the dialog that asks before the stash `oid` at `index` is dropped (B2).
+    OpenDropStashDialog {
+        index: u32,
+        oid: String,
+        label: String,
+    },
     /// Writes the open workflow's buffer to its file.
     SaveWorkflow,
     /// Drops the open workflow's unsaved changes.
@@ -242,6 +258,8 @@ pub struct Context<'a> {
     pub workflows: WorkflowCtx<'a>,
     /// The worktrees listed for the open repository, main checkout first.
     pub worktrees: &'a [WorktreeEntry],
+    /// The stashes the Stashes page listed, newest first; `None` until the first listing.
+    pub stashes: Option<&'a [StashEntry]>,
     /// The scope in effect for the sidebar's branches now (D53).
     pub branch_scope: Scope,
     /// Whether Git has a `user.email` to match branches against.
@@ -251,7 +269,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 68] = [
+const SPECS: [Spec; 71] = [
     spec(
         "file.stage",
         "Stage File",
@@ -722,6 +740,27 @@ const SPECS: [Spec; 68] = [
         ArgKind::None,
         Category::WorkingCopy,
     ),
+    spec(
+        "stash.apply",
+        "Apply Stash",
+        None,
+        ArgKind::Stash,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "stash.pop",
+        "Pop Stash",
+        None,
+        ArgKind::Stash,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "stash.drop",
+        "Drop Stash",
+        None,
+        ArgKind::Stash,
+        Category::WorkingCopy,
+    ),
 ];
 
 const fn spec(
@@ -812,6 +851,9 @@ pub enum Action {
     DiscardAllChanges,
     ShowStashes,
     NewStash,
+    StashApply,
+    StashPop,
+    StashDrop,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -923,7 +965,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 68] = [
+    pub const ALL: [Action; 71] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -992,6 +1034,9 @@ impl Action {
         Action::DiscardAllChanges,
         Action::ShowStashes,
         Action::NewStash,
+        Action::StashApply,
+        Action::StashPop,
+        Action::StashDrop,
     ];
 
     #[must_use]
@@ -1031,6 +1076,7 @@ impl Action {
                 | Action::DeleteMergedBranches
                 | Action::RemoveWorktree
                 | Action::DiscardAllChanges
+                | Action::StashDrop
         )
     }
 
@@ -1075,7 +1121,14 @@ impl Action {
 
     /// Whether the rule of `stash_rule` decides the action.
     fn is_stash_rule(self) -> bool {
-        matches!(self, Action::ShowStashes | Action::NewStash)
+        matches!(
+            self,
+            Action::ShowStashes
+                | Action::NewStash
+                | Action::StashApply
+                | Action::StashPop
+                | Action::StashDrop
+        )
     }
 
     /// Whether the rules of `workflow_rule` and `workflow_effect` decide the action.
@@ -1119,6 +1172,7 @@ impl Action {
                 | Action::DiscardFile
                 | Action::DiscardAllChanges
                 | Action::NewStash
+                | Action::StashDrop
         )
     }
 
@@ -1176,6 +1230,9 @@ impl Action {
             | Action::ApproveHook
             | Action::DenyHook => hook_rule(self, ctx),
             _ if self.is_workflow_rule() => workflow_rule(self, args, ctx),
+            Action::StashApply | Action::StashPop | Action::StashDrop => {
+                stash_entry_rule(args, ctx)
+            }
             _ if self.is_stash_rule() => stash_rule(self, ctx),
             // The placeholders, refused above by `available`.
             _ => Err(NOT_AVAILABLE),
@@ -1186,37 +1243,15 @@ impl Action {
     pub fn plan(self, args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
         self.enabled(args, ctx)?;
         Ok(match (self, args) {
-            (Action::StageFile, Args::File(path)) => Effect::Send(vec![CommandKind::Stage {
-                target: StageTarget::File { path: path.clone() },
-            }]),
-            (Action::UnstageFile, Args::File(path)) => Effect::Send(vec![CommandKind::Unstage {
-                target: StageTarget::File { path: path.clone() },
-            }]),
-            (Action::StageChunk, Args::Chunk { path, hunk, .. }) => {
-                Effect::Send(vec![CommandKind::Stage {
-                    target: StageTarget::Hunk {
-                        path: path.clone(),
-                        hunk: hunk.clone(),
-                    },
-                }])
-            }
-            (Action::UnstageChunk, Args::Chunk { path, hunk, .. }) => {
-                Effect::Send(vec![CommandKind::Unstage {
-                    target: StageTarget::Hunk {
-                        path: path.clone(),
-                        hunk: hunk.clone(),
-                    },
-                }])
-            }
-            (Action::DiscardChunk, Args::Chunk { path, hunk, .. }) => {
-                Effect::Send(vec![CommandKind::DiscardHunk {
-                    path: path.clone(),
-                    hunk: hunk.clone(),
-                }])
-            }
-            (Action::Commit, _) => Effect::Send(vec![CommandKind::Commit {
-                message: ctx.message.to_owned(),
-            }]),
+            (
+                Action::StageFile
+                | Action::UnstageFile
+                | Action::StageChunk
+                | Action::UnstageChunk
+                | Action::DiscardChunk
+                | Action::Commit,
+                _,
+            ) => change_effect(self, args, ctx)?,
             (Action::Refresh, _) => Effect::Send(vec![CommandKind::RefreshStatus]),
             (Action::Fetch, _) => Effect::Send(vec![CommandKind::Fetch]),
             (Action::Pull, _) => Effect::Send(vec![CommandKind::Pull]),
@@ -1256,6 +1291,9 @@ impl Action {
             }
             (Action::PruneWorktrees, _) => Effect::OpenPruneDialog,
             (Action::NewStash, _) => Effect::OpenNewStashDialog,
+            (Action::StashApply | Action::StashPop | Action::StashDrop, _) => {
+                stash_effect(self, args)?
+            }
             (action, _) if action.opens_a_page() => navigation_effect(action, args),
             (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
             (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
@@ -1303,6 +1341,7 @@ impl Action {
                 | (ArgKind::Commit, Args::Commit(_))
                 | (ArgKind::Workflow, Args::Workflow(_))
                 | (ArgKind::Template, Args::Template(_))
+                | (ArgKind::Stash, Args::Stash { .. })
         )
     }
 }
@@ -1671,7 +1710,6 @@ pub fn has_unstaged(entry: &StatusEntry) -> bool {
     entry.unstaged.is_some() || entry.untracked || entry.conflicted
 }
 
-/// Refuses while no repository is open.
 /// The rules of the Stashes page and of Stash Changes. The page needs a
 /// repository; stashing needs an idle one with something to stash.
 fn stash_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
@@ -1685,6 +1723,102 @@ fn stash_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
             }
         }
         _ => repository_open(ctx),
+    }
+}
+
+/// What the working copy's change actions send. Each is refused by `change_rule`
+/// before it gets here, so a target of the wrong kind is never sent.
+fn change_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
+    Ok(match (action, args) {
+        (Action::StageFile, Args::File(path)) => Effect::Send(vec![CommandKind::Stage {
+            target: StageTarget::File { path: path.clone() },
+        }]),
+        (Action::UnstageFile, Args::File(path)) => Effect::Send(vec![CommandKind::Unstage {
+            target: StageTarget::File { path: path.clone() },
+        }]),
+        (Action::StageChunk, Args::Chunk { path, hunk, .. }) => {
+            Effect::Send(vec![CommandKind::Stage {
+                target: StageTarget::Hunk {
+                    path: path.clone(),
+                    hunk: hunk.clone(),
+                },
+            }])
+        }
+        (Action::UnstageChunk, Args::Chunk { path, hunk, .. }) => {
+            Effect::Send(vec![CommandKind::Unstage {
+                target: StageTarget::Hunk {
+                    path: path.clone(),
+                    hunk: hunk.clone(),
+                },
+            }])
+        }
+        (Action::DiscardChunk, Args::Chunk { path, hunk, .. }) => {
+            Effect::Send(vec![CommandKind::DiscardHunk {
+                path: path.clone(),
+                hunk: hunk.clone(),
+            }])
+        }
+        (Action::Commit, _) => Effect::Send(vec![CommandKind::Commit {
+            message: ctx.message.to_owned(),
+        }]),
+        _ => return Err(NOT_AVAILABLE),
+    })
+}
+
+/// What apply, pop and drop do with the listed stash they name. The drop opens
+/// its dialog, which is the confirmation, so it sends nothing itself.
+fn stash_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
+    let Args::Stash { index, oid, label } = args else {
+        return Err("No target for this action");
+    };
+    Ok(match action {
+        Action::StashApply => Effect::Send(vec![CommandKind::ApplyStash {
+            index: *index,
+            oid: oid.clone(),
+        }]),
+        Action::StashPop => Effect::Send(vec![CommandKind::PopStash {
+            index: *index,
+            oid: oid.clone(),
+        }]),
+        Action::StashDrop => Effect::OpenDropStashDialog {
+            index: *index,
+            oid: oid.clone(),
+            label: label.clone(),
+        },
+        _ => return Err(NOT_AVAILABLE),
+    })
+}
+
+/// The reason of apply, pop and drop when the Stashes page has not listed the
+/// stashes yet, so there is no stash to name.
+pub(crate) const OPEN_STASHES: Reason = "Open the Stashes page first.";
+
+/// The rule of apply, pop and drop: an idle repository, a listing, and the
+/// stash the run names in it. The engine checks the index and the commit id
+/// again, so a list that has moved on is refused there too.
+fn stash_entry_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    idle(ctx)?;
+    let Args::Stash { index, oid, .. } = args else {
+        return Err("No target for this action");
+    };
+    let listed = ctx.stashes.ok_or(OPEN_STASHES)?;
+    if listed
+        .iter()
+        .any(|entry| entry.index == *index && entry.oid == *oid)
+    {
+        Ok(())
+    } else {
+        Err("This stash is no longer listed. Open the Stashes page again.")
+    }
+}
+
+/// The target of apply, pop or drop: the listed stash, by its index and commit id.
+#[must_use]
+pub(crate) fn stash_args(entry: &StashEntry) -> Args {
+    Args::Stash {
+        index: entry.index,
+        oid: entry.oid.clone(),
+        label: stashes::label(entry.index),
     }
 }
 
@@ -1810,6 +1944,7 @@ mod tests {
             branch_scope: Scope::All,
             user_email_known: false,
             remote_running: false,
+            stashes: None,
         }
     }
 
@@ -2417,6 +2552,7 @@ mod tests {
                 Action::RemoveWorktree,
                 Action::DeleteMergedBranches,
                 Action::DiscardAllChanges,
+                Action::StashDrop,
             ]
         );
     }
@@ -2877,6 +3013,169 @@ mod tests {
             Action::NewStash.enabled(&Args::None, &busy),
             Err("Wait for the branch checkout to finish.")
         );
+    }
+
+    fn stash(index: u32, oid: &str) -> StashEntry {
+        StashEntry {
+            index,
+            oid: oid.repeat(40),
+            message: format!("On main: stash {index}"),
+            branch: Some("main".into()),
+            time: 1_000,
+        }
+    }
+
+    fn with_stashes(stashes: &[StashEntry]) -> Context<'_> {
+        Context {
+            stashes: Some(stashes),
+            ..ctx(&[], "")
+        }
+    }
+
+    #[test]
+    fn apply_pop_and_drop_have_their_ids_titles_category_and_no_keys() {
+        for (action, id, title) in [
+            (Action::StashApply, "stash.apply", "Apply Stash"),
+            (Action::StashPop, "stash.pop", "Pop Stash"),
+            (Action::StashDrop, "stash.drop", "Drop Stash"),
+        ] {
+            assert_eq!(action.id(), id);
+            assert_eq!(action.spec().title, title);
+            assert_eq!(action.spec().args, ArgKind::Stash);
+            assert_eq!(action.spec().category, Category::WorkingCopy);
+            assert_eq!(action.spec().shortcut, None);
+            assert_eq!(Action::from_id(id), Some(action));
+        }
+    }
+
+    #[test]
+    fn apply_and_pop_send_the_listed_stash_by_its_index_and_commit_id() {
+        let stashes = [stash(0, "a"), stash(1, "b")];
+        let context = with_stashes(&stashes);
+        let target = stash_args(&stashes[1]);
+        assert_eq!(
+            Action::StashApply.plan(&target, &context),
+            Ok(Effect::Send(vec![CommandKind::ApplyStash {
+                index: 1,
+                oid: "b".repeat(40),
+            }]))
+        );
+        assert_eq!(
+            Action::StashPop.plan(&target, &context),
+            Ok(Effect::Send(vec![CommandKind::PopStash {
+                index: 1,
+                oid: "b".repeat(40),
+            }]))
+        );
+    }
+
+    #[test]
+    fn apply_and_pop_are_not_refused_for_a_dirty_tree_git_decides_that() {
+        let stashes = [stash(0, "a")];
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let dirty = Context {
+            entries: &entries,
+            staged_count: 0,
+            ..with_stashes(&stashes)
+        };
+        let target = stash_args(&stashes[0]);
+        assert_eq!(Action::StashApply.enabled(&target, &dirty), Ok(()));
+        assert_eq!(Action::StashPop.enabled(&target, &dirty), Ok(()));
+    }
+
+    #[test]
+    fn drop_opens_its_dialog_and_never_sends_the_command() {
+        let stashes = [stash(0, "a"), stash(1, "b")];
+        let target = stash_args(&stashes[1]);
+        assert_eq!(
+            Action::StashDrop.plan(&target, &with_stashes(&stashes)),
+            Ok(Effect::OpenDropStashDialog {
+                index: 1,
+                oid: "b".repeat(40),
+                label: "stash@{1}".into(),
+            })
+        );
+        assert!(Action::StashDrop.opens_dialog());
+        assert!(Action::StashDrop.destructive());
+        for action in [Action::StashApply, Action::StashPop] {
+            assert!(!action.opens_dialog(), "{action:?}");
+            assert!(!action.destructive(), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn a_stash_action_needs_a_listing_an_idle_repository_and_the_listed_stash() {
+        let stashes = [stash(0, "b")];
+        let target = stash_args(&stashes[0]);
+        let unlisted = ctx(&[], "");
+        for action in [Action::StashApply, Action::StashPop, Action::StashDrop] {
+            assert_eq!(
+                action.enabled(&target, &unlisted),
+                Err("Open the Stashes page first."),
+                "{action:?}"
+            );
+            let closed = Context {
+                repo_open: false,
+                root: None,
+                ..with_stashes(&stashes)
+            };
+            assert_eq!(
+                action.enabled(&target, &closed),
+                Err("No repository is open."),
+                "{action:?}"
+            );
+            let busy = Context {
+                busy: Some("Wait for the branch checkout to finish."),
+                ..with_stashes(&stashes)
+            };
+            assert_eq!(
+                action.enabled(&target, &busy),
+                Err("Wait for the branch checkout to finish."),
+                "{action:?}"
+            );
+            assert_eq!(action.enabled(&target, &with_stashes(&stashes)), Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_stash_that_moved_or_is_not_listed_is_refused_with_the_list_to_read_again() {
+        let stashes = [stash(0, "b")];
+        let context = with_stashes(&stashes);
+        // The stash `b` was at index 1 when the list was read; `stash@{1}` is now gone.
+        let moved = Args::Stash {
+            index: 1,
+            oid: "b".repeat(40),
+            label: "stash@{1}".into(),
+        };
+        let unknown = Args::Stash {
+            index: 0,
+            oid: "z".repeat(40),
+            label: "stash@{0}".into(),
+        };
+        for action in [Action::StashApply, Action::StashPop, Action::StashDrop] {
+            for args in [&moved, &unknown] {
+                assert_eq!(
+                    action.enabled(args, &context),
+                    Err("This stash is no longer listed. Open the Stashes page again."),
+                    "{action:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_stash_actions_take_only_a_stash_target() {
+        let stashes = [stash(0, "a")];
+        let context = with_stashes(&stashes);
+        for action in [Action::StashApply, Action::StashPop, Action::StashDrop] {
+            for args in [Args::None, Args::Branch("main".into())] {
+                assert_eq!(
+                    action.enabled(&args, &context),
+                    Err("No target for this action"),
+                    "{action:?}"
+                );
+            }
+        }
     }
 
     #[test]

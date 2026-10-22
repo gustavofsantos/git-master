@@ -11,9 +11,11 @@ use std::sync::Arc;
 use gm_schema::{BranchEntry, WorktreeEntry};
 
 use crate::action_registry::{
-    Action, ArgKind, Args, Category, Context as ActionContext, NOT_AVAILABLE, Reason,
+    Action, ArgKind, Args, Category, Context as ActionContext, NOT_AVAILABLE, OPEN_STASHES, Reason,
+    stash_args,
 };
 use crate::fuzzy;
+use crate::stashes;
 use crate::worktree_list;
 
 const NO_BRANCH: Reason = "No branch to choose from.";
@@ -24,6 +26,7 @@ const NO_WORKTREE: Reason = "No worktree to choose from.";
 const NO_WORKFLOW: Reason = "No workflow to choose from.";
 const NOT_LISTED: Reason = "Workflows are still being read.";
 const NO_TEMPLATE: Reason = "No templates listed yet";
+const NO_STASH: Reason = "No stash to choose from.";
 
 /// The groups the palette shows, in the order they appear.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -31,6 +34,7 @@ pub(crate) enum Section {
     Actions,
     Worktrees,
     Branches,
+    Stashes,
     Workflows,
     Files,
 }
@@ -41,6 +45,7 @@ impl Section {
             Self::Actions => "Actions",
             Self::Worktrees => "Worktrees",
             Self::Branches => "Branches",
+            Self::Stashes => "Stashes",
             Self::Workflows => "Workflows",
             Self::Files => "Files",
         }
@@ -385,6 +390,10 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
                 pick_state(action, &targets, ctx, NO_TEMPLATE),
             )
         }
+        ArgKind::Stash => (
+            Choice::Pick(action),
+            pick_state(action, &stash_targets(ctx), ctx, no_stash(ctx)),
+        ),
         // A chunk exists only in the diff pane, so the palette lists it disabled.
         ArgKind::Chunk => (
             Choice::Run {
@@ -456,6 +465,24 @@ fn template_targets(ctx: &ActionContext<'_>) -> Vec<Args> {
         .collect()
 }
 
+/// The listed stashes the palette can pick, newest first.
+fn stash_targets(ctx: &ActionContext<'_>) -> Vec<Args> {
+    ctx.stashes
+        .unwrap_or_default()
+        .iter()
+        .map(stash_args)
+        .collect()
+}
+
+/// Why no stash can be picked: without a listing the Stashes page must be opened first.
+fn no_stash(ctx: &ActionContext<'_>) -> Reason {
+    if ctx.stashes.is_none() {
+        OPEN_STASHES
+    } else {
+        NO_STASH
+    }
+}
+
 /// The worktrees the palette can pick, as the sidebar lists them: the name and
 /// the folder of each, main checkout first, bare entries left out.
 fn listed_worktrees(ctx: &ActionContext<'_>) -> Vec<(String, String)> {
@@ -510,6 +537,15 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
                 target_row(action, Section::Workflows, template.clone(), args, ctx)
             })
             .collect(),
+        ArgKind::Stash => ctx
+            .stashes
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| {
+                let label = stashes::choice_label(entry);
+                target_row(action, Section::Stashes, label, stash_args(entry), ctx)
+            })
+            .collect(),
         ArgKind::None | ArgKind::OptionalBranch | ArgKind::Chunk | ArgKind::Commit => Vec::new(),
     }
 }
@@ -552,7 +588,7 @@ pub(crate) fn rank(query: &str, candidates: &[Candidate]) -> Vec<Hit> {
 
 #[cfg(test)]
 mod tests {
-    use gm_schema::{Change, StatusEntry, WorktreeEntry};
+    use gm_schema::{Change, StashEntry, StatusEntry, WorktreeEntry};
 
     use super::*;
 
@@ -592,6 +628,7 @@ mod tests {
             branch_scope: crate::branch_filter::Scope::All,
             user_email_known: false,
             remote_running: false,
+            stashes: None,
         }
     }
 
@@ -950,6 +987,77 @@ mod tests {
                 args: Args::Worktree("/r-feature".into()),
             }
         );
+    }
+
+    fn stash(index: u32, oid: &str) -> StashEntry {
+        StashEntry {
+            index,
+            oid: oid.repeat(40),
+            message: format!("On main: stash {index}"),
+            branch: Some("main".into()),
+            time: 1_000,
+        }
+    }
+
+    #[test]
+    fn a_stash_action_is_a_pick_of_the_listed_stashes_newest_first() {
+        let entries: [StatusEntry; 0] = [];
+        let stashes = [stash(0, "a"), stash(1, "b")];
+        let ctx = ActionContext {
+            stashes: Some(&stashes[..]),
+            ..ctx_with(&entries, "")
+        };
+        let top = build(Stage::Actions, "", &ctx, &[]);
+        let row = find(&top, "Apply Stash");
+        assert_eq!(row.section, Section::Actions);
+        assert_eq!(row.choice, Choice::Pick(Action::StashApply));
+        assert_eq!(row.state, Ok(()));
+
+        let picks = build(Stage::Pick(Action::StashDrop), "", &ctx, &[]);
+        let labels: Vec<&str> = picks.iter().map(|pick| pick.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["stash@{0}  On main: stash 0", "stash@{1}  On main: stash 1"]
+        );
+        for (pick, entry) in picks.iter().zip(&stashes) {
+            assert_eq!(pick.section, Section::Stashes);
+            assert_eq!(pick.state, Ok(()));
+            assert_eq!(
+                pick.choice,
+                Choice::Run {
+                    action: Action::StashDrop,
+                    args: stash_args(entry),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_stash_pick_says_to_open_the_page_until_the_stashes_are_listed() {
+        let entries: [StatusEntry; 0] = [];
+        let unlisted = ctx_with(&entries, "");
+        let top = build(Stage::Actions, "", &unlisted, &[]);
+        for label in ["Apply Stash", "Pop Stash", "Drop Stash"] {
+            let row = find(&top, label);
+            assert_eq!(row.choice, Choice::Pick(row_action(label)), "{label}");
+            assert_eq!(row.state, Err("Open the Stashes page first."), "{label}");
+        }
+        assert!(build(Stage::Pick(Action::StashPop), "", &unlisted, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_listing_with_no_stash_says_there_is_none_to_choose() {
+        let entries: [StatusEntry; 0] = [];
+        let listed = ActionContext {
+            stashes: Some(&[]),
+            ..ctx_with(&entries, "")
+        };
+        let top = build(Stage::Actions, "", &listed, &[]);
+        assert_eq!(
+            find(&top, "Pop Stash").state,
+            Err("No stash to choose from.")
+        );
+        assert!(build(Stage::Pick(Action::StashPop), "", &listed, &[]).is_empty());
     }
 
     #[test]

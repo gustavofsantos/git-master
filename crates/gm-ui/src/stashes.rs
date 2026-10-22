@@ -3,7 +3,7 @@
 //! the user selected. Ids follow dispatch order, so an answer older than the one
 //! shown, or than the read in flight, is superseded and dropped.
 
-use gm_schema::{OperationId, OperationState, StashEntry};
+use gm_schema::{Event, OperationId, OperationState, STASH_LIST_CHANGED, StashEntry};
 
 /// Git's message when a failed read gave none.
 const NO_MESSAGE: &str = "The stashes could not be read.";
@@ -132,6 +132,26 @@ impl StashList {
     pub fn failure(&self) -> Option<&str> {
         self.failure.as_deref()
     }
+}
+
+/// A stash as the palette offers it: its name, two spaces, then its message.
+#[must_use]
+pub fn choice_label(entry: &StashEntry) -> String {
+    format!("{}  {}", label(entry.index), entry.message)
+}
+
+/// Whether `event` is the engine's refusal that a stash moved since the list was
+/// read (B2). The list is read again, so the next apply, pop or drop names it.
+#[must_use]
+pub fn is_stale_refusal(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::OperationChanged {
+            state: OperationState::Failed,
+            detail: Some(detail),
+            ..
+        } if detail == STASH_LIST_CHANGED
+    )
 }
 
 /// The header's count: "1 stash", "3 stashes", or nothing before a listing.
@@ -277,6 +297,37 @@ mod tests {
         list.request(OperationId(6));
         list.ended(OperationId(6), OperationState::Executing, None);
         assert!(list.owns(OperationId(6)));
+    }
+
+    #[test]
+    fn a_palette_choice_names_the_stash_then_its_message() {
+        assert_eq!(choice_label(&stash(2, "a")), "stash@{2}  On main: stash 2");
+    }
+
+    #[test]
+    fn only_the_refusal_of_a_moved_stash_asks_for_the_list_again() {
+        let refused = |detail: Option<&str>, state| Event::OperationChanged {
+            id: OperationId(4),
+            actor: gm_schema::Actor::Human,
+            state,
+            detail: detail.map(str::to_owned),
+        };
+        assert!(is_stale_refusal(&refused(
+            Some(STASH_LIST_CHANGED),
+            OperationState::Failed
+        )));
+        assert!(!is_stale_refusal(&refused(
+            Some("CONFLICT (content): Merge conflict in a.txt"),
+            OperationState::Failed
+        )));
+        assert!(!is_stale_refusal(&refused(
+            Some(STASH_LIST_CHANGED),
+            OperationState::Done
+        )));
+        assert!(!is_stale_refusal(&Event::StashesListed {
+            id: OperationId(4),
+            stashes: Vec::new(),
+        }));
     }
 
     #[test]

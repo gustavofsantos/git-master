@@ -2,17 +2,18 @@
 //! 48 px row each, with its `stash@{n}` chip, message, branch and relative time.
 //! A click selects a stash and fills the detail panel with its files; a file
 //! opens its diff through the history's commit machinery (H3, H4). The header
-//! opens the dialog that stashes the changes. Apply, pop and drop come later.
+//! opens the dialog that stashes the changes. The detail panel's buttons, and a
+//! right-click on a row, apply, pop or drop the stash (B2, D94).
 
 use std::ops::Range;
 
 use gm_schema::{Actor, CommandKind, StashEntry};
 use gpui::{
-    ClickEvent, Context, Div, FontWeight, MouseButton, MouseDownEvent, Stateful, div, prelude::*,
-    px, uniform_list,
+    ClickEvent, Context, Div, FontWeight, MouseButton, MouseDownEvent, Stateful, Window, div,
+    prelude::*, px, uniform_list,
 };
 
-use crate::action_registry::{Action, Args};
+use crate::action_registry::{Action, Args, Context as ActionContext, stash_args};
 use crate::model::CommitPage;
 use crate::shell_history::{Panel, commit_panel, now_secs, relative_time};
 use crate::stashes::{self, StashList};
@@ -66,7 +67,9 @@ impl StatusView {
         let body = if self.model.commit_stack(CommitPage::Stashes).is_open() {
             self.commit_file_view(cx)
         } else {
-            let index = self.model.stashes.selected_entry().map(|entry| entry.index);
+            let selected = self.model.stashes.selected_entry();
+            let index = selected.map(|entry| entry.index);
+            let actions = selected.map(|entry| self.stash_actions(entry, cx));
             div()
                 .flex_1()
                 .min_h(px(0.))
@@ -85,6 +88,7 @@ impl StatusView {
                     &self.model.stash_commit,
                     &self.commit_texts,
                     Panel::Stash(index),
+                    actions,
                     cx,
                 ))
         };
@@ -135,6 +139,30 @@ impl StatusView {
         }
     }
 
+    /// The dialogs of the stash actions: the stash dialog, the drop's, then the
+    /// message of a failed apply or pop. No two of them are open at once.
+    pub(crate) fn stash_layers(&self, window: &Window, cx: &Context<Self>) -> Vec<Div> {
+        self.new_stash_layer(window, cx)
+            .into_iter()
+            .chain(self.drop_stash_layer(window, cx))
+            .chain(self.stash_failure_layer(window, cx))
+            .collect()
+    }
+
+    /// The selected stash's buttons: Apply, Pop and Drop, in that order.
+    fn stash_actions(&self, entry: &StashEntry, cx: &Context<Self>) -> Div {
+        let target = stash_args(entry);
+        let ctx = self.action_context("");
+        div().flex().flex_row().gap_2().children(
+            [
+                (Action::StashApply, "stash-apply", "Apply"),
+                (Action::StashPop, "stash-pop", "Pop"),
+                (Action::StashDrop, "stash-drop", "Drop"),
+            ]
+            .map(|(action, id, label)| stash_action_button(action, id, label, &target, &ctx, cx)),
+        )
+    }
+
     /// Shows the page: the stash list is read again, and the history's stacked
     /// diff closes, since the diff pane is shared.
     pub(crate) fn show_stashes(&mut self, cx: &mut Context<Self>) {
@@ -170,6 +198,47 @@ impl StatusView {
         );
         self.model.stash_commit.request(id);
         cx.notify();
+    }
+}
+
+/// One of the detail panel's stash buttons. Its rule is the registry's: a refused
+/// button is muted and its reason is its tooltip; a click on it says the reason.
+fn stash_action_button(
+    action: Action,
+    id: &'static str,
+    label: &'static str,
+    target: &Args,
+    ctx: &ActionContext<'_>,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    let refusal = action.enabled(target, ctx).err();
+    let colour = match refusal {
+        Some(_) => theme::muted(),
+        None if action == Action::StashDrop => theme::removed_fg(),
+        None => theme::text(),
+    };
+    let button = div()
+        .id(id)
+        .flex_none()
+        .px_2()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::button_border())
+        .text_xs()
+        .text_color(colour)
+        .child(label)
+        .on_mouse_down(MouseButton::Left, {
+            let target = target.clone();
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.run_action(action, &target, window, cx);
+            })
+        });
+    match refusal {
+        None => button.cursor_pointer(),
+        Some(reason) => button.tooltip(window_chrome::hint(reason)),
     }
 }
 
@@ -272,6 +341,7 @@ fn stash_row(
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
     let oid = entry.oid.clone();
+    let (menu_index, menu_oid) = (entry.index, entry.oid.clone());
     div()
         .id(("stash-row", index))
         .cursor_pointer()
@@ -288,6 +358,12 @@ fn stash_row(
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.select_stash(&oid, cx);
         }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.open_stash_menu(menu_index, &menu_oid, event.position, cx);
+            }),
+        )
         .child(
             div()
                 .flex_none()

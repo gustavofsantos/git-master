@@ -47,6 +47,9 @@ use crate::shell_history::CommitTexts;
 use crate::shell_search::{self, SearchView};
 use crate::shell_sidebar;
 use crate::sidebar::Grouping;
+use crate::stash_apply::{self, FailureDialog};
+use crate::stash_drop::DropStashDialog;
+use crate::stashes;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
 use crate::title_bar;
@@ -159,6 +162,10 @@ pub struct StatusView {
     pub(crate) delete_dialog: Option<DeleteDialog>,
     /// The discard dialog, while it is open.
     pub(crate) discard_dialog: Option<DiscardDialog>,
+    /// The drop dialog of a stash, while it is open (B2).
+    pub(crate) drop_stash_dialog: Option<DropStashDialog>,
+    /// The message that an apply or a pop was not done, while it is open (B2).
+    pub(crate) stash_failure: Option<FailureDialog>,
     /// The delete-merged-branches dialog, while it is open.
     pub(crate) merged_dialog: Option<MergedDialog>,
     /// The recent repositories, newest first, as last saved or loaded.
@@ -349,6 +356,8 @@ impl StatusView {
             flow_inspector: FlowInspector::default(),
             delete_dialog: None,
             discard_dialog: None,
+            drop_stash_dialog: None,
+            stash_failure: None,
             merged_dialog: None,
             recents,
             recent_store,
@@ -422,6 +431,8 @@ impl StatusView {
     fn on_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         let reload = matches!(event, Event::StatusLoaded { .. });
         let listed = matches!(event, Event::BranchesLoaded { .. });
+        let stashes_listed = matches!(event, Event::StashesListed { .. });
+        let stash_stale = stashes::is_stale_refusal(&event);
         let committed = matches!(event, Event::Committed { .. });
         let detail_loaded = matches!(event, Event::CommitDetailLoaded { .. });
         let file_event = matches!(
@@ -442,6 +453,9 @@ impl StatusView {
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
+        if stash_stale {
+            self.request_stash_list();
+        }
         if detail_loaded {
             self.show_commit_texts(cx);
         }
@@ -499,7 +513,7 @@ impl StatusView {
             self.show_diffs(diffs.unstaged, diffs.staged, cx);
         }
         // The palette's offers come from the status, the branch and workflow listings.
-        if self.palette.open && (reload || listed || workflow_refresh) {
+        if self.palette.open && (reload || listed || stashes_listed || workflow_refresh) {
             self.refresh_palette(cx);
         }
         if reload {
@@ -548,6 +562,12 @@ impl StatusView {
         }
         if let Some(outcome) = self.model.stash_create.take() {
             self.on_stash_created(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.stash_apply.take() {
+            self.on_stash_applied(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.stash_drop.take() {
+            self.on_stash_dropped(outcome, window, cx);
         }
     }
 
@@ -931,6 +951,7 @@ impl StatusView {
                     self.request_hook_list();
                 }
                 for kind in kinds {
+                    let applying = stash_apply::tracked(&kind);
                     let checkout = matches!(kind, CommandKind::Checkout { .. });
                     let refresh = matches!(kind, CommandKind::RefreshStatus);
                     let remote = matches!(
@@ -942,6 +963,9 @@ impl StatusView {
                         _ => None,
                     };
                     let id = self.engine.dispatch(Actor::Human, kind);
+                    if let Some((apply, index)) = applying {
+                        self.model.stash_apply.start(id, apply, index);
+                    }
                     if checkout {
                         self.model.branches.begin_checkout(id);
                     }
@@ -997,6 +1021,9 @@ impl StatusView {
             Ok(Effect::ShowHistory) => self.show_history(cx),
             Ok(Effect::ShowStashes) => self.show_stashes(cx),
             Ok(Effect::OpenNewStashDialog) => self.open_new_stash_dialog(window, cx),
+            Ok(Effect::OpenDropStashDialog { index, oid, label }) => {
+                self.open_drop_stash_dialog(index, &oid, &label, window, cx);
+            }
             Ok(Effect::ShowWorkflows) => self.show_workflows(cx),
             Ok(Effect::OpenQuickOpen) => self.open_quick_open(window, cx),
             Ok(Effect::ShowCode) => self.show_code(cx),
@@ -1057,6 +1084,11 @@ impl StatusView {
             root: self.model.status().map(|status| status.root.as_str()),
             worktrees: &self.model.worktrees,
             branch_scope: self.sidebar_filter.scope(self.model.branches.user_email()),
+            stashes: self
+                .model
+                .stashes
+                .is_loaded()
+                .then(|| self.model.stashes.entries()),
             user_email_known: branch_filter::known_email(self.model.branches.user_email())
                 .is_some(),
             hooks: HookCtx {
@@ -1369,7 +1401,7 @@ impl Render for StatusView {
                     .then(|| self.prune_layer(window, cx)),
             )
             .children(self.new_branch_layer(window, cx))
-            .children(self.new_stash_layer(window, cx))
+            .children(self.stash_layers(window, cx))
             .children(self.workflow_inputs_layer(window, cx))
             .children(
                 self.delete_dialog
