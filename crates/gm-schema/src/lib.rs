@@ -8,6 +8,7 @@ mod history;
 mod hook;
 mod operation;
 mod reflog;
+mod review;
 mod stash;
 mod status;
 mod workflow;
@@ -33,6 +34,7 @@ pub use operation::{
     OperationState, STASH_LIST_CHANGED, WorktreeMode,
 };
 pub use reflog::{REFLOG_PAGE, ReflogEntry};
+pub use review::{ReviewAnchor, ReviewComment, ReviewLocation, ReviewStatus};
 pub use stash::StashEntry;
 pub use status::{
     Blocker, BranchEntry, BranchFailure, BranchInfo, Change, MergedBranch, PruneCandidate,
