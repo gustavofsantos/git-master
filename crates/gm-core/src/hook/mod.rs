@@ -1,4 +1,4 @@
-//! Hooks of the app (docs/03). Slice 2 has one: `prepare-commit`, which turns
+//! Hooks of the app (design/hooks-transitional.md). Slice 2 has one: `prepare-commit`, which turns
 //! the staged diff and the current message into a suggested message. Native
 //! Git hooks are not here; they stay with Git (D29).
 //!

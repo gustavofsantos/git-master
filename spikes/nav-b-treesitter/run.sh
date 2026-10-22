@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Spike S-B measurements (docs/09). Writes results/*.txt.
+# Spike S-B measurements (design/code-navigation.md). Writes results/*.txt.
 #
 # Needs a release build with every grammar and the Rust truth tool:
 #   export CARGO_TARGET_DIR=$HOME/.cache/gm-spikes/target-b

@@ -1,5 +1,5 @@
 //! The file list and the file viewer behind Quick Open and the Code page
-//! (docs/09, N1 and N2). Three kinds of work run on threads of their own, and
+//! (design/code-navigation.md, N1 and N2). Three kinds of work run on threads of their own, and
 //! each answers to the engine with a report: reading the list of files
 //! (`IndexJob`), searching it (`SearchJob`) and reading one file (`ReadJob`).
 //! A search or a read that a newer request superseded is stopped, and its late

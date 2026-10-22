@@ -1,4 +1,4 @@
-# Spike S-A: file lists and grep at scale (docs/09)
+# Spike S-A: file lists and grep at scale (design/code-navigation.md)
 
 Measured on 2026-10-21 by the agent, in a cloud container (4 vCPU, virtual disk, git 2.43.0). Raw numbers: `results/n100k.csv`, `results/n1m.csv`. Reproduce: `./gen.sh 100000 $HOME/.cache/gm-spikes/repos/nav100k checkout`, `./gen.sh 1000000 $HOME/.cache/gm-spikes/repos/nav1m` (index only), then `RUNS=5 python3 -I bench.py <repo> n100k worktree` (1M: `RUNS=2`, no `worktree`).
 

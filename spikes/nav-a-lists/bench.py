@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spike S-A timings (docs/09). Usage: bench.py <repo> <label> [worktree]
+"""Spike S-A timings (design/code-navigation.md). Usage: bench.py <repo> <label> [worktree]
 
 Every measurement is the median of RUNS warm runs (no root for drop_caches).
 `first` is the time until the first output line, then the process is killed,

@@ -1,4 +1,4 @@
-//! One thread owns the engine (one writer per repository, docs/06 rule 3) and
+//! One thread owns the engine (one writer per repository, design/architecture.md rule 3) and
 //! talks to the front-ends over channels, so the UI never waits for it. Hook
 //! runs are slow, so each gets its own thread; it reports back over the same
 //! channel and the engine thread records the result.

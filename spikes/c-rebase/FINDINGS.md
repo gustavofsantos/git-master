@@ -1,6 +1,6 @@
 # Spike C: in-memory restack (libgit2 vs `git merge-tree`)
 
-Question (Q6, docs/02 "Restack"): can GitMaster restack a branch stack entirely in memory, without touching the working tree or index, and surface conflicts?
+Question (Q6, design/stacks-restack.md "Restack"): can GitMaster restack a branch stack entirely in memory, without touching the working tree or index, and surface conflicts?
 
 Run: `cargo test -p spike-c-rebase` (13 tests, all pass) and `cargo run --release -p spike-c-rebase` (timing). git 2.53.0, git2 0.20.4 (libgit2 bundled). Scratch repos under `$GM_SPIKE_TMP` (`~/.cache/gm-spikes/tmp`).
 
@@ -57,7 +57,7 @@ Single run, not statistically averaged. merge-tree costs about one subprocess pa
 - **Restack backend: libgit2 in-memory.** It covers every tested scenario (with the `Applied` skip), returns correct conflict sides and resumes after programmatic resolution, and is about 18x faster than per-commit merge-tree on 200 commits. D26 (hybrid, libgit2 for merge/rebase in memory) holds for this question.
 - **merge-tree:** keep as an option or cross-check (it is the same algorithm as git's ort merge). It is slower and needs git >= 2.40.
 - **gitoxide:** do not switch now. Evaluate it only if libgit2 fails on rerere, signing or hooks, which were not tested here. Those should be spiked before D26 is closed.
-- Q6 in docs/01 is not updated by this spike; the author should record the outcome there.
+- Q6 in design/decisions.md is not updated by this spike; the author should record the outcome there.
 
 ## Open doubts
 

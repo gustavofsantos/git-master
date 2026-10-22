@@ -1,4 +1,4 @@
-//! The path matcher behind Quick Open (docs/09, N1, D46, spike S-C). Pure: no
+//! The path matcher behind Quick Open (design/code-navigation.md, N1, D46, spike S-C). Pure: no
 //! I/O, so the ranking and the highlight are tested on their own.
 //!
 //! A query matches a path when its letters appear in the path in order,

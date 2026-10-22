@@ -1,4 +1,4 @@
-//! The typed model of one workflow file: a bounded state machine (docs/10,
+//! The typed model of one workflow file: a bounded state machine (design/workflow-scripts.md,
 //! D78). Plain data, built by `parse` and read by `validate` and `machine`.
 
 use std::time::Duration;

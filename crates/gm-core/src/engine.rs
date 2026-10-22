@@ -30,7 +30,7 @@ use crate::workflow_session::{self, Actions, Session};
 use crate::worktree;
 
 /// One state change of one operation. The log is audit, and the base for undo
-/// later; it is not replayed to rebuild state (docs/06).
+/// later; it is not replayed to rebuild state (design/architecture.md).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogEntry {
     pub id: OperationId,
@@ -1796,7 +1796,7 @@ impl Engine {
         name: &str,
         command_hash: &str,
     ) -> Result<Vec<Event>, String> {
-        // Approval is the human's decision (docs/00); an agent may only propose.
+        // Approval is the human's decision (docs/concepts/principles.md); an agent may only propose.
         if !matches!(actor, Actor::Human) {
             return Err("only a human can approve a hook".to_owned());
         }

@@ -1,4 +1,4 @@
-//! The Workflows page's model (docs/05, D76): which workflow is open, the
+//! The Workflows page's model (design/screens.md, D76): which workflow is open, the
 //! buffer typed into its file and what the file held when it was loaded or
 //! last saved, the live diagnostics of the buffer, the save in flight, the Flow
 //! rows of the parsed file, and the runs of the open workflow. Plain data and

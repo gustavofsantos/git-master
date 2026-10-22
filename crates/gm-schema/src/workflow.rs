@@ -1,4 +1,4 @@
-//! Manual workflows (docs/10) as the front-ends see them: the files the engine
+//! Manual workflows (design/workflow-scripts.md) as the front-ends see them: the files the engine
 //! found, and how a run moves from one state to the next.
 
 use schemars::JsonSchema;

@@ -1,4 +1,4 @@
-//! The window side of Quick Open (docs/09, N1): the layer that Ctrl/⌘+P opens,
+//! The window side of Quick Open (design/code-navigation.md, N1): the layer that Ctrl/⌘+P opens,
 //! its one input, the virtualized list of files and the keys. The state, the
 //! highlight and the status line come from `quick_open.rs`. The engine finds the
 //! files; each keystroke sends a search, and an answer to an older one is dropped

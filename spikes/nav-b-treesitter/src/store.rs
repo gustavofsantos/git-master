@@ -1,4 +1,4 @@
-//! The symbol store benchmark (spike S-B, docs/09 "where to keep the index").
+//! The symbol store benchmark (spike S-B, design/code-navigation.md "where to keep the index").
 //!
 //! Reads the tags dumps (`path<TAB>row<TAB>kind<TAB>name`) and stores them in
 //! SQLite the way N5 would: one row per symbol, keyed by the blob it came from,

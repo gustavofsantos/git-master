@@ -1,4 +1,4 @@
-//! The graph and reference rules of a parsed workflow (docs/10, D63, D78).
+//! The graph and reference rules of a parsed workflow (design/workflow-scripts.md, D63, D78).
 //! Errors keep the workflow from running; warnings are shown on the page.
 
 use std::collections::VecDeque;
@@ -10,7 +10,7 @@ use super::catalog::{self, DEFAULTED, FieldKind, FieldSpec, Level};
 use super::expr;
 use super::model::{Approval, Definition, End, State, StateKind, Target, Transition};
 
-/// The roots a template may start with outside a `for_each` item (docs/10).
+/// The roots a template may start with outside a `for_each` item (design/workflow-scripts.md).
 const ROOTS: &[&str] = &["inputs", "trigger", "repo", "states"];
 
 /// Every problem in the definition, errors and warnings, ordered by line.

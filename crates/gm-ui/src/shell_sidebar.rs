@@ -1,9 +1,9 @@
 //! The sidebar at the window's left: the workspace destinations, the switch
 //! between the two ways of grouping branches, the branch tree and the
 //! worktrees. Only the Working Copy exists; the other destinations and the
-//! stack tree are placeholders until their slices land (docs/07). The
+//! stack tree are placeholders until their slices land (design/roadmap.md). The
 //! worktrees show their state; a double-click opens one in its own window
-//! (docs/07, W4).
+//! (design/roadmap.md, W4).
 
 use std::ops::Range;
 

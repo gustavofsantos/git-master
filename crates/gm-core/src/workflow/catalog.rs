@@ -1,5 +1,5 @@
 //! The actions, wait events and triggers a workflow may name, with each
-//! action's effect level, declared outcomes (docs/10, D63, D78) and the typed
+//! action's effect level, declared outcomes (design/workflow-scripts.md, D63, D78) and the typed
 //! `with` fields the driver reads. Static in WF0; JSON Schema of inputs and
 //! outputs comes with WF1.
 

@@ -1,4 +1,4 @@
-//! The model of the Code page (docs/09, N2): the folder tree and the viewer of
+//! The model of the Code page (design/code-navigation.md, N2): the folder tree and the viewer of
 //! one file. Nothing here touches GPUI. The tree is read a folder at a time
 //! from the engine, which lists a folder from the file list it holds in memory,
 //! and the viewer shows one file read from disk. A reply to a request that a

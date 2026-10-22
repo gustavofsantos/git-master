@@ -1,4 +1,4 @@
-//! The expression language of workflows (docs/10, D62, D78): `${path}`
+//! The expression language of workflows (design/workflow-scripts.md, D62, D78): `${path}`
 //! references inside templates, and conditions with comparisons,
 //! `and`/`or`/`not`, parentheses and `len()`. Pure; no I/O, no variables.
 

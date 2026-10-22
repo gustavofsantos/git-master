@@ -1,4 +1,4 @@
-//! Drives workflow runs (docs/10, D64, D79, D80): feeds outcomes to the pure
+//! Drives workflow runs (design/workflow-scripts.md, D64, D79, D80): feeds outcomes to the pure
 //! transition function, carries out each effect, and records every step in
 //! the store before and after it runs. Quick actions run inline; `exec` runs
 //! on a thread the caller starts (`ExecJob`); `approve` pauses for the human.

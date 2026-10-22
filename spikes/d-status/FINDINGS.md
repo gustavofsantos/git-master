@@ -30,8 +30,8 @@ Index-lock test (concurrent `git add` + `git commit` loop while status runs 30 t
 
 1. **Subprocess stays the status backend** (confirms D26). libgit2 is about 2.5x slower at 500k and has no untracked-cache path.
 2. **Keep `--no-optional-locks` on every background status.** Plain status broke concurrent commits almost every time; the app's command broke none. This matters for agents running `git` in parallel.
-3. **Latency off the UI thread is enough at these sizes.** Untuned: 0.15 s (50k), 0.35 s (200k), 0.61 s (500k). Pass criterion "opens a large repo and lists changes without freezing" holds because status never runs on the UI thread (docs/00).
-4. **Do not auto-enable untracked cache or fsmonitor.** They write `.git` metadata; docs/00 says nothing is written into the repository without consent. Proposed rule: if a warm status exceeds 1 s, offer the tuning to the user.
+3. **Latency off the UI thread is enough at these sizes.** Untuned: 0.15 s (50k), 0.35 s (200k), 0.61 s (500k). Pass criterion "opens a large repo and lists changes without freezing" holds because status never runs on the UI thread (docs/concepts/principles.md).
+4. **Do not auto-enable untracked cache or fsmonitor.** They write `.git` metadata; docs/concepts/principles.md says nothing is written into the repository without consent. Proposed rule: if a warm status exceeds 1 s, offer the tuning to the user.
 5. **Untracked cache caveat (inferred from git docs, not measured):** `--no-optional-locks` status never writes the index, so the cache only gets primed when a plain git command runs (terminal, IDE). Needs a never-primed run to confirm.
 6. **fsmonitor: no verdict.** Do not recommend `core.fsmonitor` until verified on a git build where the daemon works (macOS and Windows builds are the usual ones).
 7. commit-graph has no measurable effect on status.

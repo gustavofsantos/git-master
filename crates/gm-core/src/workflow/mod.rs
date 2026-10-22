@@ -1,4 +1,4 @@
-//! Workflows (docs/10): a bounded state machine read from a TOML file in the
+//! Workflows (design/workflow-scripts.md): a bounded state machine read from a TOML file in the
 //! user's config and interpreted by the engine. WF0 is the pure core: the
 //! model, the parser, the expression language, the action catalog, the
 //! validator and the transition function. No I/O.

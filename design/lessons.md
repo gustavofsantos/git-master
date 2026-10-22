@@ -29,7 +29,7 @@ Source: `~/Projects/rvw` (Rust + GPUI review hub by the same author). Read on 20
 - Quit: `cx.on_window_closed` quits when no windows remain; bind `secondary-q`.
 - Windows opened from a desktop launcher have no shell `PATH`. rvw reads `$SHELL -l -i -c env` once in the background (10 s limit) and gives it to every git process. GitMaster needs the same, since hooks may call an agent CLI, `jq`, linters.
 - Linux windows: `WindowDecorations::Client` plus own controls where the compositor draws none; set `app_id`.
-- Multi-line text editing is the hard part (see Q7). rvw has a ported single-line input and a custom text area; a Sonnet-class agent did the GPUI text area well, a cheaper one was not trusted there.
+- Multi-line text editing is the hard part (see Q7 in design/decisions.md). rvw has a ported single-line input and a custom text area; a Sonnet-class agent did the GPUI text area well, a cheaper one was not trusted there.
 
 ## Git practice carried over
 
@@ -49,7 +49,7 @@ Source: `~/Projects/rvw` (Rust + GPUI review hub by the same author). Read on 20
 
 State: this repository has no commits besides these docs. Nothing in `crates/` exists yet.
 
-Proposed skeleton, following `06-arquitetura.md` and D27:
+Proposed skeleton, following `design/architecture.md` and D27:
 
 1. Workspace: `gm-schema`, `gm-core`, `gm-ui`, `gm-mcp`, plus a thin binary crate `gitmaster` as composition root (arch rule 7 needs a home for the binary).
 2. `gm-schema`: `Actor`, `Command`, `Event`, `OperationId` (sequential, so the log stays deterministic), `OperationState` with a transition table, `RepoStatus` with serde + schemars.

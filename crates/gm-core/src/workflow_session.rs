@@ -1,4 +1,4 @@
-//! The engine's side of manual workflows (docs/10): the session that holds the
+//! The engine's side of manual workflows (design/workflow-scripts.md): the session that holds the
 //! driver and the store of one open repository, the Git actions a run takes
 //! through the engine's `GitPort`, and the mapping of run events to the events
 //! the front-ends get. The engine's methods that drive it live in `engine`.

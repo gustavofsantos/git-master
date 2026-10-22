@@ -1,4 +1,4 @@
-//! The pure transition function of a workflow run (docs/10, D78, D80):
+//! The pure transition function of a workflow run (design/workflow-scripts.md, D78, D80):
 //! given the definition, the run so far and the outcome of the current
 //! state, it returns the next run, the transition to record and the effect
 //! the engine must carry out. No I/O; the engine owns effects and storage.

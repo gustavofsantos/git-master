@@ -1,4 +1,4 @@
-//! Spike S-B (docs/09): tree-sitter for the symbols (N5) and the highlight (N4).
+//! Spike S-B (design/code-navigation.md): tree-sitter for the symbols (N5) and the highlight (N4).
 //!
 //!   spike-nav-b-treesitter info
 //!   spike-nav-b-treesitter parse <lang> <root> [--threads N] [--max-bytes N]

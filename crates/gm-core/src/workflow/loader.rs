@@ -1,4 +1,4 @@
-//! Finds and loads the workflow files of the user (docs/10, D61, D73): the
+//! Finds and loads the workflow files of the user (design/workflow-scripts.md, D61, D73): the
 //! user's workflows directory and the directories in `gitmaster.workflowPath`.
 //! Nothing is ever read from a repository's working tree.
 

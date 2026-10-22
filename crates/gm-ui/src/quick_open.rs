@@ -1,4 +1,4 @@
-//! The model of Quick Open (docs/09, N1): the query typed, the search in
+//! The model of Quick Open (design/code-navigation.md, N1): the query typed, the search in
 //! flight, the last answer and the highlighted row. Nothing here touches GPUI,
 //! and nothing searches: the engine does, over the file list it holds in memory,
 //! and answers with the best files. A reply to a search that a newer one
