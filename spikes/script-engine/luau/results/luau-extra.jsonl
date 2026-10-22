@@ -1,0 +1,4 @@
+{"probe":"pcall-recursion-wrapped","out":"99"}
+{"probe":"pcall-table-error-preserved","out":"table code=7"}
+{"probe":"budget-caught-then-return","out":"budget:steps | budget exceeded: steps (limit 20000000 interrupt points)"}
+{"probe":"deep-recursion-cancel-spin-100000","out":"stack_overflow after 20000 steps"}

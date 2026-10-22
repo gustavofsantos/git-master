@@ -1,0 +1,33 @@
+   Compiling libc v0.2.186
+   Compiling find-msvc-tools v0.1.14
+   Compiling shlex v2.0.1
+   Compiling parking_lot_core v0.9.12
+   Compiling pkg-config v0.3.34
+   Compiling cfg-if v1.0.5
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling memchr v2.8.3
+   Compiling scopeguard v1.2.0
+   Compiling zmij v1.0.23
+   Compiling smallvec v1.16.3
+   Compiling rustversion v1.0.23
+   Compiling jobserver v0.1.35
+   Compiling serde_core v1.0.229
+   Compiling cc v1.8.0
+   Compiling lock_api v0.4.14
+   Compiling serde_json v1.0.154
+   Compiling parking_lot v0.12.5
+   Compiling bstr v1.13.1
+   Compiling rustc-hash v2.1.3
+   Compiling luau0-src v0.18.3+luau709
+   Compiling itoa v1.0.18
+   Compiling either v1.19.0
+   Compiling mlua-sys v0.10.0
+   Compiling mlua v0.11.6
+   Compiling spike-script-luau v0.0.0 (/home/user/git-master/spikes/script-engine/luau)
+    Finished `release` profile [optimized] target(s) in 38.88s
+
+real	0m38.945s
+user	1m21.482s
+sys	0m6.379s
+exit 0
