@@ -59,6 +59,18 @@ impl ScriptEngine for LuauEngine {
         }
     }
 
+    fn read_data(&self, chunk: &str, source: &str) -> Result<Json, Vec<ScriptDiagnostic>> {
+        let run = fresh_run();
+        let (_lua, table) =
+            load(&run, chunk, source).map_err(|problem| vec![problem.diagnostic(chunk, &run)])?;
+        convert::to_json(&Value::Table(table)).map_err(|e| {
+            vec![ScriptDiagnostic {
+                line: 0,
+                message: format!("the chunk cannot hold {e}"),
+            }]
+        })
+    }
+
     fn run(&self, request: &RunRequest<'_>, host: &mut dyn CtxHost) -> RunEnd {
         let run = Arc::new(Run::new(request.budgets, Arc::clone(&request.cancel)));
         execute(request, host, &run)

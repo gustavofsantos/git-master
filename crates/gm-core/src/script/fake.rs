@@ -103,6 +103,14 @@ where
         Ok(Value::Null)
     }
 
+    fn read_data(
+        &self,
+        _chunk: &str,
+        _source: &str,
+    ) -> Result<Value, Vec<super::port::ScriptDiagnostic>> {
+        Ok(Value::Null)
+    }
+
     fn run(
         &self,
         _request: &super::port::RunRequest<'_>,

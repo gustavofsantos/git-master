@@ -200,6 +200,10 @@ pub trait ScriptEngine: Send + Sync {
     /// the chunk runs its top level under the budgets; `execute` is not called.
     fn read_meta(&self, chunk: &str, source: &str) -> Result<Value, Vec<ScriptDiagnostic>>;
 
+    /// Runs a chunk that returns a plain table (a test fixture) in the same sandbox, with no `ctx`
+    /// and no host function, and returns the table as JSON. The chunk has no `execute`.
+    fn read_data(&self, chunk: &str, source: &str) -> Result<Value, Vec<ScriptDiagnostic>>;
+
     /// Runs `execute(ctx, input)` on the calling thread, in a new VM. Never panics on a script
     /// error: every end is a `RunEnd`.
     fn run(&self, request: &RunRequest<'_>, host: &mut dyn CtxHost) -> RunEnd;
