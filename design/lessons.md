@@ -88,3 +88,26 @@ Working with agents (orchestrator plus Haiku workers, each in its own git worktr
 - The worktree guard refuses compound shell commands that name git (`cd … && git …`, pipes into git) and app launches that set `XDG_CONFIG_HOME`. Tell workers to read with the file tools, to run plain separate commands as the guard suggests, and to stop and report when a plain command is refused; never to wrap or disguise a command. Windows are checked by the orchestrator, not by workers.
 - A worker that stops with no changes loses its worktree; resuming it then fails. Start a new worker instead.
 - Haiku workers did well on pure modules with exact signatures and tests (layout, edits, dry run) and on GPUI views with a named pattern to copy. Every view still needed a look in a window: column width, focus and blur, and click coordinates were only found there.
+
+## Lessons from the WS0 and WS1 slices (2026-10-23)
+
+Build and disk:
+
+- Luau (the workflow script engine, D104) is C++ and needs a C++ compiler: `g++` or `clang++` (`build-essential` has it; macOS has it in the Command Line Tools). On Linux, `.cargo/config.toml` sets `CXXSTDLIB_<target> = "static:-bundle=stdc++"`, which links the C++ runtime statically so the binary depends only on glibc. It takes a clean rebuild of `mlua-sys` to take effect: `cargo clean -p mlua-sys -p luau0-src` after adding it. Check with `ldd target/release/gitmaster`.
+- A GPUI debug `target/` reaches 26 GB (19 GB of it in `target/debug/deps`, much of it one linked executable per integration test file). When the writable disk is spent, a git commit fails with "Out of diskspace" and, in a chain with `&&`, it fails silently: read `git log` after committing. Free space with `rm -rf target/debug/incremental`, then delete the linked test executables in `target/debug/deps` (`find . -maxdepth 1 -type f -perm -u+x ! -name '*.so' -size +5M -delete`); the libraries stay and the next `cargo test` relinks them.
+- The one-binary release build of GPUI takes about 4 minutes on 4 cores once the dependencies are warm.
+
+Testing:
+
+- Take a sandbox claim from a test written against the host side of the boundary as well as the VM side: the first escape suite had 53 cases and none of them passed a cyclic or 100,000-level table to `ctx`, which would overflow the Rust stack. The converter had a depth cap; the test makes sure it keeps it.
+- A test of "never reached" code needs a witness: a host call that must not be recorded, or a file that must not exist, not only an end status.
+- `grep_real_git::git_is_killed_when_the_result_is_full_not_waited_for` is racy under load: it kills a shell script before the shell has started its `sleep 60`, and the read then waits the 60 seconds. It passes alone. Run it alone before suspecting a change.
+- A clippy "too many lines" error appears when an existing `match` grows by one arm. Move one arm into a method instead of adding an `allow`.
+
+Working with agents (Haiku workers):
+
+- Pure modules with exact signatures, a named pattern to copy and the tests listed came back right again (loader, trust store, templates, API reference, CLI, a GPUI dialog). The contract stub (types and `todo!()` bodies, committed first) let four workers run at once on disjoint files; the orchestrator owned `mod.rs`, `lib.rs` and every `Cargo.toml`.
+- Workers' clippy runs disagree with `make check` while other workers' files are mid-edit. Run the whole `make check` once they are all done.
+- A worker told "no report .md files" wrote none and left its findings in a summary text; say where the report goes.
+- A sandbox adapter needs a reviewer who reads it. The one worker deviation (no `sandbox(true)`, a manual freeze) was right, and it was found by reading the code, not the report.
+
