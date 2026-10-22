@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, CommitFile, DiffSide, FileDiff, HookScope, Hunk, HunkId,
-    MergedBranch, PruneCandidate, RepoStatus, StageTarget, StashEntry, StatusEntry, WorktreeEntry,
-    WorktreeMode,
+    MergedBranch, PruneCandidate, ReflogEntry, RepoStatus, StageTarget, StashEntry, StatusEntry,
+    WorktreeEntry, WorktreeMode,
 };
 
 use crate::branch;
@@ -25,6 +25,7 @@ use crate::grep::{Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
 use crate::port::{DetailRead, FileListRead, GrepRead, RemoteRun, StackRead};
+use crate::reflog;
 use crate::remote;
 use crate::stage_math;
 use crate::stash;
@@ -695,6 +696,22 @@ impl GitPort for SubprocessGit {
         self.stash_command(root, "drop", index)
     }
 
+    fn reflog(&self, root: &Path, skip: u32, limit: usize) -> Result<Vec<ReflogEntry>, GitError> {
+        // An unborn HEAD makes `git reflog` fail; asking first keeps Git's wording out.
+        let mut head = self.git(root);
+        head.args(["rev-parse", "--verify", "-q", "HEAD"]);
+        if Self::run_allowing(head, &[0, 1])?.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut command = self.git(root);
+        command
+            .args(["reflog", "show", "-z", "--date=unix", reflog::LIST_FORMAT])
+            .arg(format!("-n{limit}"))
+            .arg(format!("--skip={skip}"))
+            .arg("HEAD");
+        reflog::parse_list(&Self::run(command)?, skip)
+    }
+
     fn common_dir(&self, root: &Path) -> Result<PathBuf, GitError> {
         let mut command = self.git(root);
         command.args(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
@@ -1105,6 +1122,18 @@ impl GitPort for SubprocessGit {
             // Unknown name: git reports it.
             command.args(["switch", "--", branch]);
         }
+        self.logged(command, None).map(drop)
+    }
+
+    fn checkout_commit(&self, root: &Path, oid: &str) -> Result<(), GitError> {
+        // The same rule the engine applies: only a hex id reaches Git.
+        if let Some(problem) = reflog::oid_problem(oid) {
+            return Err(GitError(problem.into()));
+        }
+        let repo = open(root)?;
+        check_index_lock(&repo)?;
+        let mut command = self.git(root);
+        command.args(["checkout", "--detach", oid]);
         self.logged(command, None).map(drop)
     }
 

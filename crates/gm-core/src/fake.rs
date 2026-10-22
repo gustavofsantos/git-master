@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use gm_schema::{
     BranchEntry, CommitDetail, CommitFile, CommitSummary, FileDiff, GrepResult, History,
-    RepoStatus, StashEntry, WorktreeEntry, WorktreeMode,
+    ReflogEntry, RepoStatus, StashEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::file_index::FileIndex;
@@ -40,6 +40,7 @@ pub struct FakeGit {
     /// Every write git was asked for (stage, unstage, discard, commit), by name.
     writes: Arc<Mutex<Vec<&'static str>>>,
     stashes: Arc<Mutex<Result<Vec<StashEntry>, GitError>>>,
+    reflog: Arc<Mutex<Result<Vec<ReflogEntry>, GitError>>>,
 }
 
 impl FakeGit {
@@ -62,6 +63,7 @@ impl FakeGit {
             file_reads: Arc::new(Mutex::new(0)),
             writes: Arc::new(Mutex::new(Vec::new())),
             stashes: Arc::new(Mutex::new(Ok(Vec::new()))),
+            reflog: Arc::new(Mutex::new(Ok(Vec::new()))),
         }
     }
 
@@ -109,6 +111,15 @@ impl FakeGit {
     /// If another thread panicked while holding the stashes lock.
     pub fn set_stashes(&self, stashes: Result<Vec<StashEntry>, GitError>) {
         *self.stashes.lock().unwrap() = stashes;
+    }
+
+    /// What the reflog reads answer: the entries, sliced by `skip` and `limit`.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the reflog lock.
+    pub fn set_reflog(&self, entries: Result<Vec<ReflogEntry>, GitError>) {
+        *self.reflog.lock().unwrap() = entries;
     }
 
     /// What the next file list read answers: the paths of the worktree.
@@ -263,6 +274,15 @@ impl GitPort for FakeGit {
         self.stashes.lock().unwrap().clone()
     }
 
+    fn reflog(&self, _root: &Path, skip: u32, limit: usize) -> Result<Vec<ReflogEntry>, GitError> {
+        let entries = self.reflog.lock().unwrap().clone()?;
+        Ok(entries
+            .into_iter()
+            .skip(skip as usize)
+            .take(limit)
+            .collect())
+    }
+
     fn resolve_stash(&self, _root: &Path, index: u32) -> Result<Option<String>, GitError> {
         let stashes = self.stashes.lock().unwrap().clone()?;
         Ok(stashes
@@ -348,6 +368,11 @@ impl GitPort for FakeGit {
 
     fn checkout(&self, _root: &Path, _branch: &str) -> Result<(), GitError> {
         self.checkout.lock().unwrap().clone()
+    }
+
+    fn checkout_commit(&self, _root: &Path, _oid: &str) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("checkout_commit");
+        Ok(())
     }
 
     fn grep_text(&self, _root: &Path, request: &GrepRequest) -> Result<GrepRead, GitError> {

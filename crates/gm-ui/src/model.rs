@@ -889,7 +889,9 @@ impl Model {
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
-            | Event::WorkflowMessageSuggested { .. } => None,
+            | Event::WorkflowMessageSuggested { .. }
+            // The Reflog page (B3) takes these; until then they change nothing.
+            | Event::ReflogLoaded { .. } => None,
         }
     }
 
@@ -1155,6 +1157,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::MergedBranchesListed { id, .. }
         | Event::MergedBranchesDeleted { id, .. }
         | Event::StashesListed { id, .. }
+        | Event::ReflogLoaded { id, .. }
         | Event::HooksListed { id, .. }
         | Event::HookStarted { id, .. }
         | Event::HookFinished { id, .. }

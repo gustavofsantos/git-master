@@ -7,6 +7,7 @@ mod grep;
 mod history;
 mod hook;
 mod operation;
+mod reflog;
 mod stash;
 mod status;
 mod workflow;
@@ -31,6 +32,7 @@ pub use operation::{
     Actor, Command, CommandKind, Event, IllegalTransition, MERGED_LIST_CHANGED, OperationId,
     OperationState, STASH_LIST_CHANGED, WorktreeMode,
 };
+pub use reflog::{REFLOG_PAGE, ReflogEntry};
 pub use stash::StashEntry;
 pub use status::{
     Blocker, BranchEntry, BranchFailure, BranchInfo, Change, MergedBranch, PruneCandidate,

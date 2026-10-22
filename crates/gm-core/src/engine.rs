@@ -7,7 +7,7 @@ use std::time::Duration;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event,
     GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch, OperationId,
-    OperationState, STASH_LIST_CHANGED, WorktreeEntry, WorktreeInspection,
+    OperationState, REFLOG_PAGE, STASH_LIST_CHANGED, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -21,6 +21,7 @@ use crate::files::{
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
+use crate::reflog;
 use crate::remote::{RemoteJob, RemoteReport};
 use crate::workflow;
 use crate::workflow::driver::{ExecJob, ExecReport};
@@ -1335,8 +1336,9 @@ impl Engine {
         }
     }
 
-    /// The branch and stash commands: create and delete a branch, and the stashes
-    /// (B2). Human only where a command writes.
+    /// The branch, HEAD and stash commands: create and delete a branch, check out a
+    /// commit, read the reflog (B3) and the stashes (B2). Human only where a command
+    /// writes.
     fn branch_command(
         &self,
         id: OperationId,
@@ -1356,6 +1358,8 @@ impl Engine {
             CommandKind::DeleteMergedBranches { branches } => {
                 self.delete_merged(id, actor, branches)
             }
+            CommandKind::CheckoutCommit { oid } => self.checkout_commit(id, actor, oid),
+            CommandKind::LoadReflog { skip } => self.load_reflog(id, *skip),
             CommandKind::ListStashes => self.list_stashes(id),
             CommandKind::CreateStash { .. }
             | CommandKind::ApplyStash { .. }
@@ -1562,6 +1566,42 @@ impl Engine {
 
     /// The branch list, with the configured user email so the UI can tell
     /// which branches are the user's own.
+    /// One page of the reflog of HEAD (B3, D95). One entry more than a page is
+    /// read, so `has_more` is known without a second run. Reads only.
+    fn load_reflog(&self, id: OperationId, skip: u32) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let mut entries = self
+            .git
+            .reflog(&root, skip, REFLOG_PAGE + 1)
+            .map_err(|e| e.0)?;
+        let has_more = entries.len() > REFLOG_PAGE;
+        entries.truncate(REFLOG_PAGE);
+        Ok(vec![Event::ReflogLoaded {
+            id,
+            skip,
+            entries,
+            has_more,
+        }])
+    }
+
+    /// Detaches HEAD at a commit, as a reflog entry is checked out (B3, D95). The
+    /// id is checked before Git runs. The status and the branch list follow, as
+    /// after a branch change. Human only.
+    fn checkout_commit(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        oid: &str,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "check out a commit")?;
+        if let Some(problem) = reflog::oid_problem(oid) {
+            return Err(problem.to_owned());
+        }
+        let root = self.open_root()?;
+        self.git.checkout_commit(&root, oid).map_err(|e| e.0)?;
+        self.branches_changed(id, &root)
+    }
+
     fn list_branches(&self, id: OperationId) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
         let branches = self.git.branches(&root).map_err(|e| e.0)?;
@@ -2310,6 +2350,7 @@ impl Engine {
             op.command.kind,
             CommandKind::ListStashes
                 | CommandKind::ListWorkflows
+                | CommandKind::LoadReflog { .. }
                 | CommandKind::ListWorkflowRuns { .. }
                 | CommandKind::LoadWorkflowRun { .. }
                 | CommandKind::DryRunWorkflow { .. }

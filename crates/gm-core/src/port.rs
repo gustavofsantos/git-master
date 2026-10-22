@@ -4,7 +4,8 @@ use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
     BranchEntry, CommitDetail, CommitFile, DiffSide, FileDiff, GrepResult, HookScope, HunkId,
-    MergedBranch, PruneCandidate, RepoStatus, StageTarget, StashEntry, WorktreeEntry, WorktreeMode,
+    MergedBranch, PruneCandidate, ReflogEntry, RepoStatus, StageTarget, StashEntry, WorktreeEntry,
+    WorktreeMode,
 };
 
 use crate::command_log::CommandLog;
@@ -293,6 +294,26 @@ pub trait GitPort: Send {
     /// branch of the same short name. Git's own refusal is the error.
     fn checkout(&self, _root: &Path, _branch: &str) -> Result<(), GitError> {
         Err(GitError("checkout is not supported by this adapter".into()))
+    }
+
+    /// Detaches HEAD at commit `oid` (`git checkout --detach`), B3 (D95). The
+    /// id is checked first; Git's own refusal is the error.
+    fn checkout_commit(&self, _root: &Path, _oid: &str) -> Result<(), GitError> {
+        Err(GitError("checkout is not supported by this adapter".into()))
+    }
+
+    /// The entries of the reflog of HEAD after the `skip` newest, at most
+    /// `limit`, newest first (B3, D95). Empty for an unborn HEAD. Never records
+    /// anything (D28) and never takes `index.lock`.
+    fn reflog(
+        &self,
+        _root: &Path,
+        _skip: u32,
+        _limit: usize,
+    ) -> Result<Vec<ReflogEntry>, GitError> {
+        Err(GitError(
+            "the reflog is not supported by this adapter".into(),
+        ))
     }
 
     /// Creates the local branch `name` at `start_point` (HEAD when `None`), and

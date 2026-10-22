@@ -16,6 +16,7 @@ mod history;
 pub mod hook;
 pub mod path_match;
 mod port;
+mod reflog;
 pub mod remote;
 mod runner;
 pub mod stage_math;

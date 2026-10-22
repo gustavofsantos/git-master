@@ -8,6 +8,7 @@ use crate::files::{DirListing, FileSearch, FileView};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History};
 use crate::hook::{HookFailure, HookInfo};
+use crate::reflog::ReflogEntry;
 use crate::stash::StashEntry;
 use crate::status::{
     BranchEntry, BranchFailure, MergedBranch, PruneCandidate, RepoStatus, WorktreeEntry,
@@ -116,6 +117,12 @@ pub enum CommandKind {
         oid: String,
         files: Vec<CommitFile>,
     },
+    /// Reads `REFLOG_PAGE` entries of the reflog of HEAD (B3, D95), newest
+    /// first, after the `skip` newest ones. Never recorded in the command log
+    /// (D28). An unborn HEAD or a repository without a reflog is an empty list.
+    LoadReflog {
+        skip: u32,
+    },
     /// Reads the file list of the worktree again (N1): `git ls-files` with the
     /// untracked files `.gitignore` does not hide, minus what a sparse checkout
     /// leaves out. The list the last read made keeps answering until the new one
@@ -163,6 +170,12 @@ pub enum CommandKind {
         name: String,
         start_point: Option<String>,
         checkout: bool,
+    },
+    /// Detaches HEAD at commit `oid` (`git checkout --detach`), as a reflog entry
+    /// is checked out (B3, D95). The id is 7 to 64 hex characters; Git's text is
+    /// the error, such as local changes that would be overwritten. Human only.
+    CheckoutCommit {
+        oid: String,
     },
     /// Deletes the local branch `name`: `git branch -d`, or `-D` when `force`.
     /// Refused while a worktree has the branch checked out. Git refuses an
@@ -452,6 +465,13 @@ pub enum Event {
         id: OperationId,
         history: History,
     },
+    /// Answers `LoadReflog`: the entries after `skip`, and whether more follow.
+    ReflogLoaded {
+        id: OperationId,
+        skip: u32,
+        entries: Vec<ReflogEntry>,
+        has_more: bool,
+    },
     /// Answers `SearchFiles`.
     FilesFound {
         id: OperationId,
@@ -724,6 +744,25 @@ mod tests {
         );
         let list = serde_json::to_value(CommandKind::ListStashes).unwrap();
         assert_eq!(list["type"], "list_stashes");
+    }
+
+    #[test]
+    fn reflog_commands_wire_format_is_tagged() {
+        let load = serde_json::to_value(CommandKind::LoadReflog { skip: 200 }).unwrap();
+        assert_eq!(load["type"], "load_reflog");
+        assert_eq!(load["skip"], 200);
+        let checkout = serde_json::to_value(CommandKind::CheckoutCommit {
+            oid: "a".repeat(40),
+        })
+        .unwrap();
+        assert_eq!(checkout["type"], "checkout_commit");
+        let back: CommandKind = serde_json::from_value(checkout).unwrap();
+        assert_eq!(
+            back,
+            CommandKind::CheckoutCommit {
+                oid: "a".repeat(40),
+            }
+        );
     }
 
     #[test]
