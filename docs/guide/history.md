@@ -89,7 +89,7 @@ The diff is read-only. It has no stage, unstage or discard controls. Lines show 
 | `Ctrl+Shift+P` (`⇧⌘P`) | Go to the previous file. At the first file, it goes to the last |
 | `Esc`, or **Back to commit** | Return to the commit details |
 
-A binary file, a rename with no text changes and a mode change show a notice in place of lines. A file with more than 5,000 lines shows its first lines, then `and N more lines, not shown.` When the commit changed more than 200 files, the last line of the diff says `and N more files, not shown.`
+A binary file, a rename with no text changes and a mode change show a notice in place of lines. A file with more than 5,000 lines shows its first 5,000 lines, then `and N more lines, not shown.` When the commit changed more than 200 files, the last line of the diff says `and N more files, not shown.`
 
 For the full key table, see [Keyboard shortcuts](../reference/keyboard-shortcuts.md).
 
@@ -98,17 +98,17 @@ For the full key table, see [Keyboard shortcuts](../reference/keyboard-shortcuts
 The commit details have two copy controls:
 
 - **Copy**, beside the hash, copies the full commit hash.
-- **Copy message**, beside the body, copies the subject and the body together.
+- **Copy message** copies the subject and the body together.
 
-Both actions are also in the command palette as **Copy Commit Hash** and **Copy Commit Message**. They act on the selected commit.
+The command palette lists the same actions as **Copy Commit Hash** and **Copy Commit Message**. They need a commit selected in the history.
 
 ## The commit graph
 
 The graph sits to the left of the subject. It draws one row per commit and one line from each commit to each of its parents.
 
-- A **lane** is a column of the graph. The graph shows up to 8 lanes. When a row needs more, the row shows `+N`, where N is the number of lanes beyond the eighth.
+- A **lane** is a line of history drawn in a column. The graph draws up to 8 columns. When a row needs more, the row shows `+N`, where N is the number of columns beyond the eighth.
 - The commit that HEAD points at has a ring around its node.
-- Each lane takes a color from the name of the branch it starts from. The color is the same in every session.
+- A lane that starts at a branch takes its color from the name of that branch. The color is the same in every session.
 - The trunk branches `main`, `master` and `trunk`, local or remote, use a quiet color.
 - The graph does not rely on color alone. Lanes sit in their own columns, and the ring marks HEAD.
 
@@ -130,13 +130,13 @@ When a branch is stacked on a parent, the graph draws the edge between them dash
 
 > **Planned.** Search by content is not available yet.
 
-A search field in the history header finds commits that add or remove a text, the same way as `git log -S`. Changing the text to a regular expression uses `git log -G`. The search waits briefly after you stop typing, and a new search cancels the one in progress.
+A search field in the history header finds commits that add or remove a text, the same way as `git log -S`. A search for a regular expression uses `git log -G`. The search waits briefly after you stop typing, and a new search cancels the one in progress.
 
 ## File history
 
 > **Planned.** File history is not available yet.
 
-The history of one file lists the commits that changed it, in the same list and detail panel as the history of HEAD.
+The history of one file lists the commits that changed that file.
 
 ## Blame
 

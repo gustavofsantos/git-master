@@ -68,7 +68,7 @@ Every call has an effect level. The level tells you what the call can change.
 
 ## Calls
 
-Calls that take several arguments take one table, with the names shown in the Arguments column, such as `ctx.branch.create({ name = "fix/login", checkout = true })`. The calls `ctx.notify`, `ctx.approve`, `ctx.exec` and `ctx.wait` take their arguments positionally, as shown.
+Calls with named arguments take one table, with the names shown in the Arguments column, such as `ctx.branch.create({ name = "fix/login", checkout = true })`. The calls `ctx.notify`, `ctx.approve`, `ctx.exec` and `ctx.wait` take their arguments positionally, as shown.
 
 Outcomes are the values a call can end with, as listed in the action catalog. A value other than `done` raises an error unless the call runs inside `ctx.try`. The section Outcomes and errors below gives the rules.
 
