@@ -1,0 +1,7 @@
+# Luau (the workflow script engine, D104) is C++. Link its C++ runtime statically on Linux, so the
+# binary depends only on glibc: GitMaster is self-contained (AGENTS.md). `-bundle` lets the linker
+# driver find libstdc++.a itself, so no machine-specific -L path is needed. macOS links the
+# system libc++, which is always present, so it needs nothing here.
+[env]
+CXXSTDLIB_x86_64_unknown_linux_gnu = "static:-bundle=stdc++"
+CXXSTDLIB_aarch64_unknown_linux_gnu = "static:-bundle=stdc++"
