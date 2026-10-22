@@ -200,7 +200,12 @@ static ACTIONS: &[ActionSpec] = &[
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
         phase: None,
-        fields: &[], // Not run by the driver yet.
+        fields: &[FieldSpec {
+            name: "remote",
+            kind: FieldKind::Text,
+            required: false,
+            help: "The remote to fetch. Default: origin.",
+        }],
     },
     ActionSpec {
         name: "set",
@@ -234,14 +239,32 @@ static ACTIONS: &[ActionSpec] = &[
         level: Level::Propose,
         outcomes: &["done", "failed"],
         phase: None,
-        fields: &[], // Not run by the driver yet.
+        fields: &[FieldSpec {
+            name: "root",
+            kind: FieldKind::Text,
+            required: true,
+            help: "The branch at the top of the subtree to restack.",
+        }],
     },
     ActionSpec {
         name: "reparent.plan",
         level: Level::Propose,
         outcomes: &["done", "failed"],
         phase: None,
-        fields: &[], // Not run by the driver yet.
+        fields: &[
+            FieldSpec {
+                name: "branch",
+                kind: FieldKind::Text,
+                required: true,
+                help: "The branch to move.",
+            },
+            FieldSpec {
+                name: "parent",
+                kind: FieldKind::Text,
+                required: true,
+                help: "The branch that becomes its parent.",
+            },
+        ],
     },
     // No `interrupted`: restack has its own recovery (D14, D80).
     ActionSpec {
@@ -249,28 +272,56 @@ static ACTIONS: &[ActionSpec] = &[
         level: Level::Apply,
         outcomes: &["done", "conflict", "stale", "failed"],
         phase: None,
-        fields: &[], // Not run by the driver yet.
+        fields: &[FieldSpec {
+            name: "plan_id",
+            kind: FieldKind::Text,
+            required: true,
+            help: "The plan_id that restack.plan returned.",
+        }],
     },
     ActionSpec {
         name: "reparent.apply",
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
         phase: None,
-        fields: &[], // Not run by the driver yet.
+        fields: &[FieldSpec {
+            name: "plan_id",
+            kind: FieldKind::Text,
+            required: true,
+            help: "The plan_id that reparent.plan returned.",
+        }],
     },
     ActionSpec {
         name: "restack.undo",
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
         phase: None,
-        fields: &[], // Not run by the driver yet.
+        fields: &[FieldSpec {
+            name: "plan_id",
+            kind: FieldKind::Text,
+            required: true,
+            help: "The plan_id of the restack to undo.",
+        }],
     },
     ActionSpec {
         name: "push.lease",
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
         phase: None,
-        fields: &[], // Not run by the driver yet.
+        fields: &[
+            FieldSpec {
+                name: "branch",
+                kind: FieldKind::Text,
+                required: true,
+                help: "The branch to push.",
+            },
+            FieldSpec {
+                name: "remote",
+                kind: FieldKind::Text,
+                required: false,
+                help: "The remote to push to. Default: origin.",
+            },
+        ],
     },
 ];
 

@@ -25,6 +25,7 @@ regex = "1"
 toml = { version = "0.9", features = ["preserve_order"] }
 toml_edit = "0.25"
 rusqlite = { version = "0.40", features = ["bundled"] }
+mlua = { version = "0.11", features = ["luau", "send", "serialize"] }
 gm-schema = { path = "crates/gm-schema" }
 gm-core = { path = "crates/gm-core" }
 gm-ui = { path = "crates/gm-ui" }

@@ -22,6 +22,7 @@ pub mod review;
 mod review_session;
 pub mod review_store;
 mod runner;
+pub mod script;
 pub mod stage_math;
 mod stash;
 pub mod watch;
