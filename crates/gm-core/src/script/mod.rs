@@ -3,8 +3,11 @@
 //! side (`run`) journals every call, applies the approval rules and runs the effects. Built next
 //! to the TOML engine in `workflow`, which WS2 removes.
 
+pub mod args;
 pub mod fake;
 pub mod journal;
 pub mod luau;
+pub mod policy;
 pub mod port;
+pub mod run;
 pub mod surface;

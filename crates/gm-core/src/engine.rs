@@ -27,6 +27,9 @@ use crate::remote::{RemoteJob, RemoteReport};
 use crate::review;
 use crate::review_session::{self, ReviewSession};
 use crate::review_store::ReviewStore;
+use crate::script::journal::RunId as ScriptRunId;
+use crate::script::run::{RunSpec, Runtime};
+use crate::script_session::{EffectRequest, ScriptLink, ScriptSession};
 use crate::workflow;
 use crate::workflow::driver::{ExecJob, ExecReport};
 use crate::workflow::store::{RETAINED_RUNS, Store};
@@ -96,6 +99,10 @@ pub struct Engine {
     workflow_trash_dir: Option<PathBuf>,
     /// The workflow runs of the open repository; see `workflow_session`.
     workflow: Option<Session>,
+    /// How script runs reach the engine thread; see `script_session`. Set by the runner.
+    script_link: Option<ScriptLink>,
+    /// The script runs of the open repository; see `script_session`.
+    script: Option<ScriptSession>,
     /// The review comments of the open repository; see `review_session`.
     review: Option<ReviewSession>,
 }
@@ -197,6 +204,8 @@ impl Engine {
             workflow_trash_dir: crate::hook::approval::default_file()
                 .and_then(|file| file.parent().map(|data| data.join("workflow-trash"))),
             workflow: None,
+            script_link: None,
+            script: None,
             review: None,
         }
     }
@@ -274,6 +283,61 @@ impl Engine {
     /// on a thread and passes its report to `remote_report`.
     pub fn take_remote_jobs(&mut self) -> Vec<RemoteJob> {
         std::mem::take(&mut self.remote_jobs)
+    }
+
+    /// Sets how script runs post their effects and events to the engine thread. The runner
+    /// calls it when it starts the engine; tests give their own link.
+    pub fn set_script_link(&mut self, link: ScriptLink) {
+        self.script_link = Some(link);
+    }
+
+    /// Starts a script run in the open repository and returns its id at once; the run goes on
+    /// its own thread. Its Git writes are logged under `id`. The first call opens the journal in
+    /// `state.db` and marks the runs a previous session left unfinished as interrupted (D100).
+    pub fn start_script(&mut self, id: OperationId, spec: RunSpec) -> Result<ScriptRunId, String> {
+        let root = self.open_root()?;
+        let link = self
+            .script_link
+            .clone()
+            .ok_or_else(|| "script runs are not connected to the engine".to_owned())?;
+        if self
+            .script
+            .as_ref()
+            .is_none_or(|session| session.root != root)
+        {
+            let common = self.git.common_dir(&root).map_err(|e| e.0)?;
+            let db = common.join("gitmaster").join("state.db");
+            let clock: crate::script::run::Clock = Arc::new(now_ms);
+            self.script = Some(ScriptSession::open(
+                root,
+                &db,
+                &link,
+                self.git.as_ref(),
+                clock,
+                id,
+            )?);
+        }
+        let session = self.script.as_mut().expect("opened above");
+        let run = session.runtime.start(spec)?;
+        session.note_origin(run, id);
+        Ok(run)
+    }
+
+    /// The runtime of the open repository's script runs: how a person approves or cancels one,
+    /// and how an event wakes a wait. `None` before the first run.
+    pub fn script_runtime(&self) -> Option<Runtime> {
+        self.script.as_ref().map(|session| session.runtime.clone())
+    }
+
+    /// Carries out an effect a script run posted, and answers the run. Returns the events the
+    /// Git write caused (the new status).
+    pub fn script_effect(&mut self, id: OperationId, request: EffectRequest) -> Vec<Event> {
+        let Some(session) = self.script.as_ref() else {
+            return Vec::new();
+        };
+        let root = session.root.clone();
+        let wrote = session.execute(self.git.as_ref(), &mut self.log, request);
+        self.workflow_events(id, &root, Vec::new(), wrote)
     }
 
     /// The `exec` steps of workflow runs started since the last call. The caller

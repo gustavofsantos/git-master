@@ -23,6 +23,7 @@ mod review_session;
 pub mod review_store;
 mod runner;
 pub mod script;
+mod script_session;
 pub mod stage_math;
 mod stash;
 pub mod watch;
@@ -37,3 +38,4 @@ pub use files::{
 pub use history::{HistoryJob, HistoryOutcome, HistoryPage, HistoryReport, HistoryStream};
 pub use port::{DetailRead, FileListRead, GitError, GitPort, GrepRead, RemoteRun};
 pub use runner::{EngineHandle, spawn, spawn_with};
+pub use script_session::{EffectRequest, ScriptLink};

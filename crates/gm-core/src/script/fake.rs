@@ -82,3 +82,32 @@ impl CtxHost for ScriptedHost {
             .unwrap_or(HostReply::Value(Value::Null))
     }
 }
+
+/// A `ScriptEngine` that runs a Rust closure in place of a VM, so the runtime is tested without
+/// Luau: the closure makes the `ctx` calls a script would make and returns how the run ends.
+pub struct FnEngine<F>(pub F);
+
+impl<F> super::port::ScriptEngine for FnEngine<F>
+where
+    F: Fn(&mut dyn CtxHost) -> super::port::RunEnd + Send + Sync,
+{
+    fn check(&self, _chunk: &str, _source: &str) -> Result<(), Vec<super::port::ScriptDiagnostic>> {
+        Ok(())
+    }
+
+    fn read_meta(
+        &self,
+        _chunk: &str,
+        _source: &str,
+    ) -> Result<Value, Vec<super::port::ScriptDiagnostic>> {
+        Ok(Value::Null)
+    }
+
+    fn run(
+        &self,
+        _request: &super::port::RunRequest<'_>,
+        host: &mut dyn CtxHost,
+    ) -> super::port::RunEnd {
+        (self.0)(host)
+    }
+}

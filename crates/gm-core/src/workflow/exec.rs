@@ -103,7 +103,7 @@ pub fn spec(input: &Value, cwd: &Path) -> Result<ExecSpec, String> {
 }
 
 /// `<positive integer><s|m|h>`.
-fn parse_timeout(text: &str) -> Result<Duration, String> {
+pub(crate) fn parse_timeout(text: &str) -> Result<Duration, String> {
     const SHAPE: &str =
         "`timeout` must be a positive whole number followed by s, m or h, such as \"30s\"";
     let (digits, seconds_per_unit) = if let Some(digits) = text.strip_suffix('s') {
