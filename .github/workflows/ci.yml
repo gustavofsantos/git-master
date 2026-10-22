@@ -33,6 +33,25 @@ jobs:
       - run: cargo install cargo-audit --locked --version 0.22.2 # same as the Makefile
       - run: cargo audit
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: tools/docsite/target
+          key: docsite-${{ hashFiles('tools/docsite/Cargo.lock') }}
+      - run: make docs-test
+      - run: make docs
+      - run: make docs-site
+      - uses: actions/upload-artifact@v4
+        with:
+          name: documentation-site
+          path: build/site
+
   msrv:
     runs-on: ubuntu-latest
     steps:

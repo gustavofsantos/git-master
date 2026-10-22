@@ -3,3 +3,5 @@
 .claude/worktrees/
 CLAUDE.local.md
 AGENTS.local.md
+/build/
+/tools/docsite/target/

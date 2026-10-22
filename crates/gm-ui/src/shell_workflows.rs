@@ -1,4 +1,4 @@
-//! The Workflows page (docs/05, D76): the workflow files on the left; on the
+//! The Workflows page (design/screens.md, D76): the workflow files on the left; on the
 //! right the open file with its Run, Save, Revert and Delete buttons and three
 //! tabs. Flow shows the states as cards, TOML is the editable text with its
 //! diagnostics, and Runs lists the runs and shows one run step by step. The

@@ -1,4 +1,4 @@
-# Spike S-B: tree-sitter for symbols (N5) and syntax highlight (N4) (docs/09)
+# Spike S-B: tree-sitter for symbols (N5) and syntax highlight (N4) (design/code-navigation.md)
 
 Measured on 2026-10-22 by the agent, in a cloud container: Linux x86_64, 4 vCPU of an Intel Xeon at 2.8 GHz, 15 GB, rustc 1.99.1, git 2.43, warm caches. **Nothing was measured on macOS.** Raw output is in `results/`; `queries/` holds the query files the numbers depend on; `truth/` holds the ground-truth tools and the comparison script.
 

@@ -1,4 +1,4 @@
-//! Text search with `git grep` (docs/09, N3, D44). The pieces here are pure,
+//! Text search with `git grep` (design/code-navigation.md, N3, D44). The pieces here are pure,
 //! so they are tested without a repository: the checked request and the
 //! arguments it makes, the parsing of Git's records, the limits, the order of
 //! the answer and the shape of a result line. The adapter starts Git and feeds

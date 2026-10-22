@@ -1,4 +1,4 @@
-//! The history page (docs/07, H1 to H3): the commits of HEAD, newest first, one
+//! The history page (design/roadmap.md, H1 to H3): the commits of HEAD, newest first, one
 //! 48 px row each, with its ref chips, subject, short id and relative time. The
 //! next page loads as the list nears its end; a click selects a row by its id
 //! and fills the detail panel on the right. Scope, graph and search come in

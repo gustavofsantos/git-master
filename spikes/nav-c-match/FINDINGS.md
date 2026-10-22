@@ -1,4 +1,4 @@
-# Spike S-C: path matcher over a million paths (docs/09)
+# Spike S-C: path matcher over a million paths (design/code-navigation.md)
 
 Measured on 2026-10-21 by the agent, in a cloud container (4 vCPU, git 2.43.0). Raw numbers: `results/n100k.csv`, `results/n1m.csv`. Reproduce: `export CARGO_TARGET_DIR=$HOME/.cache/gm-spikes/target; cd spikes && cargo build -p spike-nav-c-match --release --offline`, then `git -C <repo> ls-files -z > paths.bin; $CARGO_TARGET_DIR/release/spike-nav-c-match paths.bin 7` (`SHOW=1` prints the top results of both matchers). The paths come from the repositories of spike S-A.
 

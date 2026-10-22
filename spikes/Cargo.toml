@@ -1,4 +1,4 @@
-# Throwaway spikes (docs/07, slice 0). Not part of the product workspace; each
+# Throwaway spikes (design/roadmap.md, slice 0). Not part of the product workspace; each
 # one leaves a FINDINGS.md with numbers and a verdict. Share one target dir:
 # CARGO_TARGET_DIR=$HOME/.cache/gm-spikes/target
 [workspace]

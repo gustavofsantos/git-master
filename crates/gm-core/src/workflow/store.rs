@@ -1,4 +1,4 @@
-//! Where workflow runs live (docs/10, D79, D80): a SQLite file in the Git
+//! Where workflow runs live (design/workflow-scripts.md, D79, D80): a SQLite file in the Git
 //! common directory, `.git/gitmaster/state.db`. The workflow file holds the
 //! definition; everything about execution is here. Each transition is one
 //! SQLite transaction, so a crash resumes from the last recorded state.

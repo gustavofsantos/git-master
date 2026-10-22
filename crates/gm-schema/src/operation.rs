@@ -279,7 +279,7 @@ pub enum CommandKind {
         index: u32,
         oid: String,
     },
-    /// Lists the hooks read from config, with their state (docs/03).
+    /// Lists the hooks read from config, with their state (design/hooks-transitional.md).
     ListHooks,
     /// Approves the repository hook `name` whose command still hashes to
     /// `command_hash`, as the last `HooksListed` showed it.
@@ -414,7 +414,7 @@ pub struct Command {
 }
 
 /// `Requested → Gating → AwaitingApproval → Executing → Done | Failed |
-/// Vetoed | Cancelled` (docs/06, rule 2).
+/// Vetoed | Cancelled` (design/architecture.md, rule 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationState {

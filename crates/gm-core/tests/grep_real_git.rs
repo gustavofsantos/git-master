@@ -471,7 +471,7 @@ mod with_a_script_for_git {
     }
 }
 
-/// The S-A benchmark through the adapter the app uses (docs/09, N3).
+/// The S-A benchmark through the adapter the app uses (design/code-navigation.md, N3).
 ///
 /// `GM_BENCH_REPO=<repo with a worktree> cargo test -p gm-core --test grep_real_git
 /// -- --ignored --nocapture grep_timings`. The repository comes from

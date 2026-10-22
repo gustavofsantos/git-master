@@ -1,4 +1,4 @@
-# Spike S-A: file lists and grep at scale (docs/09)
+# Spike S-A: file lists and grep at scale (design/code-navigation.md)
 
 Measured on 2026-10-21 by the agent, in a cloud container (4 vCPU, virtual disk, git 2.43.0). Raw numbers: `results/n100k.csv`, `results/n1m.csv`. Reproduce: `./gen.sh 100000 $HOME/.cache/gm-spikes/repos/nav100k checkout`, `./gen.sh 1000000 $HOME/.cache/gm-spikes/repos/nav1m` (index only), then `RUNS=5 python3 -I bench.py <repo> n100k worktree` (1M: `RUNS=2`, no `worktree`).
 
@@ -33,14 +33,14 @@ Measured on 2026-10-21 by the agent, in a cloud container (4 vCPU, virtual disk,
 
 1. **The file list is cheap.** A million paths: half a second, 37 MB of output. `ls-files` prints nothing until it has read the whole index, so streaming gives no early records (first record at 1M: 0.56 s, no earlier than the 0.49 s total, within noise). It is a background read followed by one swap, not a stream. D46 stands: no "indexing…" wait on 100k, a half second on 1M.
 2. **`git ls-files` holds 267 MiB at 1M files in its own process.** It is gone when the process ends; the app keeps the 37 MB buffer. Not a problem for the app.
-3. **`git grep` is fast when the pattern has early hits and scans everything when it does not.** First result for a common token: 12 to 35 ms at 100k, 116 ms at 1M. For a rare or unique token the first result costs a full scan: about 1 s at 100k, 4 to 5 s at 1M over blobs. The target in `09` ("first grep result under 1 s at 100k files") holds for patterns with early hits and for the worktree at 100k (0.7 to 0.97 s), and only just.
+3. **`git grep` is fast when the pattern has early hits and scans everything when it does not.** First result for a common token: 12 to 35 ms at 100k, 116 ms at 1M. For a rare or unique token the first result costs a full scan: about 1 s at 100k, 4 to 5 s at 1M over blobs. The target in design/code-navigation.md ("first grep result under 1 s at 100k files") holds for patterns with early hits and for the worktree at 100k (0.7 to 0.97 s), and only just.
 4. **Searching a revision is slower than the worktree** (2.3 s against 1.5 s at 100k), as expected from reading and inflating blobs.
 5. **Regex costs nothing over fixed strings here** (2.34 against 2.40 s): time is dominated by reading, not matching.
 6. **`--threads=1` was twice as fast as the default on the worktree** (0.67 against 1.46 s). The default uses all cores and loses to contention on this VM. This is one machine and a virtual disk, so it is a doubt to repeat on the Mac, not a rule.
 
 ## Verdict
 
-- **D44 (`git grep` as the grep engine) holds for 100k files**, with cancellation, a result cap and a pathspec field from the first version. At 1M files a search with no early hit takes seconds (about 9 s over blobs), which `09` already expects: the answer is to narrow with a pathspec and to show "searching…" with Cancel, not to build another engine. The in-process alternative (`regex` and `ignore` crates, D51) stays the fallback if the N6 gate fails on real repositories.
+- **D44 (`git grep` as the grep engine) holds for 100k files**, with cancellation, a result cap and a pathspec field from the first version. At 1M files a search with no early hit takes seconds (about 9 s over blobs), which design/code-navigation.md already expects: the answer is to narrow with a pathspec and to show "searching…" with Cancel, not to build another engine. The in-process alternative (`regex` and `ignore` crates, D51) stays the fallback if the N6 gate fails on real repositories.
 - **D46 (file list from `ls-files` in one buffer) holds.**
 - N3 should measure `--threads` (default against 1 against N/2) on the Mac before fixing it.
 

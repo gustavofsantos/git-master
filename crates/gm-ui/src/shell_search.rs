@@ -1,4 +1,4 @@
-//! The text search page (docs/09, N3): a box for the text, three switches
+//! The text search page (design/code-navigation.md, N3): a box for the text, three switches
 //! (case, whole word, regular expression), a box for the files to look in, and
 //! the matching lines grouped by file. The state comes from `text_search.rs`;
 //! `git grep` runs in the engine. Typing starts a search after a short pause,

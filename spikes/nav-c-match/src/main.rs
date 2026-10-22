@@ -1,4 +1,4 @@
-//! Spike S-C (docs/09): a path matcher over a million paths.
+//! Spike S-C (design/code-navigation.md): a path matcher over a million paths.
 //!
 //! Usage: spike-nav-c-match <paths-file> [runs]
 //! `<paths-file>` is the output of `git ls-files -z`.

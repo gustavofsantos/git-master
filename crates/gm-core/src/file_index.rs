@@ -1,4 +1,4 @@
-//! The list of files of a worktree, in memory (docs/09, N1 and N2, D46). The
+//! The list of files of a worktree, in memory (design/code-navigation.md, N1 and N2, D46). The
 //! paths sit in one buffer, sorted bytewise, each named by an offset pair, so a
 //! million paths cost about 40 MB and no allocation per path. The index answers
 //! two questions from memory: which paths match a query, and what a folder

@@ -1,4 +1,4 @@
-//! Dry run of a workflow (docs/10): walks the transition function from the
+//! Dry run of a workflow (design/workflow-scripts.md): walks the transition function from the
 //! start and records each step, without performing a side effect. `noop` and
 //! `set` are answered as the driver answers them; every other action is not
 //! run and gets an assumed outcome, so the walk goes on past it. No I/O.

@@ -1,4 +1,4 @@
-//! Spike B (docs/07-roadmap.md): one multi-line text area in GPUI, ported from
+//! Spike B (design/roadmap.md): one multi-line text area in GPUI, ported from
 //! rvw's `rvw-gui` text area. See FINDINGS.md next to Cargo.toml.
 
 mod editor;

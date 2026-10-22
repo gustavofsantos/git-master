@@ -1,4 +1,4 @@
-//! The Code page (docs/09, N2): the folder tree on the left and a read-only
+//! The Code page (design/code-navigation.md, N2): the folder tree on the left and a read-only
 //! viewer of one file on the right. The tree and the viewer's state come from
 //! `code_page.rs`; the engine lists a folder from the file list it holds in
 //! memory and reads the file from disk. Every request goes out with an

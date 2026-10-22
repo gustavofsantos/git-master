@@ -2113,7 +2113,7 @@ mod tests {
     fn no_diff_key_is_a_registry_shortcut_on_macos() {
         // The registry's glyphs are macOS glyphs, ⌘ being the secondary modifier.
         // The commit's previous file is the one exception: ⇧⌘P is Push With Lease's
-        // label. Nothing binds that label, and its key is an open question (docs/01).
+        // label. Nothing binds that label, and its key is an open question (design/decisions.md).
         // The chunk actions are this pane's own: their label is the key bound here.
         // The comment key's label is this key too (B4c), as the chunk actions' are.
         let registry: Vec<&str> = Action::ALL

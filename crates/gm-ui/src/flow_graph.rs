@@ -1,4 +1,4 @@
-//! The layout of a workflow's state graph for the Flow tab (docs/10, Flow).
+//! The layout of a workflow's state graph for the Flow tab (design/workflow-scripts.md, Flow).
 //!
 //! Plain data in, plain data out: no GPUI types, so the layout is tested
 //! without a window. The view draws each [`Node`] as a card at its [`Rect`],

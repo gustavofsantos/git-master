@@ -1,4 +1,4 @@
-//! The `exec` action (docs/10, D74): runs a command line directly, never
+//! The `exec` action (design/workflow-scripts.md, D74): runs a command line directly, never
 //! through a shell. Each argument is one argv element, so repository content
 //! interpolated into it cannot inject flags or commands.
 

@@ -1,8 +1,8 @@
 //! The sidebar at the window's left: the workspace destinations, the switch
 //! between the two ways of grouping branches, the branch tree and the
 //! worktrees. Every destination is a row of its own; the stack tree is a
-//! placeholder until its slice lands (docs/07). The worktrees show their state;
-//! a double-click opens one in its own window (docs/07, W4).
+//! placeholder until its slice lands (design/roadmap.md). The worktrees show their state;
+//! a double-click opens one in its own window (design/roadmap.md, W4).
 
 use std::ops::Range;
 

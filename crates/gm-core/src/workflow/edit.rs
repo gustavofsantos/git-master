@@ -1,4 +1,4 @@
-//! Structural edits of a workflow file (docs/10): add, remove and move a
+//! Structural edits of a workflow file (design/workflow-scripts.md): add, remove and move a
 //! top-level state, set its transitions, action and `with` fields, and edit
 //! the trigger, the inputs and the name of the workflow. Text in, text out.
 //! The file is edited with `toml_edit`, so comments and formatting of every

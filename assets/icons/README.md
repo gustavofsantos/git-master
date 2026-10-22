@@ -1,8 +1,8 @@
 # App icons
 
-The Divisa icon: three stacked chevrons (rank insignia, one per branch of a stack) under a commit node. Design notes and the palette are in `docs/08-identidade-visual.md`.
+The Divisa icon: three stacked chevrons (rank insignia, one per branch of a stack) under a commit node. Design notes and the palette are in `design/visual-identity.md`.
 
-Two themes: `dark` is the default, `light` is the alternate. Colors come from the app palette (`docs/08`); the node is the signature orange `#f54e00`.
+Two themes: `dark` is the default, `light` is the alternate. Colors come from the app palette (`design/visual-identity.md`); the node is the signature orange `#f54e00`.
 
 ## Layout
 

@@ -1,4 +1,4 @@
-//! The Flow's inspector (docs/10, the Flow bullet): the workflow's name,
+//! The Flow's inspector (design/workflow-scripts.md, the Flow bullet): the workflow's name,
 //! description, trigger, match and inputs, and the selected state's action and
 //! `with` fields, edited as typed values. The rows, the lists the pickers show
 //! and the edit a commit sends are pure and tested here. The window side is the
@@ -153,7 +153,7 @@ fn scalar_text(value: &Value) -> String {
         .map_or_else(|| value.to_string(), str::to_owned)
 }
 
-/// The level badge text of an action (docs/10): `approve` is the pause.
+/// The level badge text of an action (design/workflow-scripts.md): `approve` is the pause.
 #[must_use]
 pub(crate) fn level_label(level: Level) -> &'static str {
     match level {

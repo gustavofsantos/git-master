@@ -18,7 +18,7 @@ use gm_schema::{
 
 use crate::command_log::{CommandLog, CommandRecord, Source};
 
-/// Staged diffs above this size go to a temporary file (docs/03).
+/// Staged diffs above this size go to a temporary file (design/hooks-transitional.md).
 pub const INLINE_DIFF_LIMIT: usize = 64 * 1024;
 
 /// The most stdout a step may print; more is cut and then fails as invalid output.

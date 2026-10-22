@@ -1,6 +1,6 @@
 //! Reads `[gitmaster "prepare-commit.<name>"]` sections from the key/value
 //! pairs git prints for them. Pure: the adapter hands in what git said, and
-//! this module decides what each section means (docs/03).
+//! this module decides what each section means (design/hooks-transitional.md).
 
 use std::time::Duration;
 

@@ -25,11 +25,11 @@ static CODE_FAMILY: OnceLock<String> = OnceLock::new();
 /// so a new role is added here for both palettes, never as a literal in a view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
-    /// The window background and the sidebar (`bg_hl` in docs/08).
+    /// The window background and the sidebar (`bg_hl` in design/visual-identity.md).
     pub ground: u32,
-    /// The diff and the text areas (`bg` in docs/08).
+    /// The diff and the text areas (`bg` in design/visual-identity.md).
     pub editor: u32,
-    /// Bars, headers and floating panels (`bg` in docs/08).
+    /// Bars, headers and floating panels (`bg` in design/visual-identity.md).
     pub panel: u32,
     pub hairline: u32,
     pub hairline_strong: u32,
@@ -75,7 +75,7 @@ pub struct Palette {
     /// The colours a worktree takes from its name (`LANE_COUNT` of them).
     pub lanes: [u32; LANE_COUNT],
     /// The colours of the history graph's lanes (`GRAPH_SLOTS` of them): the
-    /// accents of docs/08 that are not state colours (not red, yellow, green).
+    /// accents of design/visual-identity.md that are not state colours (not red, yellow, green).
     pub graph_lanes: [u32; GRAPH_SLOTS],
 }
 

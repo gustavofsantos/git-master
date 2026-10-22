@@ -1,4 +1,4 @@
-//! Manual workflows end to end (docs/10): real repositories in temporary
+//! Manual workflows end to end (design/workflow-scripts.md): real repositories in temporary
 //! directories, workflow files in a directory of their own, and the engine
 //! driven directly. Commands go in, the `exec` jobs are taken and run here, and
 //! each report goes back, as the runner does on its threads.

@@ -1,6 +1,6 @@
 # Spike B: multi-line editable text in GPUI
 
-Question (docs/01 Q7): cheapest sound way to get multi-line editable text for the
+Question (design/decisions.md Q7): cheapest sound way to get multi-line editable text for the
 commit composer (slice 1) and the conflict-result panel. Throwaway code, not committed.
 Versions: gpui 0.2.2 (spikes/Cargo.lock, same as rvw/Cargo.lock).
 
@@ -79,8 +79,8 @@ What a human must test in the window (`cargo run -p spike-b-text`):
 - Resize the window: text reflows and the box height changes between 3 and 12 rows.
 - On macOS, confirm the font falls back correctly without "Noto Sans".
 
-Also needed (not part of this spike): record the Q7 outcome in docs/01 (the roadmap asks for it), and
-the rvw LICENSE question as a decision in docs/01.
+Also needed (not part of this spike): record the Q7 outcome in design/decisions.md (the roadmap asks for it), and
+the rvw LICENSE question as a decision in design/decisions.md.
 
 ## Open doubts
 

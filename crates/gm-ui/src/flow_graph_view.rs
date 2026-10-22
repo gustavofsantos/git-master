@@ -1,4 +1,4 @@
-//! The state graph of the Flow tab, drawn in GPUI (docs/10, Flow). The layout
+//! The state graph of the Flow tab, drawn in GPUI (design/workflow-scripts.md, Flow). The layout
 //! is in `flow_graph`: every position comes from its `Geometry`, and this file
 //! only turns those positions into elements. The cards and the terminal pills
 //! are absolutely positioned divs; the edges are paths on one `canvas`, with a

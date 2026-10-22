@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deterministic synthetic repository for spike S-A (docs/09: lists and grep at scale).
+# Deterministic synthetic repository for spike S-A (design/code-navigation.md: lists and grep at scale).
 #
 #   gen.sh <files> <repo-dir> [checkout]
 #

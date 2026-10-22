@@ -1,4 +1,4 @@
-//! The model of the text search page (docs/09, N3): the text typed, the
+//! The model of the text search page (design/code-navigation.md, N3): the text typed, the
 //! options, the search in flight, the last answer and which files are folded.
 //! Nothing here touches GPUI, and nothing searches: the engine runs `git grep`
 //! and answers with the lines. A reply to a search that a newer one superseded

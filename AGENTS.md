@@ -1,6 +1,6 @@
 # GitMaster
 
-Native desktop app in Rust + GPUI, open source, sold as a premium product. This file tells an agent what the product is, how the repository is organised, where each kind of decision lives and how to work here. It holds no roadmap, no design detail and no status: those live in `docs/`.
+Native desktop app in Rust + GPUI, to be open sourced at go-live and sold as a premium product. Until the author chooses a license it is unlicensed: no license is granted (`LICENSE`, D103). This file tells an agent what the product is, how the repository is organised, where each kind of decision lives and how to work here. It holds no roadmap, no design detail and no status: the product is specified in `docs/` and the engineering records live in `design/`.
 
 ## What it is
 
@@ -10,7 +10,7 @@ It is **not a clone of any existing client**. Mature Git clients and IDE tooling
 
 1. **A Git client that is complete and fast.** Working Copy, history, branches, worktrees, conflicts, command palette. This is the base and has to be excellent on its own.
 2. **A workspace for working with code, not only commits.** Navigating the repository where you stand: file search, text search, symbol search, a read-only viewer. Local, so it should feel instant.
-3. **Agents under human accountability.** The agent proposes, the human approves, and what the agent did is observed, not self-reported. Exposed through MCP, workflows written in plain text (they replace the hooks configured in `.gitconfig`, D75), a local review loop. Branch stacking with restack is first class.
+3. **Agents under human accountability.** The agent proposes, the human approves, and what the agent did is observed, not self-reported. Exposed through MCP, workflows written as Lua scripts that run in a sandbox (they replace the hooks configured in `.gitconfig`, D75, D98), a local review loop. Branch stacking with restack is first class.
 
 Every feature should serve at least one pillar. If it serves none, question it before building it.
 
@@ -21,37 +21,48 @@ Every feature should serve at least one pillar. If it serves none, question it b
 - **Local-first.** One engineer, their machine. No headless or server mode, no account.
 - **Nothing written into the repository working tree.** Configuration and state live in the user's config, in `.git/` or in the app data directory. Many work repositories do not even allow a `.gitignore` edit.
 
-The full principles (determinism, human approves and agent proposes, Git is the source of truth, observed beats reported) are in `docs/00-visao-e-principios.md` and bind the code.
+The full principles (determinism, human approves and agent proposes, Git is the source of truth, observed beats reported) are in `docs/concepts/principles.md` and bind the code.
+
+## Documentation is the desired state
+
+`docs/` is the **official documentation**, the source of the future documentation website. It describes the product as it must be at launch, in the present tense, like a Kubernetes manifest describes the state you want. The code converges on it:
+
+1. To change behavior, change the page in `docs/` first.
+2. Mark whatever the app does not do yet: `status:` in the page's front matter and a `> **Planned.**` marker on each missing part.
+3. Implement until the marker can be removed, then update the page's `status`.
+
+`make docs-status` is the diff between the docs and the app: it lists every page with its status and the number of `Planned` markers left. `make docs` (part of `make check`) enforces the authoring rules; run it after editing docs. The authoring rules (front matter, markers, tone, no history in the docs) are in `docs/README.md`. `make docs-site` builds the documentation website (`tools/docsite`, a separate Cargo workspace) into `build/site`. Before go-live every page is `implemented`.
 
 ## Where things live
 
 | Question | Source |
 |---|---|
-| Why the product exists, principles, non-goals | `docs/00-visao-e-principios.md` |
-| What has been decided, what is open | `docs/01-decisoes-e-questoes-abertas.md` (D = decision, Q = open question) |
-| Feature design | `02` stacks, `03` hooks, `04` MCP and review, `05` screens, `09` code navigation, `10` workflows |
-| How it is built | `docs/06-arquitetura.md` |
-| What to build next, and what is done | `docs/07-roadmap.md` (the only place that tracks status) |
-| Visual identity | `docs/08-identidade-visual.md`, icons in `assets/icons/` |
-| Toolchain pitfalls and GPUI practice | `docs/rvw-lessons.md` |
-| Mockups | design canvas linked in `docs/README.md` (labels in Portuguese: translate them) |
+| What the product is and does, for users (desired state, with `Planned` markers) | `docs/` (start at `docs/index.md`) |
+| Principles, trust model, non-goals | `docs/concepts/principles.md`, `docs/concepts/trust-and-safety.md` |
+| Why a choice was made; what is decided, proposed or open | `design/decisions.md` (D = decision, Q = open question) |
+| What to build next, what is done, known gaps | `design/roadmap.md` (orders the work; per-feature status is also in the `status` of each page in `docs/`) |
+| How it is built | `design/architecture.md`, plus `design/code-navigation.md`, `design/workflow-scripts.md`, `design/stacks-restack.md`, `design/screens.md`, `design/hooks-transitional.md` |
+| Visual identity | `design/visual-identity.md`, icons in `assets/icons/` |
+| Toolchain pitfalls and GPUI practice | `design/lessons.md` |
+| Measurements behind decisions | `spikes/*/FINDINGS.md` |
+| Mockups | design canvas linked in `design/README.md` (labels in Portuguese: translate them) |
 
-Start with `docs/README.md`, then `00`, then the part of `01`, `06` and `07` that touches your task. The docs are the source for decisions; the canvas is the source for mockups.
+Start with `docs/index.md`, then the pages in `docs/` that touch your task, then the part of `design/decisions.md`, `design/architecture.md` and `design/roadmap.md` that does. `docs/` is the source for behavior, `design/decisions.md` for decisions, the canvas for mockups.
 
 ### Handling decisions
 
-- **Decidido** in `01` binds the code. Change it only by a new decision from the author.
-- **Proposto** is not a commitment. Confirm with the author before building something that depends on it, then record the outcome in `01`.
-- When you make a choice the docs do not cover, state it and record it in `01`; do not bury it in code.
-- When a slice ends, mark it done in `07` with its known gaps. Do not copy status into this file.
+- **Decided** in `design/decisions.md` binds the code. Change it only by a new decision from the author.
+- **Proposed** is not a commitment. Confirm with the author before building something that depends on it, then record the outcome in `design/decisions.md`.
+- When you make a choice the docs do not cover, state it and record it in `design/decisions.md`; do not bury it in code. If it changes behavior a user sees, it goes in `docs/` as well.
+- When a slice ends, mark it done in `design/roadmap.md` with its known gaps and update the `status` of the affected pages in `docs/`. Do not copy status into this file.
 
 ## Language
 
-Design docs are in Portuguese. Code, comments, commit messages and every UI string are in English. Translate Portuguese canvas labels instead of copying them.
+Everything is in English: documentation, code, comments, commit messages and every UI string. The only Portuguese left is on the design canvas: translate its labels instead of copying them. Do not reference paid or proprietary products in `docs/`; the rule above applies to docs too.
 
 ## Code layout
 
-Hexagonal: dependencies point inward to the engine. Details and rules in `docs/06-arquitetura.md`.
+Hexagonal: dependencies point inward to the engine. Details and rules in `design/architecture.md`.
 
 | Crate | Responsibility |
 |---|---|
@@ -70,8 +81,8 @@ Rules that matter day to day:
 
 ## Working in the repository
 
-- Toolchain: stable Rust from `rust-toolchain.toml`; `~/.cargo/bin` must come before any distro `rustc` on `PATH`. Linux needs the dev packages listed in `docs/rvw-lessons.md`. `scripts/setup-dev.sh` sets up a machine.
-- `make build`, `make run`, `make test` (`cargo test --workspace`), `make lint` (clippy with `-D warnings`, then `cargo fmt --check`), `make fmt`, `make check` (lint, audit, tests). Run `make check` before declaring work done; CI runs the same.
+- Toolchain: stable Rust from `rust-toolchain.toml`; `~/.cargo/bin` must come before any distro `rustc` on `PATH`. Linux needs the dev packages listed in `design/lessons.md`. `scripts/setup-dev.sh` sets up a machine.
+- `make build`, `make run`, `make test` (`cargo test --workspace`), `make lint` (clippy with `-D warnings`, then `cargo fmt --check`), `make fmt`, `make check` (lint, audit, docs, tests). Run `make check` before declaring work done; CI runs the same.
 - Clippy pedantic is on for the whole workspace. Fix the warning instead of adding an `allow`, unless the workspace table already documents it.
 - Tests: pure unit and property tests for logic; **real Git in temporary repositories** for anything that touches Git behaviour (`crates/gm-core/tests/*_real_git.rs`); the UI smoke below for what the user sees. Do not mock Git where a real repository is cheap.
 - Commits: conventional (`feat:`, `fix:`, `test:`, `docs:`, `build:`, `refactor:`, `ci:`, `chore:`), one logical change each.

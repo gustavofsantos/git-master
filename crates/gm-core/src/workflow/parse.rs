@@ -1,4 +1,4 @@
-//! Reads a workflow file into the typed model (docs/10, D61, D78). Only the
+//! Reads a workflow file into the typed model (design/workflow-scripts.md, D61, D78). Only the
 //! shape is checked here: TOML syntax, known keys, types, one kind per state.
 //! Graph and reference rules live in `validate`.
 

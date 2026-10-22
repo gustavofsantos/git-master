@@ -1,4 +1,4 @@
-//! The hook contract (docs/03): JSON in and out of a user script, version 1.
+//! The hook contract (design/hooks-transitional.md): JSON in and out of a user script, version 1.
 //! Also the hook descriptions and failures the front-ends show. Only
 //! `prepare-commit` exists in this slice (D29).
 

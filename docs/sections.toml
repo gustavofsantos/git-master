@@ -1,0 +1,31 @@
+# Section titles and order for the documentation site. One entry per directory under docs/.
+
+[[section]]
+dir = "getting-started"
+title = "Getting started"
+order = 10
+
+[[section]]
+dir = "concepts"
+title = "Concepts"
+order = 20
+
+[[section]]
+dir = "guide"
+title = "User guide"
+order = 30
+
+[[section]]
+dir = "workflows"
+title = "Workflows"
+order = 40
+
+[[section]]
+dir = "agents"
+title = "AI agents"
+order = 50
+
+[[section]]
+dir = "reference"
+title = "Reference"
+order = 60
