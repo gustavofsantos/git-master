@@ -159,7 +159,37 @@ Pronto quando: a mensagem de commit pode ser gerada por um script do autor, sem 
 
 ## Fatia 3: histórico e branches (visão por nome) (em andamento: H1 a H5 feitas, com H4b-A, H4b-B e H4c)
 
-**Próximo passo (decisão do autor, 2026-10-21):** a Fatia 3c (navegação no código, abaixo) vem agora: N1, N2 e N3 estão feitos e o N4 (destaque de sintaxe, depende do S-B) segue; H6, H7 e H8 ficam adiados e depois vem a WF3. A H5 está feita (abaixo). A WF2 foi fechada antes dela.
+**Próximo passo (decisão do autor, 2026-10-21; atualizado no fim da sessão de 2026-10-22):** a Fatia 3c (navegação no código, abaixo) vem agora. Estão feitos os spikes S-A, S-B e S-C e as sub-fatias N1, N2 e N3; o **N4 (destaque de sintaxe)** é o próximo e já tem spike. H6, H7 e H8 ficam adiados e depois vem a WF3. A H5 está feita. Ver "Como continuar" logo abaixo.
+
+### Como continuar (fim da sessão de 2026-10-22)
+
+**Onde está o código.** Tudo está na branch `develop` e empurrado. O que esta sessão entregou, em ordem: H5 (grafo com lanes), spikes S-A e S-C, N1 (Quick Open), N2 (página Code e visualizador), N3 (página Search com `git grep`) e o spike S-B. Nada disto foi visto numa janela pelo agente (o contêiner não tem tela); o autor usou o grafo e a interface no macOS e confirmou que funcionam, mas Quick Open, Code e Search ainda não foram experimentados por ele. `make lint` e `cargo test --workspace` passam (cerca de 1.520 testes). Não há cenários de smoke novos (D88).
+
+**Próximo trabalho: N4, destaque de sintaxe no visualizador.** O S-B responde à pergunta de risco (D92). Antes de escrever código, combinar com o autor:
+
+1. **Confirmar D45 e D92** (tree-sitter compilado no binário; consultas próprias; as cinco linguagens da primeira onda: Rust, Python, Go, TypeScript/TSX e JavaScript).
+2. **Aceitar o custo no binário**: cerca de +5 MB com as cinco gramáticas, medido só em Linux. Rodar `spikes/nav-b-treesitter/measure.sh` no macOS dá o número de lá antes de decidir.
+3. **Cores**: os 26 nomes de captura dos `highlights.scm` (lista no `FINDINGS.md`) viram uns dez papéis (comentário, texto, número, palavra-chave, operador, função, tipo, constante, variável ou propriedade, pontuação, atributo ou macro). Reaproveitar as cores do `theme.rs` ou criar tokens novos em `08`? Os testes de contraste do tema (4,5:1 para texto) passam a cobrir os papéis nos dois temas.
+4. **Onde moram os arquivos de consulta**: proposta, `crates/gm-core/queries/`, uma pasta por linguagem, com as sementes de `spikes/nav-b-treesitter/queries/` (`typescript-highlights-combined.scm`, `typescript-overlay-all.scm`, `rust-defs.scm`, `go-overlay.scm`).
+
+**Proposta de "pronto quando" do N4 (a combinar):**
+
+- `gm-core` ganha um módulo puro de sintaxe: a linguagem sai da extensão do arquivo (função pura e testada); `highlight(linguagem, texto) -> Vec<Span { início, fim, papel }>` é determinística, com spans em ordem, sem sobreposição e em fronteira de caractere (teste de propriedade); as gramáticas ficam atrás de features do Cargo; arquivo de linguagem sem gramática segue sem cor.
+- Roda como as outras leituras: um job em thread própria com `OperationId`, parando quando o arquivo muda (reaproveita `ReadFile`: o evento do arquivo passa a trazer os spans, ou um evento `FileHighlighted` logo depois). Tempo medido: 0,1 a 0,6 ms para 60 linhas, 0,4 s para um arquivo de 1,5 MB, 3,6 s para um arquivo minificado de 11 MB. Limites: o de 2 MiB que já existe; linha com mais de uns 2.000 bytes sem destaque (o visualizador já corta); parse com tempo máximo (`Parser::set_timeout_micros`), e arquivo que estoura mostra o texto sem cor.
+- O visualizador pinta os spans nas linhas visíveis com as cores dos papéis; sem cor até a resposta chegar, sem piscar.
+- Testes: mapeamento de nomes de captura para papéis (puro); um trecho pequeno por linguagem com os papéis esperados; propriedades dos spans; o motor descarta a resposta de um arquivo superado; contraste dos papéis nos dois temas; `make lint` e `cargo test --workspace`. Sem smoke (D88).
+- Fora do N4: realce no diff (D42), injeções (código dentro de markdown), realce semântico, C e C++ (qualidade não verificada), tema escolhido pelo usuário.
+
+**Depois do N4:** N5 (símbolos e caixa única, D45, D50) usa o mesmo tree-sitter e o `symbols.db` de D92; N6 (revisões, MCP, gate). H6 a H8 e a WF3 continuam adiados.
+
+**Pendências menores, por valor** (todas com os detalhes nas lacunas de cada sub-fatia):
+
+- Quick Open: a lista com os arquivos novos (`--others`) leva cerca de 0,75 s em 100 mil arquivos; uma lista em duas fases (rastreados já, novos depois) conserta. Relida só quando o Quick Open abre.
+- Search: sem streaming nem progresso; apagar a caixa não cancela o Git em andamento; medir `--threads` do `git grep` no macOS (D91).
+- Experimentar no macOS: Quick Open, Code e Search (nenhum foi visto numa janela), e rodar `measure.sh` e `run.sh` do S-B.
+- Código: visualizador sem seleção de texto nem quebra de linha; árvore sem teclado; "View file" a partir do commit espera o N6.
+
+**Preparar uma sessão nova** (o contêiner de nuvem começa limpo): `rustup update stable` (o `rust-toolchain.toml` pede o estável mais novo; o contêiner veio com uma versão velha demais), `~/.cargo/bin` na frente do `PATH`, `apt-get update && apt-get install libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig-dev pkg-config` (para ligar o `gm-ui`), depois `make lint` e `cargo test --workspace`. Os corpora dos spikes (`~/.cache/gm-spikes`) não sobrevivem: `spikes/nav-b-treesitter/fetch-corpora.sh` baixa os repositórios e o `FINDINGS.md` diz como refazer o resto. Os arquivos que o editor reformata (`cargo fmt`) mudam de linha: se uma substituição de texto por script não pegar, releia o arquivo.
 
 Ordem definida pelo autor em 2026-10-16: esta fatia, junto com a visão de diff (abaixo), é o próximo trabalho depois de terminar a 1c (incluindo a atualização automática) e a interface da fatia 2. Decisões do autor de 2026-10-17 em D32 a D37 (`01`); a fatia é dividida em sub-fatias H1 a H8, cada uma com o próprio "pronto quando". A leitura do histórico é `git log` como subprocess, sem escrever commit-graph (D32).
 
@@ -272,11 +302,11 @@ Proposta de 2026-10-19, detalhada em `10-workflows.md`, com as decisões D60 a D
 - **WF4, ações de stack e templates (com as fatias 4 e 5).** `stack.*`, `restack.*`, `reparent.*`, `push.lease`, eventos `stack.parent_moved` e `stack.parent_merged`, e três templates embutidos. Pronto quando: ativar "Restack children when parent moves" faz o restack da subárvore após um commit no pai, com plano, undo e pausa em conflito, sem código específico dessa política.
 - **WF5, MCP (com a fatia 7).** `workflow_list` e `workflow_run`. Pronto quando: um agente lista os workflows e dispara um; os passos `apply` do run esperam a aprovação do humano na UI (D64(c)).
 
-## Fatia 3c: navegação no código (em andamento: S-A, S-C, N1, N2 e N3 feitos; N4 em seguida)
+## Fatia 3c: navegação no código (em andamento: S-A, S-B, S-C, N1, N2 e N3 feitos; N4 em seguida)
 
 Detalhes, motores e riscos em `09-navegacao-no-codigo.md`; decisões D43 a D51 em `01` (D43 decidida; D44 a D51 propostas, com D44 e D46 sustentadas pelos spikes, D89). Página Code com Quick Open de arquivos, grep e símbolos, sobre um visualizador somente leitura. Sub-fatias, cada uma com o "pronto quando" em `09`:
 
-- **Spikes S-A, S-B e S-C** (listas e grep em escala, tree-sitter, casador de caminhos), antes de construir. **S-A e S-C feitos em 2026-10-21** (`spikes/nav-a-lists/FINDINGS.md`, `spikes/nav-c-match/FINDINGS.md`, D89): confirmam D44 e D46 em 100 mil arquivos e no casador até 1 milhão. Ficam por medir no Mac o `--threads` do grep e o grep no worktree de 1 milhão. S-B segue para antes do N4.
+- **Spikes S-A, S-B e S-C** (listas e grep em escala, tree-sitter, casador de caminhos), antes de construir. **S-A e S-C feitos em 2026-10-21** (`spikes/nav-a-lists/FINDINGS.md`, `spikes/nav-c-match/FINDINGS.md`, D89): confirmam D44 e D46 em 100 mil arquivos e no casador até 1 milhão. Ficam por medir no Mac o `--threads` do grep e o grep no worktree de 1 milhão. **S-B feito em 2026-10-22** (`spikes/nav-b-treesitter/FINDINGS.md`, D92): tree-sitter é viável (velocidade, tamanho, acerto), mas só com consultas próprias; macOS não foi medido (`measure.sh` e `run.sh` rodam lá sem mudança).
 - **N1, Quick Open** de arquivos do worktree ativo (feito em 2026-10-21, com o N2; D89, D90; sem cenário de smoke, por D88).
   - `Ctrl/⌘+P` abre uma camada com um campo e até 10 linhas visíveis (50 resultados): nome do arquivo e, mais fraco, a pasta, com as letras casadas em destaque. `Enter` ou clique abre o arquivo na página Code; `nome.rs:120` abre na linha 120. `Esc` fecha. "Quick Open…" é ação do registro (paleta e tecla), exige repositório aberto.
   - Motor: `FileIndex` (`gm-core/src/file_index.rs`) guarda os caminhos num buffer só, ordenados e sem repetição, lidos de `git ls-files -z -v --cached --others --exclude-standard` (sem os `skip-worktree` do sparse checkout). `path_match.rs` casa por bytes (ASCII) ou por caracteres (consulta com letra fora do ASCII), com bônus de início de segmento, de letras juntas, de nome de arquivo e de nome inteiro, e top-K em paralelo com desempate pela ordem da lista (o resultado não depende do número de threads, como medido no S-C). Comandos `IndexFiles` e `SearchFiles`; eventos `FilesFound` e `FilesIndexed`. Uma busca nova cancela a anterior (a thread é parada e a resposta tardia cai pelo `OperationId`); a primeira busca espera a primeira leitura da lista.
@@ -295,7 +325,7 @@ Detalhes, motores e riscos em `09-navegacao-no-codigo.md`; decisões D43 a D51 e
   - Medido pelo adaptador do app em 100 mil arquivos (`grep_timings`, release, uma thread): só rastreados, um padrão comum para no limite em 0,065 s e uma varredura completa leva 0,9 s; com os novos, 1,1 s e 2,0 s. Os 1 s a mais são a varredura do worktree que o Git faz para achar os não rastreados (mesmo custo do `status`), pagos mesmo quando não há nenhum. Ver a correção em `spikes/nav-a-lists/FINDINGS.md` e em D91.
   - Lacunas: o resultado chega inteiro, sem streaming nem progresso, então uma varredura completa em repositório grande (cerca de 9 s sobre blobs em 1 milhão de arquivos) fica em "Searching…" até acabar, e só uma busca nova a cancela (apagar a caixa deixa o Git terminar e descarta a resposta); a busca é do worktree, não de uma revisão; a caixa de arquivos separa por espaço, então um caminho com espaço só entra por glob; a expressão regular é a estendida do Git (`-E`), sem `\d`; o realce usa o `regex` do Rust e pode diferir do Git em casos raros (sem realce para referência anterior ou linha fora de UTF-8); um nome de arquivo com quebra de linha parte o registro e a linha some; a lista de resultados não tem teclado nem seleção de texto; o `--threads` deve ser medido no Mac; o campo de busca da página Code e o Quick Open ainda são caixas separadas (a caixa única é o N5, D50).
   - Também fica registrado que a lista de arquivos do Quick Open (`--others`) leva cerca de 0,75 s em 100 mil arquivos, não os 0,05 s dos rastreados: uma lista em duas fases (rastreados já, novos depois) seria o conserto, e não foi feita.
-- **N4, destaque de sintaxe** (depende do S-B).
+- **N4, destaque de sintaxe** (S-B feito, D92; proposta de "pronto quando" em "Como continuar", acima, a combinar com o autor antes de começar).
 - **N5, símbolos e caixa única**: índice por blob, caixa única (D50), outline, ir para a definição.
 - **N6, revisões, tools Read do MCP e gate de performance.**
 

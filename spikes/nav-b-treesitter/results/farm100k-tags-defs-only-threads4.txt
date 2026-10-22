@@ -1,0 +1,13 @@
+lang=all root=/root/.cache/gm-spikes/farm threads=4
+walk: 184901 entries, 104758 matching files in 0.43s
+parsed 104709 files (1394.8 MB, 34870698 lines), 19236 with syntax errors (18.37%), 49 skipped as too big
+wall 104.91s  =>  998 files/s, 13.3 MB/s, 332396 lines/s  (cpu: read 5.58s, parse 255.52s, query 121.26s)
+definitions 3466879 (33.1 per file), references 0
+  definition.class             828104
+  definition.constant          6852
+  definition.function          1440852
+  definition.interface         44578
+  definition.macro             8688
+  definition.method            1055541
+  definition.module            51265
+  definition.type              30999

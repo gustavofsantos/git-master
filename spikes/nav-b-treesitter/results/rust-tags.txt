@@ -1,0 +1,12 @@
+lang=rust root=/root/.cargo/registry/src threads=1
+walk: 39522 entries, 22612 matching files in 0.10s
+parsed 22604 files (534.5 MB, 12108809 lines), 1585 with syntax errors (7.01%), 8 skipped as too big
+wall 175.38s  =>  129 files/s, 3.0 MB/s, 69042 lines/s  (cpu: read 5.75s, parse 97.68s, query 53.15s)
+definitions 1482265 (65.6 per file), references 1863531
+  definition.class             386625
+  definition.function          605830
+  definition.interface         16932
+  definition.macro             4344
+  definition.method            444903
+  definition.module            23631
+dumped 1482265 rows to /tmp/s-b/rust.tags

@@ -1,0 +1,9 @@
+lang=javascript root=/opt/node22/lib/node_modules threads=1
+walk: 2331 entries, 1225 matching files in 0.01s
+parsed 1224 files (6.6 MB, 196228 lines), 1 with syntax errors (0.08%), 1 skipped as too big
+wall 1.95s  =>  628 files/s, 3.4 MB/s, 100659 lines/s  (cpu: read 0.05s, parse 1.12s, query 0.66s)
+definitions 10042 (8.2 per file), references 45415
+  definition.class             560
+  definition.function          6117
+  definition.method            3365
+dumped 10042 rows to /tmp/s-b/js.tags

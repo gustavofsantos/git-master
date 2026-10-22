@@ -1,0 +1,12 @@
+1188265 symbols from 39969 blobs
+insert 1.82s (651756 rows/s), build indexes 1.57s, file 113.4 MB (100 bytes per symbol)
+exact name (indexed, per query)                 0.040 ms  (4115 rows)
+prefix of 3 letters (indexed range, per query)    0.073 ms  (9466 rows)
+contains, no index (LIKE %x%, per query)        9.623 ms  (563 rows)
+is this blob indexed? (by oid, per lookup)      0.006 ms  (200 rows)
+outline of one file (by blob, per query)        0.021 ms  (7586 rows)
+distinct names: 336371 (collected and sorted in 0.53s)
+fuzzy scan over all names for "newf": 33.76 ms (1598 hits)
+fuzzy scan over all names for "hdl": 33.73 ms (10730 hits)
+fuzzy scan over all names for "parseexpr": 32.87 ms (154 hits)
+fuzzy scan over all names for "x": 25.41 ms (43831 hits)

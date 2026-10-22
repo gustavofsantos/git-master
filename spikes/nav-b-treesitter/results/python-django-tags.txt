@@ -1,0 +1,9 @@
+lang=python root=/root/.cache/gm-spikes/corpora/django threads=1
+walk: 7085 entries, 2937 matching files in 0.03s
+parsed 2937 files (18.6 MB, 529462 lines), 1 with syntax errors (0.03%), 0 skipped as too big
+wall 5.01s  =>  586 files/s, 3.7 MB/s, 105698 lines/s  (cpu: read 0.12s, parse 3.16s, query 1.41s)
+definitions 46858 (16.0 per file), references 189840
+  definition.class             11124
+  definition.constant          2855
+  definition.function          32879
+dumped 46858 rows to /tmp/s-b/py-django.tags

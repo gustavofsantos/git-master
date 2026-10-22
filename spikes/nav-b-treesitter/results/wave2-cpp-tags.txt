@@ -1,0 +1,9 @@
+lang=cpp root=/root/.cache/gm-spikes/corpora/json threads=1
+walk: 1444 entries, 591 matching files in 0.01s
+parsed 591 files (8.1 MB, 215465 lines), 226 with syntax errors (38.24%), 0 skipped as too big
+wall 2.69s  =>  220 files/s, 3.0 MB/s, 80046 lines/s  (cpu: read 0.03s, parse 2.01s, query 0.48s)
+definitions 7433 (12.6 per file), references 0
+  definition.class             799
+  definition.function          6537
+  definition.method            21
+  definition.type              76

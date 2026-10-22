@@ -1,0 +1,8 @@
+lang=ruby root=/root/.cache/gm-spikes/corpora/rails threads=1
+walk: 5022 entries, 3483 matching files in 0.02s
+parsed 3483 files (19.0 MB, 586431 lines), 0 with syntax errors (0.00%), 0 skipped as too big
+wall 6.16s  =>  566 files/s, 3.1 MB/s, 95230 lines/s  (cpu: read 0.16s, parse 3.67s, query 1.89s)
+definitions 52218 (15.0 per file), references 994158
+  definition.class             6686
+  definition.method            41551
+  definition.module            3981

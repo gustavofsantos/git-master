@@ -3,7 +3,7 @@
 # CARGO_TARGET_DIR=$HOME/.cache/gm-spikes/target
 [workspace]
 resolver = "2"
-members = ["b-text", "c-rebase", "d-status", "nav-c-match"]
+members = ["b-text", "c-rebase", "d-status", "nav-c-match", "nav-b-treesitter", "nav-b-truth-rust"]
 
 [workspace.package]
 version = "0.0.0"

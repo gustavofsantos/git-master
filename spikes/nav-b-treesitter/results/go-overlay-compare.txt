@@ -1,0 +1,3 @@
+fn    truth=   79085 tree-sitter=   79082 both=   79074 recall= 99.99%  precision= 99.99%
+type  truth=   16912 tree-sitter=   16905 both=   16904 recall= 99.95%  precision= 99.99%
+all   truth=   95997 tree-sitter=   95987 both=   95978 recall= 99.98%  precision= 99.99%

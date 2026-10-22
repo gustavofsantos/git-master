@@ -1,0 +1,41 @@
+file /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.2/src/tables.rs (1563226 bytes, 22869 lines) with rust
+highlights query compiled in 40.92 ms
+cold parse 424.38 ms; reparse after a one-character edit 43.47 ms
+highlight 60 lines at the top: 0.361 ms, 428 captures
+highlight 60 lines at the middle: 0.597 ms, 720 captures
+highlight 60 lines at the end: 0.532 ms, 699 captures
+highlight the whole file: 228.58 ms, 270462 captures
+
+file /usr/local/go/src/syscall/zerrors_linux_amd64.go (58756 bytes, 1523 lines) with go
+highlights query compiled in 5.44 ms
+cold parse 7.71 ms; reparse after a one-character edit 0.62 ms
+highlight 60 lines at the top: 0.098 ms, 159 captures
+highlight 60 lines at the middle: 0.107 ms, 181 captures
+highlight 60 lines at the end: 0.148 ms, 116 captures
+highlight the whole file: 3.00 ms, 4692 captures
+
+file /usr/lib/python3.13/typing.py (133960 bytes, 3846 lines) with python
+highlights query compiled in 9.32 ms
+cold parse 17.77 ms; reparse after a one-character edit 1.60 ms
+highlight 60 lines at the top: 0.165 ms, 75 captures
+highlight 60 lines at the middle: 0.278 ms, 176 captures
+highlight 60 lines at the end: 0.159 ms, 163 captures
+highlight the whole file: 10.48 ms, 11230 captures
+
+
+file /root/.cache/gm-spikes/corpora/TypeScript/packages/typescript/src/api/sync/api.ts (366837 bytes, 8202 lines) with typescript
+highlights query compiled in 9.96 ms
+cold parse 58.33 ms; reparse after a one-character edit 0.22 ms
+highlight 60 lines at the top: 0.157 ms, 59 captures
+highlight 60 lines at the middle: 0.186 ms, 48 captures
+highlight 60 lines at the end: 0.202 ms, 54 captures
+highlight the whole file: 25.82 ms, 8916 captures
+
+file /opt/node22/lib/node_modules/@anthropic-ai/claude-code/cli.js (11495956 bytes, 7560 lines) with javascript
+highlights query compiled in 24.57 ms
+cold parse 3576.23 ms; reparse after a one-character edit 48.97 ms
+highlight 60 lines at the top: 183.220 ms, 266416 captures
+highlight 60 lines at the middle: 26.491 ms, 39222 captures
+highlight 60 lines at the end: 13.191 ms, 18346 captures
+highlight the whole file: 2949.49 ms, 4388309 captures
+

@@ -11,6 +11,7 @@ Source: `~/Projects/rvw` (Rust + GPUI review hub by the same author). Read on 20
 - On macOS add `gpui` with feature `runtime_shaders`, so Command Line Tools suffice (no full Xcode).
 - `xattr` 0.2.3 (pulled by gpui) needs `libc::ENOATTR`, which libc 0.2.190 no longer exports on Linux. rvw's `Cargo.lock` pins `libc` to **0.2.186**. Do the same: `cargo update -p libc --precise 0.2.186`.
 - Linux link needs dev packages: `libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig-dev` (plus `build-essential pkg-config`).
+- A cloud container can ship a `rustc` older than the stable `rust-toolchain.toml` asks for (`error: rustc 1.97 is not supported … requires rustc 1.99`): run `rustup update stable`. A fresh container also has the runtime `libxkbcommon.so.0` but not the `-dev` packages, so `gm-ui` tests fail to link until `apt-get update && apt-get install …` has run.
 - A distro `rustc` earlier on `PATH` than `~/.cargo/bin` breaks builds (E0514, clippy failing in dependencies). Put `~/.cargo/bin` first. `rust-toolchain.toml`: channel stable, components clippy and rustfmt.
 - Workspace lints: `clippy::pedantic` warn (priority -1), a few documented allows (`missing_errors_doc`, `must_use_candidate`). `make lint` = `cargo clippy --workspace --all-targets -- -D warnings` + `cargo fmt --all --check`. Fix findings; do not relax lints.
 - `make check` = lint + audit (`cargo-audit` pinned, installed under `target/tools`) + tests. `.githooks/pre-push` runs it (`make hooks` sets `core.hooksPath`). CI: lint, audit, test, and an MSRV job.

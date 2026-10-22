@@ -1,0 +1,19 @@
+fn    truth=  605728 tree-sitter=  605786 both=  605728 recall=100.00%  precision= 99.99%
+type  truth=  335664 tree-sitter=  328691 both=  328675 recall= 97.92%  precision=100.00%
+all   truth=  941392 tree-sitter=  934477 both=  934403 recall= 99.26%  precision= 99.99%
+
+missed by tree-sitter (in the truth only): 6989  {'type': 6989}
+    ('index.crates.io-1949cf8c6b5b557f/arrayvec-0.7.8/tests/tests.rs', 311, 'type', 'ByteArray')
+    ('index.crates.io-1949cf8c6b5b557f/arrayvec-0.7.8/tests/tests.rs', 316, 'type', 'EmptyArray')
+    ('index.crates.io-1949cf8c6b5b557f/arrayvec-0.7.8/tests/tests.rs', 321, 'type', 'QuadArray')
+    ('index.crates.io-1949cf8c6b5b557f/arrayvec-0.7.8/tests/tests.rs', 328, 'type', 'RefArray')
+    ('index.crates.io-1949cf8c6b5b557f/async-io-2.6.0/examples/linux-inotify.rs', 18, 'type', 'Event')
+    ('index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.1/tests/mod.rs', 118, 'type', 'Buf')
+
+extra in tree-sitter (not in the truth): 74  {'type': 16, 'fn': 58}
+    ('index.crates.io-1949cf8c6b5b557f/exr-1.74.2/src/image/channel_groups.rs', 18, 'type', 'ChannelGroups')
+    ('index.crates.io-1949cf8c6b5b557f/exr-1.74.2/src/image/channel_groups.rs', 32, 'fn', 'groups')
+    ('index.crates.io-1949cf8c6b5b557f/exr-1.74.2/src/image/channel_groups.rs', 37, 'fn', 'lookup_group')
+    ('index.crates.io-1949cf8c6b5b557f/exr-1.74.2/src/image/channel_groups.rs', 68, 'fn', 'map')
+    ('index.crates.io-1949cf8c6b5b557f/exr-1.74.2/src/image/channel_groups.rs', 77, 'fn', 'parse_channel_list_groups')
+    ('index.crates.io-1949cf8c6b5b557f/exr-1.74.2/src/image/channel_groups.rs', 80, 'fn', 'insert_into_groups')

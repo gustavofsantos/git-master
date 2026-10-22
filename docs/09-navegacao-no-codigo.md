@@ -1,6 +1,6 @@
 # Navegação no código
 
-Última atualização: 2026-10-22. Status: escopo decidido (D43). S-A, S-C, N1, N2 e N3 estão feitos (`07`, D89 a D91); D44 e D46 foram sustentadas pelos spikes e pelo N3. O resto (S-B, N4 a N6, D45, D47 a D51) segue como **proposta** em `01`.
+Última atualização: 2026-10-22. Status: escopo decidido (D43). S-A, S-B, S-C, N1, N2 e N3 estão feitos (`07`, D89 a D92); D44 e D46 foram sustentadas pelos spikes e pelo N3, e D45 tem o spike (D92) mas segue **proposta** até o autor confirmar. O resto (N4 a N6, D47 a D51) segue como **proposta** em `01`.
 
 ## Por que
 
@@ -100,6 +100,17 @@ git grep -I -n --column -z --no-color [-i] [-w] [-F|-E|-P] [--untracked] -e <pad
 - **Ir para a definição** (clique ou atalho sobre um identificador no visualizador): busca o nome no índice. Um candidato abre direto; vários listam todos. Sem resolução semântica de escopo.
 - **Usos:** "Find usages" é `git grep -w <nome>`, e a interface diz que são ocorrências de texto, não referências semânticas. Linguagem sem gramática continua achável por nome e por texto. Não vamos fingir precisão que a abordagem não tem; referências precisas pedem LSP, fora de escopo (D47).
 - **Linguagens, em ondas:** Rust, TypeScript/JavaScript, Python, Go; depois Java, C/C++, C#, Kotlin, Ruby, Swift. Arquivo de linguagem sem gramática continua achável por nome e por texto, só não tem símbolos.
+
+### Resultado do spike S-B (2026-10-22)
+
+Detalhes e números em `spikes/nav-b-treesitter/FINDINGS.md`; decisão proposta em D92. O que muda neste desenho:
+
+- **Tree-sitter compilado no binário é viável** (D45): cerca de 9 s de um núcleo por milhão de linhas, 109 s para indexar 104 mil arquivos em 4 threads (pico de 66 MB), cinco gramáticas somam cerca de 5 MB ao binário. Só Linux foi medido.
+- **Consultas próprias, não as dos crates.** O `tags.scm` do TypeScript sozinho acha 35% das definições; somado ao do JavaScript, 87%; com um complemento de enum, alias e campo-função, 99,1%. O do Rust conta tipos associados como tipos; o do Go não vê `type X = Y`. O `highlights.scm` do TypeScript também soma ao do JavaScript. As sementes estão em `spikes/nav-b-treesitter/queries/`.
+- **Definições por caminhada simples na árvore** onde a linguagem permite (Rust, Python, Go): mesmo resultado que a consulta, 2,6 a 3 vezes mais barato. Consulta onde precisa de contexto (TypeScript, JavaScript). A consulta não fica mais barata sem os padrões de referência; "Find usages" continua sendo `git grep -w` (acima).
+- **Índice**: `.git/gitmaster/symbols.db` (SQLite), chave blob, linguagem e versão da consulta; 1,19 milhão de símbolos em 1,8 s e 113 MB; buscas exatas e por prefixo abaixo de 0,1 ms; a busca difusa por nome usa o casador do N1, não o SQLite.
+- **Destaque**: parse em thread própria, só as linhas visíveis são pintadas (0,1 a 0,6 ms por 60 linhas), limite de 2 MiB do visualizador, tempo máximo de parse e sem destaque em linha muito longa.
+- **Ficam de fora da primeira versão** C, C++ e C#, cuja qualidade não foi verificada (40% dos arquivos de git/git têm erro de sintaxe).
 
 ## Visualizador
 

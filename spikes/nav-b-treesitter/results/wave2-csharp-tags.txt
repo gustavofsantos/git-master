@@ -1,0 +1,8 @@
+lang=csharp root=/root/.cache/gm-spikes/corpora/Newtonsoft.Json threads=1
+walk: 1176 entries, 951 matching files in 0.00s
+parsed 951 files (7.0 MB, 196649 lines), 66 with syntax errors (6.94%), 0 skipped as too big
+wall 2.30s  =>  414 files/s, 3.0 MB/s, 85608 lines/s  (cpu: read 0.04s, parse 1.63s, query 0.47s)
+definitions 8550 (9.0 per file), references 47126
+  definition.class             1636
+  definition.interface         52
+  definition.method            6862

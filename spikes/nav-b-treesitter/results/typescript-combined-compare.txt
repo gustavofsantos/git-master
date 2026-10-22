@@ -1,0 +1,31 @@
+fn    truth=   41900 tree-sitter=   46854 both=   41161 recall= 98.24%  precision= 87.85%
+type  truth=   28550 tree-sitter=   20482 both=   20326 recall= 71.19%  precision= 99.24%
+all   truth=   70450 tree-sitter=   67336 both=   61487 recall= 87.28%  precision= 91.31%
+
+missed by tree-sitter (in the truth only): 8963  {'type': 8224, 'fn': 739}
+    ('packages/typescript/enums/caseSensitivity.d.ts', 3, 'type', 'CaseSensitivity')
+    ('packages/typescript/enums/characterCodes.d.ts', 1, 'type', 'CharacterCodes')
+    ('packages/typescript/enums/checkFlags.d.ts', 3, 'type', 'CheckFlags')
+    ('packages/typescript/enums/commentDirectiveType.d.ts', 1, 'type', 'CommentDirectiveType')
+    ('packages/typescript/enums/completionItemKind.d.ts', 3, 'type', 'CompletionItemKind')
+    ('packages/typescript/enums/diagnosticCategory.d.ts', 3, 'type', 'DiagnosticCategory')
+    ('packages/typescript/enums/diagnosticDirectivePolicy.d.ts', 3, 'type', 'DiagnosticDirectivePolicy')
+    ('packages/typescript/enums/elementFlags.d.ts', 3, 'type', 'ElementFlags')
+    ('packages/typescript/enums/emitOnly.d.ts', 3, 'type', 'EmitOnly')
+    ('packages/typescript/enums/indexKind.d.ts', 3, 'type', 'IndexKind')
+    ('packages/typescript/enums/internalSymbolName.d.ts', 3, 'type', 'InternalSymbolName')
+    ('packages/typescript/enums/jsDeclarationKind.d.ts', 3, 'type', 'JSDeclarationKind')
+
+extra in tree-sitter (not in the truth): 5849  {'fn': 5693, 'type': 156}
+    ('packages/typescript/src/api/async/api.ts', 454, 'fn', 'toPath')
+    ('packages/typescript/src/api/async/api.ts', 1060, 'fn', 'client')
+    ('packages/typescript/src/api/async/api.ts', 1288, 'fn', 'client')
+    ('packages/typescript/src/api/async/api.ts', 1292, 'fn', 'sourceFileCache')
+    ('packages/typescript/src/api/async/api.ts', 1593, 'fn', 'client')
+    ('packages/typescript/src/api/async/api.ts', 1726, 'fn', 'client')
+    ('packages/typescript/src/api/async/api.ts', 1730, 'fn', 'sourceFileCache')
+    ('packages/typescript/src/api/async/api.ts', 2283, 'fn', 'client')
+    ('packages/typescript/src/api/async/api.ts', 3272, 'fn', 'id')
+    ('packages/typescript/src/api/async/api.ts', 3311, 'fn', 'declarations')
+    ('packages/typescript/src/api/async/api.ts', 3315, 'fn', 'valueDeclaration')
+    ('packages/typescript/src/api/async/api.ts', 3962, 'fn', 'declaration')
