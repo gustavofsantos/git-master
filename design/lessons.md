@@ -101,7 +101,7 @@ Testing:
 
 - Take a sandbox claim from a test written against the host side of the boundary as well as the VM side: the first escape suite had 53 cases and none of them passed a cyclic or 100,000-level table to `ctx`, which would overflow the Rust stack. The converter had a depth cap; the test makes sure it keeps it.
 - A test of "never reached" code needs a witness: a host call that must not be recorded, or a file that must not exist, not only an end status.
-- `grep_real_git::git_is_killed_when_the_result_is_full_not_waited_for` is racy under load: it kills a shell script before the shell has started its `sleep 60`, and the read then waits the 60 seconds. It passes alone. Run it alone before suspecting a change.
+- A fake `git` that is a shell script must `exec` its last command (`exec sleep 60`). A child of the shell outlives a kill of the shell and keeps the pipe open, so the reader waits for the child; under load the kill came late enough to make `grep_real_git` take the full 60 seconds, twice in `make check`, while it passed alone.
 - A clippy "too many lines" error appears when an existing `match` grows by one arm. Move one arm into a method instead of adding an `allow`.
 
 Working with agents (Haiku workers):
