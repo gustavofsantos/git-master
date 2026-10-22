@@ -46,6 +46,8 @@ fn init_repo(dir: &Path) {
 enum Answer {
     Approve,
     Reject,
+    /// Cancel the run instead of answering.
+    Cancel,
 }
 
 struct Harness {
@@ -141,7 +143,14 @@ impl Harness {
                 .collect();
             while self.answered < asks.len() {
                 let runtime = self.engine.script_runtime().unwrap();
-                runtime.approve(asks[self.answered], matches!(answer, Answer::Approve));
+                match answer {
+                    Answer::Cancel => {
+                        runtime.cancel(asks[self.answered]);
+                    }
+                    Answer::Approve | Answer::Reject => {
+                        runtime.approve(asks[self.answered], matches!(answer, Answer::Approve));
+                    }
+                }
                 self.answered += 1;
             }
             if let Some(done) = snapshot.iter().find_map(|e| match e {
@@ -406,4 +415,35 @@ return M
         run_script(repo.path(), script, StartedBy::Human, Answer::Approve);
     assert_eq!(status, RunStatus::Failed);
     assert!(reason.unwrap().contains("not available"));
+}
+
+#[test]
+fn cancelling_wakes_a_script_blocked_in_approve_and_runs_nothing_after_it() {
+    let repo = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let script = r#"
+local M = {}
+M.meta = { name = "t", trigger = { on = "manual" } }
+function M.execute(ctx, input)
+  if ctx.approve("Create the branch?") then
+    ctx.branch.create({ name = "never" })
+  end
+  ctx.notify("not reached")
+end
+return M
+"#;
+    let started = Instant::now();
+    let (harness, run, (status, _, _)) =
+        run_script(repo.path(), script, StartedBy::Human, Answer::Cancel);
+    assert_eq!(status, RunStatus::Cancelled);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(git(repo.path(), &["branch", "--list", "never"]), "");
+    let calls = Harness::journal(repo.path()).calls(run).unwrap();
+    assert_eq!(calls.len(), 1, "nothing was called after the approve");
+    assert_eq!(calls[0].outcome.as_deref(), Some("cancelled"));
+    drop(harness);
 }
