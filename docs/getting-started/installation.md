@@ -11,7 +11,7 @@ GitMaster is a desktop app for macOS and Linux. The install script downloads the
 
 | Requirement | Details |
 |---|---|
-| Git | Required. GitMaster runs `git` for every operation, and it is the only external program the app needs. The install script does not install Git. |
+| Git | Required. GitMaster uses the `git` program for its operations, and it is the only external program the app needs. The install script does not install Git. |
 | Operating system | macOS, or Linux. The macOS app declares a minimum system version of 10.15.7. |
 | Processor | amd64 (x86_64) or arm64 (aarch64). |
 | Graphical session (Linux) | GitMaster draws its window, so it needs a graphical session and a graphics driver that the UI toolkit, GPUI, can use. |

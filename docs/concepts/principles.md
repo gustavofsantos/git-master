@@ -15,7 +15,7 @@ The same inputs give the same results. A plan and its execution produce the same
 
 > **Planned.** Approval of agent changes is not available in the app yet.
 
-An agent can read the repository and propose changes. An operation that an agent asks for and that changes the repository needs your approval in the app, and it runs only the exact change you approved. See [Trust and safety](trust-and-safety.md#who-may-do-what) for the details.
+An agent can read the repository and propose changes. An operation that an agent asks for and that changes the repository needs your approval in the app, and it runs only the exact change you approved. See [Trust and safety](trust-and-safety.md) for the details.
 
 ## Git is the source of truth
 

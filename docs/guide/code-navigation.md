@@ -99,13 +99,17 @@ The viewer shows the file as read-only text.
 
 The viewer reads only regular files inside the active worktree. Paths that point outside the worktree are refused, and named pipes and devices are not read.
 
+### Syntax highlighting
+
 > **Planned.** Syntax highlighting is not available in the app yet.
 
 Syntax highlighting colours the code by language for Rust, Python, Go, TypeScript and TSX, and JavaScript. Only the lines on screen are coloured, so scrolling stays smooth. Files in other languages stay plain.
 
+### Keyboard in the file tree
+
 > **Planned.** Keyboard navigation of the file tree is not available in the app yet.
 
-The file tree is navigated with the keyboard and not only with the mouse.
+The file tree is navigated with the keyboard, not only with the mouse.
 
 ## View File
 

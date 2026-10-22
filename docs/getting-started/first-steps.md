@@ -51,7 +51,7 @@ The sidebar lists the places in the repository and its branches and worktrees.
 | **Working Copy** | Changed files, the diff of a file, and the commit composer. The header shows the number of changed files. | |
 | **History** | The commit history of the current branch. See [History](../guide/history.md). | |
 | **Code** | The Code page: a folder tree and a read-only file viewer. See [Code navigation](../guide/code-navigation.md). | |
-| **Search** | The Search page, which searches the text of the repository with `git grep`. See [Code navigation](../guide/code-navigation.md). | |
+| **Search** | The Search page, which searches the text of the repository. See [Code navigation](../guide/code-navigation.md). | |
 | **Workflows** | The workflows page. See [Workflows overview](../workflows/overview.md). | Planned |
 | **Stashes** | Stashed changes. | Planned |
 | **Reflog** | The reference log. | Planned |
@@ -67,7 +67,7 @@ Drag the edge of the sidebar to resize it. Its width stays between 200 px and 40
 
 ### Main area
 
-The main area shows the page you opened from the sidebar, or the diff of the file you picked. In the Working Copy, the diff sits beside the file list.
+The main area shows the page you opened from the sidebar, such as the Working Copy, the history or the code, and the diffs and file views that open from them.
 
 ### Top bar
 
@@ -94,7 +94,7 @@ Read-only commands, such as those that load the status, a diff or the history, a
 
 ## Command palette
 
-Press `Ctrl+K` (`⌘K` on macOS) to open the command palette. Type part of an action, a worktree or a branch name, and the palette filters the list as you type. Press `Enter` to run the selected item. Press `Tab` to choose the branch or file the action needs. Press `Esc` to leave the argument step or close the palette. An action that cannot run now shows the reason next to it. Every action is also available from the keyboard and from the context menus. See [Command palette](../guide/command-palette.md).
+Press `Ctrl+K` (`⌘K` on macOS) to open the command palette. Type part of an action, a worktree or a branch name, and the palette filters the list as you type. Press `Enter` to run the selected item. Press `Tab` to choose the branch or file the action needs. Press `Esc` to leave the argument step or close the palette. An action that cannot run now shows the reason next to it. Each action is also reachable from the keyboard and from the menus. See [Command palette](../guide/command-palette.md).
 
 ## Choose a theme
 
