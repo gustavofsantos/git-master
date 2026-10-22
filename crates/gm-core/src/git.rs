@@ -276,6 +276,32 @@ impl SubprocessGit {
         })
     }
 
+    /// One logged `git` write of `path` for `discard_file`. The path comes after
+    /// `--` and the run is `--literal-pathspecs`, so a name such as `:(glob)*`
+    /// is never read as a pattern.
+    fn discard_run(&self, root: &Path, args: &[&str], path: &str) -> Result<(), GitError> {
+        let mut command = self.git(root);
+        command
+            .arg("--literal-pathspecs")
+            .args(args)
+            .arg("--")
+            .arg(path);
+        self.logged(command, None).map(drop)
+    }
+
+    /// Deletes the untracked `path`. A folder needs `-d`; a symbolic link is
+    /// removed as a link, never followed.
+    fn discard_untracked(&self, root: &Path, path: &str) -> Result<(), GitError> {
+        let is_dir = std::fs::symlink_metadata(root.join(path.trim_end_matches('/')))
+            .is_ok_and(|meta| meta.is_dir());
+        let args: &[&str] = if is_dir {
+            &["clean", "-fd"]
+        } else {
+            &["clean", "-f"]
+        };
+        self.discard_run(root, args, path)
+    }
+
     /// Whether the index differs from HEAD (from the empty tree on an unborn branch).
     fn has_staged(&self, root: &Path) -> Result<bool, GitError> {
         let mut command = self.git(root);
@@ -506,6 +532,53 @@ impl GitPort for SubprocessGit {
         command.args(["apply", "--reverse"]);
         self.logged(command, Some(hunk_patch(path, hunk).as_bytes()))
             .map(drop)
+    }
+
+    fn discard_file(&self, root: &Path, path: &str, include_staged: bool) -> Result<(), GitError> {
+        check_index_lock(&open(root)?)?;
+        let status = self.status(root)?;
+        let entry = status
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .ok_or_else(|| GitError(format!("{path} has no changes to discard")))?;
+        if entry.conflicted {
+            return Err(GitError(format!(
+                "{path} is conflicted: resolve the conflict first"
+            )));
+        }
+        if entry.untracked {
+            return self.discard_untracked(root, path);
+        }
+        if !include_staged {
+            return match entry.unstaged {
+                None => Err(GitError(format!("{path} has nothing unstaged to discard"))),
+                // An intent-to-add file (`git add -N`) has no content in the index to
+                // return to, so its whole content is the change: remove it.
+                Some(Change::Added) => self.discard_run(root, &["rm", "-f"], path),
+                Some(_) => self.discard_run(root, &["restore", "--worktree"], path),
+            };
+        }
+        match entry.staged {
+            Some(Change::Added | Change::Copied) => self.discard_run(root, &["rm", "-f"], path),
+            Some(Change::Renamed) => {
+                // The new path is an addition; the old one is still in HEAD.
+                self.discard_run(root, &["rm", "-f"], path)?;
+                match &entry.orig_path {
+                    Some(orig) => self.discard_run(
+                        root,
+                        &["restore", "--source=HEAD", "--staged", "--worktree"],
+                        orig,
+                    ),
+                    None => Ok(()),
+                }
+            }
+            _ => self.discard_run(
+                root,
+                &["restore", "--source=HEAD", "--staged", "--worktree"],
+                path,
+            ),
+        }
     }
 
     fn commit(&self, root: &Path, message: &str) -> Result<String, GitError> {

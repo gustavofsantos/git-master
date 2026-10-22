@@ -76,6 +76,19 @@ pub trait GitPort: Send {
         Err(GitError("discard is not supported by this adapter".into()))
     }
 
+    /// Discards every change of `path` (B1, D93). Without `include_staged` a
+    /// tracked file returns to its index content and the staged side stays; with
+    /// it, the file returns to HEAD in the index and the worktree. An untracked
+    /// file is deleted. The loss is permanent. A path with no change is an error.
+    fn discard_file(
+        &self,
+        _root: &Path,
+        _path: &str,
+        _include_staged: bool,
+    ) -> Result<(), GitError> {
+        Err(GitError("discard is not supported by this adapter".into()))
+    }
+
     /// Commits the index; returns the new commit id.
     fn commit(&self, _root: &Path, _message: &str) -> Result<String, GitError> {
         Err(GitError("commit is not supported by this adapter".into()))

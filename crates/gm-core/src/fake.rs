@@ -212,6 +212,16 @@ impl GitPort for FakeGit {
         Err(GitError("discard is not supported by this adapter".into()))
     }
 
+    fn discard_file(
+        &self,
+        _root: &Path,
+        _path: &str,
+        _include_staged: bool,
+    ) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("discard_file");
+        Ok(())
+    }
+
     fn commit(&self, _root: &Path, _message: &str) -> Result<String, GitError> {
         self.writes.lock().unwrap().push("commit");
         Err(GitError("commit is not supported by this adapter".into()))

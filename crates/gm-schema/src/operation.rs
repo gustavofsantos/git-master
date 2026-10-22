@@ -72,6 +72,16 @@ pub enum CommandKind {
         path: String,
         hunk: HunkId,
     },
+    /// Discards every change of `path` (B1, D93). Destructive: the loss is
+    /// permanent, with no snapshot to undo it. Without `include_staged` a
+    /// tracked file goes back to its index content and what is staged stays;
+    /// with it, the file goes back to HEAD in the index and the worktree, and
+    /// an added file is removed. An untracked file is deleted either way. Human
+    /// only, and the command is logged (D28).
+    DiscardFile {
+        path: String,
+        include_staged: bool,
+    },
     /// Stages every change of the working tree (`git add -A`), as a workflow's
     /// `stage.all` does. Never commits.
     StageAll,
@@ -626,6 +636,26 @@ mod tests {
         .unwrap();
         assert_eq!(delete["type"], "delete_merged_branches");
         assert_eq!(delete["branches"][0], "topic");
+    }
+
+    #[test]
+    fn discard_file_wire_format_is_tagged() {
+        let discard = serde_json::to_value(CommandKind::DiscardFile {
+            path: "src/main.rs".into(),
+            include_staged: true,
+        })
+        .unwrap();
+        assert_eq!(discard["type"], "discard_file");
+        assert_eq!(discard["path"], "src/main.rs");
+        assert_eq!(discard["include_staged"], true);
+        let back: CommandKind = serde_json::from_value(discard).unwrap();
+        assert_eq!(
+            back,
+            CommandKind::DiscardFile {
+                path: "src/main.rs".into(),
+                include_staged: true,
+            }
+        );
     }
 
     #[test]

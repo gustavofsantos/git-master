@@ -786,6 +786,7 @@ impl Engine {
                 self.git.discard_hunk(&root, path, hunk).map_err(|e| e.0)?;
                 self.reload_status(id, &root)
             }
+            CommandKind::DiscardFile { .. } => self.discard_file(id, actor, kind),
             CommandKind::Commit { message } => {
                 if message.trim().is_empty() {
                     return Err("the commit message is empty".to_owned());
@@ -1766,6 +1767,29 @@ impl Engine {
         self.root
             .clone()
             .ok_or_else(|| "no repository is open".to_owned())
+    }
+
+    /// Discards every change of one file (B1, D93). Human only: the loss is
+    /// permanent. The status follows, as after a stage.
+    fn discard_file(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        let CommandKind::DiscardFile {
+            path,
+            include_staged,
+        } = kind
+        else {
+            return Err("not a discard command".to_owned());
+        };
+        only_a_human(actor, "discard changes")?;
+        let root = self.open_root()?;
+        self.git
+            .discard_file(&root, path, *include_staged)
+            .map_err(|e| e.0)?;
+        self.reload_status(id, &root)
     }
 
     /// A mutation ends by showing the new state, so no front-end has to ask.
@@ -3174,6 +3198,39 @@ mod tests {
             failure(&events).as_deref(),
             Some("only a human can delete a branch")
         );
+    }
+
+    #[test]
+    fn an_agent_cannot_discard_a_file_and_a_human_can() {
+        let status = RepoStatus {
+            root: "/r".into(),
+            ..RepoStatus::default()
+        };
+        let fake = FakeGit::new("/r", status);
+        let mut engine = Engine::new(Box::new(fake.clone()));
+        engine.handle(OperationId(1), &open());
+        let agent = Actor::Agent {
+            name: "agent".into(),
+        };
+        let discard = CommandKind::DiscardFile {
+            path: "f.txt".into(),
+            include_staged: true,
+        };
+        let events = engine.handle(
+            OperationId(2),
+            &Command {
+                actor: agent,
+                kind: discard.clone(),
+            },
+        );
+        assert_eq!(
+            failure(&events).as_deref(),
+            Some("only a human can discard changes")
+        );
+        assert!(fake.writes().is_empty());
+        let events = engine.handle(OperationId(3), &command(discard));
+        assert_eq!(failure(&events), None);
+        assert_eq!(fake.writes(), ["discard_file"]);
     }
 
     #[test]
