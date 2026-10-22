@@ -86,12 +86,20 @@ fn table_to_json(table: &Table, depth: usize) -> Result<Json, ConvError> {
     if let Some(list) = as_list(&entries, depth)? {
         return Ok(Json::Array(list));
     }
-    let mut map = Map::new();
+    // Sorted by key, so the same table converts to the same JSON text whatever order Lua visits
+    // it in and whatever features `serde_json` was built with (`preserve_order` keeps the order
+    // of insertion). The journal, the dry run and the tests all read this text.
+    let mut named: Vec<(String, &Value)> = Vec::with_capacity(entries.len());
     for (key, value) in &entries {
         let Value::String(key) = key else {
             return Err(ConvError::Keys);
         };
         let key = key.to_str().map_err(|_| ConvError::Text)?.to_string();
+        named.push((key, value));
+    }
+    named.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut map = Map::new();
+    for (key, value) in named {
         map.insert(key, walk(value, depth + 1)?);
     }
     Ok(Json::Object(map))

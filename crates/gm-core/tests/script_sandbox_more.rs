@@ -162,3 +162,36 @@ fn builtins_with_huge_counts_fail_cleanly() {
         );
     }
 }
+
+#[test]
+fn the_arguments_of_a_call_reach_the_host_with_sorted_keys() {
+    // The host, the journal and the dry run read these as text, so the order must not depend on
+    // the order Lua visits a table in or on how `serde_json` was built.
+    let source = "local M = {}\nfunction M.execute(ctx, input)\n\
+        ctx.branch.create({ name = 'x', checkout = true })\n\
+        ctx.exec({ 'git' }, { timeout = '30s', stdin = 's' })\nend\nreturn M\n";
+    let surface = CtxSurface::from_catalog();
+    let input = json!({});
+    let mut host = ScriptedHost::new();
+    let request = RunRequest {
+        chunk: "flow.lua",
+        source,
+        input: &input,
+        surface: &surface,
+        budgets: small(),
+        cancel: Arc::new(AtomicBool::new(false)),
+    };
+    LuauEngine::new().run(&request, &mut host);
+    let text: Vec<String> = host
+        .calls
+        .iter()
+        .map(|(_, args)| args.to_string())
+        .collect();
+    assert_eq!(
+        text,
+        [
+            r#"{"checkout":true,"name":"x"}"#,
+            r#"{"argv":["git"],"stdin":"s","timeout":"30s"}"#
+        ]
+    );
+}

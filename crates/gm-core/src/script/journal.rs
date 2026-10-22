@@ -471,7 +471,7 @@ fn migrate(conn: &mut Connection) -> Result<(), JournalError> {
 
 /// Text stored for a JSON value. A value over `RESULT_LIMIT` bytes becomes its digest and head.
 fn stored_json(value: &Value) -> Result<String, JournalError> {
-    let text = serde_json::to_string(value)
+    let text = serde_json::to_string(&canonical(value))
         .map_err(|e| JournalError(format!("cannot encode JSON: {e}")))?;
     if text.len() <= RESULT_LIMIT {
         return Ok(text);
@@ -480,13 +480,32 @@ fn stored_json(value: &Value) -> Result<String, JournalError> {
     while !text.is_char_boundary(cut) {
         cut -= 1;
     }
-    Ok(json!({
+    Ok(canonical(&json!({
         "truncated": true,
         "sha256": hex(&Sha256::digest(text.as_bytes())),
         "size": text.len(),
         "head": &text[..cut],
-    })
+    }))
     .to_string())
+}
+
+/// The value with every object's keys in sorted order. `serde_json` keeps the order of insertion
+/// when any crate of the build turns on `preserve_order`, so the same call would otherwise be
+/// stored as different text from one build to another.
+fn canonical(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|key| (key.clone(), canonical(&map[key])))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
+        other => other.clone(),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1160,6 +1179,44 @@ mod tests {
             assert_eq!(calls.len(), 50);
             assert!(calls.iter().all(|c| c.outcome.as_deref() == Some("done")));
         }
+    }
+
+    #[test]
+    fn json_is_stored_with_sorted_keys_whatever_the_order_it_was_built_in() {
+        // With `preserve_order` (on in this crate's tests, and in a whole-workspace build) a map
+        // keeps the order of insertion; the stored text must not depend on it.
+        let j = fresh();
+        let run = start(&j, "w", 1);
+        let mut args = serde_json::Map::new();
+        args.insert("name".into(), json!("x"));
+        args.insert(
+            "checkout".into(),
+            json!({ "z": 1, "a": [{ "y": 2, "b": 3 }] }),
+        );
+        let args = Value::Object(args);
+        j.begin_call(&NewCall {
+            run,
+            seq: 1,
+            func: "branch.create",
+            level: "apply",
+            args: &args,
+            started_at: 1,
+        })
+        .unwrap();
+        let mut result = serde_json::Map::new();
+        result.insert("text".into(), json!("t"));
+        result.insert("exit_code".into(), json!(0));
+        j.finish_call(run, 1, &Value::Object(result), "done", None, 1)
+            .unwrap();
+        let call = &j.calls(run).unwrap()[0];
+        assert_eq!(
+            call.args.to_string(),
+            r#"{"checkout":{"a":[{"b":3,"y":2}],"z":1},"name":"x"}"#
+        );
+        assert_eq!(
+            call.result.as_ref().unwrap().to_string(),
+            r#"{"exit_code":0,"text":"t"}"#
+        );
     }
 
     #[test]
