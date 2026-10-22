@@ -960,7 +960,8 @@ impl Model {
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
             // The Before side of a comment (B4d) is not shown yet, so its text is dropped.
-            | Event::ReviewSnapshotText { .. } => None,
+            | Event::ReviewSnapshotText { .. }
+            | Event::ReviewCurrentText { .. } => None,
         }
     }
 
@@ -1263,7 +1264,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkflowFileSaved { id, .. }
         | Event::WorkflowFileDeleted { id, .. }
         | Event::ReviewCommentsListed { id, .. }
-        | Event::ReviewSnapshotText { id, .. } => Some(*id),
+        | Event::ReviewSnapshotText { id, .. }
+        | Event::ReviewCurrentText { id, .. } => Some(*id),
         Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }
         | Event::WorkflowNotice { .. }

@@ -154,6 +154,16 @@ fn snapshot_text(events: &[Event]) -> (String, Vec<String>) {
         .expect("a snapshot text")
 }
 
+fn current_text(events: &[Event]) -> (String, Vec<String>) {
+    events
+        .iter()
+        .find_map(|e| match e {
+            Event::ReviewCurrentText { path, lines, .. } => Some((path.clone(), lines.clone())),
+            _ => None,
+        })
+        .expect("a current text")
+}
+
 /// Lists the comments through the engine: the list is a read, not a write.
 fn list(engine: &mut Engine) -> Vec<ReviewComment> {
     let events = engine.handle(OperationId(900), &human(CommandKind::ListReviewComments));
@@ -574,6 +584,53 @@ fn the_snapshot_text_is_the_old_text_after_the_file_was_edited() {
 }
 
 #[test]
+fn the_current_text_follows_the_comment_and_is_empty_when_it_is_outdated() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 2, 3, "about b and c")));
+    let id = only(&mut engine).id;
+    let read = |engine: &mut Engine, op: u64| {
+        engine.handle(
+            OperationId(op),
+            &human(CommandKind::LoadReviewCurrentText { id }),
+        )
+    };
+    let words = |lines: &[&str]| {
+        lines
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    let events = read(&mut engine, 11);
+    assert!(done(&events), "{}", failure(&events));
+    assert_eq!(
+        current_text(&events),
+        ("f.txt".to_owned(), words(&["b", "c"]))
+    );
+
+    write(dir.path(), "f.txt", "x\na\nb\nc\nd\ne\n");
+    let moved = read(&mut engine, 12);
+    assert_eq!(
+        current_text(&moved).1,
+        words(&["b", "c"]),
+        "found where it moved"
+    );
+
+    write(dir.path(), "f.txt", "a\nB\nC\nd\ne\n");
+    let edited = read(&mut engine, 13);
+    assert!(done(&edited));
+    assert!(current_text(&edited).1.is_empty(), "outdated is empty");
+
+    write(dir.path(), "f.txt", "a\nb\nc\nd\ne\n");
+    std::fs::remove_file(dir.path().join("f.txt")).unwrap();
+    let gone = read(&mut engine, 14);
+    assert!(done(&gone));
+    assert!(current_text(&gone).1.is_empty(), "a missing file is empty");
+}
+
+#[test]
 fn an_agent_is_refused_every_write_and_can_still_list() {
     let dir = repo();
     let log = CommandLog::default();
@@ -711,6 +768,10 @@ fn reads_are_not_recorded_and_the_writes_reach_the_command_log() {
     engine.handle(
         OperationId(10),
         &human(CommandKind::LoadReviewSnapshotText { id: 1 }),
+    );
+    engine.handle(
+        OperationId(10),
+        &human(CommandKind::LoadReviewCurrentText { id: 1 }),
     );
     assert_eq!(engine.log().len(), before, "reads leave no entry");
 

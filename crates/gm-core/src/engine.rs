@@ -1992,6 +1992,9 @@ impl Engine {
             CommandKind::LoadReviewSnapshotText { id: comment } => {
                 self.load_review_snapshot(id, *comment)
             }
+            CommandKind::LoadReviewCurrentText { id: comment } => {
+                self.load_review_current(id, *comment)
+            }
             CommandKind::AddReviewComment {
                 path,
                 start_line,
@@ -2125,6 +2128,23 @@ impl Engine {
             None => Vec::new(),
         };
         Ok(vec![Event::ReviewSnapshotText {
+            id,
+            comment,
+            path: current.path,
+            lines,
+        }])
+    }
+
+    /// The lines comment `comment` covers in the file now, for the After side.
+    /// Empty when the comment is outdated, or its file cannot be read.
+    fn load_review_current(&mut self, id: OperationId, comment: i64) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let current = find_review(store, comment)?;
+        let lines = review_session::read_text(&root, &current.path)
+            .map(|text| review::current_region(&text, &current.anchor))
+            .unwrap_or_default();
+        Ok(vec![Event::ReviewCurrentText {
             id,
             comment,
             path: current.path,
@@ -2530,6 +2550,7 @@ impl Engine {
                 | CommandKind::DeleteWorkflowFile { .. }
                 | CommandKind::ListReviewComments
                 | CommandKind::LoadReviewSnapshotText { .. }
+                | CommandKind::LoadReviewCurrentText { .. }
         ) {
             self.log.push(LogEntry {
                 id: op.id,
@@ -2636,6 +2657,7 @@ fn is_review_command(kind: &CommandKind) -> bool {
             | CommandKind::ReopenReviewComment { .. }
             | CommandKind::DeleteReviewComment { .. }
             | CommandKind::LoadReviewSnapshotText { .. }
+            | CommandKind::LoadReviewCurrentText { .. }
     )
 }
 

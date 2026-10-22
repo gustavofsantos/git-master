@@ -399,6 +399,12 @@ pub enum CommandKind {
     LoadReviewSnapshotText {
         id: i64,
     },
+    /// Reads the lines review comment `id` covers in the working tree now, for
+    /// the After side of the diff. Answers `ReviewCurrentText`. A read: never
+    /// recorded (D28).
+    LoadReviewCurrentText {
+        id: i64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -699,6 +705,14 @@ pub enum Event {
     /// covered in the snapshot, empty when there is no snapshot or the file was
     /// not in it.
     ReviewSnapshotText {
+        id: OperationId,
+        comment: i64,
+        path: String,
+        lines: Vec<String>,
+    },
+    /// Answers `LoadReviewCurrentText` for comment `comment`: the lines it covers
+    /// in the file now, empty when the comment is outdated or the file is gone.
+    ReviewCurrentText {
         id: OperationId,
         comment: i64,
         path: String,

@@ -114,6 +114,28 @@ pub fn snapshot_region(file_text: &str, anchor: &ReviewAnchor) -> Vec<String> {
     }
 }
 
+/// The lines `anchor` covers in `file_text` now: the run `locate` finds, which
+/// must be unique. Empty when the anchor is outdated, so the After side shows
+/// nothing rather than a guess.
+pub fn current_region(file_text: &str, anchor: &ReviewAnchor) -> Vec<String> {
+    let Some(found) = locate(file_text, anchor) else {
+        return Vec::new();
+    };
+    let count = anchor.text.split('\n').count();
+    usize::try_from(found.start_line)
+        .ok()
+        .and_then(|line| line.checked_sub(1))
+        .and_then(|at| {
+            lines_of(file_text)
+                .get(at..at + count)
+                .map(<[&str]>::to_vec)
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The 1-based line number of the 0-based index `at`.
 fn line_number(at: usize) -> Option<u32> {
     u32::try_from(at + 1).ok()
@@ -307,6 +329,17 @@ mod tests {
         let anchor = anchored(&file(&["a", "b", "c"]), 2, 3);
         let moved = file(&["n", "n", "n", "b", "c"]);
         assert_eq!(snapshot_region(&moved, &anchor), vec!["b", "c"]);
+    }
+
+    #[test]
+    fn the_current_region_is_the_commented_lines_when_they_are_found_once() {
+        let anchor = anchored(&file(&["a", "b", "c"]), 2, 3);
+        assert_eq!(
+            current_region(&file(&["n", "b", "c"]), &anchor),
+            vec!["b", "c"]
+        );
+        assert!(current_region(&file(&["b", "c", "x", "b", "c"]), &anchor).is_empty());
+        assert!(current_region(&file(&["b", "x"]), &anchor).is_empty());
     }
 
     /// Lines that are unique in a file: each starts with its own index.
