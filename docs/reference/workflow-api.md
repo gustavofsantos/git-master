@@ -1,11 +1,11 @@
 ---
 title: Workflow API
 description: The ctx object a workflow script calls to act, with the arguments, results, effect levels and outcomes of each call, and the sandbox and budgets a script runs under.
-status: planned
+status: partial
 order: 40
 ---
 
-> **Planned.** Script workflows are not available in the app yet.
+> **Planned.** The stack, restack, reparent, fetch and push calls, the phases other than manual and the wake-up of `ctx.wait` by an event are not available in the app yet. A call to one of those ends with the outcome `failed`. The other calls work.
 
 A workflow is a Lua script. The script receives two values: `ctx`, the only way it can act in GitMaster, and `input`, which holds data only. Each call on `ctx` runs one GitMaster command, the same kind of command the window and the MCP server run, and each call is recorded in the run journal. For the file layout and how a run starts, see [Writing workflows](../workflows/writing-workflows.md). For the triggers and the rules of each phase, see [Triggers and phases](../workflows/triggers-and-phases.md).
 
@@ -52,7 +52,7 @@ GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It 
 |---|---|
 | `input.inputs` | The values you entered for the `inputs` declared in `M.meta`, by name. |
 | `input.trigger` | The payload of the trigger. Its fields depend on the trigger. The examples read `root` from a `before.restack` trigger and `parent` from a `stack.parent_moved` trigger. |
-| `input.repo` | A read-only snapshot of the repository when the run starts: `root`, `branch`, `head` and `staged_diff`. A large value, such as `staged_diff`, arrives as the path of a file that holds it. |
+| `input.repo` | A read-only snapshot of the repository when the run starts: `root`, `branch`, `head` and `staged_diff`. `staged_diff` is the diff text; a diff over 1 MiB is cut at a line break and ends with `[diff truncated at 1 MiB]`, and `staged_diff_path` is then the path of a file that holds the whole diff. |
 
 ## Effect levels
 
@@ -80,7 +80,7 @@ Outcomes are the values a call can end with, as listed in the action catalog. A 
 |---|---|---|---|---|
 | `ctx.notify(text)` | `text`: the line the notification shows. | — | read | `done`, `failed` |
 | `ctx.approve(summary)` | `summary` (optional): what you are asked to approve. | `true` when you approve, `false` when you reject. | pauses for a human | `approved`, `rejected`, `failed` |
-| `ctx.wait(event, opts)` | `event`: the event to wait for. `opts.timeout`: a duration such as `"24h"`. | A table whose `outcome` field is `resumed`, `aborted` or `timeout`. | pauses until an event | `resumed`, `aborted`, `timeout` |
+| `ctx.wait(event, opts)` | `event`: the event to wait for. `opts.timeout`: a duration such as `"24h"`; without it the wait lasts until the event or until you cancel. | A table whose `outcome` field is `resumed`, `aborted` or `timeout`. The call never raises an error, whatever the outcome. | pauses until an event | `resumed`, `aborted`, `timeout` |
 
 The catalog declares one wait event: `restack.resumed`. It is used after a restack conflict, so that the run can continue once the conflict is resolved.
 
@@ -88,7 +88,7 @@ The catalog declares one wait event: `restack.resumed`. It is used after a resta
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.exec(argv, opts)` | `argv`: a list of strings. `opts.stdin`: text for the program's standard input. `opts.timeout`: a duration such as `"60s"`, default `30s`. `opts.format`: `"json"`, or not set. | A table with `text` and `exit_code`. With `format = "json"`, the parsed JSON is also in the result. | read (output is untrusted) | `done`, `failed`, `timeout` |
+| `ctx.exec(argv, opts)` | `argv`: a list of strings. `opts.stdin`: text for the program's standard input. `opts.timeout`: a duration such as `"60s"`, default `30s`. `opts.format`: `"json"`, or not set. | A table with `text`, `exit_code`, `stderr` and `truncated`. With `format = "json"`, the parsed JSON is also in the result, as `json`. | read (output is untrusted) | `done`, `failed`, `timeout` |
 
 `ctx.exec` runs a program directly, never through a shell:
 
@@ -122,34 +122,42 @@ local r = ctx.exec({ "llm-cli", "-p", "Write a conventional commit message for t
 
 ### Remote
 
+> **Planned.** `ctx.fetch` and `ctx.push.lease` are not available in the app yet.
+
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.fetch()` | — | — | apply | `done`, `failed`, `interrupted` |
-| `ctx.push.lease(...)` | — | — | apply, always asks for your approval | `done`, `failed`, `interrupted` |
+| `ctx.fetch({ remote })` | `remote`: the remote to fetch, text. Optional, default `origin`. | — | apply | `done`, `failed`, `interrupted` |
+| `ctx.push.lease({ branch, remote })` | `branch`: the branch to push, text. Required. `remote`: the remote to push to, text. Optional, default `origin`. | — | apply, always asks for your approval | `done`, `failed`, `interrupted` |
 
 ### Stacks
 
+> **Planned.** `ctx.stack.tree` and `ctx.stack.stale` are not available in the app yet.
+
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.stack.tree()` | — | — | read | `done`, `failed` |
-| `ctx.stack.stale()` | — | — | read | `done`, `failed` |
+| `ctx.stack.tree()` | — | `branches`: a list of tables with `name`, `parent` and `stale`. | read | `done`, `failed` |
+| `ctx.stack.stale()` | — | `branches`: a list of the names of the branches whose parent moved. | read | `done`, `failed` |
 
 ### Restack
+
+> **Planned.** The restack calls are not available in the app yet.
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
 | `ctx.restack.plan({ root })` | `root`: the branch at the top of the subtree to restack, text. Required. | `plan_id` and `branch_count`. | propose | `done`, `failed` |
 | `ctx.restack.apply({ plan_id })` | `plan_id`: the id returned by `ctx.restack.plan`, text. Required. | — The outcome is available through `ctx.try`. | apply | `done`, `conflict`, `stale`, `failed` |
-| `ctx.restack.undo(...)` | — | — | apply | `done`, `failed`, `interrupted` |
+| `ctx.restack.undo({ plan_id })` | `plan_id`: the id of the restack to undo, text. Required. | — | apply | `done`, `failed`, `interrupted` |
 
 A plan's `plan_id` is tied to the commits of the branches when the plan was made. If a branch has moved since then, `ctx.restack.apply` ends with `stale`. A restack conflict ends `ctx.restack.apply` with `conflict`. `ctx.restack.apply` has no `interrupted` outcome, because restack has its own recovery steps.
 
 ### Reparent
 
+> **Planned.** The reparent calls are not available in the app yet.
+
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.reparent.plan(...)` | — | — | propose | `done`, `failed` |
-| `ctx.reparent.apply(...)` | — | — | apply | `done`, `failed`, `interrupted` |
+| `ctx.reparent.plan({ branch, parent })` | `branch`: the branch to move, text. Required. `parent`: the branch that becomes its parent, text. Required. | `plan_id` and `branch_count`. | propose | `done`, `failed` |
+| `ctx.reparent.apply({ plan_id })` | `plan_id`: the id returned by `ctx.reparent.plan`, text. Required. | — | apply | `done`, `failed`, `interrupted` |
 
 ### Helpers
 
@@ -160,8 +168,8 @@ These calls do not act on the repository, so they have no effect level or outcom
 | `ctx.try(fn)` | `fn`: a function that makes one call on `ctx`. | A table whose `outcome` field is the outcome of that call. |
 | `ctx.fail(reason)` | `reason`: text. | Ends the run as `failed` with the reason. |
 | `ctx.block(reason)` | `reason`: text. | Ends the run as `blocked` with the reason. In a `before.<operation>` phase, it vetoes the operation. |
-| `ctx.now()` | None. | The time of the call. The value is recorded in the run journal. |
-| `ctx.random()` | None. | A random value. The value is recorded in the run journal. |
+| `ctx.now()` | None. | The time of the call, as whole milliseconds since 1 January 1970 UTC. The value is recorded in the run journal. |
+| `ctx.random()` | None. | A number from 0 up to, but not including, 1. A run draws from a sequence seeded for that run, and each value is recorded in the run journal. |
 
 ## Outcomes and errors
 
@@ -184,6 +192,8 @@ end
 - Every call is written to the run journal, with its sequence number, function, resolved arguments, result, outcome and duration. Approval decisions belong to GitMaster. The script does not decide them.
 
 ## Return value by phase
+
+> **Planned.** Only manual runs are available in the app, so the other phases are not yet.
 
 What `M.execute` returns depends on the trigger.
 

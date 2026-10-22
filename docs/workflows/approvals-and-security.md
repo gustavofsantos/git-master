@@ -1,11 +1,11 @@
 ---
 title: Approvals and security
 description: Who can start a workflow run, which actions need your approval, how script review by hash works, and the limits of the sandbox.
-status: planned
+status: partial
 order: 40
 ---
 
-> **Planned.** Script workflows are not available in the app yet.
+> **Planned.** Event runs, agent runs and automatic approval of a version are not available in the app yet, because nothing starts them. Manual runs follow every rule on this page.
 
 Workflows can change your repository, so GitMaster decides what a run may do on its own and what needs you. This page covers who starts a run, the effect level of each action, when you approve, how a script is reviewed, and what the sandbox protects. A script is untrusted logic. It has no authority of its own: GitMaster is the only actor, and every action the script takes goes through a `ctx` call that GitMaster carries out.
 

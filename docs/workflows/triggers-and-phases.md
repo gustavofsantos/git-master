@@ -1,11 +1,11 @@
 ---
 title: Triggers and phases
 description: Which events start a workflow, how the match filter narrows them, and what the before, transform and after phases do.
-status: planned
+status: partial
 order: 30
 ---
 
-> **Planned.** Script workflows are not available in the app yet.
+> **Planned.** Only the `manual` trigger is available in the app. Event triggers, the `match` filter, debounce, concurrency and the before, transform and after phases are not available yet.
 
 A workflow runs when one of its triggers fires. A trigger is either an event in GitMaster, such as a commit being created or a branch being checked out, or your own request from the command palette. Some operations also offer three phases for a workflow: **before** the operation, where a workflow can veto it; **transform**, where a workflow fills in the value of a field; and **after** the operation, where a workflow only observes. This page lists the triggers, the `match` filter and the phases. For the script API, see [Writing workflows](writing-workflows.md) and the [Workflow API](../reference/workflow-api.md).
 

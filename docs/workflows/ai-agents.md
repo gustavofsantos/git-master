@@ -1,11 +1,11 @@
 ---
 title: Writing workflows with an AI agent
 description: How an AI coding agent writes a workflow script, which generated API files it reads, how it tests the script without the app window, and how you review and run the result.
-status: planned
+status: partial
 order: 50
 ---
 
-> **Planned.** Script workflows are not available in the app yet.
+> **Planned.** Starting a run through the MCP `workflow_run` tool is not available in the app yet. Writing a script, the generated `.api/` files and the three commands work.
 
 An AI coding agent with access to your files can write a workflow script. GitMaster has no MCP tool that creates or edits scripts. The agent writes a `.lua` file in your workflows directory, as it would any other text file. You stay in charge: a script that has changed is unreviewed until you run it and confirm **Run this version?**. See [Approvals and security](approvals-and-security.md).
 

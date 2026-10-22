@@ -1,11 +1,11 @@
 ---
 title: Workflows overview
 description: What a workflow is, where its file lives, how you run one, and how the Workflows page shows what it did.
-status: planned
+status: partial
 order: 10
 ---
 
-> **Planned.** Script workflows are not available in the app yet.
+> **Planned.** Manual workflows run from the command palette, with the review of a version, approvals and cancel. The Workflows page with its Script and Runs tabs, keyboard shortcuts for workflows, triggers other than manual, automatic approval of event runs and runs started by an agent are not available in the app yet.
 
 A workflow is a small script that automates a Git task in GitMaster. You write it in Lua, and it acts only through a `ctx` object, so it can do what GitMaster can do and nothing else. This page explains the model, how you run a workflow, and how to read what it did. To write one, read [Writing workflows](writing-workflows.md).
 
@@ -74,11 +74,15 @@ Confirming is also the moment you can allow event-triggered apply actions to run
 
 ### Dry run
 
+> **Planned.** The dry run from the Script tab is not available in the app yet. `gitmaster workflow dry-run` works.
+
 A dry run executes a script against your real repository without changing it. Reads run for real. Actions that propose, apply or run `exec` are recorded with the values they would receive, but they do not run, and `exec` never runs in a dry run. The dry run lists the calls in order. A value that comes after a simulated value is an estimate, and GitMaster marks it as one.
 
 In the **Script** tab, a dry run uses the text open in the editor. From the command line, `gitmaster workflow dry-run <file>` does the same for a saved file. See [CLI](../reference/cli.md).
 
 ## The Workflows page
+
+> **Planned.** The Script and Runs tabs, saving and deleting a workflow from the page, and the Cancel and Approve buttons are not available in the app yet. Cancel and approve work from the command palette.
 
 The Workflows page lists your workflows on the left and shows the selected one on the right. The right side has two tabs:
 
@@ -95,6 +99,8 @@ Two buttons control a run:
 - **Approve** appears on a run that is waiting for your approval.
 
 ## Runs
+
+> **Planned.** The Runs tab is not available in the app yet. GitMaster records every call of a run in the journal already.
 
 The **Runs** tab shows what a run actually did. GitMaster records each call the script makes to `ctx` as it happens, so the record shows what the run did, not what the script reports about itself.
 

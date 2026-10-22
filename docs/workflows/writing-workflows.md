@@ -1,11 +1,11 @@
 ---
 title: Writing workflows
 description: A tutorial on the shape of a workflow script, its metadata, the values it receives, the calls it makes through ctx, and how to check and test it before a run.
-status: planned
+status: partial
 order: 20
 ---
 
-> **Planned.** Script workflows are not available in the app yet.
+> **Planned.** Triggers other than `manual`, the `key` shortcut, `ctx.wait` (no event resumes a wait yet) and the stack, restack, reparent, fetch and push calls are not available in the app yet. The rest of this tutorial works.
 
 This tutorial takes a workflow from the first line to a tested file. Read [Workflows overview](overview.md) first for the model. Each worked example is a complete file that you save into your workflows folder.
 
@@ -62,7 +62,7 @@ For the full list of trigger names, see [Triggers and phases](triggers-and-phase
 - `input.trigger` holds the payload of the trigger. In a stack event, `input.trigger.parent` names the parent branch.
 - `input.repo` is a read-only snapshot of the repository, with `root`, `branch`, `head` and `staged_diff`.
 
-A large value, such as a big staged diff, arrives as the path to a file that holds it, not as the text itself.
+`staged_diff` is the diff text. A diff over 1 MiB is cut at a line break and ends with `[diff truncated at 1 MiB]`, and `input.repo.staged_diff_path` is then the path of a file that holds the whole diff.
 
 ## What `execute` returns
 

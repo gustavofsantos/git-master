@@ -17,7 +17,7 @@ GitMaster keeps its files in three places: your user config directory, your user
 |---|---|---|
 | `~/.config/gitmaster/settings.json` (Linux) | App preferences. See the `settings.json` section below. | |
 | `~/Library/Application Support/gitmaster/settings.json` (macOS) | App preferences, on macOS. | |
-| `~/.config/gitmaster/workflows/` (Linux), `~/Library/Application Support/gitmaster/workflows/` (macOS) | Your workflow files. A workflow file holds only its definition, never run state. | Planned |
+| `~/.config/gitmaster/workflows/` (Linux), `~/Library/Application Support/gitmaster/workflows/` (macOS) | Your workflow files. A workflow file holds only its definition, never run state. | |
 
 ### User data directory
 
@@ -25,6 +25,7 @@ GitMaster keeps its files in three places: your user config directory, your user
 |---|---|---|
 | `~/.local/share/gitmaster/recent.json` (Linux), `~/Library/Application Support/gitmaster/recent.json` (macOS) | The recently opened repositories, newest first, up to 10. |  |
 | `~/.local/share/gitmaster/hook-approvals.json` (Linux), `~/Library/Application Support/gitmaster/hook-approvals.json` (macOS) | Your approvals of repository hooks. Each approval covers one repository and one hash of the hook command. |  |
+| `~/.local/share/gitmaster/gitmaster.db` (Linux), `~/Library/Application Support/gitmaster/gitmaster.db` (macOS) | Which versions of a workflow script you reviewed, and your automatic approvals. Each is tied to the hash of the script text. | |
 | `~/.local/share/gitmaster/workflow-trash/` (Linux), `~/Library/Application Support/gitmaster/workflow-trash/` (macOS) | Workflow files you delete. They are moved here instead of being removed. | Planned |
 
 A repository whose folder no longer exists is dropped from the recent list.
@@ -35,7 +36,7 @@ GitMaster keeps per-repository state in `.git/gitmaster/`, inside the Git common
 
 | Path | What it holds | Status |
 |---|---|---|
-| `.git/gitmaster/state.db` | Workflow run history: runs, steps and their outputs. | Planned |
+| `.git/gitmaster/state.db` | Workflow run history: every run and every call it made. | |
 | `.git/gitmaster/` (local review data) | Comments and snapshots of the local review. | Planned |
 | `.git/gitmaster/symbols.db` | The symbol index used by code navigation. | Planned |
 | Private refs inside `.git` | Snapshots taken before a restack, which an undo restores. | Planned |
@@ -74,7 +75,7 @@ GitMaster reads Git's own configuration through `git`, so Git's scope rules appl
 | `user.email` | Any | Not set | Decides the default of the branch filter. With an email set, the sidebar starts on **Mine**, which shows your current branch and the branches whose latest commit is yours. The match ignores case. | |
 | `core.editor` | Any | Not set | The program that **Open in editor** starts. | Planned |
 | `merge.conflictStyle` | Any | `zdiff3` | The style of the conflict markers the conflict resolver shows. | Planned |
-| `gitmaster.workflowPath` | Any, can be set more than once | Not set | Extra folders to read workflow files from, after your workflows directory. A folder inside the repository's working tree is refused. | Planned |
+| `gitmaster.workflowPath` | Any, can be set more than once | Not set | Extra folders to read workflow files from, after your workflows directory. A folder inside the repository's working tree is refused. | |
 | `gitmaster.worktree.root` | Any | `../<repo>-<branch>` | The base folder for new worktrees. See [Worktrees](../guide/worktrees.md). | Planned |
 | `branch.<name>.stackParent` | Repository | Not set | The parent branch of a branch in a stack. See [Stacks](../guide/stacks.md). | Planned |
 | `branch.<name>.stackParentBase` | Repository | Not set | The commit the parent branch pointed to when this branch was last created or re-anchored. | Planned |
