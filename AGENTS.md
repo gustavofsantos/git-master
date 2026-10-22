@@ -31,7 +31,7 @@ The full principles (determinism, human approves and agent proposes, Git is the 
 2. Mark whatever the app does not do yet: `status:` in the page's front matter and a `> **Planned.**` marker on each missing part.
 3. Implement until the marker can be removed, then update the page's `status`.
 
-`scripts/docs-status.sh` is the diff between the docs and the app: it lists every page with its status and the number of `Planned` markers left. `make docs` (part of `make check`) runs `scripts/docs-status.sh --check`; run it after editing docs. The authoring rules (front matter, markers, tone, no history in the docs) are in `docs/README.md`. Before go-live every page is `implemented`.
+`make docs-status` is the diff between the docs and the app: it lists every page with its status and the number of `Planned` markers left. `make docs` (part of `make check`) enforces the authoring rules; run it after editing docs. The authoring rules (front matter, markers, tone, no history in the docs) are in `docs/README.md`. `make docs-site` builds the documentation website (`tools/docsite`, a separate Cargo workspace) into `build/site`. Before go-live every page is `implemented`.
 
 ## Where things live
 

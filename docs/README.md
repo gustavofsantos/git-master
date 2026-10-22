@@ -1,6 +1,6 @@
 # Documentation authoring guide
 
-This directory is the **official GitMaster documentation**. It is the source for the documentation website: a bundler (not written yet) turns every page here into a site page. This file is the only file in `docs/` that is not published.
+This directory is the **official GitMaster documentation**. It is the source of the documentation website: `tools/docsite` turns every page here into a static site (see [The site](#the-site)). This file and `sections.toml` are the only files in `docs/` that are not published as pages.
 
 ## Desired state, not history
 
@@ -25,7 +25,7 @@ The docs therefore never contain history, dates, slice names (`WF3`, `N4`), deci
 | `agents/` | MCP server and the local review loop |
 | `reference/` | Keyboard shortcuts, configuration, CLI, workflow API, MCP tools |
 
-`index.md` is the landing page. `sections.yml` gives the title and order of each directory.
+`index.md` is the landing page. `sections.toml` gives the title and order of each directory.
 
 ## Page format
 
@@ -80,16 +80,30 @@ The `Planned` marker is a blockquote that starts with exactly `> **Planned.**` f
 
 In a table, mark a row with `Planned` in a status column instead of a blockquote.
 
-The marker text is what the bundler turns into a badge, and what `scripts/docs-status.sh` counts. That script is the equivalent of a diff between desired and actual state: run it to see what is left to build.
+The marker text is what the site turns into a badge and lists on its **Availability** page, and what `docsite status` counts. That command is the equivalent of a diff between desired and actual state: run it to see what is left to build.
 
 ```sh
-scripts/docs-status.sh          # one line per page, and a total
-scripts/docs-status.sh --check  # also fails on a missing field or a status that disagrees with the markers
+make docs-status   # one line per page, and a total
+make docs          # check the pages against the rules in this guide (the CI runs it)
 ```
 
-## Bundle contract (for the future bundler)
+## The site
 
-- Input: every `*.md` under `docs/` except `docs/README.md`.
-- Navigation: directories in the order given by `sections.yml`; pages by `order`, then `title`.
-- Output per page: the front matter fields, the body, and `planned_count`, the number of `> **Planned.**` markers.
-- Links between pages resolve inside the bundle; a broken link fails the build.
+`tools/docsite` is a small Rust program (its own Cargo workspace; it is not part of the app). It reads `docs/` and writes a static website that can be deployed anywhere: plain HTML, CSS and JavaScript, with relative links, no external requests and no server-side rewrites. It also opens straight from disk.
+
+```sh
+make docs-site                       # writes build/site
+python3 -m http.server -d build/site # preview at http://localhost:8000
+```
+
+The program has three commands (`cargo run --manifest-path tools/docsite/Cargo.toml -- help`):
+
+| Command | What it does |
+|---|---|
+| `docsite check [--strict]` | Enforces the rules of this guide. Errors: bad or missing front matter, status that disagrees with the markers, a planned page that does not start with its marker, an H1, a skipped heading level, a code block without a language, a link that does not resolve (page or heading), an absolute link. Warnings: history words and decision numbers in the prose, repeated `order`. `--strict` fails on warnings too. |
+| `docsite status` | Lists every page with its status and the number of `Planned` markers. |
+| `docsite build [--out DIR] [--base-url URL] [--version LABEL]` | Checks, then writes the site (default `build/site`). `--base-url` adds canonical links, `sitemap.xml` and `robots.txt`; leave it out for a site that may live at any URL. `--version` is shown in the footer. It refuses to replace a directory it did not write. |
+
+What the site has: a sidebar built from `sections.toml` and each page's `order`, an "On this page" outline, previous and next links, search over all pages (press `/`), light and dark themes that follow the system and can be switched, syntax highlighting, copy buttons on code blocks, a status badge on each page that is not fully available, and an **Availability** page that lists every `Planned` marker by page. Pages are written to `build/site` with the same path as the source and an `.html` extension: `docs/guide/branches.md` becomes `guide/branches.html`.
+
+Images and other files under `docs/` (anything that is not Markdown) are copied to the site at the same path. Link to them with a relative path.

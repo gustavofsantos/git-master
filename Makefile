@@ -3,7 +3,7 @@
 CARGO_AUDIT_VERSION := 0.22.2
 CARGO_AUDIT := target/tools/bin/cargo-audit
 
-.PHONY: build run install uninstall test lint fmt audit docs check hooks clean
+.PHONY: build run install uninstall test lint fmt audit docs docs-status docs-site docs-test check hooks clean
 
 build:
 	cargo build --release -p gitmaster
@@ -62,12 +62,26 @@ $(CARGO_AUDIT):
 audit: $(CARGO_AUDIT)
 	$(CARGO_AUDIT) audit
 
-# The docs are the desired state (docs/README.md): every page keeps its front matter
-# and its status in step with its Planned markers.
-docs:
-	scripts/docs-status.sh --check >/dev/null
+# The documentation is the desired state of the product (docs/README.md) and tools/docsite
+# turns it into the website. `docs` is the same check the CI runs; `docs-status` shows what the
+# app does not do yet; `docs-site` writes the static site to build/site.
+DOCSITE := cargo run --quiet --release --manifest-path tools/docsite/Cargo.toml --
 
-check: lint audit docs test
+docs:
+	$(DOCSITE) check
+
+docs-status:
+	$(DOCSITE) status
+
+docs-site:
+	$(DOCSITE) build --version "$(VERSION)"
+
+docs-test:
+	cargo clippy --manifest-path tools/docsite/Cargo.toml --all-targets -- -D warnings
+	cargo fmt --manifest-path tools/docsite/Cargo.toml --check
+	cargo test --manifest-path tools/docsite/Cargo.toml
+
+check: lint audit docs docs-test test
 
 hooks:
 	git config core.hooksPath .githooks

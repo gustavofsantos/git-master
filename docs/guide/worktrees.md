@@ -64,7 +64,7 @@ Double-clicking the **here** row does nothing. A row whose folder is missing sho
 3. If a blocker can be overridden, tick the confirmation checkbox. The checkbox names what will be discarded. The remove button stays disabled until you tick it.
 4. Remove the worktree.
 
-GitMaster checks the worktree again at the moment of removal, so the dialog never acts on an old answer.
+GitMaster checks the worktree again when you remove it, so the dialog never acts on an old answer.
 
 | Situation | Can the checkbox override it? |
 |---|---|

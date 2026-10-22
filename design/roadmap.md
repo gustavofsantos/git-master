@@ -1,6 +1,6 @@
 # Roadmap
 
-The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `scripts/docs-status.sh` lists what the docs still mark as planned.
+The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `make docs-status` lists what the docs still mark as planned.
 
 Last updated: 2026-10-21 (slice H5, lane graph, done). Initial proposal, to be iterated on.
 
