@@ -261,7 +261,7 @@ fn api_md(surface: &CtxSurface, version: &str) -> String {
     para(
         &mut out,
         &format!(
-            "Version {version}. This file is generated from the action catalog. The app rewrites it when its version changes, so do not edit it."
+            "Version {version}. This file is generated from the action catalog. The app rewrites it when its version changes, so do not edit it. The file `ctx.d.luau` in this folder holds the same signatures as Luau types, for an editor with a Luau language server."
         ),
     );
     module_section(&mut out);
@@ -657,7 +657,7 @@ fn test_section(out: &mut String) {
         ]),
         row(&[
             "`gitmaster workflow dry-run <file> [--input k=v] [--repo <path>]`",
-            "Runs the script against the repository. Reads are real. Calls that propose, apply or run a program are recorded, and each returns a result of the same shape. Programs never run. Prints the list of calls.",
+            "Runs the script against the repository. Reads are real. Calls that propose, apply or run a program are recorded, and each returns a result of the same shape. Programs never run. Prints one numbered line per call, marked `read`, `propose`, `applies`, `asks` or `waits`, and `simulated` when the call got a made-up result. Every call after the first simulated result is marked `(estimate)`, because it depends on a value that is not real. The last line says how the run ended, such as `returned: null`, where `null` means the script returned nothing.",
         ]),
         row(&[
             "`gitmaster workflow test <file> [fixture]`",
@@ -674,7 +674,7 @@ fn test_section(out: &mut String) {
         row(&["`input`", "Optional. The `input` value of the run."]),
         row(&[
             "`calls`",
-            "Every `ctx` call of the run, in order. `now` and `random` are calls too. Each has `fn` (the name without `ctx.`), and optionally `args`, which must equal the arguments of the call. Then either `reply`, the value the call returns (nothing when omitted), or `outcome`, the outcome the call ends with, with an optional `message`.",
+            "Every `ctx` call of the run, in order. `now` and `random` are calls too. Each has `fn` (the name without `ctx.`), and optionally `args`, which must equal the arguments of the call. Then either `reply`, the value the call returns (a call that returns nothing needs no `reply`), or `outcome`, the outcome the call ends with, with an optional `message`. In `args`, a call with positional arguments uses the argument names: `ctx.approve(\"Go?\")` is `args = { summary = \"Go?\" }`, `ctx.notify(\"x\")` is `{ text = \"x\" }`, `ctx.exec({ \"git\" }, { timeout = \"30s\" })` is `{ argv = { \"git\" }, timeout = \"30s\" }` and `ctx.wait(\"restack.resumed\")` is `{ event = \"restack.resumed\" }`.",
         ]),
         row(&[
             "`returns`",
@@ -898,7 +898,8 @@ fn skill_md() -> String {
     out.push_str("description: Write, check and test GitMaster workflow scripts (Lua files in the workflows folder). Use when asked to create or change a GitMaster workflow.\n");
     out.push_str("---\n\n");
     out.push_str("# Writing GitMaster workflows\n\n");
-    out.push_str("- Write one `.lua` file in the workflows folder: `~/.config/gitmaster/workflows/` on Linux, `Library/Application Support/gitmaster/workflows/` in your home folder on macOS. Do not write into a repository.\n");
+    out.push_str("- Write one `.lua` file in the workflows folder, the folder that holds this `.api/` folder: `~/.config/gitmaster/workflows/` on Linux, `Library/Application Support/gitmaster/workflows/` in your home folder on macOS. Do not write into a repository.\n");
+    out.push_str("- `.api/ctx.d.luau` has the `ctx` signatures as Luau types, for an editor.\n");
     out.push_str("- Read `.api/API.md` first. It lists every `ctx` function with its arguments, effect level and outcomes, and the shape of `M.meta`.\n");
     out.push_str("- Check, dry-run and test, and repeat until each passes:\n");
     out.push_str("  1. `gitmaster workflow check <file>`. Fix every `file:line: message`.\n");
@@ -907,6 +908,7 @@ fn skill_md() -> String {
     out.push_str("- A call that ends with an outcome other than `done` raises, unless it runs inside `ctx.try`. An unknown name in `ctx` fails and lists the valid names: correct the name from that message.\n");
     out.push_str("- Never say that a script is approved or has run. The person reviews it in GitMaster and confirms \"Run this version?\". Each change makes the script unreviewed again.\n");
     out.push_str("- Do not edit the files in `.api/`. The app rewrites them.\n\n");
+    out.push_str("In a fixture, `args` of a call with positional arguments uses the argument names (`approve` takes `summary`, `notify` takes `text`, `exec` takes `argv`). A call with no result needs no `reply`.\n\n");
     out.push_str("A fixture, saved as `<workflows dir>/.tests/branch-from-ticket.lua`:\n\n");
     out.push_str("```lua\n");
     out.push_str(BRANCH_FROM_TICKET_FIXTURE.trim_end());
@@ -969,7 +971,9 @@ fn result_words(path: &str) -> &'static str {
         "wait" => {
             "a table `{ outcome = \"resumed\" | \"aborted\" | \"timeout\" }`. It never raises."
         }
-        "commit.create" => "a table `{ commit }`, the new commit.",
+        "commit.create" => {
+            "a table `{ commit }`, where `commit` is the id of the new commit: the full hexadecimal hash that Git prints."
+        }
         "restack.plan" | "reparent.plan" => "a table `{ plan_id, branch_count }`.",
         "stack.tree" => "a table `{ branches = { { name, parent, stale } } }`.",
         "stack.stale" => "a table `{ branches = { name, ... } }`, the names of the stale branches.",
@@ -1113,6 +1117,28 @@ mod tests {
                 assert!(md.contains(field.name), "{} {}", f.path, field.name);
             }
         }
+    }
+
+    #[test]
+    fn the_files_say_what_an_agent_found_missing() {
+        // Found by an agent that wrote a script from these files alone: fixture keys of
+        // positional calls, the type file, the dry-run markers, optional `reply`, the commit id.
+        let files = generate(&surface(), "test");
+        for (what, text) in [
+            ("approve key", "args = { summary = "),
+            ("notify key", "{ text = "),
+            ("exec key", "{ argv = "),
+            ("type file in API.md", "ctx.d.luau"),
+            ("estimate marker", "(estimate)"),
+            ("returned line", "returned: null"),
+            ("optional reply", "needs no `reply`"),
+            ("commit id", "full hexadecimal hash"),
+        ] {
+            assert!(files.api_md.contains(text), "API.md lacks {what}: {text}");
+        }
+        assert!(files.skill_md.contains("ctx.d.luau"));
+        assert!(files.skill_md.contains("`summary`"));
+        assert!(files.skill_md.lines().count() < 60, "SKILL.md stays short");
     }
 
     #[test]
