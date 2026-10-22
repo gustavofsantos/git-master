@@ -42,6 +42,7 @@ use crate::palette_view::{self, PaletteView};
 use crate::project_menu::ProjectMenu;
 use crate::quick_open_view::{self, QuickOpenView};
 use crate::recent::{self, Recents};
+use crate::reflog;
 use crate::resize;
 use crate::shell_code::CodeView;
 use crate::shell_history::CommitTexts;
@@ -95,6 +96,8 @@ pub(crate) enum Screen {
     Search,
     /// The stashes of the repository, with the selected stash's files and diffs (B2).
     Stashes,
+    /// The entries of HEAD's reflog, with the selected entry's files and diffs (B3).
+    Reflog,
 }
 
 pub struct StatusView {
@@ -463,7 +466,7 @@ impl StatusView {
         if file_event {
             self.after_file_event(cx);
         }
-        for page in [CommitPage::History, CommitPage::Stashes] {
+        for page in [CommitPage::History, CommitPage::Stashes, CommitPage::Reflog] {
             if let Some(fresh) = self.model.commit_stack_mut(page).take_fresh() {
                 self.commit_diff_pane.update(cx, |pane, cx| {
                     pane.show_stack(
@@ -535,6 +538,10 @@ impl StatusView {
         if reload && self.screen == Screen::Stashes {
             self.request_stash_list();
         }
+        // The Reflog page reads its first page again after every status refresh too (B3).
+        if reload && self.screen == Screen::Reflog {
+            self.request_reflog_top();
+        }
         cx.notify();
     }
 
@@ -570,6 +577,9 @@ impl StatusView {
         if let Some(outcome) = self.model.stash_drop.take() {
             self.on_stash_dropped(outcome, window, cx);
         }
+        if let Some(outcome) = self.model.reflog_checkout.take() {
+            self.on_reflog_checkout_settled(outcome, window, cx);
+        }
     }
 
     /// The row under the top bar: the sidebar and the page the screen names.
@@ -602,6 +612,7 @@ impl StatusView {
             .children((self.screen == Screen::Code).then(|| self.code_page(cx)))
             .children((self.screen == Screen::Search).then(|| self.search_page(cx)))
             .children((self.screen == Screen::Stashes).then(|| self.stashes_page(cx)))
+            .children((self.screen == Screen::Reflog).then(|| self.reflog_page(cx)))
     }
 
     fn head_name(&self) -> Option<String> {
@@ -703,6 +714,7 @@ impl StatusView {
     fn on_switched(&mut self, switched: Switched, cx: &mut Context<Self>) {
         self.model.commit_stack.close();
         self.model.stash_stack.close();
+        self.model.reflog_stack.close();
         if !switched.same_root {
             self.composer.update(cx, |composer, cx| composer.clear(cx));
         }
@@ -733,6 +745,7 @@ impl StatusView {
     pub(crate) fn show_history(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::History;
         self.model.stash_stack.close();
+        self.model.reflog_stack.close();
         self.show_commit_texts(cx);
         self.refresh_history();
         cx.notify();
@@ -946,41 +959,7 @@ impl StatusView {
         let planned = action.plan(args, &self.action_context(&message));
         match planned {
             Err(reason) => self.notify_user(reason, cx),
-            Ok(Effect::Send(kinds)) => {
-                if action == Action::Refresh {
-                    self.request_branch_list();
-                    self.request_hook_list();
-                }
-                for kind in kinds {
-                    let applying = stash_apply::tracked(&kind);
-                    let checkout = matches!(kind, CommandKind::Checkout { .. });
-                    let refresh = matches!(kind, CommandKind::RefreshStatus);
-                    let remote = matches!(
-                        kind,
-                        CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease
-                    );
-                    let prepare = match &kind {
-                        CommandKind::RunPrepareCommit { message } => Some(message.clone()),
-                        _ => None,
-                    };
-                    let id = self.engine.dispatch(Actor::Human, kind);
-                    if let Some((apply, index)) = applying {
-                        self.model.stash_apply.start(id, apply, index);
-                    }
-                    if checkout {
-                        self.model.branches.begin_checkout(id);
-                    }
-                    if remote {
-                        self.model.remote.begin(id, action);
-                    }
-                    if let Some(sent) = prepare {
-                        self.model.hooks.start(id, sent);
-                    }
-                    if refresh {
-                        self.start_refresh_indicator(id, cx);
-                    }
-                }
-            }
+            Ok(Effect::Send(kinds)) => self.send_commands(action, kinds, cx),
             Ok(Effect::Copy(text)) => {
                 let notice = format!("Copied {text}");
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -1021,6 +1000,7 @@ impl StatusView {
             }) => self.open_discard_file_dialog(&path, include_staged, window, cx),
             Ok(Effect::ShowHistory) => self.show_history(cx),
             Ok(Effect::ShowStashes) => self.show_stashes(cx),
+            Ok(Effect::ShowReflog) => self.show_reflog(cx),
             Ok(Effect::OpenNewStashDialog) => self.open_new_stash_dialog(window, cx),
             Ok(Effect::OpenDropStashDialog { index, oid, label }) => {
                 self.open_drop_stash_dialog(index, &oid, &label, window, cx);
@@ -1042,6 +1022,49 @@ impl StatusView {
             Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
         }
         cx.notify();
+    }
+
+    /// Sends the engine commands of a run, in order, all as the human, and tracks
+    /// the ones whose outcome the window shows: an apply or a pop, a checkout, a
+    /// remote operation, a hook run, a detached checkout and a refresh.
+    fn send_commands(&mut self, action: Action, kinds: Vec<CommandKind>, cx: &mut Context<Self>) {
+        if action == Action::Refresh {
+            self.request_branch_list();
+            self.request_hook_list();
+        }
+        for kind in kinds {
+            let applying = stash_apply::tracked(&kind);
+            let detached = reflog::checkout_target(&kind).map(str::to_owned);
+            let checkout = matches!(kind, CommandKind::Checkout { .. });
+            let refresh = matches!(kind, CommandKind::RefreshStatus);
+            let remote = matches!(
+                kind,
+                CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease
+            );
+            let prepare = match &kind {
+                CommandKind::RunPrepareCommit { message } => Some(message.clone()),
+                _ => None,
+            };
+            let id = self.engine.dispatch(Actor::Human, kind);
+            if let Some((apply, index)) = applying {
+                self.model.stash_apply.start(id, apply, index);
+            }
+            if let Some(oid) = detached {
+                self.model.reflog_checkout.start(id, &oid);
+            }
+            if checkout {
+                self.model.branches.begin_checkout(id);
+            }
+            if remote {
+                self.model.remote.begin(id, action);
+            }
+            if let Some(sent) = prepare {
+                self.model.hooks.start(id, sent);
+            }
+            if refresh {
+                self.start_refresh_indicator(id, cx);
+            }
+        }
     }
 
     /// Opens `path` in the file manager. The workflows folder is made first, so a

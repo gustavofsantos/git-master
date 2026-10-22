@@ -104,7 +104,7 @@ impl StatusView {
                     .child(commit_panel(
                         &self.model.commit,
                         &self.commit_texts,
-                        Panel::Commit,
+                        &Panel::Commit,
                         None,
                         cx,
                     ))
@@ -465,29 +465,40 @@ fn show_text(area: &Entity<TextArea>, text: &str, cx: &mut Context<StatusView>) 
     }
 }
 
-/// What the detail panel shows: a commit of the history, or a stash of the
-/// Stashes page (B2), which is named `stash@{n}` and has no author or parents
-/// to show. A stash's index is `None` only while none is selected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What the detail panel shows: a commit of the history, a stash of the Stashes
+/// page (B2), which is named `stash@{n}` and has no author or parents to show, or
+/// an entry of the Reflog page (B3), which is named by its header. A stash's index,
+/// and a reflog entry's header, are `None` only while none is selected.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Panel {
     Commit,
     Stash(Option<u32>),
+    /// The entry's header, `HEAD@{n} · action`.
+    Reflog(Option<String>),
 }
 
 impl Panel {
-    fn title(self) -> String {
+    fn title(&self) -> String {
         match self {
             Self::Commit => "SELECTED COMMIT".to_owned(),
-            Self::Stash(Some(index)) => stashes::label(index),
+            Self::Stash(Some(index)) => stashes::label(*index),
             Self::Stash(None) => "SELECTED STASH".to_owned(),
+            Self::Reflog(Some(header)) => header.clone(),
+            Self::Reflog(None) => "SELECTED ENTRY".to_owned(),
         }
     }
 
-    fn empty_text(self) -> &'static str {
+    fn empty_text(&self) -> &'static str {
         match self {
             Self::Commit => "Select a commit to see its details.",
             Self::Stash(_) => "Select a stash to see its details.",
+            Self::Reflog(_) => "Select an entry to see its details.",
         }
+    }
+
+    /// Whether the panel shows the commit's author and parents, which a stash does not.
+    fn shows_author(&self) -> bool {
+        matches!(self, Self::Commit | Self::Reflog(_))
     }
 }
 
@@ -499,7 +510,7 @@ impl Panel {
 pub(crate) fn commit_panel(
     pane: &CommitPane,
     texts: &CommitTexts,
-    panel: Panel,
+    panel: &Panel,
     actions: Option<Div>,
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
@@ -538,7 +549,7 @@ fn message_text(text: &'static str) -> Div {
 fn commit_detail(
     detail: &CommitDetail,
     texts: &CommitTexts,
-    panel: Panel,
+    panel: &Panel,
     cx: &mut Context<StatusView>,
 ) -> Div {
     let copy_message = copy_button(
@@ -577,11 +588,15 @@ fn commit_detail(
                 .text_xs()
                 .child(field("Hash", texts.hash.clone(), Some(copy_hash)))
                 .children(
-                    (panel == Panel::Commit).then(|| field("Author", texts.author.clone(), None)),
+                    panel
+                        .shows_author()
+                        .then(|| field("Author", texts.author.clone(), None)),
                 )
                 .child(field("Date", texts.date.clone(), None))
                 .children(
-                    (panel == Panel::Commit).then(|| field("Parents", texts.parents.clone(), None)),
+                    panel
+                        .shows_author()
+                        .then(|| field("Parents", texts.parents.clone(), None)),
                 ),
         )
         .child(section_label(&format!(
@@ -784,12 +799,12 @@ impl StatusView {
     }
 
     /// The page whose commit the detail panel and the stacked diff show: the
-    /// Stashes page while it is on screen, else the history.
+    /// Stashes or the Reflog page while it is on screen, else the history.
     pub(crate) fn commit_page(&self) -> CommitPage {
-        if self.screen == Screen::Stashes {
-            CommitPage::Stashes
-        } else {
-            CommitPage::History
+        match self.screen {
+            Screen::Stashes => CommitPage::Stashes,
+            Screen::Reflog => CommitPage::Reflog,
+            _ => CommitPage::History,
         }
     }
 
@@ -877,6 +892,7 @@ impl StatusView {
         let back_label = match owner {
             CommitPage::History => "Back to commit",
             CommitPage::Stashes => "Back to stash",
+            CommitPage::Reflog => "Back to entry",
         };
         let back = div()
             .id("commit-file-back")

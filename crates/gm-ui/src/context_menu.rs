@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::action_registry::{Action, Args, Context as ActionContext, Reason};
+use crate::reflog;
 use crate::stashes;
 use crate::theme;
 use crate::view::StatusView;
@@ -37,6 +38,11 @@ pub(crate) enum Target {
         index: u32,
         oid: String,
     },
+    /// An entry of the Reflog page, by its index and the commit it names (B3).
+    ReflogEntry {
+        index: u32,
+        oid: String,
+    },
 }
 
 impl Target {
@@ -45,6 +51,7 @@ impl Target {
         match self {
             Self::Branch(name) | Self::File(name) | Self::Worktree(name) => name.clone(),
             Self::Stash { index, .. } => stashes::label(*index),
+            Self::ReflogEntry { index, .. } => reflog::label(*index),
         }
     }
 }
@@ -131,6 +138,18 @@ pub(crate) fn stash_items(index: u32, oid: &str, ctx: &ActionContext<'_>) -> Vec
         item(Action::StashApply, 0),
         item(Action::StashPop, 0),
         item(Action::StashDrop, 1),
+    ]
+}
+
+/// The menu of a Reflog row (B3): check out the commit detached and branch from
+/// it, then copy its hash. Checking out is refused while a change is in flight, with the reason.
+pub(crate) fn reflog_items(oid: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
+    let target = Args::Commit(oid.to_owned());
+    let item = |action, group| Item::new(action, target.clone(), group, ctx);
+    vec![
+        item(Action::CheckoutCommit, 0),
+        item(Action::NewBranchFromCommit, 0),
+        item(Action::CopyCommitHash, 1),
     ]
 }
 
@@ -254,6 +273,24 @@ impl StatusView {
         );
     }
 
+    /// Opens the menu of the Reflog row `index` that names the commit `oid`, under the pointer (B3).
+    pub(crate) fn open_reflog_menu(
+        &mut self,
+        index: u32,
+        oid: &str,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_menu(
+            Target::ReflogEntry {
+                index,
+                oid: oid.to_owned(),
+            },
+            position,
+            cx,
+        );
+    }
+
     /// Opens the menu of the file row at `index`, which becomes the selection and
     /// takes the list focus, as a left click on it does.
     pub(crate) fn open_file_menu(
@@ -329,6 +366,7 @@ impl StatusView {
             Target::File(path) => file_items(path, &ctx),
             Target::Worktree(path) => worktree_items(path, &ctx),
             Target::Stash { index, oid } => stash_items(*index, oid, &ctx),
+            Target::ReflogEntry { oid, .. } => reflog_items(oid, &ctx),
         }
     }
 
@@ -908,6 +946,52 @@ mod tests {
         for item in &items {
             assert_eq!(item.state, Err("Open the Stashes page first."), "{item:?}");
         }
+    }
+
+    #[test]
+    fn a_reflog_menu_checks_out_or_branches_from_the_entry_then_copies_its_hash() {
+        let context = ctx(&[]);
+        let oid = "b".repeat(40);
+        let items = reflog_items(&oid, &context);
+        let groups: Vec<Vec<&str>> = sections(&items)
+            .iter()
+            .map(|group| group.iter().map(Item::label).collect())
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                vec!["Check Out Commit (Detached)", "New Branch From Commit…"],
+                vec!["Copy Commit Hash"],
+            ]
+        );
+        assert!(items.iter().all(|item| item.state == Ok(())));
+        assert!(items.iter().all(|item| !item.destructive()));
+        assert_eq!(
+            find(&items, Action::CheckoutCommit).args,
+            Args::Commit(oid.clone())
+        );
+        assert_eq!(
+            find(&items, Action::NewBranchFromCommit).args,
+            Args::Commit(oid)
+        );
+    }
+
+    #[test]
+    fn a_reflog_menu_says_why_checkout_and_branch_wait_while_a_change_is_running() {
+        let busy = ActionContext {
+            busy: Some("Wait for the repository to open."),
+            ..ctx(&[])
+        };
+        let items = reflog_items(&"b".repeat(40), &busy);
+        for action in [Action::CheckoutCommit, Action::NewBranchFromCommit] {
+            assert_eq!(
+                find(&items, action).state,
+                Err("Wait for the repository to open."),
+                "{action:?}"
+            );
+        }
+        // Copying the hash runs even while the repository is busy.
+        assert_eq!(find(&items, Action::CopyCommitHash).state, Ok(()));
     }
 
     #[test]

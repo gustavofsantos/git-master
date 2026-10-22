@@ -182,6 +182,8 @@ pub enum Effect {
     ShowWorkflows,
     /// Opens the Stashes page and asks the engine for the stashes (B2).
     ShowStashes,
+    /// Opens the Reflog page and asks the engine for the first page of HEAD's reflog (B3).
+    ShowReflog,
     /// Opens the dialog that stashes the working copy's changes (B2, D94).
     OpenNewStashDialog,
     /// Opens the dialog that asks before the stash `oid` at `index` is dropped (B2).
@@ -269,7 +271,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 71] = [
+const SPECS: [Spec; 74] = [
     spec(
         "file.stage",
         "Stage File",
@@ -761,6 +763,27 @@ const SPECS: [Spec; 71] = [
         ArgKind::Stash,
         Category::WorkingCopy,
     ),
+    spec(
+        "reflog.show",
+        "Show Reflog",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "commit.checkout",
+        "Check Out Commit (Detached)",
+        None,
+        ArgKind::Commit,
+        Category::Branches,
+    ),
+    spec(
+        "branch.new_from_commit",
+        "New Branch From Commit…",
+        None,
+        ArgKind::Commit,
+        Category::Branches,
+    ),
 ];
 
 const fn spec(
@@ -854,6 +877,9 @@ pub enum Action {
     StashApply,
     StashPop,
     StashDrop,
+    ShowReflog,
+    CheckoutCommit,
+    NewBranchFromCommit,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -895,6 +921,7 @@ fn navigation_effect(action: Action, args: &Args) -> Effect {
         },
         (Action::ShowWorkflows, _) => Effect::ShowWorkflows,
         (Action::ShowStashes, _) => Effect::ShowStashes,
+        (Action::ShowReflog, _) => Effect::ShowReflog,
         _ => Effect::ShowHistory,
     }
 }
@@ -965,7 +992,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 71] = [
+    pub const ALL: [Action; 74] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1037,6 +1064,9 @@ impl Action {
         Action::StashApply,
         Action::StashPop,
         Action::StashDrop,
+        Action::ShowReflog,
+        Action::CheckoutCommit,
+        Action::NewBranchFromCommit,
     ];
 
     #[must_use]
@@ -1091,6 +1121,7 @@ impl Action {
                 | Action::ViewFile
                 | Action::ShowWorkflows
                 | Action::ShowStashes
+                | Action::ShowReflog
         )
     }
 
@@ -1173,6 +1204,7 @@ impl Action {
                 | Action::DiscardAllChanges
                 | Action::NewStash
                 | Action::StashDrop
+                | Action::NewBranchFromCommit
         )
     }
 
@@ -1206,7 +1238,8 @@ impl Action {
             | Action::QuickOpen
             | Action::ShowCode
             | Action::SearchText
-            | Action::ShowWorkflows => repository_open(ctx),
+            | Action::ShowWorkflows
+            | Action::ShowReflog => repository_open(ctx),
             Action::CheckoutBranch => {
                 idle(ctx)?;
                 match args {
@@ -1217,7 +1250,10 @@ impl Action {
                 }
             }
             Action::NewBranch | Action::DeleteBranch => branch_rule(self, args, ctx),
-            Action::DeleteMergedBranches => idle(ctx),
+            // A checkout of a commit moves HEAD, so it waits for an idle repository, like a branch.
+            Action::DeleteMergedBranches | Action::CheckoutCommit | Action::NewBranchFromCommit => {
+                idle(ctx)
+            }
             Action::RevealFile | Action::ViewFile => reveal_rule(args, ctx),
             Action::DiscardFile | Action::DiscardAllChanges => discard_rule(self, args, ctx),
             Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
@@ -1302,6 +1338,12 @@ impl Action {
                 start: Some(name.clone()),
             },
             (Action::NewBranch, _) => Effect::OpenNewBranchDialog { start: None },
+            (Action::CheckoutCommit, Args::Commit(oid)) => {
+                Effect::Send(vec![CommandKind::CheckoutCommit { oid: oid.clone() }])
+            }
+            (Action::NewBranchFromCommit, Args::Commit(oid)) => Effect::OpenNewBranchDialog {
+                start: Some(oid.clone()),
+            },
             (Action::DeleteBranch, Args::Branch(name)) => {
                 Effect::OpenDeleteBranchDialog(name.clone())
             }
@@ -2978,6 +3020,109 @@ mod tests {
         assert_eq!(Action::ShowStashes.spec().category, Category::Repository);
         assert_eq!(Action::ShowStashes.spec().shortcut, None);
         assert!(!Action::ShowStashes.opens_dialog());
+    }
+
+    #[test]
+    fn show_reflog_needs_an_open_repository_and_plans_the_page() {
+        assert_eq!(
+            Action::ShowReflog.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::ShowReflog)
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowReflog.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(Action::ShowReflog.id(), "reflog.show");
+        assert_eq!(Action::ShowReflog.spec().title, "Show Reflog");
+        assert_eq!(Action::ShowReflog.spec().category, Category::Repository);
+        assert_eq!(Action::ShowReflog.spec().shortcut, None);
+        assert!(!Action::ShowReflog.opens_dialog());
+    }
+
+    #[test]
+    fn checkout_commit_needs_an_idle_repository_and_sends_the_detached_checkout() {
+        let oid = "e".repeat(40);
+        let target = Args::Commit(oid.clone());
+        assert_eq!(
+            Action::CheckoutCommit.plan(&target, &ctx(&[], "")),
+            Ok(Effect::Send(vec![CommandKind::CheckoutCommit {
+                oid: oid.clone()
+            }]))
+        );
+        let busy = Context {
+            busy: Some("Wait for the repository to open."),
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::CheckoutCommit.enabled(&target, &busy),
+            Err("Wait for the repository to open.")
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::CheckoutCommit.enabled(&target, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::CheckoutCommit.enabled(&Args::None, &ctx(&[], "")),
+            Err("No target for this action")
+        );
+        // Git refuses a checkout that would lose changes, so nothing asks first.
+        assert!(!Action::CheckoutCommit.destructive());
+        assert!(!Action::CheckoutCommit.opens_dialog());
+    }
+
+    #[test]
+    fn new_branch_from_commit_opens_the_dialog_starting_at_the_commit() {
+        let oid = "f".repeat(40);
+        let target = Args::Commit(oid.clone());
+        assert_eq!(
+            Action::NewBranchFromCommit.plan(&target, &ctx(&[], "")),
+            Ok(Effect::OpenNewBranchDialog { start: Some(oid) })
+        );
+        assert!(Action::NewBranchFromCommit.opens_dialog());
+        assert_eq!(Action::NewBranchFromCommit.spec().args, ArgKind::Commit);
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::NewBranchFromCommit.enabled(&target, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn the_reflog_actions_have_their_ids_titles_categories_and_no_keys() {
+        for (action, id, title) in [
+            (Action::ShowReflog, "reflog.show", "Show Reflog"),
+            (
+                Action::CheckoutCommit,
+                "commit.checkout",
+                "Check Out Commit (Detached)",
+            ),
+            (
+                Action::NewBranchFromCommit,
+                "branch.new_from_commit",
+                "New Branch From Commit…",
+            ),
+        ] {
+            assert_eq!(action.id(), id);
+            assert_eq!(action.spec().title, title);
+            assert_eq!(action.spec().shortcut, None);
+            assert!(action.available());
+        }
+        assert_eq!(Action::CheckoutCommit.spec().category, Category::Branches);
+        assert_eq!(
+            Action::NewBranchFromCommit.spec().category,
+            Category::Branches
+        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ const NO_BRANCH: Reason = "No branch to choose from.";
 const NO_FILE: Reason = "No file in the working copy.";
 const NEEDS_CHUNK: Reason = "Pick a chunk in the diff first.";
 const NEEDS_COMMIT: Reason = "Pick a commit in the history first.";
+const NEEDS_REFLOG_COMMIT: Reason = "Pick a commit on the Reflog page first.";
 const NO_WORKTREE: Reason = "No worktree to choose from.";
 const NO_WORKFLOW: Reason = "No workflow to choose from.";
 const NOT_LISTED: Reason = "Workflows are still being read.";
@@ -402,13 +403,14 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
             },
             Err(NEEDS_CHUNK),
         ),
-        // A commit is copied from the history panel, which names it, so the palette lists it disabled.
+        // A commit is named by the panel it is shown in (the history's or the Reflog's), so
+        // the palette lists it disabled. The palette has no picker of commits to offer.
         ArgKind::Commit => (
             Choice::Run {
                 action,
                 args: Args::None,
             },
-            Err(NEEDS_COMMIT),
+            Err(commit_reason(action)),
         ),
     };
     // A placeholder says it is not available, whatever its target would be.
@@ -423,6 +425,15 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
         shortcut: action.shortcut_label(),
         choice,
         state,
+    }
+}
+
+/// Why a commit action is listed disabled in the palette: the Reflog's two
+/// actions name an entry of the Reflog page, the copies name one of the history.
+fn commit_reason(action: Action) -> Reason {
+    match action {
+        Action::CheckoutCommit | Action::NewBranchFromCommit => NEEDS_REFLOG_COMMIT,
+        _ => NEEDS_COMMIT,
     }
 }
 
@@ -833,6 +844,20 @@ mod tests {
                 "{title}"
             );
         }
+    }
+
+    #[test]
+    fn reflog_commit_actions_are_listed_disabled_and_show_reflog_is_offered() {
+        let entries: [StatusEntry; 0] = [];
+        let top = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
+        for title in ["Check Out Commit (Detached)", "New Branch From Commit…"] {
+            assert_eq!(
+                find(&top, title).state,
+                Err("Pick a commit on the Reflog page first."),
+                "{title}"
+            );
+        }
+        assert_eq!(find(&top, "Show Reflog").state, Ok(()));
     }
 
     #[test]

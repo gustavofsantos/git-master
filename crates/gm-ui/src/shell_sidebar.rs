@@ -32,8 +32,8 @@ const ROW_HEIGHT: f32 = 28.;
 const WORKTREE_ROWS_SHOWN: f32 = 6.;
 
 /// The destinations under "Workspace" that do not exist yet, and the slice
-/// that brings each one. Working Copy, History and Stashes are rows of their own.
-const PLACEHOLDERS: [(&str, &str); 2] = [("Local review", "Local review"), ("Reflog", "Reflog")];
+/// that brings each one. Working Copy, History, Stashes and Reflog are rows of their own.
+const PLACEHOLDERS: [(&str, &str); 1] = [("Local review", "Local review")];
 
 impl StatusView {
     /// The sidebar at `width`. Its right edge is the strip that resizes it.
@@ -166,6 +166,14 @@ impl StatusView {
                             .text_xs()
                             .child(count.to_string())
                     })),
+            )
+            .child(
+                item_row("Reflog", self.screen == Screen::Reflog).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        this.run_action(Action::ShowReflog, &Args::None, window, cx);
+                    }),
+                ),
             )
             .children(PLACEHOLDERS.iter().map(|&(label, name)| {
                 item_row(label, false).on_mouse_down(

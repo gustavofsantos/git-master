@@ -19,6 +19,7 @@ use crate::merged_branches::Merging;
 use crate::new_branch::BranchCreate;
 use crate::new_stash::StashCreate;
 use crate::quick_open::QuickOpen;
+use crate::reflog::{DetachedCheckout, ReflogList};
 use crate::remote_op::{Outcome, RemoteOp};
 use crate::stash_apply::Applying;
 use crate::stash_drop::Dropping;
@@ -84,6 +85,14 @@ pub struct Model {
     pub stash_stack: OpenStack,
     /// The Stashes page's list: the read in flight, what answered it and the selection (B2).
     pub stashes: StashList,
+    /// The Reflog page's list: the entries shown, the read in flight and the selection (B3).
+    pub reflog: ReflogList,
+    /// The Reflog page's detail panel: the read in flight, or the selected entry's answer (B3).
+    pub reflog_commit: CommitPane,
+    /// The Reflog page's stacked diff of the selected entry (B3).
+    pub reflog_stack: OpenStack,
+    /// The detached checkout started from the Reflog page, and its outcome (B3).
+    pub reflog_checkout: DetachedCheckout,
     /// Quick Open: its query, the search in flight and the last answer (N1).
     pub quick_open: QuickOpen,
     /// The Code page: the folder tree and the file viewer (N2).
@@ -116,12 +125,13 @@ pub struct Model {
     pub merging: Merging,
 }
 
-/// The page a commit read belongs to: the history (H3, H4) or the Stashes page
-/// (B2). Each keeps its own detail panel and stacked diff.
+/// The page a commit read belongs to: the history (H3, H4), the Stashes page
+/// (B2) or the Reflog page (B3). Each keeps its own detail panel and stacked diff.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitPage {
     History,
     Stashes,
+    Reflog,
 }
 
 /// The stacked diff of the open commit (H4c): every file's diff, shown in one
@@ -498,6 +508,7 @@ impl Model {
         match page {
             CommitPage::History => &self.commit,
             CommitPage::Stashes => &self.stash_commit,
+            CommitPage::Reflog => &self.reflog_commit,
         }
     }
 
@@ -507,6 +518,7 @@ impl Model {
         match page {
             CommitPage::History => &self.commit_stack,
             CommitPage::Stashes => &self.stash_stack,
+            CommitPage::Reflog => &self.reflog_stack,
         }
     }
 
@@ -514,6 +526,7 @@ impl Model {
         match page {
             CommitPage::History => &mut self.commit_stack,
             CommitPage::Stashes => &mut self.stash_stack,
+            CommitPage::Reflog => &mut self.reflog_stack,
         }
     }
 
@@ -616,11 +629,25 @@ impl Model {
                 self.stash_drop.settle(state, detail);
                 None
             }
+            // A detached checkout's outcome belongs to its message, not to the status bar (B3).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.reflog_checkout.owns(id) => {
+                self.reflog_checkout.settle(state, detail);
+                None
+            }
             // A failed list read belongs to the Stashes page, which shows it there.
             Event::OperationChanged {
                 id, state, detail, ..
             } if self.stashes.owns(id) => {
                 self.stashes.ended(id, state, detail);
+                None
+            }
+            // A failed read of the Reflog page is shown on the page (B3).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.reflog.owns(id) => {
+                self.reflog.ended(id, state, detail);
                 None
             }
             Event::PrunableListed { id, candidates } if self.pruning.owns(id) => {
@@ -681,11 +708,13 @@ impl Model {
                     .clone()
                     .unwrap_or_else(|| "git could not read the commit".to_owned());
                 self.commit.failed(id, text.clone());
+                self.reflog_commit.failed(id, text.clone());
                 self.stash_commit.failed(id, text);
                 let diff = detail
                     .clone()
                     .unwrap_or_else(|| "git could not read the commit's diff".to_owned());
                 self.commit_stack.failed(id, diff.clone());
+                self.reflog_stack.failed(id, diff.clone());
                 self.stash_stack.failed(id, diff);
                 // A refused checkout keeps the branch; git's reason, first line only, is the notice.
                 if self.branches.finish_checkout(id) {
@@ -726,6 +755,8 @@ impl Model {
             Event::CommitDetailLoaded { id, detail } => {
                 if self.stash_commit.awaits(id) {
                     self.stash_commit.received(id, detail);
+                } else if self.reflog_commit.awaits(id) {
+                    self.reflog_commit.received(id, detail);
                 } else {
                     self.commit.received(id, detail);
                 }
@@ -734,6 +765,8 @@ impl Model {
             Event::CommitStackLoaded { id, diffs } => {
                 if self.stash_stack.awaits(id) {
                     self.stash_stack.received(id, diffs);
+                } else if self.reflog_stack.awaits(id) {
+                    self.reflog_stack.received(id, diffs);
                 } else {
                     self.commit_stack.received(id, diffs);
                 }
@@ -741,6 +774,15 @@ impl Model {
             }
             Event::StashesListed { id, stashes } => {
                 self.list_stashes(id, stashes);
+                None
+            }
+            Event::ReflogLoaded {
+                id,
+                skip,
+                entries,
+                has_more,
+            } => {
+                self.list_reflog(id, skip, entries, has_more);
                 None
             }
             Event::FilesFound { id, search } => {
@@ -798,6 +840,7 @@ impl Model {
                 if state == OperationState::Cancelled {
                     self.commit.cancelled(id);
                     self.stash_commit.cancelled(id);
+                    self.reflog_commit.cancelled(id);
                     self.code.file_cancelled(id);
                     self.text_search.cancelled(id);
                 }
@@ -889,9 +932,7 @@ impl Model {
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
-            | Event::WorkflowMessageSuggested { .. }
-            // The Reflog page (B3) takes these; until then they change nothing.
-            | Event::ReflogLoaded { .. } => None,
+            | Event::WorkflowMessageSuggested { .. } => None,
         }
     }
 
@@ -902,6 +943,25 @@ impl Model {
         if self.stashes.listed(id, stashes) && had_selection && self.stashes.selected().is_none() {
             self.stash_commit = CommitPane::Empty;
             self.stash_stack.close();
+        }
+    }
+
+    /// Applies a reflog page. When the selected entry is gone after the first
+    /// page, its detail and diff go with it, as a stash's do (B3).
+    fn list_reflog(
+        &mut self,
+        id: OperationId,
+        skip: u32,
+        entries: Vec<gm_schema::ReflogEntry>,
+        has_more: bool,
+    ) {
+        let had_selection = self.reflog.has_selection();
+        if self.reflog.listed(id, skip, entries, has_more)
+            && had_selection
+            && !self.reflog.has_selection()
+        {
+            self.reflog_commit = CommitPane::Empty;
+            self.reflog_stack.close();
         }
     }
 
@@ -936,6 +996,9 @@ impl Model {
         self.stashes = StashList::default();
         self.stash_commit = CommitPane::Empty;
         self.stash_stack = OpenStack::default();
+        self.reflog = ReflogList::default();
+        self.reflog_commit = CommitPane::Empty;
+        self.reflog_stack = OpenStack::default();
         self.quick_open = QuickOpen::default();
         self.code.reset();
         self.text_search = TextSearch::default();
@@ -2260,5 +2323,107 @@ mod stash_tests {
             model.stash_drop.take(),
             Some(Outcome::Failed(gm_schema::STASH_LIST_CHANGED.to_owned()))
         );
+    }
+
+    fn reflog_entry(index: u32, oid: char, time: i64) -> gm_schema::ReflogEntry {
+        gm_schema::ReflogEntry {
+            index,
+            oid: oid.to_string().repeat(40),
+            action: "commit".into(),
+            detail: format!("entry {index}"),
+            subject: None,
+            time,
+        }
+    }
+
+    fn reflog_failed(id: u64, detail: Option<&str>) -> Event {
+        Event::OperationChanged {
+            id: OperationId(id),
+            actor: gm_schema::Actor::Human,
+            state: gm_schema::OperationState::Failed,
+            detail: detail.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_reflog_page_is_applied_only_when_it_answers_the_read_in_flight() {
+        let mut model = Model::default();
+        model.reflog.request(OperationId(4));
+        let answer = |id: u64| Event::ReflogLoaded {
+            id: OperationId(id),
+            skip: 0,
+            entries: vec![reflog_entry(0, 'a', 1)],
+            has_more: true,
+        };
+        let _ = model.apply(answer(3));
+        assert!(!model.reflog.is_loaded());
+        let _ = model.apply(answer(4));
+        assert!(model.reflog.is_loaded());
+        assert_eq!(model.reflog.entries().len(), 1);
+        assert!(model.reflog.can_page());
+    }
+
+    #[test]
+    fn a_failed_reflog_read_is_shown_on_its_page_and_not_in_the_status_bar() {
+        let mut model = Model::default();
+        model.reflog.request(OperationId(5));
+        let _ = model.apply(reflog_failed(5, Some("fatal: bad revision")));
+        assert_eq!(model.error, None);
+        assert_eq!(model.reflog.failure(), Some("fatal: bad revision"));
+    }
+
+    #[test]
+    fn a_detached_checkout_that_fails_goes_to_its_message_and_not_the_status_bar() {
+        use crate::reflog::CheckoutOutcome;
+
+        let mut model = Model::default();
+        model.reflog_checkout.start(OperationId(6), &"a".repeat(40));
+        let git = "error: Your local changes would be overwritten by checkout.";
+        let _ = model.apply(reflog_failed(6, Some(git)));
+        assert_eq!(model.error, None);
+        assert_eq!(
+            model.reflog_checkout.take(),
+            Some(CheckoutOutcome::Failed {
+                short: "aaaaaaa".into(),
+                text: git.into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_reload_that_drops_the_selected_entry_clears_its_detail_and_diff() {
+        let mut model = Model::default();
+        model.reflog.request(OperationId(1));
+        let _ = model.apply(Event::ReflogLoaded {
+            id: OperationId(1),
+            skip: 0,
+            entries: vec![reflog_entry(0, 'a', 1), reflog_entry(1, 'b', 2)],
+            has_more: false,
+        });
+        assert!(
+            model
+                .reflog
+                .select(&crate::reflog::EntryKey::of(&reflog_entry(1, 'b', 2)))
+        );
+        model.reflog_commit = CommitPane::Loading(OperationId(2));
+        // The same entry is kept across a reload: its detail stays.
+        model.reflog.request(OperationId(3));
+        let _ = model.apply(Event::ReflogLoaded {
+            id: OperationId(3),
+            skip: 0,
+            entries: vec![reflog_entry(0, 'c', 3), reflog_entry(1, 'b', 2)],
+            has_more: false,
+        });
+        assert_eq!(model.reflog_commit, CommitPane::Loading(OperationId(2)));
+        // Once it is gone, the panel goes with it.
+        model.reflog.request(OperationId(4));
+        let _ = model.apply(Event::ReflogLoaded {
+            id: OperationId(4),
+            skip: 0,
+            entries: vec![reflog_entry(0, 'c', 3)],
+            has_more: false,
+        });
+        assert_eq!(model.reflog_commit, CommitPane::Empty);
+        assert!(!model.reflog.has_selection());
     }
 }

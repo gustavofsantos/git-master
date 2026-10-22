@@ -87,7 +87,7 @@ impl StatusView {
                 .child(commit_panel(
                     &self.model.stash_commit,
                     &self.commit_texts,
-                    Panel::Stash(index),
+                    &Panel::Stash(index),
                     actions,
                     cx,
                 ))
@@ -168,6 +168,7 @@ impl StatusView {
     pub(crate) fn show_stashes(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::Stashes;
         self.model.commit_stack.close();
+        self.model.reflog_stack.close();
         self.show_commit_texts(cx);
         self.request_stash_list();
         cx.notify();
