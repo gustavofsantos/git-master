@@ -42,6 +42,8 @@ mod reflog;
 mod remote_op;
 mod resize;
 mod resize_handle;
+mod review;
+mod review_composer;
 mod shell_code;
 mod shell_commit;
 mod shell_history;
@@ -197,6 +199,7 @@ fn bind_keys(cx: &mut App) {
     ]);
     composer::bind_keys(cx);
     diff_pane::bind_keys(cx);
+    review_composer::bind_keys(cx);
 }
 
 /// The window is the app: closing it quits, and so does ⌘Q from the app menu.

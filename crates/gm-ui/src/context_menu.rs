@@ -588,6 +588,7 @@ mod tests {
             user_email_known: false,
             remote_running: false,
             stashes: None,
+            review: crate::action_registry::ReviewCtx::default(),
         }
     }
 
@@ -913,6 +914,7 @@ mod tests {
         }];
         let context = ActionContext {
             stashes: Some(&stashes[..]),
+            review: crate::action_registry::ReviewCtx::default(),
             ..ctx(&[])
         };
         let items = stash_items(0, &"a".repeat(40), &context);

@@ -17,7 +17,8 @@ use gpui::{
 };
 
 use crate::action_registry::{
-    self, Action, Args, Context as ActionContext, Effect, HookCtx, Reason, WorkflowCtx,
+    self, Action, Args, CommentSpot, Context as ActionContext, Effect, HookCtx, Reason, ReviewCtx,
+    WorkflowCtx,
 };
 use crate::app_settings::{self, AppSettings};
 use crate::branch_delete::DeleteDialog;
@@ -44,6 +45,7 @@ use crate::quick_open_view::{self, QuickOpenView};
 use crate::recent::{self, Recents};
 use crate::reflog;
 use crate::resize;
+use crate::review_composer::{ReviewDialog, ReviewTarget};
 use crate::shell_code::CodeView;
 use crate::shell_history::CommitTexts;
 use crate::shell_search::{self, SearchView};
@@ -156,6 +158,8 @@ pub struct StatusView {
     pub(crate) new_branch_dialog: Option<NewBranchDialog>,
     /// The stash dialog, while it is open (B2).
     pub(crate) new_stash_dialog: Option<NewStashDialog>,
+    /// The review comment composer, while it is open (B4c).
+    pub(crate) review_dialog: Option<ReviewDialog>,
     /// The inputs dialog of a workflow that declares inputs, while it is open.
     pub(crate) workflow_inputs_dialog: Option<WorkflowInputsDialog>,
     /// The editor of the Workflows page's TOML tab; its text is the page's buffer.
@@ -355,6 +359,7 @@ impl StatusView {
             prune_dialog: None,
             new_branch_dialog: None,
             new_stash_dialog: None,
+            review_dialog: None,
             workflow_inputs_dialog: None,
             workflow_source,
             flow_inspector: FlowInspector::default(),
@@ -436,6 +441,7 @@ impl StatusView {
         let reload = matches!(event, Event::StatusLoaded { .. });
         let listed = matches!(event, Event::BranchesLoaded { .. });
         let stashes_listed = matches!(event, Event::StashesListed { .. });
+        let review_listed = matches!(event, Event::ReviewCommentsListed { .. });
         let stash_stale = stashes::is_stale_refusal(&event);
         let committed = matches!(event, Event::Committed { .. });
         let detail_loaded = matches!(event, Event::CommitDetailLoaded { .. });
@@ -457,6 +463,7 @@ impl StatusView {
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
+        self.follow_review(review_listed, reload, cx);
         if stash_stale {
             self.request_stash_list();
         }
@@ -545,6 +552,17 @@ impl StatusView {
         cx.notify();
     }
 
+    /// The review comments follow the engine: the diff pane gets each listing, and
+    /// every status refresh asks for the list again (B4c).
+    fn follow_review(&mut self, listed: bool, reload: bool, cx: &mut Context<Self>) {
+        if listed {
+            self.sync_review_comments(cx);
+        }
+        if reload {
+            self.request_review_list();
+        }
+    }
+
     /// Shows the outcome of each dialog's operation that the model settled.
     fn settle_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(outcome) = self.model.creating.take() {
@@ -570,6 +588,9 @@ impl StatusView {
         }
         if let Some(outcome) = self.model.stash_create.take() {
             self.on_stash_created(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.review_write.take() {
+            self.on_review_written(outcome, window, cx);
         }
         if let Some(outcome) = self.model.stash_apply.take() {
             self.on_stash_applied(outcome, window, cx);
@@ -712,6 +733,8 @@ impl StatusView {
     /// A successful open replaced the repository: the view state of the old
     /// one goes, and the new root joins the recent list.
     fn on_switched(&mut self, switched: Switched, cx: &mut Context<Self>) {
+        // The comments of the repository left are gone with the model's reset.
+        self.sync_review_comments(cx);
         self.model.commit_stack.close();
         self.model.stash_stack.close();
         self.model.reflog_stack.close();
@@ -853,6 +876,7 @@ impl StatusView {
                 cx,
             ),
             DiffPaneEvent::LeaveCommit => self.close_commit_file(cx),
+            DiffPaneEvent::Review { action, args } => self.run_action(*action, args, window, cx),
             // One layout for both diffs: the other pane follows, and the choice is saved (D40).
             DiffPaneEvent::LayoutChosen(layout) => {
                 self.diff_pane
@@ -956,10 +980,25 @@ impl StatusView {
         cx: &mut Context<Self>,
     ) {
         let message = self.composer.read(cx).text(cx);
-        let planned = action.plan(args, &self.action_context(&message));
+        let spot = self.comment_spot(cx);
+        let planned = action.plan(args, &self.action_context_with(&message, spot));
         match planned {
             Err(reason) => self.notify_user(reason, cx),
             Ok(Effect::Send(kinds)) => self.send_commands(action, kinds, cx),
+            Ok(Effect::OpenReviewComposer {
+                path,
+                start_line,
+                end_line,
+            }) => self.open_review_composer(
+                ReviewTarget::New {
+                    path,
+                    start_line,
+                    end_line,
+                },
+                window,
+                cx,
+            ),
+            Ok(Effect::OpenReviewEdit { id }) => self.open_review_edit(id, window, cx),
             Ok(Effect::Copy(text)) => {
                 let notice = format!("Copied {text}");
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -1092,8 +1131,18 @@ impl StatusView {
         }
     }
 
-    /// What the registry's rules read, for a run made now.
+    /// What the registry's rules read, for a run made now, with no diff selection.
     pub(crate) fn action_context<'a>(&'a self, message: &'a str) -> ActionContext<'a> {
+        self.action_context_with(message, CommentSpot::Nothing)
+    }
+
+    /// What the registry's rules read, for a run made now. `spot` is where the
+    /// Working Copy diff's cursor or selection is (see `comment_spot`).
+    pub(crate) fn action_context_with<'a>(
+        &'a self,
+        message: &'a str,
+        spot: CommentSpot<'a>,
+    ) -> ActionContext<'a> {
         ActionContext {
             repo_open: self.model.status().is_some(),
             busy: self.busy_reason(),
@@ -1113,6 +1162,10 @@ impl StatusView {
                 .stashes
                 .is_loaded()
                 .then(|| self.model.stashes.entries()),
+            review: ReviewCtx {
+                comments: self.model.review.comments(),
+                spot,
+            },
             user_email_known: branch_filter::known_email(self.model.branches.user_email())
                 .is_some(),
             hooks: HookCtx {
@@ -1409,35 +1462,35 @@ impl Render for StatusView {
             )
             .children(self.workflow_picker_layer(window, cx))
             .children(self.inspector_picker_layer(window, cx))
-            .children(
-                self.worktree_dialog
-                    .is_some()
-                    .then(|| self.worktree_layer(window, cx)),
-            )
-            .children(
-                self.removal_dialog
-                    .is_some()
-                    .then(|| self.removal_layer(window, cx)),
-            )
-            .children(
-                self.prune_dialog
-                    .is_some()
-                    .then(|| self.prune_layer(window, cx)),
-            )
-            .children(self.new_branch_layer(window, cx))
-            .children(self.stash_layers(window, cx))
-            .children(self.workflow_inputs_layer(window, cx))
-            .children(
-                self.delete_dialog
-                    .is_some()
-                    .then(|| self.delete_branch_layer(window, cx)),
-            )
-            .children(self.discard_file_layer(window, cx))
-            .children(
-                self.merged_dialog
-                    .is_some()
-                    .then(|| self.merged_layer(window, cx)),
-            );
+            .children(self.dialog_layers(window, cx));
         window_chrome::framed(window, app)
+    }
+}
+
+impl StatusView {
+    /// The dialogs that open over the window, in the order they stack: the last is on top.
+    fn dialog_layers(&self, window: &Window, cx: &Context<Self>) -> Vec<Div> {
+        let mut layers = Vec::new();
+        if self.worktree_dialog.is_some() {
+            layers.push(self.worktree_layer(window, cx));
+        }
+        if self.removal_dialog.is_some() {
+            layers.push(self.removal_layer(window, cx));
+        }
+        if self.prune_dialog.is_some() {
+            layers.push(self.prune_layer(window, cx));
+        }
+        layers.extend(self.new_branch_layer(window, cx));
+        layers.extend(self.stash_layers(window, cx));
+        layers.extend(self.review_composer_layer(window, cx));
+        layers.extend(self.workflow_inputs_layer(window, cx));
+        if self.delete_dialog.is_some() {
+            layers.push(self.delete_branch_layer(window, cx));
+        }
+        layers.extend(self.discard_file_layer(window, cx));
+        if self.merged_dialog.is_some() {
+            layers.push(self.merged_layer(window, cx));
+        }
+        layers
     }
 }

@@ -21,6 +21,7 @@ use crate::new_stash::StashCreate;
 use crate::quick_open::QuickOpen;
 use crate::reflog::{DetachedCheckout, ReflogList};
 use crate::remote_op::{Outcome, RemoteOp};
+use crate::review::{ReviewList, ReviewWrite};
 use crate::stash_apply::Applying;
 use crate::stash_drop::Dropping;
 use crate::stashes::StashList;
@@ -123,6 +124,10 @@ pub struct Model {
     pub stash_drop: Dropping,
     /// The delete-merged-branches dialog's listing, delete in flight and outcome.
     pub merging: Merging,
+    /// The review comments the engine listed, and the read in flight (B4c).
+    pub review: ReviewList,
+    /// The composer's comment write in flight, and its outcome (B4c).
+    pub review_write: ReviewWrite,
 }
 
 /// The page a commit read belongs to: the history (H3, H4), the Stashes page
@@ -636,6 +641,23 @@ impl Model {
                 self.reflog_checkout.settle(state, detail);
                 None
             }
+            // A comment write's outcome belongs to the composer, not to the status bar (B4c).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.review_write.owns(id) => {
+                self.review_write.settle(state, detail);
+                None
+            }
+            // A failed comments read is the window's error, as any failed read is (B4c).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.review.owns(id) => {
+                self.review.ended(id, state, detail);
+                if let Some(message) = self.review.failure() {
+                    self.error = Some(message.to_owned());
+                }
+                None
+            }
             // A failed list read belongs to the Stashes page, which shows it there.
             Event::OperationChanged {
                 id, state, detail, ..
@@ -774,6 +796,10 @@ impl Model {
             }
             Event::StashesListed { id, stashes } => {
                 self.list_stashes(id, stashes);
+                None
+            }
+            Event::ReviewCommentsListed { id, comments } => {
+                let _ = self.review.listed(id, comments);
                 None
             }
             Event::ReflogLoaded {
@@ -933,8 +959,7 @@ impl Model {
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
-            // The review page (B4c, B4d) reads the comments; until it is there they are dropped.
-            | Event::ReviewCommentsListed { .. }
+            // The Before side of a comment (B4d) is not shown yet, so its text is dropped.
             | Event::ReviewSnapshotText { .. } => None,
         }
     }
@@ -999,6 +1024,7 @@ impl Model {
         self.stashes = StashList::default();
         self.stash_commit = CommitPane::Empty;
         self.stash_stack = OpenStack::default();
+        self.review = ReviewList::default();
         self.reflog = ReflogList::default();
         self.reflog_commit = CommitPane::Empty;
         self.reflog_stack = OpenStack::default();

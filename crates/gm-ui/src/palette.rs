@@ -21,6 +21,7 @@ use crate::worktree_list;
 const NO_BRANCH: Reason = "No branch to choose from.";
 const NO_FILE: Reason = "No file in the working copy.";
 const NEEDS_CHUNK: Reason = "Pick a chunk in the diff first.";
+const NEEDS_COMMENT: Reason = "Pick the comment on its card in the diff.";
 const NEEDS_COMMIT: Reason = "Pick a commit in the history first.";
 const NEEDS_REFLOG_COMMIT: Reason = "Pick a commit on the Reflog page first.";
 const NO_WORKTREE: Reason = "No worktree to choose from.";
@@ -396,22 +397,12 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
             pick_state(action, &stash_targets(ctx), ctx, no_stash(ctx)),
         ),
         // A chunk exists only in the diff pane, so the palette lists it disabled.
-        ArgKind::Chunk => (
-            Choice::Run {
-                action,
-                args: Args::None,
-            },
-            Err(NEEDS_CHUNK),
-        ),
+        ArgKind::Chunk => disabled_run(action, NEEDS_CHUNK),
+        // A review comment is named by its card in the diff, so the palette lists it disabled.
+        ArgKind::ReviewComment => disabled_run(action, NEEDS_COMMENT),
         // A commit is named by the panel it is shown in (the history's or the Reflog's), so
         // the palette lists it disabled. The palette has no picker of commits to offer.
-        ArgKind::Commit => (
-            Choice::Run {
-                action,
-                args: Args::None,
-            },
-            Err(commit_reason(action)),
-        ),
+        ArgKind::Commit => disabled_run(action, commit_reason(action)),
     };
     // A placeholder says it is not available, whatever its target would be.
     let state = if action.available() {
@@ -505,6 +496,18 @@ fn listed_worktrees(ctx: &ActionContext<'_>) -> Vec<(String, String)> {
         .collect()
 }
 
+/// An action the palette lists disabled and runs with no target: `reason` says
+/// what to do instead.
+fn disabled_run(action: Action, reason: Reason) -> (Choice, Result<(), Reason>) {
+    (
+        Choice::Run {
+            action,
+            args: Args::None,
+        },
+        Err(reason),
+    )
+}
+
 fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Vec<Candidate> {
     match action.spec().args {
         ArgKind::Branch => branches
@@ -557,7 +560,11 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
                 target_row(action, Section::Stashes, label, stash_args(entry), ctx)
             })
             .collect(),
-        ArgKind::None | ArgKind::OptionalBranch | ArgKind::Chunk | ArgKind::Commit => Vec::new(),
+        ArgKind::None
+        | ArgKind::OptionalBranch
+        | ArgKind::Chunk
+        | ArgKind::Commit
+        | ArgKind::ReviewComment => Vec::new(),
     }
 }
 
@@ -640,6 +647,7 @@ mod tests {
             user_email_known: false,
             remote_running: false,
             stashes: None,
+            review: crate::action_registry::ReviewCtx::default(),
         }
     }
 
@@ -1030,6 +1038,7 @@ mod tests {
         let stashes = [stash(0, "a"), stash(1, "b")];
         let ctx = ActionContext {
             stashes: Some(&stashes[..]),
+            review: crate::action_registry::ReviewCtx::default(),
             ..ctx_with(&entries, "")
         };
         let top = build(Stage::Actions, "", &ctx, &[]);
@@ -1075,6 +1084,7 @@ mod tests {
         let entries: [StatusEntry; 0] = [];
         let listed = ActionContext {
             stashes: Some(&[]),
+            review: crate::action_registry::ReviewCtx::default(),
             ..ctx_with(&entries, "")
         };
         let top = build(Stage::Actions, "", &listed, &[]);

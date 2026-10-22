@@ -4,13 +4,15 @@
 //! rows and the selection rules live in `diff_rows`; this file draws them and
 //! maps keys and clicks onto them.
 
+use std::collections::BTreeSet;
 use std::ops::Range;
+use std::time::Instant;
 
-use gm_schema::{CommitFile, FileDiff, LineKind, StageTarget};
+use gm_schema::{CommitFile, FileDiff, LineKind, ReviewComment, StageTarget};
 use gpui::{
     AnyElement, ClickEvent, Context, Div, EventEmitter, FocusHandle, FontWeight, Hsla, IntoElement,
-    KeyBinding, Render, ScrollStrategy, ScrollWheelEvent, UniformListScrollHandle, Window, actions,
-    div, prelude::*, px, uniform_list,
+    KeyBinding, Render, ScrollStrategy, ScrollWheelEvent, Stateful, UniformListScrollHandle,
+    Window, actions, div, prelude::*, px, uniform_list,
 };
 
 use crate::action_registry::{Action, Args};
@@ -23,7 +25,10 @@ use crate::diff_rows::{
     split_cell_on_cursor, split_pairs, split_rows, step_from_top,
 };
 use crate::icon::{self, Icon};
-use crate::shell_history::{change_color, file_counts, path_label};
+use crate::review::{
+    self, Badge, Covered, Delete, DeleteArm, Entry, Heading, Listing, Notes, Opened, Part,
+};
+use crate::shell_history::{change_color, file_counts, now_secs, path_label};
 use crate::shell_list::change_letter;
 use crate::theme;
 
@@ -51,7 +56,8 @@ struct KeyRow {
 /// hunk. The letters avoid the registry's shortcuts (⇧⌘R restack, ⇧⌘P push), the
 /// text area's redo (⇧⌘Z), the palette and quit (⌘K, ⌘Q), and Ctrl+Shift+U, which
 /// is the Unicode entry of `IBus` on GNOME: that key never reaches the app there.
-const WORKING_KEYS: [KeyRow; 10] = [
+/// Ctrl+Shift+M comments on the selected lines (B4c): its label is this key.
+const WORKING_KEYS: [KeyRow; 11] = [
     KeyRow {
         keys: "up",
         action: "PrevChangedLine",
@@ -101,6 +107,11 @@ const WORKING_KEYS: [KeyRow; 10] = [
         keys: "escape",
         action: "ClearSelection",
         what: "Clear the selection",
+    },
+    KeyRow {
+        keys: "secondary-shift-m",
+        action: "CommentOnSelection",
+        what: "Comment on the selected lines",
     },
 ];
 
@@ -179,6 +190,7 @@ const PAIR_WARNING: &str = "Half-staged −/+ pair: the index would lose both th
 actions!(
     diff_pane,
     [
+        CommentOnSelection,
         NextChangedLine,
         PrevChangedLine,
         NextHunk,
@@ -214,6 +226,12 @@ pub enum DiffPaneEvent {
     LeaveCommit,
     /// The user chose a layout in the header (D39); the shell saves it.
     LayoutChosen(Layout),
+    /// A review action of the diff: the comment key or button, or a card's button.
+    /// The shell runs it through the registry (B4c).
+    Review {
+        action: Action,
+        args: Args,
+    },
 }
 
 /// Visual mode: where it started, and the selection made before it.
@@ -252,6 +270,15 @@ pub struct DiffPane {
     stack_more: usize,
     unified_starts: Vec<usize>,
     split_starts: Vec<usize>,
+    /// Every review comment the engine listed (B4c); the shown file's are drawn.
+    comments: Vec<ReviewComment>,
+    /// What is drawn for the shown file: the rows with their cards, both layouts.
+    notes: Notes,
+    /// The resolved comments the list shows in full, and whether the outdated strip is open.
+    opened: BTreeSet<i64>,
+    outdated_open: bool,
+    /// The comment whose delete waits for its second click.
+    delete_arm: DeleteArm,
 }
 
 impl EventEmitter<DiffPaneEvent> for DiffPane {}
@@ -295,7 +322,20 @@ impl DiffPane {
             stack_more: 0,
             unified_starts: Vec::new(),
             split_starts: Vec::new(),
+            comments: Vec::new(),
+            notes: Notes::default(),
+            opened: BTreeSet::new(),
+            outdated_open: false,
+            delete_arm: DeleteArm::default(),
         }
+    }
+
+    /// Replaces the review comments the list draws (B4c). The shown file's
+    /// comments are drawn under their rows; the cursor and the selection stay.
+    pub fn set_review_comments(&mut self, comments: &[ReviewComment], cx: &mut Context<Self>) {
+        self.comments = comments.to_vec();
+        self.rebuild_notes();
+        cx.notify();
     }
 
     /// Replaces what is shown. `None` for a side means it has no diff (or is
@@ -339,6 +379,7 @@ impl DiffPane {
         self.visual = None;
         self.pending = None;
         self.discard_armed = None;
+        self.delete_arm.clear();
         if !same_file {
             self.scroll_columns = 0;
         }
@@ -390,6 +431,8 @@ impl DiffPane {
             rows: stacked.split,
             of_unified: Vec::new(),
         };
+        // A stack has no comments of its own: the path is empty, so none is drawn.
+        self.rebuild_notes();
         self.scroll_columns = 0;
         self.selection.clear();
         self.visual = None;
@@ -511,15 +554,103 @@ impl DiffPane {
     fn rebuild_rows(&mut self) {
         self.rows = build_rows(self.diffs(), self.side);
         self.split = split_rows(self.diffs(), self.side);
+        self.rebuild_notes();
+    }
+
+    /// Lays the comments of the shown file over the rows, in both layouts.
+    fn rebuild_notes(&mut self) {
+        let path = self.path().unwrap_or_default();
+        let opened = Opened {
+            outdated: self.outdated_open,
+            comments: &self.opened,
+        };
+        self.notes = review::notes(
+            &self.rows,
+            self.diffs(),
+            &self.split,
+            &self.comments,
+            &path,
+            opened,
+        );
+    }
+
+    /// The lines the cursor or the visual selection covers, for a review comment
+    /// (B4c): the side shown and what the rows cover. `None` outside the Working
+    /// Copy diff or with no rows.
+    pub fn comment_spot(&self) -> Option<(Side, Covered)> {
+        if self.mode != Mode::Working || self.rows.is_empty() {
+            return None;
+        }
+        let from = self
+            .visual
+            .as_ref()
+            .map_or(self.cursor, |visual| visual.anchor);
+        Some((
+            self.side,
+            review::covered(&self.rows, self.diffs(), from, self.cursor),
+        ))
+    }
+
+    /// Comment on Selection, from the key or the header button.
+    fn comment_at_selection(&mut self, cx: &mut Context<Self>) {
+        if controls(self.mode).line_selection {
+            cx.emit(DiffPaneEvent::Review {
+                action: Action::CommentOnSelection,
+                args: Args::None,
+            });
+        }
+    }
+
+    /// Opens or folds a resolved card, or shows or hides the outdated strip.
+    fn toggle_opened(&mut self, id: Option<i64>, cx: &mut Context<Self>) {
+        match id {
+            Some(id) if self.opened.contains(&id) => {
+                self.opened.remove(&id);
+            }
+            Some(id) => {
+                self.opened.insert(id);
+            }
+            None => self.outdated_open = !self.outdated_open,
+        }
+        self.rebuild_notes();
+        cx.notify();
+    }
+
+    /// A card's delete: the first press asks, the second sends the delete.
+    fn press_delete(&mut self, id: i64, cx: &mut Context<Self>) {
+        match self.delete_arm.press(id, Instant::now()) {
+            Delete::Confirmed => cx.emit(DiffPaneEvent::Review {
+                action: Action::DeleteReviewComment,
+                args: Args::ReviewComment(id),
+            }),
+            Delete::Ask => {
+                // The label reverts when the window of the first press is over.
+                cx.spawn(async move |pane, cx| {
+                    cx.background_executor().timer(review::DELETE_CONFIRM).await;
+                    let _ = pane.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            }
+        }
+        cx.notify();
     }
 
     /// The row the cursor is on, as an index into the list being drawn. The
     /// cursor walks the unified rows, so in the split view it is mapped to the
     /// split row that holds it.
     fn cursor_ix(&self) -> usize {
-        match self.layout {
+        let row = match self.layout {
             Layout::Unified => self.cursor,
             Layout::Split => self.split.of_unified.get(self.cursor).copied().unwrap_or(0),
+        };
+        self.listing().at.get(row).copied().unwrap_or(0)
+    }
+
+    /// The list drawn in the current layout: diff rows, with cards and headings.
+    fn listing(&self) -> &Listing {
+        match self.layout {
+            Layout::Unified => &self.notes.unified,
+            Layout::Split => &self.notes.split,
         }
     }
 
@@ -535,11 +666,9 @@ impl DiffPane {
         }
     }
 
+    /// The entries drawn, including the cards and headings of comments.
     fn row_count(&self) -> usize {
-        match self.layout {
-            Layout::Unified => self.rows.len(),
-            Layout::Split => self.split.rows.len(),
-        }
+        self.listing().entries.len()
     }
 
     /// Shows the layout `layout` (D39) without saying so to the shell: used
@@ -590,6 +719,173 @@ impl DiffPane {
         cx.notify();
     }
 
+    /// The gutter marker of a line that an open comment covers (B4c): a small dot
+    /// in a slot of fixed width, so the columns do not move.
+    fn marker(&self, new_no: Option<u32>) -> Div {
+        let covered = new_no.is_some_and(|number| self.notes.marked.contains(&number));
+        div()
+            .w(px(12.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .children(covered.then(|| div().size(px(6.)).rounded_full().bg(theme::accent())))
+    }
+
+    /// One row of a comment's card (B4c): a bar at the left in the card's colour,
+    /// then the head's badge, range, time and buttons, the body's line, or the
+    /// folded line of a resolved comment.
+    fn card_row(&self, ix: usize, id: i64, part: &Part, cx: &mut Context<Self>) -> AnyElement {
+        let bar = match part {
+            Part::Head {
+                badge: Badge::Outdated,
+                ..
+            } => theme::warn_fg(),
+            Part::Head {
+                badge: Badge::Resolved,
+                ..
+            }
+            | Part::Folded(_) => theme::muted(),
+            _ => theme::accent(),
+        };
+        let content = match part {
+            Part::Head {
+                badge,
+                lines,
+                created_at,
+            } => self.card_head(ix, id, *badge, lines, *created_at, cx),
+            Part::Text(text) => div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(text.clone())
+                .into_any_element(),
+            Part::Folded(summary) => div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(theme::muted())
+                .child(summary.clone())
+                .into_any_element(),
+        };
+        let folded = matches!(part, Part::Folded(_));
+        div()
+            .id(("review-card", ix))
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .bg(theme::panel())
+            .when(folded, gpui::Styled::cursor_pointer)
+            .child(div().w(px(3.)).h_full().flex_none().bg(bar))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h_full()
+                    .px_3()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(content),
+            )
+            .when(folded, |row| {
+                row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.toggle_opened(Some(id), cx);
+                }))
+            })
+            .into_any_element()
+    }
+
+    /// The head row of a card: the badge, the range, when it was made, and the
+    /// buttons. Delete asks once, inline; a resolved card can be folded again.
+    fn card_head(
+        &self,
+        ix: usize,
+        id: i64,
+        badge: Badge,
+        lines: &str,
+        created_at: i64,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (label, colour) = match badge {
+            Badge::Open => ("Open", theme::accent()),
+            Badge::Resolved => ("Resolved", theme::muted()),
+            Badge::Outdated => ("Outdated", theme::warn_fg()),
+        };
+        let resolved = badge == Badge::Resolved;
+        let armed = self.delete_arm.is_armed(id, Instant::now());
+        let delete_label = if armed {
+            "Click again to delete"
+        } else {
+            "Delete"
+        };
+        let resolve_label = if resolved { "Reopen" } else { "Resolve" };
+        let resolve_action = if resolved {
+            Action::ReopenReviewComment
+        } else {
+            Action::ResolveReviewComment
+        };
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_none()
+                    .px_1()
+                    .rounded_sm()
+                    .text_color(colour)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(label),
+            )
+            .child(div().flex_none().text_color(theme::muted()).child(format!(
+                "{lines} · {}",
+                review::made_label(now_secs(), created_at)
+            )))
+            .child(div().flex_1())
+            .child(
+                chunk_button(("review-resolve", ix), resolve_label, true, theme::text()).on_click(
+                    cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        review_event(resolve_action, id, cx);
+                    }),
+                ),
+            )
+            .children(resolved.then(|| {
+                chunk_button(("review-fold", ix), "Hide", true, theme::muted()).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.toggle_opened(Some(id), cx);
+                    }),
+                )
+            }))
+            .child(
+                chunk_button(("review-edit", ix), "Edit", true, theme::text()).on_click(
+                    cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        review_event(Action::EditReviewComment, id, cx);
+                    }),
+                ),
+            )
+            .child(
+                chunk_button(
+                    ("review-delete", ix),
+                    delete_label,
+                    true,
+                    theme::removed_fg(),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.press_delete(id, cx);
+                })),
+            )
+            .into_any_element()
+    }
+
     /// The "Unified | Split" switch in the file header (D39).
     fn layout_selector(&self, cx: &Context<Self>) -> Div {
         let segment = |layout: Layout, label: &'static str| {
@@ -627,20 +923,24 @@ impl DiffPane {
 
     /// One row of the split list: a hunk header, or a pair of cells.
     fn render_ix(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        if ix >= self.row_count() {
+        let Some(entry) = self.listing().entries.get(ix) else {
             // Padding past the last row (see `padding_rows`): blank, one row high.
             return div().h(px(ROW_HEIGHT)).w_full().into_any_element();
-        }
-        match self.layout {
-            Layout::Unified => self.render_row(ix, cx),
-            Layout::Split => match self.split.rows.get(ix).copied() {
-                Some(SplitRow::HunkHeader { side, hunk_index }) => {
-                    self.hunk_row(ix, side, hunk_index, cx)
-                }
-                Some(SplitRow::Pair { old, new }) => self.pair_row(ix, old, new, cx),
-                Some(SplitRow::Banner(row)) => self.banner_row(row),
-                None => div().into_any_element(),
+        };
+        match entry {
+            Entry::Diff(row) => match self.layout {
+                Layout::Unified => self.render_row(ix, *row, cx),
+                Layout::Split => match self.split.rows.get(*row).copied() {
+                    Some(SplitRow::HunkHeader { side, hunk_index }) => {
+                        self.hunk_row(ix, side, hunk_index, cx)
+                    }
+                    Some(SplitRow::Pair { old, new }) => self.pair_row(ix, old, new, cx),
+                    Some(SplitRow::Banner(row)) => self.banner_row(row),
+                    None => div().into_any_element(),
+                },
             },
+            Entry::Heading(heading) => heading_row(ix, heading, cx),
+            Entry::Card { id, part } => self.card_row(ix, *id, part, cx),
         }
     }
 
@@ -710,6 +1010,7 @@ impl DiffPane {
         let selected = self.selection.contains(cell.key);
         let background = if on_cursor { theme::cursor_row() } else { tint };
         let number = if which == 0 { line.old_no } else { line.new_no };
+        let marker = self.marker(line.new_no);
         let checkbox = if changed && controls(self.mode).line_selection {
             let mark = if selected {
                 icon::filled(Icon::CheckSquare, icon::SMALL, theme::accent())
@@ -730,6 +1031,7 @@ impl DiffPane {
             div().w(icon::SMALL).mx_1().flex_none().into_any_element()
         };
         base.bg(background)
+            .child(marker)
             .child(
                 div()
                     .w(px(44.))
@@ -1017,6 +1319,11 @@ impl DiffPane {
                     .gap_2()
                     .children(
                         controls(self.mode)
+                            .line_selection
+                            .then(|| comment_button(cx)),
+                    )
+                    .children(
+                        controls(self.mode)
                             .side_selector
                             .then(|| self.side_selector(cx)),
                     )
@@ -1286,6 +1593,7 @@ impl DiffPane {
             .items_center()
             .bg(background)
             .font_family(theme::code_font())
+            .child(self.marker(line.new_no))
             .child(number(line.old_no))
             .child(number(line.new_no))
             .child(checkbox)
@@ -1311,8 +1619,9 @@ impl DiffPane {
             .into_any_element()
     }
 
-    fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        match self.rows.get(ix).copied() {
+    /// The diff row `row` (an index into `rows`), drawn as entry `ix`.
+    fn render_row(&self, ix: usize, row: usize, cx: &mut Context<Self>) -> AnyElement {
+        match self.rows.get(row).copied() {
             Some(Row::HunkHeader { side, hunk_index }) => self.hunk_row(ix, side, hunk_index, cx),
             Some(Row::Line {
                 side,
@@ -1432,6 +1741,62 @@ impl DiffPane {
         .min_h(px(0.))
         .into_any_element()
     }
+}
+
+/// The "Comment" button of the header: Comment on Selection (B4c).
+fn comment_button(cx: &Context<DiffPane>) -> Stateful<Div> {
+    chunk_button("review-comment", "Comment", true, theme::text()).on_click(cx.listener(
+        |this, _: &ClickEvent, _, cx| {
+            this.comment_at_selection(cx);
+        },
+    ))
+}
+
+/// A heading of the file's strip (B4c): the outdated comments, which open and
+/// fold, or the comments outside the changed lines.
+fn heading_row(ix: usize, heading: &Heading, cx: &mut Context<DiffPane>) -> AnyElement {
+    let row = div()
+        .h(px(ROW_HEIGHT))
+        .w_full()
+        .px_3()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .bg(theme::panel())
+        .border_b_1()
+        .border_color(theme::hairline());
+    match heading {
+        Heading::Outdated { count, open } => {
+            let noun = if *count == 1 { "comment" } else { "comments" };
+            let action = if *open { "Hide" } else { "Show" };
+            row.id(("review-outdated", ix))
+                .cursor_pointer()
+                .text_color(theme::warn_fg())
+                .child(format!("{count} outdated {noun}"))
+                .child(
+                    div()
+                        .text_color(theme::muted())
+                        .child(format!("· {action}")),
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.toggle_opened(None, cx);
+                }))
+                .into_any_element()
+        }
+        Heading::Outside => row
+            .text_color(theme::muted())
+            .child("Comments outside the changed lines")
+            .into_any_element(),
+    }
+}
+
+/// Emits a review action on a comment, from a card's button (B4c). The shell runs it.
+fn review_event(action: Action, id: i64, cx: &mut Context<DiffPane>) {
+    cx.emit(DiffPaneEvent::Review {
+        action,
+        args: Args::ReviewComment(id),
+    });
 }
 
 /// A list row of plain text, one row high.
@@ -1556,6 +1921,7 @@ fn binding(action: &str, keys: &str, context: &'static str) -> KeyBinding {
         "PrevHunk" => KeyBinding::new(keys, PrevHunk, context),
         "ToggleLine" => KeyBinding::new(keys, ToggleLine, context),
         "ToggleVisual" => KeyBinding::new(keys, ToggleVisual, context),
+        "CommentOnSelection" => KeyBinding::new(keys, CommentOnSelection, context),
         "StageHunkUnderCursor" => KeyBinding::new(keys, StageHunkUnderCursor, context),
         "StageSelectedLines" => KeyBinding::new(keys, StageSelectedLines, context),
         "UnstageSelectedLines" => KeyBinding::new(keys, UnstageSelectedLines, context),
@@ -1619,6 +1985,9 @@ impl Render for DiffPane {
             }))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| this.escape(cx)))
             .on_action(cx.listener(|this, _: &ToggleVisual, _, cx| this.toggle_visual(cx)))
+            .on_action(cx.listener(|this, _: &CommentOnSelection, _, cx| {
+                this.comment_at_selection(cx);
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -1705,9 +2074,15 @@ mod tests {
         // The commit's previous file is the one exception: ⇧⌘P is Push With Lease's
         // label. Nothing binds that label, and its key is an open question (docs/01).
         // The chunk actions are this pane's own: their label is the key bound here.
+        // The comment key's label is this key too (B4c), as the chunk actions' are.
         let registry: Vec<&str> = Action::ALL
             .iter()
-            .filter(|action| !matches!(action, Action::StageChunk | Action::UnstageChunk))
+            .filter(|action| {
+                !matches!(
+                    action,
+                    Action::StageChunk | Action::UnstageChunk | Action::CommentOnSelection
+                )
+            })
             .filter_map(|action| action.spec().shortcut)
             .collect();
         for row in WORKING_KEYS.iter().chain(COMMIT_KEYS.iter()) {
@@ -1761,6 +2136,15 @@ mod tests {
             key("StageHunkUnderCursor").as_deref(),
             Action::UnstageChunk.spec().shortcut
         );
+    }
+
+    #[test]
+    fn the_comment_key_shows_the_key_it_is_bound_to() {
+        let key = WORKING_KEYS
+            .iter()
+            .find(|row| row.action == "CommentOnSelection")
+            .map(|row| mac_glyph(row.keys));
+        assert_eq!(key.as_deref(), Action::CommentOnSelection.spec().shortcut);
     }
 
     #[test]

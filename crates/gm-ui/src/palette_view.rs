@@ -104,7 +104,8 @@ impl StatusView {
     pub(crate) fn refresh_palette(&mut self, cx: &mut Context<Self>) {
         let message = self.composer.read(cx).text(cx);
         let candidates = {
-            let ctx = self.action_context(&message);
+            let spot = self.comment_spot(cx);
+            let ctx = self.action_context_with(&message, spot);
             palette::build(
                 self.palette.stage(),
                 self.palette.query(),

@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use gm_schema::{
-    CommandKind, DiffSide, HunkId, OperationId, StageTarget, StashEntry, StatusEntry, WorkflowInfo,
-    WorkflowInput, WorktreeEntry,
+    CommandKind, DiffSide, HunkId, OperationId, ReviewComment, ReviewStatus, StageTarget,
+    StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
 };
 
 use gm_core::workflow::edit::Direction;
@@ -68,6 +68,8 @@ pub enum ArgKind {
     Template,
     /// A stash of the Stashes page's list.
     Stash,
+    /// A review comment of the Working Copy diff, by its id (B4c).
+    ReviewComment,
 }
 
 /// The target of one run. Its kind must match the action's `ArgKind`.
@@ -98,6 +100,8 @@ pub enum Args {
         oid: String,
         label: String,
     },
+    /// The review comment with this id, as the listing gave it (B4c).
+    ReviewComment(i64),
 }
 
 /// Static description of an action.
@@ -186,6 +190,17 @@ pub enum Effect {
     ShowReflog,
     /// Opens the dialog that stashes the working copy's changes (B2, D94).
     OpenNewStashDialog,
+    /// Opens the composer that comments on the working-tree lines `start_line` to
+    /// `end_line` of `path` (B4c).
+    OpenReviewComposer {
+        path: String,
+        start_line: u32,
+        end_line: u32,
+    },
+    /// Opens the composer that edits the body of review comment `id` (B4c).
+    OpenReviewEdit {
+        id: i64,
+    },
     /// Opens the dialog that asks before the stash `oid` at `index` is dropped (B2).
     OpenDropStashDialog {
         index: u32,
@@ -240,6 +255,31 @@ pub struct WorkflowCtx<'a> {
     pub page: PageState<'a>,
 }
 
+/// Where the Working Copy diff's cursor or visual selection is, for a review
+/// comment (B4c). Built by the window from the diff pane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommentSpot<'a> {
+    /// No file is shown, or the cursor is on a hunk header.
+    #[default]
+    Nothing,
+    /// Lines of `path` on `side`. `working` is the working-tree lines they cover,
+    /// from the lowest to the highest; `None` when they are all removed lines.
+    Lines {
+        path: &'a str,
+        side: DiffSide,
+        working: Option<(u32, u32)>,
+    },
+}
+
+/// What the window knows of the review comments, for the rules (B4c).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReviewCtx<'a> {
+    /// The comments the engine listed; `None` until the first listing.
+    pub comments: Option<&'a [ReviewComment]>,
+    /// Where the Working Copy diff's cursor or selection is.
+    pub spot: CommentSpot<'a>,
+}
+
 /// The window state an action's rule reads. Built by the window for each run.
 #[derive(Clone, Copy, Debug)]
 pub struct Context<'a> {
@@ -268,10 +308,12 @@ pub struct Context<'a> {
     pub user_email_known: bool,
     /// A fetch, pull or push with lease is in flight; the three refuse another one meanwhile.
     pub remote_running: bool,
+    /// The review comments and the Working Copy diff's selection (B4c).
+    pub review: ReviewCtx<'a>,
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 74] = [
+const SPECS: [Spec; 79] = [
     spec(
         "file.stage",
         "Stage File",
@@ -784,6 +826,41 @@ const SPECS: [Spec; 74] = [
         ArgKind::Commit,
         Category::Branches,
     ),
+    spec(
+        "review.comment",
+        "Comment on Selection",
+        Some("⇧⌘M"),
+        ArgKind::None,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "review.resolve",
+        "Resolve Comment",
+        None,
+        ArgKind::ReviewComment,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "review.reopen",
+        "Reopen Comment",
+        None,
+        ArgKind::ReviewComment,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "review.delete",
+        "Delete Comment",
+        None,
+        ArgKind::ReviewComment,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "review.edit",
+        "Edit Comment",
+        None,
+        ArgKind::ReviewComment,
+        Category::WorkingCopy,
+    ),
 ];
 
 const fn spec(
@@ -880,6 +957,11 @@ pub enum Action {
     ShowReflog,
     CheckoutCommit,
     NewBranchFromCommit,
+    CommentOnSelection,
+    ResolveReviewComment,
+    ReopenReviewComment,
+    DeleteReviewComment,
+    EditReviewComment,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -992,7 +1074,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 74] = [
+    pub const ALL: [Action; 79] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1067,6 +1149,11 @@ impl Action {
         Action::ShowReflog,
         Action::CheckoutCommit,
         Action::NewBranchFromCommit,
+        Action::CommentOnSelection,
+        Action::ResolveReviewComment,
+        Action::ReopenReviewComment,
+        Action::DeleteReviewComment,
+        Action::EditReviewComment,
     ];
 
     #[must_use]
@@ -1107,6 +1194,7 @@ impl Action {
                 | Action::RemoveWorktree
                 | Action::DiscardAllChanges
                 | Action::StashDrop
+                | Action::DeleteReviewComment
         )
     }
 
@@ -1205,6 +1293,8 @@ impl Action {
                 | Action::NewStash
                 | Action::StashDrop
                 | Action::NewBranchFromCommit
+                | Action::CommentOnSelection
+                | Action::EditReviewComment
         )
     }
 
@@ -1270,6 +1360,11 @@ impl Action {
                 stash_entry_rule(args, ctx)
             }
             _ if self.is_stash_rule() => stash_rule(self, ctx),
+            Action::CommentOnSelection => comment_rule(ctx),
+            Action::ResolveReviewComment
+            | Action::ReopenReviewComment
+            | Action::DeleteReviewComment
+            | Action::EditReviewComment => review_entry_rule(self, args, ctx),
             // The placeholders, refused above by `available`.
             _ => Err(NOT_AVAILABLE),
         }
@@ -1330,6 +1425,20 @@ impl Action {
             (Action::StashApply | Action::StashPop | Action::StashDrop, _) => {
                 stash_effect(self, args)?
             }
+            (Action::CommentOnSelection, _) => comment_effect(ctx)?,
+            (Action::EditReviewComment, Args::ReviewComment(id)) => {
+                Effect::OpenReviewEdit { id: *id }
+            }
+            (Action::ResolveReviewComment, Args::ReviewComment(id)) => {
+                Effect::Send(vec![CommandKind::ResolveReviewComment { id: *id }])
+            }
+            (Action::ReopenReviewComment, Args::ReviewComment(id)) => {
+                Effect::Send(vec![CommandKind::ReopenReviewComment { id: *id }])
+            }
+            // The card asks once before it gets here, so the command is sent at once.
+            (Action::DeleteReviewComment, Args::ReviewComment(id)) => {
+                Effect::Send(vec![CommandKind::DeleteReviewComment { id: *id }])
+            }
             (action, _) if action.opens_a_page() => navigation_effect(action, args),
             (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
             (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
@@ -1384,6 +1493,7 @@ impl Action {
                 | (ArgKind::Workflow, Args::Workflow(_))
                 | (ArgKind::Template, Args::Template(_))
                 | (ArgKind::Stash, Args::Stash { .. })
+                | (ArgKind::ReviewComment, Args::ReviewComment(_))
         )
     }
 }
@@ -1864,6 +1974,64 @@ pub(crate) fn stash_args(entry: &StashEntry) -> Args {
     }
 }
 
+/// The rule of Comment on Selection: an idle repository, and a line of the
+/// unstaged side with a working-tree line under the cursor or the selection.
+fn comment_rule(ctx: &Context<'_>) -> Result<(), Reason> {
+    idle(ctx)?;
+    match ctx.review.spot {
+        CommentSpot::Nothing => Err("Select lines of the unstaged diff first."),
+        CommentSpot::Lines {
+            side: DiffSide::Staged,
+            ..
+        } => Err("Comment from the unstaged side of the diff."),
+        CommentSpot::Lines { working: None, .. } => Err("Those lines are not in the working tree."),
+        CommentSpot::Lines { .. } => Ok(()),
+    }
+}
+
+/// What Comment on Selection opens: the composer for the working-tree lines.
+fn comment_effect(ctx: &Context<'_>) -> Result<Effect, Reason> {
+    comment_rule(ctx)?;
+    match ctx.review.spot {
+        CommentSpot::Lines {
+            path,
+            working: Some((start_line, end_line)),
+            ..
+        } => Ok(Effect::OpenReviewComposer {
+            path: path.to_owned(),
+            start_line,
+            end_line,
+        }),
+        _ => Err(NOT_AVAILABLE),
+    }
+}
+
+/// The rule of resolve, reopen, edit and delete: a repository, a listing that
+/// has the comment, and the status the action needs.
+fn review_entry_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    repository_open(ctx)?;
+    let Args::ReviewComment(id) = args else {
+        return Err("No target for this action");
+    };
+    let listed = ctx
+        .review
+        .comments
+        .ok_or("The comments are still being read.")?;
+    let comment = listed
+        .iter()
+        .find(|comment| comment.id == *id)
+        .ok_or("This comment is no longer listed.")?;
+    match action {
+        Action::ResolveReviewComment if comment.status == ReviewStatus::Resolved => {
+            Err("This comment is already resolved.")
+        }
+        Action::ReopenReviewComment if comment.status == ReviewStatus::Open => {
+            Err("This comment is not resolved.")
+        }
+        _ => Ok(()),
+    }
+}
+
 fn repository_open(ctx: &Context<'_>) -> Result<(), Reason> {
     if ctx.repo_open {
         Ok(())
@@ -1987,6 +2155,7 @@ mod tests {
             user_email_known: false,
             remote_running: false,
             stashes: None,
+            review: ReviewCtx::default(),
         }
     }
 
@@ -2595,6 +2764,7 @@ mod tests {
                 Action::DeleteMergedBranches,
                 Action::DiscardAllChanges,
                 Action::StashDrop,
+                Action::DeleteReviewComment,
             ]
         );
     }
@@ -3173,6 +3343,7 @@ mod tests {
     fn with_stashes(stashes: &[StashEntry]) -> Context<'_> {
         Context {
             stashes: Some(stashes),
+            review: ReviewCtx::default(),
             ..ctx(&[], "")
         }
     }
@@ -4035,5 +4206,196 @@ mod tests {
                 run: 7
             }]))
         );
+    }
+
+    fn lines(path: &str, working: Option<(u32, u32)>) -> CommentSpot<'_> {
+        CommentSpot::Lines {
+            path,
+            side: DiffSide::Unstaged,
+            working,
+        }
+    }
+
+    fn review_ctx<'a>(spot: CommentSpot<'a>, comments: Option<&'a [ReviewComment]>) -> Context<'a> {
+        Context {
+            review: ReviewCtx { comments, spot },
+            ..ctx(&[], "")
+        }
+    }
+
+    fn comment_with(id: i64, status: ReviewStatus) -> ReviewComment {
+        ReviewComment {
+            id,
+            path: "a.txt".into(),
+            body: "note".into(),
+            status,
+            anchor: gm_schema::ReviewAnchor {
+                text: "x".into(),
+                before: Vec::new(),
+                after: Vec::new(),
+                start_line: 1,
+            },
+            created_at: 0,
+            resolved_at: None,
+            snapshot: None,
+            location: Some(gm_schema::ReviewLocation {
+                start_line: 1,
+                end_line: 1,
+            }),
+            outdated: false,
+        }
+    }
+
+    #[test]
+    fn comment_on_selection_needs_lines_of_the_unstaged_side_with_a_working_tree_line() {
+        let shown = review_ctx(lines("a.txt", Some((12, 15))), None);
+        assert_eq!(
+            Action::CommentOnSelection.enabled(&Args::None, &shown),
+            Ok(())
+        );
+        let none = review_ctx(CommentSpot::Nothing, None);
+        assert_eq!(
+            Action::CommentOnSelection.enabled(&Args::None, &none),
+            Err("Select lines of the unstaged diff first.")
+        );
+        let removed = review_ctx(lines("a.txt", None), None);
+        assert_eq!(
+            Action::CommentOnSelection.enabled(&Args::None, &removed),
+            Err("Those lines are not in the working tree.")
+        );
+        let staged = review_ctx(
+            CommentSpot::Lines {
+                path: "a.txt",
+                side: DiffSide::Staged,
+                working: Some((1, 1)),
+            },
+            None,
+        );
+        assert_eq!(
+            Action::CommentOnSelection.enabled(&Args::None, &staged),
+            Err("Comment from the unstaged side of the diff.")
+        );
+        let closed = Context {
+            repo_open: false,
+            ..review_ctx(lines("a.txt", Some((1, 1))), None)
+        };
+        assert_eq!(
+            Action::CommentOnSelection.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn comment_on_selection_plans_the_composer_for_the_lines_it_covers() {
+        let shown = review_ctx(lines("src/a.rs", Some((12, 15))), None);
+        assert_eq!(
+            Action::CommentOnSelection.plan(&Args::None, &shown),
+            Ok(Effect::OpenReviewComposer {
+                path: "src/a.rs".into(),
+                start_line: 12,
+                end_line: 15,
+            })
+        );
+        assert_eq!(
+            Action::CommentOnSelection.plan(&Args::None, &review_ctx(CommentSpot::Nothing, None)),
+            Err("Select lines of the unstaged diff first.")
+        );
+    }
+
+    #[test]
+    fn the_comment_action_is_listed_with_its_key_and_opens_a_dialog() {
+        assert_eq!(Action::CommentOnSelection.id(), "review.comment");
+        assert_eq!(Action::CommentOnSelection.spec().shortcut, Some("⇧⌘M"));
+        assert_eq!(Action::CommentOnSelection.spec().args, ArgKind::None);
+        assert_eq!(
+            Action::CommentOnSelection.spec().category,
+            Category::WorkingCopy
+        );
+        assert!(Action::CommentOnSelection.opens_dialog());
+        assert!(!Action::CommentOnSelection.destructive());
+    }
+
+    #[test]
+    fn resolve_reopen_edit_and_delete_need_the_listed_comment_in_the_right_status() {
+        let open = [comment_with(4, ReviewStatus::Open)];
+        let done = [comment_with(5, ReviewStatus::Resolved)];
+        let listed = review_ctx(CommentSpot::Nothing, Some(&open));
+        assert_eq!(
+            Action::ResolveReviewComment.plan(&Args::ReviewComment(4), &listed),
+            Ok(Effect::Send(vec![CommandKind::ResolveReviewComment {
+                id: 4
+            }]))
+        );
+        assert_eq!(
+            Action::ReopenReviewComment.plan(&Args::ReviewComment(4), &listed),
+            Err("This comment is not resolved.")
+        );
+        assert_eq!(
+            Action::DeleteReviewComment.plan(&Args::ReviewComment(4), &listed),
+            Ok(Effect::Send(vec![CommandKind::DeleteReviewComment {
+                id: 4
+            }]))
+        );
+        assert_eq!(
+            Action::EditReviewComment.plan(&Args::ReviewComment(4), &listed),
+            Ok(Effect::OpenReviewEdit { id: 4 })
+        );
+        let closed = review_ctx(CommentSpot::Nothing, Some(&done));
+        assert_eq!(
+            Action::ResolveReviewComment.enabled(&Args::ReviewComment(5), &closed),
+            Err("This comment is already resolved.")
+        );
+        assert_eq!(
+            Action::ReopenReviewComment.plan(&Args::ReviewComment(5), &closed),
+            Ok(Effect::Send(vec![CommandKind::ReopenReviewComment {
+                id: 5
+            }]))
+        );
+    }
+
+    #[test]
+    fn a_comment_action_needs_the_listing_and_a_listed_comment() {
+        let not_read = review_ctx(CommentSpot::Nothing, None);
+        assert_eq!(
+            Action::DeleteReviewComment.enabled(&Args::ReviewComment(4), &not_read),
+            Err("The comments are still being read.")
+        );
+        let listed = [comment_with(4, ReviewStatus::Open)];
+        let gone = review_ctx(CommentSpot::Nothing, Some(&listed));
+        assert_eq!(
+            Action::EditReviewComment.enabled(&Args::ReviewComment(9), &gone),
+            Err("This comment is no longer listed.")
+        );
+        assert_eq!(
+            Action::EditReviewComment.enabled(&Args::File("a.txt".into()), &gone),
+            Err("No target for this action")
+        );
+        let closed = Context {
+            repo_open: false,
+            ..review_ctx(CommentSpot::Nothing, Some(&listed))
+        };
+        assert_eq!(
+            Action::ResolveReviewComment.enabled(&Args::ReviewComment(4), &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn delete_comment_is_destructive_and_the_review_actions_have_their_ids() {
+        assert!(Action::DeleteReviewComment.destructive());
+        assert!(!Action::DeleteReviewComment.opens_dialog());
+        assert_eq!(Action::ResolveReviewComment.id(), "review.resolve");
+        assert_eq!(Action::ReopenReviewComment.id(), "review.reopen");
+        assert_eq!(Action::DeleteReviewComment.id(), "review.delete");
+        assert_eq!(Action::EditReviewComment.id(), "review.edit");
+        for action in [
+            Action::ResolveReviewComment,
+            Action::ReopenReviewComment,
+            Action::DeleteReviewComment,
+            Action::EditReviewComment,
+        ] {
+            assert_eq!(action.spec().args, ArgKind::ReviewComment);
+            assert_eq!(action.spec().shortcut, None);
+        }
     }
 }

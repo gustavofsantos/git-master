@@ -236,6 +236,7 @@ mod tests {
             workflows: WorkflowCtx::default(),
             remote_running: false,
             stashes: None,
+            review: crate::action_registry::ReviewCtx::default(),
         };
         for action in [Action::Fetch, Action::Pull, Action::PushWithLease] {
             let args = toolbar_args(action, Some("main"));
@@ -266,6 +267,7 @@ mod tests {
             user_email_known: false,
             remote_running: true,
             stashes: None,
+            review: crate::action_registry::ReviewCtx::default(),
         };
         for action in [Action::Fetch, Action::Pull, Action::PushWithLease] {
             let args = toolbar_args(action, Some("main"));
