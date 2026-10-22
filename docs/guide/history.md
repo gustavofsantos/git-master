@@ -114,7 +114,7 @@ The graph sits to the left of the subject. It draws one row per commit and one l
 
 As you load more pages, the graph grows with the list. A commit keeps its row when more commits are loaded below it.
 
-## Planned
+## Scope of the list
 
 > **Planned.** The scope control is not available yet.
 
@@ -130,7 +130,7 @@ When a branch is stacked on a parent, the graph draws the edge between them dash
 
 > **Planned.** Search by content is not available yet.
 
-A search field in the history header finds commits that add or remove a text, the same way as `git log -S`. A search for a regular expression uses `git log -G`. The search waits briefly after you stop typing, and a new search cancels the one in progress.
+A search field in the history header finds commits that add or remove a text, the same way as `git log -S`. This is the pickaxe search. A search for a regular expression uses `git log -G`. The search waits briefly after you stop typing, and a new search cancels the one in progress.
 
 ## File history
 

@@ -63,7 +63,7 @@ Use any of these ways:
 2. Click a branch in the **By name** view of the sidebar.
 3. Run **Checkout Branch** from the command palette (`Ctrl+K`, `⌘K` on macOS), then press `Tab` and choose the branch.
 
-Choosing a remote branch that has no local copy creates a local branch that tracks it, with the same name.
+Choosing a remote branch that has no local copy creates a local branch that tracks the remote one.
 
 You cannot check out the current branch again. Its entry says **This is the current branch**.
 
@@ -80,7 +80,7 @@ GitMaster does not stash or carry your uncommitted changes across a checkout. If
 ## Delete a branch
 
 1. Run **Delete Branch** from the branch menu. The item is red, because it asks for confirmation.
-2. The dialog **Delete branch** asks for confirmation. It says that Git deletes the branch only when its commits are merged into HEAD or its upstream.
+2. The dialog asks **Delete branch** followed by the name of the branch, with a question mark. It says that Git deletes the branch only when its commits are merged into HEAD or its upstream.
 3. Click **Delete branch**. GitMaster runs `git branch -d`.
 
 When Git refuses because the branch has commits that are not merged, the dialog shows Git's message and a checkbox, **Discard commits that exist only on this branch**. The delete button stays off until you tick the checkbox. Then GitMaster deletes the branch with `-D`, which discards those commits.
@@ -132,7 +132,7 @@ For **Push with lease**, the upstream decides where the branch goes:
 
 - When the branch has an upstream, the push goes there.
 - When the branch has no upstream and the repository has exactly one remote, the push goes to that remote, and the branch's upstream is set to it.
-- When the repository has no remote or several remotes, the push is refused. GitMaster does not guess a remote.
+- When the branch has no upstream and the repository has no remote or several remotes, the push is refused. GitMaster does not guess a remote.
 
 ## The branch menu
 
@@ -155,19 +155,19 @@ A branch that is checked out in a linked worktree has a different menu, for work
 
 > **Planned.** New Child Branch, Restack This Stack and Rename Branch are not available yet.
 
-The branch menu shows **New Child Branch**, **Restack This Stack** and **Rename Branch**. New Child Branch creates a branch whose parent is this branch. Restack This Stack updates the branches of the stack above this branch. Rename Branch changes the name of the branch. For stacks, see [Stacks](stacks.md).
+The branch menu shows **New Child Branch**, **Restack This Stack** and **Rename Branch**. New Child Branch creates a branch whose parent is this branch. Restack This Stack brings the branches of the stack that contains this branch up to date with their parents. Rename Branch changes the name of the branch. For stacks, see [Stacks](stacks.md).
 
 ## By stack view
 
 > **Planned.** The By stack view is not available yet.
 
-The **By stack** view shows the branches as a tree of parents, under a **Stacks** section and a **No stack** section. A branch that is behind its parent shows an indicator with the number of commits it is behind. A branch that is ahead of its parent shows the number of commits it has beyond the parent. For stacks, see [Stacks](stacks.md).
+The **By stack** view shows the branches as a tree of parents, under a **Stacks** section and a **No stack** section. A branch whose parent has moved shows an amber dot. A branch with commits beyond its parent shows their number, such as `↑3`. A parent that has branches to restack shows the action with their number, such as `restack 3`. For stacks, see [Stacks](stacks.md).
 
 ## Set a parent by dragging
 
 > **Planned.** Dragging a branch onto another branch to set its parent is not available yet.
 
-In the **By stack** view, drag a branch onto another branch to make the other branch its parent. For how a parent is set and what it changes, see [Stacks](stacks.md).
+In the **By stack** view, drag a branch onto another branch. The branch you drop it on becomes the parent of the dragged branch. For how a parent is set and what it changes, see [Stacks](stacks.md).
 
 ## Reflog and stashes
 

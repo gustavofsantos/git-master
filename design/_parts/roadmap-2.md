@@ -1,21 +1,20 @@
 ## Slice 2: `prepare-commit` hook (done)
 
-Backend and UI are done. Reviewed on 2026-10-16 (D29, D30): only what Git lacks becomes a GitMaster hook. The `pre-commit` hook and the other native Git hooks stay with Git (D18, D29). It will move to a workflow in WF3 (D75).
+Backend and UI are done. Reviewed on 2026-10-16 (D29, D30): only what Git lacks becomes a GitMaster hook. `pre-commit` and the other native hooks stay with Git (D18, D29). It moves to a workflow in WF3 (D75).
 
-- Versioned JSON contract in `gm-schema`. Input: current message, staged diff and repo. Output: message. Always JSON (D30).
+- Versioned JSON contract in `gm-schema`: input is the current message, staged diff and repo; output is the message (D30). Hooks run with the login shell's PATH.
 - Configured as `[gitmaster "prepare-commit.<name>"]`. A repo-level hook runs only after an approval kept outside the repo, tied to the command's hash (D17).
-- Hooks run with the login shell's PATH, like `git`.
-- Runs are async. The message header shows the run state (step, ready, failed with a one-line reason, cancelled) and a "Cancel" button while it runs. "Suggest message" starts a run (`commit.suggest_message`).
-- The answer fills the message only if HEAD, the staged diff and the text are all unchanged. Otherwise it is offered as a suggestion, with "Replace" and "Discard" (keeps the text).
-- For a repo-level hook, the panel shows the full command with "Approve" and "Deny". Deny hides the panel for this session only; nothing is saved.
-- Each finished step appears in the "Git commands" panel as `hook <name>: <command>`, with exit code, duration and a one-line result (`ok`, `exit 2`, `timed out after 30000 ms`, `cancelled`). Input, output and diff never enter the log (D28).
+- Async run: the message header shows the run state and has "Cancel". "Suggest message" starts it (`commit.suggest_message`).
+- The answer fills the message only if HEAD, the staged diff and the text are all unchanged. Otherwise it is offered with "Replace" or "Discard".
+- A repo-level hook needs "Approve" or "Deny" first. Deny hides the panel for this session only.
+- Each finished step is logged in "Git commands" as `hook <name>: <command>`, with exit code, duration and a one-line result. Input, output and diff are never logged (D28).
 
-Done when: a script the author writes can generate the commit message without freezing the UI, and the native `pre-commit` keeps running as before.
+Done when: a script the author writes can generate the commit message without freezing the UI, and native `pre-commit` still runs as before.
 
 Known gaps:
 
-- The command log does not store the command hash (approval uses it; the log shows the full command). A cancelled or timed-out step shows as a failure on the "Git log" button.
-- A failed step shows only its exit code in the log. The first line of the hook's error output appears on the chip only.
+- The log does not store the command hash, so a cancelled or timed-out step shows as a failure.
+- A failed step shows only its exit code. The hook's first error line is on the chip, not in the log.
 
 ## Slice 3: history and branches (by-name view) (in progress: H1 to H5 done, with H4b-A, H4b-B and H4c)
 
@@ -55,108 +54,102 @@ Order set by the author on 2026-10-16: this slice, together with the diff view (
 
 ### H1: real commit list (done)
 
-- Flat list of HEAD's first 200 commits, in 48 px rows: ref chips (HEAD, branches, tags), subject, short hash and relative time.
+- HEAD's first 200 commits, flat, in 48 px rows: ref chips (HEAD, branches, tags), subject, short hash and relative time.
 - HEAD with no commits shows a message instead of an empty list.
-- "Show History" action in the action registry. The sidebar opens the page.
-- Read command, not logged (D28, D33).
+- A "Show History" action in the action registry opens the page from the sidebar. Read command, not logged (D28, D33).
 
-Done when: the page lists the real commits of HEAD for linear repos, merges, root commits, HEAD with no commits, detached HEAD and Unicode subjects (checked against real Git), and the UI smoke passes in both themes.
+Done when: the page matches real Git for linear repos, merges, root commits, HEAD with no commits, detached HEAD and Unicode subjects, and the UI smoke passes in both themes.
 
 Known gaps:
 
 - Ref chips cannot tell local refs from remote ones (`%D` does not say).
-- The list refreshes only when the page opens (H2). No paging beyond 200. No selection. No keyboard shortcut for "Show History".
-- The list uses Git's default date order, not `--topo-order` (H5).
-- Relative time uses the author date, computed at draw time.
+- The list refreshes only when the page opens (H2). No paging beyond 200, no selection, no keyboard shortcut for "Show History".
+- The list uses Git's default date order, not `--topo-order` (H5). Relative time uses the author date.
 
 ### H2: paging and refresh (done)
 
-- Pages of 200 commits. Near the end of the list, the next page is requested from the last listed commit (cursor by oid). The `git log --topo-order` output is streamed and resumes where it stopped. If the cursor does not match, the read restarts and reads up to it.
-- Each watcher status update rereads the top while the page is open, so a commit made outside the app appears at the top.
+- Pages of 200 commits, requested near the end of the list from the last listed commit (cursor by oid). Output is streamed and resumes where it stopped. If the cursor does not match, the read restarts.
+- Each watcher status update rereads the top, so commits made outside the app appear.
 - A click selects a row by oid. The selection survives updates.
-- Reads run on their own thread. A superseded request's answer is dropped by `OperationId`, and its git process is killed. Nothing is written to the commit-graph or the command log.
+- Reads run on their own thread. A superseded answer is dropped by `OperationId`, and its git process is killed. Nothing is written to the commit-graph or the command log.
 
-Done when: a 5,000-commit repo with merges (made with `git fast-import`) pages through exactly what `git rev-list --topo-order HEAD` lists, with no repeats or gaps. An outside commit appears at the top with the selection kept. Superseded answers are dropped. The UI smoke passes in both themes.
+Done when: a 5,000-commit merged repo (made with `git fast-import`) pages exactly like `git rev-list --topo-order HEAD`, with no repeats or gaps; outside commits appear with the selection kept; the UI smoke passes in both themes.
 
 Known gaps:
 
-- Refresh rereads only the first page, so rows beyond it come back on scroll.
+- Refresh rereads only the first page.
 - Every status update rereads the top, even when only the working tree changed.
-- Paging has model and engine tests only: no UI test and no smoke run with 5,000 commits (the performance gate is H8).
+- Paging has no UI test and no smoke run with 5,000 commits (the performance gate is H8).
 
 ### H3: commit detail (done)
 
-- A 360 px panel beside the history: subject, full body (paragraphs kept), full hash, author name and email, author date, short parents, and the file list. Each file has a status letter (A, M, D, R; a rename shows `old → new`) and + and − counts. Binary files show `bin`. More than 200 files show "and N more". No selection shows "Select a commit to see its details."; an error shows Git's own message.
+- A 360 px panel: subject, full body, full hash, author name and email, author date, short parents, and the changed files. Each file has a status letter (A, M, D, R; a rename shows `old → new`) and + and − counts. Binary files show `bin`. Over 200 files show "and N more". No selection shows "Select a commit to see its details."; an error shows Git's own message.
 - Merges compare with the first parent (`--diff-merges=first-parent`). A root commit lists every file as A.
-- Read on its own thread, with the H2 request model. A new selection kills the ongoing read. Switching repo ends it. Read command, not logged.
+- Reads on their own thread with the H2 model. A new selection kills the ongoing read.
 
-Done when: real-Git tests cover add, modify, delete, rename, binary, root commit, merge, multi-paragraph body, Unicode and the file limit. The engine drops superseded answers and stops the read. The UI smoke passes in both themes.
+Done when: real-Git tests cover add, modify, delete, rename, binary, root commit, merge, multi-paragraph body, Unicode and the file limit. Superseded reads are dropped and stopped. The UI smoke passes in both themes.
 
 Known gaps:
 
 - `git show` output is read fully into memory before the 200-file limit applies.
 - The hash and parents wrap to two lines. The date has no relative time.
-- File rows are not clickable yet (H4). Clicking the same row again rereads the commit.
-- No UI test for the panel; the smoke checks pixels, not text.
-- Killing a running `git show` has no real-Git test.
-- Non-UTF-8 names show replacement characters.
-- The design's "Range" is not included (outside H3's scope).
+- File rows are not clickable yet (H4). The panel has no UI test; the smoke checks pixels, not text.
+- Killing a running `git show` has no real-Git test. Non-UTF-8 names show replacement characters.
+- The design's "Range" is outside H3's scope.
 
 ### H4: read-only commit diff (done)
 
-- Clicking a file row shows that file's diff in place of the list and panel. Up and Down move to the previous and next file. Esc or "Back to commit" returns to the commit. The header has the path, `+ −`, "N chunks, N insertions, N deletions", and the hunks, as in the Working Copy. There are no stage, chunk or Staged | Unstaged controls.
-- Merges compare with the first parent. Root commits use `--root`. Renames show both paths. Binary files show "Binary file".
-- The diff pane gained a read-only mode rather than a new component. The view matches the Working Copy's, minus the actions.
-- Read on its own thread, with the H2 and H3 request model. Emits no stage.
+- Clicking a file opens its diff in place of the list. Up and Down go to the previous and next file. Esc or "Back to commit" returns to the commit. The header shows the path, `+ −` and the chunk summary. Hunks look as in the Working Copy, without stage or chunk controls.
+- Merges compare with the first parent. Root commits use `--root`. Renames show both paths. Binary shows "Binary file".
+- A read-only mode of the diff pane, not a new component.
+- Reads on their own thread with the H2 and H3 model. Emits no stage.
 
-Done when: real-Git tests cover add, modify, delete, rename with edits, binary, root commit, merge, mode change, large file and non-UTF-8 content. The engine drops superseded answers, stops reads and emits no stage. The UI smoke passes in both themes, with the other history and staging scenarios green.
+Done when: real-Git tests cover add, modify, delete, rename with edits, binary, root commit, merge, mode change, large file and non-UTF-8 content. Superseded answers are dropped and reads are stopped. The UI smoke passes in both themes, with the related scenarios green.
 
 Known gaps:
 
-- "Back to commit" does not stop the ongoing read. Its answer is dropped when the read ends.
-- A non-UTF-8 file name shows replacement characters, and the diff comes out empty, because the path is not passed back to Git.
+- "Back to commit" does not stop the ongoing read.
+- A non-UTF-8 file name shows replacement characters, and its diff comes out empty.
 - A mode change with no content shows "No text changes in this file.", the same as an empty file.
-- Up and Down skip the "and N more" files.
-- The smoke covers add and delete only.
+- Up and Down skip the "and N more" files. The smoke covers add and delete only.
 
 ### H4b-A: split commit diff (done)
 
-- A "Unified | Split" selector in the commit diff header. The choice is saved per user in `settings.json` (D39, D40). Default: Unified.
-- Split puts old and new lines side by side, one row per line pair. The pairing is the same as the D24 pair warning. A missing side is blank, with no number or marker. Horizontal scroll is shared by both sides.
-- Cursor, navigation and selection follow the unified lines, mapped to their split rows. Changing layout keeps the cursor line.
+- A "Unified | Split" selector in the commit diff header, saved per user in `settings.json` (D39, D40). Default: Unified.
+- Split shows old and new lines side by side, paired as in the D24 warning. A missing side is blank. Horizontal scroll is shared by both sides.
+- Cursor and selection follow the unified lines, mapped to their split rows. Switching layout keeps the cursor line.
 - No automatic switch to Unified in narrow windows (D41).
 
-Done when: pairing tests (2 vs 3 lines, pure addition, pure removal, interleaved lines, context) pass, and each changed line appears once on one side. Real-Git tests for add, remove and rename with edits pass. The UI smoke passes in both themes, and the choice survives a restart.
+Done when: pairing tests (2 vs 3 lines, pure addition, pure removal, interleaved lines, context) pass, and a property test shows each changed line appears once per side. Real-Git tests for add, remove and rename with edits pass. The UI smoke passes in both themes, and the choice survives a restart.
 
 Known gaps:
 
 - No keyboard shortcut for the layout.
-- Horizontal scroll works with the wheel only, in fixed steps. Its limit is the widest line, not the visible width.
+- Horizontal scroll is wheel-only, in fixed steps. Its limit is the widest line, not the visible width.
 - The choice is saved only from the header. Its own screen is slice 9 (D38).
 - Split and unified rows have separate draw functions, so a visual change to one must be checked in the other.
 - No UI test for the split panel.
 
 ### H4b-B: split Working Copy diff (done, with gaps)
 
-- The same selector and row model as the commit diff. The choice is shared: switching either diff changes both and saves the choice (D39, D40). Stage, unstage and discard work as before. The D24 half-pair warning applies to both.
-- Each split cell has its own line box. Only the cursor's cell is highlighted. Keys are the unified ones (D43): Up and Down walk the changed lines in both views, so a −/+ pair visits each of its cells in turn.
-- It also closes H4b-A gaps. A second Down pressed while a file loads is no longer lost. The "\ No newline at end of file" marker is drawn after the line text, in both layouts.
+- The same selector and row model as the commit diff. The choice is shared by both diffs and saved (D39, D40). Stage, unstage and discard work as before. The D24 half-pair warning applies to both.
+- Each split cell has its own line box. Only the cursor's cell is highlighted. Keys are the unified ones (D43): Up and Down walk the changed lines, so a −/+ pair visits each of its cells in turn.
+- It also closes two H4b-A gaps. A second Down pressed while a file loads is no longer lost. The "\ No newline at end of file" marker is drawn after the line text, in both layouts.
 
-Done when: selection by cell and by unified line gives the same result, and with real Git the written index matches. The split-stage UI smoke passes in both themes (single-line stage from the cell checkbox, a second `s` on a half pair, Stage Chunk, and a git check). The other staging and history smoke scenarios stay green in both layouts.
+Done when: cell and unified-line selection give the same result, and the written index matches real Git; the split-stage smoke passes in both themes (single-line stage, a second `s` on a half pair, Stage Chunk); the other staging and history scenarios stay green in both layouts.
 
 Known gaps:
 
 - No keyboard shortcut for the layout, and no keys to jump between the cells of a pair.
-- No UI test for the split panel. The smoke checks git and pixels.
-- The half-pair warning is checked by pixels, not by text.
+- No UI test for the split panel. The smoke checks git and pixels; the half-pair warning is checked by pixels, not text.
 - The end-of-file marker is tested only as a text function. No smoke scenario draws it.
-- The horizontal offset resets when the file or side changes. There is no unit test, because the state lives in the GPUI entity.
+- The horizontal offset resets when the file or side changes. There is no unit test for it.
 - Intra-line highlighting waits until after slice 3 (D42).
 
 ### H4c: stacked commit diff (done, with gaps)
 
-- Clicking a file shows one continuous diff of all the commit's files, in order, like `git show`, scrolled to the clicked file. Each file has a header with its status letter, its path (old → new for renames) and `+ −`. Binary, renamed-without-text, mode-change and empty files show a notice instead of lines. A file over 5,000 lines shows "and N more lines, not shown.". Past 200 files, the last line reads "and N more files, not shown.". The header shows "N files" and the Unified | Split selector, which applies to every file.
-- Keys (D43 to D46). Neither diff binds bare letters. Keys are Ctrl+Shift plus a letter, which is ⇧⌘ on macOS (D44). Ctrl+Shift+N and Ctrl+Shift+B are the next and previous hunk in the Working Copy, and the next and previous file in the commit view. The table below lists them. Tests check that there are no bare letters, no repeated key per screen, and no diff key that clashes with a registry shortcut on macOS (the exception is Ctrl+Shift+P, see Q13).
+- Clicking a file shows one continuous diff of all the commit's files, in order, like `git show`, scrolled to the clicked file. Each file has a header with its status letter, path (old → new for renames) and `+ −`. Binary, mode-change and empty files show a notice. A file over 5,000 lines shows "and N more lines, not shown.". Past 200 files, the last line reads "and N more files, not shown.". The header shows "N files" and the Unified | Split selector, which applies to all files.
+- Keys (D43 to D46) are Ctrl+Shift plus a letter (⇧⌘ on macOS, D44); neither diff binds bare letters. Ctrl+Shift+N and Ctrl+Shift+B mean next and previous hunk in the Working Copy, and next and previous file in the commit view. Tests check for bare letters, repeated keys and macOS clashes with registry shortcuts (exception: Ctrl+Shift+P, Q13).
 
 | Screen | Key (Linux and Windows; macOS) | Action |
 | --- | --- | --- |
@@ -174,9 +167,9 @@ Known gaps:
 | Commit, stacked | Esc | Back to the commit |
 
 - The stacked view has one page of space after the last file, so any file can scroll to the top (D46).
-- One read of the commit patch (`git show --format= --patch --histogram --diff-merges=first-parent -M --root`), split per file and paired with the file list by position. It runs on its own thread, with the H3 and H4 request model. Read command, not logged.
+- One read of the commit patch (`git show --format= --patch --histogram --diff-merges=first-parent -M --root`), split per file and paired with the file list by position. It runs on its own thread with the H3 and H4 model. Read command, not logged.
 
-Done when: pure tests cover the stacked layout, the notices, the per-file line limit, and the file-at-line and step rules. Real-Git tests cover two files in order, rename, binary, mode, root commit and merge. The engine cancels superseded reads and writes nothing. The UI smoke passes in both themes, with the related history and staging scenarios green, including the split variants.
+Done when: pure tests cover the layout, notices, line limit and steps; real-Git tests cover two files, rename, binary, mode, root commit and merge; superseded reads are cancelled and nothing is written; the UI smoke passes in both themes, with the related scenarios (split variants included) green.
 
 Known gaps:
 
@@ -186,31 +179,27 @@ Known gaps:
 - The 5,000-line limit hides the rest of a file, with no way to view it on this screen.
 - Up and Down move one fixed line, with no acceleration.
 - Non-UTF-8 names show replacement characters, as in H4.
-- The space at the end is one page, computed from the window height. Scroll-to-top works only after the window has been drawn.
-- Not tested on macOS, including the ⇧⌘ shortcuts (D44).
-- Ctrl+Shift+P is still the Push With Lease label in the registry (Q13). The Working Copy file list still uses j, k and r (Q14).
+- Scroll-to-top works only after the window has been drawn.
+- Not tested on macOS, including the ⇧⌘ shortcuts (D44). Ctrl+Shift+P is still the Push With Lease label in the registry (Q13). The Working Copy file list still uses j, k and r (Q14).
 
 ### H5: lane graph (done, with gaps)
 
-- History reads now request parents (`%P`): full oids, first parent first. The order is still `--topo-order`, page by page.
-- A pure, deterministic layout, built in one top-to-bottom pass that does not look ahead. Each new page extends the layout without redoing earlier rows. Lanes still open at a page's end carry over to the next page. Each commit becomes one row: its node column, plus the lanes that pass, arrive, leave or shift. Drawing only paints the segments.
-- The graph column sits left of the subject, up to 8 columns. Beyond that, the row shows `+N`. Rows join seamlessly across the list. The 48 px row height is unchanged. HEAD's node has a ring.
-- Colors: five lane accents (not state colors) and a faint trunk color. The theme contrast test covers all six in both themes, in normal and selected rows.
+- Reads now request parents (`%P`): full oids, first parent first. The order is still `--topo-order`, page by page.
+- A pure, deterministic layout built in one top-to-bottom pass that does not look ahead. Each new page extends the previous layout, and lanes still open at a page's end carry over. Each commit is one row: its node column, plus the lanes that pass, arrive, leave or shift. Drawing only paints.
+- The graph column sits left of the subject, up to 8 columns. Beyond that, the row shows `+N`. Rows join seamlessly. Row height stays 48 px. HEAD's node has a ring.
+- Colors: five lane accents (not state colors) and a faint trunk color. The theme contrast test covers all six in both themes, normal and selected.
 
-Done when: `%P` tests (root, linear, merge, octopus) pass, and parents match `git rev-list --parents --topo-order`. Layout property tests pass: one row per commit, every parent edge drawn to its parent, the same input gives the same layout, and pages extend a single-pass layout. Case and geometry tests pass (linear, fork and merge, octopus, two roots, parent outside the page, repeated parent, over 8 columns). A real repo with two merges draws every edge. `make lint` and `cargo test --workspace` pass. The author used the graph on macOS on 2026-10-21 and confirmed it works and that the UI is good to use.
+Done when: `%P` matches `git rev-list --parents --topo-order`; layout property tests pass (one row per commit, every parent edge drawn, deterministic, pages extend the layout); case tests pass (linear, fork, merge, octopus, two roots, parent outside the page, repeated parent, over 8 columns); a real repo with two merges draws every edge; `make lint` and `cargo test --workspace` pass. The author used the graph on macOS on 2026-10-21 and confirmed it works.
 
-Deviations from what was agreed: the layout runs on the UI thread, not off it, because it takes microseconds (20,000 commits in about 45 ms in a debug build, so a 200-row page takes well under 1 ms). The timing test is 20,000 commits in under 2 s in debug, not 200 rows in under 5 ms in release. A lane born from a merge takes its color from the hash of the oid it expects, not from the branch name. A single pass does not look ahead, and looking would change rows already drawn when a new page arrives.
+Deviations from what was agreed: the layout runs on the UI thread, not off it, because 20,000 commits take about 45 ms in a debug build, so a 200-row page takes well under 1 ms. The timing test is 20,000 commits under 2 s in debug, not 200 rows under 5 ms in release. A lane born from a merge takes its color from the hash of the oid it expects, not the branch name, because looking ahead would recolor rows already drawn.
 
 Known gaps:
 
 - No smoke scenario and no UI test of the drawing (D88).
-- A lane that shifts changes tint where it joins.
-- The `+N` label counts columns in the row, not lanes hidden in the list.
-- No hover highlight for lanes.
+- A shifting lane changes tint where it joins. The `+N` label counts columns, not hidden lanes. No hover highlight for lanes.
 - The graph column takes 14 px even in linear history.
-- Local and remote branch names (`feature` and `origin/feature`) get different colors, because `%D` does not say which is which.
-- No dashed edge and no commit owner (D25 stays Proposed).
-- The graph shows only HEAD. Choosing other scopes is H6.
+- Local and remote names (`feature` and `origin/feature`) get different colors, because `%D` does not say which is which.
+- No dashed edge and no commit owner (D25 stays Proposed). The graph shows only HEAD; choosing other scopes is H6.
 
 ### H6, scope
 
