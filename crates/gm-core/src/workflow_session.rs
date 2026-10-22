@@ -62,10 +62,6 @@ impl Session {
             .unwrap_or(self.default_origin)
     }
 
-    pub(crate) fn started(&mut self, run: RunId, by: OperationId) {
-        self.origins.insert(run, by);
-    }
-
     /// Keeps the jobs of a driver call and turns its events into the ones the
     /// front-ends get.
     pub(crate) fn absorb(&mut self, outcome: Outcome) -> Vec<Event> {

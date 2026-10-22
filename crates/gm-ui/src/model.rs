@@ -941,6 +941,16 @@ impl Model {
                 self.workflows.created(path);
                 None
             }
+            Event::WorkflowReviewRequested {
+                name,
+                hash,
+                source,
+                inputs,
+                ..
+            } => {
+                self.workflows.review_requested(name, hash, source, inputs);
+                None
+            }
             Event::WorkflowRunChanged {
                 run,
                 workflow,
@@ -1274,6 +1284,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::HookCancelled { id, .. }
         | Event::WorkflowsListed { id, .. }
         | Event::WorkflowCreated { id, .. }
+        | Event::WorkflowReviewRequested { id, .. }
         | Event::WorkflowRunsListed { id, .. }
         | Event::WorkflowRunLoaded { id, .. }
         | Event::WorkflowDryRun { id, .. }

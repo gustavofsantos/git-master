@@ -17,6 +17,8 @@ use crate::files::{
 use crate::history::HistoryReport;
 use crate::hook::{ApprovalStore, Report};
 use crate::remote::RemoteReport;
+use crate::script::run::ScriptEvent;
+use crate::script_session::{EffectRequest, ScriptLink};
 use crate::workflow::driver::{ExecJob, ExecReport};
 use crate::{Engine, GitPort};
 
@@ -38,6 +40,10 @@ enum Message {
     Search(SearchReport),
     Read(ReadReport),
     Text(TextReport),
+    /// A script run asks the engine to carry out an effect. The run waits for the answer.
+    ScriptEffect(EffectRequest),
+    /// A script run reports; the front ends hear it as events.
+    ScriptEvent(ScriptEvent),
 }
 
 /// Cloneable front door to the engine thread. The thread stops when every
@@ -98,9 +104,28 @@ pub fn spawn_with(git: Box<dyn GitPort>, approvals: ApprovalStore) -> EngineHand
     let (tx, rx) = async_channel::unbounded::<Message>();
     let busy = Arc::new(AtomicBool::new(false));
     let thread_busy = Arc::clone(&busy);
+    // Script runs reach the engine thread through weak handles, so they do not keep it alive.
+    let effects_to = tx.downgrade();
+    let events_to = tx.downgrade();
+    let link = ScriptLink {
+        effects: Arc::new(move |request| {
+            if let Some(tx) = effects_to.upgrade() {
+                let _ = tx.send_blocking(Message::ScriptEffect(request));
+            }
+        }),
+        events: Arc::new(move |event| {
+            if let Some(tx) = events_to.upgrade() {
+                let _ = tx.send_blocking(Message::ScriptEvent(event));
+            }
+        }),
+    };
     std::thread::Builder::new()
         .name("gm-engine".into())
-        .spawn(move || run(Engine::with_approvals(git, approvals), &rx, &thread_busy))
+        .spawn(move || {
+            let mut engine = Engine::with_approvals(git, approvals);
+            engine.set_script_link(link);
+            run(engine, &rx, &thread_busy);
+        })
         .expect("spawn the engine thread");
     EngineHandle {
         tx,
@@ -119,6 +144,14 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
     while let Ok(message) = rx.recv_blocking() {
         match message {
             Message::Subscribe(tx) => subscribers.push(tx),
+            Message::ScriptEffect(request) => {
+                let events = engine.script_effect(request);
+                broadcast(events, &mut subscribers);
+            }
+            Message::ScriptEvent(event) => {
+                let events = engine.script_event(event);
+                broadcast(events, &mut subscribers);
+            }
             Message::Dispatch(id, command, reports) => {
                 busy.store(true, Ordering::SeqCst);
                 let events = engine.handle(id, &command);

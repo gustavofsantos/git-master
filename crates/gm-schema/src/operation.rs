@@ -316,6 +316,14 @@ pub enum CommandKind {
     CancelWorkflowRun {
         run: i64,
     },
+    /// The person reviewed the version of the script `name` whose text hashes to `hash`
+    /// (answering `WorkflowReviewRequested`), and chose whether event runs of this version
+    /// apply without asking. Refused when the file changed since `hash` was shown. Human only.
+    ReviewWorkflow {
+        name: String,
+        hash: String,
+        auto_approve: bool,
+    },
     /// Copies the built-in template `template` into the user's workflows
     /// directory under a file name not taken yet; never into a repository.
     /// Answers `WorkflowCreated`. Human only.
@@ -665,6 +673,17 @@ pub enum Event {
         id: OperationId,
         path: String,
         name: String,
+    },
+    /// `RunWorkflow` found a version of the script the person has not reviewed (D101), so it did
+    /// not start. The window shows `source` and asks "Run this version?"; a yes is
+    /// `ReviewWorkflow` with this `hash`, then `RunWorkflow` again.
+    WorkflowReviewRequested {
+        id: OperationId,
+        name: String,
+        hash: String,
+        source: String,
+        /// The inputs of the run that did not start, so the window can send it again.
+        inputs: BTreeMap<String, String>,
     },
     /// A workflow run moved: its status, and the state it is in when it has one.
     WorkflowRunChanged {

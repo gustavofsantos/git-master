@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use serde_json::json;
+
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event,
     GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch, OperationId,
@@ -28,8 +30,14 @@ use crate::review;
 use crate::review_session::{self, ReviewSession};
 use crate::review_store::ReviewStore;
 use crate::script::journal::RunId as ScriptRunId;
+use crate::script::loader;
+use crate::script::luau::LuauEngine;
+use crate::script::policy::StartedBy;
+use crate::script::run::ScriptEvent;
 use crate::script::run::{RunSpec, Runtime};
-use crate::script_session::{EffectRequest, ScriptLink, ScriptSession};
+use crate::script::trust::{self, TrustStore};
+use crate::script::{api_docs, input as script_input, templates as script_templates};
+use crate::script_session::{self, EffectRequest, ScriptLink, ScriptSession};
 use crate::workflow;
 use crate::workflow::driver::{ExecJob, ExecReport};
 use crate::workflow::store::{RETAINED_RUNS, Store};
@@ -103,6 +111,10 @@ pub struct Engine {
     script_link: Option<ScriptLink>,
     /// The script runs of the open repository; see `script_session`.
     script: Option<ScriptSession>,
+    /// Which versions of a script the person reviewed (D101). Opened on first use.
+    trust: Option<TrustStore>,
+    /// The `.api/` reference was written for this session already.
+    api_written: bool,
     /// The review comments of the open repository; see `review_session`.
     review: Option<ReviewSession>,
 }
@@ -206,6 +218,8 @@ impl Engine {
             workflow: None,
             script_link: None,
             script: None,
+            trust: None,
+            api_written: false,
             review: None,
         }
     }
@@ -334,13 +348,27 @@ impl Engine {
 
     /// Carries out an effect a script run posted, and answers the run. Returns the events the
     /// Git write caused (the new status).
-    pub fn script_effect(&mut self, id: OperationId, request: EffectRequest) -> Vec<Event> {
+    pub fn script_effect(&mut self, request: EffectRequest) -> Vec<Event> {
         let Some(session) = self.script.as_ref() else {
             return Vec::new();
         };
         let root = session.root.clone();
+        let origin = session.origin(request.call.run);
         let wrote = session.execute(self.git.as_ref(), &mut self.log, request);
-        self.workflow_events(id, &root, Vec::new(), wrote)
+        self.workflow_events(origin, &root, Vec::new(), wrote)
+    }
+
+    /// Turns what a script run reported into the events the front ends get.
+    pub fn script_event(&mut self, event: ScriptEvent) -> Vec<Event> {
+        if let (ScriptEvent::Finished { run, .. }, Some(session)) = (&event, self.script.as_mut()) {
+            session.drop_diff(*run);
+        }
+        script_session::to_events(event)
+    }
+
+    /// Chooses where reviews are kept, in place of the app's data directory (tests).
+    pub fn set_trust_store(&mut self, store: TrustStore) {
+        self.trust = Some(store);
     }
 
     /// The `exec` steps of workflow runs started since the last call. The caller
@@ -908,16 +936,11 @@ impl Engine {
             CommandKind::RunPrepareCommit { .. } => {
                 Err("a prepare-commit run is started by handle, not execute".to_owned())
             }
-            CommandKind::CancelHook { run } => match self.runs.get(run) {
-                Some(active) => {
-                    active.cancel.store(true, Ordering::SeqCst);
-                    Ok(Vec::new())
-                }
-                None => Err(format!("no hook run {} is active", run.0)),
-            },
+            CommandKind::CancelHook { run } => self.cancel_hook(*run),
             CommandKind::StageAll => self.stage_all(id),
             CommandKind::ListWorkflows
             | CommandKind::RunWorkflow { .. }
+            | CommandKind::ReviewWorkflow { .. }
             | CommandKind::ApproveWorkflowStep { .. }
             | CommandKind::CancelWorkflowRun { .. }
             | CommandKind::CreateWorkflowFromTemplate { .. }
@@ -2226,6 +2249,17 @@ impl Engine {
         Ok(vec![Event::ReviewCommentsListed { id, comments }])
     }
 
+    /// Stops the hook run `run`, if it is still active.
+    fn cancel_hook(&self, run: OperationId) -> Result<Vec<Event>, String> {
+        match self.runs.get(&run) {
+            Some(active) => {
+                active.cancel.store(true, Ordering::SeqCst);
+                Ok(Vec::new())
+            }
+            None => Err(format!("no hook run {} is active", run.0)),
+        }
+    }
+
     /// The workflow commands: the listing, and a run's start, approval and cancel.
     fn workflow_command(
         &mut self,
@@ -2234,14 +2268,19 @@ impl Engine {
         kind: &CommandKind,
     ) -> Result<Vec<Event>, String> {
         match kind {
-            CommandKind::RunWorkflow { name, inputs } => self.run_workflow(id, actor, name, inputs),
+            CommandKind::RunWorkflow { name, inputs } => self.run_script(id, actor, name, inputs),
+            CommandKind::ReviewWorkflow {
+                name,
+                hash,
+                auto_approve,
+            } => self.review_script(actor, name, hash, *auto_approve),
             CommandKind::ApproveWorkflowStep { run, approved } => {
-                self.approve_workflow_step(id, actor, *run, *approved)
+                self.approve_script_step(actor, *run, *approved)
             }
-            CommandKind::CancelWorkflowRun { run } => self.cancel_workflow_run(id, actor, *run),
-            CommandKind::ListWorkflows => self.list_workflows(id),
+            CommandKind::CancelWorkflowRun { run } => self.cancel_script_run(actor, *run),
+            CommandKind::ListWorkflows => self.list_scripts(id),
             CommandKind::CreateWorkflowFromTemplate { template } => {
-                self.create_workflow_from_template(id, actor, template)
+                self.create_script_from_template(id, actor, template)
             }
             CommandKind::ListWorkflowRuns { workflow, limit } => {
                 self.list_workflow_runs(id, workflow, *limit)
@@ -2284,14 +2323,6 @@ impl Engine {
         let events = session.absorb(outcome);
         self.workflow = Some(session);
         Ok(self.workflow_events(id, &root, events, wrote))
-    }
-
-    /// The workflow files as the front-ends list them. Reads only.
-    fn list_workflows(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
-        let mut events = self.ensure_workflows(id)?;
-        let root = self.open_root()?;
-        events.push(self.workflows_listed(id, &root)?);
-        Ok(events)
     }
 
     /// The listing of the workflow files, as `ListWorkflows` answers it.
@@ -2461,18 +2492,90 @@ impl Engine {
         ])
     }
 
-    /// Copies a built-in template into the user's workflows directory. It writes
-    /// no Git state, so it is not in the command log. Human only.
-    fn create_workflow_from_template(
+    /// The review store, opened on first use.
+    fn trust_store(&mut self) -> Result<TrustStore, String> {
+        if self.trust.is_none() {
+            let file = trust::default_file()
+                .ok_or_else(|| "there is no data directory (HOME is not set)".to_owned())?;
+            self.trust = Some(TrustStore::open(&file).map_err(|e| e.0)?);
+        }
+        self.trust
+            .clone()
+            .ok_or_else(|| "the review store is not open".to_owned())
+    }
+
+    /// The scripts of the user's directories, read in the sandbox without `ctx`.
+    fn load_scripts(&self, root: &Path) -> Result<loader::Loaded, String> {
+        let dirs = workflow_session::workflow_dirs(
+            self.git.as_ref(),
+            root,
+            self.workflow_user_dir.as_deref(),
+        )?;
+        Ok(loader::load_dirs(&LuauEngine::new(), &dirs, Some(root)))
+    }
+
+    /// The script `name`, if it loads.
+    fn find_script(&self, root: &Path, name: &str) -> Result<loader::ScriptEntry, String> {
+        let loaded = self.load_scripts(root)?;
+        let entry = loaded
+            .entries
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| format!("no workflow named `{name}`"))?;
+        if let Err(problems) = &entry.meta {
+            let first = problems
+                .first()
+                .map_or_else(String::new, ToString::to_string);
+            return Err(format!("the workflow `{name}` does not load: {first}"));
+        }
+        Ok(entry)
+    }
+
+    /// The scripts as the front ends list them. Reads only, apart from the `.api/` reference
+    /// that is written once per session when its version changed (D102).
+    fn list_scripts(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let loaded = self.load_scripts(&root)?;
+        let mut ignored = script_session::ignored_lines(&loaded);
+        if !self.api_written {
+            self.api_written = true;
+            if let Some(dir) = self.workflow_user_dir.as_deref()
+                && let Err(e) = api_docs::write_if_stale(dir, env!("CARGO_PKG_VERSION"))
+            {
+                ignored.push(format!(
+                    "{}: could not write the .api reference: {e}",
+                    dir.display()
+                ));
+            }
+        }
+        Ok(vec![Event::WorkflowsListed {
+            id,
+            workflows: loaded
+                .entries
+                .iter()
+                .map(script_session::workflow_info)
+                .collect(),
+            ignored,
+            user_dir: self
+                .workflow_user_dir
+                .as_ref()
+                .map(|dir| dir.display().to_string()),
+            templates: script_templates::all()
+                .iter()
+                .map(|template| template.name.to_owned())
+                .collect(),
+        }])
+    }
+
+    /// Copies a built-in template into the user's workflows directory; never into a repository.
+    fn create_script_from_template(
         &self,
         id: OperationId,
         actor: &Actor,
         template_name: &str,
     ) -> Result<Vec<Event>, String> {
         only_a_human(actor, "create a workflow from a template")?;
-        let template = templates::all()
-            .iter()
-            .find(|template| template.name == template_name)
+        let template = script_templates::get(template_name)
             .ok_or_else(|| format!("no template named `{template_name}`"))?;
         let dir = self
             .workflow_user_dir
@@ -2480,7 +2583,7 @@ impl Engine {
             .ok_or_else(|| "there is no user workflows directory (HOME is not set)".to_owned())?;
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-        let created = templates::create(dir, template)?;
+        let created = script_templates::create(dir, template)?;
         Ok(vec![Event::WorkflowCreated {
             id,
             path: created.path.display().to_string(),
@@ -2488,9 +2591,9 @@ impl Engine {
         }])
     }
 
-    /// Starts a manual workflow run for a human. The run's own events follow;
-    /// the operation ends once it has started.
-    fn run_workflow(
+    /// Starts the manual script `name`. A version the person has not reviewed does not start:
+    /// the answer is `WorkflowReviewRequested` (D101). The run goes on with its own events.
+    fn run_script(
         &mut self,
         id: OperationId,
         actor: &Actor,
@@ -2500,71 +2603,109 @@ impl Engine {
         if !matches!(actor, Actor::Human) {
             return Err("agents run workflows through MCP in a later slice".to_owned());
         }
-        let mut events = self.ensure_workflows(id)?;
         let root = self.open_root()?;
-        let loaded =
-            workflow_session::load(self.git.as_ref(), &root, self.workflow_user_dir.as_deref())?;
-        let entry = loaded
-            .entries
-            .iter()
-            .find(|entry| entry.name == name)
-            .ok_or_else(|| format!("no workflow named `{name}`"))?;
-        let repo = workflow_session::repo_snapshot(self.git.as_ref(), &root);
-        let inputs = serde_json::to_value(inputs).map_err(|e| e.to_string())?;
-        let session = self
-            .workflow
-            .as_mut()
-            .ok_or_else(|| "the workflow session is not open".to_owned())?;
-        let mut actions = Actions::new(self.git.as_ref(), &root, &mut self.log, id);
-        let (run, outcome) = session
-            .driver
-            .start(entry, inputs, repo, &mut actions, now_ms())?;
-        let wrote = actions.wrote();
-        session.started(run, id);
-        events.extend(session.absorb(outcome));
-        Ok(self.workflow_events(id, &root, events, wrote))
+        let entry = self.find_script(&root, name)?;
+        let meta = entry
+            .meta
+            .clone()
+            .map_err(|_| "the workflow does not load".to_owned())?;
+        if meta.trigger.on != "manual" {
+            return Err(format!(
+                "`{name}` runs on `{}`, not by hand",
+                meta.trigger.on
+            ));
+        }
+        for spec in &meta.inputs {
+            if !inputs.contains_key(&spec.name) {
+                return Err(format!("the input `{}` is required", spec.name));
+            }
+        }
+        if let Some(extra) = inputs
+            .keys()
+            .find(|k| !meta.inputs.iter().any(|s| &s.name == *k))
+        {
+            return Err(format!("`{name}` has no input named `{extra}`"));
+        }
+        let trust = self.trust_store()?;
+        if !trust.is_reviewed(&entry.hash).map_err(|e| e.0)? {
+            return Ok(vec![Event::WorkflowReviewRequested {
+                id,
+                name: entry.name,
+                hash: entry.hash,
+                source: entry.source,
+                inputs: inputs.clone(),
+            }]);
+        }
+        let auto_approve = trust.auto_approve(&entry.hash).map_err(|e| e.0)?;
+        let repo = script_input::repo_input(self.git.as_ref(), &root);
+        let input = json!({ "inputs": inputs, "trigger": { "on": "manual" }, "repo": repo.value });
+        let seed = u64::try_from(now_ms()).unwrap_or(0) ^ id.0.rotate_left(32);
+        let run = self.start_script(
+            id,
+            RunSpec {
+                workflow: entry.name,
+                chunk: entry.file_name,
+                source: entry.source,
+                definition_hash: entry.hash,
+                started_by: StartedBy::Human,
+                trigger: json!({ "on": "manual" }),
+                input,
+                reviewed: true,
+                auto_approve,
+                seed,
+            },
+        )?;
+        if let (Some(file), Some(session)) = (repo.diff_file, self.script.as_mut()) {
+            session.keep_diff(run, file);
+        }
+        Ok(Vec::new())
     }
 
-    /// The human's answer to the `approve` step a run waits at.
-    fn approve_workflow_step(
+    /// Records that the person reviewed this version (D101). Refused when the file changed
+    /// since the hash was shown, so a review is always of the text that was read.
+    fn review_script(
         &mut self,
-        id: OperationId,
+        actor: &Actor,
+        name: &str,
+        hash: &str,
+        auto_approve: bool,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "review a workflow")?;
+        let root = self.open_root()?;
+        let entry = self.find_script(&root, name)?;
+        if entry.hash != hash {
+            return Err(
+                "the script changed after it was shown to you; open it again to review the new version"
+                    .to_owned(),
+            );
+        }
+        self.trust_store()?
+            .review(hash, &entry.name, auto_approve, now_ms())
+            .map_err(|e| e.0)?;
+        Ok(Vec::new())
+    }
+
+    /// The person's answer to an approval a run waits for.
+    fn approve_script_step(
+        &self,
         actor: &Actor,
         run: i64,
         approved: bool,
     ) -> Result<Vec<Event>, String> {
         only_a_human(actor, "approve a workflow step")?;
-        let mut events = self.ensure_workflows(id)?;
-        let root = self.open_root()?;
-        let session = self
-            .workflow
-            .as_mut()
-            .ok_or_else(|| format!("run {run} is not awaiting approval"))?;
-        let mut actions = Actions::new(self.git.as_ref(), &root, &mut self.log, id);
-        let outcome = session
-            .driver
-            .approve(run, approved, &mut actions, now_ms())?;
-        let wrote = actions.wrote();
-        events.extend(session.absorb(outcome));
-        Ok(self.workflow_events(id, &root, events, wrote))
+        match self.script_runtime() {
+            Some(runtime) if runtime.approve(run, approved) => Ok(Vec::new()),
+            _ => Err(format!("run {run} is not awaiting approval")),
+        }
     }
 
-    /// Stops a workflow run; its `exec` step, if any, is killed.
-    fn cancel_workflow_run(
-        &mut self,
-        id: OperationId,
-        actor: &Actor,
-        run: i64,
-    ) -> Result<Vec<Event>, String> {
+    /// Stops a script run: a blocked call wakes and its program is killed.
+    fn cancel_script_run(&self, actor: &Actor, run: i64) -> Result<Vec<Event>, String> {
         only_a_human(actor, "cancel a workflow run")?;
-        let mut events = self.ensure_workflows(id)?;
-        let session = self
-            .workflow
-            .as_mut()
-            .ok_or_else(|| format!("run {run} is not active"))?;
-        let outcome = session.driver.cancel(run, now_ms())?;
-        events.extend(session.absorb(outcome));
-        Ok(events)
+        match self.script_runtime() {
+            Some(runtime) if runtime.cancel(run) => Ok(Vec::new()),
+            _ => Err(format!("run {run} is not active")),
+        }
     }
 
     /// The events of a workflow call. Once Git was written, the status is read

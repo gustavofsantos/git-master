@@ -127,7 +127,7 @@ static ACTIONS: &[ActionSpec] = &[
                 name: "format",
                 kind: FieldKind::Choice(&["json"]),
                 required: false,
-                help: "`json` parses stdout and exposes it as `output.json`.",
+                help: "`json` parses stdout and exposes it as `json` in the result.",
             },
         ],
     },

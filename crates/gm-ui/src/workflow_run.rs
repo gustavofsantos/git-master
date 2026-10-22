@@ -53,9 +53,22 @@ impl RunView {
     }
 }
 
+/// A script the engine did not start because this version was never reviewed (D101): the window
+/// shows `source` and asks "Run this version?".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewRequest {
+    pub name: String,
+    pub hash: String,
+    pub source: String,
+    /// The inputs of the run that waits for the review.
+    pub inputs: BTreeMap<String, String>,
+}
+
 /// The workflow state the window keeps.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Workflows {
+    /// The version waiting for the person's review, until they answer.
+    pub review: Option<ReviewRequest>,
     /// Every workflow the engine listed, or `None` until the first listing.
     pub listed: Option<Vec<WorkflowInfo>>,
     /// Each directory the listing did not read, as `<path>: <reason>`.
@@ -87,6 +100,27 @@ impl Workflows {
         self.ignored = ignored;
         self.user_dir = user_dir;
         self.templates = templates;
+    }
+
+    /// The engine asks for a review before it runs `name`.
+    pub fn review_requested(
+        &mut self,
+        name: String,
+        hash: String,
+        source: String,
+        inputs: BTreeMap<String, String>,
+    ) {
+        self.review = Some(ReviewRequest {
+            name,
+            hash,
+            source,
+            inputs,
+        });
+    }
+
+    /// The person answered the review (or closed it).
+    pub fn review_answered(&mut self) {
+        self.review = None;
     }
 
     /// A template was copied to `path`. The status says so until a run starts.

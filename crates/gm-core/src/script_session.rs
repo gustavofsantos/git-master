@@ -9,10 +9,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use gm_schema::OperationId;
+use gm_schema::{Event, OperationId, WorkflowEnd, WorkflowInfo, WorkflowInput, WorkflowRunStatus};
 use serde_json::{Value, json};
 
-use crate::script::journal::{Journal, RunId};
+use crate::script::journal::{Journal, RunId, RunStatus};
+use crate::script::loader::{Loaded, ScriptEntry};
 use crate::script::luau::LuauEngine;
 use crate::script::port::{Budgets, ScriptEngine};
 use crate::script::run::{
@@ -74,6 +75,8 @@ pub(crate) struct ScriptSession {
     origins: BTreeMap<RunId, OperationId>,
     default_origin: OperationId,
     events: EventSink,
+    /// The temporary file that holds the whole staged diff of a run, until the run ends.
+    diffs: BTreeMap<RunId, tempfile::NamedTempFile>,
 }
 
 impl ScriptSession {
@@ -107,6 +110,7 @@ impl ScriptSession {
             origins: BTreeMap::new(),
             default_origin: opened_by,
             events: Arc::clone(&link.events),
+            diffs: BTreeMap::new(),
         })
     }
 
@@ -114,7 +118,17 @@ impl ScriptSession {
         self.origins.insert(run, origin);
     }
 
-    fn origin(&self, run: RunId) -> OperationId {
+    /// Keeps the file with the whole staged diff alive while the run lasts.
+    pub(crate) fn keep_diff(&mut self, run: RunId, file: tempfile::NamedTempFile) {
+        self.diffs.insert(run, file);
+    }
+
+    /// The run ended: its diff file goes.
+    pub(crate) fn drop_diff(&mut self, run: RunId) {
+        self.diffs.remove(&run);
+    }
+
+    pub(crate) fn origin(&self, run: RunId) -> OperationId {
         self.origins
             .get(&run)
             .copied()
@@ -187,5 +201,136 @@ fn effect(actions: &mut Actions<'_>, call: &EffectCall, events: &EventSink) -> E
         other => EffectResult::failed(format!(
             "ctx.{other} is not available in this version of GitMaster yet"
         )),
+    }
+}
+
+/// One script as the front ends list it. A script that does not load carries its first problem.
+pub(crate) fn workflow_info(entry: &ScriptEntry) -> WorkflowInfo {
+    let (trigger, key, inputs, error) = match &entry.meta {
+        Ok(meta) => (
+            meta.trigger.on.clone(),
+            meta.trigger.key.clone(),
+            meta.inputs
+                .iter()
+                .map(|input| WorkflowInput {
+                    name: input.name.clone(),
+                    prompt: Some(input.prompt.clone()),
+                })
+                .collect(),
+            None,
+        ),
+        Err(problems) => (
+            String::new(),
+            None,
+            Vec::new(),
+            problems.first().map(|p| {
+                if p.line == 0 {
+                    p.message.clone()
+                } else {
+                    format!("line {}: {}", p.line, p.message)
+                }
+            }),
+        ),
+    };
+    WorkflowInfo {
+        name: entry.name.clone(),
+        path: entry.path.display().to_string(),
+        trigger,
+        key,
+        inputs,
+        hash: entry.hash.clone(),
+        error,
+        warnings: Vec::new(),
+        source: entry.source.clone(),
+    }
+}
+
+/// What the listing did not read, as `<path>: <reason>`.
+pub(crate) fn ignored_lines(loaded: &Loaded) -> Vec<String> {
+    loaded
+        .ignored
+        .iter()
+        .map(|ignored| format!("{}: {}", ignored.path.display(), ignored.reason))
+        .collect()
+}
+
+/// The events a front end gets for what a run reported.
+pub(crate) fn to_events(event: ScriptEvent) -> Vec<Event> {
+    match event {
+        // A run left over from a session that stopped (D100) is not news in the window.
+        ScriptEvent::Changed {
+            status: RunStatus::Interrupted,
+            ..
+        } => Vec::new(),
+        ScriptEvent::Changed {
+            run,
+            workflow,
+            status,
+        } => vec![Event::WorkflowRunChanged {
+            run,
+            workflow,
+            status: run_status(status),
+            state: None,
+        }],
+        ScriptEvent::Notify { run, text } => vec![Event::WorkflowNotice { run, text }],
+        ScriptEvent::SuggestMessage { run, message } => {
+            vec![Event::WorkflowMessageSuggested { run, message }]
+        }
+        ScriptEvent::AwaitingApproval {
+            run,
+            func,
+            summary,
+            args,
+            ..
+        } => {
+            // The person approves the concrete call, so the dialog carries its arguments (D101).
+            let shown = if func == "approve" {
+                summary
+            } else {
+                let args = serde_json::to_string_pretty(&args).unwrap_or_default();
+                format!("{summary}\n\nctx.{func}({args})")
+            };
+            vec![Event::WorkflowApprovalRequested {
+                run,
+                state: func,
+                summary: shown,
+            }]
+        }
+        ScriptEvent::Finished {
+            run,
+            workflow,
+            status,
+            reason,
+            ..
+        } => {
+            let end = match status {
+                RunStatus::Done => WorkflowEnd::Done,
+                RunStatus::Blocked => WorkflowEnd::Blocked,
+                _ => WorkflowEnd::Failed,
+            };
+            // `WorkflowEnd` has no cancelled; the status change says how the run ended.
+            vec![
+                Event::WorkflowRunChanged {
+                    run,
+                    workflow,
+                    status: run_status(status),
+                    state: None,
+                },
+                Event::WorkflowRunFinished { run, end, reason },
+            ]
+        }
+    }
+}
+
+fn run_status(status: RunStatus) -> WorkflowRunStatus {
+    match status {
+        RunStatus::Running => WorkflowRunStatus::Running,
+        RunStatus::AwaitingApproval => WorkflowRunStatus::AwaitingApproval,
+        RunStatus::Waiting => WorkflowRunStatus::Waiting,
+        RunStatus::Done => WorkflowRunStatus::Done,
+        RunStatus::Blocked => WorkflowRunStatus::Blocked,
+        RunStatus::Cancelled => WorkflowRunStatus::Cancelled,
+        // The window has no `interrupted` yet (WS2); a stopped run reads as failed.
+        RunStatus::Failed | RunStatus::Interrupted => WorkflowRunStatus::Failed,
     }
 }

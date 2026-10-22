@@ -127,9 +127,7 @@ impl Harness {
             );
             match self.requests.recv_timeout(Duration::from_millis(20)) {
                 Ok(request) => {
-                    self.last += 1;
-                    let id = OperationId(self.last);
-                    self.engine.script_effect(id, request);
+                    self.engine.script_effect(request);
                 }
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
             }
