@@ -7,6 +7,8 @@ pub mod api_docs;
 pub mod args;
 pub mod cli;
 pub mod fake;
+pub mod input;
+pub mod inspect;
 pub mod journal;
 pub mod loader;
 pub mod luau;
