@@ -17,6 +17,7 @@ mod context_menu;
 mod diff_pane;
 mod diff_rows;
 mod editor;
+mod file_discard;
 mod flow_graph;
 mod flow_graph_view;
 mod flow_inspector;

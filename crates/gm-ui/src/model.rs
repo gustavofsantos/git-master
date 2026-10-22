@@ -11,6 +11,7 @@ use crate::branch_delete::Deleting;
 use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
 use crate::code_page::CodePage;
+use crate::file_discard::Discarding;
 use crate::history_graph::GraphLayout;
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
@@ -93,6 +94,8 @@ pub struct Model {
     pub branch_create: BranchCreate,
     /// The delete-branch dialog's delete in flight, and its outcome.
     pub branch_delete: Deleting,
+    /// The discard dialog's discard in flight, and its outcome.
+    pub discarding: Discarding,
     /// The delete-merged-branches dialog's listing, delete in flight and outcome.
     pub merging: Merging,
 }
@@ -522,6 +525,13 @@ impl Model {
                 id, state, detail, ..
             } if self.branch_delete.owns(id) => {
                 self.branch_delete.settle(state, detail);
+                None
+            }
+            // A file discard's outcome belongs to its dialog, not to the status bar.
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.discarding.owns(id) => {
+                self.discarding.settle(state, detail);
                 None
             }
             Event::PrunableListed { id, candidates } if self.pruning.owns(id) => {

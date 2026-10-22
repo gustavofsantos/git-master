@@ -27,6 +27,7 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::context_menu::ContextMenu;
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::diff_rows::Layout;
+use crate::file_discard::DiscardDialog;
 use crate::flow_inspector::FlowInspector;
 use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
@@ -148,6 +149,8 @@ pub struct StatusView {
     pub(crate) flow_inspector: FlowInspector,
     /// The delete-branch dialog, while it is open.
     pub(crate) delete_dialog: Option<DeleteDialog>,
+    /// The discard dialog, while it is open.
+    pub(crate) discard_dialog: Option<DiscardDialog>,
     /// The delete-merged-branches dialog, while it is open.
     pub(crate) merged_dialog: Option<MergedDialog>,
     /// The recent repositories, newest first, as last saved or loaded.
@@ -336,6 +339,7 @@ impl StatusView {
             workflow_source,
             flow_inspector: FlowInspector::default(),
             delete_dialog: None,
+            discard_dialog: None,
             merged_dialog: None,
             recents,
             recent_store,
@@ -519,6 +523,9 @@ impl StatusView {
         }
         if let Some(outcome) = self.model.branch_delete.take() {
             self.on_branch_delete_settled(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.discarding.take() {
+            self.on_file_discard_settled(outcome, window, cx);
         }
         if let Some(outcome) = self.model.merging.take_outcome() {
             self.on_merged_settled(outcome, window, cx);
@@ -959,6 +966,10 @@ impl StatusView {
                 self.open_delete_branch_dialog(&branch, window, cx);
             }
             Ok(Effect::OpenMergedBranchesDialog) => self.open_merged_dialog(window, cx),
+            Ok(Effect::OpenDiscardFileDialog {
+                path,
+                include_staged,
+            }) => self.open_discard_file_dialog(&path, include_staged, window, cx),
             Ok(Effect::ShowHistory) => self.show_history(cx),
             Ok(Effect::ShowWorkflows) => self.show_workflows(cx),
             Ok(Effect::OpenQuickOpen) => self.open_quick_open(window, cx),
@@ -1332,6 +1343,7 @@ impl Render for StatusView {
                     .is_some()
                     .then(|| self.delete_branch_layer(window, cx)),
             )
+            .children(self.discard_file_layer(window, cx))
             .children(
                 self.merged_dialog
                     .is_some()

@@ -148,6 +148,13 @@ pub enum Effect {
     /// Opens the delete-merged-branches dialog, which lists what Git would
     /// delete and asks before anything goes.
     OpenMergedBranchesDialog,
+    /// Opens the discard dialog for the file at `path`, which says what will be
+    /// lost before anything goes. `include_staged` also throws away the staged
+    /// changes (D93).
+    OpenDiscardFileDialog {
+        path: String,
+        include_staged: bool,
+    },
     /// Opens the history page and asks the engine for the commits of HEAD.
     ShowHistory,
     /// Opens Quick Open, which finds a file by part of its path (N1).
@@ -240,7 +247,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 65] = [
+const SPECS: [Spec; 66] = [
     spec(
         "file.stage",
         "Stage File",
@@ -690,6 +697,13 @@ const SPECS: [Spec; 65] = [
         ArgKind::None,
         Category::Repository,
     ),
+    spec(
+        "file.discard_all",
+        "Discard All Changes",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
+    ),
 ];
 
 const fn spec(
@@ -777,6 +791,7 @@ pub enum Action {
     ShowCode,
     ViewFile,
     SearchText,
+    DiscardAllChanges,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -887,7 +902,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 65] = [
+    pub const ALL: [Action; 66] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -953,6 +968,7 @@ impl Action {
         Action::ShowCode,
         Action::ViewFile,
         Action::SearchText,
+        Action::DiscardAllChanges,
     ];
 
     #[must_use]
@@ -977,7 +993,7 @@ impl Action {
     pub fn available(self) -> bool {
         !matches!(
             self,
-            Action::NewChildBranch | Action::Restack | Action::RenameBranch | Action::DiscardFile
+            Action::NewChildBranch | Action::Restack | Action::RenameBranch
         )
     }
 
@@ -991,6 +1007,7 @@ impl Action {
                 | Action::DeleteBranch
                 | Action::DeleteMergedBranches
                 | Action::RemoveWorktree
+                | Action::DiscardAllChanges
         )
     }
 
@@ -1070,6 +1087,8 @@ impl Action {
                 | Action::NewBranch
                 | Action::DeleteBranch
                 | Action::DeleteMergedBranches
+                | Action::DiscardFile
+                | Action::DiscardAllChanges
         )
     }
 
@@ -1168,6 +1187,7 @@ impl Action {
             Action::NewBranch | Action::DeleteBranch => branch_rule(self, args, ctx),
             Action::DeleteMergedBranches => idle(ctx),
             Action::RevealFile | Action::ViewFile => reveal_rule(args, ctx),
+            Action::DiscardFile | Action::DiscardAllChanges => discard_rule(self, args, ctx),
             Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
             _ if self.copies_its_target() => Ok(()),
             Action::Fetch | Action::Pull | Action::PushWithLease => remote_rule(self, args, ctx),
@@ -1268,6 +1288,13 @@ impl Action {
                 Effect::OpenDeleteBranchDialog(name.clone())
             }
             (Action::DeleteMergedBranches, _) => Effect::OpenMergedBranchesDialog,
+            // The dialog is the confirmation, so neither sends the discard itself.
+            (Action::DiscardFile | Action::DiscardAllChanges, Args::File(path)) => {
+                Effect::OpenDiscardFileDialog {
+                    path: path.clone(),
+                    include_staged: self == Action::DiscardAllChanges,
+                }
+            }
             (
                 Action::SuggestMessage
                 | Action::CancelHook
@@ -1316,6 +1343,23 @@ fn branch_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Rea
         Action::DeleteBranch if current => Err("Cannot delete the checked-out branch"),
         Action::DeleteBranch if elsewhere => Err("Checked out in another worktree"),
         _ => Ok(()),
+    }
+}
+
+/// The rule of the two discard actions: an idle repository and a listed file
+/// that is not conflicted, with something to throw away. Discard Changes needs
+/// an unstaged change or an untracked file; Discard All Changes needs any change.
+fn discard_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    idle(ctx)?;
+    let entry = file_entry(args, ctx)?;
+    if entry.conflicted {
+        return Err("Resolve the conflict first.");
+    }
+    match action {
+        Action::DiscardAllChanges if entry.staged.is_some() || has_unstaged(entry) => Ok(()),
+        Action::DiscardAllChanges => Err("Nothing to discard"),
+        _ if has_unstaged(entry) => Ok(()),
+        _ => Err("Nothing unstaged to discard"),
     }
 }
 
@@ -1786,7 +1830,6 @@ mod tests {
             Action::NewChildBranch,
             Action::Restack,
             Action::RenameBranch,
-            Action::DiscardFile,
         ];
         for action in placeholders {
             let args = match action.spec().args {
@@ -2318,7 +2361,8 @@ mod tests {
                 Action::DeleteBranch,
                 Action::DiscardFile,
                 Action::RemoveWorktree,
-                Action::DeleteMergedBranches
+                Action::DeleteMergedBranches,
+                Action::DiscardAllChanges,
             ]
         );
     }
@@ -2580,6 +2624,131 @@ mod tests {
         assert_eq!(
             Action::DeleteBranch.enabled(&Args::None, &ctx(&entries, "")),
             Err("No target for this action")
+        );
+    }
+
+    #[test]
+    fn discard_changes_needs_an_unstaged_change_or_an_untracked_file() {
+        let file = Args::File("a.txt".into());
+        let modified = [entry("a.txt", None, Some(Change::Modified))];
+        let both = [entry(
+            "a.txt",
+            Some(Change::Modified),
+            Some(Change::Modified),
+        )];
+        let new = [untracked("a.txt")];
+        let staged_only = [entry("a.txt", Some(Change::Modified), None)];
+        assert!(Action::DiscardFile.available());
+        assert_eq!(
+            Action::DiscardFile.enabled(&file, &ctx(&modified, "")),
+            Ok(())
+        );
+        assert_eq!(Action::DiscardFile.enabled(&file, &ctx(&both, "")), Ok(()));
+        assert_eq!(Action::DiscardFile.enabled(&file, &ctx(&new, "")), Ok(()));
+        assert_eq!(
+            Action::DiscardFile.enabled(&file, &ctx(&staged_only, "")),
+            Err("Nothing unstaged to discard")
+        );
+    }
+
+    #[test]
+    fn discard_all_changes_needs_any_change_in_the_file() {
+        let file = Args::File("a.txt".into());
+        let staged_only = [entry("a.txt", Some(Change::Added), None)];
+        let new = [untracked("a.txt")];
+        let clean = [entry("a.txt", None, None)];
+        assert!(Action::DiscardAllChanges.available());
+        assert_eq!(
+            Action::DiscardAllChanges.enabled(&file, &ctx(&staged_only, "")),
+            Ok(())
+        );
+        assert_eq!(
+            Action::DiscardAllChanges.enabled(&file, &ctx(&new, "")),
+            Ok(())
+        );
+        assert_eq!(
+            Action::DiscardAllChanges.enabled(&file, &ctx(&clean, "")),
+            Err("Nothing to discard")
+        );
+    }
+
+    #[test]
+    fn both_discard_actions_refuse_a_conflicted_file_and_say_so() {
+        let file = Args::File("a.txt".into());
+        let conflicted = [StatusEntry {
+            conflicted: true,
+            ..entry("a.txt", None, Some(Change::Modified))
+        }];
+        for action in [Action::DiscardFile, Action::DiscardAllChanges] {
+            assert_eq!(
+                action.enabled(&file, &ctx(&conflicted, "")),
+                Err("Resolve the conflict first."),
+                "{action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn both_discard_actions_refuse_an_unknown_file_a_busy_repository_and_a_closed_one() {
+        let modified = [entry("a.txt", None, Some(Change::Modified))];
+        let file = Args::File("a.txt".into());
+        let other = Args::File("b.txt".into());
+        let busy = Context {
+            busy: Some("Wait for the branch checkout to finish."),
+            ..ctx(&modified, "")
+        };
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&modified, "")
+        };
+        for action in [Action::DiscardFile, Action::DiscardAllChanges] {
+            assert_eq!(
+                action.enabled(&other, &ctx(&modified, "")),
+                Err("That file is not in the working copy"),
+                "{action:?}"
+            );
+            assert_eq!(
+                action.enabled(&file, &busy),
+                Err("Wait for the branch checkout to finish."),
+                "{action:?}"
+            );
+            assert_eq!(
+                action.enabled(&file, &closed),
+                Err("No repository is open."),
+                "{action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn discard_actions_open_the_dialog_and_never_send_the_command() {
+        let modified = [entry("a.txt", None, Some(Change::Modified))];
+        let file = Args::File("a.txt".into());
+        assert_eq!(
+            Action::DiscardFile.plan(&file, &ctx(&modified, "")),
+            Ok(Effect::OpenDiscardFileDialog {
+                path: "a.txt".into(),
+                include_staged: false,
+            })
+        );
+        assert_eq!(
+            Action::DiscardAllChanges.plan(&file, &ctx(&modified, "")),
+            Ok(Effect::OpenDiscardFileDialog {
+                path: "a.txt".into(),
+                include_staged: true,
+            })
+        );
+        for action in [Action::DiscardFile, Action::DiscardAllChanges] {
+            assert!(action.destructive(), "{action:?}");
+            assert!(action.opens_dialog(), "{action:?}");
+            assert_eq!(action.spec().args, ArgKind::File, "{action:?}");
+            assert_eq!(action.spec().category, Category::WorkingCopy, "{action:?}");
+            assert_eq!(action.spec().shortcut, None, "{action:?}");
+        }
+        assert_eq!(Action::DiscardAllChanges.id(), "file.discard_all");
+        assert_eq!(
+            Action::DiscardAllChanges.spec().title,
+            "Discard All Changes"
         );
     }
 

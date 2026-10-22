@@ -87,7 +87,7 @@ pub(crate) fn branch_items(name: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
 }
 
 /// The menu of a file row: stage or unstage (both are listed, each disabled
-/// when it has nothing to act on), discard, then copy the path and reveal it.
+/// when it has nothing to act on), the two discards, then copy the path and reveal it.
 pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     let target = Args::File(path.to_owned());
     let item = |action, group| Item::new(action, target.clone(), group, ctx);
@@ -95,6 +95,7 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         item(Action::StageFile, 0),
         item(Action::UnstageFile, 0),
         item(Action::DiscardFile, 1),
+        item(Action::DiscardAllChanges, 1),
         item(Action::ViewFile, 2),
         item(Action::CopyFilePath, 2),
         item(Action::RevealFile, 2),
@@ -728,18 +729,42 @@ mod tests {
     }
 
     #[test]
-    fn file_menu_discard_is_destructive_and_not_available_yet() {
+    fn file_menu_discards_are_destructive_and_enabled_for_a_modified_file() {
         let entries = [entry("a.txt", None, Some(Change::Modified))];
         let items = file_items("a.txt", &ctx(&entries));
-        let discard = find(&items, Action::DiscardFile);
-        assert_eq!(discard.state, Err("Not available yet"));
-        assert!(discard.destructive());
+        for action in [Action::DiscardFile, Action::DiscardAllChanges] {
+            let discard = find(&items, action);
+            assert_eq!(discard.state, Ok(()), "{action:?}");
+            assert!(discard.destructive(), "{action:?}");
+        }
         let destructive: Vec<&str> = items
             .iter()
             .filter(|item| item.destructive())
             .map(Item::label)
             .collect();
-        assert_eq!(destructive, ["Discard Changes"]);
+        assert_eq!(destructive, ["Discard Changes", "Discard All Changes"]);
+    }
+
+    #[test]
+    fn file_menu_discard_all_is_disabled_for_a_clean_file_and_discard_for_staged_only() {
+        let clean = [entry("a.txt", None, None)];
+        let items = file_items("a.txt", &ctx(&clean));
+        assert_eq!(
+            find(&items, Action::DiscardFile).state,
+            Err("Nothing unstaged to discard")
+        );
+        assert_eq!(
+            find(&items, Action::DiscardAllChanges).state,
+            Err("Nothing to discard")
+        );
+
+        let staged = [entry("a.txt", Some(Change::Modified), None)];
+        let items = file_items("a.txt", &ctx(&staged));
+        assert_eq!(
+            find(&items, Action::DiscardFile).state,
+            Err("Nothing unstaged to discard")
+        );
+        assert_eq!(find(&items, Action::DiscardAllChanges).state, Ok(()));
     }
 
     #[test]
@@ -750,7 +775,7 @@ mod tests {
         assert_eq!(find(&items, Action::RevealFile).state, Ok(()));
         assert_eq!(find(&items, Action::ViewFile).state, Ok(()));
         let sizes: Vec<usize> = sections(&items).iter().map(|s| s.len()).collect();
-        assert_eq!(sizes, [2, 1, 3]);
+        assert_eq!(sizes, [2, 2, 3]);
     }
 
     #[test]
