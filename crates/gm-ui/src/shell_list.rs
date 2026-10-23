@@ -5,10 +5,12 @@ use std::ops::Range;
 
 use gm_schema::{Change, StatusEntry};
 use gpui::{
-    Context, Div, Hsla, MouseButton, MouseDownEvent, Window, div, prelude::*, px, uniform_list,
+    Context, Div, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*, px,
+    uniform_list,
 };
 
 use crate::action_registry::{Action, Args};
+use crate::move_file;
 use crate::resize::{self, LEFT};
 use crate::resize_handle::{self, Edge};
 use crate::theme;
@@ -154,7 +156,12 @@ impl StatusView {
 
 /// One file: its status letter and its full path. A discreet dot after the
 /// letter marks a file that has something staged.
-fn file_row(entry: &StatusEntry, selected: bool, index: usize, cx: &Context<StatusView>) -> Div {
+fn file_row(
+    entry: &StatusEntry,
+    selected: bool,
+    index: usize,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
     let (letter, colour) = status_letter(entry);
     let label = match entry.orig_path.as_deref() {
         Some(orig) => format!("{}  ← {orig}", entry.path),
@@ -169,7 +176,8 @@ fn file_row(entry: &StatusEntry, selected: bool, index: usize, cx: &Context<Stat
                 .rounded_full()
                 .bg(theme::staged())
         });
-    div()
+    let row = div()
+        .id(("file-row", index))
         .w_full()
         .flex()
         .flex_row()
@@ -209,7 +217,9 @@ fn file_row(entry: &StatusEntry, selected: bool, index: usize, cx: &Context<Stat
                 .text_ellipsis()
                 .font_family(theme::code_font())
                 .child(label),
-        )
+        );
+    // A changed file is dragged onto a sidebar row to move its change (D109).
+    move_file::drag_source(row, &entry.path, cx)
 }
 
 /// The letter that stands for the file: `?` untracked, `U` conflicted, else the

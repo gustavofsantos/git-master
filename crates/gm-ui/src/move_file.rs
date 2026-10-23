@@ -1,6 +1,3 @@
-// The drag, popover and status elements that call this API come in the next slice.
-#![allow(dead_code)]
-
 //! Moving a file's change to another branch or worktree (D109). A changed file
 //! is dragged onto a sidebar row, or moved from the palette or the file menu,
 //! and the move ends here. The answers the rows give, the check Git makes
@@ -18,12 +15,19 @@ use gm_schema::{
     Actor, CommandKind, MoveBlocker, MoveOutcome, MovePreview, MoveTarget, OperationId,
     OperationState, WorktreeEntry,
 };
-use gpui::{Context, Window};
+use gpui::{
+    App, Context, Div, DragMoveEvent, Entity, FontWeight, InteractiveElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, Render, Stateful, StatefulInteractiveElement, StyleRefinement,
+    Styled, Subscription, Window, div, prelude::*, px,
+};
 
-use crate::action_registry::{Action, Reason};
+use crate::action_registry::{Action, Args, Reason};
+use crate::text_area::{TextArea, TextAreaEvent};
+use crate::theme;
 use crate::view::StatusView;
-use crate::worktree_create::Mode;
+use crate::worktree_create::{Mode, field_row};
 use crate::worktree_list;
+use crate::{FocusNext, FocusPrev};
 
 /// How long the pointer must rest on a row before Git is asked about it.
 pub(crate) const HOVER_DELAY: Duration = Duration::from_millis(150);
@@ -257,6 +261,128 @@ pub(crate) fn moved_notice(
     }
 }
 
+/// The period of the drag's poll. It runs only while a drag runs.
+pub(crate) const POLL: Duration = Duration::from_millis(50);
+
+/// A sidebar row that takes dragged files: its target and what it answers for the drag now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DropZone {
+    pub(crate) target: DropTarget,
+    /// `None` when no drag runs: the row is then plain, but it still hears the drag.
+    pub(crate) answer: Option<DropAnswer>,
+}
+
+/// How a row is styled while a file is dragged over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DragStyle {
+    /// The row takes the file: highlighted.
+    Accept,
+    /// The row refuses the file: dimmed, with the not-allowed pointer.
+    Reject,
+    /// The row is still checking: a subtle pending look.
+    Checking,
+}
+
+/// The style of a row for `answer`. Without an answer, no drag runs and the row is plain.
+#[must_use]
+pub(crate) fn drag_style(answer: Option<&DropAnswer>) -> Option<DragStyle> {
+    match answer? {
+        DropAnswer::Accepts { .. } => Some(DragStyle::Accept),
+        DropAnswer::Rejects { .. } => Some(DragStyle::Reject),
+        DropAnswer::Checking => Some(DragStyle::Checking),
+    }
+}
+
+/// Whether a drop on a row with `answer` is taken: an accepting row, or one still checking.
+#[must_use]
+pub(crate) fn takes_drop(answer: Option<&DropAnswer>) -> bool {
+    matches!(
+        answer,
+        Some(DropAnswer::Accepts { .. } | DropAnswer::Checking)
+    )
+}
+
+/// The status bar line while a file is dragged: the hint of the row under the
+/// pointer, or what to do when no row is under it. `None` when no drag runs.
+#[must_use]
+pub(crate) fn drag_status(hovered: Option<&DropAnswer>, dragging: bool) -> Option<String> {
+    if !dragging {
+        return None;
+    }
+    Some(match hovered {
+        Some(DropAnswer::Accepts { hint }) => hint.clone(),
+        Some(DropAnswer::Rejects { reason }) => reason.clone(),
+        Some(DropAnswer::Checking) => "Checking…".to_owned(),
+        None => "Drop the file on a branch or a worktree to move it.".to_owned(),
+    })
+}
+
+/// The popover's title: the commit it makes, or the branch it creates.
+#[must_use]
+pub(crate) fn popover_title(popover: &PopoverState) -> String {
+    match popover {
+        PopoverState::Existing { path, branch, .. } => {
+            format!("Commit {} to {branch}", file_name(path))
+        }
+        PopoverState::New { .. } => "New branch".to_owned(),
+    }
+}
+
+/// What one poll of a drag does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PollStep {
+    /// The drag runs: ask Git about the row under the pointer, then poll again.
+    Ask,
+    /// gpui has ended the drag (dropped outside, released, or cancelled): end ours.
+    End,
+    /// This poll belongs to a drag that is over or superseded: stop, touch nothing.
+    Stop,
+}
+
+/// The step of a poll started for drag `loop_generation`, given the drag now
+/// (`current`, `dragging`) and whether gpui still carries a drag (`gpui_dragging`).
+#[must_use]
+pub(crate) fn poll_step(
+    loop_generation: u64,
+    current: u64,
+    dragging: bool,
+    gpui_dragging: bool,
+) -> PollStep {
+    if loop_generation != current || !dragging {
+        PollStep::Stop
+    } else if gpui_dragging {
+        PollStep::Ask
+    } else {
+        PollStep::End
+    }
+}
+
+/// What the pointer does on a row during a drag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PointerStep {
+    /// The pointer came onto the row.
+    Enter,
+    /// The pointer left the row, which was the one hovered.
+    Leave,
+    /// Nothing changes for this row.
+    Stay,
+}
+
+/// The step for `row` after a drag move: `inside` says whether the pointer is over
+/// it, and `hovered` is the row the window last entered.
+#[must_use]
+pub(crate) fn pointer_step(
+    hovered: Option<&DropTarget>,
+    row: &DropTarget,
+    inside: bool,
+) -> PointerStep {
+    match (inside, hovered == Some(row)) {
+        (true, false) => PointerStep::Enter,
+        (false, true) => PointerStep::Leave,
+        _ => PointerStep::Stay,
+    }
+}
+
 /// The popover's default message: the file name, as the commit's subject.
 fn default_message(path: &str) -> String {
     format!("Move {}", file_name(path))
@@ -303,14 +429,6 @@ impl PopoverState {
             path: path.to_owned(),
             name,
             message: default_message(path),
-        }
-    }
-
-    /// The file the move is for.
-    #[must_use]
-    pub(crate) fn path(&self) -> &str {
-        match self {
-            Self::Existing { path, .. } | Self::New { path, .. } => path,
         }
     }
 
@@ -384,11 +502,6 @@ impl PopoverState {
             }
         }
     }
-
-    /// The command the popover sends when it is valid, or the reason it is not.
-    pub(crate) fn submit(&self, existing: &[String]) -> Result<CommandKind, String> {
-        self.validate(existing).map(MoveRequest::into_command)
-    }
 }
 
 /// A validated move from the popover: the file, the target and the trimmed message.
@@ -399,17 +512,7 @@ pub(crate) struct MoveRequest {
     pub(crate) message: String,
 }
 
-impl MoveRequest {
-    /// The engine command for this move.
-    #[must_use]
-    pub(crate) fn into_command(self) -> CommandKind {
-        CommandKind::MoveChanges {
-            path: self.path,
-            target: self.target,
-            message: Some(self.message),
-        }
-    }
-}
+impl MoveRequest {}
 
 /// The hover check: the row under the pointer, the preview asked for it and
 /// the answers that came back. Time is passed in, so the timing is tested.
@@ -525,6 +628,12 @@ impl HoverCheck {
         true
     }
 
+    /// The row under the pointer, while a drag runs.
+    #[must_use]
+    pub(crate) fn hovered(&self) -> Option<&DropTarget> {
+        self.hovering.as_ref().map(|(target, _)| target)
+    }
+
     /// The preview of `target` for this drag, once Git has answered it.
     #[must_use]
     pub(crate) fn preview(&self, target: &DropTarget) -> Option<&MovePreview> {
@@ -585,6 +694,8 @@ pub(crate) struct MoveFile {
     pub(crate) after_create: Option<String>,
     /// Set once a preview reported that the installed Git is too old.
     pub(crate) git_too_old: bool,
+    /// Counts the drags begun: a poll of an older drag stops.
+    pub(crate) generation: u64,
 }
 
 impl MoveFile {
@@ -612,12 +723,14 @@ impl MoveFile {
         self.hover.answered(id, preview)
     }
 
-    /// A drag of `path` began.
-    pub(crate) fn begin_drag(&mut self, path: &str) {
+    /// A drag of `path` began. Returns its generation, which its poll checks.
+    pub(crate) fn begin_drag(&mut self, path: &str) -> u64 {
+        self.generation += 1;
         self.drag = Some(DragSource {
             path: path.to_owned(),
         });
         self.hover.start(path);
+        self.generation
     }
 
     /// The drag ended. The popover, if one opened, keeps its own file.
@@ -689,10 +802,45 @@ impl MoveFile {
 }
 
 impl StatusView {
-    /// A changed file was picked up on its row of the Working Copy list.
+    /// A changed file was picked up on its row of the Working Copy list. A poll
+    /// starts with the drag: it asks Git about the row under the pointer, and it
+    /// ends the drag once gpui no longer carries it.
     pub(crate) fn begin_drag(&mut self, path: &str, cx: &mut Context<Self>) {
-        self.model.move_file.begin_drag(path);
+        let generation = self.model.move_file.begin_drag(path);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(POLL).await;
+                let kept = this
+                    .update(cx, |view, cx| view.poll_drag(generation, cx))
+                    .unwrap_or(false);
+                if !kept {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.notify();
+    }
+
+    /// One poll of the drag `generation`. True when the poll goes on.
+    fn poll_drag(&mut self, generation: u64, cx: &mut Context<Self>) -> bool {
+        let step = poll_step(
+            generation,
+            self.model.move_file.generation,
+            self.model.move_file.drag.is_some(),
+            cx.has_active_drag(),
+        );
+        match step {
+            PollStep::Ask => {
+                self.request_due_preview(Instant::now(), cx);
+                true
+            }
+            PollStep::End => {
+                self.end_drag(cx);
+                false
+            }
+            PollStep::Stop => false,
+        }
     }
 
     /// The drag ended, dropped or not.
@@ -784,11 +932,13 @@ impl StatusView {
                 self.model
                     .move_file
                     .open_popover(PopoverState::existing(&drag.path, &name));
+                self.show_move_popover(window, cx);
             }
             DropTarget::NewBranchGroup { prefix } => {
                 self.model
                     .move_file
                     .open_popover(PopoverState::new(&drag.path, prefix.as_deref()));
+                self.show_move_popover(window, cx);
             }
             DropTarget::NewWorktree => {
                 self.model.move_file.after_create = Some(drag.path);
@@ -941,6 +1091,346 @@ impl StatusView {
             worktrees: &self.model.worktrees,
         }
     }
+}
+
+/// The payload of a drag from a changed file's row of the Working Copy list.
+pub(crate) struct DraggedFile {
+    pub(crate) path: String,
+}
+
+/// What a drag shows under the pointer: the file's name.
+struct DragGhost {
+    label: String,
+}
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .h(px(22.))
+            .flex()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(theme::hairline_strong())
+            .bg(theme::panel())
+            .text_color(theme::text())
+            .font_family(theme::code_font())
+            .text_sm()
+            .child(self.label.clone())
+    }
+}
+
+/// Makes a changed file's row draggable. gpui starts a drag only once the pointer
+/// has moved past its threshold, so a click and a double click keep working.
+pub(crate) fn drag_source(
+    row: Stateful<Div>,
+    path: &str,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    let view = cx.entity().downgrade();
+    row.on_drag(
+        DraggedFile {
+            path: path.to_owned(),
+        },
+        move |dragged: &DraggedFile, _, _, cx: &mut App| {
+            let path = dragged.path.clone();
+            // The window learns of the drag as it starts: its state and poll follow.
+            let _ = view.update(cx, |this, cx| this.begin_drag(&path, cx));
+            let label = file_name(&path).to_owned();
+            cx.new(|_| DragGhost { label })
+        },
+    )
+}
+
+/// The style a drag over a row adds, given the row's style for the answer.
+fn dragged_over(style: StyleRefinement, drag: Option<DragStyle>) -> StyleRefinement {
+    match drag {
+        Some(DragStyle::Accept) => style
+            .bg(theme::selection())
+            .border_1()
+            .border_color(theme::accent()),
+        Some(DragStyle::Reject) => style.opacity(0.4).cursor_not_allowed(),
+        Some(DragStyle::Checking) => style.opacity(0.7),
+        None => style,
+    }
+}
+
+/// Makes a sidebar row take dropped files, styled by what it answers for the drag.
+/// A row without a zone takes nothing. A drop runs `drop_on` and ends the drag;
+/// a drag over the row keeps the window's hover in step with the pointer.
+pub(crate) fn accept_drops<E: InteractiveElement>(
+    element: E,
+    zone: Option<DropZone>,
+    cx: &Context<StatusView>,
+) -> E {
+    let Some(zone) = zone else {
+        return element;
+    };
+    let drag = drag_style(zone.answer.as_ref());
+    let takes = takes_drop(zone.answer.as_ref());
+    let dropped = zone.target.clone();
+    let moved_over = zone.target;
+    element
+        .drag_over::<DraggedFile>(move |style, _, _, _| dragged_over(style, drag))
+        .can_drop(move |_, _, _| takes)
+        .on_drop(cx.listener(move |this, _: &DraggedFile, window, cx| {
+            this.drop_on(dropped.clone(), window, cx);
+            this.end_drag(cx);
+        }))
+        .on_drag_move(
+            cx.listener(move |this, event: &DragMoveEvent<DraggedFile>, _, cx| {
+                let inside = event.bounds.contains(&event.event.position);
+                match pointer_step(this.model.move_file.hover.hovered(), &moved_over, inside) {
+                    PointerStep::Enter => this.hover_row(moved_over.clone(), Instant::now(), cx),
+                    PointerStep::Leave => this.leave_row(cx),
+                    PointerStep::Stay => {}
+                }
+            }),
+        )
+}
+
+/// The popover's inputs while it is open. The text lives in the inputs until the
+/// person submits, and then it is read into the state.
+pub(crate) struct MovePopover {
+    name: Option<Entity<TextArea>>,
+    message: Entity<TextArea>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// One single-line input with its text. Esc in it closes the popover.
+fn popover_input(
+    placeholder: &'static str,
+    text: &str,
+    window: &mut Window,
+    cx: &mut Context<StatusView>,
+) -> (Entity<TextArea>, Subscription) {
+    let area = cx.new(|cx| TextArea::new(placeholder, cx).with_lines(1, 1));
+    area.update(cx, |area, cx| area.set_text(text, cx));
+    let subscription = cx.subscribe_in(
+        &area,
+        window,
+        |this, _, event: &TextAreaEvent, window, cx| {
+            if *event == TextAreaEvent::Cancel {
+                this.close_move_popover_view(window, cx);
+            }
+        },
+    );
+    (area, subscription)
+}
+
+/// Where the popover sits: below the top of the window, just right of the sidebar.
+const POPOVER_TOP: f32 = 120.;
+const POPOVER_GAP: f32 = 8.;
+const POPOVER_WIDTH: f32 = 340.;
+
+impl StatusView {
+    /// The drop target and answer of a sidebar row, as the row is drawn now.
+    #[must_use]
+    pub(crate) fn drop_zone(&self, target: DropTarget) -> DropZone {
+        let answer = self.drop_answer(&target);
+        DropZone { target, answer }
+    }
+
+    /// The status bar line while a file is dragged, if one runs.
+    #[must_use]
+    pub(crate) fn drag_status_text(&self) -> Option<String> {
+        let dragging = self.model.move_file.drag.is_some();
+        let hovered = self
+            .model
+            .move_file
+            .hover
+            .hovered()
+            .and_then(|target| self.drop_answer(target));
+        drag_status(hovered.as_ref(), dragging)
+    }
+
+    /// **Open Worktree** on the notice of a finished move, when the move has a worktree.
+    pub(crate) fn open_worktree_offer(&self, cx: &Context<Self>) -> Option<Stateful<Div>> {
+        let path = self.model.notice_open.clone()?;
+        Some(
+            div()
+                .id("notice-open-worktree")
+                .flex_none()
+                .px_2()
+                .rounded_sm()
+                .cursor_pointer()
+                .text_color(theme::accent())
+                .font_weight(FontWeight::MEDIUM)
+                .child("Open Worktree")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.run_action(
+                            Action::OpenWorktree,
+                            &Args::Worktree(path.clone()),
+                            window,
+                            cx,
+                        );
+                    }),
+                ),
+        )
+    }
+
+    /// Opens the popover's inputs for the state the drop opened, focusing the first.
+    pub(crate) fn show_move_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(popover) = self.model.move_file.popover.clone() else {
+            return;
+        };
+        let mut subscriptions = Vec::new();
+        let name = match &popover {
+            PopoverState::New { name, .. } => {
+                let (area, subscription) = popover_input("Branch name", name, window, cx);
+                subscriptions.push(subscription);
+                Some(area)
+            }
+            PopoverState::Existing { .. } => None,
+        };
+        let (message, subscription) =
+            popover_input("Commit message", popover.message(), window, cx);
+        subscriptions.push(subscription);
+        let first = name.clone().unwrap_or_else(|| message.clone());
+        first.update(cx, |area, cx| area.focus(window, cx));
+        self.move_popover = Some(MovePopover {
+            name,
+            message,
+            _subscriptions: subscriptions,
+        });
+        cx.notify();
+    }
+
+    /// Enter in the popover: reads its inputs and sends the move if they are valid.
+    pub(crate) fn submit_move_popover_view(&mut self, cx: &mut Context<Self>) {
+        let Some(fields) = self.move_popover.as_ref() else {
+            return;
+        };
+        let name = fields
+            .name
+            .as_ref()
+            .map(|area| area.read(cx).text().to_owned());
+        let message = fields.message.read(cx).text().to_owned();
+        self.submit_move_popover(name, message, cx);
+    }
+
+    /// Esc, Cancel and a click outside: closes the popover and gives the keys back to the list.
+    pub(crate) fn close_move_popover_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_move_popover(cx);
+        self.move_popover = None;
+        self.list_focus.focus(window);
+    }
+
+    /// Once the state has closed the popover (a move succeeded), the view lets it go too.
+    pub(crate) fn sync_move_popover(&mut self, window: &mut Window) {
+        if self.move_popover.is_some() && self.model.move_file.popover.is_none() {
+            self.move_popover = None;
+            self.list_focus.focus(window);
+        }
+    }
+
+    /// The popover's layer, or nothing while it is closed.
+    pub(crate) fn move_popover_layer(&self, cx: &Context<Self>) -> Option<Div> {
+        let fields = self.move_popover.as_ref()?;
+        let popover = self.model.move_file.popover.as_ref()?;
+        let outside = div().absolute().size_full().occlude().on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.close_move_popover_view(window, cx);
+            }),
+        );
+        let mut panel = div()
+            .absolute()
+            .top(px(POPOVER_TOP))
+            .left(px(self.sidebar_width + POPOVER_GAP))
+            .w(px(POPOVER_WIDTH))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .bg(theme::panel())
+            .border_1()
+            .border_color(theme::hairline_strong())
+            .rounded_md()
+            .shadow_lg()
+            .occlude()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "escape" => this.close_move_popover_view(window, cx),
+                    "enter" => this.submit_move_popover_view(cx),
+                    _ => {}
+                }
+            }))
+            // Tab has nothing else to reach while the popover is open.
+            .capture_action(|_: &FocusNext, _, cx| cx.stop_propagation())
+            .capture_action(|_: &FocusPrev, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .text_color(theme::text())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(popover_title(popover)),
+            );
+        if let Some(name) = &fields.name {
+            panel = panel.child(field_row("Branch name", name.clone()));
+        }
+        panel = panel
+            .child(field_row("Commit message", fields.message.clone()))
+            .child(div().text_sm().text_color(theme::muted()).child(HOOKS_NOTE))
+            .children(self.model.move_file.popover_error.as_ref().map(|error| {
+                div()
+                    .text_sm()
+                    .text_color(theme::error())
+                    .child(error.clone())
+            }))
+            .child(popover_buttons(cx));
+        Some(div().absolute().inset_0().child(outside).child(panel))
+    }
+}
+
+/// Cancel, and the button that sends the move (Enter does the same).
+fn popover_buttons(cx: &Context<StatusView>) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .justify_end()
+        .gap_2()
+        .child(
+            div()
+                .id("move-popover-cancel")
+                .px_3()
+                .h(px(26.))
+                .flex()
+                .items_center()
+                .rounded_md()
+                .bg(theme::selection())
+                .text_color(theme::text())
+                .cursor_pointer()
+                .child("Cancel")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        this.close_move_popover_view(window, cx);
+                    }),
+                ),
+        )
+        .child(
+            div()
+                .id("move-popover-confirm")
+                .px_3()
+                .h(px(26.))
+                .flex()
+                .items_center()
+                .rounded_md()
+                .bg(theme::accent())
+                .text_color(theme::on_accent())
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .child("Move")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.submit_move_popover_view(cx);
+                    }),
+                ),
+        )
 }
 
 #[cfg(test)]
@@ -1324,7 +1814,6 @@ mod tests {
     #[test]
     fn the_popover_of_a_branch_is_prefilled_with_the_file_name() {
         let popover = PopoverState::existing("src/a.rs", "feature");
-        assert_eq!(popover.path(), "src/a.rs");
         assert_eq!(popover.message(), "Move a.rs");
         assert!(matches!(popover, PopoverState::Existing { .. }));
         assert_eq!(HOOKS_NOTE, "Git hooks do not run for this commit.");
@@ -1358,14 +1847,14 @@ mod tests {
         );
         popover.set_message("  Fix the parser  ".into());
         assert_eq!(
-            popover.submit(&existing),
-            Ok(CommandKind::MoveChanges {
+            popover.validate(&existing),
+            Ok(MoveRequest {
                 path: "a.rs".into(),
                 target: MoveTarget::Branch {
                     name: "feature".into(),
                     create: false,
                 },
-                message: Some("Fix the parser".into()),
+                message: "Fix the parser".into(),
             })
         );
     }
@@ -1412,20 +1901,19 @@ mod tests {
     }
 
     #[test]
-    fn a_new_branch_submits_the_create_with_the_message() {
+    fn a_new_branch_is_validated_into_the_create_with_the_message() {
         let mut popover = PopoverState::new("a.rs", Some("ui"));
         popover.set_name("ui/a".into());
-        let command = popover.submit(&[]).expect("valid");
         assert_eq!(
-            command,
-            CommandKind::MoveChanges {
+            popover.validate(&[]),
+            Ok(MoveRequest {
                 path: "a.rs".into(),
                 target: MoveTarget::Branch {
                     name: "ui/a".into(),
                     create: true,
                 },
-                message: Some("Move a.rs".into()),
-            }
+                message: "Move a.rs".into(),
+            })
         );
     }
 
@@ -1660,5 +2148,115 @@ mod tests {
             DropTarget::NewBranchGroup { prefix: None }.move_target(),
             None
         );
+    }
+
+    #[test]
+    fn a_row_is_styled_by_its_answer_and_plain_without_a_drag() {
+        let accepts = DropAnswer::Accepts {
+            hint: "Commit to feature".into(),
+        };
+        let rejects = DropAnswer::Rejects {
+            reason: "no".into(),
+        };
+        assert_eq!(drag_style(Some(&accepts)), Some(DragStyle::Accept));
+        assert_eq!(drag_style(Some(&rejects)), Some(DragStyle::Reject));
+        assert_eq!(
+            drag_style(Some(&DropAnswer::Checking)),
+            Some(DragStyle::Checking)
+        );
+        assert_eq!(drag_style(None), None);
+    }
+
+    #[test]
+    fn only_an_accepting_or_checking_row_takes_the_drop() {
+        let accepts = DropAnswer::Accepts { hint: "x".into() };
+        let rejects = DropAnswer::Rejects { reason: "x".into() };
+        assert!(takes_drop(Some(&accepts)));
+        assert!(takes_drop(Some(&DropAnswer::Checking)));
+        assert!(!takes_drop(Some(&rejects)));
+        assert!(!takes_drop(None));
+    }
+
+    #[test]
+    fn the_status_line_shows_the_hovered_row_or_what_to_do() {
+        let accepts = DropAnswer::Accepts {
+            hint: "Move to ui".into(),
+        };
+        assert_eq!(drag_status(Some(&accepts), true), Some("Move to ui".into()));
+        let rejects = DropAnswer::Rejects {
+            reason: "Conflicts".into(),
+        };
+        assert_eq!(drag_status(Some(&rejects), true), Some("Conflicts".into()));
+        assert_eq!(
+            drag_status(Some(&DropAnswer::Checking), true),
+            Some("Checking…".into())
+        );
+        assert_eq!(
+            drag_status(None, true),
+            Some("Drop the file on a branch or a worktree to move it.".into())
+        );
+        assert_eq!(drag_status(Some(&accepts), false), None);
+    }
+
+    #[test]
+    fn the_popover_title_names_the_commit_or_the_new_branch() {
+        let existing = PopoverState::existing("src/a.rs", "feature");
+        assert_eq!(popover_title(&existing), "Commit a.rs to feature");
+        let new = PopoverState::new("a.rs", Some("ui"));
+        assert_eq!(popover_title(&new), "New branch");
+    }
+
+    #[test]
+    fn a_poll_asks_while_the_drag_runs_and_stops_when_it_is_over_or_superseded() {
+        assert_eq!(poll_step(1, 1, true, true), PollStep::Ask);
+        assert_eq!(poll_step(1, 1, true, false), PollStep::End);
+        assert_eq!(poll_step(1, 1, false, true), PollStep::Stop);
+        assert_eq!(poll_step(1, 1, false, false), PollStep::Stop);
+        assert_eq!(poll_step(1, 2, true, true), PollStep::Stop);
+    }
+
+    #[test]
+    fn a_drag_gets_a_new_generation_so_an_older_poll_stops() {
+        let mut state = MoveFile::default();
+        let first = state.begin_drag("a.rs");
+        state.end_drag();
+        let second = state.begin_drag("b.rs");
+        assert_ne!(first, second);
+        assert_eq!(
+            poll_step(first, state.generation, true, true),
+            PollStep::Stop
+        );
+        assert_eq!(
+            poll_step(second, state.generation, true, true),
+            PollStep::Ask
+        );
+    }
+
+    #[test]
+    fn the_pointer_enters_and_leaves_only_the_row_it_is_on() {
+        let feature = branch("feature");
+        let ui = at("/w/ui");
+        assert_eq!(pointer_step(None, &feature, true), PointerStep::Enter);
+        assert_eq!(
+            pointer_step(Some(&feature), &feature, true),
+            PointerStep::Stay
+        );
+        assert_eq!(
+            pointer_step(Some(&feature), &feature, false),
+            PointerStep::Leave
+        );
+        assert_eq!(pointer_step(Some(&ui), &feature, false), PointerStep::Stay);
+        assert_eq!(pointer_step(Some(&ui), &feature, true), PointerStep::Enter);
+    }
+
+    #[test]
+    fn the_hovered_row_is_the_one_last_entered() {
+        let mut hover = HoverCheck::default();
+        hover.start("a.rs");
+        assert_eq!(hover.hovered(), None);
+        hover.enter(branch("feature"), Instant::now());
+        assert_eq!(hover.hovered(), Some(&branch("feature")));
+        hover.leave();
+        assert_eq!(hover.hovered(), None);
     }
 }

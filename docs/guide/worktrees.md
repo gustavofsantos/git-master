@@ -59,8 +59,6 @@ Double-clicking the **here** row does nothing. A row whose folder is missing sho
 
 ## Move a file to a worktree
 
-> **Planned.** Moving a file to a worktree is not available yet.
-
 Drag a changed file from the Working Copy and drop it on a worktree row. The change is applied in that worktree, unstaged and uncommitted, and the file leaves the Working Copy you dragged it from. The target may already have changes: the move is refused only when they conflict. Drop the file on the section header or on **+** to move it into a new worktree. The rules are on the [Working Copy](working-copy.md#move-a-file-to-a-branch-or-a-worktree) page.
 
 ## Remove a worktree

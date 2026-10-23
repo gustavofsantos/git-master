@@ -12,8 +12,8 @@ use gm_core::command_log::CommandLog;
 use gm_core::watch::{Notice, Notices, WatchHandle};
 use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff, OperationId, OperationState};
 use gpui::{
-    ClipboardItem, Context, Div, Entity, FocusHandle, Render, ScrollHandle, Subscription,
-    UniformListScrollHandle, Window, div, prelude::*, px,
+    ClipboardItem, Context, Div, Entity, FocusHandle, KeyDownEvent, Render, ScrollHandle,
+    Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
 };
 
 use crate::action_registry::{
@@ -34,6 +34,7 @@ use crate::icon::{self, Icon};
 use crate::merged_branches::MergedDialog;
 use crate::message_dialog::MessageDialog;
 use crate::model::{CommitPage, Model, Switched};
+use crate::move_file::MovePopover;
 use crate::name_fit::name_label;
 use crate::new_branch::NewBranchDialog;
 use crate::new_stash::NewStashDialog;
@@ -173,6 +174,8 @@ pub struct StatusView {
     pub(crate) delete_dialog: Option<DeleteDialog>,
     /// The discard dialog, while it is open.
     pub(crate) discard_dialog: Option<DiscardDialog>,
+    /// The branch popover of a move, while it is open: its inputs (D109).
+    pub(crate) move_popover: Option<MovePopover>,
     /// The drop dialog of a stash, while it is open (B2).
     pub(crate) drop_stash_dialog: Option<DropStashDialog>,
     /// The message shown when a stash apply or pop, or a detached checkout, was not done.
@@ -368,6 +371,7 @@ impl StatusView {
             workflow_source,
             delete_dialog: None,
             discard_dialog: None,
+            move_popover: None,
             drop_stash_dialog: None,
             message_dialog: None,
             merged_dialog: None,
@@ -588,6 +592,7 @@ impl StatusView {
         if let Some(outcome) = self.model.branch_delete.take() {
             self.on_branch_delete_settled(outcome, window, cx);
         }
+        self.sync_move_popover(window);
         if let Some(outcome) = self.model.discarding.take() {
             self.on_file_discard_settled(outcome, window, cx);
         }
@@ -1347,10 +1352,17 @@ impl StatusView {
             "{} staged · {} unstaged · {} untracked",
             summary.staged, summary.unstaged, summary.untracked
         );
-        let (message, colour, tint) = match (&self.model.error, &self.model.notice) {
-            (Some(error), _) => (error.clone(), theme::removed_fg(), theme::removed_bg()),
-            (None, Some(notice)) => (notice.clone(), theme::warn_fg(), theme::warn_bg()),
-            (None, None) => (String::new(), muted, theme::panel()),
+        let drag_status = self.drag_status_text();
+        let (message, colour, tint) = match (&self.model.error, &drag_status, &self.model.notice) {
+            (Some(error), _, _) => (error.clone(), theme::removed_fg(), theme::removed_bg()),
+            (None, Some(hint), _) => (hint.clone(), theme::text(), theme::panel()),
+            (None, None, Some(notice)) => (notice.clone(), theme::warn_fg(), theme::warn_bg()),
+            (None, None, None) => (String::new(), muted, theme::panel()),
+        };
+        let offer = if self.model.error.is_none() && drag_status.is_none() {
+            self.open_worktree_offer(cx)
+        } else {
+            None
         };
         let notice_icon = match &self.model.error {
             None => self.model.notice_icon,
@@ -1402,7 +1414,8 @@ impl StatusView {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .child(message),
-                    ),
+                    )
+                    .children(offer),
             )
             .child(self.command_log_button(cx))
     }
@@ -1436,6 +1449,12 @@ impl Render for StatusView {
             .text_color(theme::text())
             .font_family(theme::ui_font())
             .text_sm()
+            // Esc ends a file drag, as gpui itself does not: the drop then has no file to move.
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.model.move_file.drag.is_some() {
+                    this.end_drag(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
                 this.cycle_focus(true, window, cx);
             }))
@@ -1528,6 +1547,7 @@ impl StatusView {
             layers.push(self.delete_branch_layer(window, cx));
         }
         layers.extend(self.discard_file_layer(window, cx));
+        layers.extend(self.move_popover_layer(cx));
         if self.merged_dialog.is_some() {
             layers.push(self.merged_layer(window, cx));
         }

@@ -88,8 +88,6 @@ To discard part of a file, use **Discard Chunk** in [Diff and staging](diff-and-
 
 ## Move a file to a branch or a worktree
 
-> **Planned.** Moving a file to a branch or to a worktree is not available in the app yet.
-
 You can move the changes of one file out of the Working Copy and into another branch or another worktree, without switching to it. The file leaves the Working Copy, with its staged, unstaged and untracked state together, and the change is recorded where you drop it.
 
 To move a file, drag its row from the changed-files list and drop it on a row of the sidebar. The file name follows the pointer while you drag. You move one file at a time.
@@ -102,6 +100,8 @@ Each row of the sidebar answers while you drag over it:
 | It cannot accept the file | The row is dimmed, the pointer shows that dropping is not allowed, and the hint gives the reason. |
 
 The branch you are on and the worktree marked **here** never accept a file.
+
+> **Planned.** The hint is shown in the status bar while the file is dragged, not beside the row yet. The popover opens beside the sidebar, not on its row yet. In the **By stack** view the Branches header is not a drop target yet.
 
 ### Move to a worktree
 

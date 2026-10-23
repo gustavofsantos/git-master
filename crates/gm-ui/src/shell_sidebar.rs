@@ -16,6 +16,7 @@ use crate::action_registry::{Action, Args};
 use crate::branch_filter::{self, Scope};
 use crate::icon::{self, Icon};
 use crate::local_review;
+use crate::move_file::{self, DropTarget, DropZone};
 use crate::name_fit::{self, name_label};
 use crate::resize::{self, SIDEBAR};
 use crate::resize_handle::{self, Edge};
@@ -84,8 +85,16 @@ impl StatusView {
             .overflow_hidden()
             .px_2()
             .pb_2()
-            .child(worktrees_header(cx))
-            .children(rows.iter().map(|row| worktree_row(row, cx)))
+            .child(worktrees_header(
+                self.drop_zone(DropTarget::NewWorktree),
+                cx,
+            ))
+            .children(rows.iter().map(|row| {
+                let zone = self.drop_zone(DropTarget::Worktree {
+                    path: row.entry.path.clone(),
+                });
+                worktree_row(row, zone, cx)
+            }))
     }
 
     fn workspace_items(&self, cx: &mut Context<Self>) -> Div {
@@ -387,7 +396,11 @@ impl StatusView {
                             .unwrap_or_default()
                             .iter()
                             .zip(range)
-                            .map(|(row, index)| tree_row(row, index, head.as_deref(), cx))
+                            .map(|(row, index)| {
+                                let zone = drop_target_of(&rows, index)
+                                    .map(|target| this.drop_zone(target));
+                                tree_row(row, index, head.as_deref(), zone, cx)
+                            })
                             .collect()
                     },
                 ),
@@ -481,8 +494,8 @@ fn new_branch_button(cx: &Context<StatusView>) -> Stateful<Div> {
 }
 
 /// The WORKTREES heading, with the "+" that opens the New Worktree dialog.
-fn worktrees_header(cx: &Context<StatusView>) -> Div {
-    div()
+fn worktrees_header(zone: DropZone, cx: &Context<StatusView>) -> Div {
+    let header = div()
         .px_4()
         .pt_4()
         .pb_1()
@@ -493,7 +506,8 @@ fn worktrees_header(cx: &Context<StatusView>) -> Div {
         .text_xs()
         .text_color(theme::muted())
         .child("WORKTREES")
-        .child(new_worktree_button(cx))
+        .child(new_worktree_button(cx));
+    move_file::accept_drops(header, Some(zone), cx)
 }
 
 /// The "+" of the WORKTREES heading: a plain glyph that brightens on hover.
@@ -614,21 +628,51 @@ fn item_row(label: &'static str, selected: bool) -> Stateful<Div> {
 }
 
 /// A row of the branch tree. `head` is the branch HEAD is on.
+/// The drop target a sidebar row stands for, when it takes files: a local branch,
+/// a prefix group of local branches, or the Local header. Remote branches, their
+/// groups and the other headers take nothing.
+fn drop_target_of(rows: &[Row<'_>], index: usize) -> Option<DropTarget> {
+    let remote = rows[..index]
+        .iter()
+        .rev()
+        .find_map(|row| match row {
+            Row::Header(title) => Some(*title == "Remote"),
+            _ => None,
+        })
+        .unwrap_or(false);
+    if remote {
+        return None;
+    }
+    match &rows[index] {
+        Row::Header("Local") => Some(DropTarget::NewBranchGroup { prefix: None }),
+        Row::Group(prefix) => Some(DropTarget::NewBranchGroup {
+            prefix: Some((*prefix).to_owned()),
+        }),
+        Row::Branch { branch, .. } if !branch.is_remote => Some(DropTarget::Branch {
+            name: branch.name.clone(),
+        }),
+        _ => None,
+    }
+}
+
 fn tree_row(
     row: &Row<'_>,
     index: usize,
     head: Option<&str>,
+    zone: Option<DropZone>,
     cx: &mut Context<StatusView>,
 ) -> AnyElement {
     match row {
         // The same height as every row, which a `uniform_list` needs; the title
         // sits at the bottom of it.
-        Row::Header(title) => section_title(title)
-            .h(px(ROW_HEIGHT))
-            .flex()
-            .items_end()
-            .pt_0()
-            .into_any_element(),
+        Row::Header(title) => {
+            let header = section_title(title)
+                .h(px(ROW_HEIGHT))
+                .flex()
+                .items_end()
+                .pt_0();
+            move_file::accept_drops(header, zone, cx).into_any_element()
+        }
         Row::Note(text) => div()
             .px_4()
             .h(px(ROW_HEIGHT))
@@ -643,7 +687,7 @@ fn tree_row(
             .into_any_element(),
         Row::Group(prefix) => {
             let text = format!("{prefix}/");
-            div()
+            let group = div()
                 .id(("sidebar-group", index))
                 .px_4()
                 .h(px(ROW_HEIGHT))
@@ -653,8 +697,8 @@ fn tree_row(
                 .when(name_fit::needs_hover(&text), |this| {
                     this.tooltip(window_chrome::hint(text.clone()))
                 })
-                .child(name_label(&text, &[]))
-                .into_any_element()
+                .child(name_label(&text, &[]));
+            move_file::accept_drops(group, zone, cx).into_any_element()
         }
         Row::Branch {
             branch,
@@ -708,6 +752,7 @@ fn tree_row(
                         this.open_branch_menu(&name, event.position, cx);
                     }),
                 );
+            let inner = move_file::accept_drops(inner, zone, cx);
             // A `uniform_list` item takes no margin, so the inset is padding here.
             div()
                 .w_full()
@@ -722,7 +767,11 @@ fn tree_row(
 /// One worktree: its colour mark, its name, and the tags that say it is the
 /// window's own or that its folder is gone. A double-click opens the others in
 /// a window of their own.
-fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> Stateful<Div> {
+fn worktree_row(
+    row: &worktree_list::Row<'_>,
+    zone: DropZone,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
     let action = match worktree_list::open_target(row) {
         worktree_list::Open::Nothing => None,
         worktree_list::Open::Missing => Some(Err("This worktree's folder is missing.")),
@@ -734,7 +783,7 @@ fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> State
     let group = SharedString::from(format!("worktree-row-{}", row.entry.path));
     let remove = (!row.entry.is_main && !row.here)
         .then(|| remove_button(&row.entry.path, group.clone(), cx));
-    div()
+    let row_div = div()
         .id(id)
         .group(group)
         .h(px(ROW_HEIGHT))
@@ -787,7 +836,8 @@ fn worktree_row(row: &worktree_list::Row<'_>, cx: &Context<StatusView>) -> State
                 }),
             )
         })
-        .children(remove)
+        .children(remove);
+    move_file::accept_drops(row_div, Some(zone), cx)
 }
 
 /// A small window glyph in the worktree's colour: an outline with a title bar.

@@ -72,8 +72,6 @@ The file menu has **Stage File** or **Unstage File**, whichever applies, **Copy 
 
 #### Move a file
 
-> **Planned.** **Move File to Branch…** and **Move File to Worktree…** are not available yet.
-
 The file menu also has **Move File to Branch…** and **Move File to Worktree…**. Both are in the command palette too, where you press **Tab** to pick the target. They have no default shortcut. Dragging the file onto the sidebar does the same. See [Working Copy](working-copy.md#move-a-file-to-a-branch-or-a-worktree).
 
 #### Discard changes
