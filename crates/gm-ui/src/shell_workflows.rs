@@ -6,11 +6,11 @@
 //! for to the engine, through the action registry where one exists.
 
 use std::path::Path;
+use std::time::Duration;
 
-use gm_core::script::port::ScriptDiagnostic;
 use gm_schema::{
-    Actor, WorkflowDryCall, WorkflowDryRun, WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus,
-    WorkflowRunSummary,
+    Actor, WorkflowDiagnostic, WorkflowDryCall, WorkflowDryRun, WorkflowInfo, WorkflowRunDetail,
+    WorkflowRunStatus, WorkflowRunSummary,
 };
 use gpui::{
     AnyElement, Context, Div, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
@@ -22,10 +22,11 @@ use crate::action_registry::{Action, Args};
 use crate::shell_history::{now_secs, relative_time};
 use crate::theme;
 use crate::view::{Screen, StatusView};
+use crate::workflow_keys;
 use crate::workflows_page::{
     Preview, SaveState, StepRecord, Tab, context_blocks, context_key, diagnostic_text,
-    duration_label, expand_key, input_text, outcome_line, output_text, pretty_json, preview,
-    run_duration, status_label, step_duration, step_rows,
+    duration_label, expand_key, input_text, output_text, pretty_json, preview, run_duration,
+    status_label, step_duration, step_rows, step_summary,
 };
 
 /// The width of the workflow list on the left.
@@ -34,6 +35,8 @@ const LIST_WIDTH: f32 = 260.;
 const RUNS_LIST_HEIGHT: f32 = 220.;
 /// The most of the dry run panel shown; it scrolls past this.
 const DRY_RUN_HEIGHT: f32 = 260.;
+/// How long the typing must pause before the buffer is checked.
+const CHECK_DELAY: Duration = Duration::from_millis(300);
 
 impl StatusView {
     /// Ctrl or ⌘ S: the registry's Save Workflow.
@@ -191,7 +194,58 @@ impl StatusView {
         }
     }
 
-    /// Puts the page's buffer in the editor, when they differ.
+    /// Asks the engine to check the buffer, unless it has checked this text already.
+    pub(crate) fn check_workflow(&mut self, cx: &mut Context<Self>) {
+        if let Some(kind) = self.model.workflows_page.check_request() {
+            let id = self.engine.dispatch(Actor::Human, kind);
+            self.model.workflows_page.track_check(id);
+        }
+        cx.notify();
+    }
+
+    /// Checks the buffer once the typing has paused for `CHECK_DELAY`: the check goes out only
+    /// when no edit came after this one.
+    pub(crate) fn schedule_workflow_check(&mut self, cx: &mut Context<Self>) {
+        let generation = self.model.workflows_page.check_generation();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CHECK_DELAY).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.model.workflows_page.check_is_latest(generation) {
+                    view.check_workflow(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Makes the window's shortcuts for the listed manual workflows, and keeps the plan, whose
+    /// warnings the Script tab shows. Called when the listing arrives.
+    pub(crate) fn bind_workflow_keys(&mut self, cx: &mut Context<Self>) {
+        let manual: Vec<(String, String)> = self
+            .model
+            .workflows
+            .listed
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|info| info.trigger == "manual" && info.error.is_none())
+            .filter_map(|info| info.key.clone().map(|key| (info.name.clone(), key)))
+            .collect();
+        let built_in = crate::built_in_keys(cx);
+        let plan = workflow_keys::plan(&manual, &built_in, cfg!(target_os = "macos"));
+        crate::bind_keys_with_workflows(cx, &plan.bound);
+        self.model.workflows.keys = plan;
+    }
+
+    /// Moves the editor's caret to a diagnostic's line.
+    fn go_to_workflow_line(&mut self, line: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let line = usize::try_from(line).unwrap_or(1).max(1);
+        self.workflow_source
+            .update(cx, |area, cx| area.go_to_line(line, window, cx));
+    }
+
+    /// Puts the page's buffer in the editor, when they differ, and checks the buffer when its
+    /// text changed since the last check.
     pub(crate) fn sync_workflow_source(&mut self, cx: &mut Context<Self>) {
         let text = self.model.workflows_page.text().to_owned();
         self.workflow_source.update(cx, |area, cx| {
@@ -199,12 +253,18 @@ impl StatusView {
                 area.set_text(&text, cx);
             }
         });
+        self.check_workflow(cx);
     }
 
-    /// The editor changed: its text becomes the page's buffer.
+    /// The editor changed: its text becomes the page's buffer, and the buffer is checked once
+    /// the typing pauses.
     pub(crate) fn on_workflow_source_changed(&mut self, cx: &mut Context<Self>) {
         let text = self.workflow_source.read(cx).text().to_owned();
+        let before = self.model.workflows_page.check_generation();
         self.model.workflows_page.edit(&text);
+        if self.model.workflows_page.check_generation() != before {
+            self.schedule_workflow_check(cx);
+        }
         cx.notify();
     }
 
@@ -299,6 +359,13 @@ impl StatusView {
                     .flex_col()
                     .gap_1()
                     .children(
+                        self.model
+                            .workflows
+                            .ignored
+                            .iter()
+                            .map(|line| ignored_line(line)),
+                    )
+                    .children(
                         (!empty.is_empty())
                             .then(|| div().px_2().py_1().text_color(theme::muted()).child(empty)),
                     )
@@ -337,7 +404,7 @@ impl StatusView {
             .children(self.workflow_banners(cx))
             .child(tab_bar(page.tab(), cx))
             .child(match page.tab() {
-                Tab::Script => self.script_body(),
+                Tab::Script => self.script_body(cx),
                 Tab::Runs => self.runs_body(cx),
             })
             .children(
@@ -513,8 +580,8 @@ impl StatusView {
         banners
     }
 
-    /// The Script tab: the editor, then the diagnostics of the buffer.
-    fn script_body(&self) -> AnyElement {
+    /// The Script tab: the editor, then the problems of the buffer and the shortcut warning.
+    fn script_body(&self, cx: &Context<Self>) -> AnyElement {
         let page = &self.model.workflows_page;
         div()
             .flex_1()
@@ -546,10 +613,26 @@ impl StatusView {
                             .text_color(theme::muted())
                             .child("Saving revokes this workflow's automatic approvals."),
                     )
-                    .children(page.diagnostics().iter().map(diagnostic_line))
                     .children(
-                        (page.diagnostics().is_empty())
+                        page.name()
+                            .and_then(|name| self.model.workflows.key_warning(name))
+                            .map(|warning| {
+                                div().text_color(theme::warn_fg()).child(warning.to_owned())
+                            }),
+                    )
+                    .children(
+                        page.diagnostics()
+                            .iter()
+                            .enumerate()
+                            .map(|(index, problem)| Self::diagnostic_row(index, problem, cx)),
+                    )
+                    .children(
+                        (page.check_answered() && page.diagnostics().is_empty())
                             .then(|| div().text_color(theme::muted()).child("No problems found.")),
+                    )
+                    .children(
+                        (!page.check_answered())
+                            .then(|| div().text_color(theme::muted()).child("Checking…")),
                     ),
             )
             .into_any_element()
@@ -676,11 +759,7 @@ impl StatusView {
         let page = &self.model.workflows_page;
         let input_key = expand_key(run, index, "input");
         let output_key = expand_key(run, index, "output");
-        let title = step.state.clone();
-        let action = step
-            .action
-            .clone()
-            .unwrap_or_else(|| "wait or for_each".to_owned());
+        let title = format!("{}. {}", step.seq, step.func);
         let took = step_duration(step).map(duration_label);
         let output_label = "Output";
         div()
@@ -712,7 +791,7 @@ impl StatusView {
                 div()
                     .text_xs()
                     .text_color(theme::muted())
-                    .child(format!("{action} · {}", outcome_line(step))),
+                    .child(step_summary(step)),
             )
             .child(json_block(
                 "Input",
@@ -729,6 +808,18 @@ impl StatusView {
                 cx,
             ))
     }
+}
+
+/// A line of the list's top: a file the listing did not read, and why.
+fn ignored_line(line: &str) -> Div {
+    div()
+        .px_2()
+        .text_xs()
+        .text_color(theme::warn_fg())
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .child(format!("Ignored: {line}"))
 }
 
 /// One workflow in the list: its name, trigger and key, and a red dot with the
@@ -1006,12 +1097,29 @@ impl StatusView {
     }
 }
 
-/// One diagnostic of the buffer, in the error colour.
-pub(crate) fn diagnostic_line(diagnostic: &ScriptDiagnostic) -> Div {
-    div()
-        .text_xs()
-        .text_color(theme::error())
-        .child(diagnostic_text(diagnostic))
+impl StatusView {
+    /// One problem of the buffer, in the error colour. A click moves the editor's caret to its
+    /// line, when it has one.
+    fn diagnostic_row(
+        index: usize,
+        problem: &WorkflowDiagnostic,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let line = problem.line;
+        div()
+            .id(30_000 + index)
+            .text_xs()
+            .text_color(theme::error())
+            .when(line > 0, |row| {
+                row.cursor_pointer().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.go_to_workflow_line(line, window, cx);
+                    }),
+                )
+            })
+            .child(diagnostic_text(problem))
+    }
 }
 
 fn run_row(

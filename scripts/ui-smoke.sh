@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split w-script-editor)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -63,6 +63,9 @@ STACK_LIST_CROP="1040x520+322+222"           # the stacked diff's list, screen c
 WORK_LAYOUT_SPLIT_X=1320; WORK_LAYOUT_Y=120               # "Split" in the Working Copy diff header
 SPLIT_OLD_CHECK_X=797; SPLIT_NEW_CHECK_X=1107             # gutter checkboxes of the split cells (old, new)
 MOD_ENTRY_Y=217                                           # src/ledger/mod.rs: the -/+ pair row (entry, ledger)
+WF_EDITOR_X=760; WF_EDITOR_Y=400            # unverified: take a screenshot and adjust; a point inside the Script editor
+WF_TAB_RUNS_X=500; WF_TAB_RUNS_Y=180        # unverified: take a screenshot and adjust; the Runs tab of the Workflows page
+WF_FIRST_RUN_X=600; WF_FIRST_RUN_Y=240      # unverified: take a screenshot and adjust; the first row of the Runs list
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -541,6 +544,78 @@ scenario_history() {
   read -r differing _ <<<"$differing"
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -lt 2000 ] || fail "the Working Copy did not come back ($differing pixels differ)"
+}
+
+# --- 3w. A Lua workflow edited, saved and run from the Workflows page ---------
+# smoke-hello.lua is written before the app starts. Its trigger.key binds Ctrl+Alt+H, so the
+# run goes through the same review dialog as the palette. The editor's text is checked on the
+# screen only as ink; the file, the save and the run's journal are checked with grep.
+write_script_fixture() {
+  mkdir -p "$1"
+  cat > "$1/smoke-hello.lua" <<'EOF'
+local M = {}
+
+M.meta = {
+  name = "smoke-hello",
+  description = "Say hello in the notification line",
+  trigger = { on = "manual", key = "secondary-alt-h" },
+}
+
+function M.execute(ctx, input)
+  ctx.notify("hello from smoke")
+end
+
+return M
+EOF
+}
+
+scenario_w_script_editor() {
+  local theme="$1" file differing ink
+  file="$RUN_DIR/xdg-config/gitmaster/workflows/smoke-hello.lua"
+  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y" click 1; sleep 1
+  shoot "$RUN_DIR/w-before-$theme.png"
+
+  # Ctrl+K, then "Show Workflows": the page opens on the first workflow, on its Script tab.
+  xdotool key ctrl+k; sleep 1
+  xdotool type --delay 20 -- "show workflows"; sleep 1
+  xdotool key Return; sleep 2
+  shoot "$SMOKE_OUT/w-script-editor-page-$theme.png"
+  differing="$(compare -metric AE "$RUN_DIR/w-before-$theme.png" "$SMOKE_OUT/w-script-editor-page-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the Workflows page did not open ($differing pixels changed)"
+  # The script's text is ink in the editor: a blank editor has none.
+  convert "$SMOKE_OUT/w-script-editor-page-$theme.png" -crop "900x260+340+200" +repage "$RUN_DIR/w-editor.png"
+  ink="$(convert "$RUN_DIR/w-editor.png" -colorspace gray -threshold 50% -negate -format '%[fx:mean]' info:)"
+  awk -v d="$ink" 'BEGIN { exit !(d > 0.0005) }' || fail "the Script tab shows no text (ink $ink)"
+
+  # Type at the end of the script and save with Ctrl+S: the file on disk must have the edit.
+  xdotool mousemove "$WF_EDITOR_X" "$WF_EDITOR_Y" click 1; sleep 0.5
+  xdotool key ctrl+End; sleep 0.3
+  xdotool key Return
+  xdotool type --delay 20 -- "-- smoke edit"; sleep 0.5
+  xdotool key Return; sleep 1
+  shoot "$SMOKE_OUT/w-script-editor-edited-$theme.png"
+  xdotool key ctrl+s; sleep 1.5
+  grep -qxF -- '-- smoke edit' "$file" || fail "the save did not write the edit to $file"
+  grep -q 'hello from smoke' "$file" || fail "the save lost the script's own text in $file"
+
+  # The shortcut runs the saved version. The first run of a version asks once: Enter confirms.
+  xdotool key ctrl+alt+h; sleep 1.5
+  shoot "$SMOKE_OUT/w-script-editor-review-$theme.png"
+  xdotool key Return; sleep 2
+  cat "$RUN_DIR/repo/.git/gitmaster/state.db"* 2>/dev/null | grep -aq 'hello from smoke' \
+    || fail "the run did not reach the journal in $RUN_DIR/repo/.git/gitmaster/state.db"
+  grep -qxF -- '-- smoke edit' "$file" || fail "running the workflow changed its file"
+
+  # The Runs tab lists the run; a click on its row shows its calls.
+  xdotool mousemove "$WF_TAB_RUNS_X" "$WF_TAB_RUNS_Y" click 1; sleep 1.5
+  xdotool mousemove "$WF_FIRST_RUN_X" "$WF_FIRST_RUN_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/w-script-editor-runs-$theme.png"
+  differing="$(compare -metric AE "$SMOKE_OUT/w-script-editor-edited-$theme.png" "$SMOKE_OUT/w-script-editor-runs-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 20000 ] || fail "the Runs tab did not replace the Script tab ($differing pixels changed)"
 }
 
 # --- 3i. Stage one hunk with its header button ---------------------------------
@@ -1147,6 +1222,10 @@ run_scenario() {
     echo "PASS  $LABEL"
     return
   fi
+  if [ "$base" = w-script-editor ]; then
+    # A Lua workflow in the user's folder, written before the app lists them. Its shortcut runs it.
+    write_script_fixture "$RUN_DIR/xdg-config/gitmaster/workflows"
+  fi
   if [ "$base" = h-welcome ]; then
     # Starts with no recent list at all; scenario_h makes its own launches.
     scenario_h "$theme"
@@ -1181,6 +1260,7 @@ run_scenario() {
     u-remove-worktree) scenario_u "$theme" ;;
     v-lock-prune-worktree) scenario_v "$theme" ;;
     h-history) scenario_history "$theme" ;;
+    w-script-editor) scenario_w_script_editor "$theme" ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app

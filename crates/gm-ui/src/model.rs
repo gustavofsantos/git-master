@@ -929,6 +929,10 @@ impl Model {
                 self.workflows_page.dry_run_answered(id, *dry_run);
                 None
             }
+            Event::WorkflowChecked { id, diagnostics } => {
+                self.workflows_page.checked(id, diagnostics);
+                None
+            }
             Event::WorkflowFileSaved { id, hash, .. } => {
                 self.workflows_page.saved(id, &hash);
                 None
@@ -1288,6 +1292,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkflowRunsListed { id, .. }
         | Event::WorkflowRunLoaded { id, .. }
         | Event::WorkflowDryRun { id, .. }
+        | Event::WorkflowChecked { id, .. }
         | Event::WorkflowFileSaved { id, .. }
         | Event::WorkflowFileDeleted { id, .. }
         | Event::ReviewCommentsListed { id, .. }

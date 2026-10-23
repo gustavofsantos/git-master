@@ -66,6 +66,7 @@ mod view;
 mod welcome;
 mod window_chrome;
 mod workflow_inputs;
+mod workflow_keys;
 mod workflow_review;
 mod workflow_run;
 mod workflows_page;
@@ -103,6 +104,17 @@ actions!(
         SaveWorkflow,
     ]
 );
+
+/// Runs the manual workflow `name` from its shortcut (`trigger.key`). It runs as the palette's
+/// Run Workflow does. Bound by `bind_keys_with_workflows`, one binding per shortcut.
+#[derive(Clone, Debug, PartialEq, Eq, gpui::Action)]
+#[action(namespace = gitmaster, no_json, no_register)]
+pub struct RunWorkflowKey {
+    pub name: String,
+}
+
+/// The name GPUI gives `RunWorkflowKey`; the built-in bindings leave those out.
+const RUN_WORKFLOW_KEY: &str = "gitmaster::RunWorkflowKey";
 
 /// Where the window starts: the path given on the command line, or the
 /// working directory when none was given.
@@ -202,6 +214,44 @@ fn bind_keys(cx: &mut App) {
     review_composer::bind_keys(cx);
 }
 
+/// The window's own bindings as the keymap holds them now, as `(shortcut, what it does)` with the
+/// shortcut in the spelling the keymap gives and the action in words. The shortcuts of workflows
+/// are left out, and so are chords, which a single shortcut cannot clash with.
+pub(crate) fn built_in_keys(cx: &App) -> Vec<(String, String)> {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    keymap
+        .bindings()
+        .filter(|binding| binding.action().name() != RUN_WORKFLOW_KEY)
+        .filter_map(|binding| match binding.keystrokes() {
+            [only] => Some((
+                only.unparse(),
+                workflow_keys::action_words(binding.action().name()),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Replaces the keymap with the window's own bindings and one binding per workflow shortcut.
+/// Shortcuts GPUI cannot parse are skipped; the plan already left out the ones that clash.
+pub(crate) fn bind_keys_with_workflows(cx: &mut App, bound: &[workflow_keys::WorkflowKey]) {
+    cx.clear_key_bindings();
+    bind_keys(cx);
+    for key in bound {
+        if gpui::Keystroke::parse(&key.keystroke).is_err() {
+            continue;
+        }
+        cx.bind_keys([KeyBinding::new(
+            &key.keystroke,
+            RunWorkflowKey {
+                name: key.workflow.clone(),
+            },
+            None,
+        )]);
+    }
+}
+
 /// The window is the app: closing it quits, and so does ⌘Q from the app menu.
 fn quit_with_the_window(cx: &mut App) {
     cx.on_window_closed(|cx| {
@@ -220,6 +270,15 @@ fn quit_with_the_window(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_workflow_key_action_has_the_name_the_built_in_list_leaves_out() {
+        use gpui::Action;
+        let action = RunWorkflowKey {
+            name: String::new(),
+        };
+        assert_eq!(action.name(), RUN_WORKFLOW_KEY);
+    }
 
     #[test]
     fn every_key_binding_string_is_valid() {

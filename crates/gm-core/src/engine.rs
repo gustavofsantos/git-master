@@ -9,8 +9,8 @@ use serde_json::{Map, json};
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event,
     GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch, OperationId,
-    OperationState, REFLOG_PAGE, ReviewComment, ReviewStatus, STASH_LIST_CHANGED, WorktreeEntry,
-    WorktreeInspection,
+    OperationState, REFLOG_PAGE, ReviewComment, ReviewStatus, STASH_LIST_CHANGED,
+    WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -917,6 +917,7 @@ impl Engine {
             | CommandKind::ListWorkflowRuns { .. }
             | CommandKind::LoadWorkflowRun { .. }
             | CommandKind::DryRunWorkflow { .. }
+            | CommandKind::CheckWorkflowScript { .. }
             | CommandKind::SaveWorkflowFile { .. }
             | CommandKind::DeleteWorkflowFile { .. } => self.workflow_command(id, actor, kind),
             _ if is_review_command(kind) => self.review_command(id, actor, kind),
@@ -2259,6 +2260,7 @@ impl Engine {
             CommandKind::DryRunWorkflow { source, inputs } => {
                 self.dry_run_workflow(id, source, inputs)
             }
+            CommandKind::CheckWorkflowScript { source } => Ok(check_workflow_script(id, source)),
             CommandKind::SaveWorkflowFile {
                 path,
                 source,
@@ -2332,10 +2334,8 @@ impl Engine {
         source: &str,
         inputs: &serde_json::Value,
     ) -> Result<Vec<Event>, String> {
-        // The text has no file, so errors cite this name.
-        const CHUNK: &str = "workflow.lua";
         let engine = LuauEngine::new();
-        let dry_run = match inspect(&engine, CHUNK, source) {
+        let dry_run = match inspect(&engine, TEXT_CHUNK, source) {
             Ok(meta) => {
                 let root = self.open_root()?;
                 let mut given = Map::new();
@@ -2357,7 +2357,7 @@ impl Engine {
                     "trigger": { "on": "manual" },
                     "repo": repo.value,
                 });
-                let run = dry::walk(&engine, CHUNK, source, &input);
+                let run = dry::walk(&engine, TEXT_CHUNK, source, &input);
                 script_session::dry_run_result(missing, run)
             }
             Err(problems) => script_session::dry_run_error(&problems),
@@ -2716,6 +2716,7 @@ impl Engine {
                 | CommandKind::ListWorkflowRuns { .. }
                 | CommandKind::LoadWorkflowRun { .. }
                 | CommandKind::DryRunWorkflow { .. }
+                | CommandKind::CheckWorkflowScript { .. }
                 | CommandKind::CreateWorkflowFromTemplate { .. }
                 | CommandKind::SaveWorkflowFile { .. }
                 | CommandKind::DeleteWorkflowFile { .. }
@@ -2775,6 +2776,24 @@ fn check_hash(file: &Path, expected: &str) -> Result<(), String> {
 }
 
 /// Worktree changes are human decisions (D31, Q12): an agent may not make one.
+/// The name errors of a script's text cite: the text has no file.
+const TEXT_CHUNK: &str = "workflow.lua";
+
+/// Answers `CheckWorkflowScript`: the problems `inspect` finds in `source`, none when it loads.
+fn check_workflow_script(id: OperationId, source: &str) -> Vec<Event> {
+    let diagnostics = match inspect(&LuauEngine::new(), TEXT_CHUNK, source) {
+        Ok(_) => Vec::new(),
+        Err(problems) => problems
+            .into_iter()
+            .map(|problem| WorkflowDiagnostic {
+                line: u32::try_from(problem.line).unwrap_or(u32::MAX),
+                message: problem.message,
+            })
+            .collect(),
+    };
+    vec![Event::WorkflowChecked { id, diagnostics }]
+}
+
 fn only_a_human(actor: &Actor, what: &str) -> Result<(), String> {
     if matches!(actor, Actor::Human) {
         Ok(())

@@ -66,7 +66,8 @@ use crate::worktree_create::WorktreeDialog;
 use crate::worktree_prune::PruneDialog;
 use crate::worktree_remove::RemoveDialog;
 use crate::{
-    CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, OpenQuickOpen, OpenSearch, StartPath,
+    CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, OpenQuickOpen, OpenSearch,
+    RunWorkflowKey, StartPath,
 };
 
 /// The key context of the change list. Its keys work only while the list has
@@ -713,7 +714,25 @@ impl StatusView {
     /// The Workflows page after the engine's answer is in the model: the first
     /// listing opens the first workflow, and the buffer shows what the page holds.
     fn follow_workflows(&mut self, listed: bool, cx: &mut Context<Self>) {
-        if listed && self.screen == Screen::Workflows {
+        if !listed {
+            self.sync_workflow_source(cx);
+            return;
+        }
+        self.bind_workflow_keys(cx);
+        // A template just copied opens in the page once the listing has it, so the edit can
+        // start; the page keeps it open when the screen is shown later.
+        let fresh = self.model.workflows.fresh.clone().filter(|path| {
+            self.model
+                .workflows
+                .listed
+                .as_deref()
+                .is_some_and(|listed| listed.iter().any(|info| info.path == *path))
+        });
+        if let Some(path) = fresh {
+            self.model.workflows.fresh = None;
+            self.select_workflow(&path, cx);
+        }
+        if self.screen == Screen::Workflows {
             self.open_first_workflow(cx);
         }
         self.sync_workflow_source(cx);
@@ -1429,6 +1448,14 @@ impl Render for StatusView {
                 }
             }))
             .on_action(cx.listener(Self::save_workflow_action))
+            .on_action(cx.listener(|this, action: &RunWorkflowKey, window, cx| {
+                this.run_action(
+                    Action::RunWorkflow,
+                    &Args::Workflow(action.name.clone()),
+                    window,
+                    cx,
+                );
+            }))
             .on_action(cx.listener(|this, _: &CopyCurrentBranch, window, cx| {
                 this.copy_current_branch(window, cx);
             }))

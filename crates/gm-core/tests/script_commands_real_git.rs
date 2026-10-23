@@ -16,8 +16,9 @@ use gm_core::script::run::ScriptEvent;
 use gm_core::script::trust::TrustStore;
 use gm_core::{EffectRequest, Engine, ScriptLink};
 use gm_schema::{
-    Actor, Command, CommandKind, Event, OperationId, OperationState, WorkflowDryRun, WorkflowEnd,
-    WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,
+    Actor, Command, CommandKind, Event, OperationId, OperationState, WorkflowDiagnostic,
+    WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus,
+    WorkflowRunSummary,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -781,6 +782,74 @@ fn dry_run_of(events: &[Event]) -> WorkflowDryRun {
             _ => None,
         })
         .expect("a dry run")
+}
+
+/// The problems a check answered, in the order it found them.
+fn checked_of(events: &[Event]) -> Vec<WorkflowDiagnostic> {
+    events
+        .iter()
+        .find_map(|e| match e {
+            Event::WorkflowChecked { diagnostics, .. } => Some(diagnostics.clone()),
+            _ => None,
+        })
+        .expect("a check answer")
+}
+
+#[test]
+fn a_check_of_a_good_script_finds_nothing_and_writes_nothing() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let mut harness = Harness::open(repo.path(), flows.path());
+
+    let events = harness.send(CommandKind::CheckWorkflowScript {
+        source: DRY.to_owned(),
+    });
+
+    assert!(checked_of(&events).is_empty());
+    assert!(harness.listing().is_empty(), "a check saves nothing");
+}
+
+#[test]
+fn a_check_of_a_syntax_error_points_at_its_line() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let mut harness = Harness::open(repo.path(), flows.path());
+
+    let events = harness.send(CommandKind::CheckWorkflowScript {
+        source: "local M = {}\nM.meta = {\nreturn M\n".into(),
+    });
+
+    let problems = checked_of(&events);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].line >= 2, "{problems:?}");
+    assert!(!problems[0].message.is_empty());
+}
+
+#[test]
+fn a_check_of_a_bad_meta_points_at_the_field() {
+    let flows = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let mut harness = Harness::open(repo.path(), flows.path());
+    let source = r#"local M = {}
+M.meta = {
+  name = "w",
+  trigger = { on = "nope" },
+}
+function M.execute(ctx, input)
+end
+return M
+"#;
+
+    let problems = checked_of(&harness.send(CommandKind::CheckWorkflowScript {
+        source: source.to_owned(),
+    }));
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems[0].line, 4, "{problems:?}");
+    assert!(problems[0].message.contains("unknown trigger `nope`"));
 }
 
 const DRY: &str = r#"

@@ -179,6 +179,17 @@ impl TextArea {
         self.restart_blink(window, cx);
     }
 
+    /// Moves the caret to the start of `line` (1-based; a line past the end is the last one),
+    /// shows it and focuses the area.
+    pub fn go_to_line(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let range = self.editor.line_range(line.saturating_sub(1));
+        self.editor.set_cursor(range.start, false);
+        self.preferred_x = None;
+        self.reveal = true;
+        self.focus(window, cx);
+        cx.notify();
+    }
+
     // What the element reads.
 
     pub(crate) fn marked_range(&self) -> Option<&Range<usize>> {

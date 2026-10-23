@@ -16,8 +16,8 @@ use crate::status::{
     WorktreeInspection,
 };
 use crate::workflow::{
-    WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus,
-    WorkflowRunSummary,
+    WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
+    WorkflowRunStatus, WorkflowRunSummary,
 };
 
 /// The refusal of `DeleteMergedBranches` when the merged list no longer matches
@@ -349,6 +349,13 @@ pub enum CommandKind {
         source: String,
         inputs: serde_json::Value,
     },
+    /// Checks `source`, the workflow text the editor holds, without running it: the
+    /// problems `inspect` finds (a syntax error, a missing `execute`, a bad `M.meta`), each
+    /// with its line. Answers `WorkflowChecked`, with no problems when the text loads. Nothing
+    /// is written and nothing is run, so agents may ask too; never recorded.
+    CheckWorkflowScript {
+        source: String,
+    },
     /// Writes `source` to the `.lua` file at `path`, which must be inside
     /// the user's workflows directories (never a repository). With
     /// `expected_hash`, refuses when the file on disk no longer hashes to it
@@ -655,6 +662,11 @@ pub enum Event {
     WorkflowDryRun {
         id: OperationId,
         dry_run: Box<WorkflowDryRun>,
+    },
+    /// Answers `CheckWorkflowScript`: every problem of the text, empty when it loads.
+    WorkflowChecked {
+        id: OperationId,
+        diagnostics: Vec<WorkflowDiagnostic>,
     },
     /// The file at `path` now holds what was saved; `hash` is its new sha256.
     WorkflowFileSaved {

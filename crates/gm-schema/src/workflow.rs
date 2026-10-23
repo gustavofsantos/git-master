@@ -135,6 +135,14 @@ pub struct WorkflowDryRun {
     pub stop: String,
 }
 
+/// One problem of a script's text, as the editor shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowDiagnostic {
+    /// 1-based; 0 when the problem has no single line.
+    pub line: u32,
+    pub message: String,
+}
+
 /// One `ctx` call of a dry run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowDryCall {

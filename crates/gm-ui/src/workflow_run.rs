@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use gm_schema::{WorkflowEnd, WorkflowInfo, WorkflowRunStatus};
 
 use crate::hook_run::Fill;
+use crate::workflow_keys::KeyPlan;
 
 /// How many runs the window keeps. Older ones are forgotten.
 const KEPT_RUNS: usize = 10;
@@ -79,6 +80,10 @@ pub struct Workflows {
     pub templates: Vec<String>,
     /// The file the last `WorkflowCreated` named, until a run starts.
     pub created: Option<String>,
+    /// The file a template just created, until the listing has it and the page opens it.
+    pub fresh: Option<String>,
+    /// The shortcuts of the manual workflows: the ones bound and the ones left out.
+    pub keys: KeyPlan,
     /// The last runs, keyed by run id. Ids grow, so the last key is the newest.
     pub runs: BTreeMap<i64, RunView>,
 }
@@ -125,7 +130,18 @@ impl Workflows {
 
     /// A template was copied to `path`. The status says so until a run starts.
     pub fn created(&mut self, path: String) {
+        self.fresh = Some(path.clone());
         self.created = Some(path);
+    }
+
+    /// Why the shortcut of the workflow `name` is not bound, when it is not.
+    #[must_use]
+    pub fn key_warning(&self, name: &str) -> Option<&str> {
+        self.keys
+            .warnings
+            .iter()
+            .find(|warning| warning.workflow == name)
+            .map(|warning| warning.message.as_str())
     }
 
     /// A run moved. Leaving `AwaitingApproval` clears the approval it waited on.
@@ -339,6 +355,32 @@ mod tests {
             Some("/home/u/.config/gitmaster/workflows")
         );
         assert_eq!(workflows.templates, ["commit-message"]);
+    }
+
+    #[test]
+    fn a_key_the_plan_left_out_has_its_warning_on_its_workflow() {
+        let workflows = Workflows {
+            keys: crate::workflow_keys::plan(
+                &[("flow".to_owned(), "secondary-s".to_owned())],
+                &[("ctrl-s".to_owned(), "Save Workflow".to_owned())],
+                false,
+            ),
+            ..Workflows::default()
+        };
+        assert_eq!(
+            workflows.key_warning("flow"),
+            Some("key secondary-s is already used by Save Workflow")
+        );
+        assert_eq!(workflows.key_warning("other"), None);
+    }
+
+    #[test]
+    fn a_created_file_is_opened_once() {
+        let mut workflows = Workflows::default();
+        workflows.created("/w/new.lua".into());
+        assert_eq!(workflows.fresh.as_deref(), Some("/w/new.lua"));
+        workflows.fresh = None;
+        assert_eq!(workflows.created.as_deref(), Some("/w/new.lua"));
     }
 
     #[test]
