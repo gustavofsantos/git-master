@@ -1,4 +1,0 @@
-lang=python root=/usr/lib/python3.13 threads=1
-walk: 1250 entries, 589 matching files in 0.00s
-parsed 589 files (10.3 MB, 293718 lines), 0 with syntax errors (0.00%), 0 skipped as too big
-wall 1.74s  =>  338 files/s, 5.9 MB/s, 168679 lines/s  (cpu: read 0.17s, parse 1.45s, query 0.00s)

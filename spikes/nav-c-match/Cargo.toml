@@ -1,9 +1,0 @@
-[package]
-name = "spike-nav-c-match"
-version.workspace = true
-edition.workspace = true
-publish.workspace = true
-
-[[bin]]
-name = "spike-nav-c-match"
-path = "src/main.rs"

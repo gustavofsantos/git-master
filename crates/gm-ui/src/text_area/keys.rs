@@ -1,5 +1,5 @@
 // Ported from rvw (local checkout ~/Projects/rvw): crates/rvw-gui/src/text_area/keys.rs, MIT, same author.
-// Copied into gm-ui from spikes/b-text (see spikes/b-text/FINDINGS.md).
+// Copied into gm-ui from the b-text spike (removed from the tree; see git history: git show 7932c61:spikes/b-text/FINDINGS.md).
 //! The area's actions and their key bindings.
 
 use gpui::{App, KeyBinding, actions};

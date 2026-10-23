@@ -1,7 +1,0 @@
-fn    truth=   14421 tree-sitter=   14421 both=   14421 recall=100.00%  precision=100.00%
-type  truth=    2432 tree-sitter=    2432 both=    2432 recall=100.00%  precision=100.00%
-all   truth=   16853 tree-sitter=   16853 both=   16853 recall=100.00%  precision=100.00%
-
-missed by tree-sitter (in the truth only): 0  {}
-
-extra in tree-sitter (not in the truth): 0  {}

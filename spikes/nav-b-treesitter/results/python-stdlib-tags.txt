@@ -1,9 +1,0 @@
-lang=python root=/usr/lib/python3.13 threads=1
-walk: 1250 entries, 589 matching files in 0.00s
-parsed 589 files (10.3 MB, 293718 lines), 0 with syntax errors (0.00%), 0 skipped as too big
-wall 2.24s  =>  263 files/s, 4.6 MB/s, 131242 lines/s  (cpu: read 0.05s, parse 1.48s, query 0.58s)
-definitions 20043 (34.0 per file), references 55963
-  definition.class             2432
-  definition.constant          3190
-  definition.function          14421
-dumped 20043 rows to /tmp/s-b/py-stdlib.tags

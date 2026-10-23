@@ -1,4 +1,0 @@
-lang=python root=/root/.cache/gm-spikes/corpora/django threads=1
-walk: 7085 entries, 2937 matching files in 0.03s
-parsed 2937 files (18.6 MB, 529462 lines), 1 with syntax errors (0.03%), 0 skipped as too big
-wall 3.38s  =>  869 files/s, 5.5 MB/s, 156596 lines/s  (cpu: read 0.10s, parse 2.99s, query 0.00s)

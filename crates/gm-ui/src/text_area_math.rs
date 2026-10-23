@@ -1,5 +1,5 @@
 // Ported from rvw (local checkout ~/Projects/rvw): crates/rvw-gui/src/text_area_math.rs, MIT, same author.
-// Copied into gm-ui from spikes/b-text (see spikes/b-text/FINDINGS.md).
+// Copied into gm-ui from the b-text spike (removed from the tree; see git history: git show 7932c61:spikes/b-text/FINDINGS.md).
 //! The pure arithmetic of the multi-line text area: visual lines, heights,
 //! scrolling and clicks. Nothing here touches gpui, so the parts that cause
 //! jitter when wrong (height clamp, scroll to caret) are unit tested.

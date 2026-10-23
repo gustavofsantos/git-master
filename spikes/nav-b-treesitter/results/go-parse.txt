@@ -1,4 +1,0 @@
-lang=go root=/usr/local/go/src threads=1
-walk: 10703 entries, 7117 matching files in 0.02s
-parsed 7117 files (75.5 MB, 2511604 lines), 52 with syntax errors (0.73%), 0 skipped as too big
-wall 18.54s  =>  384 files/s, 4.1 MB/s, 135462 lines/s  (cpu: read 1.98s, parse 14.87s, query 0.00s)

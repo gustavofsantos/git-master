@@ -1,3 +1,0 @@
-highlights query compiled in 35.25 ms
-highlight 60 lines at the top: 0.310 ms, 325 captures
-highlight the whole file: 45.75 ms, 56058 captures

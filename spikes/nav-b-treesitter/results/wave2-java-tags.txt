@@ -1,8 +1,0 @@
-lang=java root=/root/.cache/gm-spikes/corpora/guava threads=1
-walk: 3363 entries, 3275 matching files in 0.01s
-parsed 3275 files (28.0 MB, 796386 lines), 13 with syntax errors (0.40%), 0 skipped as too big
-wall 5.88s  =>  557 files/s, 4.8 MB/s, 135553 lines/s  (cpu: read 0.15s, parse 3.73s, query 1.72s)
-definitions 62139 (19.0 per file), references 283939
-  definition.class             6391
-  definition.interface         452
-  definition.method            55296

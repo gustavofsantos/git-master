@@ -1,4 +1,0 @@
-lang=typescript root=/root/.cache/gm-spikes/corpora/TypeScript threads=1
-walk: 67927 entries, 13413 matching files in 0.12s
-parsed 13410 files (20.8 MB, 648445 lines), 1147 with syntax errors (8.55%), 3 skipped as too big
-wall 4.11s  =>  3259 files/s, 5.0 MB/s, 157609 lines/s  (cpu: read 0.23s, parse 3.53s, query 0.00s)

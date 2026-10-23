@@ -1,9 +1,0 @@
-lang=go root=/usr/local/go/src threads=1
-walk: 10703 entries, 7117 matching files in 0.02s
-parsed 7117 files (75.5 MB, 2511604 lines), 52 with syntax errors (0.73%), 0 skipped as too big
-wall 24.37s  =>  292 files/s, 3.1 MB/s, 103063 lines/s  (cpu: read 0.44s, parse 14.56s, query 7.68s)
-definitions 95611 (13.4 per file), references 1010538
-  definition.function          56782
-  definition.method            22300
-  definition.type              16529
-dumped 95611 rows to /tmp/s-b/go.tags

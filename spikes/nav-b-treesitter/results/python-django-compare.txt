@@ -1,8 +1,0 @@
-fn    truth=   32879 tree-sitter=   32879 both=   32879 recall=100.00%  precision=100.00%
-type  truth=   11123 tree-sitter=   11124 both=   11123 recall=100.00%  precision= 99.99%
-all   truth=   44002 tree-sitter=   44003 both=   44002 recall=100.00%  precision=100.00%
-
-missed by tree-sitter (in the truth only): 0  {}
-
-extra in tree-sitter (not in the truth): 1  {'type': 1}
-    ('tests/test_runner_apps/tagged/tests_syntax_error.py', 7, 'type', 'SyntaxErrorTestCase')

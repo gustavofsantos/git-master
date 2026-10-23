@@ -1,8 +1,0 @@
-lang=c root=/root/.cache/gm-spikes/corpora/git threads=1
-walk: 4853 entries, 986 matching files in 0.01s
-parsed 986 files (11.7 MB, 444538 lines), 397 with syntax errors (40.26%), 0 skipped as too big
-wall 3.37s  =>  293 files/s, 3.5 MB/s, 131971 lines/s  (cpu: read 0.06s, parse 2.27s, query 0.87s)
-definitions 19666 (19.9 per file), references 0
-  definition.class             1224
-  definition.function          16351
-  definition.type              2091

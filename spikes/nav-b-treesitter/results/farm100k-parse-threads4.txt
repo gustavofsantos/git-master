@@ -1,4 +1,0 @@
-lang=all root=/root/.cache/gm-spikes/farm threads=4
-walk: 184901 entries, 104758 matching files in 0.41s
-parsed 104709 files (1394.8 MB, 34870698 lines), 19236 with syntax errors (18.37%), 49 skipped as too big
-wall 75.56s  =>  1386 files/s, 18.5 MB/s, 461494 lines/s  (cpu: read 5.49s, parse 259.82s, query 0.00s)

@@ -1,4 +1,0 @@
-lang=rust root=/root/.cargo/registry/src threads=1
-walk: 39522 entries, 22612 matching files in 0.12s
-parsed 22604 files (534.5 MB, 12108809 lines), 1585 with syntax errors (7.01%), 8 skipped as too big
-wall 105.06s  =>  215 files/s, 5.1 MB/s, 115253 lines/s  (cpu: read 1.45s, parse 89.73s, query 0.00s)

@@ -475,8 +475,8 @@ mod with_a_script_for_git {
 /// The S-A benchmark through the adapter the app uses (design/code-navigation.md, N3).
 ///
 /// `GM_BENCH_REPO=<repo with a worktree> cargo test -p gm-core --test grep_real_git
-/// -- --ignored --nocapture grep_timings`. The repository comes from
-/// `spikes/nav-a-lists/gen.sh <files> <dir> checkout`: `common_token` is in one
+/// -- --ignored --nocapture grep_timings`. The repository comes from the `gen.sh <files> <dir> checkout`
+/// script of the nav-a-lists spike (git history, 7932c61): `common_token` is in one
 /// file of ten, `rare_token` in one of 20 000, `needle_unique` in one.
 #[test]
 #[ignore = "needs GM_BENCH_REPO, a large generated repository"]

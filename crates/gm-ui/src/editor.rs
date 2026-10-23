@@ -1,5 +1,5 @@
 // Ported from rvw (local checkout ~/Projects/rvw): crates/rvw-view/src/editor.rs, MIT, same author.
-// Copied into gm-ui from spikes/b-text (see spikes/b-text/FINDINGS.md).
+// Copied into gm-ui from the b-text spike (removed from the tree; see git history: git show 7932c61:spikes/b-text/FINDINGS.md).
 //! A multi-line text buffer with a cursor, a selection and undo.
 //!
 //! Offsets are byte offsets and always sit on char boundaries. Newlines are

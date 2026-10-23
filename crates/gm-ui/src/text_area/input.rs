@@ -1,5 +1,5 @@
 // Ported from rvw (local checkout ~/Projects/rvw): crates/rvw-gui/src/text_area/input.rs, MIT, same author.
-// Copied into gm-ui from spikes/b-text (see spikes/b-text/FINDINGS.md).
+// Copied into gm-ui from the b-text spike (removed from the tree; see git history: git show 7932c61:spikes/b-text/FINDINGS.md).
 //! IME and typed text: the platform's input handler for the area.
 
 use std::ops::Range;

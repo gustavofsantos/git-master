@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["spikes", "tools/docsite"]
+exclude = ["tools/docsite"]
 members = ["crates/gm-schema", "crates/gm-core", "crates/gm-ui", "crates/gm-mcp", "crates/gitmaster"]
 
 [workspace.package]
