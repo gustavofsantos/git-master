@@ -165,6 +165,7 @@ impl Workflows {
             WorkflowEnd::Done => WorkflowRunStatus::Done,
             WorkflowEnd::Failed => WorkflowRunStatus::Failed,
             WorkflowEnd::Blocked => WorkflowRunStatus::Blocked,
+            WorkflowEnd::Cancelled => WorkflowRunStatus::Cancelled,
         };
         view.approval = None;
         view.finished = Some((end, reason));
@@ -262,6 +263,7 @@ fn status_text(view: &RunView) -> String {
             WorkflowEnd::Done => return format!("{name}: done"),
             WorkflowEnd::Failed => "failed",
             WorkflowEnd::Blocked => "blocked",
+            WorkflowEnd::Cancelled => "cancelled",
         };
         return match reason {
             Some(reason) => format!("{name}: {verb}: {reason}"),
@@ -282,6 +284,7 @@ fn status_text(view: &RunView) -> String {
         WorkflowRunStatus::Failed => format!("{name}: failed"),
         WorkflowRunStatus::Blocked => format!("{name}: blocked"),
         WorkflowRunStatus::Cancelled => format!("{name}: cancelled"),
+        WorkflowRunStatus::Interrupted => format!("{name}: interrupted"),
     }
 }
 

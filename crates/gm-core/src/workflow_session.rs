@@ -1,74 +1,19 @@
-//! The engine's side of manual workflows (design/workflow-scripts.md): the session that holds the
-//! driver and the store of one open repository, the Git actions a run takes
-//! through the engine's `GitPort`, and the mapping of run events to the events
-//! the front-ends get. The engine's methods that drive it live in `engine`.
+//! The engine's side of workflow scripts (design/workflow-scripts.md): the Git actions a run takes
+//! through the engine's `GitPort`, the directories scripts are read from, and the files of the
+//! Workflows page (save atomically, delete to the trash). The engine's methods that drive them
+//! live in `engine`.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use gm_schema::{
-    Actor, CommandKind, Event, OperationId, RepoStatus, WorkflowDryRun, WorkflowDryStep,
-    WorkflowEnd, WorkflowInfo, WorkflowInput, WorkflowRunDetail, WorkflowRunStatus,
-    WorkflowRunSummary, WorkflowStepRecord,
-};
-use serde_json::{Value, json};
+use gm_schema::{Actor, CommandKind, OperationId};
 
 use crate::branch;
-use crate::workflow::catalog::Level;
-use crate::workflow::driver::{Driver, ExecJob, GitActions, Outcome, RunEvent};
-use crate::workflow::dry_run::{self, DryStep, DryStop, MAX_STEPS};
-use crate::workflow::loader::{Entry, Ignored, Loaded, sha256_hex};
-use crate::workflow::machine::Context;
-use crate::workflow::model::{Definition, End, StateKind};
-use crate::workflow::parse;
-use crate::workflow::store::{OutputRow, RunId, RunRow, RunStatus, Store, TransitionRow, prefix};
-use crate::workflow::{Diagnostic, Severity};
+use crate::script::loader::sha256_hex;
+use crate::workflow::driver::GitActions;
 use crate::{GitError, GitPort, LogEntry};
 
 /// The `gitmaster.workflowPath` key: extra directories of workflow files (D61).
 const WORKFLOW_PATH_KEY: &str = "gitmaster.workflowPath";
-
-/// A run's `repo.staged_diff` is kept to this many bytes in the run view.
-const STAGED_DIFF_HEAD: usize = 4 * 1024;
-
-/// The workflow session of one open repository: created on the first workflow
-/// command, and replaced when another repository opens.
-pub(crate) struct Session {
-    pub(crate) root: PathBuf,
-    pub(crate) driver: Driver,
-    /// `exec` jobs started and not yet taken by the caller.
-    pub(crate) jobs: Vec<ExecJob>,
-    /// The operation that started each run. Its Git writes are logged under it.
-    origins: BTreeMap<RunId, OperationId>,
-    /// The operation that opened the session: the origin of a run it resumed.
-    default_origin: OperationId,
-}
-
-impl Session {
-    pub(crate) fn new(root: PathBuf, store: Store, opened_by: OperationId) -> Self {
-        Self {
-            driver: Driver::new(store, root.clone()),
-            root,
-            jobs: Vec::new(),
-            origins: BTreeMap::new(),
-            default_origin: opened_by,
-        }
-    }
-
-    pub(crate) fn origin(&self, run: RunId) -> OperationId {
-        self.origins
-            .get(&run)
-            .copied()
-            .unwrap_or(self.default_origin)
-    }
-
-    /// Keeps the jobs of a driver call and turns its events into the ones the
-    /// front-ends get.
-    pub(crate) fn absorb(&mut self, outcome: Outcome) -> Vec<Event> {
-        self.jobs.extend(outcome.jobs);
-        outcome.events.into_iter().map(run_event).collect()
-    }
-}
 
 /// The Git actions of a workflow step: each one is a Git write of the engine's
 /// `GitPort`, and goes into the command log under the operation that caused it.
@@ -185,269 +130,6 @@ fn expand_home(value: &str) -> PathBuf {
     }
 }
 
-/// The repository snapshot a run's expressions read as `repo.*`. A piece that
-/// cannot be read is `null`.
-pub(crate) fn repo_snapshot(git: &dyn GitPort, root: &Path) -> Value {
-    let (branch, head) = match git.status(root) {
-        Ok(RepoStatus { branch, .. }) => (branch.head, branch.oid),
-        Err(_) => (None, None),
-    };
-    json!({
-        "root": root.to_string_lossy(),
-        "branch": branch,
-        "head": head,
-        "staged_diff": git.staged_diff(root).ok(),
-    })
-}
-
-/// A dry run of `definition` for the editor: the repository snapshot a manual
-/// run reads, and `given` inputs with each declared input it does not give set
-/// to `""`. Nothing runs.
-pub(crate) fn dry_run(
-    git: &dyn GitPort,
-    root: &Path,
-    definition: &Definition,
-    given: &Value,
-) -> WorkflowDryRun {
-    let mut inputs = match given {
-        Value::Object(map) => map.clone(),
-        _ => serde_json::Map::new(),
-    };
-    let mut missing_inputs = Vec::new();
-    for input in &definition.inputs {
-        if !inputs.contains_key(&input.name) {
-            inputs.insert(input.name.clone(), json!(""));
-            missing_inputs.push(input.name.clone());
-        }
-    }
-    let context = Context {
-        inputs: Value::Object(inputs),
-        trigger: json!({"on": definition.trigger.on}),
-        repo: repo_snapshot(git, root),
-    };
-    let walk = dry_run::dry_run(definition, &context);
-    WorkflowDryRun {
-        error: None,
-        missing_inputs,
-        steps: walk.steps.iter().map(dry_step).collect(),
-        stop: dry_stop(&walk.stop),
-    }
-}
-
-/// The dry run of a text that does not load: its errors, and no steps.
-pub(crate) fn dry_run_error(diagnostics: &[Diagnostic]) -> WorkflowDryRun {
-    let text = diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.severity == Severity::Error)
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    WorkflowDryRun {
-        error: Some(text),
-        missing_inputs: Vec::new(),
-        steps: Vec::new(),
-        stop: String::new(),
-    }
-}
-
-fn dry_step(step: &DryStep) -> WorkflowDryStep {
-    WorkflowDryStep {
-        state: step.state.clone(),
-        action: step.action.clone(),
-        level: level_name(step.level).to_owned(),
-        input: step.input.clone(),
-        executed: step.executed,
-        assumed: step.assumed,
-        outcome: step.outcome.clone(),
-        output: step.output.clone(),
-    }
-}
-
-fn level_name(level: Level) -> &'static str {
-    match level {
-        Level::Read => "read",
-        Level::Propose => "propose",
-        Level::Apply => "apply",
-        Level::Pause => "approve",
-    }
-}
-
-/// Why a dry run stopped, in words (see `WorkflowDryRun::stop`).
-fn dry_stop(stop: &DryStop) -> String {
-    match stop {
-        DryStop::Ended { end, reason } => {
-            let end = match end {
-                End::Done => "end.done",
-                End::Failed => "end.failed",
-                End::Blocked => "end.blocked",
-            };
-            match reason {
-                Some(reason) => format!("{end}: {reason}"),
-                None => end.to_owned(),
-            }
-        }
-        DryStop::Waiting { event } => format!("would wait for {event}"),
-        DryStop::Unavailable { action } => format!("`{action}` is not available yet"),
-        DryStop::Error(message) => message.clone(),
-        DryStop::StepLimit => format!("stopped after {MAX_STEPS} steps"),
-    }
-}
-
-/// What `ListWorkflows` shows for one file.
-pub(crate) fn workflow_info(entry: &Entry) -> WorkflowInfo {
-    let (trigger, key, inputs, error, warnings) = match &entry.result {
-        Ok((definition, diagnostics)) => (
-            definition.trigger.on.clone(),
-            definition.trigger.key.clone(),
-            definition
-                .inputs
-                .iter()
-                .map(|input| WorkflowInput {
-                    name: input.name.clone(),
-                    prompt: input.prompt.clone(),
-                })
-                .collect(),
-            None,
-            diagnostics
-                .iter()
-                .filter(|d| d.severity == Severity::Warning)
-                .map(|d| format!("line {}: {}", d.line, d.message))
-                .collect(),
-        ),
-        Err(diagnostics) => (
-            String::new(),
-            None,
-            Vec::new(),
-            diagnostics
-                .iter()
-                .find(|d| d.severity == Severity::Error)
-                .or(diagnostics.first())
-                .map(|d| format!("line {}: {}", d.line, d.message)),
-            Vec::new(),
-        ),
-    };
-    WorkflowInfo {
-        name: entry.name.clone(),
-        path: entry.path.display().to_string(),
-        trigger,
-        key,
-        inputs,
-        hash: entry.hash.clone(),
-        error,
-        warnings,
-        source: entry.source.clone(),
-    }
-}
-
-/// One run as the history lists it.
-pub(crate) fn run_summary(row: &RunRow) -> WorkflowRunSummary {
-    WorkflowRunSummary {
-        run: row.id,
-        workflow: row.workflow.clone(),
-        status: run_status(row.status),
-        started_by: row.started_by.clone(),
-        started_at: row.started_at,
-        ended_at: row.ended_at,
-        end_reason: row.end_reason.clone(),
-        current_state: row.current_state.clone(),
-    }
-}
-
-/// Everything about one run, for the run view. `inputs`, `trigger` and `repo`
-/// are the context the run stored when it started. A definition that no longer
-/// parses leaves every step without its action; the history still shows.
-pub(crate) fn run_detail(store: &Store, run: RunId) -> Result<WorkflowRunDetail, String> {
-    let row = store
-        .run(run)
-        .map_err(|e| e.0)?
-        .ok_or_else(|| format!("no run {run}"))?;
-    let definition = parse::parse(&row.definition_text).ok();
-    let outputs = store.outputs(run).map_err(|e| e.0)?;
-    let transitions = store.transitions(run).map_err(|e| e.0)?;
-    let field = |name: &str| row.trigger.get(name).cloned().unwrap_or(Value::Null);
-    let mut repo = field("repo");
-    cut_staged_diff(&mut repo);
-    Ok(WorkflowRunDetail {
-        summary: run_summary(&row),
-        definition: row.definition_text.clone(),
-        inputs: field("inputs"),
-        trigger: field("trigger"),
-        repo,
-        steps: steps(&outputs, &transitions, definition.as_ref()),
-    })
-}
-
-/// One record per output row, in the order the rows hold. The k-th visit of a
-/// state is paired with the k-th transition out of it.
-fn steps(
-    outputs: &[OutputRow],
-    transitions: &[TransitionRow],
-    definition: Option<&Definition>,
-) -> Vec<WorkflowStepRecord> {
-    let mut out_of: BTreeMap<&str, Vec<&TransitionRow>> = BTreeMap::new();
-    for transition in transitions {
-        out_of
-            .entry(transition.from_state.as_str())
-            .or_default()
-            .push(transition);
-    }
-    outputs
-        .iter()
-        .map(|row| {
-            let taken = out_of.get(row.state.as_str()).and_then(|list| {
-                list.get(usize::try_from(row.visit.saturating_sub(1)).ok()?)
-                    .copied()
-            });
-            WorkflowStepRecord {
-                state: row.state.clone(),
-                visit: row.visit,
-                action: definition.and_then(|definition| action_of(definition, &row.state)),
-                input: row.input.clone(),
-                output: row.output.clone(),
-                truncated: row.truncated,
-                outcome: taken.map(|t| t.outcome.clone()),
-                next: taken.map(|t| t.to_state.clone()),
-                started_at: row.started_at,
-                ended_at: row.ended_at,
-            }
-        })
-        .collect()
-}
-
-/// The action of the state at `path` (`each/plan` inside a `for_each`); `None`
-/// for a wait, a `for_each`, or a state the definition does not have.
-fn action_of(definition: &Definition, path: &str) -> Option<String> {
-    let (top, inner) = match path.split_once('/') {
-        Some((outer, inner)) => (outer, Some(inner)),
-        None => (path, None),
-    };
-    let state = definition.state(top)?;
-    let state = match (&state.kind, inner) {
-        (StateKind::ForEach { states, .. }, Some(inner)) => {
-            states.iter().find(|nested| nested.id == inner)?
-        }
-        (_, None) => state,
-        _ => return None,
-    };
-    match &state.kind {
-        StateKind::Action { action, .. } => Some(action.clone()),
-        _ => None,
-    }
-}
-
-/// Cuts a string `repo.staged_diff` to its head, saying how large it was.
-fn cut_staged_diff(repo: &mut Value) {
-    let Some(Value::String(diff)) = repo.get_mut("staged_diff") else {
-        return;
-    };
-    if diff.len() <= STAGED_DIFF_HEAD {
-        return;
-    }
-    let size = diff.len();
-    let head = prefix(diff, STAGED_DIFF_HEAD);
-    *diff = format!("{head}\n… ({size} bytes)");
-}
-
 /// The workflow file `path` names, when its folder is one of `dirs` and is not
 /// inside the repository (D73). The result holds the folder canonicalized.
 pub(crate) fn workflow_file(root: &Path, dirs: &[PathBuf], path: &str) -> Result<PathBuf, String> {
@@ -455,13 +137,13 @@ pub(crate) fn workflow_file(root: &Path, dirs: &[PathBuf], path: &str) -> Result
     if !path.is_absolute() {
         return Err(format!("{} is not an absolute path", path.display()));
     }
-    // The loader reads `*.toml` by extension, so the same test applies here.
+    // The loader reads `*.lua` by extension, so the same test applies here.
     let name = path
         .file_name()
-        .filter(|_| path.extension().is_some_and(|ext| ext == "toml"))
+        .filter(|_| path.extension().is_some_and(|ext| ext == "lua"))
         .ok_or_else(|| {
             format!(
-                "{} is not a workflow file: its name must end in .toml",
+                "{} is not a workflow file: its name must end in .lua",
                 path.display()
             )
         })?;
@@ -536,78 +218,4 @@ pub(crate) fn trash_file(file: &Path, dir: &Path, stamp: i64) -> Result<PathBuf,
         })?;
     }
     Ok(target)
-}
-
-/// The listing's `ignored` lines: `<path>: <reason>`.
-pub(crate) fn ignored_lines(ignored: &[Ignored]) -> Vec<String> {
-    ignored
-        .iter()
-        .map(|item| format!("{}: {}", item.path.display(), item.reason))
-        .collect()
-}
-
-/// Loads every workflow file of the listed directories.
-pub(crate) fn load(
-    git: &dyn GitPort,
-    root: &Path,
-    user_dir: Option<&Path>,
-) -> Result<Loaded, String> {
-    let dirs = workflow_dirs(git, root, user_dir)?;
-    Ok(crate::workflow::loader::load_dirs(&dirs, Some(root)))
-}
-
-fn run_event(event: RunEvent) -> Event {
-    match event {
-        RunEvent::Changed {
-            run,
-            workflow,
-            status,
-            state,
-        } => Event::WorkflowRunChanged {
-            run,
-            workflow,
-            status: run_status(status),
-            state,
-        },
-        RunEvent::SuggestMessage { run, message } => {
-            Event::WorkflowMessageSuggested { run, message }
-        }
-        RunEvent::Notify { run, text } => Event::WorkflowNotice { run, text },
-        RunEvent::AwaitingApproval {
-            run,
-            state,
-            summary,
-        } => Event::WorkflowApprovalRequested {
-            run,
-            state,
-            summary,
-        },
-        RunEvent::Finished {
-            run, end, reason, ..
-        } => Event::WorkflowRunFinished {
-            run,
-            end: run_end(end),
-            reason,
-        },
-    }
-}
-
-fn run_status(status: RunStatus) -> WorkflowRunStatus {
-    match status {
-        RunStatus::Running => WorkflowRunStatus::Running,
-        RunStatus::Waiting => WorkflowRunStatus::Waiting,
-        RunStatus::AwaitingApproval => WorkflowRunStatus::AwaitingApproval,
-        RunStatus::Done => WorkflowRunStatus::Done,
-        RunStatus::Failed => WorkflowRunStatus::Failed,
-        RunStatus::Blocked => WorkflowRunStatus::Blocked,
-        RunStatus::Cancelled => WorkflowRunStatus::Cancelled,
-    }
-}
-
-fn run_end(end: End) -> WorkflowEnd {
-    match end {
-        End::Done => WorkflowEnd::Done,
-        End::Failed => WorkflowEnd::Failed,
-        End::Blocked => WorkflowEnd::Blocked,
-    }
 }

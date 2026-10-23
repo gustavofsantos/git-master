@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{Map, json};
 
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event,
@@ -29,7 +29,9 @@ use crate::remote::{RemoteJob, RemoteReport};
 use crate::review;
 use crate::review_session::{self, ReviewSession};
 use crate::review_store::ReviewStore;
-use crate::script::journal::RunId as ScriptRunId;
+use crate::script::dry;
+use crate::script::inspect::inspect;
+use crate::script::journal::{Journal, RETAINED_RUNS, RunId as ScriptRunId};
 use crate::script::loader;
 use crate::script::luau::LuauEngine;
 use crate::script::policy::StartedBy;
@@ -38,11 +40,7 @@ use crate::script::run::{RunSpec, Runtime};
 use crate::script::trust::{self, TrustStore};
 use crate::script::{api_docs, input as script_input, templates as script_templates};
 use crate::script_session::{self, EffectRequest, ScriptLink, ScriptSession};
-use crate::workflow;
-use crate::workflow::driver::{ExecJob, ExecReport};
-use crate::workflow::store::{RETAINED_RUNS, Store};
-use crate::workflow::templates;
-use crate::workflow_session::{self, Actions, Session};
+use crate::workflow_session;
 use crate::worktree;
 
 /// One state change of one operation. The log is audit, and the base for undo
@@ -105,8 +103,6 @@ pub struct Engine {
     workflow_user_dir: Option<PathBuf>,
     /// The folder a deleted workflow file is moved to; see `delete_workflow_file`.
     workflow_trash_dir: Option<PathBuf>,
-    /// The workflow runs of the open repository; see `workflow_session`.
-    workflow: Option<Session>,
     /// How script runs reach the engine thread; see `script_session`. Set by the runner.
     script_link: Option<ScriptLink>,
     /// The script runs of the open repository; see `script_session`.
@@ -212,10 +208,9 @@ impl Engine {
             text_jobs: Vec::new(),
             remote: None,
             remote_jobs: Vec::new(),
-            workflow_user_dir: crate::workflow::loader::default_user_dir(),
+            workflow_user_dir: loader::default_user_dir(),
             workflow_trash_dir: crate::hook::approval::default_file()
                 .and_then(|file| file.parent().map(|data| data.join("workflow-trash"))),
-            workflow: None,
             script_link: None,
             script: None,
             trust: None,
@@ -369,31 +364,6 @@ impl Engine {
     /// Chooses where reviews are kept, in place of the app's data directory (tests).
     pub fn set_trust_store(&mut self, store: TrustStore) {
         self.trust = Some(store);
-    }
-
-    /// The `exec` steps of workflow runs started since the last call. The caller
-    /// runs each on a thread and passes its report to `workflow_report`.
-    pub fn take_workflow_jobs(&mut self) -> Vec<ExecJob> {
-        self.workflow
-            .as_mut()
-            .map(|session| std::mem::take(&mut session.jobs))
-            .unwrap_or_default()
-    }
-
-    /// Turns the answer of an `exec` step into the run's next events. A report
-    /// for a run that was cancelled is dropped.
-    pub fn workflow_report(&mut self, report: ExecReport) -> Vec<Event> {
-        let now = now_ms();
-        let Some(session) = self.workflow.as_mut() else {
-            return Vec::new();
-        };
-        let origin = session.origin(report.run);
-        let root = session.root.clone();
-        let mut actions = Actions::new(self.git.as_ref(), &root, &mut self.log, origin);
-        let outcome = session.driver.exec_report(report, &mut actions, now);
-        let wrote = actions.wrote();
-        let events = session.absorb(outcome);
-        self.workflow_events(origin, &root, events, wrote)
     }
 
     /// Turns the answer of a remote operation into events: the operation ends
@@ -2302,50 +2272,20 @@ impl Engine {
         }
     }
 
-    /// Opens the workflow session of the open repository, unless it is open, and
-    /// resumes the unfinished runs its database holds (D80). Its events come first.
-    fn ensure_workflows(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
+    /// The run journal of the open repository, for a read. A session that is open has
+    /// recovered the runs a previous session left (D100) when it opened; otherwise this is the
+    /// first look since the app started, and the runs still marked unfinished are over now.
+    fn journal(&self, root: &Path) -> Result<Journal, String> {
+        let common = self.git.common_dir(root).map_err(|e| e.0)?;
+        let journal = Journal::open(&common.join("gitmaster").join("state.db")).map_err(|e| e.0)?;
         if self
-            .workflow
+            .script
             .as_ref()
-            .is_some_and(|session| session.root == root)
+            .is_none_or(|session| session.root != root)
         {
-            return Ok(Vec::new());
+            journal.recover_interrupted(now_ms()).map_err(|e| e.0)?;
         }
-        let common = self.git.common_dir(&root).map_err(|e| e.0)?;
-        let store = Store::open(&common.join("gitmaster").join("state.db")).map_err(|e| e.0)?;
-        let mut session = Session::new(root.clone(), store, id);
-        session.driver.set_login_path(self.git.login_path());
-        let mut actions = Actions::new(self.git.as_ref(), &root, &mut self.log, id);
-        let outcome = session.driver.resume(&mut actions, now_ms());
-        let wrote = actions.wrote();
-        let events = session.absorb(outcome);
-        self.workflow = Some(session);
-        Ok(self.workflow_events(id, &root, events, wrote))
-    }
-
-    /// The listing of the workflow files, as `ListWorkflows` answers it.
-    fn workflows_listed(&self, id: OperationId, root: &Path) -> Result<Event, String> {
-        let loaded =
-            workflow_session::load(self.git.as_ref(), root, self.workflow_user_dir.as_deref())?;
-        Ok(Event::WorkflowsListed {
-            id,
-            workflows: loaded
-                .entries
-                .iter()
-                .map(workflow_session::workflow_info)
-                .collect(),
-            ignored: workflow_session::ignored_lines(&loaded.ignored),
-            user_dir: self
-                .workflow_user_dir
-                .as_ref()
-                .map(|dir| dir.display().to_string()),
-            templates: templates::all()
-                .iter()
-                .map(|template| template.name.to_owned())
-                .collect(),
-        })
+        Ok(journal)
     }
 
     /// The newest `limit` runs of `workflow` in the open repository. Reads only.
@@ -2355,55 +2295,72 @@ impl Engine {
         workflow: &str,
         limit: u32,
     ) -> Result<Vec<Event>, String> {
-        let mut events = self.ensure_workflows(id)?;
-        let session = self
-            .workflow
-            .as_ref()
-            .ok_or_else(|| "the workflow session is not open".to_owned())?;
+        let root = self.open_root()?;
+        let journal = self.journal(&root)?;
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-        let rows = session
-            .driver
-            .store()
+        let rows = journal
             .runs(workflow, limit.min(RETAINED_RUNS))
             .map_err(|e| e.0)?;
-        events.push(Event::WorkflowRunsListed {
+        Ok(vec![Event::WorkflowRunsListed {
             id,
             workflow: workflow.to_owned(),
-            runs: rows.iter().map(workflow_session::run_summary).collect(),
-        });
-        Ok(events)
+            runs: rows.iter().map(script_session::run_summary).collect(),
+        }])
     }
 
-    /// One run with every step it took. Reads only.
+    /// One run with its script, input and every `ctx` call. Reads only.
     fn load_workflow_run(&mut self, id: OperationId, run: i64) -> Result<Vec<Event>, String> {
-        let mut events = self.ensure_workflows(id)?;
-        let session = self
-            .workflow
-            .as_ref()
-            .ok_or_else(|| "the workflow session is not open".to_owned())?;
-        let detail = workflow_session::run_detail(session.driver.store(), run)?;
-        events.push(Event::WorkflowRunLoaded {
+        let root = self.open_root()?;
+        let journal = self.journal(&root)?;
+        let row = journal
+            .run(run)
+            .map_err(|e| e.0)?
+            .ok_or_else(|| format!("no run {run}"))?;
+        let calls = journal.calls(run).map_err(|e| e.0)?;
+        Ok(vec![Event::WorkflowRunLoaded {
             id,
-            detail: Box::new(detail),
-        });
-        Ok(events)
+            detail: Box::new(script_session::run_detail(&row, &calls)),
+        }])
     }
 
-    /// Dry run of the workflow text `source` (the editor's, not a saved file):
-    /// walks it without running a step. Reads only. The workflow session is not
-    /// opened, so nothing is resumed and the store is not touched.
+    /// Dry run of the script text `source` (the editor's, not a saved file): it runs with every
+    /// `ctx` call answered by the dry host, so nothing is performed. Reads only; no run is
+    /// recorded. A declared input that `inputs` does not give is `""`.
     fn dry_run_workflow(
         &self,
         id: OperationId,
         source: &str,
         inputs: &serde_json::Value,
     ) -> Result<Vec<Event>, String> {
-        let dry_run = match workflow::load(source) {
-            Ok((definition, _)) => {
+        // The text has no file, so errors cite this name.
+        const CHUNK: &str = "workflow.lua";
+        let engine = LuauEngine::new();
+        let dry_run = match inspect(&engine, CHUNK, source) {
+            Ok(meta) => {
                 let root = self.open_root()?;
-                workflow_session::dry_run(self.git.as_ref(), &root, &definition, inputs)
+                let mut given = Map::new();
+                let mut missing = Vec::new();
+                for spec in &meta.inputs {
+                    let value = if let Some(value) =
+                        inputs.get(&spec.name).and_then(serde_json::Value::as_str)
+                    {
+                        value.to_owned()
+                    } else {
+                        missing.push(spec.name.clone());
+                        String::new()
+                    };
+                    given.insert(spec.name.clone(), json!(value));
+                }
+                let repo = script_input::repo_input(self.git.as_ref(), &root);
+                let input = json!({
+                    "inputs": given,
+                    "trigger": { "on": "manual" },
+                    "repo": repo.value,
+                });
+                let run = dry::walk(&engine, CHUNK, source, &input);
+                script_session::dry_run_result(missing, run)
             }
-            Err(diagnostics) => workflow_session::dry_run_error(&diagnostics),
+            Err(problems) => script_session::dry_run_error(&problems),
         };
         Ok(vec![Event::WorkflowDryRun {
             id,
@@ -2438,7 +2395,7 @@ impl Engine {
                 .map_err(|e| format!("could not create {}: {e}", user.display()))?;
         }
         let file = workflow_session::workflow_file(&root, &dirs, path)?;
-        if u64::try_from(source.len()).unwrap_or(u64::MAX) > crate::workflow::loader::MAX_FILE {
+        if u64::try_from(source.len()).unwrap_or(u64::MAX) > loader::MAX_FILE {
             return Err("the workflow is larger than 256 KiB".to_owned());
         }
         match expected_hash {
@@ -2453,9 +2410,9 @@ impl Engine {
             Event::WorkflowFileSaved {
                 id,
                 path: path.to_owned(),
-                hash: crate::workflow::loader::sha256_hex(source.as_bytes()),
+                hash: loader::sha256_hex(source.as_bytes()),
             },
-            self.workflows_listed(id, &root)?,
+            self.scripts_listed(id, &root)?,
         ])
     }
 
@@ -2488,7 +2445,7 @@ impl Engine {
                 path: path.to_owned(),
                 trashed_to: trashed_to.display().to_string(),
             },
-            self.workflows_listed(id, &root)?,
+            self.scripts_listed(id, &root)?,
         ])
     }
 
@@ -2535,12 +2492,12 @@ impl Engine {
     /// that is written once per session when its version changed (D102).
     fn list_scripts(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
-        let loaded = self.load_scripts(&root)?;
-        let mut ignored = script_session::ignored_lines(&loaded);
+        let mut listed = self.scripts_listed(id, &root)?;
         if !self.api_written {
             self.api_written = true;
             if let Some(dir) = self.workflow_user_dir.as_deref()
                 && let Err(e) = api_docs::write_if_stale(dir, env!("CARGO_PKG_VERSION"))
+                && let Event::WorkflowsListed { ignored, .. } = &mut listed
             {
                 ignored.push(format!(
                     "{}: could not write the .api reference: {e}",
@@ -2548,14 +2505,20 @@ impl Engine {
                 ));
             }
         }
-        Ok(vec![Event::WorkflowsListed {
+        Ok(vec![listed])
+    }
+
+    /// The `WorkflowsListed` event of the open repository's scripts.
+    fn scripts_listed(&self, id: OperationId, root: &Path) -> Result<Event, String> {
+        let loaded = self.load_scripts(root)?;
+        Ok(Event::WorkflowsListed {
             id,
             workflows: loaded
                 .entries
                 .iter()
                 .map(script_session::workflow_info)
                 .collect(),
-            ignored,
+            ignored: script_session::ignored_lines(&loaded),
             user_dir: self
                 .workflow_user_dir
                 .as_ref()
@@ -2564,7 +2527,7 @@ impl Engine {
                 .iter()
                 .map(|template| template.name.to_owned())
                 .collect(),
-        }])
+        })
     }
 
     /// Copies a built-in template into the user's workflows directory; never into a repository.
@@ -3725,7 +3688,6 @@ mod tests {
             failure(&events).as_deref(),
             Some("agents run workflows through MCP in a later slice")
         );
-        assert!(engine.take_workflow_jobs().is_empty());
     }
 
     fn failure(events: &[Event]) -> Option<String> {

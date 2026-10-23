@@ -8,11 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
-use super::args;
+use super::dry::{self, call_text, reason_of};
 use super::input::{self, RepoInput};
 use super::inspect::inspect;
 use super::meta::Meta;
@@ -21,7 +20,6 @@ use super::port::{
 };
 use super::surface::CtxSurface;
 use crate::git::SubprocessGit;
-use crate::workflow::catalog::Level;
 
 /// What a subcommand prints and how it exits.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -250,19 +248,18 @@ fn dry_run(options: &Options, engine: &dyn ScriptEngine, cwd: &Path) -> CliResul
         Err(message) => return failed(1, &message),
     };
     let input = json!({"inputs": inputs, "trigger": {}, "repo": repo.value});
-    let mut host = DryHost::new();
-    let end = run_with(engine, &options.file, &loaded.source, &input, &mut host);
+    let run = dry::walk(engine, &options.file, &loaded.source, &input);
 
     let mut out = format!(
         "dry run of {}: nothing is applied and no program runs\n",
         loaded.meta.name
     );
-    for line in &host.lines {
+    for line in dry::lines(&run.calls) {
         let _ = writeln!(out, "{line}");
     }
-    let _ = writeln!(out, "{}", end_line(&end));
+    let _ = writeln!(out, "{}", dry::end_line(&run.end));
     CliResult {
-        code: i32::from(!matches!(end, RunEnd::Returned(_) | RunEnd::Blocked(_))),
+        code: i32::from(!matches!(run.end, RunEnd::Returned(_) | RunEnd::Blocked(_))),
         out,
         err: note.map(|note| format!("{note}\n")).unwrap_or_default(),
     }
@@ -348,144 +345,6 @@ fn git_root(dir: &Path) -> Option<PathBuf> {
     let text = String::from_utf8_lossy(&output.stdout);
     let root = text.trim_end_matches(['\n', '\r']);
     (!root.is_empty()).then(|| PathBuf::from(root))
-}
-
-fn end_line(end: &RunEnd) -> String {
-    match end {
-        RunEnd::Returned(value) => format!("returned: {value}"),
-        RunEnd::Blocked(reason) => format!("ended: blocked: {reason}"),
-        RunEnd::Failed(failure) => format!("ended: failed: {failure}"),
-        RunEnd::Cancelled => "ended: cancelled".to_owned(),
-    }
-}
-
-/// The host of a dry run. It records every call, and answers the ones that would reach the
-/// engine with a simulated result of the same shape (D85).
-struct DryHost {
-    surface: CtxSurface,
-    lines: Vec<String>,
-    /// A simulated result was already given, so the calls after it are estimates.
-    simulated: bool,
-}
-
-impl DryHost {
-    fn new() -> Self {
-        Self {
-            surface: CtxSurface::from_catalog(),
-            lines: Vec::new(),
-            simulated: false,
-        }
-    }
-
-    fn record(&mut self, func: &str, args: &Value, note: &str) {
-        let number = self.lines.len() + 1;
-        self.lines
-            .push(format!("{number}. {}  {note}", call_text(func, args)));
-    }
-
-    fn simulate(&mut self, func: &str, args: &Value) -> HostReply {
-        let Some(spec) = self.surface.get(func) else {
-            let message = format!("ctx.{func} is not a function of ctx");
-            self.record(func, args, &format!("rejected: {message}"));
-            return HostReply::Error(message);
-        };
-        let (level, fields) = (spec.level, spec.fields);
-        if let Err(message) = args::validate(func, fields, args) {
-            self.record(func, args, &format!("rejected: {message}"));
-            return HostReply::Error(message);
-        }
-        let (what, result) = simulated_result(func, args);
-        let estimate = self.simulated;
-        self.simulated = true;
-        let mark = if estimate { "  (estimate)" } else { "" };
-        let note = format!("{}, simulated: {what}{mark}", level_word(level, func));
-        self.record(func, args, &note);
-        HostReply::Value(result)
-    }
-}
-
-impl CtxHost for DryHost {
-    fn call(&mut self, func: &str, args: Value) -> HostReply {
-        match func {
-            "now" => {
-                self.record(func, &args, "helper, real clock");
-                HostReply::Value(json!(now_millis()))
-            }
-            "random" => {
-                self.record(func, &args, "helper, fixed at 0.5");
-                HostReply::Value(json!(0.5))
-            }
-            "notify" => {
-                self.record(func, &args, "read, recorded only");
-                HostReply::Value(Value::Null)
-            }
-            "block" | "fail" => {
-                let reason = reason_of(&args);
-                self.record(func, &args, "ends the run");
-                HostReply::End(if func == "block" {
-                    HostEnd::Blocked(reason)
-                } else {
-                    HostEnd::Failed(reason)
-                })
-            }
-            _ => self.simulate(func, &args),
-        }
-    }
-}
-
-fn level_word(level: Level, func: &str) -> &'static str {
-    match level {
-        Level::Read => "read",
-        Level::Propose => "propose",
-        Level::Apply => "applies",
-        Level::Pause if func == "wait" => "waits",
-        Level::Pause => "asks",
-    }
-}
-
-/// What a call answers in a dry run, and the words that say what it is.
-fn simulated_result(func: &str, args: &Value) -> (&'static str, Value) {
-    match func {
-        "exec" => ("a program never runs", exec_result(args)),
-        "approve" => ("assumed approved", json!(true)),
-        "wait" => ("assumed resumed", json!({"outcome": "resumed"})),
-        "commit.create" => ("nothing is applied", json!({"commit": "0000000"})),
-        "restack.plan" | "reparent.plan" => (
-            "nothing is applied",
-            json!({"plan_id": "dry-run", "branch_count": 1}),
-        ),
-        "stack.tree" | "stack.stale" => ("not available yet", json!({"branches": []})),
-        _ => ("nothing is applied", Value::Null),
-    }
-}
-
-fn exec_result(args: &Value) -> Value {
-    let mut result = json!({"text": "", "exit_code": 0, "stderr": "", "truncated": false});
-    if args.get("format").and_then(Value::as_str) == Some("json") {
-        result["json"] = json!({});
-    }
-    result
-}
-
-/// `ctx.name(args)`, with the arguments as JSON; `()` when there are none.
-fn call_text(func: &str, args: &Value) -> String {
-    match args.as_object() {
-        Some(map) if map.is_empty() => format!("ctx.{func}()"),
-        _ => format!("ctx.{func}({args})"),
-    }
-}
-
-fn reason_of(args: &Value) -> String {
-    args.get("reason")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
-}
-
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 fn run_test(options: &Options, engine: &dyn ScriptEngine, cwd: &Path) -> CliResult {
@@ -917,86 +776,6 @@ mod tests {
         assert!(Options::parse(Subcommand::Check, &words(&[])).is_err());
         assert!(Options::parse(Subcommand::Check, &words(&["a.lua", "b.lua"])).is_err());
         assert!(Options::parse(Subcommand::DryRun, &words(&["a.lua", "--input"])).is_err());
-    }
-
-    #[test]
-    fn a_dry_host_records_and_marks_estimates() {
-        let mut host = DryHost::new();
-        host.call(
-            "exec",
-            json!({"argv": ["ticket-branch-name", "ABC-1"], "timeout": "30s"}),
-        );
-        host.call("approve", json!({"summary": "Create branch ?"}));
-        assert_eq!(
-            host.lines[0],
-            "1. ctx.exec({\"argv\":[\"ticket-branch-name\",\"ABC-1\"],\"timeout\":\"30s\"})  read, simulated: a program never runs"
-        );
-        assert_eq!(
-            host.lines[1],
-            "2. ctx.approve({\"summary\":\"Create branch ?\"})  asks, simulated: assumed approved  (estimate)"
-        );
-    }
-
-    #[test]
-    fn a_dry_host_answers_with_the_shape_of_each_result() {
-        let mut host = DryHost::new();
-        let exec = host.call("exec", json!({"argv": ["x"], "format": "json"}));
-        assert_eq!(
-            exec,
-            HostReply::Value(
-                json!({"text": "", "exit_code": 0, "stderr": "", "truncated": false, "json": {}})
-            )
-        );
-        assert_eq!(
-            host.call("wait", json!({"event": "restack.resumed"})),
-            HostReply::Value(json!({"outcome": "resumed"}))
-        );
-        assert_eq!(
-            host.call("commit.create", json!({"message": "m"})),
-            HostReply::Value(json!({"commit": "0000000"}))
-        );
-        assert_eq!(
-            host.call("branch.create", json!({"name": "b"})),
-            HostReply::Value(Value::Null)
-        );
-        assert_eq!(
-            host.call("stack.tree", json!({})),
-            HostReply::Value(json!({"branches": []}))
-        );
-        assert!(
-            host.lines
-                .last()
-                .unwrap()
-                .contains("simulated: not available yet")
-        );
-    }
-
-    #[test]
-    fn a_rejected_call_is_recorded_and_is_not_a_simulated_result() {
-        let mut host = DryHost::new();
-        let reply = host.call("exec", json!({"bogus": 1}));
-        assert!(matches!(reply, HostReply::Error(_)), "{reply:?}");
-        assert!(host.lines[0].ends_with("rejected: ctx.exec: unknown field `bogus`. Valid fields: argv, stdin, timeout, format"), "{:?}", host.lines);
-        host.call("approve", json!({"summary": "x"}));
-        assert!(!host.lines[1].contains("(estimate)"), "{:?}", host.lines);
-    }
-
-    #[test]
-    fn helpers_are_answered_without_a_simulation() {
-        let mut host = DryHost::new();
-        assert!(
-            matches!(host.call("now", json!({})), HostReply::Value(v) if v.as_u64().is_some_and(|ms| ms > 0))
-        );
-        assert_eq!(host.call("random", json!({})), HostReply::Value(json!(0.5)));
-        assert_eq!(
-            host.call("block", json!({"reason": "no"})),
-            HostReply::End(HostEnd::Blocked("no".into()))
-        );
-        assert_eq!(
-            host.call("fail", json!({"reason": "bad"})),
-            HostReply::End(HostEnd::Failed("bad".into()))
-        );
-        assert!(!host.simulated);
     }
 
     fn entry(func: &str, args: Option<Value>) -> Entry {

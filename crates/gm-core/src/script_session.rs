@@ -9,13 +9,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use gm_schema::{Event, OperationId, WorkflowEnd, WorkflowInfo, WorkflowInput, WorkflowRunStatus};
+use gm_schema::{
+    Event, OperationId, WorkflowCallRecord, WorkflowDryCall, WorkflowDryRun, WorkflowEnd,
+    WorkflowInfo, WorkflowInput, WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,
+};
 use serde_json::{Value, json};
 
-use crate::script::journal::{Journal, RunId, RunStatus};
+use crate::script::dry::{self, DryRun};
+use crate::script::journal::{CallRow, Journal, RunId, RunRow, RunStatus};
 use crate::script::loader::{Loaded, ScriptEntry};
 use crate::script::luau::LuauEngine;
-use crate::script::port::{Budgets, ScriptEngine};
+use crate::script::port::{Budgets, ScriptDiagnostic, ScriptEngine};
 use crate::script::run::{
     Clock, EffectCall, EffectResult, Effects, EventSink, Runtime, RuntimeConfig, ScriptEvent,
 };
@@ -306,9 +310,9 @@ pub(crate) fn to_events(event: ScriptEvent) -> Vec<Event> {
             let end = match status {
                 RunStatus::Done => WorkflowEnd::Done,
                 RunStatus::Blocked => WorkflowEnd::Blocked,
+                RunStatus::Cancelled => WorkflowEnd::Cancelled,
                 _ => WorkflowEnd::Failed,
             };
-            // `WorkflowEnd` has no cancelled; the status change says how the run ended.
             vec![
                 Event::WorkflowRunChanged {
                     run,
@@ -330,7 +334,89 @@ fn run_status(status: RunStatus) -> WorkflowRunStatus {
         RunStatus::Done => WorkflowRunStatus::Done,
         RunStatus::Blocked => WorkflowRunStatus::Blocked,
         RunStatus::Cancelled => WorkflowRunStatus::Cancelled,
-        // The window has no `interrupted` yet (WS2); a stopped run reads as failed.
-        RunStatus::Failed | RunStatus::Interrupted => WorkflowRunStatus::Failed,
+        RunStatus::Failed => WorkflowRunStatus::Failed,
+        RunStatus::Interrupted => WorkflowRunStatus::Interrupted,
+    }
+}
+
+/// A run of the journal as the history lists it.
+pub(crate) fn run_summary(row: &RunRow) -> WorkflowRunSummary {
+    WorkflowRunSummary {
+        run: row.id,
+        workflow: row.workflow.clone(),
+        status: run_status(row.status),
+        started_by: row.started_by.clone(),
+        started_at: row.started_at,
+        ended_at: row.ended_at,
+        end_reason: row.end_reason.clone(),
+        current_state: None,
+    }
+}
+
+/// A run with its script as it ran, its input, trigger and every `ctx` call (the Runs tab).
+pub(crate) fn run_detail(row: &RunRow, calls: &[CallRow]) -> WorkflowRunDetail {
+    WorkflowRunDetail {
+        summary: run_summary(row),
+        definition: row.definition_text.clone(),
+        trigger: row.trigger.clone(),
+        input: row.input.clone(),
+        calls: calls.iter().map(call_record).collect(),
+    }
+}
+
+fn call_record(call: &CallRow) -> WorkflowCallRecord {
+    WorkflowCallRecord {
+        seq: call.seq,
+        func: call.func.clone(),
+        level: call.level.clone(),
+        args: call.args.clone(),
+        result: call.result.clone(),
+        outcome: call.outcome.clone(),
+        message: call.message.clone().filter(|m| !m.is_empty()),
+        started_at: call.started_at,
+        duration_ms: call.duration_ms,
+    }
+}
+
+/// A dry run that found the text does not load: the problems, one per line.
+pub(crate) fn dry_run_error(problems: &[ScriptDiagnostic]) -> WorkflowDryRun {
+    let error = problems
+        .iter()
+        .map(|p| {
+            if p.line == 0 {
+                p.message.clone()
+            } else {
+                format!("line {}: {}", p.line, p.message)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    WorkflowDryRun {
+        error: Some(error),
+        missing_inputs: Vec::new(),
+        calls: Vec::new(),
+        stop: String::new(),
+    }
+}
+
+/// What a dry run made, for the window.
+pub(crate) fn dry_run_result(missing_inputs: Vec<String>, run: DryRun) -> WorkflowDryRun {
+    WorkflowDryRun {
+        error: None,
+        missing_inputs,
+        calls: run
+            .calls
+            .into_iter()
+            .map(|call| WorkflowDryCall {
+                func: call.func,
+                level: call.level,
+                args: call.args,
+                executed: call.executed,
+                assumed: call.assumed,
+                outcome: call.outcome,
+                note: call.note,
+            })
+            .collect(),
+        stop: dry::end_line(&run.end),
     }
 }

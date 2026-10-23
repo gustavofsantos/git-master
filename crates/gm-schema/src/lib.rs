@@ -41,6 +41,6 @@ pub use status::{
     RepoStatus, StatusEntry, WorktreeEntry, WorktreeInspection,
 };
 pub use workflow::{
-    WorkflowDryRun, WorkflowDryStep, WorkflowEnd, WorkflowInfo, WorkflowInput, WorkflowRunDetail,
-    WorkflowRunStatus, WorkflowRunSummary, WorkflowStepRecord,
+    WorkflowCallRecord, WorkflowDryCall, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowInput,
+    WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,
 };

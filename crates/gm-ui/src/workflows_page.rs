@@ -13,7 +13,7 @@ use gm_core::workflow::model::{Definition, End, State, StateKind, Target};
 use gm_core::workflow::{Diagnostic, Severity, parse, validate};
 use gm_schema::{
     CommandKind, OperationId, OperationState, WorkflowDryRun, WorkflowInfo, WorkflowRunDetail,
-    WorkflowRunStatus, WorkflowRunSummary, WorkflowStepRecord,
+    WorkflowRunStatus, WorkflowRunSummary,
 };
 use serde_json::{Value, json};
 
@@ -1165,6 +1165,7 @@ pub fn status_label(status: WorkflowRunStatus) -> &'static str {
         WorkflowRunStatus::Failed => "Failed",
         WorkflowRunStatus::Blocked => "Blocked",
         WorkflowRunStatus::Cancelled => "Cancelled",
+        WorkflowRunStatus::Interrupted => "Interrupted",
     }
 }
 
@@ -1191,14 +1192,14 @@ pub fn run_duration(run: &WorkflowRunSummary) -> Option<i64> {
 
 /// How long a step took, when it has ended.
 #[must_use]
-pub fn step_duration(step: &WorkflowStepRecord) -> Option<i64> {
+pub fn step_duration(step: &StepRecord) -> Option<i64> {
     step.ended_at.map(|ended| ended - step.started_at)
 }
 
 /// The step's outcome and where the run went: `done → next`, or `running` while
 /// the step has not answered.
 #[must_use]
-pub fn outcome_line(step: &WorkflowStepRecord) -> String {
+pub fn outcome_line(step: &StepRecord) -> String {
     match (&step.outcome, &step.next) {
         (Some(outcome), Some(next)) => format!("{outcome} → {next}"),
         (Some(outcome), None) => outcome.clone(),
@@ -1255,19 +1256,64 @@ pub fn context_key(run: i64, part: &str) -> String {
     format!("run-{run}-{part}")
 }
 
-/// The three blocks of a run's context, in the order the page shows them.
+/// The three blocks of a run's context, in the order the page shows them. The input value holds
+/// `inputs` and `repo`.
 #[must_use]
 pub fn context_blocks(detail: &WorkflowRunDetail) -> [(&'static str, String); 3] {
+    static NOTHING: Value = Value::Null;
     [
-        ("Inputs", pretty_json(&detail.inputs)),
+        (
+            "Inputs",
+            pretty_json(detail.input.get("inputs").unwrap_or(&NOTHING)),
+        ),
         ("Trigger", pretty_json(&detail.trigger)),
-        ("Repository", pretty_json(&detail.repo)),
+        (
+            "Repository",
+            pretty_json(detail.input.get("repo").unwrap_or(&NOTHING)),
+        ),
     ]
+}
+
+/// One `ctx` call of a run, in the shape the run view reads. A script has no states, so the call
+/// is the step, named by its function, and it has no visit and no next state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepRecord {
+    pub state: String,
+    pub visit: u32,
+    pub action: Option<String>,
+    pub input: Option<Value>,
+    pub output: Option<Value>,
+    pub truncated: bool,
+    pub outcome: Option<String>,
+    pub next: Option<String>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+}
+
+/// The calls of a run, as the run view's steps, in the order they were made.
+#[must_use]
+pub fn step_rows(detail: &WorkflowRunDetail) -> Vec<StepRecord> {
+    detail
+        .calls
+        .iter()
+        .map(|call| StepRecord {
+            state: call.func.clone(),
+            visit: 1,
+            action: Some(call.func.clone()),
+            input: Some(call.args.clone()),
+            output: call.result.clone(),
+            truncated: false,
+            outcome: call.outcome.clone(),
+            next: None,
+            started_at: call.started_at,
+            ended_at: call.duration_ms.map(|ms| call.started_at + ms),
+        })
+        .collect()
 }
 
 /// The text of the Input block: the recorded input, or a line saying none was kept.
 #[must_use]
-pub fn input_text(step: &WorkflowStepRecord) -> String {
+pub fn input_text(step: &StepRecord) -> String {
     match &step.input {
         Some(value) => pretty_json(value),
         None => "No input recorded".to_owned(),
@@ -1276,7 +1322,7 @@ pub fn input_text(step: &WorkflowStepRecord) -> String {
 
 /// The text of the Output block, or a line saying the step has not answered.
 #[must_use]
-pub fn output_text(step: &WorkflowStepRecord) -> String {
+pub fn output_text(step: &StepRecord) -> String {
     match &step.output {
         Some(value) => pretty_json(value),
         None => "No output yet".to_owned(),
@@ -1330,7 +1376,7 @@ pub fn run_path(detail: &WorkflowRunDetail) -> RunPath {
     if let Some(current) = detail.summary.current_state.as_deref() {
         path.states.insert(top_level(current).to_owned());
     }
-    for step in &detail.steps {
+    for step in &step_rows(detail) {
         path.states.insert(top_level(&step.state).to_owned());
         let Some(next) = step.next.as_deref() else {
             continue;
@@ -1716,10 +1762,9 @@ with = { name = "${states.name.output.text}", checkout = true }
         let detail = WorkflowRunDetail {
             summary: summary(3, WorkflowRunStatus::Done),
             definition: String::new(),
-            inputs: json!({}),
+            input: json!({"inputs": json!({}), "repo": json!({})}),
             trigger: json!({}),
-            repo: json!({}),
-            steps: Vec::new(),
+            calls: Vec::new(),
         };
         page.run_loaded(id(21), detail.clone());
         assert!(
@@ -1745,10 +1790,9 @@ with = { name = "${states.name.output.text}", checkout = true }
             WorkflowRunDetail {
                 summary: summary(1, WorkflowRunStatus::Done),
                 definition: String::new(),
-                inputs: json!(null),
+                input: json!({"inputs": json!(null), "repo": json!(null)}),
                 trigger: json!(null),
-                repo: json!(null),
-                steps: Vec::new(),
+                calls: Vec::new(),
             },
         );
         page.open_run(2);
@@ -1985,7 +2029,7 @@ states = [
 
     #[test]
     fn a_step_shows_its_input_or_says_none_was_kept() {
-        let step = WorkflowStepRecord {
+        let step = StepRecord {
             state: "name".into(),
             visit: 1,
             action: Some("exec".into()),
@@ -2013,10 +2057,9 @@ states = [
         let detail = WorkflowRunDetail {
             summary: summary(1, WorkflowRunStatus::Done),
             definition: String::new(),
-            inputs: json!({"ticket": "ENG-1"}),
+            input: json!({"inputs": json!({"ticket": "ENG-1"}), "repo": json!({"branch": "main"})}),
             trigger: json!({"on": "manual"}),
-            repo: json!({"branch": "main"}),
-            steps: Vec::new(),
+            calls: Vec::new(),
         };
         let blocks = context_blocks(&detail);
         let labels: Vec<&str> = blocks.iter().map(|(label, _)| *label).collect();
@@ -2047,7 +2090,7 @@ states = [
         WorkflowDryRun {
             error: None,
             missing_inputs: Vec::new(),
-            steps: Vec::new(),
+            calls: Vec::new(),
             stop: "end.done".into(),
         }
     }
@@ -2358,228 +2401,5 @@ states = [
                 ("failed → end.failed".to_owned(), 0),
             ]
         );
-    }
-
-    fn step(state: &str, outcome: &str, next: &str) -> WorkflowStepRecord {
-        WorkflowStepRecord {
-            state: state.into(),
-            visit: 1,
-            action: None,
-            input: None,
-            output: None,
-            truncated: false,
-            outcome: Some(outcome.into()),
-            next: Some(next.into()),
-            started_at: 0,
-            ended_at: Some(1),
-        }
-    }
-
-    fn run_with(
-        status: WorkflowRunStatus,
-        current: Option<&str>,
-        steps: Vec<WorkflowStepRecord>,
-    ) -> WorkflowRunDetail {
-        let mut summary = summary(7, status);
-        summary.current_state = current.map(str::to_owned);
-        WorkflowRunDetail {
-            summary,
-            definition: SAMPLE.to_owned(),
-            inputs: json!({}),
-            trigger: json!({}),
-            repo: json!({}),
-            steps,
-        }
-    }
-
-    fn pairs(list: &[(&str, &str)]) -> BTreeSet<(String, String)> {
-        list.iter()
-            .map(|(from, to)| ((*from).to_owned(), (*to).to_owned()))
-            .collect()
-    }
-
-    fn names(list: &[&str]) -> BTreeSet<String> {
-        list.iter().map(|name| (*name).to_owned()).collect()
-    }
-
-    #[test]
-    fn a_linear_run_visits_each_state_and_takes_each_transition_once() {
-        let detail = run_with(
-            WorkflowRunStatus::Done,
-            None,
-            vec![
-                step("a", "done", "b"),
-                step("b", "done", "c"),
-                step("c", "done", "end.done"),
-            ],
-        );
-        let path = run_path(&detail);
-        assert_eq!(path.states, names(&["a", "b", "c"]));
-        assert_eq!(
-            path.edges,
-            pairs(&[("a", "b"), ("b", "c"), ("c", "end.done")])
-        );
-    }
-
-    #[test]
-    fn a_retry_loop_draws_its_edge_once() {
-        let detail = run_with(
-            WorkflowRunStatus::Done,
-            None,
-            vec![
-                step("a", "done", "b"),
-                step("b", "retry", "a"),
-                step("a", "done", "b"),
-                step("b", "retry", "a"),
-                step("a", "done", "b"),
-                step("b", "done", "end.done"),
-            ],
-        );
-        let path = run_path(&detail);
-        assert_eq!(path.states, names(&["a", "b"]));
-        assert_eq!(
-            path.edges,
-            pairs(&[("a", "b"), ("b", "a"), ("b", "end.done")])
-        );
-    }
-
-    #[test]
-    fn a_run_that_failed_ends_its_path_at_end_failed() {
-        let detail = run_with(
-            WorkflowRunStatus::Failed,
-            None,
-            vec![step("a", "done", "b"), step("b", "failed", "end.failed")],
-        );
-        let path = run_path(&detail);
-        assert_eq!(path.states, names(&["a", "b"]));
-        assert_eq!(path.edges, pairs(&[("a", "b"), ("b", "end.failed")]));
-    }
-
-    #[test]
-    fn a_running_run_shows_the_state_it_is_in() {
-        let detail = run_with(
-            WorkflowRunStatus::Waiting,
-            Some("confirm"),
-            vec![step("a", "done", "confirm")],
-        );
-        let path = run_path(&detail);
-        assert_eq!(path.states, names(&["a", "confirm"]));
-        assert_eq!(path.edges, pairs(&[("a", "confirm")]));
-    }
-
-    #[test]
-    fn a_nested_run_maps_its_states_to_the_for_each_and_skips_inner_moves() {
-        let detail = run_with(
-            WorkflowRunStatus::Done,
-            None,
-            vec![
-                step("prep", "done", "each/plan"),
-                step("each/plan", "retry", "each/plan"),
-                step("each/plan", "done", "each/apply"),
-                step("each/apply", "done", "each/plan"),
-                step("each/plan", "done", "after"),
-                step("after", "done", "end.done"),
-            ],
-        );
-        let path = run_path(&detail);
-        assert_eq!(path.states, names(&["prep", "each", "after"]));
-        assert_eq!(
-            path.edges,
-            pairs(&[("prep", "each"), ("each", "after"), ("after", "end.done"),])
-        );
-    }
-
-    #[test]
-    fn a_nested_state_that_fails_the_run_leaves_from_its_for_each() {
-        let detail = run_with(
-            WorkflowRunStatus::Failed,
-            None,
-            vec![step("each/plan", "failed", "end.failed")],
-        );
-        let path = run_path(&detail);
-        assert_eq!(path.states, names(&["each"]));
-        assert_eq!(path.edges, pairs(&[("each", "end.failed")]));
-    }
-
-    #[test]
-    fn a_path_says_which_states_and_ends_it_visits_and_which_moves_it_took() {
-        let path = run_path(&run_with(
-            WorkflowRunStatus::Done,
-            None,
-            vec![step("a", "retry", "a"), step("a", "done", "end.done")],
-        ));
-        assert!(path.visits("a"));
-        assert!(path.visits("end.done"));
-        assert!(!path.visits("b"));
-        assert!(path.takes("a", "a"));
-        assert!(path.takes("a", "end.done"));
-        assert!(!path.takes("end.done", "a"));
-    }
-
-    #[test]
-    fn a_run_with_no_steps_has_no_path() {
-        let path = run_path(&run_with(WorkflowRunStatus::Running, None, Vec::new()));
-        assert_eq!(path, RunPath::default());
-    }
-
-    #[test]
-    fn showing_a_run_path_needs_the_run_loaded_and_follows_the_open_run() {
-        let (mut page, _) = opened();
-        page.open_run(7);
-        page.track_run(id(1));
-        page.run_loaded(
-            id(1),
-            run_with(
-                WorkflowRunStatus::Done,
-                None,
-                vec![step("ticket", "done", "end.done")],
-            ),
-        );
-        assert_eq!(page.shown_path(), None, "no path until one is shown");
-        page.show_run_in_flow();
-        assert_eq!(page.tab(), Tab::Flow);
-        let (run, path) = page.shown_path().expect("the loaded run is shown");
-        assert_eq!(run, 7);
-        assert_eq!(path.edges, pairs(&[("ticket", "end.done")]));
-        assert!(!page.shown_path_file_changed());
-
-        page.open_run(8);
-        assert_eq!(page.shown_path(), None, "the new run has not loaded");
-        page.track_run(id(2));
-        let mut other = run_with(WorkflowRunStatus::Done, None, Vec::new());
-        other.summary.run = 8;
-        page.run_loaded(id(2), other);
-        assert_eq!(page.shown_path().map(|(run, _)| run), Some(8));
-    }
-
-    #[test]
-    fn clear_and_another_workflow_both_drop_the_shown_path() {
-        let (mut page, listed) = opened();
-        page.open_run(7);
-        page.track_run(id(1));
-        page.run_loaded(id(1), run_with(WorkflowRunStatus::Done, None, Vec::new()));
-        page.show_run_in_flow();
-        assert!(page.shown_path().is_some());
-        page.clear_run_path();
-        assert_eq!(page.shown_path(), None);
-
-        page.show_run_in_flow();
-        let mut other = listed.clone();
-        other.push(info("/w/other.toml", "other", SAMPLE, "h2"));
-        assert!(page.select("/w/other.toml", &other));
-        assert_eq!(page.shown_path(), None, "another workflow drops the path");
-    }
-
-    #[test]
-    fn a_path_of_a_run_of_an_older_file_says_the_file_changed() {
-        let (mut page, _) = opened();
-        page.open_run(7);
-        page.track_run(id(1));
-        let mut detail = run_with(WorkflowRunStatus::Done, None, Vec::new());
-        detail.definition = "an older text".to_owned();
-        page.run_loaded(id(1), detail);
-        page.show_run_in_flow();
-        assert!(page.shown_path().is_some(), "the path is still shown");
-        assert!(page.shown_path_file_changed());
     }
 }

@@ -677,6 +677,7 @@ fn a_restart_marks_unfinished_runs_interrupted() {
                 definition_hash: "h",
                 definition_text: "",
                 trigger: &json!({}),
+                input: &json!(null),
                 started_by: "human",
                 seed: 1,
             },

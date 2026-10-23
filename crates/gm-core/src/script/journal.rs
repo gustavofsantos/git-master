@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS script_run (
     started_at INTEGER NOT NULL,
     ended_at INTEGER,
     end_reason TEXT,
-    value_json TEXT
+    value_json TEXT,
+    input_json TEXT
 );
 CREATE INDEX IF NOT EXISTS script_run_by_workflow ON script_run (workflow, id);
 CREATE TABLE IF NOT EXISTS script_call (
@@ -63,7 +64,7 @@ CREATE TABLE IF NOT EXISTS script_call (
 
 /// Columns read back for a `RunRow`, in the order `raw_run` expects them.
 const RUN_COLUMNS: &str = "id, workflow, definition_hash, definition_text, trigger_json, \
-     started_by, seed, status, started_at, ended_at, end_reason, value_json";
+     started_by, seed, status, started_at, ended_at, end_reason, value_json, input_json";
 /// Columns read back for a `CallRow`, in the order `raw_call` expects them.
 const CALL_COLUMNS: &str = "run_id, seq, func, level, args_json, result_json, outcome, message, \
      started_at, duration_ms";
@@ -144,6 +145,8 @@ pub struct NewRun<'a> {
     pub definition_hash: &'a str,
     pub definition_text: &'a str,
     pub trigger: &'a Value,
+    /// The `input` value the run got: `inputs`, `trigger` and `repo`.
+    pub input: &'a Value,
     /// `human`, `event:<name>` or `agent:<client>` (D64).
     pub started_by: &'a str,
     /// The seed of `ctx.random()`, so a run's random values can be told apart from its journal.
@@ -157,6 +160,8 @@ pub struct RunRow {
     pub definition_hash: String,
     pub definition_text: String,
     pub trigger: Value,
+    /// The `input` value the run got; `Null` for a run recorded before inputs were kept.
+    pub input: Value,
     pub started_by: String,
     pub seed: u64,
     pub status: RunStatus,
@@ -239,12 +244,13 @@ impl Journal {
     pub fn create_run(&self, new: &NewRun<'_>, now: i64) -> Result<RunId, JournalError> {
         let trigger = serde_json::to_string(new.trigger)
             .map_err(|e| JournalError(format!("cannot encode the trigger: {e}")))?;
+        let input = stored_json(new.input)?;
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO script_run (workflow, definition_hash, definition_text, trigger_json, \
-             started_by, seed, status, started_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7)",
+             started_by, seed, status, started_at, input_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8)",
             params![
                 new.workflow,
                 new.definition_hash,
@@ -253,6 +259,7 @@ impl Journal {
                 new.started_by,
                 new.seed.cast_signed(),
                 now,
+                input,
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -444,6 +451,15 @@ fn configure(conn: &Connection) -> Result<(), JournalError> {
 fn migrate(conn: &mut Connection) -> Result<(), JournalError> {
     let tx = conn.transaction()?;
     tx.execute_batch(SCHEMA)?;
+    // A journal made before runs kept their input has no `input_json` column (same version).
+    let has_input: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('script_run') WHERE name = 'input_json')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_input {
+        tx.execute_batch("ALTER TABLE script_run ADD COLUMN input_json TEXT;")?;
+    }
     let stored: Option<String> = tx
         .query_row(
             "SELECT value FROM script_meta WHERE key = 'schema_version'",
@@ -555,6 +571,7 @@ struct RawRun {
     ended_at: Option<i64>,
     end_reason: Option<String>,
     value_json: Option<String>,
+    input_json: Option<String>,
 }
 
 fn raw_run(row: &Row<'_>) -> rusqlite::Result<RawRun> {
@@ -571,6 +588,7 @@ fn raw_run(row: &Row<'_>) -> rusqlite::Result<RawRun> {
         ended_at: row.get(9)?,
         end_reason: row.get(10)?,
         value_json: row.get(11)?,
+        input_json: row.get(12)?,
     })
 }
 
@@ -595,6 +613,10 @@ impl RawRun {
             ended_at: self.ended_at,
             end_reason: self.end_reason,
             value: self.value_json.as_deref().map(parse_json).transpose()?,
+            input: self
+                .input_json
+                .as_deref()
+                .map_or(Ok(Value::Null), parse_json)?,
         })
     }
 }
@@ -667,6 +689,7 @@ mod tests {
             definition_hash: "sha256:abc",
             definition_text: "return {}",
             trigger,
+            input: &Value::Null,
             started_by: "human",
             seed: 7,
         }
@@ -705,6 +728,7 @@ mod tests {
     fn run_round_trips_every_field() {
         let j = fresh();
         let trigger = json!({"event": "push", "count": 3});
+        let input = json!({"inputs": {"name": "x"}, "repo": {"branch": "main"}});
         let id = j
             .create_run(
                 &NewRun {
@@ -712,6 +736,7 @@ mod tests {
                     definition_hash: "h1",
                     definition_text: "text of the file",
                     trigger: &trigger,
+                    input: &input,
                     started_by: "event:push",
                     seed: 42,
                 },
@@ -726,6 +751,7 @@ mod tests {
                 definition_hash: "h1".into(),
                 definition_text: "text of the file".into(),
                 trigger: trigger.clone(),
+                input: input.clone(),
                 started_by: "event:push".into(),
                 seed: 42,
                 status: RunStatus::Running,
@@ -762,6 +788,47 @@ mod tests {
             assert_eq!(j.run(id).expect("read").expect("row").status, status);
         }
         assert_eq!(RunStatus::parse("Running"), None);
+    }
+
+    #[test]
+    fn a_journal_without_the_input_column_gains_it_and_keeps_its_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE script_meta (key TEXT PRIMARY KEY, value TEXT);
+                 INSERT INTO script_meta (key, value) VALUES ('schema_version', '1');
+                 CREATE TABLE script_run (
+                     id INTEGER PRIMARY KEY, workflow TEXT NOT NULL, definition_hash TEXT NOT NULL,
+                     definition_text TEXT NOT NULL, trigger_json TEXT NOT NULL, started_by TEXT NOT NULL,
+                     seed INTEGER NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL,
+                     ended_at INTEGER, end_reason TEXT, value_json TEXT
+                 );
+                 INSERT INTO script_run (workflow, definition_hash, definition_text, trigger_json,
+                     started_by, seed, status, started_at)
+                 VALUES ('old', 'h', 'text', '{}', 'human', 1, 'done', 5);",
+            )
+            .unwrap();
+        }
+        let journal = Journal::open(&path).unwrap();
+        let rows = journal.runs("old", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].input, Value::Null);
+        let trigger = json!({});
+        let id = journal
+            .create_run(
+                &NewRun {
+                    input: &json!({"inputs": {}}),
+                    ..new_run("new", &trigger)
+                },
+                6,
+            )
+            .unwrap();
+        assert_eq!(
+            journal.run(id).unwrap().unwrap().input,
+            json!({"inputs": {}})
+        );
     }
 
     #[test]

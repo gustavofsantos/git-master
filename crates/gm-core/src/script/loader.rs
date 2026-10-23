@@ -47,8 +47,7 @@ pub struct Loaded {
 const IGNORED_IN_REPO: &str =
     "inside the repository's working tree; workflows are only read from your own config (D73)";
 
-const TOML_IGNORED: &str =
-    "TOML workflows are no longer supported; convert it to a Lua script (see Writing workflows)";
+const TOML_IGNORED: &str = ".toml workflows are no longer supported; rewrite it as a .lua script";
 
 /// `$XDG_CONFIG_HOME/gitmaster/workflows` (else `~/.config/...`) on Linux,
 /// `~/Library/Application Support/gitmaster/workflows` on macOS. A relative `XDG_CONFIG_HOME` is
@@ -405,7 +404,7 @@ return M
             loaded.ignored,
             [Ignored {
                 path: old,
-                reason: "TOML workflows are no longer supported; convert it to a Lua script (see Writing workflows)"
+                reason: ".toml workflows are no longer supported; rewrite it as a .lua script"
                     .to_owned(),
             }]
         );

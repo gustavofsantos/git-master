@@ -9,8 +9,8 @@ use std::path::Path;
 
 use gm_core::workflow::{Diagnostic, Severity};
 use gm_schema::{
-    Actor, WorkflowDryRun, WorkflowDryStep, WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus,
-    WorkflowRunSummary, WorkflowStepRecord,
+    Actor, WorkflowDryCall, WorkflowDryRun, WorkflowInfo, WorkflowRunDetail, WorkflowRunStatus,
+    WorkflowRunSummary,
 };
 use gpui::{
     AnyElement, Context, Div, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, Pixels,
@@ -26,9 +26,10 @@ use crate::shell_history::{now_secs, relative_time};
 use crate::theme;
 use crate::view::{Screen, StatusView};
 use crate::workflows_page::{
-    Choice, Edge, FlowEdit, FlowRow, Preview, SaveState, Tab, context_blocks, context_key,
-    diagnostic_text, duration_label, expand_key, flow_rows, input_text, outcome_line, output_text,
-    pretty_json, preview, run_duration, status_label, step_duration, visit_label,
+    Choice, Edge, FlowEdit, FlowRow, Preview, SaveState, StepRecord, Tab, context_blocks,
+    context_key, diagnostic_text, duration_label, expand_key, flow_rows, input_text, outcome_line,
+    output_text, pretty_json, preview, run_duration, status_label, step_duration, step_rows,
+    visit_label,
 };
 
 /// The width of the workflow list on the left.
@@ -827,8 +828,7 @@ impl StatusView {
             }))
             .child(section_label("Steps"))
             .children(
-                detail
-                    .steps
+                step_rows(detail)
                     .iter()
                     .enumerate()
                     .map(|(index, step)| self.step_card(summary.run, index, step, cx)),
@@ -837,13 +837,7 @@ impl StatusView {
 
     /// One step of a run: its state and visit, what it did, how it ended, and
     /// its input and output.
-    fn step_card(
-        &self,
-        run: i64,
-        index: usize,
-        step: &WorkflowStepRecord,
-        cx: &Context<Self>,
-    ) -> Div {
+    fn step_card(&self, run: i64, index: usize, step: &StepRecord, cx: &Context<Self>) -> Div {
         let page = &self.model.workflows_page;
         let input_key = expand_key(run, index, "input");
         let output_key = expand_key(run, index, "output");
@@ -1246,7 +1240,7 @@ impl StatusView {
             )));
         }
         lines.extend(
-            dry.steps
+            dry.calls
                 .iter()
                 .enumerate()
                 .map(|(index, step)| self.dry_step_card(index, step, cx)),
@@ -1256,7 +1250,7 @@ impl StatusView {
 
     /// One step of a dry run: its state, action and level, whether the answer
     /// was computed or assumed, and the input it would receive.
-    fn dry_step_card(&self, index: usize, step: &WorkflowDryStep, cx: &Context<Self>) -> Div {
+    fn dry_step_card(&self, index: usize, step: &WorkflowDryCall, cx: &Context<Self>) -> Div {
         let page = &self.model.workflows_page;
         let key = format!("dry-run-step-{index}-input");
         let answer = if step.executed {
@@ -1285,13 +1279,13 @@ impl StatusView {
                         div()
                             .font_family(theme::code_font())
                             .font_weight(FontWeight::MEDIUM)
-                            .child(step.state.clone()),
+                            .child(step.func.clone()),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme::muted())
-                            .child(step.action.clone()),
+                            .child(step.note.clone()),
                     )
                     .child(
                         div()
@@ -1306,7 +1300,7 @@ impl StatusView {
             .child(div().text_xs().text_color(theme::muted()).child(answer))
             .child(json_block(
                 "Input",
-                &pretty_json(&step.input),
+                &pretty_json(&step.args),
                 &key,
                 page.is_expanded(&key),
                 cx,
@@ -1614,7 +1608,7 @@ fn status_color(status: WorkflowRunStatus) -> Hsla {
         WorkflowRunStatus::Failed | WorkflowRunStatus::Blocked => theme::error(),
         WorkflowRunStatus::Running => theme::accent(),
         WorkflowRunStatus::Waiting | WorkflowRunStatus::AwaitingApproval => theme::warn_fg(),
-        WorkflowRunStatus::Cancelled => theme::muted(),
+        WorkflowRunStatus::Cancelled | WorkflowRunStatus::Interrupted => theme::muted(),
     }
 }
 

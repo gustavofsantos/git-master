@@ -243,6 +243,7 @@ impl Runtime {
                     definition_hash: &spec.definition_hash,
                     definition_text: &spec.source,
                     trigger: &spec.trigger,
+                    input: &spec.input,
                     started_by: &spec.started_by.label(),
                     seed: spec.seed,
                 },

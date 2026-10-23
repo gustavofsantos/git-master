@@ -6,6 +6,7 @@
 pub mod api_docs;
 pub mod args;
 pub mod cli;
+pub mod dry;
 pub mod fake;
 pub mod input;
 pub mod inspect;

@@ -336,20 +336,20 @@ pub enum CommandKind {
         workflow: String,
         limit: u32,
     },
-    /// Reads one run: its context and every step. Answers `WorkflowRunLoaded`.
+    /// Reads one run: its script, input and every `ctx` call. Answers `WorkflowRunLoaded`.
     /// A read: never recorded.
     LoadWorkflowRun {
         run: i64,
     },
     /// Dry run of `source`, the workflow text the editor holds (not a saved
-    /// file): walks it without performing any step, and answers
-    /// `WorkflowDryRun`. `inputs` is an object of input values; a declared input
+    /// file): runs it with every `ctx` call answered by the dry host, so nothing is
+    /// performed, and answers `WorkflowDryRun` with the calls it would make. `inputs` is an object of input values; a declared input
     /// it does not give is `""`. Writes nothing, and is never recorded.
     DryRunWorkflow {
         source: String,
         inputs: serde_json::Value,
     },
-    /// Writes `source` to the workflow file at `path`, which must be inside
+    /// Writes `source` to the `.lua` file at `path`, which must be inside
     /// the user's workflows directories (never a repository). With
     /// `expected_hash`, refuses when the file on disk no longer hashes to it
     /// (changed elsewhere). A new file passes `None`. Answers
@@ -629,8 +629,8 @@ pub enum Event {
         id: OperationId,
         hook: String,
     },
-    /// Answers `ListWorkflows`. `ignored` holds each directory that was not
-    /// read, as `<path>: <reason>`.
+    /// Answers `ListWorkflows`. `ignored` holds each directory or file that was not
+    /// read, as `<path>: <reason>` (a `.toml` file is one of these).
     WorkflowsListed {
         id: OperationId,
         workflows: Vec<WorkflowInfo>,
@@ -650,7 +650,7 @@ pub enum Event {
         id: OperationId,
         detail: Box<WorkflowRunDetail>,
     },
-    /// Answers `DryRunWorkflow`: the steps the workflow would take, and why the
+    /// Answers `DryRunWorkflow`: the calls the script would make, and why the
     /// walk stopped. Boxed, like `WorkflowRunLoaded`.
     WorkflowDryRun {
         id: OperationId,
