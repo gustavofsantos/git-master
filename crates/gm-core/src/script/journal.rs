@@ -1,7 +1,7 @@
 //! The run journal (design/workflow-scripts.md, D80, D100): what the host observed of each run,
 //! written by the host from the calls themselves, never from what a script says. It is history for
 //! the Runs tab and the evidence a restart needs to mark a run `interrupted`; it is not a way to
-//! resume (Q23). Lives in `state.db`, next to the tables of the TOML engine.
+//! resume (Q23). Lives in `state.db`.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -676,7 +676,6 @@ impl RawCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::store::Store;
     use sha2::{Digest, Sha256};
 
     fn fresh() -> Journal {
@@ -1150,42 +1149,6 @@ mod tests {
         let calls = j.calls(id).expect("calls");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].result, Some(json!("out")));
-    }
-
-    #[test]
-    fn a_file_journal_and_the_old_store_coexist_in_either_order() {
-        for store_first in [true, false] {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let path = dir.path().join("state.db");
-            let trigger = json!(null);
-            let id = if store_first {
-                let _store = Store::open(&path).expect("store");
-                let j = Journal::open(&path).expect("journal");
-                j.create_run(&new_run("both", &trigger), 1).expect("create")
-            } else {
-                let j = Journal::open(&path).expect("journal");
-                let id = j.create_run(&new_run("both", &trigger), 1).expect("create");
-                let _store = Store::open(&path).expect("store");
-                id
-            };
-            let raw = Connection::open(&path).expect("raw");
-            let user_version: i64 = raw
-                .query_row("PRAGMA user_version", [], |row| row.get(0))
-                .expect("user_version");
-            assert_eq!(user_version, 2, "the old store keeps its version");
-            let version: String = raw
-                .query_row(
-                    "SELECT value FROM script_meta WHERE key = 'schema_version'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("own version");
-            assert_eq!(version, SCHEMA_VERSION);
-            drop(raw);
-
-            let j = Journal::open(&path).expect("reopen journal");
-            assert!(j.run(id).expect("read").is_some());
-        }
     }
 
     #[test]

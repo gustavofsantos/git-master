@@ -3,8 +3,8 @@
 
 use serde_json::Value;
 
-use crate::workflow::catalog::{FieldKind, FieldSpec};
-use crate::workflow::exec::parse_timeout;
+use crate::script::catalog::{FieldKind, FieldSpec};
+use crate::script::exec::parse_timeout;
 
 /// `Ok` when `args` is an object whose keys are all fields, every required field is there and
 /// every value has its field's type.

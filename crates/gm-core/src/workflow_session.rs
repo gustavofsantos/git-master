@@ -9,13 +9,25 @@ use gm_schema::{Actor, CommandKind, OperationId};
 
 use crate::branch;
 use crate::script::loader::sha256_hex;
-use crate::workflow::driver::GitActions;
 use crate::{GitError, GitPort, LogEntry};
 
 /// The `gitmaster.workflowPath` key: extra directories of workflow files (D61).
 const WORKFLOW_PATH_KEY: &str = "gitmaster.workflowPath";
 
-/// The Git actions of a workflow step: each one is a Git write of the engine's
+/// The Git side effects of the script's `ctx` calls: the engine implements it over its
+/// `GitPort`, and each call is one side effect that goes to the command log.
+pub(crate) trait GitActions {
+    /// `stage.all`: stages every change of the working tree.
+    fn stage_all(&mut self) -> Result<(), String>;
+    /// `commit.create`: commits the index; returns the new commit id.
+    fn commit(&mut self, message: &str) -> Result<String, String>;
+    /// `branch.create`.
+    fn create_branch(&mut self, name: &str, checkout: bool) -> Result<(), String>;
+    /// `branch.checkout`.
+    fn checkout(&mut self, branch: &str) -> Result<(), String>;
+}
+
+/// The Git actions of a script run: each one is a Git write of the engine's
 /// `GitPort`, and goes into the command log under the operation that caused it.
 pub(crate) struct Actions<'a> {
     git: &'a dyn GitPort,

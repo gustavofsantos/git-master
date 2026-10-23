@@ -15,12 +15,9 @@ use gm_schema::{
     StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
 };
 
-use gm_core::workflow::edit::Direction;
-
 use crate::branch_filter::Scope;
-use crate::flow_inspector::PickerKind;
 use crate::stashes;
-use crate::workflows_page::{FlowEdit, PageState};
+use crate::workflows_page::PageState;
 
 /// Why an action is not enabled, as a short English sentence for the user.
 pub type Reason = &'static str;
@@ -221,14 +218,8 @@ pub enum Effect {
     RevertWorkflow,
     /// Opens the confirmation that moves the open workflow's file to the trash.
     OpenDeleteWorkflow,
-    /// Applies a structural edit to the open workflow's Flow.
-    EditFlow(FlowEdit),
     /// Asks the engine for a dry run of the open workflow's buffer.
     DryRunWorkflow,
-    /// Opens a popover of the Flow's inspector: the actions or the triggers.
-    OpenInspectorPicker(PickerKind),
-    /// Moves the keyboard to the field that adds an input.
-    FocusWorkflowInput,
     /// Sets the sidebar's branches to the scope the window names (D53).
     SetBranchScope(Scope),
 }
@@ -321,7 +312,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 81] = [
+const SPECS: [Spec; 74] = [
     spec(
         "file.stage",
         "Stage File",
@@ -589,57 +580,8 @@ const SPECS: [Spec; 81] = [
         Category::Workflows,
     ),
     spec(
-        "workflow.add_state",
-        "Add Workflow State",
-        None,
-        ArgKind::None,
-        Category::Workflows,
-    ),
-    spec(
-        "workflow.remove_state",
-        "Remove Workflow State",
-        None,
-        ArgKind::None,
-        Category::Workflows,
-    ),
-    spec(
-        "workflow.move_state_up",
-        "Move Workflow State Up",
-        None,
-        ArgKind::None,
-        Category::Workflows,
-    ),
-    spec(
-        "workflow.move_state_down",
-        "Move Workflow State Down",
-        None,
-        ArgKind::None,
-        Category::Workflows,
-    ),
-    spec(
         "workflow.dry_run",
         "Dry Run Workflow",
-        None,
-        ArgKind::None,
-        Category::Workflows,
-    ),
-    spec(
-        "workflow.set_action",
-        "Set Workflow State Action",
-        None,
-        ArgKind::None,
-        Category::Workflows,
-    ),
-    spec(
-        "workflow.set_trigger",
-        "Set Workflow Trigger",
-        None,
-        ArgKind::None,
-        Category::Workflows,
-    ),
-    spec(
-        "workflow.add_input",
-        "Add Workflow Input",
         None,
         ArgKind::None,
         Category::Workflows,
@@ -943,14 +885,7 @@ pub enum Action {
     SaveWorkflow,
     RevertWorkflow,
     DeleteWorkflow,
-    AddWorkflowState,
-    RemoveWorkflowState,
-    MoveWorkflowStateUp,
-    MoveWorkflowStateDown,
     DryRunWorkflow,
-    SetWorkflowStateCall,
-    SetWorkflowTrigger,
-    AddWorkflowInput,
     Fetch,
     Pull,
     OpenWorktree,
@@ -1099,7 +1034,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 81] = [
+    pub const ALL: [Action; 74] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1138,14 +1073,7 @@ impl Action {
         Action::SaveWorkflow,
         Action::RevertWorkflow,
         Action::DeleteWorkflow,
-        Action::AddWorkflowState,
-        Action::RemoveWorkflowState,
-        Action::MoveWorkflowStateUp,
-        Action::MoveWorkflowStateDown,
         Action::DryRunWorkflow,
-        Action::SetWorkflowStateCall,
-        Action::SetWorkflowTrigger,
-        Action::AddWorkflowInput,
         Action::Fetch,
         Action::Pull,
         Action::OpenWorktree,
@@ -1292,14 +1220,7 @@ impl Action {
                 | Action::SaveWorkflow
                 | Action::RevertWorkflow
                 | Action::DeleteWorkflow
-                | Action::AddWorkflowState
-                | Action::RemoveWorkflowState
-                | Action::MoveWorkflowStateUp
-                | Action::MoveWorkflowStateDown
                 | Action::DryRunWorkflow
-                | Action::SetWorkflowStateCall
-                | Action::SetWorkflowTrigger
-                | Action::AddWorkflowInput
         )
     }
 
@@ -1673,19 +1594,7 @@ fn workflow_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), R
             }
         }
         Action::DeleteWorkflow => page_open(ctx).map(|_| ()),
-        Action::AddWorkflowState
-        | Action::RemoveWorkflowState
-        | Action::MoveWorkflowStateUp
-        | Action::MoveWorkflowStateDown => flow_edit_rule(action, ctx),
         Action::DryRunWorkflow => dry_run_rule(ctx),
-        Action::SetWorkflowStateCall => {
-            inspector_rule(ctx)?;
-            match page_open(ctx)?.flow.selected {
-                Some(_) => Ok(()),
-                None => Err("Select a state in the Flow first."),
-            }
-        }
-        Action::SetWorkflowTrigger | Action::AddWorkflowInput => inspector_rule(ctx),
         _ => ctx
             .workflows
             .active
@@ -1720,14 +1629,7 @@ fn workflow_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Eff
         (Action::SaveWorkflow, _) => Effect::SaveWorkflow,
         (Action::RevertWorkflow, _) => Effect::RevertWorkflow,
         (Action::DeleteWorkflow, _) => Effect::OpenDeleteWorkflow,
-        (Action::AddWorkflowState, _) => Effect::EditFlow(FlowEdit::Add),
-        (Action::RemoveWorkflowState, _) => Effect::EditFlow(FlowEdit::Remove),
-        (Action::MoveWorkflowStateUp, _) => Effect::EditFlow(FlowEdit::Move(Direction::Up)),
-        (Action::MoveWorkflowStateDown, _) => Effect::EditFlow(FlowEdit::Move(Direction::Down)),
         (Action::DryRunWorkflow, _) => Effect::DryRunWorkflow,
-        (Action::SetWorkflowStateCall, _) => Effect::OpenInspectorPicker(PickerKind::Action),
-        (Action::SetWorkflowTrigger, _) => Effect::OpenInspectorPicker(PickerKind::Trigger),
-        (Action::AddWorkflowInput, _) => Effect::FocusWorkflowInput,
         (Action::OpenWorkflowsFolder, _) => Effect::Reveal(PathBuf::from(workflows_folder(ctx)?)),
         (Action::ApproveWorkflowStep | Action::RejectWorkflowStep, _) => {
             let Some((run, _)) = ctx.workflows.awaiting else {
@@ -1746,46 +1648,8 @@ fn workflow_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Eff
     })
 }
 
-/// The rule of the Flow's structural edits: an open file that parses, a state
-/// selected for the remove and the moves, and a move that has room.
-fn flow_edit_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
-    let page = page_open(ctx)?;
-    if !page.flow.parses {
-        return Err("Fix the file in the TOML tab first.");
-    }
-    if action == Action::AddWorkflowState {
-        return Ok(());
-    }
-    let Some(index) = page.flow.selected else {
-        return Err("Select a state in the Flow first.");
-    };
-    match action {
-        Action::RemoveWorkflowState if page.flow.states == 1 => {
-            Err("A workflow needs at least one state.")
-        }
-        Action::MoveWorkflowStateUp if index == 0 => Err("This state is already the first."),
-        Action::MoveWorkflowStateDown if index + 1 == page.flow.states => {
-            Err("This state is already the last.")
-        }
-        _ => Ok(()),
-    }
-}
-
-/// The rule of the inspector's pickers and its new-input field: the Flow tab
-/// shows, and the file parses so the inspector has its values.
-fn inspector_rule(ctx: &Context<'_>) -> Result<(), Reason> {
-    let page = page_open(ctx)?;
-    if !page.flow.shown {
-        return Err("Open the Flow tab first.");
-    }
-    if !page.flow.parses {
-        return Err("Fix the file in the TOML tab first.");
-    }
-    Ok(())
-}
-
-/// The rule of Dry Run: the page has an open file that parses. A save in flight
-/// does not stop it; the dry run walks the buffer, not the file.
+/// The rule of Dry Run: the page has an open file. A save in flight does not stop it; the dry
+/// run walks the buffer, not the file.
 fn dry_run_rule(ctx: &Context<'_>) -> Result<(), Reason> {
     let page = ctx.workflows.page;
     if !page.shown {
@@ -1793,9 +1657,6 @@ fn dry_run_rule(ctx: &Context<'_>) -> Result<(), Reason> {
     }
     if page.name.is_none() {
         return Err("No workflow is open.");
-    }
-    if !page.flow.parses {
-        return Err("Fix the file in the TOML tab first.");
     }
     Ok(())
 }
@@ -2186,7 +2047,6 @@ fn hook_effect(action: Action, ctx: &Context<'_>) -> Result<Effect, Reason> {
 mod tests {
     use std::collections::HashSet;
 
-    use crate::workflows_page::FlowPosition;
     use gm_schema::{Change, WorkflowInfo, WorkflowInput};
 
     use super::*;
@@ -3764,7 +3624,6 @@ mod tests {
             name,
             dirty,
             saving,
-            ..PageState::default()
         };
         let closed = with_workflows(WorkflowCtx::default());
         assert_eq!(
@@ -3822,7 +3681,6 @@ mod tests {
                 name: Some("w"),
                 dirty: true,
                 saving: false,
-                ..PageState::default()
             },
             ..WorkflowCtx::default()
         });
@@ -3837,88 +3695,20 @@ mod tests {
     }
 
     #[test]
-    fn the_flow_edits_need_a_parsing_file_and_a_selected_state_for_the_moves() {
-        let flow = |parses, states, selected| FlowPosition {
-            parses,
-            states,
-            selected,
-            shown: true,
-        };
-        let page = |flow| {
+    fn dry_run_needs_an_open_file() {
+        let open = || {
             with_workflows(WorkflowCtx {
                 page: PageState {
                     shown: true,
                     name: Some("w"),
-                    flow,
-                    ..PageState::default()
-                },
-                ..WorkflowCtx::default()
-            })
-        };
-        let broken = page(flow(false, 3, None));
-        assert_eq!(
-            Action::AddWorkflowState.enabled(&Args::None, &broken),
-            Err("Fix the file in the TOML tab first.")
-        );
-        let unselected = page(flow(true, 3, None));
-        assert_eq!(
-            Action::AddWorkflowState.plan(&Args::None, &unselected),
-            Ok(Effect::EditFlow(FlowEdit::Add))
-        );
-        assert_eq!(
-            Action::RemoveWorkflowState.enabled(&Args::None, &unselected),
-            Err("Select a state in the Flow first.")
-        );
-        let first = page(flow(true, 3, Some(0)));
-        assert_eq!(
-            Action::MoveWorkflowStateUp.enabled(&Args::None, &first),
-            Err("This state is already the first.")
-        );
-        assert_eq!(
-            Action::MoveWorkflowStateDown.plan(&Args::None, &first),
-            Ok(Effect::EditFlow(FlowEdit::Move(Direction::Down)))
-        );
-        assert_eq!(
-            Action::RemoveWorkflowState.plan(&Args::None, &first),
-            Ok(Effect::EditFlow(FlowEdit::Remove))
-        );
-        let last = page(flow(true, 3, Some(2)));
-        assert_eq!(
-            Action::MoveWorkflowStateDown.enabled(&Args::None, &last),
-            Err("This state is already the last.")
-        );
-        let only = page(flow(true, 1, Some(0)));
-        assert_eq!(
-            Action::RemoveWorkflowState.enabled(&Args::None, &only),
-            Err("A workflow needs at least one state.")
-        );
-    }
-
-    #[test]
-    fn dry_run_needs_an_open_file_that_parses() {
-        let open = |parses| {
-            with_workflows(WorkflowCtx {
-                page: PageState {
-                    shown: true,
-                    name: Some("w"),
-                    flow: FlowPosition {
-                        parses,
-                        states: 1,
-                        selected: None,
-                        shown: true,
-                    },
                     ..PageState::default()
                 },
                 ..WorkflowCtx::default()
             })
         };
         assert_eq!(
-            Action::DryRunWorkflow.plan(&Args::None, &open(true)),
+            Action::DryRunWorkflow.plan(&Args::None, &open()),
             Ok(Effect::DryRunWorkflow)
-        );
-        assert_eq!(
-            Action::DryRunWorkflow.enabled(&Args::None, &open(false)),
-            Err("Fix the file in the TOML tab first.")
         );
         assert_eq!(
             Action::DryRunWorkflow.enabled(&Args::None, &with_workflows(WorkflowCtx::default())),
@@ -3938,95 +3728,6 @@ mod tests {
     }
 
     #[test]
-    fn the_inspector_actions_need_the_flow_tab_a_parsing_file_and_a_state_for_the_action() {
-        let page = |shown, parses, selected| {
-            with_workflows(WorkflowCtx {
-                page: PageState {
-                    shown: true,
-                    name: Some("w"),
-                    flow: FlowPosition {
-                        parses,
-                        states: 2,
-                        selected,
-                        shown,
-                    },
-                    ..PageState::default()
-                },
-                ..WorkflowCtx::default()
-            })
-        };
-        let on_toml = page(false, true, Some(0));
-        assert_eq!(
-            Action::SetWorkflowTrigger.enabled(&Args::None, &on_toml),
-            Err("Open the Flow tab first.")
-        );
-        let broken = page(true, false, Some(0));
-        assert_eq!(
-            Action::AddWorkflowInput.enabled(&Args::None, &broken),
-            Err("Fix the file in the TOML tab first.")
-        );
-        let unselected = page(true, true, None);
-        assert_eq!(
-            Action::SetWorkflowStateCall.enabled(&Args::None, &unselected),
-            Err("Select a state in the Flow first.")
-        );
-        assert_eq!(
-            Action::SetWorkflowStateCall.plan(&Args::None, &page(true, true, Some(0))),
-            Ok(Effect::OpenInspectorPicker(PickerKind::Action))
-        );
-        assert_eq!(
-            Action::SetWorkflowTrigger.plan(&Args::None, &page(true, true, None)),
-            Ok(Effect::OpenInspectorPicker(PickerKind::Trigger))
-        );
-        assert_eq!(
-            Action::AddWorkflowInput.plan(&Args::None, &page(true, true, None)),
-            Ok(Effect::FocusWorkflowInput)
-        );
-    }
-
-    #[test]
-    fn the_inspector_actions_have_their_ids_titles_and_no_keys() {
-        assert_eq!(Action::SetWorkflowStateCall.id(), "workflow.set_action");
-        assert_eq!(Action::SetWorkflowTrigger.id(), "workflow.set_trigger");
-        assert_eq!(Action::AddWorkflowInput.id(), "workflow.add_input");
-        assert_eq!(Action::AddWorkflowInput.spec().title, "Add Workflow Input");
-        for action in [
-            Action::SetWorkflowStateCall,
-            Action::SetWorkflowTrigger,
-            Action::AddWorkflowInput,
-        ] {
-            assert_eq!(action.spec().shortcut, None, "{action:?}");
-            assert_eq!(action.spec().category, Category::Workflows, "{action:?}");
-            assert_eq!(action.spec().args, ArgKind::None, "{action:?}");
-        }
-    }
-
-    #[test]
-    fn the_flow_and_dry_run_actions_have_their_ids_titles_and_no_keys() {
-        assert_eq!(Action::AddWorkflowState.id(), "workflow.add_state");
-        assert_eq!(Action::AddWorkflowState.spec().title, "Add Workflow State");
-        assert_eq!(Action::RemoveWorkflowState.id(), "workflow.remove_state");
-        assert_eq!(Action::MoveWorkflowStateUp.id(), "workflow.move_state_up");
-        assert_eq!(
-            Action::MoveWorkflowStateDown.id(),
-            "workflow.move_state_down"
-        );
-        assert_eq!(Action::DryRunWorkflow.id(), "workflow.dry_run");
-        assert_eq!(Action::DryRunWorkflow.spec().title, "Dry Run Workflow");
-        for action in [
-            Action::AddWorkflowState,
-            Action::RemoveWorkflowState,
-            Action::MoveWorkflowStateUp,
-            Action::MoveWorkflowStateDown,
-            Action::DryRunWorkflow,
-        ] {
-            assert_eq!(action.spec().shortcut, None, "{action:?}");
-            assert_eq!(action.spec().category, Category::Workflows, "{action:?}");
-            assert_eq!(action.spec().args, ArgKind::None, "{action:?}");
-        }
-    }
-
-    #[test]
     fn show_workflows_needs_a_repository_and_opens_the_page() {
         let open = ctx(&[], "");
         assert_eq!(
@@ -4035,6 +3736,14 @@ mod tests {
         );
         assert_eq!(Action::ShowWorkflows.id(), "workflow.show");
         assert_eq!(Action::SaveWorkflow.spec().shortcut, Some("⌘S"));
+    }
+
+    #[test]
+    fn the_dry_run_action_has_its_id_title_and_no_key() {
+        assert_eq!(Action::DryRunWorkflow.id(), "workflow.dry_run");
+        assert_eq!(Action::DryRunWorkflow.spec().title, "Dry Run Workflow");
+        assert_eq!(Action::DryRunWorkflow.spec().shortcut, None);
+        assert_eq!(Action::DryRunWorkflow.spec().category, Category::Workflows);
     }
 
     #[test]

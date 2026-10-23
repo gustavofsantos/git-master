@@ -4,7 +4,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::workflow::catalog;
+use crate::script::catalog;
 
 /// The fields `M.meta` may hold.
 pub const FIELDS: &[&str] = &["name", "description", "trigger", "concurrency", "inputs"];

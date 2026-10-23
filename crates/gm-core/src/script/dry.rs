@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use super::args;
 use super::port::{Budgets, CtxHost, HostEnd, HostReply, RunEnd, RunRequest, ScriptEngine};
 use super::surface::CtxSurface;
-use crate::workflow::catalog::Level;
+use crate::script::catalog::Level;
 
 /// One `ctx` call of a dry run.
 #[derive(Clone, Debug, PartialEq)]

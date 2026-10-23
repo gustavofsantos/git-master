@@ -38,7 +38,7 @@ pub struct ExecSpec {
     pub path: Option<String>,
 }
 
-/// Reads the rendered `with` of an `exec` state: `argv` (non-empty list of
+/// Reads the `with` table of an `exec` call: `argv` (non-empty list of
 /// strings), `stdin` (string), `timeout` (`"<n>s|m|h"`), `format` (`"json"`).
 /// A leading `~/` in `argv[0]` is the home directory.
 pub fn spec(input: &Value, cwd: &Path) -> Result<ExecSpec, String> {

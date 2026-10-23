@@ -1,12 +1,13 @@
 //! The workflow script engine (design/workflow-scripts.md, D98 to D104): a Lua script runs in a
 //! sandbox, and `ctx` is its only authority. The VM sits behind the `ScriptEngine` port; the host
-//! side (`run`) journals every call, applies the approval rules and runs the effects. Built next
-//! to the TOML engine in `workflow`, which WS2 removes.
+//! side (`run`) journals every call, applies the approval rules and runs the effects.
 
 pub mod api_docs;
 pub mod args;
+pub mod catalog;
 pub mod cli;
 pub mod dry;
+pub mod exec;
 pub mod fake;
 pub mod input;
 pub mod inspect;

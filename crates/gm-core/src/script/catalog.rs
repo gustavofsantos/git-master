@@ -1,7 +1,6 @@
-//! The actions, wait events and triggers a workflow may name, with each
-//! action's effect level, declared outcomes (design/workflow-scripts.md, D63, D78) and the typed
-//! `with` fields the driver reads. Static in WF0; JSON Schema of inputs and
-//! outputs comes with WF1.
+//! The actions, wait events and triggers a workflow script may name, with each action's effect
+//! level, declared outcomes (design/workflow-scripts.md, D63) and typed fields. The `ctx` surface
+//! is generated from it (`script::surface`), and so are the checks of a call's arguments.
 
 /// Effect level of an action (D20, D64).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,9 +19,6 @@ pub struct ActionSpec {
     /// Every outcome the action can end with, including `done` and `failed`
     /// (and `interrupted` for apply actions, D80).
     pub outcomes: &'static [&'static str],
-    /// The trigger phase the action is limited to, such as `transform` for
-    /// `set`; `None` when it is valid everywhere.
-    pub phase: Option<&'static str>,
     /// The `with` keys the driver reads, typed. Empty when the action reads
     /// none, or when the driver does not run it yet; the validator checks
     /// nothing for an action with no fields.
@@ -55,11 +51,6 @@ pub enum FieldKind {
     Any,
 }
 
-/// Outcomes with a default transition when the file writes none (D78):
-/// `done` goes to the next state; `failed`, `interrupted` and `timeout` to
-/// `end.failed`.
-pub const DEFAULTED: &[&str] = &["done", "failed", "interrupted", "timeout"];
-
 /// Phases a `before.<op>` or `after.<op>` trigger may name.
 const PHASE_OPS: &[&str] = &["commit", "restack", "branch_create", "conflict_resolve"];
 
@@ -69,17 +60,9 @@ const TRANSFORM_FIELDS: &[&str] = &["commit_message", "branch_name", "conflict_h
 /// Every action, in catalog order.
 static ACTIONS: &[ActionSpec] = &[
     ActionSpec {
-        name: "noop",
-        level: Level::Read,
-        outcomes: &["done", "failed"],
-        phase: None,
-        fields: &[],
-    },
-    ActionSpec {
         name: "notify",
         level: Level::Read,
         outcomes: &["done", "failed"],
-        phase: None,
         fields: &[FieldSpec {
             name: "text",
             kind: FieldKind::Text,
@@ -91,7 +74,6 @@ static ACTIONS: &[ActionSpec] = &[
         name: "approve",
         level: Level::Pause,
         outcomes: &["approved", "rejected", "failed"],
-        phase: None,
         fields: &[FieldSpec {
             name: "summary",
             kind: FieldKind::Text,
@@ -103,7 +85,6 @@ static ACTIONS: &[ActionSpec] = &[
         name: "exec",
         level: Level::Read,
         outcomes: &["done", "failed", "timeout"],
-        phase: None,
         fields: &[
             FieldSpec {
                 name: "argv",
@@ -135,27 +116,24 @@ static ACTIONS: &[ActionSpec] = &[
         name: "commit.suggest_message",
         level: Level::Propose,
         outcomes: &["done", "failed"],
-        phase: None,
         fields: &[FieldSpec {
             name: "message",
             kind: FieldKind::Text,
             required: true,
-            help: "The suggested commit message, usually `${states.<id>.output.text}`.",
+            help: "The suggested commit message.",
         }],
     },
-    // The driver runs `stage.all` with no `with` key.
+    // `stage.all` takes no `with` key.
     ActionSpec {
         name: "stage.all",
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
-        phase: None,
         fields: &[],
     },
     ActionSpec {
         name: "commit.create",
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
-        phase: None,
         fields: &[FieldSpec {
             name: "message",
             kind: FieldKind::Text,
@@ -167,7 +145,6 @@ static ACTIONS: &[ActionSpec] = &[
         name: "branch.create",
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
-        phase: None,
         fields: &[
             FieldSpec {
                 name: "name",
@@ -187,7 +164,6 @@ static ACTIONS: &[ActionSpec] = &[
         name: "branch.checkout",
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
-        phase: None,
         fields: &[FieldSpec {
             name: "branch",
             kind: FieldKind::Text,
@@ -199,7 +175,6 @@ static ACTIONS: &[ActionSpec] = &[
         name: "fetch",
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
-        phase: None,
         fields: &[FieldSpec {
             name: "remote",
             kind: FieldKind::Text,
@@ -208,37 +183,21 @@ static ACTIONS: &[ActionSpec] = &[
         }],
     },
     ActionSpec {
-        name: "set",
-        level: Level::Propose,
-        outcomes: &["done", "failed"],
-        phase: Some("transform"),
-        // `set` returns its whole `with` table, so the validator does not check it.
-        fields: &[FieldSpec {
-            name: "value",
-            kind: FieldKind::Any,
-            required: true,
-            help: "The value the transform returns.",
-        }],
-    },
-    ActionSpec {
         name: "stack.tree",
         level: Level::Read,
         outcomes: &["done", "failed"],
-        phase: None,
         fields: &[], // Not run by the driver yet.
     },
     ActionSpec {
         name: "stack.stale",
         level: Level::Read,
         outcomes: &["done", "failed"],
-        phase: None,
         fields: &[], // Not run by the driver yet.
     },
     ActionSpec {
         name: "restack.plan",
         level: Level::Propose,
         outcomes: &["done", "failed"],
-        phase: None,
         fields: &[FieldSpec {
             name: "root",
             kind: FieldKind::Text,
@@ -250,7 +209,6 @@ static ACTIONS: &[ActionSpec] = &[
         name: "reparent.plan",
         level: Level::Propose,
         outcomes: &["done", "failed"],
-        phase: None,
         fields: &[
             FieldSpec {
                 name: "branch",
@@ -271,7 +229,6 @@ static ACTIONS: &[ActionSpec] = &[
         name: "restack.apply",
         level: Level::Apply,
         outcomes: &["done", "conflict", "stale", "failed"],
-        phase: None,
         fields: &[FieldSpec {
             name: "plan_id",
             kind: FieldKind::Text,
@@ -283,7 +240,6 @@ static ACTIONS: &[ActionSpec] = &[
         name: "reparent.apply",
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
-        phase: None,
         fields: &[FieldSpec {
             name: "plan_id",
             kind: FieldKind::Text,
@@ -295,7 +251,6 @@ static ACTIONS: &[ActionSpec] = &[
         name: "restack.undo",
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
-        phase: None,
         fields: &[FieldSpec {
             name: "plan_id",
             kind: FieldKind::Text,
@@ -307,7 +262,6 @@ static ACTIONS: &[ActionSpec] = &[
         name: "push.lease",
         level: Level::Apply,
         outcomes: &["done", "failed", "interrupted"],
-        phase: None,
         fields: &[
             FieldSpec {
                 name: "branch",
@@ -337,21 +291,12 @@ pub fn action(name: &str) -> Option<&'static ActionSpec> {
 }
 
 /// The group an action sits in when a picker lists them: the part before the
-/// first `.`, or `general` for a bare name such as `noop` or `exec`.
+/// first `.`, or `general` for a bare name such as `exec`.
 #[must_use]
 pub fn domain(action: &str) -> &str {
     action
         .split_once('.')
         .map_or("general", |(domain, _)| domain)
-}
-
-/// Outcomes of a wait state on this event, without `timeout` (which exists
-/// only when the state sets one).
-pub fn wait_outcomes(event: &str) -> Option<&'static [&'static str]> {
-    match event {
-        "restack.resumed" => Some(&["resumed", "aborted"]),
-        _ => None,
-    }
 }
 
 /// The events a workflow may name as `trigger.on` without a phase or a field.
@@ -445,14 +390,6 @@ mod tests {
     }
 
     #[test]
-    fn set_is_limited_to_transform() {
-        assert_eq!(action("set").expect("set exists").phase, Some("transform"));
-        for spec in actions().iter().filter(|spec| spec.name != "set") {
-            assert_eq!(spec.phase, None, "{} must not be phase-limited", spec.name);
-        }
-    }
-
-    #[test]
     fn unknown_action_is_none() {
         assert!(action("nope").is_none());
     }
@@ -512,7 +449,6 @@ mod tests {
         assert_eq!(required("branch.checkout"), ["branch"]);
         assert!(required("approve").is_empty());
         assert!(action("stage.all").expect("stage.all").fields.is_empty());
-        assert!(action("noop").expect("noop").fields.is_empty());
     }
 
     #[test]
@@ -531,18 +467,7 @@ mod tests {
         assert_eq!(domain("commit.create"), "commit");
         assert_eq!(domain("restack.plan"), "restack");
         assert_eq!(domain("stack.tree"), "stack");
-        assert_eq!(domain("noop"), "general");
         assert_eq!(domain("exec"), "general");
-        assert_eq!(domain("set"), "general");
-    }
-
-    #[test]
-    fn restack_resumed_waits_on_resumed_or_aborted() {
-        assert_eq!(
-            wait_outcomes("restack.resumed"),
-            Some(&["resumed", "aborted"][..])
-        );
-        assert!(wait_outcomes("restack.nope").is_none());
     }
 
     #[test]

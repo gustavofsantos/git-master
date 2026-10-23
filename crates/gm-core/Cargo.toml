@@ -18,8 +18,6 @@ notify.workspace = true
 regex.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-toml.workspace = true
-toml_edit.workspace = true
 rusqlite.workspace = true
 mlua.workspace = true
 

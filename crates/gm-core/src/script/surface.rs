@@ -4,7 +4,7 @@
 //! this, the host validates arguments against it, and `.api/` documentation (WS1) is written from
 //! it.
 
-use crate::workflow::catalog::{self, ActionSpec, FieldKind, FieldSpec, Level};
+use crate::script::catalog::{self, ActionSpec, FieldKind, FieldSpec, Level};
 
 /// How a call takes its arguments in Lua.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,7 +33,7 @@ pub const HELPERS: &[&str] = &["now", "random", "block", "fail", "try"];
 /// Helpers that call the host, in the order the VM registers them. `try` is the VM's own.
 pub const HOST_HELPERS: &[&str] = &["now", "random", "block", "fail"];
 
-/// The one event `ctx.wait` knows in v1 (the catalog's `wait_outcomes`).
+/// The one event `ctx.wait` knows in v1.
 pub const WAIT_EVENTS: &[&str] = &["restack.resumed"];
 
 static WAIT_FIELDS: &[FieldSpec] = &[
@@ -55,9 +55,6 @@ static WAIT_FIELDS: &[FieldSpec] = &[
 /// raises (D105).
 pub const WAIT_OUTCOMES: &[&str] = &["resumed", "aborted", "timeout"];
 
-/// Catalog actions that exist only for the old TOML state machine.
-const NOT_IN_CTX: &[&str] = &["noop", "set"];
-
 /// Positional shapes by catalog name. Every other action takes one table.
 fn shape_of(name: &str) -> ArgShape {
     match name {
@@ -76,15 +73,10 @@ pub struct CtxSurface {
 }
 
 impl CtxSurface {
-    /// The surface of the current catalog: its actions, minus the ones the state machine alone
-    /// used, plus `wait`.
+    /// The surface of the current catalog: its actions, plus `wait`.
     #[must_use]
     pub fn from_catalog() -> Self {
-        let mut functions: Vec<CtxFn> = catalog::actions()
-            .iter()
-            .filter(|spec| !NOT_IN_CTX.contains(&spec.name))
-            .map(Self::function)
-            .collect();
+        let mut functions: Vec<CtxFn> = catalog::actions().iter().map(Self::function).collect();
         functions.push(CtxFn {
             path: "wait",
             level: Level::Pause,
@@ -213,15 +205,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_catalog_action_is_a_ctx_function_but_the_state_machine_ones() {
+    fn every_catalog_action_is_a_ctx_function() {
         let surface = CtxSurface::from_catalog();
         for spec in catalog::actions() {
-            let in_ctx = surface.get(spec.name).is_some();
-            assert_eq!(in_ctx, !NOT_IN_CTX.contains(&spec.name), "{}", spec.name);
+            assert!(surface.get(spec.name).is_some(), "{}", spec.name);
         }
         assert!(surface.get("wait").is_some());
-        assert!(surface.get("set").is_none());
-        assert!(surface.get("noop").is_none());
     }
 
     #[test]

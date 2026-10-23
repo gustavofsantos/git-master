@@ -23,8 +23,7 @@ use crate::script::port::{Budgets, ScriptDiagnostic, ScriptEngine};
 use crate::script::run::{
     Clock, EffectCall, EffectResult, Effects, EventSink, Runtime, RuntimeConfig, ScriptEvent,
 };
-use crate::workflow::driver::GitActions;
-use crate::workflow_session::Actions;
+use crate::workflow_session::{Actions, GitActions};
 use crate::{GitPort, LogEntry};
 
 /// An effect posted by a run thread, with the way back.

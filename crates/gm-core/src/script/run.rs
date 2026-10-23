@@ -20,8 +20,8 @@ use super::port::{
     Budgets, CtxHost, Failure, HostEnd, HostReply, RunEnd, RunRequest, ScriptEngine,
 };
 use super::surface::{CtxFn, CtxSurface};
-use crate::workflow::catalog::Level;
-use crate::workflow::exec;
+use crate::script::catalog::Level;
+use crate::script::exec;
 
 /// Milliseconds since the Unix epoch. A function so tests and `ctx.now()` can use a fixed clock.
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;

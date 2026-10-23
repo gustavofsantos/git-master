@@ -4,7 +4,7 @@ local M = {}
 
 M.meta = {
   name = "new-workflow",
-  description = "An empty workflow to build in the Flow tab",
+  description = "An empty workflow to write in the Script tab",
   trigger = { on = "manual" },
 }
 

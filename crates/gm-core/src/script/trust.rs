@@ -280,7 +280,6 @@ fn migrate(conn: &mut Connection) -> Result<(), TrustError> {
 mod tests {
     use super::*;
     use crate::script::journal::Journal;
-    use crate::workflow::store::Store;
 
     const HASH: &str = "sha256:aaaa";
 
@@ -381,23 +380,21 @@ mod tests {
     }
 
     #[test]
-    fn trust_coexists_with_the_journal_and_the_store_in_either_order() {
+    fn trust_coexists_with_the_journal_in_either_order() {
         for trust_first in [true, false] {
             let dir = tempfile::tempdir().expect("tempdir");
             let path = dir.path().join("gitmaster.db");
-            let (trust, journal, store) = if trust_first {
+            let (trust, journal) = if trust_first {
                 let t = TrustStore::open(&path).expect("trust");
                 let j = Journal::open(&path).expect("journal");
-                let s = Store::open(&path).expect("store");
-                (t, j, s)
+                (t, j)
             } else {
-                let s = Store::open(&path).expect("store");
                 let j = Journal::open(&path).expect("journal");
                 let t = TrustStore::open(&path).expect("trust");
-                (t, j, s)
+                (t, j)
             };
             trust.review(HASH, "both", true, 1).unwrap();
-            drop((journal, store));
+            drop(journal);
             let reopened = TrustStore::open(&path).expect("reopen");
             assert!(reopened.auto_approve(HASH).unwrap());
         }

@@ -29,7 +29,6 @@ use crate::context_menu::ContextMenu;
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::diff_rows::Layout;
 use crate::file_discard::DiscardDialog;
-use crate::flow_inspector::FlowInspector;
 use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
 use crate::merged_branches::MergedDialog;
@@ -167,10 +166,8 @@ pub struct StatusView {
     pub(crate) workflow_inputs_dialog: Option<WorkflowInputsDialog>,
     /// The "Run this version?" dialog, while the engine waits for a review of a script.
     pub(crate) workflow_review_dialog: Option<WorkflowReviewDialog>,
-    /// The editor of the Workflows page's TOML tab; its text is the page's buffer.
+    /// The editor of the Workflows page's Script tab; its text is the page's buffer.
     pub(crate) workflow_source: Entity<TextArea>,
-    /// The Flow's inspector: its text fields and the popover open over it.
-    pub(crate) flow_inspector: FlowInspector,
     /// The delete-branch dialog, while it is open.
     pub(crate) delete_dialog: Option<DeleteDialog>,
     /// The discard dialog, while it is open.
@@ -368,7 +365,6 @@ impl StatusView {
             workflow_inputs_dialog: None,
             workflow_review_dialog: None,
             workflow_source,
-            flow_inspector: FlowInspector::default(),
             delete_dialog: None,
             discard_dialog: None,
             drop_stash_dialog: None,
@@ -1068,12 +1064,7 @@ impl StatusView {
             Ok(Effect::SaveWorkflow) => self.save_workflow(false, cx),
             Ok(Effect::RevertWorkflow) => self.revert_workflow(cx),
             Ok(Effect::OpenDeleteWorkflow) => self.ask_delete_workflow(cx),
-            Ok(Effect::EditFlow(edit)) => self.apply_flow_edit(edit, cx),
             Ok(Effect::DryRunWorkflow) => self.dry_run_workflow(cx),
-            Ok(Effect::OpenInspectorPicker(kind)) => {
-                self.open_inspector_picker_from_keyboard(kind, window, cx);
-            }
-            Ok(Effect::FocusWorkflowInput) => self.focus_new_input(window, cx),
             Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
         }
         cx.notify();
@@ -1407,7 +1398,6 @@ impl StatusView {
 
 impl Render for StatusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_flow_inspector(window, cx);
         let (sidebar_width, left_width, commit_height) = self.fitted_sizes(window);
         window_chrome::sync_client_inset(window);
         let app = div()
@@ -1476,8 +1466,6 @@ impl Render for StatusView {
                     .open
                     .then(|| self.quick_open_layer(window, cx)),
             )
-            .children(self.workflow_picker_layer(window, cx))
-            .children(self.inspector_picker_layer(window, cx))
             .children(self.dialog_layers(window, cx));
         window_chrome::framed(window, app)
     }

@@ -1,7 +1,0 @@
-# expect: line 1: missing `[trigger]`
-schema = 1
-name = "no-trigger"
-
-[[state]]
-id = "a"
-action = "noop"

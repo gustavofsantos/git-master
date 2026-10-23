@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use super::meta::{self, Concurrency};
 use super::port::Budgets;
 use super::surface::{ArgShape, CtxFn, CtxSurface, HELPERS};
-use crate::workflow::catalog::{self, FieldKind, FieldSpec, Level};
+use crate::script::catalog::{self, FieldKind, FieldSpec, Level};
 
 /// The type file's name. Luau's definition-file format, for editors with a Luau language server.
 pub const TYPES_FILE: &str = "ctx.d.luau";

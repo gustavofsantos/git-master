@@ -17,7 +17,7 @@ static TEMPLATES: &[Template] = &[
     // The name is the workflow's own `name`, so a copy is named like it.
     Template {
         name: "new-workflow",
-        description: "An empty workflow to build in the Flow tab",
+        description: "An empty workflow to write in the Script tab",
         source: include_str!("templates/blank.lua"),
     },
     Template {

@@ -1,16 +1,12 @@
-//! The Workflows page's model (design/screens.md, D76): which workflow is open, the
-//! buffer typed into its file and what the file held when it was loaded or
-//! last saved, the live diagnostics of the buffer, the save in flight, the Flow
-//! rows of the parsed file, and the runs of the open workflow. Plain data and
-//! pure functions; the screen is in `shell_workflows`, and the engine's answers
-//! reach this model through `Model::apply`.
+//! The Workflows page's model (design/screens.md, D76): which script is open, the buffer typed
+//! into its file and what the file held when it was loaded or last saved, the diagnostics of the
+//! buffer, the save in flight, the dry run of the buffer, and the runs of the open script. Plain
+//! data and pure functions; the screen is in `shell_workflows`, and the engine's answers reach
+//! this model through `Model::apply`.
 
 use std::collections::BTreeSet;
 
-use gm_core::workflow::catalog::{self, DEFAULTED, Level};
-use gm_core::workflow::edit::{self, Direction, EditError, FieldValue};
-use gm_core::workflow::model::{Definition, End, State, StateKind, Target};
-use gm_core::workflow::{Diagnostic, Severity, parse, validate};
+use gm_core::script::port::ScriptDiagnostic;
 use gm_schema::{
     CommandKind, OperationId, OperationState, WorkflowDryRun, WorkflowInfo, WorkflowRunDetail,
     WorkflowRunStatus, WorkflowRunSummary,
@@ -23,23 +19,21 @@ pub const RUN_LIMIT: u32 = 50;
 /// How many lines of a JSON block show before "Show all".
 pub const SHOWN_LINES: usize = 6;
 
-/// The three tabs of an open workflow.
+/// The two tabs of an open script: its text, and the runs of it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab {
     #[default]
-    Flow,
-    Toml,
+    Script,
     Runs,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Flow, Tab::Toml, Tab::Runs];
+    pub const ALL: [Tab; 2] = [Tab::Script, Tab::Runs];
 
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Tab::Flow => "Flow",
-            Tab::Toml => "TOML",
+            Tab::Script => "Script",
             Tab::Runs => "Runs",
         }
     }
@@ -58,74 +52,6 @@ pub enum SaveState {
 
 /// The engine's words for a save that found the file changed.
 const CONFLICT_TEXT: &str = "changed on disk";
-
-/// A structural change the Flow's controls ask for. It is applied to the buffer
-/// through `gm_core::workflow::edit`. The state edits act on the selected state;
-/// the rest act on the workflow.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FlowEdit {
-    /// A new state after the selected one, or at the end when none is selected.
-    Add,
-    Remove,
-    Move(Direction),
-    /// The selected state's action; its `with` keys the new action does not know go.
-    SetAction(String),
-    /// One `with` key of the selected state.
-    SetField {
-        field: String,
-        value: FieldValue,
-    },
-    RemoveField(String),
-    /// `[trigger] on`, and `match` (`None` removes it).
-    SetTrigger {
-        on: String,
-        matcher: Option<String>,
-    },
-    /// An input's prompt; `None` removes the prompt and an unknown name adds the input.
-    SetInput {
-        name: String,
-        prompt: Option<String>,
-    },
-    RemoveInput(String),
-    /// The workflow's name and description (`None` removes the description).
-    SetMeta {
-        name: Option<String>,
-        description: Option<String>,
-    },
-}
-
-/// Where the Flow's selection stands, for the action rules.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FlowPosition {
-    /// The buffer parses, so the Flow's controls can edit it.
-    pub parses: bool,
-    /// How many top-level states the file has.
-    pub states: usize,
-    /// The index of the selected top-level state.
-    pub selected: Option<usize>,
-    /// Whether the Flow tab is the one shown, where the inspector is.
-    pub shown: bool,
-}
-
-/// The target picker open over one edge of the selected state.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Picker {
-    pub state: String,
-    pub outcome: String,
-    /// The transition of `on.<outcome>` the choice sets.
-    pub index: usize,
-    /// The pointer's position in window pixels, where the panel opens.
-    pub at: (f32, f32),
-}
-
-/// What the picker sets on its edge.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Choice {
-    /// A state or an end, as the file writes it.
-    Target(String),
-    /// The outcome goes back to its default: its rule is removed (D78).
-    Default,
-}
 
 /// The last dry run answered: the text it walked and what it found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,8 +83,9 @@ struct Open {
 pub struct WorkflowsPage {
     open: Option<Open>,
     tab: Tab,
-    definition: Option<Definition>,
-    diagnostics: Vec<Diagnostic>,
+    /// The problems of the buffer, as the engine reports them. Nothing fills it yet: the
+    /// editor's diagnostics come from the engine in a later step.
+    diagnostics: Vec<ScriptDiagnostic>,
     save: SaveState,
     /// The save the engine is writing: its operation and the text it writes.
     saving: Option<(OperationId, String)>,
@@ -178,15 +105,6 @@ pub struct WorkflowsPage {
     run_op: Option<OperationId>,
     /// The JSON blocks the user expanded with "Show all", by `expand_key`.
     expanded: BTreeSet<String>,
-    /// The run whose path the Flow highlights, once the user chose to show it.
-    /// It follows the run open in the Runs view while it is shown.
-    flow_run: Option<i64>,
-    /// The top-level state the Flow's controls act on.
-    selected: Option<String>,
-    /// Why the last Flow edit was refused; the buffer is unchanged then.
-    flow_error: Option<String>,
-    /// The target picker open over an edge of the selected state.
-    picker: Option<Picker>,
     /// The dry run asked for and not sent yet: the text it walks.
     pending_dry_run: Option<String>,
     /// The dry run the engine is computing: its operation and the text it walks.
@@ -204,8 +122,6 @@ pub struct PageState<'a> {
     pub name: Option<&'a str>,
     pub dirty: bool,
     pub saving: bool,
-    /// The Flow's selection and the file's states.
-    pub flow: FlowPosition,
 }
 
 impl WorkflowsPage {
@@ -243,15 +159,9 @@ impl WorkflowsPage {
         self.tab
     }
 
-    /// The parsed file, when it parses. Errors in it still leave it here.
-    #[must_use]
-    pub fn definition(&self) -> Option<&Definition> {
-        self.definition.as_ref()
-    }
-
     /// Every diagnostic of the buffer, errors first, then by line.
     #[must_use]
-    pub fn diagnostics(&self) -> &[Diagnostic] {
+    pub fn diagnostics(&self) -> &[ScriptDiagnostic] {
         &self.diagnostics
     }
 
@@ -317,197 +227,13 @@ impl WorkflowsPage {
             name: self.name(),
             dirty: self.dirty(),
             saving: self.is_saving(),
-            flow: self.flow_position(),
         }
     }
 
-    /// The top-level state the Flow's controls act on.
-    #[must_use]
-    pub fn selected(&self) -> Option<&str> {
-        self.selected.as_deref()
-    }
-
-    /// Why the last Flow edit was refused, as the engine's parser or editor words it.
-    #[must_use]
-    pub fn flow_error(&self) -> Option<&str> {
-        self.flow_error.as_deref()
-    }
-
-    #[must_use]
-    pub fn picker(&self) -> Option<&Picker> {
-        self.picker.as_ref()
-    }
-
-    /// The top-level state ids of the parsed file, in file order.
-    fn top_level_ids(&self) -> Vec<&str> {
-        self.definition
-            .as_ref()
-            .map_or_else(Vec::new, |definition| {
-                definition
-                    .states
-                    .iter()
-                    .map(|state| state.id.as_str())
-                    .collect()
-            })
-    }
-
-    fn flow_position(&self) -> FlowPosition {
-        let ids = self.top_level_ids();
-        FlowPosition {
-            parses: self.definition.is_some(),
-            states: ids.len(),
-            selected: self
-                .selected
-                .as_deref()
-                .and_then(|id| ids.iter().position(|known| *known == id)),
-            shown: self.tab == Tab::Flow,
-        }
-    }
-
-    /// Selects the top-level state `id`. Another state than the selected one
-    /// closes the picker; a click on the selected state leaves it open.
-    pub fn select_state(&mut self, id: &str) {
-        if self.selected() == Some(id) || !self.top_level_ids().contains(&id) {
-            return;
-        }
-        self.selected = Some(id.to_owned());
-        self.picker = None;
-    }
-
-    /// Applies a Flow edit to the buffer as one change, and selects what the
-    /// edit leaves selected: the new state after an add, the neighbour after a
-    /// remove. A refused edit keeps the buffer and sets `flow_error`. Returns
-    /// whether the buffer changed.
-    pub fn apply_flow_edit(&mut self, edit: FlowEdit) -> bool {
-        let Some(text) = self.open.as_ref().map(|open| open.text.clone()) else {
-            return false;
-        };
-        let selected = self.selected.clone();
-        let result =
-            match (edit, selected.as_deref()) {
-                (FlowEdit::Add, _) => edit::fresh_id(&text, "step").and_then(|id| {
-                    let edited = edit::add_state(&text, selected.as_deref(), &id, "noop")?;
-                    Ok((edited, Some(id)))
-                }),
-                (FlowEdit::Remove, Some(id)) => {
-                    let ids: Vec<String> = self
-                        .top_level_ids()
-                        .into_iter()
-                        .map(str::to_owned)
-                        .collect();
-                    edit::remove_state(&text, id)
-                        .map(|edited| (edited, neighbour_after_removal(&ids, id)))
-                }
-                (FlowEdit::Move(direction), Some(id)) => edit::move_state(&text, id, direction)
-                    .map(|edited| (edited, Some(id.to_owned()))),
-                (FlowEdit::SetAction(action), Some(id)) => {
-                    edit::set_action(&text, id, &action).map(|edited| (edited, Some(id.to_owned())))
-                }
-                (FlowEdit::SetField { field, value }, Some(id)) => {
-                    edit::set_field(&text, id, &field, &value)
-                        .map(|edited| (edited, Some(id.to_owned())))
-                }
-                (FlowEdit::RemoveField(field), Some(id)) => edit::remove_field(&text, id, &field)
-                    .map(|edited| (edited, Some(id.to_owned()))),
-                (FlowEdit::SetTrigger { on, matcher }, _) => {
-                    edit::set_trigger(&text, &on, matcher.as_deref())
-                        .map(|edited| (edited, selected.clone()))
-                }
-                (FlowEdit::SetInput { name, prompt }, _) => {
-                    edit::set_input(&text, &name, prompt.as_deref())
-                        .map(|edited| (edited, selected.clone()))
-                }
-                (FlowEdit::RemoveInput(name), _) => {
-                    edit::remove_input(&text, &name).map(|edited| (edited, selected.clone()))
-                }
-                (FlowEdit::SetMeta { name, description }, _) => {
-                    edit::set_meta(&text, name.as_deref(), description.as_deref())
-                        .map(|edited| (edited, selected.clone()))
-                }
-                (
-                    FlowEdit::Remove
-                    | FlowEdit::Move(_)
-                    | FlowEdit::SetAction(_)
-                    | FlowEdit::SetField { .. }
-                    | FlowEdit::RemoveField(_),
-                    None,
-                ) => Err(no_selection()),
-            };
-        self.commit(result)
-    }
-
-    /// Opens the target picker over transition `index` of `on.<outcome>` in the
-    /// selected state `state`, under the pointer. Only the selected state has one.
-    pub fn open_picker(&mut self, state: &str, outcome: &str, index: usize, at: (f32, f32)) {
-        if self.selected() != Some(state) {
-            return;
-        }
-        self.picker = Some(Picker {
-            state: state.to_owned(),
-            outcome: outcome.to_owned(),
-            index,
-            at,
-        });
-    }
-
-    pub fn close_picker(&mut self) {
-        self.picker = None;
-    }
-
-    /// The targets the picker of `state` offers; see `target_options`.
-    #[must_use]
-    pub fn target_options(&self, state: &str) -> Vec<String> {
-        self.definition
-            .as_ref()
-            .map_or_else(Vec::new, |definition| target_options(definition, state))
-    }
-
-    /// Sets the picker's edge to `choice` as one change, and closes the picker.
-    /// Returns whether the buffer changed.
-    pub fn pick_target(&mut self, choice: &Choice) -> bool {
-        let Some(picker) = self.picker.take() else {
-            return false;
-        };
-        let Some(text) = self.open.as_ref().map(|open| open.text.clone()) else {
-            return false;
-        };
-        let result = match choice {
-            Choice::Target(target) => {
-                edit::set_target(&text, &picker.state, &picker.outcome, picker.index, target)
-            }
-            Choice::Default => edit::clear_outcome(&text, &picker.state, &picker.outcome),
-        };
-        let selection = self.selected.clone();
-        self.commit(result.map(|edited| (edited, selection)))
-    }
-
-    /// Takes an edit's text: the buffer becomes it and the selection it names.
-    /// A refused edit only sets `flow_error`. Returns whether the buffer changed.
-    fn commit(&mut self, result: Result<(String, Option<String>), EditError>) -> bool {
-        match result {
-            Ok((text, selection)) => {
-                self.flow_error = None;
-                self.selected = selection;
-                self.picker = None;
-                let changed = self.open.as_ref().is_some_and(|open| open.text != text);
-                if let Some(open) = self.open.as_mut() {
-                    open.text = text;
-                }
-                self.analyse();
-                changed
-            }
-            Err(EditError(message)) => {
-                self.flow_error = Some(message);
-                false
-            }
-        }
-    }
-
-    /// Asks for a dry run of the buffer, which must parse. The request is
-    /// tracked by `track_dry_run` once the window has sent it.
+    /// Asks for a dry run of the buffer. The request is tracked by `track_dry_run` once the
+    /// window has sent it.
     pub fn dry_run_request(&mut self) -> Option<CommandKind> {
         let open = self.open.as_ref()?;
-        self.definition.as_ref()?;
         self.pending_dry_run = Some(open.text.clone());
         Some(CommandKind::DryRunWorkflow {
             source: open.text.clone(),
@@ -575,7 +301,6 @@ impl WorkflowsPage {
             open.baseline = info.source.clone();
             open.text = info.source.clone();
             open.loaded_hash = info.hash.clone();
-            self.analyse();
         }
     }
 
@@ -619,7 +344,6 @@ impl WorkflowsPage {
             return;
         }
         text.clone_into(&mut open.text);
-        self.analyse();
     }
 
     /// Throws the unsaved changes away: the buffer goes back to the file on disk as loaded.
@@ -628,7 +352,6 @@ impl WorkflowsPage {
             open.text = open.baseline.clone();
             self.save = SaveState::Idle;
         }
-        self.analyse();
     }
 
     /// Takes the file as the listing last read it, dropping the buffer.
@@ -639,7 +362,6 @@ impl WorkflowsPage {
             open.loaded_hash = open.disk_hash.clone();
             self.save = SaveState::Idle;
         }
-        self.analyse();
     }
 
     /// Shows `tab`. The Runs tab asks for the open workflow's runs; the request
@@ -648,7 +370,7 @@ impl WorkflowsPage {
         self.tab = tab;
         match tab {
             Tab::Runs => self.runs_request(),
-            Tab::Flow | Tab::Toml => None,
+            Tab::Script => None,
         }
     }
 
@@ -677,51 +399,12 @@ impl WorkflowsPage {
         self.runs = Some(runs);
     }
 
-    /// Selects a run of the Runs list and returns the read of its detail. A
-    /// path the Flow is showing moves to this run.
+    /// Selects a run of the Runs list and returns the read of its detail.
     pub fn open_run(&mut self, run: i64) -> Option<CommandKind> {
         self.open.as_ref()?;
         self.run = Some(run);
         self.detail = None;
-        if self.flow_run.is_some() {
-            self.flow_run = Some(run);
-        }
         Some(CommandKind::LoadWorkflowRun { run })
-    }
-
-    /// Shows the open run's path in the Flow, and switches to the Flow tab.
-    pub fn show_run_in_flow(&mut self) {
-        if self.run.is_some() {
-            self.flow_run = self.run;
-            self.tab = Tab::Flow;
-        }
-    }
-
-    /// Stops showing a run's path in the Flow.
-    pub fn clear_run_path(&mut self) {
-        self.flow_run = None;
-    }
-
-    /// The run whose path the Flow highlights, and its path. `None` when no
-    /// path is shown, or its run's detail is not loaded yet.
-    #[must_use]
-    pub fn shown_path(&self) -> Option<(i64, RunPath)> {
-        let run = self.flow_run?;
-        let detail = self
-            .detail
-            .as_ref()
-            .filter(|detail| detail.summary.run == run)?;
-        Some((run, run_path(detail)))
-    }
-
-    /// Whether the file changed since the shown run started, so its path may
-    /// name edges the file no longer has.
-    #[must_use]
-    pub fn shown_path_file_changed(&self) -> bool {
-        match (self.detail.as_ref(), self.open.as_ref()) {
-            (Some(detail), Some(open)) => detail.definition != open.disk_source,
-            _ => false,
-        }
     }
 
     /// Records the operation that answers a run's detail read.
@@ -874,7 +557,6 @@ impl WorkflowsPage {
             disk_source: info.source.clone(),
             disk_hash: info.hash.clone(),
         });
-        self.analyse();
     }
 
     /// Closes the open workflow and keeps the tab.
@@ -883,58 +565,6 @@ impl WorkflowsPage {
         *self = Self::default();
         self.tab = tab;
     }
-
-    /// Parses the buffer and keeps its diagnostics. A file that parses no longer
-    /// has the selected state, or none, drops the selection and the picker; a
-    /// file that does not parse keeps them, so a typo does not lose the place.
-    fn analyse(&mut self) {
-        let text = self.text().to_owned();
-        let (definition, diagnostics) = analyse(&text);
-        self.definition = definition;
-        self.diagnostics = diagnostics;
-        if self.definition.is_some() {
-            let known = self
-                .selected
-                .as_deref()
-                .is_some_and(|id| self.top_level_ids().contains(&id));
-            if !known {
-                self.selected = None;
-                self.picker = None;
-            }
-        }
-    }
-}
-
-/// The state the Flow selects after `removed` goes: the one after it, or the
-/// one before it when it was last.
-fn neighbour_after_removal(ids: &[String], removed: &str) -> Option<String> {
-    let index = ids.iter().position(|id| id == removed)?;
-    ids.get(index + 1)
-        .or_else(|| index.checked_sub(1).and_then(|before| ids.get(before)))
-        .cloned()
-}
-
-fn no_selection() -> EditError {
-    EditError("Select a state in the Flow first.".to_owned())
-}
-
-/// The targets a state's picker offers: the other top-level states, then
-/// `end.done` and `end.failed`, and `end.blocked` only in a `before.*` phase,
-/// where a run can veto.
-#[must_use]
-pub fn target_options(definition: &Definition, state: &str) -> Vec<String> {
-    let mut options: Vec<String> = definition
-        .states
-        .iter()
-        .map(|known| known.id.clone())
-        .filter(|id| id != state)
-        .collect();
-    options.push("end.done".to_owned());
-    options.push("end.failed".to_owned());
-    if definition.trigger.is_before() {
-        options.push("end.blocked".to_owned());
-    }
-    options
 }
 
 /// Whether a save's failure text is the engine's conflict answer.
@@ -943,214 +573,13 @@ pub fn is_conflict(text: &str) -> bool {
     text.to_ascii_lowercase().contains(CONFLICT_TEXT)
 }
 
-/// Parses and checks a workflow file as the editor reads it. The definition is
-/// kept even when validation finds errors, so the Flow can still show the
-/// states; a file that does not parse gives only its one diagnostic. Errors
-/// come first, then the rest, each by line.
-#[must_use]
-pub fn analyse(source: &str) -> (Option<Definition>, Vec<Diagnostic>) {
-    let (definition, mut diagnostics) = match parse::parse(source) {
-        Err(diagnostic) => (None, vec![diagnostic]),
-        Ok(definition) => {
-            let diagnostics = validate::validate(&definition);
-            (Some(definition), diagnostics)
-        }
-    };
-    diagnostics.sort_by_key(|d| (d.severity != Severity::Error, d.line));
-    (definition, diagnostics)
-}
-
 /// The text of one diagnostic in the editor: `line N: message`.
 #[must_use]
-pub fn diagnostic_text(diagnostic: &Diagnostic) -> String {
+pub fn diagnostic_text(diagnostic: &ScriptDiagnostic) -> String {
     if diagnostic.line == 0 {
         diagnostic.message.clone()
     } else {
         format!("line {}: {}", diagnostic.line, diagnostic.message)
-    }
-}
-
-/// One state of the Flow, with its nesting depth in a `for_each`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FlowRow {
-    pub depth: usize,
-    /// The line of the state's `id` in the file.
-    pub line: usize,
-    pub id: String,
-    /// The action's name, `wait <event>`, or `for_each`.
-    pub kind: String,
-    /// The effect level badge of an action: `read`, `propose`, `apply` or `approve`.
-    pub level: Option<&'static str>,
-    pub edges: Vec<Edge>,
-    /// The diagnostics whose line falls inside this state.
-    pub diagnostics: Vec<Diagnostic>,
-}
-
-/// One line of a state's outcomes: `outcome → target`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Edge {
-    pub outcome: String,
-    /// The transition's place in `on.<outcome>`, for the picker; zero for a
-    /// default or an unhandled outcome.
-    pub index: usize,
-    pub target: String,
-    pub guard: Option<String>,
-    pub limit: Option<u32>,
-    /// The short form (D78): the file writes no rule for this outcome.
-    pub defaulted: bool,
-    /// The outcome has no rule and no default: the run would stop on it.
-    pub dangling: bool,
-}
-
-impl Edge {
-    /// The line the Flow shows for this edge.
-    #[must_use]
-    pub fn label(&self) -> String {
-        let mut text = format!("{} → {}", self.outcome, self.target);
-        if let Some(guard) = &self.guard {
-            text = format!("{text} if {guard}");
-        }
-        if let Some(limit) = self.limit {
-            text = format!("{text} (limit {limit})");
-        }
-        text
-    }
-}
-
-/// The Flow rows of a parsed file, in file order, nested `for_each` states
-/// after their parent. Diagnostics go to the state whose line is the last one
-/// at or before theirs; the ones with no such state come back as the second
-/// value.
-#[must_use]
-pub fn flow_rows(
-    definition: &Definition,
-    diagnostics: &[Diagnostic],
-) -> (Vec<FlowRow>, Vec<Diagnostic>) {
-    let mut rows = Vec::new();
-    push_states(&definition.states, 0, &mut rows);
-    let mut unplaced = Vec::new();
-    for diagnostic in diagnostics {
-        let owner = rows
-            .iter_mut()
-            .filter(|row| diagnostic.line > 0 && row.line <= diagnostic.line)
-            .max_by_key(|row| row.line);
-        match owner {
-            Some(row) => row.diagnostics.push(diagnostic.clone()),
-            None => unplaced.push(diagnostic.clone()),
-        }
-    }
-    (rows, unplaced)
-}
-
-fn push_states(states: &[State], depth: usize, rows: &mut Vec<FlowRow>) {
-    for (index, state) in states.iter().enumerate() {
-        let next = states
-            .get(index + 1)
-            .map_or_else(|| "end.done".to_owned(), |next| next.id.clone());
-        let (kind, level, outcomes): (String, Option<&'static str>, Vec<&str>) = match &state.kind {
-            StateKind::Action { action, .. } => {
-                let spec = catalog::action(action);
-                (
-                    action.clone(),
-                    spec.map(|spec| level_label(spec.level)),
-                    spec.map_or_else(Vec::new, |spec| spec.outcomes.to_vec()),
-                )
-            }
-            StateKind::Wait { event, timeout } => {
-                let mut outcomes = catalog::wait_outcomes(event).unwrap_or(&[]).to_vec();
-                if timeout.is_some() && !outcomes.contains(&"timeout") {
-                    outcomes.push("timeout");
-                }
-                (format!("wait {event}"), None, outcomes)
-            }
-            StateKind::ForEach { .. } => ("for_each".to_owned(), None, vec!["done", "failed"]),
-        };
-        let edges = edges(state, &outcomes, &next);
-        rows.push(FlowRow {
-            depth,
-            line: state.line,
-            id: state.id.clone(),
-            kind,
-            level,
-            edges,
-            diagnostics: Vec::new(),
-        });
-        if let StateKind::ForEach { states, .. } = &state.kind {
-            push_states(states, depth + 1, rows);
-        }
-    }
-}
-
-/// The edges of a state: every outcome its action or wait declares, then any
-/// outcome the file names that the catalog does not list.
-fn edges(state: &State, declared: &[&str], next: &str) -> Vec<Edge> {
-    let mut outcomes: Vec<&str> = declared.to_vec();
-    for rule in &state.on {
-        if !outcomes.contains(&rule.outcome.as_str()) {
-            outcomes.push(rule.outcome.as_str());
-        }
-    }
-    let mut edges = Vec::new();
-    for outcome in outcomes {
-        match state.rule(outcome) {
-            Some(rule) if !rule.transitions.is_empty() => {
-                for (index, transition) in rule.transitions.iter().enumerate() {
-                    edges.push(Edge {
-                        outcome: outcome.to_owned(),
-                        index,
-                        target: target_text(&transition.to),
-                        guard: transition.guard.clone(),
-                        limit: transition.limit,
-                        defaulted: false,
-                        dangling: false,
-                    });
-                }
-            }
-            _ if DEFAULTED.contains(&outcome) => {
-                let target = if outcome == "done" {
-                    next
-                } else {
-                    "end.failed"
-                };
-                edges.push(Edge {
-                    outcome: outcome.to_owned(),
-                    index: 0,
-                    target: target.to_owned(),
-                    guard: None,
-                    limit: None,
-                    defaulted: true,
-                    dangling: false,
-                });
-            }
-            _ => edges.push(Edge {
-                outcome: outcome.to_owned(),
-                index: 0,
-                target: "unhandled".to_owned(),
-                guard: None,
-                limit: None,
-                defaulted: false,
-                dangling: true,
-            }),
-        }
-    }
-    edges
-}
-
-fn target_text(target: &Target) -> String {
-    match target {
-        Target::State(id) => id.clone(),
-        Target::End(End::Done) => "end.done".to_owned(),
-        Target::End(End::Failed) => "end.failed".to_owned(),
-        Target::End(End::Blocked) => "end.blocked".to_owned(),
-    }
-}
-
-fn level_label(level: Level) -> &'static str {
-    match level {
-        Level::Read => "read",
-        Level::Propose => "propose",
-        Level::Apply => "apply",
-        Level::Pause => "approve",
     }
 }
 
@@ -1196,21 +625,12 @@ pub fn step_duration(step: &StepRecord) -> Option<i64> {
     step.ended_at.map(|ended| ended - step.started_at)
 }
 
-/// The step's outcome and where the run went: `done → next`, or `running` while
-/// the step has not answered.
+/// The step's outcome, or a line saying the call has not answered.
 #[must_use]
 pub fn outcome_line(step: &StepRecord) -> String {
-    match (&step.outcome, &step.next) {
-        (Some(outcome), Some(next)) => format!("{outcome} → {next}"),
-        (Some(outcome), None) => outcome.clone(),
-        (None, _) => "no outcome yet".to_owned(),
-    }
-}
-
-/// The "visit n" note of a step that ran more than once in the run.
-#[must_use]
-pub fn visit_label(visit: u32) -> Option<String> {
-    (visit > 1).then(|| format!("visit {visit}"))
+    step.outcome
+        .clone()
+        .unwrap_or_else(|| "no outcome yet".to_owned())
 }
 
 /// Pretty JSON for a context value or a step's input or output.
@@ -1275,17 +695,14 @@ pub fn context_blocks(detail: &WorkflowRunDetail) -> [(&'static str, String); 3]
 }
 
 /// One `ctx` call of a run, in the shape the run view reads. A script has no states, so the call
-/// is the step, named by its function, and it has no visit and no next state.
+/// is the step, named by its function.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepRecord {
     pub state: String,
-    pub visit: u32,
     pub action: Option<String>,
     pub input: Option<Value>,
     pub output: Option<Value>,
-    pub truncated: bool,
     pub outcome: Option<String>,
-    pub next: Option<String>,
     pub started_at: i64,
     pub ended_at: Option<i64>,
 }
@@ -1298,13 +715,10 @@ pub fn step_rows(detail: &WorkflowRunDetail) -> Vec<StepRecord> {
         .iter()
         .map(|call| StepRecord {
             state: call.func.clone(),
-            visit: 1,
             action: Some(call.func.clone()),
             input: Some(call.args.clone()),
             output: call.result.clone(),
-            truncated: false,
             outcome: call.outcome.clone(),
-            next: None,
             started_at: call.started_at,
             ended_at: call.duration_ms.map(|ms| call.started_at + ms),
         })
@@ -1329,105 +743,27 @@ pub fn output_text(step: &StepRecord) -> String {
     }
 }
 
-/// The way one run went through the Flow: the top-level states it was in and
-/// the transitions it took between them. Read from the run's step records.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RunPath {
-    /// The top-level states the run visited, or is in.
-    pub states: BTreeSet<String>,
-    /// The transitions taken, as `(from, to)` top-level states; `to` may be an
-    /// `end.*`. A transition between two states nested under the same
-    /// `for_each` is not an edge of the Flow, so it is not here.
-    pub edges: BTreeSet<(String, String)>,
-}
-
-impl RunPath {
-    /// Whether the run was in the top-level state `id`, or went to it: a state
-    /// or an `end.*` of the Flow.
-    #[must_use]
-    pub fn visits(&self, id: &str) -> bool {
-        self.states.contains(id) || self.edges.iter().any(|(_, to)| to == id)
-    }
-
-    /// Whether the run went from the top-level state `from` straight to `to`.
-    #[must_use]
-    pub fn takes(&self, from: &str, to: &str) -> bool {
-        self.edges.iter().any(|(a, b)| a == from && b == to)
-    }
-}
-
-/// The top-level state a state path belongs to: `each` for `each/plan`.
-fn top_level(path: &str) -> &str {
-    path.split_once('/').map_or(path, |(top, _)| top)
-}
-
-/// Whether two state paths are nested under the same `for_each`.
-fn same_parent(a: &str, b: &str) -> bool {
-    matches!((a.split_once('/'), b.split_once('/')), (Some((x, _)), Some((y, _))) if x == y)
-}
-
-/// The states and transitions a run took, for the Flow to highlight. Every step
-/// record names the state it left (`state`) and the place the run went to
-/// (`next`, a state path or an `end.*`); the state the run is in is in the
-/// summary while it has not ended.
-#[must_use]
-pub fn run_path(detail: &WorkflowRunDetail) -> RunPath {
-    let mut path = RunPath::default();
-    if let Some(current) = detail.summary.current_state.as_deref() {
-        path.states.insert(top_level(current).to_owned());
-    }
-    for step in &step_rows(detail) {
-        path.states.insert(top_level(&step.state).to_owned());
-        let Some(next) = step.next.as_deref() else {
-            continue;
-        };
-        if !next.starts_with("end.") {
-            path.states.insert(top_level(next).to_owned());
-            if same_parent(&step.state, next) {
-                continue;
-            }
-        }
-        path.edges.insert((
-            top_level(&step.state).to_owned(),
-            top_level(next).to_owned(),
-        ));
-    }
-    path
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use gm_schema::WorkflowRunSummary;
     use serde_json::json;
 
-    const SAMPLE: &str = r#"schema = 1
-name = "ticket-branch"
-description = "Create a branch from a ticket"
+    const SAMPLE: &str = r#"local M = {}
 
-[inputs]
-ticket = { type = "string", prompt = "Ticket key" }
+M.meta = {
+  name = "ticket-branch",
+  description = "Create a branch from a ticket",
+  inputs = { { name = "ticket", prompt = "Ticket key" } },
+  trigger = { on = "manual" },
+}
 
-[trigger]
-on = "manual"
+function M.execute(ctx, input)
+  local name = ctx.exec({ argv = { "ticket-branch-name", input.inputs.ticket } })
+  ctx.branch.create({ name = name.text, checkout = true })
+end
 
-[[state]]
-id = "name"
-action = "exec"
-with = { argv = ["ticket-branch-name", "${inputs.ticket}"] }
-on.timeout = "end.failed"
-
-[[state]]
-id = "confirm"
-action = "approve"
-with = { summary = "Create branch ${states.name.output.text}?" }
-on.approved = "create"
-on.rejected = "end.done"
-
-[[state]]
-id = "create"
-action = "branch.create"
-with = { name = "${states.name.output.text}", checkout = true }
+return M
 "#;
 
     fn info(path: &str, name: &str, source: &str, hash: &str) -> WorkflowInfo {
@@ -1462,9 +798,9 @@ with = { name = "${states.name.output.text}", checkout = true }
     }
 
     fn opened() -> (WorkflowsPage, Vec<WorkflowInfo>) {
-        let listed = vec![info("/w/ticket.toml", "ticket-branch", SAMPLE, "h1")];
+        let listed = vec![info("/w/ticket.lua", "ticket-branch", SAMPLE, "h1")];
         let mut page = WorkflowsPage::default();
-        assert!(page.select("/w/ticket.toml", &listed));
+        assert!(page.select("/w/ticket.lua", &listed));
         (page, listed)
     }
 
@@ -1474,7 +810,6 @@ with = { name = "${states.name.output.text}", checkout = true }
         assert_eq!(page.name(), Some("ticket-branch"));
         assert_eq!(page.text(), SAMPLE);
         assert!(!page.dirty());
-        assert!(page.definition().is_some());
         assert!(page.diagnostics().is_empty());
     }
 
@@ -1489,40 +824,13 @@ with = { name = "${states.name.output.text}", checkout = true }
     }
 
     #[test]
-    fn a_broken_buffer_keeps_its_one_parse_error_and_no_definition() {
-        let (mut page, _) = opened();
-        page.edit("schema = 1\n[[state]\n");
-        assert!(page.definition().is_none());
-        assert_eq!(page.diagnostics().len(), 1);
-        assert!(page.diagnostics()[0].line > 0);
-    }
-
-    #[test]
-    fn a_validation_error_keeps_the_definition_for_the_flow() {
-        let broken = SAMPLE.replace(r#"on.approved = "create""#, r#"on.approved = "nowhere""#);
-        let (definition, diagnostics) = analyse(&broken);
-        assert!(definition.is_some());
-        assert!(diagnostics.iter().any(|d| d.severity == Severity::Error));
-    }
-
-    #[test]
-    fn errors_come_before_warnings() {
-        let (_, diagnostics) =
-            analyse(&SAMPLE.replace(r#"on.approved = "create""#, r#"on.approved = "nowhere""#));
-        let severities: Vec<Severity> = diagnostics.iter().map(|d| d.severity).collect();
-        let mut sorted = severities.clone();
-        sorted.sort_by_key(|s| *s != Severity::Error);
-        assert_eq!(severities, sorted);
-    }
-
-    #[test]
     fn switching_with_unsaved_changes_asks_and_keeps_the_buffer() {
         let (mut page, mut listed) = opened();
-        listed.push(info("/w/other.toml", "other", "schema = 1", "h2"));
+        listed.push(info("/w/other.lua", "other", "return {}", "h2"));
         page.edit("changed");
-        assert!(!page.select("/w/other.toml", &listed));
-        assert_eq!(page.asked_switch(), Some("/w/other.toml"));
-        assert_eq!(page.path(), Some("/w/ticket.toml"));
+        assert!(!page.select("/w/other.lua", &listed));
+        assert_eq!(page.asked_switch(), Some("/w/other.lua"));
+        assert_eq!(page.path(), Some("/w/ticket.lua"));
         assert!(page.dirty());
         page.keep_editing();
         assert_eq!(page.asked_switch(), None);
@@ -1532,11 +840,11 @@ with = { name = "${states.name.output.text}", checkout = true }
     #[test]
     fn discarding_opens_the_file_that_was_asked_for() {
         let (mut page, mut listed) = opened();
-        listed.push(info("/w/other.toml", "other", "schema = 1", "h2"));
+        listed.push(info("/w/other.lua", "other", "return {}", "h2"));
         page.edit("changed");
-        page.select("/w/other.toml", &listed);
+        page.select("/w/other.lua", &listed);
         page.discard_and_switch(&listed);
-        assert_eq!(page.path(), Some("/w/other.toml"));
+        assert_eq!(page.path(), Some("/w/other.lua"));
         assert!(!page.dirty());
         assert_eq!(page.asked_switch(), None);
     }
@@ -1544,14 +852,9 @@ with = { name = "${states.name.output.text}", checkout = true }
     #[test]
     fn a_listing_with_a_new_hash_updates_a_clean_buffer_only() {
         let (mut page, listed) = opened();
-        let changed = vec![info(
-            "/w/ticket.toml",
-            "ticket-branch",
-            "schema = 1\n",
-            "h9",
-        )];
+        let changed = vec![info("/w/ticket.lua", "ticket-branch", "return {}\n", "h9")];
         page.listed(&changed);
-        assert_eq!(page.text(), "schema = 1\n");
+        assert_eq!(page.text(), "return {}\n");
         assert!(!page.dirty());
 
         page.edit("mine");
@@ -1572,13 +875,13 @@ with = { name = "${states.name.output.text}", checkout = true }
     fn a_save_sends_the_loaded_hash_and_a_saved_answer_clears_the_dirty_flag() {
         let (mut page, _) = opened();
         assert_eq!(page.save_request(false), None, "nothing to save yet");
-        page.edit("schema = 1\n");
+        page.edit("return {}\n");
         let kind = page.save_request(false).expect("dirty buffer saves");
         assert_eq!(
             kind,
             CommandKind::SaveWorkflowFile {
-                path: "/w/ticket.toml".into(),
-                source: "schema = 1\n".into(),
+                path: "/w/ticket.lua".into(),
+                source: "return {}\n".into(),
                 expected_hash: Some("h1".into()),
             }
         );
@@ -1619,7 +922,7 @@ with = { name = "${states.name.output.text}", checkout = true }
     fn a_listing_that_saw_the_outside_edit_lets_overwrite_expect_the_new_hash() {
         let (mut page, _) = opened();
         page.edit("mine");
-        page.listed(&[info("/w/ticket.toml", "ticket-branch", "theirs", "h5")]);
+        page.listed(&[info("/w/ticket.lua", "ticket-branch", "theirs", "h5")]);
         assert_eq!(page.text(), "mine", "a dirty buffer is kept");
         let kind = page.save_request(true).expect("overwrite sends");
         assert!(matches!(
@@ -1632,7 +935,7 @@ with = { name = "${states.name.output.text}", checkout = true }
     fn reload_takes_the_listed_source_and_hash() {
         let (mut page, _) = opened();
         page.edit("mine");
-        page.listed(&[info("/w/ticket.toml", "ticket-branch", "theirs", "h5")]);
+        page.listed(&[info("/w/ticket.lua", "ticket-branch", "theirs", "h5")]);
         page.reload();
         assert_eq!(page.text(), "theirs");
         assert!(!page.dirty());
@@ -1688,12 +991,12 @@ with = { name = "${states.name.output.text}", checkout = true }
         assert_eq!(
             kind,
             CommandKind::DeleteWorkflowFile {
-                path: "/w/ticket.toml".into(),
+                path: "/w/ticket.lua".into(),
                 expected_hash: "h1".into(),
             }
         );
         assert!(!page.asking_delete());
-        page.deleted("/w/ticket.toml");
+        page.deleted("/w/ticket.lua");
         assert_eq!(page.path(), None);
     }
 
@@ -1718,7 +1021,7 @@ with = { name = "${states.name.output.text}", checkout = true }
             })
         );
         assert_eq!(page.tab(), Tab::Runs);
-        assert_eq!(page.show_tab(Tab::Toml), None);
+        assert_eq!(page.show_tab(Tab::Script), None);
     }
 
     #[test]
@@ -1819,149 +1122,6 @@ with = { name = "${states.name.output.text}", checkout = true }
     }
 
     #[test]
-    fn the_flow_lists_each_state_in_order_with_its_action_and_level() {
-        let (definition, _) = analyse(SAMPLE);
-        let definition = definition.expect("the sample parses");
-        let (rows, unplaced) = flow_rows(&definition, &[]);
-        assert!(unplaced.is_empty());
-        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, ["name", "confirm", "create"]);
-        assert_eq!(rows[0].kind, "exec");
-        assert_eq!(rows[0].level, Some("read"));
-        assert_eq!(rows[1].kind, "approve");
-        assert_eq!(rows[1].level, Some("approve"));
-    }
-
-    #[test]
-    fn the_flow_shows_declared_outcomes_and_the_defaults_dimmed() {
-        let (definition, _) = analyse(SAMPLE);
-        let (rows, _) = flow_rows(&definition.expect("parses"), &[]);
-        let name = &rows[0];
-        let labels: Vec<(String, bool)> = name
-            .edges
-            .iter()
-            .map(|edge| (edge.label(), edge.defaulted))
-            .collect();
-        // exec declares `done`, `failed`, `interrupted`, `timeout`; `timeout` is written.
-        assert!(labels.contains(&("done → confirm".to_owned(), true)));
-        assert!(labels.contains(&("timeout → end.failed".to_owned(), false)));
-        assert!(labels.contains(&("failed → end.failed".to_owned(), true)));
-        let confirm = &rows[1];
-        assert!(
-            confirm
-                .edges
-                .iter()
-                .any(|e| e.label() == "approved → create" && !e.defaulted)
-        );
-        assert!(
-            confirm
-                .edges
-                .iter()
-                .any(|e| e.label() == "rejected → end.done")
-        );
-    }
-
-    #[test]
-    fn a_state_with_no_rule_and_no_default_is_a_dangling_edge() {
-        let source = SAMPLE.replace(r#"on.rejected = "end.done""#, "");
-        let (definition, _) = analyse(&source);
-        let (rows, _) = flow_rows(&definition.expect("parses"), &[]);
-        let dangling: Vec<&Edge> = rows[1].edges.iter().filter(|e| e.dangling).collect();
-        assert_eq!(dangling.len(), 1);
-        assert_eq!(dangling[0].outcome, "rejected");
-    }
-
-    #[test]
-    fn the_last_state_defaults_to_end_done() {
-        let (definition, _) = analyse(SAMPLE);
-        let (rows, _) = flow_rows(&definition.expect("parses"), &[]);
-        let create = rows.last().expect("three rows");
-        assert!(
-            create
-                .edges
-                .iter()
-                .any(|e| e.label() == "done → end.done" && e.defaulted)
-        );
-    }
-
-    #[test]
-    fn a_diagnostic_lands_on_the_state_it_falls_in() {
-        let source = SAMPLE.replace(r#"on.approved = "create""#, r#"on.approved = "nowhere""#);
-        let (definition, diagnostics) = analyse(&source);
-        let (rows, unplaced) = flow_rows(&definition.expect("parses"), &diagnostics);
-        assert!(unplaced.is_empty());
-        let confirm = rows.iter().find(|r| r.id == "confirm").expect("row");
-        assert!(
-            confirm
-                .diagnostics
-                .iter()
-                .any(|d| d.message.contains("nowhere"))
-        );
-        assert!(rows[0].diagnostics.is_empty());
-    }
-
-    #[test]
-    fn a_diagnostic_before_every_state_is_unplaced() {
-        let definition = analyse(SAMPLE).0.expect("parses");
-        let early = Diagnostic::warning(1, "header note");
-        let (_, unplaced) = flow_rows(&definition, std::slice::from_ref(&early));
-        assert_eq!(unplaced, vec![early]);
-    }
-
-    #[test]
-    fn a_nested_for_each_state_is_indented_under_its_parent() {
-        let source = r#"schema = 1
-name = "each"
-
-[trigger]
-on = "manual"
-
-[[state]]
-id = "roots"
-action = "exec"
-with = { argv = ["roots"] }
-
-[[state]]
-id = "each"
-for_each = "${states.roots.output.roots}"
-as = "root"
-states = [
-  { id = "plan", action = "exec", with = { argv = ["plan", "${root}"] } },
-  { id = "apply", action = "exec", with = { argv = ["apply", "${states.plan.output.text}"] } },
-]
-"#;
-        let (definition, _) = analyse(source);
-        let definition = definition.expect("the nested file parses");
-        let (rows, _) = flow_rows(&definition, &[]);
-        let shape: Vec<(usize, &str)> = rows.iter().map(|r| (r.depth, r.id.as_str())).collect();
-        assert_eq!(
-            shape,
-            [(0, "roots"), (0, "each"), (1, "plan"), (1, "apply")]
-        );
-        assert_eq!(rows[1].kind, "for_each");
-    }
-
-    #[test]
-    fn an_unparsed_file_has_no_flow_and_one_diagnostic() {
-        let (definition, diagnostics) = analyse("name = ");
-        assert!(definition.is_none());
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostic_text(&diagnostics[0]).starts_with("line "));
-    }
-
-    #[test]
-    fn a_diagnostic_without_a_line_says_its_message() {
-        assert_eq!(
-            diagnostic_text(&Diagnostic::error(0, "no states")),
-            "no states"
-        );
-        assert_eq!(
-            diagnostic_text(&Diagnostic::error(4, "bad key")),
-            "line 4: bad key"
-        );
-    }
-
-    #[test]
     fn conflicts_are_recognised_by_the_engine_wording_only() {
         assert!(is_conflict("The file changed on disk; reload it."));
         assert!(is_conflict("Changed on disk"));
@@ -1996,12 +1156,6 @@ states = [
     }
 
     #[test]
-    fn visits_after_the_first_are_named() {
-        assert_eq!(visit_label(1), None);
-        assert_eq!(visit_label(3), Some("visit 3".to_owned()));
-    }
-
-    #[test]
     fn a_long_block_folds_to_six_lines_and_says_how_many_hide() {
         let text = (1..=9)
             .map(|n| n.to_string())
@@ -2031,19 +1185,16 @@ states = [
     fn a_step_shows_its_input_or_says_none_was_kept() {
         let step = StepRecord {
             state: "name".into(),
-            visit: 1,
             action: Some("exec".into()),
             input: None,
             output: Some(json!({"text": "x"})),
-            truncated: false,
             outcome: Some("done".into()),
-            next: Some("confirm".into()),
             started_at: 0,
             ended_at: Some(120),
         };
         assert_eq!(input_text(&step), "No input recorded");
         assert!(output_text(&step).contains("\"text\": \"x\""));
-        assert_eq!(outcome_line(&step), "done → confirm");
+        assert_eq!(outcome_line(&step), "done");
         assert_eq!(step_duration(&step), Some(120));
         let mut running = step;
         running.output = None;
@@ -2067,23 +1218,14 @@ states = [
         assert!(blocks[0].1.contains("ENG-1"));
     }
 
-    /// Three top-level states; `b` has two transitions on `done`.
-    const FLOW: &str = "schema = 1\n# The header note stays.\nname = \"flow\"\n\n[trigger]\non = \"manual\"\n\n# First.\n[[state]]\nid = \"a\"\naction = \"noop\"\non.done = \"b\"\n\n[[state]]\nid = \"b\"\naction = \"noop\"\non.done = [\n  { to = \"end.done\" },\n  { to = \"a\", limit = 2 },\n]\n\n[[state]]\nid = \"c\"\naction = \"noop\"\n";
+    /// A script that is not the open file's text: the dry run walks whatever the buffer holds.
+    const FLOW: &str = "return {}\n-- a second line\n";
 
-    fn flow_page(source: &str) -> WorkflowsPage {
-        let listed = vec![info("/w/flow.toml", "flow", source, "h1")];
+    fn page_with(source: &str) -> WorkflowsPage {
+        let listed = vec![info("/w/flow.lua", "flow", source, "h1")];
         let mut page = WorkflowsPage::default();
-        assert!(page.select("/w/flow.toml", &listed));
+        assert!(page.select("/w/flow.lua", &listed));
         page
-    }
-
-    fn state_ids(page: &WorkflowsPage) -> Vec<String> {
-        page.definition()
-            .expect("the file parses")
-            .states
-            .iter()
-            .map(|state| state.id.clone())
-            .collect()
     }
 
     fn answer() -> WorkflowDryRun {
@@ -2096,189 +1238,8 @@ states = [
     }
 
     #[test]
-    fn a_terminal_of_the_graph_cannot_be_selected() {
-        let mut page = flow_page(FLOW);
-        page.select_state("a");
-        page.select_state("end.done");
-        page.select_state("end.failed");
-        assert_eq!(page.selected(), Some("a"));
-    }
-
-    #[test]
-    fn an_add_goes_after_the_selected_state_and_selects_the_new_one() {
-        let mut page = flow_page(FLOW);
-        page.select_state("a");
-        assert!(page.apply_flow_edit(FlowEdit::Add));
-        assert_eq!(state_ids(&page), ["a", "step", "b", "c"]);
-        assert_eq!(page.selected(), Some("step"));
-        assert!(page.dirty());
-        assert!(page.text().contains("# The header note stays."));
-    }
-
-    #[test]
-    fn an_add_with_no_selection_goes_to_the_end() {
-        let mut page = flow_page(FLOW);
-        assert!(page.apply_flow_edit(FlowEdit::Add));
-        assert_eq!(state_ids(&page), ["a", "b", "c", "step"]);
-        assert_eq!(page.selected(), Some("step"));
-    }
-
-    #[test]
-    fn a_remove_selects_the_next_state_or_the_one_before_the_last() {
-        let mut page = flow_page(FLOW);
-        page.select_state("b");
-        assert!(page.apply_flow_edit(FlowEdit::Remove));
-        assert_eq!(state_ids(&page), ["a", "c"]);
-        assert_eq!(page.selected(), Some("c"));
-        page.select_state("c");
-        assert!(page.apply_flow_edit(FlowEdit::Remove));
-        assert_eq!(state_ids(&page), ["a"]);
-        assert_eq!(page.selected(), Some("a"));
-    }
-
-    #[test]
-    fn a_refused_edit_keeps_the_buffer_and_says_why() {
-        let mut page = flow_page(FLOW);
-        assert!(!page.apply_flow_edit(FlowEdit::Move(Direction::Up)));
-        assert_eq!(page.flow_error(), Some("Select a state in the Flow first."));
-        assert!(!page.dirty());
-        assert_eq!(page.text(), FLOW);
-
-        let mut single = flow_page(
-            "schema = 1\nname = \"w\"\n\n[trigger]\non = \"manual\"\n\n[[state]]\nid = \"a\"\naction = \"noop\"\n",
-        );
-        single.select_state("a");
-        assert!(!single.apply_flow_edit(FlowEdit::Remove));
-        assert!(
-            single
-                .flow_error()
-                .is_some_and(|error| error.contains("only state"))
-        );
-        assert!(!single.dirty());
-    }
-
-    #[test]
-    fn a_move_keeps_the_selection_and_an_edge_move_is_refused() {
-        let mut page = flow_page(FLOW);
-        page.select_state("a");
-        assert!(!page.apply_flow_edit(FlowEdit::Move(Direction::Up)));
-        assert!(
-            page.flow_error()
-                .is_some_and(|error| error.contains("already the first"))
-        );
-        assert!(page.apply_flow_edit(FlowEdit::Move(Direction::Down)));
-        assert_eq!(state_ids(&page), ["b", "a", "c"]);
-        assert_eq!(page.selected(), Some("a"));
-        assert_eq!(page.flow_error(), None);
-    }
-
-    #[test]
-    fn a_flow_edit_is_one_change_that_revert_takes_back() {
-        let mut page = flow_page(FLOW);
-        page.select_state("a");
-        assert!(page.apply_flow_edit(FlowEdit::Add));
-        assert!(page.dirty());
-        page.revert();
-        assert!(!page.dirty());
-        assert_eq!(page.text(), FLOW);
-    }
-
-    #[test]
-    fn a_picked_target_sets_its_edge_and_default_clears_the_outcome() {
-        let mut page = flow_page(FLOW);
-        page.select_state("a");
-        page.open_picker("a", "done", 0, (10., 20.));
-        assert!(page.picker().is_some());
-        assert!(page.pick_target(&Choice::Target("c".into())));
-        assert!(page.picker().is_none());
-        assert!(page.text().contains("on.done = \"c\""));
-
-        page.select_state("b");
-        page.open_picker("b", "done", 1, (0., 0.));
-        assert!(page.pick_target(&Choice::Target("c".into())));
-        let (rows, _) = flow_rows(page.definition().expect("parses"), &[]);
-        let labels: Vec<String> = rows[1].edges.iter().map(Edge::label).collect();
-        assert_eq!(
-            labels,
-            [
-                "done → end.done",
-                "done → c (limit 2)",
-                "failed → end.failed"
-            ]
-        );
-
-        page.open_picker("b", "done", 0, (0., 0.));
-        assert!(page.pick_target(&Choice::Default));
-        assert!(!page.text().contains("on.done = ["));
-    }
-
-    #[test]
-    fn the_picker_opens_only_over_the_selected_state_and_another_state_closes_it() {
-        let mut page = flow_page(FLOW);
-        page.select_state("a");
-        page.open_picker("b", "done", 0, (0., 0.));
-        assert!(page.picker().is_none());
-
-        page.open_picker("a", "done", 0, (1., 2.));
-        page.select_state("a");
-        assert!(
-            page.picker().is_some(),
-            "a click on the selected state keeps it"
-        );
-        page.select_state("b");
-        assert!(page.picker().is_none());
-        page.select_state("zz");
-        assert_eq!(page.selected(), Some("b"), "an unknown state is ignored");
-    }
-
-    #[test]
-    fn the_selection_survives_typing_and_a_broken_file_but_not_its_state_going() {
-        let mut page = flow_page(FLOW);
-        page.select_state("b");
-        page.edit(&format!("{FLOW}# note\n"));
-        assert_eq!(page.selected(), Some("b"));
-        page.edit("schema = ");
-        assert_eq!(
-            page.selected(),
-            Some("b"),
-            "a file that does not parse keeps the place"
-        );
-        page.edit(&edit::remove_state(FLOW, "b").expect("b can go"));
-        assert_eq!(page.selected(), None);
-    }
-
-    #[test]
-    fn the_picker_offers_the_other_states_and_end_blocked_only_before_a_veto() {
-        let definition = analyse(FLOW).0.expect("parses");
-        assert_eq!(
-            target_options(&definition, "a"),
-            ["b", "c", "end.done", "end.failed"]
-        );
-        let before = analyse(&FLOW.replace("on = \"manual\"", "on = \"before.restack\""))
-            .0
-            .expect("parses");
-        assert!(target_options(&before, "a").contains(&"end.blocked".to_owned()));
-    }
-
-    #[test]
-    fn a_dry_run_is_asked_only_for_a_file_that_parses() {
-        let mut broken = flow_page(FLOW);
-        broken.edit("schema = ");
-        assert_eq!(broken.dry_run_request(), None);
-
-        let mut page = flow_page(FLOW);
-        assert_eq!(
-            page.dry_run_request(),
-            Some(CommandKind::DryRunWorkflow {
-                source: FLOW.into(),
-                inputs: json!({}),
-            })
-        );
-    }
-
-    #[test]
     fn a_dry_run_answer_is_kept_for_its_request_and_stale_after_an_edit() {
-        let mut page = flow_page(FLOW);
+        let mut page = page_with(FLOW);
         let _ = page.dry_run_request();
         page.track_dry_run(id(5));
         assert!(page.dry_run_pending());
@@ -2303,103 +1264,10 @@ states = [
 
     #[test]
     fn a_failed_dry_run_is_no_longer_pending() {
-        let mut page = flow_page(FLOW);
+        let mut page = page_with(FLOW);
         let _ = page.dry_run_request();
         page.track_dry_run(id(7));
         page.operation_ended(id(7), OperationState::Failed, Some("no"));
         assert!(!page.dry_run_pending());
-    }
-
-    #[test]
-    fn the_workflow_edits_need_no_selection_and_change_the_file_once_each() {
-        let mut page = flow_page(FLOW);
-        assert!(page.apply_flow_edit(FlowEdit::SetMeta {
-            name: Some("renamed".to_owned()),
-            description: Some("Does a thing".to_owned()),
-        }));
-        assert!(
-            page.text()
-                .contains("name = \"renamed\"\ndescription = \"Does a thing\"\n")
-        );
-        assert!(page.apply_flow_edit(FlowEdit::SetTrigger {
-            on: "before.restack".to_owned(),
-            matcher: Some("branch:feat/*".to_owned()),
-        }));
-        let definition = page.definition().expect("parses");
-        assert_eq!(definition.trigger.on, "before.restack");
-        assert_eq!(definition.trigger.matcher.as_deref(), Some("branch:feat/*"));
-        assert!(page.apply_flow_edit(FlowEdit::SetInput {
-            name: "ticket".to_owned(),
-            prompt: Some("Ticket".to_owned()),
-        }));
-        assert_eq!(page.definition().expect("parses").inputs.len(), 1);
-        assert!(page.apply_flow_edit(FlowEdit::RemoveInput("ticket".to_owned())));
-        assert!(page.definition().expect("parses").inputs.is_empty());
-        assert_eq!(page.flow_error(), None);
-    }
-
-    #[test]
-    fn the_state_edits_act_on_the_selected_state_and_refuse_without_one() {
-        let mut page = flow_page(FLOW);
-        let before = page.text().to_owned();
-        assert!(!page.apply_flow_edit(FlowEdit::SetAction("notify".to_owned())));
-        assert_eq!(page.flow_error(), Some("Select a state in the Flow first."));
-        assert_eq!(page.text(), before);
-
-        page.select_state("a");
-        assert!(page.apply_flow_edit(FlowEdit::SetAction("notify".to_owned())));
-        assert_eq!(page.flow_error(), None);
-        assert_eq!(page.selected(), Some("a"));
-        assert!(page.apply_flow_edit(FlowEdit::SetField {
-            field: "text".to_owned(),
-            value: FieldValue::Text("hi".to_owned()),
-        }));
-        assert!(page.text().contains("with = { text = \"hi\" }"));
-        assert!(page.apply_flow_edit(FlowEdit::RemoveField("text".to_owned())));
-        assert!(!page.text().contains("text = \"hi\""));
-
-        let typed = page.text().to_owned();
-        assert!(!page.apply_flow_edit(FlowEdit::SetField {
-            field: "text".to_owned(),
-            value: FieldValue::Bool(true),
-        }));
-        assert!(
-            page.flow_error()
-                .is_some_and(|error| error.contains("`with.text` must be a string"))
-        );
-        assert_eq!(
-            page.text(),
-            typed,
-            "a refused edit leaves the text as it was"
-        );
-    }
-
-    #[test]
-    fn the_flow_position_and_the_edge_places_follow_the_file() {
-        let mut page = flow_page(FLOW);
-        page.select_state("b");
-        assert_eq!(
-            page.state(true).flow,
-            FlowPosition {
-                parses: true,
-                states: 3,
-                selected: Some(1),
-                shown: true,
-            }
-        );
-        let (rows, _) = flow_rows(page.definition().expect("parses"), &[]);
-        let places: Vec<(String, usize)> = rows[1]
-            .edges
-            .iter()
-            .map(|edge| (edge.label(), edge.index))
-            .collect();
-        assert_eq!(
-            places,
-            [
-                ("done → end.done".to_owned(), 0),
-                ("done → a (limit 2)".to_owned(), 1),
-                ("failed → end.failed".to_owned(), 0),
-            ]
-        );
     }
 }
