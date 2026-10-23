@@ -741,12 +741,9 @@ impl DiffPane {
         cx.emit(DiffPaneEvent::LayoutChosen(layout));
     }
 
-    /// A wheel step with a sideways part moves the split cells (D41). The
+    /// A wheel step with a sideways part moves the code of every row (D41). The
     /// vertical part is left to the list.
     fn scroll_across(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        if self.layout != Layout::Split {
-            return;
-        }
         let dx = event.delta.pixel_delta(px(ROW_HEIGHT)).x;
         if dx == px(0.) {
             return;
@@ -1652,7 +1649,7 @@ impl DiffPane {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(code_with_mark(
-                        line.text.clone(),
+                        skip_columns(&line.text, self.scroll_columns).to_owned(),
                         text_colour,
                         line.no_newline,
                     )),
@@ -1912,6 +1909,7 @@ fn chunk_button(
 ) -> gpui::Stateful<Div> {
     let button = div()
         .id(id)
+        .h(px(ROW_HEIGHT - 4.))
         .px_2()
         .flex()
         .items_center()

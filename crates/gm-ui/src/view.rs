@@ -54,7 +54,7 @@ use crate::sidebar::Grouping;
 use crate::stash_apply;
 use crate::stash_drop::DropStashDialog;
 use crate::stashes;
-use crate::text_area::{TextArea, TextAreaEvent};
+use crate::text_area::{TextArea, TextAreaEvent, TextStyle};
 use crate::theme;
 use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
@@ -256,8 +256,14 @@ impl StatusView {
         let diff_pane = cx.new(DiffPane::new);
         let commit_diff_pane = cx.new(DiffPane::read_only);
         let commit_texts = CommitTexts::new(cx);
-        let workflow_source =
-            cx.new(|cx| TextArea::new("Workflow file", cx).with_lines(24, usize::MAX));
+        let workflow_source = cx.new(|cx| {
+            TextArea::new("Workflow file", cx)
+                .with_lines(24, usize::MAX)
+                .with_style(TextStyle {
+                    mono: true,
+                    ..TextStyle::default()
+                })
+        });
         // The saved preferences are read here, before the first frame, so the
         // commit diff opens in the layout the user last chose (D40).
         let settings_store =
