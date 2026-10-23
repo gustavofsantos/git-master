@@ -359,7 +359,8 @@ pub trait GitPort: Send {
     /// tree (`add -A` on those paths alone). It is the move snapshot of D109:
     /// the other paths are HEAD's, whatever the index holds. The real index,
     /// HEAD, the working tree and every public ref stay as they are. Returns the
-    /// commit id; nothing points at it yet.
+    /// commit id; nothing points at it yet. Not recorded in the command log: it
+    /// writes objects only.
     fn snapshot_paths(&self, _root: &Path, _paths: &[String]) -> Result<String, GitError> {
         Err(GitError(
             "snapshots are not supported by this adapter".into(),

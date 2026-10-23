@@ -212,8 +212,8 @@ pub enum CommandKind {
         path: String,
     },
     /// Reads what moving the Working Copy change of `path` to `target` would
-    /// refuse (D109). Never changes anything and is not recorded in the command
-    /// log, like `InspectWorktree`. Answered by `MovePreviewed`.
+    /// refuse (D109). Never changes anything visible and is not recorded in the
+    /// command log. Answered by `MovePreviewed`.
     PreviewMoveChanges {
         path: String,
         target: MoveTarget,

@@ -24,6 +24,7 @@ use crate::files::{
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
+use crate::move_preview;
 use crate::reflog;
 use crate::remote::{RemoteJob, RemoteReport};
 use crate::review;
@@ -1718,6 +1719,11 @@ impl Engine {
                 let inspection = self.inspect(&root, path)?;
                 Ok(vec![Event::WorktreeInspected { id, inspection }])
             }
+            CommandKind::PreviewMoveChanges { path, target } => {
+                let root = self.open_root()?;
+                let preview = move_preview::preview(self.git.as_ref(), &root, path, target)?;
+                Ok(vec![Event::MovePreviewed { id, preview }])
+            }
             CommandKind::RemoveWorktree { path, force } => {
                 self.remove_worktree(id, actor, path, *force)
             }
@@ -2723,6 +2729,7 @@ impl Engine {
                 | CommandKind::ListReviewComments
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }
+                | CommandKind::PreviewMoveChanges { .. }
         ) {
             self.log.push(LogEntry {
                 id: op.id,
@@ -2852,7 +2859,7 @@ fn is_review_command(kind: &CommandKind) -> bool {
 }
 
 /// Whether two paths name the same folder, through symbolic links when both exist.
-fn same_folder(open: &Path, path: &str) -> bool {
+pub(crate) fn same_folder(open: &Path, path: &str) -> bool {
     let path = Path::new(path);
     match (std::fs::canonicalize(open), std::fs::canonicalize(path)) {
         (Ok(a), Ok(b)) => a == b,

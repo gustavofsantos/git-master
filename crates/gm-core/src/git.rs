@@ -345,18 +345,35 @@ impl SubprocessGit {
             std::fs::copy(&real, index)
                 .map_err(|e| GitError(format!("cannot copy the index: {e}")))?;
         } else if let Some(head) = head {
-            self.read_tree(root, index, head)?;
+            self.read_tree(root, index, head, true)?;
         }
         Ok(())
     }
 
     /// Fills the snapshot index `index` with the tree `tree` (`read-tree`).
-    fn read_tree(&self, root: &Path, index: &Path, tree: &str) -> Result<(), GitError> {
+    /// `record` puts the run in the command log.
+    fn read_tree(
+        &self,
+        root: &Path,
+        index: &Path,
+        tree: &str,
+        record: bool,
+    ) -> Result<(), GitError> {
         let mut command = self.git(root);
         command
             .env("GIT_INDEX_FILE", index)
             .args(["read-tree", tree]);
-        self.logged(command, None).map(drop)
+        self.snapshot_step(command, record).map(drop)
+    }
+
+    /// Runs one plumbing step of a snapshot. Recorded in the command log when
+    /// `record` is set; otherwise it only writes objects and is not.
+    fn snapshot_step(&self, command: Command, record: bool) -> Result<Vec<u8>, GitError> {
+        if record {
+            self.logged(command, None)
+        } else {
+            Self::run(command)
+        }
     }
 
     /// A folder under `<common_dir>/gitmaster/tmp` for scratch files. It and its
@@ -378,6 +395,17 @@ impl SubprocessGit {
         let out = Self::run_allowing(command, &[0, 1])?;
         let text = String::from_utf8_lossy(&out).trim().to_owned();
         Ok((!text.is_empty()).then_some(text))
+    }
+
+    /// The commit id that `rev` names, such as `HEAD` or `refs/heads/main`, so
+    /// that only object ids reach a command that takes them as arguments. A
+    /// name that starts with `-` is refused as an option. Never records anything.
+    fn commit_of(&self, root: &Path, rev: &str) -> Result<String, GitError> {
+        if rev.starts_with('-') {
+            return Err(GitError(format!("not a revision: {rev:?}")));
+        }
+        self.verify_rev(root, &format!("{rev}^{{commit}}"))?
+            .ok_or_else(|| GitError(format!("not a commit: {rev}")))
     }
 
     /// Whether the index differs from HEAD (from the empty tree on an unborn branch).
@@ -498,13 +526,16 @@ impl SubprocessGit {
         let scratch = self.scratch_dir(root)?;
         let index = scratch.path().join("index");
         let head = self.head_commit(root)?;
+        // A move snapshot writes unreferenced objects only, so it is not recorded;
+        // the ref that later points at it is (D109).
+        let record = paths.is_none();
         match paths {
             None => self.seed_index(root, &index, head.as_deref())?,
             // A move snapshot holds HEAD everywhere except the chosen paths, so it
             // starts from HEAD rather than from the real index.
             Some(_) => {
                 if let Some(head) = head.as_deref() {
-                    self.read_tree(root, &index, head)?;
+                    self.read_tree(root, &index, head, record)?;
                 }
             }
         }
@@ -516,10 +547,10 @@ impl SubprocessGit {
                 .args(["--literal-pathspecs", "add", "-A", "--"])
                 .args(paths),
         };
-        self.logged(add, None)?;
+        self.snapshot_step(add, record)?;
         let mut write = self.git(root);
         write.env("GIT_INDEX_FILE", &index).arg("write-tree");
-        let tree = String::from_utf8_lossy(&self.logged(write, None)?)
+        let tree = String::from_utf8_lossy(&self.snapshot_step(write, record)?)
             .trim()
             .to_owned();
         let mut commit = self.git(root);
@@ -533,7 +564,7 @@ impl SubprocessGit {
             .env("GIT_AUTHOR_EMAIL", SNAPSHOT_EMAIL)
             .env("GIT_COMMITTER_NAME", SNAPSHOT_NAME)
             .env("GIT_COMMITTER_EMAIL", SNAPSHOT_EMAIL);
-        let out = self.logged(commit, None)?;
+        let out = self.snapshot_step(commit, record)?;
         Ok(String::from_utf8_lossy(&out).trim().to_owned())
     }
 }
@@ -841,9 +872,11 @@ impl GitPort for SubprocessGit {
         ours: &str,
         theirs: &str,
     ) -> Result<TreeMerge, GitError> {
-        for id in [base, ours, theirs] {
-            require_commit_id(id)?;
-        }
+        let (base, ours, theirs) = (
+            self.commit_of(root, base)?,
+            self.commit_of(root, ours)?,
+            self.commit_of(root, theirs)?,
+        );
         let mut command = self.git(root);
         command
             .args(["merge-tree", "--write-tree", "--name-only", "-z"])

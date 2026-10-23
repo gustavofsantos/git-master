@@ -15,6 +15,7 @@ pub mod grep;
 mod history;
 pub mod hook;
 pub mod move_changes;
+mod move_preview;
 pub mod path_match;
 mod port;
 mod reflog;
