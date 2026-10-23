@@ -2,7 +2,7 @@
 //! the version floor, the path rules, the per-file plan and the order of the
 //! blockers. The Git runs and the writes are in the engine.
 
-use gm_schema::MoveBlocker;
+use gm_schema::{MoveBlocker, OperationId};
 
 /// The oldest Git this feature works with: `merge-tree --write-tree` (D109).
 pub const MIN_GIT: (u32, u32, u32) = (2, 38, 0);
@@ -158,6 +158,53 @@ fn rank(blocker: &MoveBlocker) -> u8 {
 pub fn order_blockers(mut blockers: Vec<MoveBlocker>) -> Vec<MoveBlocker> {
     blockers.sort_by_key(rank);
     blockers
+}
+
+/// The one-line English sentence that tells the human why a move is refused.
+#[must_use]
+pub fn describe(blocker: &MoveBlocker) -> String {
+    match blocker {
+        MoveBlocker::NothingToMove => "the file has no change to move".to_owned(),
+        MoveBlocker::Conflicted => "the file is conflicted; resolve the conflict first".to_owned(),
+        MoveBlocker::SameBranch => "that is the branch you are on".to_owned(),
+        MoveBlocker::SameWorktree => "that is the worktree you are in".to_owned(),
+        MoveBlocker::BranchExists => "the branch already exists".to_owned(),
+        MoveBlocker::BranchNotFound => "there is no such branch".to_owned(),
+        MoveBlocker::InvalidName { reason } => reason.clone(),
+        MoveBlocker::BranchCheckedOutElsewhere { path } => {
+            format!("the branch is checked out in {path}")
+        }
+        MoveBlocker::WorktreeNotFound => "no worktree has that folder".to_owned(),
+        MoveBlocker::WorktreeMissing => "the worktree folder is missing".to_owned(),
+        MoveBlocker::UnsafePath => "the path is a symbolic link or leaves the worktree".to_owned(),
+        MoveBlocker::GitTooOld { found } => {
+            format!("moving needs Git 2.38 or newer (found {found})")
+        }
+        MoveBlocker::Conflict { paths } if paths.is_empty() => {
+            "the change conflicts with the target".to_owned()
+        }
+        MoveBlocker::Conflict { paths } => {
+            format!("the change conflicts with {}", paths.join(", "))
+        }
+        MoveBlocker::BinaryDiffers => {
+            "a binary file differs from the version the change started from".to_owned()
+        }
+        MoveBlocker::AddOverExisting => "a file with other content already exists there".to_owned(),
+    }
+}
+
+/// The commit message of a branch move, trimmed. Refused when it is empty.
+pub fn commit_message(message: Option<&str>) -> Result<String, String> {
+    match message.map(str::trim) {
+        Some(text) if !text.is_empty() => Ok(text.to_owned()),
+        _ => Err("a commit message is required".to_owned()),
+    }
+}
+
+/// The safety ref that keeps the snapshot of operation `id` (D109, Q24).
+#[must_use]
+pub fn move_ref_name(id: OperationId) -> String {
+    format!("refs/gitmaster/move/{}", id.0)
 }
 
 #[cfg(test)]
@@ -446,5 +493,137 @@ mod tests {
                 MoveBlocker::AddOverExisting,
             ]
         );
+    }
+
+    #[test]
+    fn every_blocker_has_a_one_line_sentence() {
+        let blockers = [
+            MoveBlocker::NothingToMove,
+            MoveBlocker::Conflicted,
+            MoveBlocker::SameBranch,
+            MoveBlocker::SameWorktree,
+            MoveBlocker::BranchExists,
+            MoveBlocker::BranchNotFound,
+            MoveBlocker::InvalidName {
+                reason: "a branch name cannot be empty".into(),
+            },
+            MoveBlocker::BranchCheckedOutElsewhere {
+                path: "/w/dev".into(),
+            },
+            MoveBlocker::WorktreeNotFound,
+            MoveBlocker::WorktreeMissing,
+            MoveBlocker::UnsafePath,
+            MoveBlocker::GitTooOld {
+                found: "2.34.1".into(),
+            },
+            MoveBlocker::Conflict {
+                paths: vec!["a.txt".into()],
+            },
+            MoveBlocker::Conflict { paths: Vec::new() },
+            MoveBlocker::BinaryDiffers,
+            MoveBlocker::AddOverExisting,
+        ];
+        for blocker in blockers {
+            let text = describe(&blocker);
+            assert!(!text.is_empty(), "{blocker:?} has no sentence");
+            assert!(!text.contains('\n'), "{blocker:?} spans lines: {text:?}");
+        }
+    }
+
+    #[test]
+    fn describes_each_refusal_in_plain_words() {
+        assert_eq!(
+            describe(&MoveBlocker::NothingToMove),
+            "the file has no change to move"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::Conflicted),
+            "the file is conflicted; resolve the conflict first"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::SameBranch),
+            "that is the branch you are on"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::SameWorktree),
+            "that is the worktree you are in"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::BranchExists),
+            "the branch already exists"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::BranchNotFound),
+            "there is no such branch"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::InvalidName {
+                reason: "bad name".into()
+            }),
+            "bad name"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::BranchCheckedOutElsewhere {
+                path: "/w/dev".into()
+            }),
+            "the branch is checked out in /w/dev"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::WorktreeNotFound),
+            "no worktree has that folder"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::WorktreeMissing),
+            "the worktree folder is missing"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::UnsafePath),
+            "the path is a symbolic link or leaves the worktree"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::GitTooOld {
+                found: "2.34.1".into()
+            }),
+            "moving needs Git 2.38 or newer (found 2.34.1)"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::Conflict {
+                paths: vec!["a.txt".into(), "b/c.txt".into()]
+            }),
+            "the change conflicts with a.txt, b/c.txt"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::Conflict { paths: Vec::new() }),
+            "the change conflicts with the target"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::BinaryDiffers),
+            "a binary file differs from the version the change started from"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::AddOverExisting),
+            "a file with other content already exists there"
+        );
+    }
+
+    #[test]
+    fn the_commit_message_is_trimmed_and_must_not_be_empty() {
+        assert_eq!(
+            commit_message(Some("  move a.txt\n")).as_deref(),
+            Ok("move a.txt")
+        );
+        assert_eq!(
+            commit_message(None),
+            Err("a commit message is required".to_owned())
+        );
+        assert_eq!(
+            commit_message(Some(" \n\t ")),
+            Err("a commit message is required".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_safety_ref_is_named_by_the_operation() {
+        assert_eq!(move_ref_name(OperationId(7)), "refs/gitmaster/move/7");
     }
 }

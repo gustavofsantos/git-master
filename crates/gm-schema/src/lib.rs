@@ -30,7 +30,7 @@ pub use hook::{
     CONTRACT_VERSION, HookFailure, HookInfo, HookInput, HookOutput, HookPayload, HookRepo,
     HookResult, HookScope, HookState, PREPARE_COMMIT,
 };
-pub use move_changes::{MoveBlocker, MovePreview, MoveTarget};
+pub use move_changes::{MoveBlocker, MoveOutcome, MovePreview, MoveTarget};
 pub use operation::{
     Actor, Command, CommandKind, Event, IllegalTransition, MERGED_LIST_CHANGED, OperationId,
     OperationState, STASH_LIST_CHANGED, WorktreeMode,

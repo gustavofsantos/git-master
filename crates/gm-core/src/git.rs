@@ -1031,6 +1031,10 @@ impl GitPort for SubprocessGit {
         self.logged(command, None).map(drop)
     }
 
+    fn resolve_commit(&self, root: &Path, rev: &str) -> Result<String, GitError> {
+        self.commit_of(root, rev)
+    }
+
     fn file_at_commit(
         &self,
         root: &Path,

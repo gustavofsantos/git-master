@@ -215,7 +215,7 @@ fn tree_blocker(merge: TreeMerge) -> Option<MoveBlocker> {
 
 /// True when the file or a folder between the worktree and the file is a
 /// symbolic link. The walk ends at the first part that is not there.
-fn crosses_symlink(worktree: &Path, path: &str) -> Result<bool, String> {
+pub(crate) fn crosses_symlink(worktree: &Path, path: &str) -> Result<bool, String> {
     let mut current = worktree.to_path_buf();
     for part in path.split('/') {
         current.push(part);
@@ -230,7 +230,7 @@ fn crosses_symlink(worktree: &Path, path: &str) -> Result<bool, String> {
 }
 
 /// The file on disk in the target, `None` when it is not there.
-fn read_target(file: &Path) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn read_target(file: &Path) -> Result<Option<Vec<u8>>, String> {
     match std::fs::read(file) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

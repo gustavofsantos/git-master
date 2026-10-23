@@ -56,3 +56,13 @@ pub enum MoveBlocker {
 pub struct MovePreview {
     pub blockers: Vec<MoveBlocker>,
 }
+
+/// What a move did (D109). A branch target names the commit it made; `kept`
+/// says why the source file stayed, when it did.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MoveOutcome {
+    /// The commit on the target branch; `None` for a worktree target.
+    pub commit: Option<String>,
+    /// The reason the source file was kept, when it was not discarded.
+    pub kept: Option<String>,
+}

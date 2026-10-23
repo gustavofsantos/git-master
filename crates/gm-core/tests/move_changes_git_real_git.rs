@@ -505,3 +505,30 @@ fn discard_moved_refuses_a_symbolic_link_and_a_path_outside_the_tree() {
     );
     assert_eq!(read(dir.path(), "f.txt"), "one\n");
 }
+
+#[test]
+fn resolve_commit_names_the_commit_of_a_revision_and_refuses_the_rest() {
+    let dir = repo();
+    let git_port = SubprocessGit::default();
+    let first = head(dir.path());
+    write(dir.path(), "f.txt", "two\n");
+    let second = commit_all(dir.path(), "second");
+    git(dir.path(), &["branch", "dev", &first]);
+
+    assert_eq!(git_port.resolve_commit(dir.path(), "HEAD").unwrap(), second);
+    assert_eq!(
+        git_port
+            .resolve_commit(dir.path(), "refs/heads/dev")
+            .unwrap(),
+        first
+    );
+    assert!(git_port.resolve_commit(dir.path(), "no-such-ref").is_err());
+    assert!(git_port.resolve_commit(dir.path(), "-n").is_err());
+    let tree = git(dir.path(), &["rev-parse", "HEAD^{tree}"])
+        .trim()
+        .to_owned();
+    assert!(
+        git_port.resolve_commit(dir.path(), &tree).is_err(),
+        "a tree is not a commit"
+    );
+}

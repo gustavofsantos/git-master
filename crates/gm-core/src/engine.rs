@@ -24,6 +24,7 @@ use crate::files::{
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
+use crate::move_exec;
 use crate::move_preview;
 use crate::reflog;
 use crate::remote::{RemoteJob, RemoteReport};
@@ -1723,6 +1724,25 @@ impl Engine {
                 let root = self.open_root()?;
                 let preview = move_preview::preview(self.git.as_ref(), &root, path, target)?;
                 Ok(vec![Event::MovePreviewed { id, preview }])
+            }
+            CommandKind::MoveChanges {
+                path,
+                target,
+                message,
+            } => {
+                only_a_human(actor, "move changes")?;
+                let root = self.open_root()?;
+                let moved = move_exec::run(
+                    self.git.as_ref(),
+                    &root,
+                    id,
+                    path,
+                    target,
+                    message.as_deref(),
+                )?;
+                let mut events = self.reloaded(id, &root)?;
+                events.push(Event::ChangesMoved { id, moved });
+                Ok(events)
             }
             CommandKind::RemoveWorktree { path, force } => {
                 self.remove_worktree(id, actor, path, *force)

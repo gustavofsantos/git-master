@@ -988,6 +988,8 @@ impl Model {
             | Event::WorktreeInspected { .. }
             // A move preview is for the drag that asked it; no view shows it yet (D109).
             | Event::MovePreviewed { .. }
+            // A finished move shows in the status and the worktrees that follow it (D109).
+            | Event::ChangesMoved { .. }
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
@@ -1279,6 +1281,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorktreesLoaded { id, .. }
         | Event::WorktreeInspected { id, .. }
         | Event::MovePreviewed { id, .. }
+        | Event::ChangesMoved { id, .. }
         | Event::PrunableListed { id, .. }
         | Event::MergedBranchesListed { id, .. }
         | Event::MergedBranchesDeleted { id, .. }

@@ -8,7 +8,7 @@ use crate::files::{DirListing, FileSearch, FileView};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History};
 use crate::hook::{HookFailure, HookInfo};
-use crate::move_changes::{MovePreview, MoveTarget};
+use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
 use crate::review::ReviewComment;
 use crate::stash::StashEntry;
@@ -217,6 +217,14 @@ pub enum CommandKind {
     PreviewMoveChanges {
         path: String,
         target: MoveTarget,
+    },
+    /// Moves the Working Copy change of `path` to `target` (D109). Human only,
+    /// and recorded in the command log. A branch target needs `message`, the
+    /// commit message; a worktree target ignores it. Answered by `ChangesMoved`.
+    MoveChanges {
+        path: String,
+        target: MoveTarget,
+        message: Option<String>,
     },
     /// Removes the linked worktree at `path` with `git worktree remove`; the
     /// folder is deleted, never by hand. Human only (D31). Refused while a hard
@@ -594,6 +602,12 @@ pub enum Event {
     MovePreviewed {
         id: OperationId,
         preview: MovePreview,
+    },
+    /// Answers `MoveChanges`: what the move did. Follows the status, as after a
+    /// change to the worktrees.
+    ChangesMoved {
+        id: OperationId,
+        moved: MoveOutcome,
     },
     /// Answers `ListPrunable`: the admin records a prune would remove.
     PrunableListed {

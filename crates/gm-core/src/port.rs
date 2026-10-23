@@ -466,6 +466,14 @@ pub trait GitPort: Send {
         ))
     }
 
+    /// The commit id that `rev` names, such as `HEAD` or `refs/heads/main`; an
+    /// error when it names no commit. Never records anything.
+    fn resolve_commit(&self, _root: &Path, _rev: &str) -> Result<String, GitError> {
+        Err(GitError(
+            "resolve commit is not supported by this adapter".into(),
+        ))
+    }
+
     /// The content of `path` in commit `oid`, or `None` when the commit has no
     /// such file. Never records anything (D28).
     fn file_at_commit(
