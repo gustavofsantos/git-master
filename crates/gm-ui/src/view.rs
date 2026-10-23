@@ -1085,6 +1085,13 @@ impl StatusView {
             Ok(Effect::OpenDeleteWorkflow) => self.ask_delete_workflow(cx),
             Ok(Effect::DryRunWorkflow) => self.dry_run_workflow(cx),
             Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
+            Ok(Effect::PickMoveTarget {
+                action: target,
+                path,
+            }) => self.pick_move_target(target, &path, window, cx),
+            Ok(Effect::MoveFileTo { path, target }) => {
+                self.move_file_to(&path, target, window, cx);
+            }
         }
         cx.notify();
     }
@@ -1171,6 +1178,7 @@ impl StatusView {
     ) -> ActionContext<'a> {
         ActionContext {
             repo_open: self.model.status().is_some(),
+            selected_file: self.model.selected_path(),
             busy: self.busy_reason(),
             remote_running: self.model.remote.in_flight().is_some(),
             entries: self.model.entries(),
@@ -1227,7 +1235,7 @@ impl StatusView {
     /// Why a repository change must wait: an open or a checkout is in flight.
     /// Changes would run against the repository being left, the one being
     /// opened, or a branch that is about to change.
-    fn busy_reason(&self) -> Option<Reason> {
+    pub(crate) fn busy_reason(&self) -> Option<Reason> {
         if self.model.is_opening() {
             Some("Wait for the repository to open.")
         } else if self.model.branches.checkout_in_flight() {

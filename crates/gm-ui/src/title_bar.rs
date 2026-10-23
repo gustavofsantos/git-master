@@ -223,6 +223,7 @@ mod tests {
     fn the_remote_buttons_are_enabled_on_a_branch_and_restack_is_not_available() {
         let context = RuleContext {
             repo_open: true,
+            selected_file: None,
             busy: None,
             worktrees: &[],
             branch_scope: crate::branch_filter::Scope::All,
@@ -254,6 +255,7 @@ mod tests {
     fn a_running_remote_operation_disables_the_three_buttons_and_labels_its_own() {
         let context = RuleContext {
             repo_open: true,
+            selected_file: None,
             busy: None,
             worktrees: &[],
             entries: &[],

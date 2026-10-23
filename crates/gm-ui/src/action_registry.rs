@@ -16,6 +16,7 @@ use gm_schema::{
 };
 
 use crate::branch_filter::Scope;
+use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, SAME_WORKTREE};
 use crate::stashes;
 use crate::workflows_page::PageState;
 
@@ -222,6 +223,18 @@ pub enum Effect {
     DryRunWorkflow,
     /// Sets the sidebar's branches to the scope the window names (D53).
     SetBranchScope(Scope),
+    /// Opens the palette on the target step of a move action, with the file
+    /// at `path` selected, so the branch or worktree is picked there.
+    PickMoveTarget {
+        action: Action,
+        path: String,
+    },
+    /// Moves the change of `path` to `target`, as a drop of that file on that
+    /// row does (D109).
+    MoveFileTo {
+        path: String,
+        target: DropTarget,
+    },
 }
 
 /// What the window knows of the prepare-commit hooks, for the rules.
@@ -309,10 +322,12 @@ pub struct Context<'a> {
     pub remote_running: bool,
     /// The review comments and the Working Copy diff's selection (B4c).
     pub review: ReviewCtx<'a>,
+    /// The path of the selected row of the Working Copy list: the file a move takes.
+    pub selected_file: Option<&'a str>,
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 74] = [
+const SPECS: [Spec; 76] = [
     spec(
         "file.stage",
         "Stage File",
@@ -707,6 +722,20 @@ const SPECS: [Spec; 74] = [
         Category::WorkingCopy,
     ),
     spec(
+        "file.move_to_branch",
+        "Move File to Branch…",
+        None,
+        ArgKind::Branch,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "file.move_to_worktree",
+        "Move File to Worktree…",
+        None,
+        ArgKind::Worktree,
+        Category::WorkingCopy,
+    ),
+    spec(
         "search.text",
         "Search Text…",
         Some("⇧⌘F"),
@@ -904,6 +933,8 @@ pub enum Action {
     QuickOpen,
     ShowCode,
     ViewFile,
+    MoveFileToBranch,
+    MoveFileToWorktree,
     SearchText,
     DiscardAllChanges,
     ShowStashes,
@@ -1034,7 +1065,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 74] = [
+    pub const ALL: [Action; 76] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1092,6 +1123,8 @@ impl Action {
         Action::QuickOpen,
         Action::ShowCode,
         Action::ViewFile,
+        Action::MoveFileToBranch,
+        Action::MoveFileToWorktree,
         Action::SearchText,
         Action::DiscardAllChanges,
         Action::ShowStashes,
@@ -1295,6 +1328,7 @@ impl Action {
                 idle(ctx)
             }
             Action::RevealFile | Action::ViewFile => reveal_rule(args, ctx),
+            Action::MoveFileToBranch | Action::MoveFileToWorktree => move_rule(self, args, ctx),
             Action::DiscardFile | Action::DiscardAllChanges => discard_rule(self, args, ctx),
             Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
             _ if self.copies_its_target() => Ok(()),
@@ -1385,6 +1419,9 @@ impl Action {
                 | Action::OpenReviewComment,
                 _,
             ) => review_entry_effect(self, args, ctx)?,
+            (Action::MoveFileToBranch | Action::MoveFileToWorktree, _) => {
+                move_effect(self, args, ctx)?
+            }
             (action, _) if action.opens_a_page() => navigation_effect(action, args),
             (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
             (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
@@ -1425,8 +1462,17 @@ impl Action {
         })
     }
 
-    /// Whether `args` is the kind of target this action takes.
+    /// Whether the action opens the palette's target step when the file menu runs it.
+    fn opens_target_pick(self) -> bool {
+        matches!(self, Action::MoveFileToBranch | Action::MoveFileToWorktree)
+    }
+
+    /// Whether `args` is the kind of target this action takes. The move actions
+    /// also take the file, from the file menu, which then picks the target.
     fn takes(self, args: &Args) -> bool {
+        if self.opens_target_pick() && matches!(args, Args::File(_)) {
+            return true;
+        }
         matches!(
             (self.spec().args, args),
             (ArgKind::None, Args::None)
@@ -1536,6 +1582,98 @@ fn discard_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Re
         _ if has_unstaged(entry) => Ok(()),
         _ => Err("Nothing unstaged to discard"),
     }
+}
+
+/// The rule of the two move actions (D109): an idle repository, a changed file
+/// that can move, and a target that can take it. The file is the one the run
+/// names, or else the selected row of the Working Copy.
+fn move_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    idle(ctx)?;
+    let path = match args {
+        Args::File(path) => path.as_str(),
+        _ => selected_file(ctx)?,
+    };
+    move_source(path, ctx)?;
+    match (action, args) {
+        (Action::MoveFileToBranch, Args::Branch(name)) => move_to_branch(name, ctx),
+        (Action::MoveFileToWorktree, Args::Worktree(path)) => move_to_worktree(path, ctx),
+        // The file menu names the file only; the target is picked next.
+        (_, Args::File(_)) => Ok(()),
+        _ => Err("No target for this action"),
+    }
+}
+
+/// What a move action does once its rule passes: a file named alone opens the
+/// target step, and a target names the move, which the window sends as a drop (D109).
+fn move_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
+    Ok(match (action, args) {
+        (_, Args::File(path)) => Effect::PickMoveTarget {
+            action,
+            path: path.clone(),
+        },
+        (Action::MoveFileToBranch, Args::Branch(name)) => Effect::MoveFileTo {
+            path: selected_file(ctx)?.to_owned(),
+            target: DropTarget::Branch { name: name.clone() },
+        },
+        (Action::MoveFileToWorktree, Args::Worktree(path)) => Effect::MoveFileTo {
+            path: selected_file(ctx)?.to_owned(),
+            target: DropTarget::Worktree { path: path.clone() },
+        },
+        _ => return Err(NOT_AVAILABLE),
+    })
+}
+
+/// The file a move takes: a listed, unconflicted file, and not a folder.
+fn move_source<'a>(path: &str, ctx: &Context<'a>) -> Result<&'a StatusEntry, Reason> {
+    if path.ends_with('/') {
+        return Err(FOLDER_REASON);
+    }
+    let entry = ctx
+        .entries
+        .iter()
+        .find(|entry| entry.path == path)
+        .ok_or("That file is not in the working copy")?;
+    if entry.conflicted {
+        return Err("Resolve the conflict first.");
+    }
+    Ok(entry)
+}
+
+/// The file a palette run takes when it names only the target: the selected row.
+fn selected_file<'a>(ctx: &Context<'a>) -> Result<&'a str, Reason> {
+    ctx.selected_file
+        .ok_or("Select a changed file to move first.")
+}
+
+/// A branch takes a move unless it is the branch of the window or is checked out elsewhere.
+fn move_to_branch(name: &str, ctx: &Context<'_>) -> Result<(), Reason> {
+    if ctx.current_branch == Some(name) {
+        return Err(SAME_BRANCH);
+    }
+    if ctx
+        .worktrees
+        .iter()
+        .any(|entry| entry.branch.as_deref() == Some(name))
+    {
+        return Err("Checked out in another worktree");
+    }
+    Ok(())
+}
+
+/// A worktree takes a move unless it is the window's own, or its folder is gone.
+fn move_to_worktree(path: &str, ctx: &Context<'_>) -> Result<(), Reason> {
+    let entry = ctx
+        .worktrees
+        .iter()
+        .find(|entry| entry.path == path)
+        .ok_or("This worktree is not listed.")?;
+    if ctx.root == Some(entry.path.as_str()) {
+        return Err(SAME_WORKTREE);
+    }
+    if entry.prunable.is_some() {
+        return Err(MISSING_FOLDER);
+    }
+    Ok(())
 }
 
 /// The rules of the prepare-commit actions: what the window's hook state allows.
@@ -2072,6 +2210,7 @@ mod tests {
     fn ctx<'a>(entries: &'a [StatusEntry], message: &'a str) -> Context<'a> {
         Context {
             repo_open: true,
+            selected_file: None,
             busy: None,
             entries,
             staged_count: entries.iter().filter(|e| e.staged.is_some()).count(),
@@ -2237,6 +2376,7 @@ mod tests {
         let entries: [StatusEntry; 0] = [];
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&entries, "")
         };
         assert_eq!(
@@ -2309,6 +2449,7 @@ mod tests {
         assert_eq!(Action::NewWorktree.spec().title, "New Worktree…");
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -2363,6 +2504,7 @@ mod tests {
     fn create_worktree_needs_an_open_repository_and_a_branch() {
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -2534,6 +2676,7 @@ mod tests {
     fn no_repository_refuses_refresh_and_changes() {
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -2602,6 +2745,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             root: None,
             ..ctx(&entries, "")
         };
@@ -2632,6 +2776,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             root: None,
             ..ctx(&entries, "")
         };
@@ -2654,6 +2799,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             root: None,
             ..ctx(&[], "")
         };
@@ -2715,6 +2861,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -2901,6 +3048,7 @@ mod tests {
         assert_eq!(Action::NewBranch.spec().args, ArgKind::OptionalBranch);
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3031,6 +3179,7 @@ mod tests {
         };
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&modified, "")
         };
         for action in [Action::DiscardFile, Action::DiscardAllChanges] {
@@ -3092,6 +3241,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3109,6 +3259,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3130,6 +3281,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3163,6 +3315,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3190,6 +3343,7 @@ mod tests {
         assert_eq!(Action::NewBranchFromCommit.spec().args, ArgKind::Commit);
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3244,6 +3398,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&modified, "")
         };
         assert_eq!(
@@ -3362,6 +3517,7 @@ mod tests {
             );
             let closed = Context {
                 repo_open: false,
+                selected_file: None,
                 root: None,
                 ..with_stashes(&stashes)
             };
@@ -3466,6 +3622,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3482,6 +3639,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3766,6 +3924,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..with_workflows(WorkflowCtx::default())
         };
         assert_eq!(
@@ -3915,6 +4074,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..with_workflows(WorkflowCtx::default())
         };
         assert_eq!(
@@ -4056,6 +4216,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..review_ctx(lines("a.txt", Some((1, 1))), None)
         };
         assert_eq!(
@@ -4151,6 +4312,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..review_ctx(CommentSpot::Nothing, Some(&listed))
         };
         assert_eq!(
@@ -4199,6 +4361,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -4263,6 +4426,7 @@ mod tests {
         );
         let closed = Context {
             repo_open: false,
+            selected_file: None,
             ..open_ctx(&entries, Some(&current))
         };
         assert_eq!(
@@ -4282,5 +4446,185 @@ mod tests {
             Action::OpenReviewComment.enabled(&Args::None, &open_ctx(&entries, Some(&current))),
             Err("No target for this action")
         );
+    }
+
+    fn move_ctx<'a>(
+        entries: &'a [StatusEntry],
+        worktrees: &'a [WorktreeEntry],
+        selected: Option<&'a str>,
+    ) -> Context<'a> {
+        Context {
+            selected_file: selected,
+            worktrees,
+            ..ctx(entries, "")
+        }
+    }
+
+    #[test]
+    fn the_move_actions_have_their_ids_titles_targets_and_no_keys() {
+        assert_eq!(Action::MoveFileToBranch.id(), "file.move_to_branch");
+        assert_eq!(
+            Action::MoveFileToBranch.spec().title,
+            "Move File to Branch…"
+        );
+        assert_eq!(Action::MoveFileToBranch.spec().args, ArgKind::Branch);
+        assert_eq!(Action::MoveFileToWorktree.id(), "file.move_to_worktree");
+        assert_eq!(
+            Action::MoveFileToWorktree.spec().title,
+            "Move File to Worktree…"
+        );
+        assert_eq!(Action::MoveFileToWorktree.spec().args, ArgKind::Worktree);
+        for action in [Action::MoveFileToBranch, Action::MoveFileToWorktree] {
+            assert_eq!(action.spec().shortcut, None);
+            assert_eq!(action.spec().category, Category::WorkingCopy);
+            assert!(action.available());
+            assert!(!action.destructive());
+        }
+    }
+
+    #[test]
+    fn a_branch_move_takes_the_selected_file_and_sends_it_to_the_drop_path() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let context = move_ctx(&entries, &[], Some("a.txt"));
+        assert_eq!(
+            Action::MoveFileToBranch.plan(&Args::Branch("feature".into()), &context),
+            Ok(Effect::MoveFileTo {
+                path: "a.txt".into(),
+                target: DropTarget::Branch {
+                    name: "feature".into()
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn a_move_needs_a_selected_changed_file_in_an_idle_repository() {
+        let mut conflicted = entry("c.txt", None, Some(Change::Modified));
+        conflicted.conflicted = true;
+        let entries = [entry("a.txt", None, Some(Change::Modified)), conflicted];
+        let target = Args::Branch("feature".into());
+        assert_eq!(
+            Action::MoveFileToBranch.enabled(&target, &move_ctx(&entries, &[], None)),
+            Err("Select a changed file to move first.")
+        );
+        assert_eq!(
+            Action::MoveFileToBranch.enabled(&target, &move_ctx(&entries, &[], Some("c.txt"))),
+            Err("Resolve the conflict first.")
+        );
+        assert_eq!(
+            Action::MoveFileToBranch.enabled(&target, &move_ctx(&entries, &[], Some("gone.txt"))),
+            Err("That file is not in the working copy")
+        );
+        let busy = Context {
+            busy: Some("Wait for the refresh to finish."),
+            ..move_ctx(&entries, &[], Some("a.txt"))
+        };
+        assert_eq!(
+            Action::MoveFileToBranch.enabled(&target, &busy),
+            Err("Wait for the refresh to finish.")
+        );
+        let closed = Context {
+            repo_open: false,
+            root: None,
+            ..move_ctx(&entries, &[], Some("a.txt"))
+        };
+        assert_eq!(
+            Action::MoveFileToWorktree.enabled(&Args::Worktree("/w/ui".into()), &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::MoveFileToBranch.enabled(&target, &move_ctx(&entries, &[], Some("a.txt"))),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_folder_cannot_be_moved_as_one_from_the_palette_or_the_menu() {
+        let entries = [untracked("new/")];
+        let context = move_ctx(&entries, &[], Some("new/"));
+        assert_eq!(
+            Action::MoveFileToBranch.enabled(&Args::Branch("feature".into()), &context),
+            Err(FOLDER_REASON)
+        );
+        assert_eq!(
+            Action::MoveFileToBranch.enabled(&Args::File("new/".into()), &context),
+            Err(FOLDER_REASON)
+        );
+    }
+
+    #[test]
+    fn a_branch_target_refuses_the_branch_of_the_window_and_one_checked_out_elsewhere() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let others = [listed("/w/ui", "ui", false)];
+        let context = move_ctx(&entries, &others, Some("a.txt"));
+        let refuse =
+            |name: &str| Action::MoveFileToBranch.enabled(&Args::Branch(name.into()), &context);
+        assert_eq!(refuse("main"), Err(SAME_BRANCH));
+        assert_eq!(refuse("ui"), Err("Checked out in another worktree"));
+        assert_eq!(refuse("feature"), Ok(()));
+    }
+
+    #[test]
+    fn a_worktree_target_refuses_the_window_own_worktree_a_missing_folder_and_an_unlisted_one() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let mut missing = listed("/w/gone", "gone", false);
+        missing.prunable = Some("gitdir points nowhere".into());
+        let others = [
+            listed("/repo", "main", true),
+            listed("/w/ui", "ui", false),
+            missing,
+        ];
+        let context = move_ctx(&entries, &others, Some("a.txt"));
+        let refuse =
+            |path: &str| Action::MoveFileToWorktree.enabled(&Args::Worktree(path.into()), &context);
+        assert_eq!(refuse("/repo"), Err(SAME_WORKTREE));
+        assert_eq!(refuse("/w/gone"), Err(MISSING_FOLDER));
+        assert_eq!(refuse("/w/none"), Err("This worktree is not listed."));
+        assert_eq!(refuse("/w/ui"), Ok(()));
+        assert_eq!(
+            Action::MoveFileToWorktree.plan(&Args::Worktree("/w/ui".into()), &context),
+            Ok(Effect::MoveFileTo {
+                path: "a.txt".into(),
+                target: DropTarget::Worktree {
+                    path: "/w/ui".into()
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn the_file_menu_names_the_file_and_the_palette_then_picks_the_target() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let context = move_ctx(&entries, &[], None);
+        assert_eq!(
+            Action::MoveFileToWorktree.enabled(&Args::File("a.txt".into()), &context),
+            Ok(())
+        );
+        assert_eq!(
+            Action::MoveFileToBranch.plan(&Args::File("a.txt".into()), &context),
+            Ok(Effect::PickMoveTarget {
+                action: Action::MoveFileToBranch,
+                path: "a.txt".into(),
+            })
+        );
+        assert_eq!(
+            Action::MoveFileToBranch.enabled(&Args::File("gone.txt".into()), &context),
+            Err("That file is not in the working copy")
+        );
+        assert_eq!(
+            Action::MoveFileToBranch.enabled(&Args::Worktree("/w/ui".into()), &context),
+            Err("No target for this action")
+        );
+        assert_eq!(
+            Action::MoveFileToWorktree.enabled(&Args::Branch("feature".into()), &context),
+            Err("No target for this action")
+        );
+    }
+
+    #[test]
+    fn the_refusal_reasons_of_the_rules_are_the_drop_sentences() {
+        assert_eq!(SAME_BRANCH, "This is the branch you are on");
+        assert_eq!(SAME_WORKTREE, "This is the worktree you are in");
+        assert_eq!(MISSING_FOLDER, "the worktree folder is missing");
     }
 }

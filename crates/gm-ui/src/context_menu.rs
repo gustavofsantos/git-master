@@ -120,6 +120,8 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         item(Action::DiscardFile, 1),
         item(Action::DiscardAllChanges, 1),
         item(Action::ViewFile, 2),
+        item(Action::MoveFileToBranch, 2),
+        item(Action::MoveFileToWorktree, 2),
         item(Action::CopyFilePath, 2),
         item(Action::RevealFile, 2),
     ]
@@ -575,6 +577,7 @@ mod tests {
     fn ctx(entries: &[StatusEntry]) -> ActionContext<'_> {
         ActionContext {
             repo_open: true,
+            selected_file: None,
             busy: None,
             entries,
             staged_count: 0,
@@ -866,7 +869,22 @@ mod tests {
         assert_eq!(find(&items, Action::RevealFile).state, Ok(()));
         assert_eq!(find(&items, Action::ViewFile).state, Ok(()));
         let sizes: Vec<usize> = sections(&items).iter().map(|s| s.len()).collect();
-        assert_eq!(sizes, [2, 2, 3]);
+        assert_eq!(sizes, [2, 2, 5]);
+    }
+
+    #[test]
+    fn the_move_items_follow_view_file_in_the_same_group() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let items = file_items("a.txt", &ctx(&entries));
+        let at = |action| items.iter().position(|item| item.action == action);
+        let view = at(Action::ViewFile).expect("view file is listed");
+        assert_eq!(at(Action::MoveFileToBranch), Some(view + 1));
+        assert_eq!(at(Action::MoveFileToWorktree), Some(view + 2));
+        let branch = find(&items, Action::MoveFileToBranch);
+        assert_eq!(branch.args, Args::File("a.txt".into()));
+        assert_eq!(branch.group, 2);
+        assert_eq!(branch.state, Ok(()));
+        assert_eq!(find(&items, Action::MoveFileToWorktree).state, Ok(()));
     }
 
     #[test]
@@ -889,6 +907,7 @@ mod tests {
     fn a_menu_without_a_repository_offers_nothing_that_runs() {
         let closed = ActionContext {
             repo_open: false,
+            selected_file: None,
             root: None,
             ..ctx(&[])
         };

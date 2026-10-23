@@ -616,6 +616,7 @@ pub(crate) fn rank(query: &str, candidates: &[Candidate]) -> Vec<Hit> {
 
 #[cfg(test)]
 mod tests {
+    use crate::move_file::{SAME_BRANCH, SAME_WORKTREE};
     use gm_schema::{Change, StashEntry, StatusEntry, WorktreeEntry};
 
     use super::*;
@@ -644,6 +645,7 @@ mod tests {
     fn ctx_with<'a>(entries: &'a [StatusEntry], message: &'a str) -> ActionContext<'a> {
         ActionContext {
             repo_open: true,
+            selected_file: None,
             busy: None,
             entries,
             staged_count: entries.iter().filter(|e| e.staged.is_some()).count(),
@@ -1334,5 +1336,57 @@ mod tests {
             find(&top, "Cancel Workflow Run").state,
             Err("No workflow run is active.")
         );
+    }
+
+    #[test]
+    fn move_file_to_branch_is_a_pick_of_the_branches_for_the_selected_file() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let branches = [branch("main", true), branch("feature", false)];
+        let mut ctx = ctx_with(&entries, "");
+        ctx.selected_file = Some("a.txt");
+        let top = build(Stage::Actions, "", &ctx, &branches);
+        let row = find(&top, "Move File to Branch…");
+        assert_eq!(row.choice, Choice::Pick(Action::MoveFileToBranch));
+        assert_eq!(row.state, Ok(()));
+        let picks = build(Stage::Pick(Action::MoveFileToBranch), "", &ctx, &branches);
+        let feature = find(&picks, "feature");
+        assert_eq!(
+            feature.choice,
+            Choice::Run {
+                action: Action::MoveFileToBranch,
+                args: Args::Branch("feature".into()),
+            }
+        );
+        assert_eq!(feature.state, Ok(()));
+        assert_eq!(find(&picks, "main").state, Err(SAME_BRANCH));
+    }
+
+    #[test]
+    fn move_file_says_to_select_a_file_when_none_is_selected() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let branches = [branch("feature", false)];
+        let ctx = ctx_with(&entries, "");
+        let top = build(Stage::Actions, "", &ctx, &branches);
+        assert_eq!(
+            find(&top, "Move File to Branch…").state,
+            Err("Select a changed file to move first.")
+        );
+    }
+
+    #[test]
+    fn move_file_to_worktree_is_a_pick_of_the_listed_worktrees() {
+        let entries = [entry("a.txt", None, Some(Change::Modified))];
+        let worktrees = [
+            worktree("/repo", "main", true),
+            worktree("/w/ui", "ui", false),
+        ];
+        let mut ctx = ctx_with_worktrees(&entries, &worktrees);
+        ctx.selected_file = Some("a.txt");
+        let top = build(Stage::Actions, "", &ctx, &[]);
+        let row = find(&top, "Move File to Worktree…");
+        assert_eq!(row.choice, Choice::Pick(Action::MoveFileToWorktree));
+        let picks = build(Stage::Pick(Action::MoveFileToWorktree), "", &ctx, &[]);
+        assert_eq!(find(&picks, "ui").state, Ok(()));
+        assert_eq!(find(&picks, "main").state, Err(SAME_WORKTREE));
     }
 }

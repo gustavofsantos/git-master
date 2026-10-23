@@ -17,6 +17,7 @@ use crate::hook_run::Hooks;
 use crate::icon::Icon;
 use crate::local_review::LocalReview;
 use crate::merged_branches::Merging;
+use crate::move_file::MoveFile;
 use crate::new_branch::BranchCreate;
 use crate::new_stash::StashCreate;
 use crate::quick_open::QuickOpen;
@@ -47,6 +48,8 @@ pub struct Model {
     pub notice: Option<String>,
     /// The icon drawn before the notice, if it has one.
     pub notice_icon: Option<Icon>,
+    /// The folder the notice offers to open, as **Open Worktree** does (D109).
+    pub notice_open: Option<String>,
     notice_generation: u64,
     pub loading: bool,
     /// The refresh the indicator follows, while it runs.
@@ -131,6 +134,9 @@ pub struct Model {
     pub review_write: ReviewWrite,
     /// The Local review page: its filter, the selected comment and its texts (B4d).
     pub local_review: LocalReview,
+    /// Moving a changed file to a branch or a worktree: the drag, the hover check,
+    /// the popover and the move in flight (D109).
+    pub move_file: MoveFile,
 }
 
 /// The page a commit read belongs to: the history (H3, H4), the Stashes page
@@ -573,6 +579,8 @@ impl Model {
                     self.reset_for_repo();
                 }
                 self.status = Some(status);
+                // Every answer about the old status may be stale now (D109).
+                self.move_file.hover.status_changed();
                 self.reconcile_selection(old_row);
                 self.error = None;
                 self.loading = false;
@@ -607,6 +615,34 @@ impl Model {
                 id, state, detail, ..
             } if self.branch_delete.owns(id) => {
                 self.branch_delete.settle(state, detail);
+                None
+            }
+            // A move's preview answers the hover check of its row (D109).
+            Event::MovePreviewed { id, preview } => {
+                let _ = self.move_file.answered(id, preview);
+                None
+            }
+            // A finished move is the status bar's notice, with its Open Worktree offer.
+            Event::ChangesMoved { id, moved } => {
+                if let Some(notice) = self.move_file.moved(id, &moved) {
+                    self.set_notice(notice.text);
+                    self.notice_icon = Some(Icon::CheckCircle);
+                    self.notice_open = notice.open_worktree;
+                }
+                None
+            }
+            // A preview that ended without an answer belongs to its row, not to the status bar.
+            Event::OperationChanged { id, state, .. } if self.move_file.hover.awaits(id) => {
+                self.move_file.hover.ended(id, state);
+                None
+            }
+            // A move that failed stays in its popover, or else says why in the status bar.
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.move_file.owns(id) => {
+                if let Some(message) = self.move_file.settle(id, state, detail) {
+                    self.error = Some(message);
+                }
                 None
             }
             // A file discard's outcome belongs to its dialog, not to the status bar.
@@ -986,10 +1022,6 @@ impl Model {
             Event::HookFailed { .. }
             | Event::HookCancelled { .. }
             | Event::WorktreeInspected { .. }
-            // A move preview is for the drag that asked it; no view shows it yet (D109).
-            | Event::MovePreviewed { .. }
-            // A finished move shows in the status and the worktrees that follow it (D109).
-            | Event::ChangesMoved { .. }
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
@@ -1053,6 +1085,8 @@ impl Model {
         self.diffs = None;
         self.notice = None;
         self.notice_icon = None;
+        self.notice_open = None;
+        self.move_file = MoveFile::default();
         self.history = HistoryList::default();
         self.commit = CommitPane::Empty;
         self.stashes = StashList::default();
@@ -1161,6 +1195,7 @@ impl Model {
     pub fn set_notice(&mut self, text: String) -> u64 {
         self.notice = Some(text);
         self.notice_icon = None;
+        self.notice_open = None;
         self.notice_generation += 1;
         self.notice_generation
     }
@@ -1170,6 +1205,7 @@ impl Model {
         if self.notice_generation == generation {
             self.notice = None;
             self.notice_icon = None;
+            self.notice_open = None;
         }
     }
 
@@ -2566,5 +2602,210 @@ mod stash_tests {
             comments: vec![listed_comment(8, "other")],
         });
         assert_eq!(model.local_review.selected_id(), None);
+    }
+}
+
+#[cfg(test)]
+mod move_file_tests {
+    use gm_schema::{Actor, BranchInfo, MoveBlocker, MoveOutcome, MovePreview, OperationState};
+
+    use super::*;
+    use crate::move_file::{DropTarget, Moving, PopoverState};
+
+    fn done(id: u64) -> Event {
+        Event::OperationChanged {
+            id: OperationId(id),
+            actor: Actor::Human,
+            state: OperationState::Done,
+            detail: None,
+        }
+    }
+
+    fn failed(id: u64, detail: Option<&str>) -> Event {
+        Event::OperationChanged {
+            id: OperationId(id),
+            actor: Actor::Human,
+            state: OperationState::Failed,
+            detail: detail.map(str::to_owned),
+        }
+    }
+
+    fn branch(name: &str) -> DropTarget {
+        DropTarget::Branch {
+            name: name.to_owned(),
+        }
+    }
+
+    /// A model with a drag of `a.txt` resting on the branch `feature`, its check sent as `id`.
+    fn checking(id: u64) -> Model {
+        let mut model = Model::default();
+        model.move_file.begin_drag("a.txt");
+        model
+            .move_file
+            .hover
+            .enter(branch("feature"), std::time::Instant::now());
+        model.move_file.hover.sent(OperationId(id));
+        model
+    }
+
+    #[test]
+    fn a_preview_answers_the_check_of_its_row_and_a_late_one_is_dropped() {
+        let mut model = checking(1);
+        let _ = model.apply(Event::MovePreviewed {
+            id: OperationId(9),
+            preview: MovePreview::default(),
+        });
+        assert_eq!(model.move_file.hover.preview(&branch("feature")), None);
+        let blocked = MovePreview {
+            blockers: vec![MoveBlocker::BranchExists],
+        };
+        let _ = model.apply(Event::MovePreviewed {
+            id: OperationId(1),
+            preview: blocked.clone(),
+        });
+        assert_eq!(
+            model.move_file.hover.preview(&branch("feature")),
+            Some(&blocked)
+        );
+    }
+
+    #[test]
+    fn a_preview_that_fails_is_not_shown_as_an_error_and_is_not_asked_again_at_once() {
+        let mut model = checking(2);
+        let _ = model.apply(failed(2, Some("git refused")));
+        assert_eq!(model.error, None);
+        assert_eq!(
+            model
+                .move_file
+                .hover
+                .due(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_new_status_makes_every_answer_ask_again() {
+        let mut model = checking(3);
+        let _ = model.apply(Event::MovePreviewed {
+            id: OperationId(3),
+            preview: MovePreview::default(),
+        });
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(4),
+            status: RepoStatus {
+                root: "/r".to_owned(),
+                branch: BranchInfo::default(),
+                entries: Vec::new(),
+            },
+        });
+        assert_eq!(model.move_file.hover.preview(&branch("feature")), None);
+    }
+
+    #[test]
+    fn a_worktree_move_says_it_and_offers_to_open_the_worktree() {
+        let mut model = Model::default();
+        let id = OperationId(5);
+        model.move_file.sent_move(Moving {
+            id,
+            file: "a.txt".into(),
+            target: DropTarget::Worktree {
+                path: "/w/ui".into(),
+            },
+            worktree: "ui".into(),
+            from_popover: false,
+        });
+        let _ = model.apply(Event::ChangesMoved {
+            id,
+            moved: MoveOutcome::default(),
+        });
+        assert_eq!(model.notice.as_deref(), Some("Moved a.txt to ui."));
+        assert_eq!(model.notice_icon, Some(Icon::CheckCircle));
+        assert_eq!(model.notice_open.as_deref(), Some("/w/ui"));
+        let _ = model.apply(done(5));
+        assert!(model.move_file.moving.is_none());
+        model.set_notice("Something else".to_owned());
+        assert_eq!(model.notice_open, None);
+    }
+
+    #[test]
+    fn a_branch_move_closes_its_popover_and_names_the_commit_branch() {
+        let mut model = Model::default();
+        let id = OperationId(6);
+        model
+            .move_file
+            .open_popover(PopoverState::existing("a.txt", "feature"));
+        model.move_file.sent_move(Moving {
+            id,
+            file: "a.txt".into(),
+            target: branch("feature"),
+            worktree: String::new(),
+            from_popover: true,
+        });
+        let _ = model.apply(Event::ChangesMoved {
+            id,
+            moved: MoveOutcome {
+                commit: Some("abc1234".into()),
+                kept: None,
+            },
+        });
+        assert_eq!(model.notice.as_deref(), Some("Committed a.txt to feature."));
+        assert_eq!(model.notice_open, None);
+        assert!(model.move_file.popover.is_none());
+    }
+
+    #[test]
+    fn a_failed_branch_move_stays_in_its_popover_with_the_reason() {
+        let mut model = Model::default();
+        let id = OperationId(7);
+        model
+            .move_file
+            .open_popover(PopoverState::existing("a.txt", "feature"));
+        model.move_file.sent_move(Moving {
+            id,
+            file: "a.txt".into(),
+            target: branch("feature"),
+            worktree: String::new(),
+            from_popover: true,
+        });
+        let _ = model.apply(failed(7, Some("the branch moved")));
+        assert!(model.move_file.popover.is_some());
+        assert_eq!(
+            model.move_file.popover_error.as_deref(),
+            Some("the branch moved")
+        );
+        assert_eq!(model.error, None);
+    }
+
+    #[test]
+    fn a_failed_worktree_move_is_an_error_of_the_status_bar() {
+        let mut model = Model::default();
+        let id = OperationId(8);
+        model.move_file.sent_move(Moving {
+            id,
+            file: "a.txt".into(),
+            target: DropTarget::Worktree {
+                path: "/w/ui".into(),
+            },
+            worktree: "ui".into(),
+            from_popover: false,
+        });
+        let _ = model.apply(failed(8, Some("a conflict")));
+        assert_eq!(model.error.as_deref(), Some("a conflict"));
+        assert!(model.move_file.moving.is_none());
+    }
+
+    #[test]
+    fn a_move_in_flight_is_owned_by_its_own_operation_only() {
+        let mut model = Model::default();
+        model.move_file.sent_move(Moving {
+            id: OperationId(10),
+            file: "a.txt".into(),
+            target: branch("feature"),
+            worktree: String::new(),
+            from_popover: false,
+        });
+        assert!(model.move_file.owns(OperationId(10)));
+        let _ = model.apply(done(11));
+        assert!(model.move_file.owns(OperationId(10)));
     }
 }

@@ -146,6 +146,18 @@ impl StatusView {
         self.reset_palette_input(cx);
     }
 
+    /// Opens the palette straight on the target step of `action`, as a move
+    /// from the file menu does.
+    pub(crate) fn open_palette_at_pick(
+        &mut self,
+        action: Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_palette(window, cx);
+        self.enter_palette_pick(action, cx);
+    }
+
     /// Enter or a click on the highlighted row.
     fn choose_palette_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(candidate) = self.palette.highlighted().cloned() else {

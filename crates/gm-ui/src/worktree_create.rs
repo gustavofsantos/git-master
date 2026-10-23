@@ -341,6 +341,18 @@ impl StatusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_worktree_dialog_in(Mode::Existing, branch, window, cx);
+    }
+
+    /// Opens the dialog in `mode`, as `open_worktree_dialog` does for the
+    /// existing branch. A drop on the Worktrees header opens the new-branch mode.
+    pub(crate) fn open_worktree_dialog_in(
+        &mut self,
+        mode: Mode,
+        branch: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let root = self
             .model
             .status()
@@ -351,7 +363,6 @@ impl StatusView {
             .status()
             .and_then(|status| status.branch.head.clone())
             .unwrap_or_else(|| "HEAD".to_owned());
-        let mode = Mode::Existing;
         let field = |placeholder: &'static str, cx: &mut Context<Self>| {
             cx.new(|cx| TextArea::new(placeholder, cx).with_lines(1, 1))
         };
@@ -405,6 +416,10 @@ impl StatusView {
     }
 
     pub(crate) fn close_worktree_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A file waiting for the worktree goes with the dialog, unless a create is still running.
+        if !self.model.creating.is_pending() {
+            self.model.move_file.after_create = None;
+        }
         if self.worktree_dialog.take().is_some() {
             self.list_focus.focus(window);
         }
@@ -538,12 +553,17 @@ impl StatusView {
                 self.worktree_dialog = None;
                 self.list_focus.focus(window);
                 self.notify_user(&format!("Created worktree at {path}"), cx);
+                self.move_after_create(&path, cx);
             }
             // Closed while the create ran: the reason goes to the status bar instead.
-            Err(message) => match self.worktree_dialog.as_mut() {
-                Some(dialog) => dialog.error = Some(message),
-                None => self.notify_user(&message, cx),
-            },
+            Err(message) => {
+                if let Some(dialog) = self.worktree_dialog.as_mut() {
+                    dialog.error = Some(message);
+                } else {
+                    self.model.move_file.after_create = None;
+                    self.notify_user(&message, cx);
+                }
+            }
         }
         cx.notify();
     }

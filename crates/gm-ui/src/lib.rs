@@ -26,6 +26,7 @@ mod local_review;
 mod merged_branches;
 mod message_dialog;
 mod model;
+mod move_file;
 mod name_fit;
 mod new_branch;
 mod new_stash;
