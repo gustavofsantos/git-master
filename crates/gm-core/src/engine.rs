@@ -1732,14 +1732,8 @@ impl Engine {
             } => {
                 only_a_human(actor, "move changes")?;
                 let root = self.open_root()?;
-                let moved = move_exec::run(
-                    self.git.as_ref(),
-                    &root,
-                    id,
-                    path,
-                    target,
-                    message.as_deref(),
-                )?;
+                let moved =
+                    move_exec::run(self.git.as_ref(), &root, path, target, message.as_deref())?;
                 let mut events = self.reloaded(id, &root)?;
                 events.push(Event::ChangesMoved { id, moved });
                 Ok(events)

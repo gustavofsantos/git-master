@@ -21,6 +21,10 @@ pub fn preview(
     path: &str,
     target: &MoveTarget,
 ) -> Result<MovePreview, String> {
+    // A folder is listed as one entry such as `deep/`; it moves as nothing in v1.
+    if path.ends_with('/') {
+        return Ok(answer(vec![MoveBlocker::IsFolder]));
+    }
     let version = git.git_version().map_err(|e| e.0)?;
     // Without a usable Git nothing else can be computed.
     if let Some(blocker) = git_blocker(&version) {

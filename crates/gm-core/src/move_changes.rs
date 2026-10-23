@@ -2,7 +2,7 @@
 //! the version floor, the path rules, the per-file plan and the order of the
 //! blockers. The Git runs and the writes are in the engine.
 
-use gm_schema::{MoveBlocker, OperationId};
+use gm_schema::MoveBlocker;
 
 /// The oldest Git this feature works with: `merge-tree --write-tree` (D109).
 pub const MIN_GIT: (u32, u32, u32) = (2, 38, 0);
@@ -137,19 +137,20 @@ fn rank(blocker: &MoveBlocker) -> u8 {
     match blocker {
         MoveBlocker::GitTooOld { .. } => 0,
         MoveBlocker::NothingToMove => 1,
-        MoveBlocker::Conflicted => 2,
-        MoveBlocker::SameBranch => 3,
-        MoveBlocker::SameWorktree => 4,
-        MoveBlocker::InvalidName { .. } => 5,
-        MoveBlocker::BranchExists => 6,
-        MoveBlocker::BranchNotFound => 7,
-        MoveBlocker::BranchCheckedOutElsewhere { .. } => 8,
-        MoveBlocker::WorktreeNotFound => 9,
-        MoveBlocker::WorktreeMissing => 10,
-        MoveBlocker::UnsafePath => 11,
-        MoveBlocker::Conflict { .. } => 12,
-        MoveBlocker::BinaryDiffers => 13,
-        MoveBlocker::AddOverExisting => 14,
+        MoveBlocker::IsFolder => 2,
+        MoveBlocker::Conflicted => 3,
+        MoveBlocker::SameBranch => 4,
+        MoveBlocker::SameWorktree => 5,
+        MoveBlocker::InvalidName { .. } => 6,
+        MoveBlocker::BranchExists => 7,
+        MoveBlocker::BranchNotFound => 8,
+        MoveBlocker::BranchCheckedOutElsewhere { .. } => 9,
+        MoveBlocker::WorktreeNotFound => 10,
+        MoveBlocker::WorktreeMissing => 11,
+        MoveBlocker::UnsafePath => 12,
+        MoveBlocker::Conflict { .. } => 13,
+        MoveBlocker::BinaryDiffers => 14,
+        MoveBlocker::AddOverExisting => 15,
     }
 }
 
@@ -165,6 +166,9 @@ pub fn order_blockers(mut blockers: Vec<MoveBlocker>) -> Vec<MoveBlocker> {
 pub fn describe(blocker: &MoveBlocker) -> String {
     match blocker {
         MoveBlocker::NothingToMove => "the file has no change to move".to_owned(),
+        MoveBlocker::IsFolder => {
+            "a folder cannot be moved as one; move its files one at a time".to_owned()
+        }
         MoveBlocker::Conflicted => "the file is conflicted; resolve the conflict first".to_owned(),
         MoveBlocker::SameBranch => "that is the branch you are on".to_owned(),
         MoveBlocker::SameWorktree => "that is the worktree you are in".to_owned(),
@@ -201,10 +205,11 @@ pub fn commit_message(message: Option<&str>) -> Result<String, String> {
     }
 }
 
-/// The safety ref that keeps the snapshot of operation `id` (D109, Q24).
+/// The safety ref that keeps a move snapshot, named by the snapshot commit
+/// (D109, Q24). Identical content gives the same name.
 #[must_use]
-pub fn move_ref_name(id: OperationId) -> String {
-    format!("refs/gitmaster/move/{}", id.0)
+pub fn move_ref_name(snapshot: &str) -> String {
+    format!("refs/gitmaster/move/{snapshot}")
 }
 
 #[cfg(test)]
@@ -463,6 +468,7 @@ mod tests {
             MoveBlocker::SameBranch,
             MoveBlocker::Conflicted,
             MoveBlocker::NothingToMove,
+            MoveBlocker::IsFolder,
             MoveBlocker::GitTooOld {
                 found: "2.34.1".into(),
             },
@@ -475,6 +481,7 @@ mod tests {
                     found: "2.34.1".into()
                 },
                 MoveBlocker::NothingToMove,
+                MoveBlocker::IsFolder,
                 MoveBlocker::Conflicted,
                 MoveBlocker::SameBranch,
                 MoveBlocker::SameWorktree,
@@ -499,6 +506,7 @@ mod tests {
     fn every_blocker_has_a_one_line_sentence() {
         let blockers = [
             MoveBlocker::NothingToMove,
+            MoveBlocker::IsFolder,
             MoveBlocker::Conflicted,
             MoveBlocker::SameBranch,
             MoveBlocker::SameWorktree,
@@ -535,6 +543,10 @@ mod tests {
         assert_eq!(
             describe(&MoveBlocker::NothingToMove),
             "the file has no change to move"
+        );
+        assert_eq!(
+            describe(&MoveBlocker::IsFolder),
+            "a folder cannot be moved as one; move its files one at a time"
         );
         assert_eq!(
             describe(&MoveBlocker::Conflicted),
@@ -623,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn the_safety_ref_is_named_by_the_operation() {
-        assert_eq!(move_ref_name(OperationId(7)), "refs/gitmaster/move/7");
+    fn the_safety_ref_is_named_by_the_snapshot() {
+        assert_eq!(move_ref_name("abc123"), "refs/gitmaster/move/abc123");
     }
 }

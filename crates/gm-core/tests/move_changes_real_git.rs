@@ -13,8 +13,8 @@ use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
 use gm_core::{DiscardOutcome, Engine, FileMerge, GitError, GitPort, TreeMerge};
 use gm_schema::{
-    Actor, BranchEntry, Command, CommandKind, Event, MoveOutcome, MoveTarget, OperationId,
-    OperationState, RepoStatus, WorktreeEntry,
+    Actor, BranchEntry, Command, CommandKind, Event, MoveBlocker, MoveOutcome, MoveTarget,
+    OperationId, OperationState, RepoStatus, WorktreeEntry,
 };
 
 fn git_output(dir: &Path, args: &[&str]) -> std::process::Output {
@@ -230,12 +230,12 @@ fn worktree_target(path: &Path) -> MoveTarget {
     MoveTarget::Worktree { path: text(path) }
 }
 
-/// The safety ref of operation `id` exists and holds `content` for `path`.
-fn assert_safety_ref(repo: &Path, id: OperationId, path: &str, content: &[u8]) {
-    let name = format!("refs/gitmaster/move/{}", id.0);
-    assert_eq!(move_refs(repo), [name.as_str()], "the safety ref of {id:?}");
+/// The one safety ref of a move exists and holds `content` for `path`.
+fn assert_safety_ref(repo: &Path, path: &str, content: &[u8]) {
+    let refs = move_refs(repo);
+    assert_eq!(refs.len(), 1, "one safety ref: {refs:?}");
     assert_eq!(
-        git_bytes(repo, &["show", &format!("{name}:{path}")]),
+        git_bytes(repo, &["show", &format!("{}:{path}", refs[0])]),
         content,
         "the safety ref holds the file as it was moved"
     );
@@ -400,7 +400,7 @@ fn a_modified_file_moves_to_a_clean_worktree_and_the_source_returns_to_head() {
     let log = CommandLog::default();
     let mut engine = engine_on(&fixture.main, &log);
 
-    let (id, events) = move_to(&mut engine, "a.txt", worktree_target(&folder), None);
+    let (_, events) = move_to(&mut engine, "a.txt", worktree_target(&folder), None);
 
     assert_eq!(outcome(&events), MoveOutcome::default());
     assert_eq!(read(&folder.join("a.txt")), b"changed\n");
@@ -411,7 +411,7 @@ fn a_modified_file_moves_to_a_clean_worktree_and_the_source_returns_to_head() {
         [" M a.txt"],
         "unstaged in the target"
     );
-    assert_safety_ref(&fixture.main, id, "a.txt", b"changed\n");
+    assert_safety_ref(&fixture.main, "a.txt", b"changed\n");
 }
 
 #[test]
@@ -422,14 +422,14 @@ fn a_new_file_arrives_untracked_and_leaves_the_source() {
     let log = CommandLog::default();
     let mut engine = engine_on(&fixture.main, &log);
 
-    let (id, events) = move_to(&mut engine, "sub/new.txt", worktree_target(&folder), None);
+    let (_, events) = move_to(&mut engine, "sub/new.txt", worktree_target(&folder), None);
 
     outcome(&events);
     assert_eq!(read(&folder.join("sub/new.txt")), b"new\n");
     assert_eq!(status_lines(&folder), ["?? sub/new.txt"]);
     assert!(!fixture.main.join("sub/new.txt").exists());
     assert!(status_lines(&fixture.main).is_empty());
-    assert_safety_ref(&fixture.main, id, "sub/new.txt", b"new\n");
+    assert_safety_ref(&fixture.main, "sub/new.txt", b"new\n");
 }
 
 #[test]
@@ -550,7 +550,7 @@ fn a_source_file_edited_after_the_snapshot_is_kept_and_reported() {
     let git = Racing::new(&log).on_move_ref(move || write(&main, "a.txt", b"edited later\n"));
     let mut engine = engine_with(Box::new(git), &fixture.main);
 
-    let (id, events) = move_to(&mut engine, "a.txt", worktree_target(&folder), None);
+    let (_, events) = move_to(&mut engine, "a.txt", worktree_target(&folder), None);
 
     let moved = outcome(&events);
     assert!(
@@ -562,7 +562,7 @@ fn a_source_file_edited_after_the_snapshot_is_kept_and_reported() {
     );
     assert_eq!(read(&fixture.main.join("a.txt")), b"edited later\n");
     assert_eq!(read(&folder.join("a.txt")), b"changed\n");
-    assert_safety_ref(&fixture.main, id, "a.txt", b"changed\n");
+    assert_safety_ref(&fixture.main, "a.txt", b"changed\n");
 }
 
 // Branch target (D109, the commit built with plumbing).
@@ -578,7 +578,7 @@ fn a_change_becomes_a_commit_on_a_new_branch_and_the_window_stays_put() {
     let log = CommandLog::default();
     let mut engine = engine_on(main, &log);
 
-    let (id, events) = move_to(
+    let (_, events) = move_to(
         &mut engine,
         "a.txt",
         branch("feature/x", true),
@@ -614,7 +614,7 @@ fn a_change_becomes_a_commit_on_a_new_branch_and_the_window_stays_put() {
         b"one\n",
         "the source returns to HEAD"
     );
-    assert_safety_ref(main, id, "a.txt", b"changed\n");
+    assert_safety_ref(main, "a.txt", b"changed\n");
 }
 
 #[test]
@@ -717,7 +717,7 @@ fn a_branch_that_moves_while_the_move_runs_is_not_overwritten() {
     let git = Racing::new(&log).on_resolve(move || advance_branch(&race_repo, "dev"));
     let mut engine = engine_with(Box::new(git), main);
 
-    let (id, events) = move_to(&mut engine, "a.txt", branch("dev", false), Some("move a"));
+    let (_, events) = move_to(&mut engine, "a.txt", branch("dev", false), Some("move a"));
 
     assert!(
         failure(&events).contains("dev"),
@@ -731,7 +731,7 @@ fn a_branch_that_moves_while_the_move_runs_is_not_overwritten() {
     );
     assert_eq!(read(&main.join("a.txt")), b"changed\n");
     assert_eq!(status_lines(main), source_before);
-    assert_safety_ref(main, id, "a.txt", b"changed\n");
+    assert_safety_ref(main, "a.txt", b"changed\n");
 }
 
 // Both targets.
@@ -747,7 +747,7 @@ fn a_move_is_recorded_in_the_command_log_with_its_safety_ref() {
     let (id, events) = move_to(&mut engine, "a.txt", worktree_target(&folder), None);
 
     outcome(&events);
-    let safety = format!("refs/gitmaster/move/{}", id.0);
+    let safety = move_refs(&fixture.main).remove(0);
     assert!(
         log.entries()
             .iter()
@@ -759,6 +759,76 @@ fn a_move_is_recorded_in_the_command_log_with_its_safety_ref() {
             && entry.state == OperationState::Done
             && matches!(entry.kind, CommandKind::MoveChanges { .. })
     }));
+}
+
+#[test]
+fn two_moves_of_the_same_content_from_a_restarted_engine_do_not_collide() {
+    let fixture = fixture();
+    let folder = worktree(&fixture, "wt", "feat");
+    let log = CommandLog::default();
+    // Each round is a new engine on the same repository, with the same first
+    // operation id, as an app restart gives.
+    for _ in 0..2 {
+        write(&fixture.main, "a.txt", b"changed\n");
+        let mut engine = engine_on(&fixture.main, &log);
+        let events = engine.handle(
+            OperationId(1),
+            &human(CommandKind::MoveChanges {
+                path: "a.txt".to_owned(),
+                target: worktree_target(&folder),
+                message: None,
+            }),
+        );
+        outcome(&events);
+        assert!(status_lines(&fixture.main).is_empty());
+    }
+    assert_eq!(read(&folder.join("a.txt")), b"changed\n");
+    let refs = move_refs(&fixture.main);
+    assert!(!refs.is_empty(), "the checkpoint is kept");
+    for name in refs {
+        assert_eq!(
+            git_bytes(&fixture.main, &["show", &format!("{name}:a.txt")]),
+            b"changed\n"
+        );
+    }
+}
+
+#[test]
+fn an_untracked_folder_is_refused_as_a_folder_and_nothing_moves() {
+    let fixture = fixture();
+    let folder = worktree(&fixture, "wt", "feat");
+    write(&fixture.main, "deep/x.txt", b"x\n");
+    let source_before = status_lines(&fixture.main);
+    assert_eq!(source_before, ["?? deep/"], "the status lists the folder");
+    let log = CommandLog::default();
+    let mut engine = engine_on(&fixture.main, &log);
+
+    let events = engine.handle(
+        OperationId(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
+        &human(CommandKind::PreviewMoveChanges {
+            path: "deep/".to_owned(),
+            target: worktree_target(&folder),
+        }),
+    );
+    let blockers = events
+        .iter()
+        .find_map(|e| match e {
+            Event::MovePreviewed { preview, .. } => Some(preview.blockers.clone()),
+            _ => None,
+        })
+        .expect("the preview is answered");
+    assert_eq!(blockers, [MoveBlocker::IsFolder]);
+
+    let (_, events) = move_to(&mut engine, "deep/", worktree_target(&folder), None);
+
+    assert_eq!(
+        failure(&events),
+        "a folder cannot be moved as one; move its files one at a time"
+    );
+    assert_eq!(read(&fixture.main.join("deep/x.txt")), b"x\n");
+    assert_eq!(status_lines(&fixture.main), source_before);
+    assert!(!folder.join("deep").exists());
+    assert!(move_refs(&fixture.main).is_empty());
 }
 
 #[test]

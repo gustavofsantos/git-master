@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use gm_schema::{MoveBlocker, MoveOutcome, MoveTarget, OperationId};
+use gm_schema::{MoveBlocker, MoveOutcome, MoveTarget};
 
 use crate::DiscardOutcome;
 use crate::engine::same_folder;
@@ -28,7 +28,6 @@ const TEMP_PREFIX: &str = ".gitmaster-move-";
 pub fn run(
     git: &dyn GitPort,
     root: &Path,
-    id: OperationId,
     path: &str,
     target: &MoveTarget,
     message: Option<&str>,
@@ -45,8 +44,7 @@ pub fn run(
     let snapshot = git
         .snapshot_paths(root, &[path.to_owned()])
         .map_err(|e| e.0)?;
-    git.update_ref(root, &move_ref_name(id), &snapshot, None)
-        .map_err(|e| e.0)?;
+    keep_checkpoint(git, root, &snapshot)?;
     // Step 3: the target gets the change.
     let mut moved = match target {
         MoveTarget::Branch { name, create } => MoveOutcome {
@@ -71,6 +69,21 @@ pub fn run(
         moved.kept = Some(reason);
     }
     Ok(moved)
+}
+
+/// Points the safety ref of `snapshot` at it. The ref is named by the snapshot
+/// commit, so a move of the same content, even from a new engine, reaches the
+/// same ref: when the ref already holds this snapshot, it is the same
+/// checkpoint and it is kept. Any other failure is an error.
+fn keep_checkpoint(git: &dyn GitPort, root: &Path, snapshot: &str) -> Result<(), String> {
+    let name = move_ref_name(snapshot);
+    match git.update_ref(root, &name, snapshot, None) {
+        Ok(()) => Ok(()),
+        Err(error) => match git.resolve_commit(root, &name) {
+            Ok(oid) if oid == snapshot => Ok(()),
+            _ => Err(error.0),
+        },
+    }
 }
 
 /// The revision a branch move merges onto: HEAD for a new branch, else the tip

@@ -20,6 +20,9 @@ pub enum MoveTarget {
 pub enum MoveBlocker {
     /// The path has no change in the Working Copy.
     NothingToMove,
+    /// The path names a folder, as an untracked folder does in the status. A
+    /// folder cannot be moved as one in v1; its files move one at a time.
+    IsFolder,
     /// The path is conflicted in the source.
     Conflicted,
     /// The target is the branch of the window.
