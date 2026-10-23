@@ -5,6 +5,7 @@
 mod action_registry;
 mod app_settings;
 mod assets;
+mod avatar;
 mod branch_delete;
 mod branch_filter;
 mod branch_menu;

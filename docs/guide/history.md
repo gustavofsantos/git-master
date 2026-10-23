@@ -48,10 +48,15 @@ The panel shows the selected commit:
 | Subject | The first line of the message |
 | Body | The full message, with its paragraphs |
 | Hash | The full hash |
-| Author | The author's name and email |
+| Author | The author's name and email, after the author's picture |
+| With | One row for each `Co-authored-by` trailer of the message: the person's picture, name and email |
 | Date | The author date |
 | Parents | The short hashes of the parents. A root commit shows `none` |
 | Files | Each changed file, with its status letter and the count of added and removed lines |
+
+### Author pictures
+
+Git stores no pictures, so a picture is looked up on Gravatar by the hash of the person's email. The lookup is **off** until you run **Show Author Pictures from Gravatar** in the palette, because it tells a third party which emails appear in your repositories. **Hide Author Pictures** turns it off again. A picture is fetched once and kept in the app's config folder. While there is no picture, or when the lookup is off, a disc with the person's initials on a colour taken from the email stands in. The commit list and the diff are never held up by a lookup.
 
 The status letters are:
 

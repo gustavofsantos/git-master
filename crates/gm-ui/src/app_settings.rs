@@ -23,6 +23,9 @@ pub struct AppSettings {
     /// The scope the user chose for the sidebar's branches (D53). `None` until
     /// they choose one, which leaves the default in force.
     pub branch_scope: Option<Scope>,
+    /// Whether author pictures are looked up on Gravatar (D110). Off until chosen,
+    /// because a lookup sends a hash of the author's email to a third party.
+    pub author_pictures: bool,
 }
 
 impl AppSettings {
@@ -41,9 +44,14 @@ impl AppSettings {
             .get("branch_scope")
             .and_then(Value::as_str)
             .and_then(Scope::from_id);
+        let author_pictures = fields
+            .get("author_pictures")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         Self {
             diff_layout,
             branch_scope,
+            author_pictures,
         }
     }
 
@@ -66,6 +74,7 @@ impl AppSettings {
             Some(scope) => fields.insert("branch_scope".to_owned(), json!(scope.id())),
             None => fields.remove("branch_scope"),
         };
+        fields.insert("author_pictures".to_owned(), json!(self.author_pictures));
         // An object of JSON values always serializes.
         serde_json::to_string_pretty(&Value::Object(fields)).unwrap_or_else(|_| "{}".to_owned())
     }
@@ -125,6 +134,12 @@ impl Store {
         }
     }
 
+    /// The folder of the settings file, where the app keeps its other files.
+    #[must_use]
+    pub fn dir(&self) -> Option<&Path> {
+        self.path.parent()
+    }
+
     /// The saved settings, or the defaults when the file is missing or
     /// unreadable.
     #[must_use]
@@ -174,7 +189,19 @@ mod tests {
         AppSettings {
             diff_layout: Layout::Split,
             branch_scope: None,
+            author_pictures: false,
         }
+    }
+
+    #[test]
+    fn author_pictures_are_off_until_chosen_and_round_trip() {
+        assert!(!AppSettings::default().author_pictures);
+        let on = AppSettings {
+            author_pictures: true,
+            ..split()
+        };
+        assert_eq!(AppSettings::parse(&on.merge_into("")), on);
+        assert!(!AppSettings::parse("{\"author_pictures\": \"yes\"}").author_pictures);
     }
 
     #[test]

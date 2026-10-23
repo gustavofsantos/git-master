@@ -588,6 +588,7 @@ mod tests {
             workflows: crate::action_registry::WorkflowCtx::default(),
             worktrees: &[],
             branch_scope: crate::branch_filter::Scope::All,
+            author_pictures: crate::action_registry::AuthorPictures::Hidden,
             user_email_known: false,
             remote_running: false,
             stashes: None,

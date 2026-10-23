@@ -21,6 +21,7 @@ use crate::action_registry::{
     WorkflowCtx,
 };
 use crate::app_settings::{self, AppSettings};
+use crate::avatar::Avatars;
 use crate::branch_delete::DeleteDialog;
 use crate::branch_filter::{self, BranchFilter};
 use crate::branch_menu::BranchMenu;
@@ -255,7 +256,6 @@ impl StatusView {
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
         let commit_diff_pane = cx.new(DiffPane::read_only);
-        let commit_texts = CommitTexts::new(cx);
         let workflow_source = cx.new(|cx| {
             TextArea::new("Workflow file", cx)
                 .with_lines(24, usize::MAX)
@@ -272,6 +272,14 @@ impl StatusView {
             .as_ref()
             .map(|store| store.load())
             .unwrap_or_default();
+        let avatars = Avatars::new(
+            settings_store
+                .as_ref()
+                .and_then(|store| store.dir())
+                .map(|dir| dir.join("avatars")),
+            settings.author_pictures,
+        );
+        let commit_texts = CommitTexts::new(avatars, cx);
         // Both diffs open in the saved layout (D39, D40).
         diff_pane.update(cx, |pane, cx| pane.set_layout(settings.diff_layout, cx));
         commit_diff_pane.update(cx, |pane, cx| pane.set_layout(settings.diff_layout, cx));
@@ -1096,6 +1104,7 @@ impl StatusView {
             Ok(Effect::OpenDeleteWorkflow) => self.ask_delete_workflow(cx),
             Ok(Effect::DryRunWorkflow) => self.dry_run_workflow(cx),
             Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
+            Ok(Effect::SetAuthorPictures(on)) => self.set_author_pictures(on, cx),
             Ok(Effect::PickMoveTarget {
                 action: target,
                 path,
@@ -1202,6 +1211,9 @@ impl StatusView {
             root: self.model.status().map(|status| status.root.as_str()),
             worktrees: &self.model.worktrees,
             branch_scope: self.sidebar_filter.scope(self.model.branches.user_email()),
+            author_pictures: crate::action_registry::AuthorPictures::from_on(
+                self.settings.author_pictures,
+            ),
             stashes: self
                 .model
                 .stashes

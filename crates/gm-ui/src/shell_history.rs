@@ -12,10 +12,11 @@ use gm_schema::{
 };
 use gpui::{
     App, ClickEvent, Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
-    PathBuilder, Pixels, Stateful, Window, canvas, div, point, prelude::*, px, uniform_list,
+    PathBuilder, Pixels, Stateful, Window, canvas, div, img, point, prelude::*, px, uniform_list,
 };
 
 use crate::action_registry::{Action, Args, Context as ActionContext};
+use crate::avatar::{self, Avatars};
 use crate::history_graph::{self, Drawing, GraphRow, Tint};
 use crate::model::{CommitPage, CommitPane, HistoryList};
 use crate::shell_list::change_letter;
@@ -37,6 +38,8 @@ const DETAIL_WIDTH: f32 = 360.;
 /// The label column of the detail's fields, and the row height of their text.
 const FIELD_LABEL_WIDTH: f32 = 56.;
 const DETAIL_LINE_HEIGHT: f32 = 17.;
+/// The side of an author's picture.
+const AVATAR_SIZE: f32 = 24.;
 /// The next page is asked for when the rows drawn reach this close to the end.
 const PAGE_PREFETCH: usize = 20;
 
@@ -412,10 +415,12 @@ pub(crate) struct CommitTexts {
     author: Entity<TextArea>,
     date: Entity<TextArea>,
     parents: Entity<TextArea>,
+    /// The author pictures, shared with the tasks that fetch them (D110).
+    pub(crate) avatars: Avatars,
 }
 
 impl CommitTexts {
-    pub(crate) fn new(cx: &mut Context<StatusView>) -> Self {
+    pub(crate) fn new(avatars: Avatars, cx: &mut Context<StatusView>) -> Self {
         let detail = TextStyle {
             line_height: DETAIL_LINE_HEIGHT,
             size: 12.,
@@ -438,6 +443,7 @@ impl CommitTexts {
             author: read_only_area(detail, cx),
             date: read_only_area(detail, cx),
             parents: read_only_area(code, cx),
+            avatars,
         }
     }
 
@@ -587,10 +593,17 @@ fn commit_detail(
                 .gap_2()
                 .text_xs()
                 .child(field("Hash", texts.hash.clone(), Some(copy_hash)))
+                .children(panel.shows_author().then(|| {
+                    person_field(
+                        "Author",
+                        avatar_disc(&texts.avatars, &detail.author_name, &detail.author_email),
+                        texts.author.clone(),
+                    )
+                }))
                 .children(
                     panel
                         .shows_author()
-                        .then(|| field("Author", texts.author.clone(), None)),
+                        .then(|| co_author_rows(&detail.body, &texts.avatars)),
                 )
                 .child(field("Date", texts.date.clone(), None))
                 .children(
@@ -635,6 +648,70 @@ fn field(label: &'static str, value: Entity<TextArea>, action: Option<Stateful<D
         .child(field_label(label).flex_none().w(px(FIELD_LABEL_WIDTH)))
         .child(div().flex_1().min_w(px(0.)).child(value))
         .children(action)
+}
+
+/// The author's field: the picture, then the selectable name and email.
+fn person_field(label: &'static str, disc: Div, value: Entity<TextArea>) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_2()
+        .child(field_label(label).flex_none().w(px(FIELD_LABEL_WIDTH)))
+        .child(disc)
+        .child(div().flex_1().min_w(px(0.)).child(value))
+}
+
+/// One row for each `Co-authored-by` trailer of the message: the picture, the
+/// name and the email. Nothing when the message has none.
+fn co_author_rows(body: &str, avatars: &Avatars) -> Div {
+    let people = avatar::co_authors(body);
+    let mut rows = div().flex().flex_col().gap_2();
+    for (ix, person) in people.iter().enumerate() {
+        rows = rows.child(
+            div()
+                .id(("co-author", ix))
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap_2()
+                .child(
+                    field_label(if ix == 0 { "With" } else { "" })
+                        .flex_none()
+                        .w(px(FIELD_LABEL_WIDTH)),
+                )
+                .child(avatar_disc(avatars, &person.name, &person.email))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(author_label(&person.name, &person.email)),
+                ),
+        );
+    }
+    rows
+}
+
+/// A person's picture as a disc, or their initials on a colour taken from the
+/// email while there is no picture.
+fn avatar_disc(avatars: &Avatars, name: &str, email: &str) -> Div {
+    let disc = div()
+        .size(px(AVATAR_SIZE))
+        .flex_none()
+        .rounded_full()
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .justify_center();
+    match avatars.picture(email) {
+        Some(path) => disc.child(img(path).size_full().object_fit(gpui::ObjectFit::Cover)),
+        None => disc
+            .bg(gpui::hsla(avatar::hue(email), 0.45, 0.42, 1.))
+            .text_color(gpui::white())
+            .text_size(px(AVATAR_SIZE * 0.4))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(avatar::initials(name)),
+    }
 }
 
 /// A small text control with a border, for the Copy actions.
@@ -812,7 +889,47 @@ impl StatusView {
     pub(crate) fn show_commit_texts(&self, cx: &mut Context<Self>) {
         if let CommitPane::Shown(detail) = self.model.commit_pane(self.commit_page()) {
             self.commit_texts.show(detail, cx);
+            self.fetch_pictures(detail, cx);
         }
+    }
+
+    /// Asks Gravatar, in the background, for the pictures of the commit's author and
+    /// co-authors that are not known yet; the panel repaints as each one arrives.
+    fn fetch_pictures(&self, detail: &CommitDetail, cx: &mut Context<Self>) {
+        let co_authors = avatar::co_authors(&detail.body);
+        let mut emails = vec![detail.author_email.as_str()];
+        emails.extend(co_authors.iter().map(|person| person.email.as_str()));
+        let avatars = self.commit_texts.avatars.clone();
+        let (dir, wanted) = avatars.to_fetch(&emails);
+        let Some(dir) = dir else {
+            return;
+        };
+        for email in wanted {
+            let (avatars, dir) = (avatars.clone(), dir.clone());
+            cx.spawn(async move |this, cx| {
+                let found = cx
+                    .background_executor()
+                    .spawn({
+                        let (dir, email) = (dir.clone(), email.clone());
+                        async move { avatar::fetch(&dir, &email) }
+                    })
+                    .await;
+                avatars.record(&dir, &email, found);
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+    }
+
+    /// Turns the Gravatar lookup on or off and remembers the choice (D110).
+    pub(crate) fn set_author_pictures(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.commit_texts.avatars.set_enabled(on);
+        if self.settings.author_pictures != on {
+            self.settings.author_pictures = on;
+            self.save_settings(cx);
+        }
+        self.show_commit_texts(cx);
+        cx.notify();
     }
 
     /// The Copy control by the hash: copies the full commit id.

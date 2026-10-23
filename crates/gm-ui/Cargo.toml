@@ -14,6 +14,8 @@ gm-core.workspace = true
 serde_json.workspace = true
 unicode-width = "0.2"
 gpui = "0.2"
+ureq = "3"
+sha2 = "0.10"
 
 # gpui compiles its Metal shaders at build time with `xcrun metal`, which only
 # a full Xcode has. Compiled at startup instead, the Command Line Tools suffice.

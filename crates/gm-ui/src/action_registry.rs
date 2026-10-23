@@ -223,6 +223,8 @@ pub enum Effect {
     DryRunWorkflow,
     /// Sets the sidebar's branches to the scope the window names (D53).
     SetBranchScope(Scope),
+    /// Turns the Gravatar lookup of author pictures on or off (D110).
+    SetAuthorPictures(bool),
     /// Opens the palette on the target step of a move action, with the file
     /// at `path` selected, so the branch or worktree is picked there.
     PickMoveTarget {
@@ -316,6 +318,8 @@ pub struct Context<'a> {
     pub stashes: Option<&'a [StashEntry]>,
     /// The scope in effect for the sidebar's branches now (D53).
     pub branch_scope: Scope,
+    /// Whether author pictures are looked up on Gravatar (D110).
+    pub author_pictures: AuthorPictures,
     /// Whether Git has a `user.email` to match branches against.
     pub user_email_known: bool,
     /// A fetch, pull or push with lease is in flight; the three refuse another one meanwhile.
@@ -327,7 +331,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 76] = [
+const SPECS: [Spec; 78] = [
     spec(
         "file.stage",
         "Stage File",
@@ -680,6 +684,20 @@ const SPECS: [Spec; 76] = [
         Category::Branches,
     ),
     spec(
+        "commit.show_pictures",
+        "Show Author Pictures from Gravatar",
+        None,
+        ArgKind::None,
+        Category::Commit,
+    ),
+    spec(
+        "commit.hide_pictures",
+        "Hide Author Pictures",
+        None,
+        ArgKind::None,
+        Category::Commit,
+    ),
+    spec(
         "commit.copy_hash",
         "Copy Commit Hash",
         None,
@@ -927,6 +945,8 @@ pub enum Action {
     ShowHistory,
     ShowOnlyMyBranches,
     ShowAllBranches,
+    ShowAuthorPictures,
+    HideAuthorPictures,
     CopyCommitHash,
     CopyCommitMessage,
     DeleteMergedBranches,
@@ -1007,6 +1027,41 @@ fn reveal_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
     file_entry(args, ctx).map(|_| ())
 }
 
+/// Whether the action sets a preference of the window (the sidebar scope, the pictures).
+fn is_choice(action: Action) -> bool {
+    matches!(
+        action,
+        Action::ShowOnlyMyBranches
+            | Action::ShowAllBranches
+            | Action::ShowAuthorPictures
+            | Action::HideAuthorPictures
+    )
+}
+
+/// The effect of an action that sets a preference of the window.
+fn choice_effect(action: Action) -> Effect {
+    match action {
+        Action::ShowOnlyMyBranches => Effect::SetBranchScope(Scope::Mine),
+        Action::ShowAuthorPictures => Effect::SetAuthorPictures(true),
+        Action::HideAuthorPictures => Effect::SetAuthorPictures(false),
+        _ => Effect::SetBranchScope(Scope::All),
+    }
+}
+
+/// Whether author pictures are looked up on Gravatar now (D110).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthorPictures {
+    Shown,
+    Hidden,
+}
+
+impl AuthorPictures {
+    #[must_use]
+    pub fn from_on(on: bool) -> Self {
+        if on { Self::Shown } else { Self::Hidden }
+    }
+}
+
 /// The rule of the two sidebar scope actions: each is refused when it would
 /// change nothing, and Mine is refused when Git has no email to match.
 fn scope_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
@@ -1065,7 +1120,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 76] = [
+    pub const ALL: [Action; 78] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1117,6 +1172,8 @@ impl Action {
         Action::ShowHistory,
         Action::ShowOnlyMyBranches,
         Action::ShowAllBranches,
+        Action::ShowAuthorPictures,
+        Action::HideAuthorPictures,
         Action::CopyCommitHash,
         Action::CopyCommitMessage,
         Action::DeleteMergedBranches,
@@ -1331,6 +1388,13 @@ impl Action {
             Action::MoveFileToBranch | Action::MoveFileToWorktree => move_rule(self, args, ctx),
             Action::DiscardFile | Action::DiscardAllChanges => discard_rule(self, args, ctx),
             Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
+            Action::ShowAuthorPictures if ctx.author_pictures == AuthorPictures::Shown => {
+                Err("Author pictures are already shown.")
+            }
+            Action::HideAuthorPictures if ctx.author_pictures == AuthorPictures::Hidden => {
+                Err("Author pictures are already hidden.")
+            }
+            Action::ShowAuthorPictures | Action::HideAuthorPictures => Ok(()),
             _ if self.copies_its_target() => Ok(()),
             Action::Fetch | Action::Pull | Action::PushWithLease => remote_rule(self, args, ctx),
             Action::SuggestMessage
@@ -1423,8 +1487,7 @@ impl Action {
                 move_effect(self, args, ctx)?
             }
             (action, _) if action.opens_a_page() => navigation_effect(action, args),
-            (Action::ShowOnlyMyBranches, _) => Effect::SetBranchScope(Scope::Mine),
-            (Action::ShowAllBranches, _) => Effect::SetBranchScope(Scope::All),
+            (action, _) if is_choice(action) => choice_effect(action),
             (Action::CopyCommitMessage, Args::Commit(text)) => Effect::CopyMessage(text.clone()),
             (Action::NewBranch, Args::Branch(name)) => Effect::OpenNewBranchDialog {
                 start: Some(name.clone()),
@@ -2221,6 +2284,7 @@ mod tests {
             workflows: WorkflowCtx::default(),
             worktrees: &[],
             branch_scope: Scope::All,
+            author_pictures: AuthorPictures::Hidden,
             user_email_known: false,
             remote_running: false,
             stashes: None,
@@ -3581,9 +3645,40 @@ mod tests {
     }
 
     #[test]
+    fn the_picture_actions_switch_the_lookup_and_refuse_a_no_op() {
+        let hidden = Context {
+            author_pictures: AuthorPictures::Hidden,
+            ..ctx(&[], "")
+        };
+        let shown = Context {
+            author_pictures: AuthorPictures::Shown,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowAuthorPictures.plan(&Args::None, &hidden),
+            Ok(Effect::SetAuthorPictures(true))
+        );
+        assert_eq!(
+            Action::HideAuthorPictures.plan(&Args::None, &shown),
+            Ok(Effect::SetAuthorPictures(false))
+        );
+        assert!(
+            Action::ShowAuthorPictures
+                .enabled(&Args::None, &shown)
+                .is_err()
+        );
+        assert!(
+            Action::HideAuthorPictures
+                .enabled(&Args::None, &hidden)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn the_branch_scope_actions_switch_to_the_other_scope() {
         let mine = Context {
             branch_scope: Scope::Mine,
+            author_pictures: AuthorPictures::Hidden,
             user_email_known: true,
             ..ctx(&[], "")
         };
@@ -3597,6 +3692,7 @@ mod tests {
         );
         let all = Context {
             branch_scope: Scope::All,
+            author_pictures: AuthorPictures::Hidden,
             user_email_known: true,
             ..ctx(&[], "")
         };
