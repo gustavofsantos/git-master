@@ -986,6 +986,8 @@ impl Model {
             Event::HookFailed { .. }
             | Event::HookCancelled { .. }
             | Event::WorktreeInspected { .. }
+            // A move preview is for the drag that asked it; no view shows it yet (D109).
+            | Event::MovePreviewed { .. }
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
@@ -1276,6 +1278,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::FilesIndexed { id, .. }
         | Event::WorktreesLoaded { id, .. }
         | Event::WorktreeInspected { id, .. }
+        | Event::MovePreviewed { id, .. }
         | Event::PrunableListed { id, .. }
         | Event::MergedBranchesListed { id, .. }
         | Event::MergedBranchesDeleted { id, .. }

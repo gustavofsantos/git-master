@@ -8,6 +8,7 @@ use crate::files::{DirListing, FileSearch, FileView};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History};
 use crate::hook::{HookFailure, HookInfo};
+use crate::move_changes::{MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
 use crate::review::ReviewComment;
 use crate::stash::StashEntry;
@@ -209,6 +210,13 @@ pub enum CommandKind {
     /// changes anything, so it is not an operation the log records as a change.
     InspectWorktree {
         path: String,
+    },
+    /// Reads what moving the Working Copy change of `path` to `target` would
+    /// refuse (D109). Never changes anything and is not recorded in the command
+    /// log, like `InspectWorktree`. Answered by `MovePreviewed`.
+    PreviewMoveChanges {
+        path: String,
+        target: MoveTarget,
     },
     /// Removes the linked worktree at `path` with `git worktree remove`; the
     /// folder is deleted, never by hand. Human only (D31). Refused while a hard
@@ -581,6 +589,11 @@ pub enum Event {
     WorktreeInspected {
         id: OperationId,
         inspection: WorktreeInspection,
+    },
+    /// Answers `PreviewMoveChanges`: the blockers of the move, none when it would work.
+    MovePreviewed {
+        id: OperationId,
+        preview: MovePreview,
     },
     /// Answers `ListPrunable`: the admin records a prune would remove.
     PrunableListed {

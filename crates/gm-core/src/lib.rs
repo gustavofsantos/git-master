@@ -14,6 +14,7 @@ pub mod git;
 pub mod grep;
 mod history;
 pub mod hook;
+pub mod move_changes;
 pub mod path_match;
 mod port;
 mod reflog;
