@@ -64,7 +64,7 @@ Use the **Unified | Split** selector in the diff header to switch layouts. **Uni
 - **Unified** shows removed and added lines one after another, in one column.
 - **Split** shows the old side on the left and the new side on the right. The two sides are paired one row at a time: each row holds one line of the old side and one line of the new side. Where a side has no line for a row, that side stays empty, with no line number and no marker. Each side's gutter marks only its own line.
 
-Each line shows its line number. In both layouts, long lines are not wrapped. In Split, both sides scroll sideways together: use a horizontal wheel or a trackpad gesture.
+Each line shows its line number. In both layouts, long lines are not wrapped. Both layouts scroll sideways (in Split, both sides together): use a horizontal wheel or a trackpad gesture.
 
 The layout you choose is saved for your user account in `settings.json`, in your configuration folder: `~/.config/gitmaster/` on Linux and `~/Library/Application Support/gitmaster/` on macOS. The Working Copy diff and the commit diff share the choice, so changing it in one changes both. If the file is missing or invalid, Unified is used.
 
