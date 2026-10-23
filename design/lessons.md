@@ -79,7 +79,7 @@ Headless runs (Linux cloud container):
 
 - Besides the dev packages above, the smoke run needs `xvfb xdotool scrot imagemagick mesa-vulkan-drivers` (the last one provides lavapipe, `/usr/share/vulkan/icd.d/lvp_icd.json`). `scripts/setup-dev.sh` installs them.
 - `scripts/ui-smoke.sh` builds into `CARGO_TARGET_DIR` when it is set, and runs the binary from there.
-- Coordinates in the smoke script move with the content: the "Unsaved changes / Run is off" line pushes the tabs down 23 px, and "Show in Flow" sits after the workflow's name. Read a screenshot before changing a constant.
+- Coordinates in the smoke script move with the content: the "Unsaved changes / Run is off" line pushes the tabs down 23 px. Read a screenshot before changing a constant.
 
 Working with agents (orchestrator plus Haiku workers, each in its own git worktree):
 

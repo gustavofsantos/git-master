@@ -14,7 +14,7 @@ Every action in GitMaster has one of three effect levels.
 | Level | What it does | Examples | Status |
 |---|---|---|---|
 | Read | Looks at the repository and changes nothing. | Status, diff, history, branch list, text search. | Implemented |
-| Propose | Computes a plan or a suggestion and changes nothing. | Restack plan, conflict suggestion. | Planned |
+| Propose | Computes a plan or a suggestion and changes nothing. | Commit message suggestion from a workflow. Restack plan, conflict suggestion. | Partial |
 | Apply | Changes the repository or its Git state. | Commit, checkout, push, delete a branch, remove a worktree. | Partial |
 
 ## Who may do what
@@ -54,13 +54,11 @@ GitMaster runs `git` as a program with a list of arguments, never through a shel
 
 ### Programs you configure
 
-> **Planned.** Running programs from workflow steps is not available in the app yet.
-
 Workflow scripts run in a sandbox, and they act only through the actions the app provides. A workflow step can run a program that you choose, such as a tool that writes a commit message. That program receives an argument list, never a shell, and it is stopped when its run is cancelled. Its output is untrusted data.
 
 ## Approvals for workflows
 
-> **Planned.** Workflow approvals are not available in the app yet.
+> **Planned.** Automatic approval, and the approval rules for runs started by an event or by an agent, are not available in the app yet.
 
 A workflow script runs only after you have reviewed it. Each version of a script is identified by its content. You review a version the first time it runs, and any edit, by you or by an agent, makes it unreviewed again. A run that you start by hand goes ahead, and a run started by an event waits for your approval at each Apply step, unless you have chosen automatic approval for that reviewed version. After a run has executed a program, its later Apply steps ask again, and the dialog shows the exact arguments. A run started by an agent always waits for you. See [Approvals and security](../workflows/approvals-and-security.md).
 
@@ -86,4 +84,6 @@ The operation log records each operation that changes a repository, what was ask
 | Git commands panel | Memory only. | Implemented |
 | Operation log | Outside the working tree. | Planned |
 | Local review comments and their snapshots | Outside the working tree. | Planned |
-| Workflow scripts | The workflows directory in your user config: `~/.config/gitmaster/workflows/` on Linux, and `Library/Application Support/gitmaster/workflows/` in your home directory on macOS. Also any directory listed in `gitmaster.workflowPath`. Never a repository. | Planned |
+| Workflow scripts | The workflows directory in your user config: `~/.config/gitmaster/workflows/` on Linux, and `Library/Application Support/gitmaster/workflows/` in your home directory on macOS. Also any directory listed in `gitmaster.workflowPath`. Never a repository. | Implemented |
+| Workflow review record | `gitmaster.db` in the app data directory, keyed by the hash of each script version. | Implemented |
+| Workflow run history | `.git/gitmaster/state.db`, in the Git common directory of the repository. | Implemented |

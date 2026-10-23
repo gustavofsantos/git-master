@@ -2,7 +2,7 @@
 
 > The user-facing documentation for workflows is in `docs/workflows/` and `docs/reference/workflow-api.md`. This file records the engineering rationale: why the design has this shape, and the rules the code must keep.
 
-Last updated: 2026-10-22. The status of each decision is in `design/decisions.md`. D98 to D102 were decided by the author on 2026-10-22, in a planning session. Details marked "to be defined" depend on spike S-D or on the slice that builds them.
+Last updated: 2026-10-23. The status of each decision is in `design/decisions.md`. D98 to D102 were decided by the author on 2026-10-22, in a planning session. Details marked "to be defined" depend on spike S-D or on the slice that builds them.
 
 This file replaces, for what is not built yet, the TOML format and state machine sections of the earlier workflow design: the TOML workflow specification, available in git history at commit `5f88889` (`docs/10-workflows.md`). Those sections covered the format, the state machine, the expression language and validation. The rest of the earlier design (triggers, phases, actor and levels, concurrency, reconciliation, stacks as workflows, MCP) still holds, with the changes listed here. See [The earlier TOML design](#the-earlier-toml-design).
 
@@ -145,11 +145,11 @@ return M
 
 **Invariant:** the script is untrusted logic, and the host is the only actor. The script has no authority of its own. Everything it does goes through `ctx`.
 
-- Engine: a Lua VM compiled into the binary (self-contained). The engine is **Luau via `mlua`** (sandbox mode, interrupt hook, memory limit, hardened for untrusted code), chosen by spike S-D (D104, `spikes/script-engine/FINDINGS.md`). The alternatives measured were Lua 5.4 (needs a manual allow list and four guards) and Rhai (pure Rust, but not Lua).
+- Engine: a Lua VM compiled into the binary (self-contained). The engine is **Luau via `mlua`** (sandbox mode, interrupt hook, memory limit, hardened for untrusted code), chosen by spike S-D (D104, `FINDINGS.md` of the script-engine spike (git history, 7932c61)). The alternatives measured were Lua 5.4 (needs a manual allow list and four guards) and Rhai (pure Rust, but not Lua).
 - Removed from the environment: `io`, `os`, `debug`, `package`/`require`, `load`/`loadstring`/`dofile`, and `string.dump`. The sources of nondeterminism (`os.time`, `os.clock`, `math.random`) are removed too. `ctx.now()` and `ctx.random()` replace them, and they pass through the journal. The global environment is read-only and new on each run, so that one run does not affect the next.
 - **Budgets per run:** instructions, total wall-clock time, memory, string size, stack depth, and the number of `ctx` calls. The number of calls replaces the 1000-transition ceiling of D78. Exceeding a budget ends the run as `failed`, with the reason. The values are to be defined in the spike.
 - **Cancellation:** the VM's interrupt hook checks a signal. A blocked call (`approve`, `wait`, `exec`) is woken by the cancellation, and `exec` kills its process (D65).
-- **Journal:** the host records each `ctx` call: sequence, function, resolved arguments, result, outcome and duration. The Runs tab (D84) is built only from it. What the script writes with `ctx.notify` or `ctx.log` appears marked as "from the script".
+- **Journal:** the host records each `ctx` call: sequence, function, resolved arguments, result, outcome and duration. The Runs tab (D84) is built only from it. What the script writes with `ctx.notify` appears marked as "from the script".
 - **Known limit:** the VM runs in the same process. Its security is that of its C or C++ implementation. A separate process for the script would harden this, and it is outside v1. `exec` is, by design, an exit to programs the user owns. The sandbox protects the app and the repository from the script's logic, not from a program that the script itself calls (D101 covers that case).
 
 ## Ephemeral execution (D100)
@@ -192,24 +192,26 @@ Real effects only run from the UI, with the human as the actor. The CLI never do
 
 ## Interface (revises D76)
 
-The Workflows page stays: a list on the left, the detail on the right, with the **Script** and **Runs** tabs. The Flow tab (graph, inspector, structural editing) goes away.
+The Workflows page is a list on the left and the detail on the right, with the **Script** and **Runs** tabs. The Flow tab (graph, inspector, structural editing) was removed in WS2 (D108).
 
 - **Script:** the text of the file in the app's editor, with line diagnostics from `check` as you type, and a notice that saving makes the hash "unreviewed". Saving stays atomic, and it refuses when the file changed on disk. Deleting moves the file to the trash. Syntax highlighting uses the tree-sitter grammar of D92 (for Lua), if N4 already provides it.
 - **Runs:** the view of D84, now with one entry per `ctx` call (function, resolved arguments, result, outcome, duration), built from the journal.
 - **Dry run:** the same mechanism as the subcommand, on the text open in the editor.
 - **Review:** the "Run this version?" dialog of D101.
 
-## What survives from WF0 to WF2, and what goes
+## What the code has after WS2
 
-| Kept (adapted) | Removed |
+The WF0 to WF2 code was adapted or removed in WS2 (D108). What remains:
+
+| Kept and adapted (`gm-core/src/script/` and `workflow_session.rs`, `script_session.rs`) | Removed in WS2 |
 |---|---|
-| `store` (SQLite, retention; no waits or queues), `driver` (becomes the executor of `ctx`), `exec`, `loader` (`.lua` files, `gitmaster.workflowPath`), `workflow_session`, `catalog` (becomes the source of `ctx`), `templates` (rewritten in Lua), runs view, workflow commands and events, palette, approval | `model`, `parse`, `expr`, `validate`, `machine`, `edit`, `dry_run` (about 6.6 thousand lines in `gm-core`), `flow_graph`, `flow_graph_view`, `flow_inspector`, the Flow tab, the `.toml` fixtures, the `w-flow-editor` scenario |
+| `catalog` (the source of `ctx`), `surface` and `api_docs` (generated `ctx` and `.api/`), `loader` (`.lua` files, `gitmaster.workflowPath`), `meta`, `inspect`, `trust` (review by hash), `journal` (the run history, SQLite), `exec`, `run` and `policy`, `templates` (rewritten in Lua), `cli` and `dry` (the subcommands), the Workflows page, the runs view, workflow commands and events, palette, approval | `model`, `parse`, `expr`, `validate`, `machine`, `edit`, `dry_run`, `driver`, `store`, the TOML `loader`, `flow_graph*`, `flow_inspector`, the Flow tab, the `.toml` fixtures, the `w-flow-editor` scenario |
 
-There is no support for both formats at the same time: two interpreters would double the surface. After the switch, a `.toml` file in the workflows directory is ignored, with a visible warning. If the author has real TOML workflows, they are converted by hand once. The built-in templates are rewritten in Lua.
+There is no support for both formats at the same time: two interpreters would double the surface. A `.toml` file in the workflows directory is ignored, with a visible warning. Real TOML workflows, if any, are converted to Lua by hand. The built-in templates are written in Lua.
 
 ## The earlier TOML design
 
-The TOML design was built in WF0 to WF2. It is replaced by D98. Its format, state machine, expression language and validation rules are no longer the design. Their full specification is in git history only, at commit `5f88889` (`docs/10-workflows.md`). The TOML engine is to be removed in WS2.
+The TOML design was built in WF0 to WF2 and removed in WS2. It was replaced by D98. Its format, state machine, expression language and validation rules are no longer the design. Their full specification is in git history only, at commit `5f88889` (`docs/10-workflows.md`).
 
 ## Kept from the earlier design
 
@@ -289,26 +291,29 @@ The script file holds only the definition. No execution field (no `enabled`, no 
 Everything about execution is stored in SQLite, through `rusqlite` with SQLite bundled and compiled into the binary, to keep the app self-contained. There are two places, by scope:
 
 - **Per repository**: the `state.db` that already exists in the Git common directory (`.git/gitmaster/state.db`, `design/architecture.md`), next to the operation log. It travels with the repository and works with worktrees. It stores the run journal. Waits and queues are in memory (D100).
-- **Per user**: `~/.local/share/gitmaster/gitmaster.db` (the app's data directory). It stores which workflow is enabled in which repository, the automatic approvals by definition hash, and the cache of validated definitions.
+- **Per user**: `~/.local/share/gitmaster/gitmaster.db` (the app's data directory). It stores the review of each script version by its hash, with the automatic approval flag that WF3 will use. Which workflow is enabled in which repository is not stored yet (WF3).
 
 #### Tables
 
-Outline, with English names. It adapts the earlier sketch to D100. The names are to be settled in the slice that builds them. `workflow_call` is a placeholder name for the journal.
+The tables as built, with the names of the code:
 
 ```text
-workflow_run(id, workflow_name, definition_hash, definition_text, trigger_json,
-             started_by, status, started_at, ended_at, end_reason)
-workflow_call(run_id, seq, fn, args_json, result_json, outcome, started_at, duration)  -- append-only: the journal
+-- .git/gitmaster/state.db (journal.rs)
+script_run(id, workflow, definition_hash, definition_text, trigger_json, started_by,
+           seed, status, started_at, ended_at, end_reason, value_json, input_json)
+script_call(run_id, seq, func, level, args_json, result_json, outcome, message,
+            started_at, duration_ms)  -- append-only: the journal
+script_meta(key, value)
 
--- per user
-workflow_enabled(repo_common_dir, workflow_name)
-workflow_approval(definition_hash, granted_at)
+-- gitmaster.db, in the app data directory (trust.rs)
+script_review(hash, workflow, reviewed_at, auto_approve)
 ```
 
 Changes from the earlier sketch:
 
 - `current_state`, `workflow_transition`, `workflow_state_output`, `workflow_wait` and `workflow_pending` are removed. There are no states to store, and waits and queues are in memory (D100).
-- `workflow_approval` loses `state_id`. Approval covers the hash (D101), not a state.
+- There is no approval table keyed by state. Approval covers the hash (D101): `script_review` is keyed by it.
+- `workflow_enabled` (enabling a workflow per repository) is not built yet.
 
 #### What it enables (D80, adapted to D100)
 
@@ -337,30 +342,32 @@ A workflow that calls `restack.apply` shows the same interactive flow as `design
 
 `workflow_list` (read) and `workflow_run(name, inputs)`, with `apply` actions following D64(c). This is slice 7 (WF5). Writing scripts is not an MCP tool (D102).
 
-### Action catalog (v1, grows with the slices)
+### Action catalog (as built in WS2)
 
-| Action | Level | Outcomes | Slice |
+The catalog in `gm-core/src/script/catalog.rs` generates `ctx`. Status is what a manual run gets from the app today.
+
+| Action | Level | Outcomes | Status |
 |---|---|---|---|
-| `noop` | read | `done` | WF0 |
-| `notify` | read | `done` | WF1 |
-| `approve` | pauses for the human | `approved \| rejected` | WF1 |
-| `exec` | read (untrusted output) | `done \| failed \| timeout` | WF1 |
-| `commit.suggest_message` | propose | `done \| failed` | WF1 |
-| `stage.all`, `commit.create` | apply | `done \| failed \| interrupted` | WF1 |
-| `branch.create`, `branch.checkout` | apply | `done \| failed \| interrupted` | WF1 |
-| `fetch` | apply | `done \| failed \| interrupted` | when Fetch exists |
+| `notify` | read | `done \| failed` | Works |
+| `approve` | pauses for the human | `approved \| rejected \| failed` | Works |
+| `exec` | read (untrusted output) | `done \| failed \| timeout` | Works |
+| `commit.suggest_message` | propose | `done \| failed` | Works |
+| `stage.all`, `commit.create` | apply | `done \| failed \| interrupted` | Works |
+| `branch.create`, `branch.checkout` | apply | `done \| failed \| interrupted` | Works |
+| `fetch` | apply | `done \| failed \| interrupted` | Not yet: fails with "not available" |
 | `stack.tree`, `stack.stale` | read | `done \| failed` | WF4 |
 | `restack.plan`, `reparent.plan` | propose | `done \| failed` | WF4 |
 | `restack.apply` | apply | `done \| conflict \| stale \| failed` | WF4 |
 | `reparent.apply`, `restack.undo` | apply | `done \| failed \| interrupted` | WF4 |
 | `push.lease` | apply, always asks | `done \| failed \| interrupted` | WF4 |
-| `wait` (`ctx.wait`) | pauses until the event | `resumed \| aborted` (+ `timeout`) | WF3 |
+| `wait` (`ctx.wait`) | pauses until the event | `resumed \| aborted \| timeout` | WF3 |
+
+Helpers that are not actions have no level: `now`, `random`, `block`, `fail` and `try`.
 
 Notes:
 
-- The `set` row is removed. `set` belonged to the TOML design and no longer exists (D98). The `for_each` row is removed too: Lua's `for` replaces it.
-- `noop` is read and has only the outcome `done`. In the TOML design it existed so that a state could only branch. Under D98 the script branches with plain Lua.
-- `block` was removed (D77, revised by D78). Under D98 the veto is `ctx.block(reason)`.
+- There is no `set`, `for_each` or `noop` row. They belonged to the TOML design and no longer exist (D98). Lua's `for` replaces `for_each`, and the script branches with plain Lua.
+- The veto is `ctx.block(reason)`, and `ctx.fail(reason)` ends the run as failed (D77, revised by D78 and D98).
 - `interrupted` is the outcome of an `apply` action that was in progress when the engine stopped, and that has no recovery of its own (D80). Actions with their own recovery, such as the restack (D14), resume through their own flow and do not produce `interrupted`.
 
 ### LLM and exec (D69, revised by D74)
@@ -377,5 +384,5 @@ Rules:
 
 ## Open questions
 
-- **Q22. Script engine (resolved by D104).** Luau via `mlua` was chosen from the S-D numbers (`spikes/script-engine/FINDINGS.md`). Luau is C++, so CI and releases need a C++ compiler.
+- **Q22. Script engine (resolved by D104).** Luau via `mlua` was chosen from the S-D numbers (`FINDINGS.md` of the script-engine spike (git history, 7932c61)). Luau is C++, so CI and releases need a C++ compiler.
 - **Q23. Durable execution.** Re-execution from the journal, as Temporal does, is postponed by D100. Reopen it when losing runs at app close becomes a problem.

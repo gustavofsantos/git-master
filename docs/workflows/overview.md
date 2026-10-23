@@ -27,7 +27,7 @@ Workflows replace GitMaster's own hooks: the points where a script runs inside a
 
 ## What workflows are for
 
-> **Planned.** The commit message suggestion, the gates and the stack policies need triggers and phases, which are not available yet. A branch name from a ticket works with a manual run.
+> **Planned.** The gates and the stack policies need triggers and phases, which are not available yet, and the commit message suggestion is not automatic yet, so you run it by hand. A branch name from a ticket works with a manual run.
 
 - **Commit message suggestions.** A command-line LLM that you already use writes a message from the staged diff, and the commit composer shows it as a suggestion. You decide whether to use it.
 - **Branch names from a ticket.** You enter a ticket key, a program builds the branch name, you confirm it, and GitMaster creates and checks out the branch.

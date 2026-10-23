@@ -78,9 +78,9 @@ The file menu has **Stage File** or **Unstage File**, whichever applies, **Copy 
 
 The worktree menu has **Open Worktree**, **Reveal Worktree in File Manager**, **Copy Worktree Path**, **Lock Worktree** or **Unlock Worktree**, and **Remove Worktree** in red. On the row of a missing worktree, it has **Prune Worktrees**.
 
-### Commit and stash menus
+### Commit menus
 
-> **Planned.** Context menus for commits and stashes are not available yet.
+> **Planned.** Context menus for commits are not available yet.
 
 ## Every action from the keyboard
 

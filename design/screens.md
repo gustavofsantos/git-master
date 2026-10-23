@@ -70,12 +70,12 @@ Reference: conflict resolvers in IDEs. Three panes: left, result (editable), rig
 The page to view, create and edit workflows in the UI (D76, D84, D98, D101). It has two tabs: **Script** and **Runs**.
 
 - **Script**: the text of the script, with line diagnostics. Saving shows a warning about the unreviewed hash.
-- **Runs**: one entry per `ctx` call, with its resolved arguments, result, outcome and duration. **Cancel** and **Approve** act on the run.
+- **Runs**: one entry per `ctx` call, with its resolved arguments, result, outcome and duration. **Cancel** and **Approve** act on the run. Today they are palette commands only (Cancel Workflow Run, Approve Workflow Step); the buttons are planned.
 - **Dry run** runs on the open text.
 - **Save** is atomic. It refuses when the file changed on disk.
 - **Delete** moves the file to the trash, so it can be recovered. It never deletes with `rm`.
 
-The earlier Flow and TOML tabs are described in git history (commit 5f88889).
+The Flow and TOML tabs were removed in WS2 (D108). The TOML specification is in git history (commit 5f88889).
 
 ## Settings screen (D38)
 

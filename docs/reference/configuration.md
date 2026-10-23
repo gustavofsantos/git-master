@@ -75,7 +75,7 @@ GitMaster reads Git's own configuration through `git`, so Git's scope rules appl
 | `user.email` | Any | Not set | Decides the default of the branch filter. With an email set, the sidebar starts on **Mine**, which shows your current branch and the branches whose latest commit is yours. The match ignores case. | |
 | `core.editor` | Any | Not set | The program that **Open in editor** starts. | Planned |
 | `merge.conflictStyle` | Any | `zdiff3` | The style of the conflict markers the conflict resolver shows. | Planned |
-| `gitmaster.workflowPath` | Any, can be set more than once | Not set | Extra folders to read workflow files from, after your workflows directory. A folder inside the repository's working tree is refused. | |
+| `gitmaster.workflowPath` | Any, can be set more than once | Not set | Extra folders to read workflow files from, after your workflows directory. A folder inside the repository's working tree is ignored, with a warning. | |
 | `gitmaster.worktree.root` | Any | `../<repo>-<branch>` | The base folder for new worktrees. See [Worktrees](../guide/worktrees.md). | Planned |
 | `branch.<name>.stackParent` | Repository | Not set | The parent branch of a branch in a stack. See [Stacks](../guide/stacks.md). | Planned |
 | `branch.<name>.stackParentBase` | Repository | Not set | The commit the parent branch pointed to when this branch was last created or re-anchored. | Planned |
@@ -177,6 +177,8 @@ Changes apply as you make them, and there is no **Save** button. A value is save
 | **Storage** | Shows where review comments and local snapshots are stored. See [Local review](../agents/local-review.md). |
 
 ### Workflows
+
+> **Planned.** Automatic approvals and the choice of workflows per repository are not available yet, so the **Automatic Approvals** and **Enabled per Repository** fields are not shown.
 
 | Field | What it does |
 |---|---|

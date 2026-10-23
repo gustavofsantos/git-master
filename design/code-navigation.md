@@ -96,7 +96,7 @@ This is the hard part and the one with the highest risk. Four paths:
 - **Classification cache** keyed by blob OID, like the definitions index.
 
 - **Content-addressed index.** The key is the blob OID (or the content hash, for a file modified in the worktree). The same blob on another branch, or in history, reuses the result, and nothing goes stale: the index is derived and disposable (Principle 3). Losing the file only costs a rebuild.
-- **Where to store it:** SQLite in `.git/gitmaster/` (aligned with the `gm-store` planned in `design/architecture.md`) or in the app's data directory. Decide in the spike; both respect Principle 5.
+- **Where to store it:** SQLite in `.git/gitmaster/` (the SQLite stores are in `gm-core`, see `design/architecture.md`) or in the app's data directory. Decide in the spike; both respect Principle 5.
 - **Built in the background**, at low priority, with a thread limit and visible progress ("symbols: 12,340 / 98,000 files"). Symbol search works with the partial index and says that it is partial.
 - **Search:** fuzzy over the name, with a filter by kind (`fn`, `struct`, `class`, `trait`…), file name, and line alongside. The "file overview" (outline) uses the same table, filtered by file.
 - **Go to definition** (click, or a shortcut on an identifier in the viewer): looks up the name in the index. One candidate opens directly; several are all listed. No semantic scope resolution.
@@ -105,10 +105,10 @@ This is the hard part and the one with the highest risk. Four paths:
 
 ### Result of spike S-B (2026-10-22)
 
-Details and numbers are in `spikes/nav-b-treesitter/FINDINGS.md`; decision proposed in D92. What changes in this design:
+Details and numbers are in `FINDINGS.md` of the nav-b-treesitter spike (git history, 7932c61); decision proposed in D92. What changes in this design:
 
 - **Tree-sitter compiled into the binary is feasible** (D45): about 9 s on one core per million lines; 109 s to index 104 thousand files on 4 threads (peak of 66 MB); five grammars add about 5 MB to the binary. Only Linux was measured.
-- **Our own queries, not the crates' ones.** TypeScript's `tags.scm` alone finds 35% of definitions; added to JavaScript's, 87%; with a supplement for enum, alias and function-field, 99.1%. Rust's counts associated types as types; Go's does not see `type X = Y`. TypeScript's `highlights.scm` also adds to JavaScript's. The seeds are in `spikes/nav-b-treesitter/queries/`.
+- **Our own queries, not the crates' ones.** TypeScript's `tags.scm` alone finds 35% of definitions; added to JavaScript's, 87%; with a supplement for enum, alias and function-field, 99.1%. Rust's counts associated types as types; Go's does not see `type X = Y`. TypeScript's `highlights.scm` also adds to JavaScript's. The seeds are in `queries/` of the nav-b-treesitter spike (git history, 7932c61).
 - **Definitions by simple tree walk** where the language allows it (Rust, Python, Go): same result as the query, 2.6 to 3 times cheaper. Query where context is needed (TypeScript, JavaScript). The query does not get cheaper without the reference patterns; "Find usages" remains `git grep -w` (above).
 - **Index**: `.git/gitmaster/symbols.db` (SQLite), key: blob, language and query version; 1.19 million symbols in 1.8 s and 113 MB; exact and prefix searches under 0.1 ms; fuzzy search by name uses the N1 matcher, not SQLite.
 - **Highlighting**: parse on its own thread; only visible lines are painted (0.1 to 0.6 ms per 60 lines); a 2 MiB limit in the viewer; a maximum parse time; and no highlighting on very long lines.

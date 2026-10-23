@@ -102,8 +102,8 @@ Closing GitMaster ends the runs in progress. When GitMaster starts again:
 
 GitMaster records every `ctx` call in a run journal. For each call it records the sequence number, the function, the resolved arguments, the result, the outcome and the duration. The Runs tab is built only from this journal. It shows what the run did, not what the script says it did.
 
-- Text that the script writes with `ctx.notify` or `ctx.log` is marked as coming from the script.
-- Each Git command with a side effect that a run performs appears in the Git commands panel as a human action, under the operation that caused it.
+- Text that the script writes with `ctx.notify` is marked as coming from the script.
+- Each Git command with a side effect that a run performs appears in the Git commands panel, as the same action started from the window does.
 - The journal is kept for each repository, in `.git/gitmaster/state.db`. GitMaster keeps the last 200 runs for each workflow and repository. Large outputs are cut short.
 
 ## Output of programs

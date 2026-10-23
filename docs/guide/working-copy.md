@@ -55,9 +55,9 @@ Git's own hooks run during the commit, such as `pre-commit`. If a hook stops the
 
 ### Commit message suggestions
 
-> **Planned.** Workflows that suggest a commit message are not available in the app yet.
+> **Planned.** A suggestion that appears on its own, as the composer opens, is not available in the app yet.
 
-A workflow can suggest a message in the composer. A suggestion never overwrites the text you typed. It appears as a suggestion, with **Replace** to take it and **Discard** to keep your text. See the [workflows overview](../workflows/overview.md).
+A workflow can suggest a message in the composer. You start it yourself, with **Run Workflow…** in the command palette. A suggestion never overwrites the text you typed. It appears as a suggestion, with **Replace** to take it and **Discard** to keep your text. See the [workflows overview](../workflows/overview.md).
 
 ## Automatic refresh
 
@@ -97,9 +97,9 @@ A reviewed mark is a reminder that you read a file's changes. It is independent 
 
 Generated files and lockfiles are collapsed in the list. GitMaster reads the rules for generated files from `.gitattributes` and never writes to it.
 
-## Commit and stash menus
+## Commit menus
 
-> **Planned.** Context menus for commits and stashes are not available in the app yet.
+> **Planned.** Context menus for commits are not available in the app yet.
 
 ## Git commands panel
 

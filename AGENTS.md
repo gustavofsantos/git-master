@@ -44,7 +44,7 @@ The full principles (determinism, human approves and agent proposes, Git is the 
 | How it is built | `design/architecture.md`, plus `design/code-navigation.md`, `design/workflow-scripts.md`, `design/stacks-restack.md`, `design/screens.md`, `design/hooks-transitional.md` |
 | Visual identity | `design/visual-identity.md`, icons in `assets/icons/` |
 | Toolchain pitfalls and GPUI practice | `design/lessons.md` |
-| Measurements behind decisions | `spikes/*/FINDINGS.md` |
+| Measurements behind decisions | Spike findings were removed from the tree after their analysis closed; they are in git history (`git show 7932c61:spikes/<name>/FINDINGS.md`) and the numbers that matter are quoted in `design/decisions.md` |
 | Mockups | design canvas linked in `design/README.md` (labels in Portuguese: translate them) |
 
 Start with `docs/index.md`, then the pages in `docs/` that touch your task, then the part of `design/decisions.md`, `design/architecture.md` and `design/roadmap.md` that does. `docs/` is the source for behavior, `design/decisions.md` for decisions, the canvas for mockups.
@@ -91,7 +91,7 @@ Rules that matter day to day:
 
 ## Driving the app headless
 
-`scripts/ui-smoke.sh` launches the release binary on a private virtual display, drives it with `xdotool`, checks the result with `git` and compares screenshots. Each scenario runs in both themes and stops at the first failed assertion, printing the screenshot path. It needs Xvfb, xdotool, scrot, git and ImageMagick, builds the release binary if missing, uses display `:97` and creates fixtures under `~/.cache/gm-spikes/smoke-run`. Screenshots go to `$SMOKE_OUT` (default `~/.cache/gm-spikes/smoke-out`).
+`scripts/ui-smoke.sh` launches the release binary on a private virtual display, drives it with `xdotool`, checks the result with `git` and compares screenshots. Each scenario runs in both themes and stops at the first failed assertion, printing the screenshot path. It needs Xvfb, xdotool, scrot, git and ImageMagick, builds the release binary if missing, uses display `:97` and creates fixtures under `~/.cache/gm-smoke/smoke-run`. Screenshots go to `$SMOKE_OUT` (default `~/.cache/gm-smoke/smoke-out`).
 
 To run by hand:
 

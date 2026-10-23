@@ -13,7 +13,7 @@ GitMaster is a Git client joined to the tools an engineer needs to work with cod
 
 GitMaster covers the work you do every day in a repository. The **Working Copy** shows your changes, with staging per file, per chunk and per line, and a commit composer. History shows the commit graph with the files and diff of each commit. Branches and worktrees are managed from the sidebar, and the remote operations **Fetch**, **Pull** and **Push** are available too. Every action can be reached from the command palette (`Ctrl+K`, `⌘K` on macOS), the menus and the keyboard.
 
-> **Planned.** Conflict resolution, stashes and the reflog are not available in the app yet.
+> **Planned.** Conflict resolution is not available in the app yet.
 
 ### A workspace for working with code
 
@@ -23,9 +23,9 @@ You can move around a repository without leaving the app. **Quick Open** (`Ctrl+
 
 ### Agents under human accountability
 
-An agent can read the repository and propose changes, but it never changes the repository on its own. Each change an agent asks for waits for your approval in the app, and what the agent did is measured from the repository, not taken from its own account. The agent integration is exposed through an MCP server, workflows written as plain text, a local review loop, and branch stacks with restack.
+An agent can read the repository and propose changes, but it never changes the repository on its own. Each change an agent asks for waits for your approval in the app, and what the agent did is measured from the repository, not taken from its own account. Workflows are Lua scripts that run in a sandbox and act only through GitMaster's own actions. You run them from the command palette or with a keyboard shortcut. The agent integration is exposed through an MCP server, a local review loop, and branch stacks with restack.
 
-> **Planned.** The MCP server, the local review loop, workflows and branch stacks are not available in the app yet.
+> **Planned.** The MCP server, the local review loop, branch stacks, and workflow triggers and agent runs are not available in the app yet.
 
 ## Who it is for
 

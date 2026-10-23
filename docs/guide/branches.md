@@ -171,6 +171,4 @@ In the **By stack** view, drag a branch onto another branch. The branch you drop
 
 ## Reflog and stashes
 
-> **Planned.** The reflog and stashes are not available yet.
-
 The **Workspace** section of the sidebar lists **Stashes** and **Reflog**. Stashes lists the changes you have saved aside. Reflog lists the past positions of HEAD and of the branches.

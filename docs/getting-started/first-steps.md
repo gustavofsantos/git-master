@@ -53,8 +53,8 @@ The sidebar lists the places in the repository and its branches and worktrees.
 | **Code** | The Code page: a folder tree and a read-only file viewer. See [Code navigation](../guide/code-navigation.md). | |
 | **Search** | The Search page, which searches the text of the repository. See [Code navigation](../guide/code-navigation.md). | |
 | **Workflows** | The workflows page. See [Workflows overview](../workflows/overview.md). | |
-| **Stashes** | Stashed changes. | Planned |
-| **Reflog** | The reference log. | Planned |
+| **Stashes** | Stashed changes. | |
+| **Reflog** | The reference log. | |
 | **Local review** | Review comments on local changes. | Planned |
 
 Below the entries, the **Branches** section shows local and remote branches in a tree grouped by prefix, such as `feature/`. The current branch carries a **HEAD** badge. A filter above the tree shows **Mine** or **All** branches, with a search box and a count such as "3 of 12". **Mine** is the default when Git has a `user.email` set. Your choice is saved in `settings.json`. See [Branches](../guide/branches.md).

@@ -6,7 +6,7 @@ The product is specified in [`docs/`](../docs/README.md): the official documenta
 
 | File | Content |
 |---|---|
-| [`decisions.md`](decisions.md) | Decision log (D01–D103) with status, open questions (Q1–Q23) and implementation notes. Decisions marked Decided bind the code. |
+| [`decisions.md`](decisions.md) | Decision log (D01–D108) with status, open questions (Q1–Q23) and implementation notes. Decisions marked Decided bind the code. |
 | [`roadmap.md`](roadmap.md) | The order of the work: slices, what is done, known gaps, what comes next. |
 | [`architecture.md`](architecture.md) | Hexagonal architecture, engine rules, persistence, crates, risks. |
 | [`screens.md`](screens.md) | Screen-level design decisions behind the user guide. |

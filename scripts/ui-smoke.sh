@@ -16,8 +16,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${CARGO_TARGET_DIR:-$ROOT/target}/release/gitmaster"
 DISPLAY_NUM=":97"
-RUN_ROOT="$HOME/.cache/gm-spikes/smoke-run"
-SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-spikes/smoke-out}"
+RUN_ROOT="$HOME/.cache/gm-smoke/smoke-run"
+SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-smoke/smoke-out}"
 THEMES=(light dark)
 SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split w-script-editor)
 
@@ -88,7 +88,7 @@ cleanup() {
     XPID=""
   fi
   # The per-run fixture repos are scratch. Screenshots live in $SMOKE_OUT and
-  # stay; the rest of ~/.cache/gm-spikes is not touched.
+  # stay; the rest of ~/.cache/gm-smoke is not touched.
   case "$SMOKE_OUT/" in
     "$RUN_ROOT"/*) ;;
     *) rm -rf "$RUN_ROOT" ;;
