@@ -19,6 +19,16 @@ Indicators:
 - State is calculated outside the UI thread.
 - Virtualized list (`uniform_list` in GPUI), designed for hundreds of remote branches.
 
+## Drag a file to move it (D109)
+
+Drag one changed file from the Working Copy list onto a sidebar row. The ghost shows the file name. Each row answers while the pointer is over it:
+
+- **Accepts**: highlighted, with the hint `Commit to <branch>` or `Move to <worktree>`.
+- **Refuses**: dimmed, a "not allowed" pointer and the reason in the hint (conflicts, branch checked out elsewhere, missing folder, Git older than 2.38). The branch and the worktree of the window never accept.
+- **Checking**: the conflict check runs after a short pause on the row, in the background, and is cancelled when the pointer leaves. The hint reads `Checking…` until the answer arrives.
+
+Drop on a worktree: runs at once and the status bar offers **Open Worktree**. Drop on a branch: a popover on that row asks for the commit message. Drop on the Worktrees header or `+` opens New Worktree; drop on the Branches header or a prefix group asks for a branch name. The same idiom as dragging a branch to set its parent. The keyboard path is the palette and the file menu.
+
 ## Restack flow
 
 Four steps: Plan, Running, Conflict, Done. Details in design/stacks-restack.md.

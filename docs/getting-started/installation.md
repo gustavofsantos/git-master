@@ -17,6 +17,8 @@ GitMaster is a desktop app for macOS and Linux. The install script downloads the
 | Graphical session (Linux) | GitMaster draws its window, so it needs a graphical session and a graphics driver that the UI toolkit, GPUI, can use. |
 | Tools for the install script | `curl`, `tar`, and either `sha256sum` or `shasum`. |
 
+> **Planned.** Moving a file to a branch or a worktree needs Git 2.38 or newer. With an older Git, those actions are disabled and the rest of the app works as usual.
+
 ## Install with the script
 
 Run this command in a terminal:

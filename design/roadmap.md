@@ -2,7 +2,7 @@
 
 The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `make docs-status` lists what the docs still mark as planned.
 
-Last updated: 2026-10-21 (slice H5, lane graph, done). Initial proposal, to be iterated on.
+Last updated: 2026-10-23 (slice 1f, move a file, planned). Initial proposal, to be iterated on.
 
 ## Order criteria
 
@@ -180,6 +180,22 @@ The author's request of 2026-10-22, before H5: close what a Git client needs day
   - Inline comments in the diff, states `open` and `resolved` (the agent's `handled` comes with slice 7), anchors that never guess (exact text once; otherwise `outdated`), a working tree snapshot at the moment of the comment (D97), a Before/After selector. The MCP tools stay for slice 7.
   - Done when: anchor and states in a pure module with property tests; real-Git tests of the snapshot (touching neither public refs nor the working tree).
   - Known gaps: the Before/After selector marks no line: with the anchor found exactly once both sides have the same text, and an outdated comment has no "after" (D97 forbids re-anchoring by approximation); what really changed comes with the agent's "after" snapshot in slice 7; only the Working Copy diff (the commit diff comes later), commenting only on the unstaged side, and on the staged side the cards anchor by the index's line numbers; the margin marker is a dot (there is no balloon icon in `assets/icons`); the palette lists the comment actions disabled (there is no comment picker); a snapshot that fails is silent (the comment is left without a snapshot); resolving as a human takes no "after" snapshot; the cost of the snapshot's `git add -A` was not measured in release and a split index (`core.splitIndex`) was not checked; not seen in a window: the "Comments outside the changed lines" strip, Escape in the composer, the engine's refusal in the composer, saving an edit from the page, the split layout on the page and the keyboard-only paths. The composer returns focus to the diff when it closes; the other dialogs (discard file, stash, branch, worktree, merge, workflow, message) still return focus to the file list, which only matters when they are opened from the palette with the focus in the diff.
+
+## Slice 1f: move a file to a branch or a worktree (to do)
+
+Requested by the author on 2026-10-23. Decision D109 in `design/decisions.md`; the undo that this slice prepares is Q24. The behavior is in `docs/guide/working-copy.md` ("Move a file to a branch or a worktree"), marked `Planned`.
+
+**Scope**
+
+1. **M1, engine core.** `GitPort` methods: snapshot of given paths (generalises `snapshot_worktree`), tree merge (`merge-tree --write-tree`), `commit-tree`, `update-ref` with the old value, a per-file three-way merge (`merge-file -p`) and an atomic write into another worktree, discard of paths with the check against the snapshot (D93), the safety ref `refs/gitmaster/move/<id>`, and the Git version read (floor 2.38, only for this feature). Command `PreviewMoveChanges` (read) with its blockers. Pure module `move_changes.rs` for the rules (blockers, names, step order). Done when: real-Git tests (new, modified, deleted, renamed, binary, untracked; clean merge and conflict; branch checked out elsewhere; a race on `update-ref`; a target file that changed after the read; a failure injected after the write proves nothing is lost and the ref stays).
+2. **M2, move to an existing worktree** (`MoveChanges`, logged, human only), including a dirty target.
+3. **M3, move to an existing or new branch**, with the commit message.
+4. **M4, spike of drag in GPUI, measured in a release build.** It can run in parallel with M1 to M3. It checks auto-scroll of the sidebar during a drag, dropping on a virtualized row, and the cost of the drag ghost. If it fails the bar of "smooth and fast", the gesture degrades to the menu and palette, it does not ship slow.
+5. **M5, drag and drop UI.** Pure model `drop_target.rs` (accepts, rejects with a reason, pending), ghost with the hint, the hover preview (delayed, cancellable), the message popover, the status bar notice with **Open Worktree**.
+6. **M6, creation targets**: drop on the Worktrees header or `+`, and on the Branches header or a prefix group.
+7. **M7, palette, file menu and keyboard** (`Move File to Branch…`, `Move File to Worktree…`), then update the `status` of the pages in `docs/` and run `make check`.
+
+**Out of this slice:** Undo (Q24), multiple selection, moving by hunk or the staged side only, carrying the staged state, agents and workflows (Q12).
 
 ## Slice 2: `prepare-commit` hook (done)
 

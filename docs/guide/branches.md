@@ -169,6 +169,12 @@ The **By stack** view shows the branches as a tree of parents, under a **Stacks*
 
 In the **By stack** view, drag a branch onto another branch. The branch you drop it on becomes the parent of the dragged branch. For how a parent is set and what it changes, see [Stacks](stacks.md).
 
+## Move a file to a branch
+
+> **Planned.** Moving a file to a branch is not available yet.
+
+Drag a changed file from the Working Copy and drop it on a branch row. A popover asks for the commit message, and the change is committed on that branch. You stay on your current branch, and the file leaves the Working Copy. Drop the file on the **Branches** header or on a prefix group to create a new branch for it. The rules are on the [Working Copy](working-copy.md#move-a-file-to-a-branch-or-a-worktree) page.
+
 ## Reflog and stashes
 
 The **Workspace** section of the sidebar lists **Stashes** and **Reflog**. Stashes lists the changes you have saved aside. Reflog lists the past positions of HEAD and of the branches.

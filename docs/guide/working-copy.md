@@ -38,6 +38,7 @@ You can also right-click the file, or select it and press `Shift+F10`, and choos
 | **Copy file path** | Copies the path of the file. |
 | **Reveal in file manager** | Shows the file in your file manager. |
 | **View File** | Opens the file in the read-only viewer of the [Code navigation](code-navigation.md) page. |
+| **Move File to Branch…** and **Move File to Worktree…** | Move the file's changes to another branch or worktree. See [Move a file to a branch or a worktree](#move-a-file-to-a-branch-or-a-worktree). |
 
 **Stage file** and **Unstage file** are disabled when there is nothing to do. A disabled item shows the reason in place of its shortcut.
 
@@ -84,6 +85,72 @@ On a very large repository, the status is read as a stream, and the list shows a
 > **Planned.** Discarding all changes in a file is not available in the app yet.
 
 To discard part of a file, use **Discard Chunk** in [Diff and staging](diff-and-staging.md).
+
+## Move a file to a branch or a worktree
+
+> **Planned.** Moving a file to a branch or to a worktree is not available in the app yet.
+
+You can move the changes of one file out of the Working Copy and into another branch or another worktree, without switching to it. The file leaves the Working Copy, with its staged, unstaged and untracked state together, and the change is recorded where you drop it.
+
+To move a file, drag its row from the changed-files list and drop it on a row of the sidebar. The file name follows the pointer while you drag. You move one file at a time.
+
+Each row of the sidebar answers while you drag over it:
+
+| Row | Answer |
+| --- | --- |
+| It accepts the file | The row is highlighted, and the hint says what will happen: **Commit to `<branch>`** or **Move to `<worktree>`**. |
+| It cannot accept the file | The row is dimmed, the pointer shows that dropping is not allowed, and the hint gives the reason. |
+
+The branch you are on and the worktree marked **here** never accept a file.
+
+### Move to a worktree
+
+Drop the file on a row of the **Worktrees** section. The change is applied to the same path in that worktree, and nothing is committed. The move runs at once, with no confirmation, and the status bar tells you it is done and offers **Open Worktree**.
+
+In the target worktree the change arrives unstaged. A new file arrives untracked. The index of the target worktree is not touched.
+
+The target worktree may have changes of its own. GitMaster merges your change into the file as it is on disk in that worktree, the way Git merges two sets of changes to one file. The move is refused when:
+
+- The merge has conflicts. The hint says `Conflicts with changes in <worktree>`, and nothing is written.
+- The file is binary and differs from the version your change started from.
+- A new file would land on a file that already exists there with other content.
+- The path is a symbolic link, or leaves the worktree.
+- The folder of the worktree is missing.
+
+A locked worktree accepts a file, because the lock only protects it from removal.
+
+If the target file changes between the check and the write, the move is refused. Drop the file again.
+
+### Move to a branch
+
+Drop the file on a branch row of the **Branches** section. A popover opens on that row with the commit message, filled with the file name. Press `Enter` to move, or `Esc` to cancel.
+
+GitMaster creates a commit on that branch with your change and leaves the checked-out branch, the index and the rest of the Working Copy alone. It does not run Git hooks such as `pre-commit`, because it does not check the branch out. The popover says so. You stay on your current branch.
+
+The move is refused when:
+
+- Your change conflicts with the tip of the target branch. The hint lists the files in conflict, and nothing changes.
+- The branch is checked out in another worktree. Move the file to that worktree instead.
+- The branch moved while the popover was open. Drop the file again.
+
+### Move to a new branch or a new worktree
+
+- Drop the file on the **Worktrees** header, or on its **+** button, to create a worktree for it. The dialog of [New Worktree](worktrees.md#create-a-worktree) opens with a new branch, and the file moves when the worktree exists.
+- Drop the file on the **Branches** header, or on a prefix group such as `feature/`, to create a branch for it. The popover asks for the branch name, which starts with the prefix, and for the commit message. The new branch starts at the commit you are on.
+
+### What stays in the Working Copy
+
+After a successful move the file is gone from the Working Copy. GitMaster checks the file before it removes it, and when the file changed since the move began, it keeps that file and the status bar says so. If any step fails, your change is not lost: it stays in the Working Copy, in the target, or in both.
+
+The move is recorded in the [Git commands panel](#git-commands-panel).
+
+### From the keyboard
+
+**Move File to Branch…** and **Move File to Worktree…** are in the file menu and in the [command palette](command-palette.md). Select a file, run the action, and press **Tab** to choose the target. They have no default shortcut. Every rule above applies to them.
+
+### Requirements
+
+Moving a file needs Git 2.38 or newer. With an older Git, the actions are disabled and the reason names the version found, for example `Requires Git 2.38 or newer (found 2.34)`. The rest of the app does not need 2.38.
 
 ## Reviewed marker
 
