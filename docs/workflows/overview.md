@@ -5,8 +5,6 @@ status: partial
 order: 10
 ---
 
-> **Planned.** Manual workflows run from the command palette, with the review of a version, approvals and cancel. The Workflows page with its Script and Runs tabs, keyboard shortcuts for workflows, triggers other than manual, automatic approval of event runs and runs started by an agent are not available in the app yet.
-
 A workflow is a small script that automates a Git task in GitMaster. You write it in Lua, and it acts only through a `ctx` object, so it can do what GitMaster can do and nothing else. This page explains the model, how you run a workflow, and how to read what it did. To write one, read [Writing workflows](writing-workflows.md).
 
 ## What a workflow is
@@ -23,9 +21,13 @@ A script has no shell, no file access and no network access of its own. Every ac
 
 `input` holds the values you entered, the payload of the trigger, and a read-only snapshot of the repository. The script can read these values but cannot change them.
 
-Workflows also replace GitMaster's own hooks. The points where a script used to run inside an operation become phases of a workflow. Git's own hooks, such as `pre-commit`, still belong to Git.
+Workflows replace GitMaster's own hooks: the points where a script runs inside an operation are phases of a workflow. Git's own hooks, such as `pre-commit`, still belong to Git.
+
+> **Planned.** Phases are not available yet. Only manual workflows run.
 
 ## What workflows are for
+
+> **Planned.** The commit message suggestion, the gates and the stack policies need triggers and phases, which are not available yet. A branch name from a ticket works with a manual run.
 
 - **Commit message suggestions.** A command-line LLM that you already use writes a message from the staged diff, and the commit composer shows it as a suggestion. You decide whether to use it.
 - **Branch names from a ticket.** You enter a ticket key, a program builds the branch name, you confirm it, and GitMaster creates and checks out the branch.
@@ -54,6 +56,7 @@ These rules apply:
 
 - Nothing is read from a repository. A `gitmaster.workflowPath` that points inside the working tree of the open repository is ignored, and GitMaster shows a warning.
 - Files in directories whose names start with a dot are not read as workflows. GitMaster writes generated reference files for editors and agents into a `.api` directory in the workflows folder. Those files are not workflows.
+- A `.toml` file in a workflows directory is ignored, and GitMaster shows a warning for it.
 - A workflow file holds only the definition. Whether a workflow is enabled for a repository, and your approvals, are kept by GitMaster, not in the file.
 - Nothing is written into the working tree of a repository.
 
@@ -61,20 +64,22 @@ These rules apply:
 
 You can start a workflow in four ways:
 
+> **Planned.** Triggers other than `manual`, and runs started by an agent, are not available in the app yet.
+
 1. **Command palette.** Press `Ctrl+K` (`⌘K` on macOS), choose **Run Workflow…**, and pick the workflow. If the workflow declares inputs, a dialog asks for their values.
 2. **A trigger.** A workflow can run by itself when an operation starts or ends, a repository opens, or a ref changes. See [Triggers and phases](triggers-and-phases.md).
-3. **A key binding.** A manual workflow can declare a keyboard shortcut.
+3. **A key binding.** A manual workflow can declare a keyboard shortcut with `key` in its `trigger` table. If the key clashes with a built-in shortcut, the Script tab warns you.
 4. **An agent.** An agent connected through MCP can list workflows and run them. The apply actions of an agent's run always wait for your approval. See [AI agents](ai-agents.md).
 
 ### Review a version before its first run
 
 The first time you run a version of a script, GitMaster shows you the script and asks **Run this version?**. Confirming marks that exact text as reviewed. Any edit, made by you or by an agent, makes the version unreviewed again, and GitMaster asks once more.
 
+> **Planned.** Automatic approval for event runs is not available yet, because event triggers are not.
+
 Confirming is also the moment you can allow event-triggered apply actions to run without asking. That choice applies only to the version you reviewed. See [Approvals and security](approvals-and-security.md).
 
 ### Dry run
-
-> **Planned.** The dry run from the Script tab is not available in the app yet. `gitmaster workflow dry-run` works.
 
 A dry run executes a script against your real repository without changing it. Reads run for real. Actions that propose, apply or run `exec` are recorded with the values they would receive, but they do not run, and `exec` never runs in a dry run. The dry run lists the calls in order. A value that comes after a simulated value is an estimate, and GitMaster marks it as one.
 
@@ -82,31 +87,33 @@ In the **Script** tab, a dry run uses the text open in the editor. From the comm
 
 ## The Workflows page
 
-> **Planned.** The Script and Runs tabs, saving and deleting a workflow from the page, and the Cancel and Approve buttons are not available in the app yet. Cancel and approve work from the command palette.
-
 The Workflows page lists your workflows on the left and shows the selected one on the right. The right side has two tabs:
 
 | Tab | What it shows |
 |---|---|
-| **Script** | The workflow file in an editor. Diagnostics point to the line of each error as you type. Saving replaces the file in one step and makes the version unreviewed. Saving is refused when the file changed on disk after you opened it. |
+| **Script** | The workflow file in an editor. Diagnostics point to the line of each error as you type, and **Dry Run** walks the text in the editor. Saving replaces the file in one step and makes the version unreviewed. Saving is refused when the file changed on disk after you opened it, and the page shows **The file changed on disk.** with its choices. |
 | **Runs** | One entry per run of this workflow in this repository. See [Runs](#runs). |
 
-**New workflow** creates a blank workflow or one from a template. Deleting a workflow moves its file to the trash.
+**New from Template…** lists the built-in templates, and choosing one creates a workflow from it. Deleting a workflow moves its file to the trash, after you confirm.
 
-Two buttons control a run:
+Press **Run** to start the open workflow.
 
-- **Cancel** stops a run. It works at any time, even while the script waits for you, waits for an event, or waits for a program to finish.
-- **Approve** appears on a run that is waiting for your approval.
+Cancel and approve work from the command palette:
+
+- **Cancel Workflow Run** stops a run at any time, even while the script waits for you or waits for a program to finish.
+- **Approve Workflow Step** and **Reject Workflow Step** answer a run that waits for your approval.
+
+> **Planned.** The Cancel and Approve buttons are not on the Workflows page yet. Use the palette commands.
 
 ## Runs
 
-> **Planned.** The Runs tab is not available in the app yet. GitMaster records every call of a run in the journal already.
-
 The **Runs** tab shows what a run actually did. GitMaster records each call the script makes to `ctx` as it happens, so the record shows what the run did, not what the script reports about itself.
+
+> **Planned.** Runs started by a trigger or by an agent are not available yet. Every run is started by you.
 
 Each run has a header with:
 
-- its status, such as running, waiting, done, failed, blocked, cancelled or interrupted;
+- its status: Running, Waiting, Awaiting approval, Done, Failed, Blocked, Cancelled or Interrupted. Cancelling a run ends it as Cancelled;
 - who started it: `human` for a manual run, `event:<name>` for a trigger, or `agent:<client>` for an agent over MCP;
 - its start and end times, and the reason it ended.
 
@@ -123,9 +130,9 @@ GitMaster keeps the last 200 runs of each workflow in each repository. Large out
 
 ## Runs are not resumed
 
-Runs live only while the app is open. Closing GitMaster ends any run in progress, along with any queued runs. The next time you open the app, a run that did not finish shows as **interrupted**, and GitMaster does not continue it. An action that had started but has no recorded result also shows as interrupted, and it never runs again. To run the workflow again, start it again.
+Runs live only while the app is open. Closing GitMaster ends any run in progress. The next time you open the app, a run that did not finish shows as **interrupted**, and GitMaster does not continue it. An action that had started but has no recorded result also shows as interrupted, and it never runs again. To run the workflow again, start it again.
 
-Waits for an event, and their timeouts, also exist only while the app is open.
+> **Planned.** Waits for an event, and their timeouts, are not available yet. When they are, they also exist only while the app is open.
 
 ## Related pages
 

@@ -82,8 +82,8 @@ In the stacked commit diff, `Ctrl+Shift+P` moves to the previous file. The branc
 
 ## Workflows
 
-> **Planned.** Workflows are not available in the app yet.
+A manual workflow can declare its own shortcut with `key` in the `trigger` table of `M.meta`. See [Writing workflows](../workflows/writing-workflows.md).
 
 | Action | Linux and Windows | macOS | Status |
 |---|---|---|---|
-| Save Workflow | `Ctrl+S` | `⌘S` | Planned |
+| Save Workflow | `Ctrl+S` | `⌘S` | Implemented |

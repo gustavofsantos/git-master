@@ -5,8 +5,6 @@ status: partial
 order: 50
 ---
 
-> **Planned.** Starting a run through the MCP `workflow_run` tool is not available in the app yet. Writing a script, the generated `.api/` files and the three commands work.
-
 An AI coding agent with access to your files can write a workflow script. GitMaster has no MCP tool that creates or edits scripts. The agent writes a `.lua` file in your workflows directory, as it would any other text file. You stay in charge: a script that has changed is unreviewed until you run it and confirm **Run this version?**. See [Approvals and security](approvals-and-security.md).
 
 ## Where the agent writes
@@ -23,8 +21,8 @@ Each time the app starts with a new version, it writes a `.api/` folder inside t
 | File | Content |
 |---|---|
 | `API.md` | The reference of `ctx`, generated from the action catalog: each call, its arguments, effect level and outcomes. It also has the shape of `M.meta`, the phases and examples. The same reference is in [Workflow API](../reference/workflow-api.md). |
-| A type definition file | Completion for an editor. Its file name depends on the script engine. |
-| `SKILL.md` (optional) | A short skill file for agents that read skills. |
+| `ctx.d.luau` | The same `ctx` signatures as Luau types, for an editor with a Luau language server. |
+| `SKILL.md` | A short skill file for agents that read skills. |
 
 The app writes these files and replaces them when the version changes, so do not edit them.
 
@@ -48,10 +46,13 @@ Effects run only from the app, with you as the actor. The command line never app
 2. Run `gitmaster workflow check` on the file and fix every error it reports.
 3. Run `gitmaster workflow dry-run` and read the list of calls. Check the estimates.
 4. Write a fixture file with a canned answer for each call and the sequence of calls the script should make. Run `gitmaster workflow test` until it passes.
-5. Open GitMaster and review the script in the app. Confirm **Run this version?**, then start the run. A manual run applies its changes. A run started by an event pauses for your approval before each applying action, unless you granted automatic approval for this version.
+5. Open GitMaster and review the script in the app. Confirm **Run this version?**, then start the run. A manual run applies its changes.
+
+> **Planned.** A run started by an event pauses for your approval before each applying action, unless you granted automatic approval for this version. Event runs are not available yet.
 
 ## Limits for agents
 
 - An agent cannot approve anything for you. Approval dialogs appear in the app.
-- Through the [MCP server](../agents/mcp-server.md), an agent can list workflows and start one with `workflow_run`. When an agent starts a run, every applying action waits for you. See [MCP tools](../reference/mcp-tools.md).
-- A script that an agent wrote is unreviewed until you review it. Its first manual or event run shows you the script before anything happens.
+- A script that an agent wrote is unreviewed until you review it. Its first manual run shows you the script before anything happens.
+
+> **Planned.** An agent cannot start a run through the MCP `workflow_run` tool yet. Every applying action of an agent's run will wait for you. See [MCP tools](../reference/mcp-tools.md).

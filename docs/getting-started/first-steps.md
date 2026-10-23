@@ -52,7 +52,7 @@ The sidebar lists the places in the repository and its branches and worktrees.
 | **History** | The commit history of the current branch. See [History](../guide/history.md). | |
 | **Code** | The Code page: a folder tree and a read-only file viewer. See [Code navigation](../guide/code-navigation.md). | |
 | **Search** | The Search page, which searches the text of the repository. See [Code navigation](../guide/code-navigation.md). | |
-| **Workflows** | The workflows page. See [Workflows overview](../workflows/overview.md). | Planned |
+| **Workflows** | The workflows page. See [Workflows overview](../workflows/overview.md). | |
 | **Stashes** | Stashed changes. | Planned |
 | **Reflog** | The reference log. | Planned |
 | **Local review** | Review comments on local changes. | Planned |

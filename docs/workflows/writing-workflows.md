@@ -5,8 +5,6 @@ status: partial
 order: 20
 ---
 
-> **Planned.** Triggers other than `manual`, the `key` shortcut, `ctx.wait` (no event resumes a wait yet) and the stack, restack, reparent, fetch and push calls are not available in the app yet. The rest of this tutorial works.
-
 This tutorial takes a workflow from the first line to a tested file. Read [Workflows overview](overview.md) first for the model. Each worked example is a complete file that you save into your workflows folder.
 
 ## The shape of a module
@@ -42,9 +40,11 @@ return M
 |---|---|
 | `name` | The name of the workflow. |
 | `description` | One line that says what the workflow does. |
-| `trigger` | When the workflow runs. `on` names the trigger: `manual`, a phase such as `before.restack`, or an event such as `stack.parent_moved`. `match` narrows the trigger with the hook syntax, for example `branch:feat/*`. `key` adds a keyboard shortcut to a manual workflow. |
+| `trigger` | When the workflow runs. `on` names the trigger, such as `manual`, a phase such as `before.restack`, or an event such as `stack.parent_moved`. `match` narrows the trigger with the hook syntax, for example `branch:feat/*`. `key` adds a keyboard shortcut to a manual workflow. |
 | `concurrency` | What happens when the trigger fires during a run: `queue`, `replace` or `skip`. The default is `queue`. |
 | `inputs` | Values the user enters before the run. Each input has a `type` and a `prompt`, which the dialog shows. |
+
+> **Planned.** Only the `manual` trigger runs. The `match` filter and `concurrency` are not available yet, and so are the phase and event triggers.
 
 The `concurrency` values work this way:
 
@@ -59,8 +59,10 @@ For the full list of trigger names, see [Triggers and phases](triggers-and-phase
 ## What `input` contains
 
 - `input.inputs` holds the values the user entered, by name. In the example above, the ticket key is `input.inputs.ticket`.
-- `input.trigger` holds the payload of the trigger. In a stack event, `input.trigger.parent` names the parent branch.
 - `input.repo` is a read-only snapshot of the repository, with `root`, `branch`, `head` and `staged_diff`.
+- `input.trigger` holds the payload of the trigger. In a stack event, `input.trigger.parent` names the parent branch.
+
+> **Planned.** The trigger payload comes with the triggers other than `manual`, which are not available yet.
 
 `staged_diff` is the diff text. A diff over 1 MiB is cut at a line break and ends with `[diff truncated at 1 MiB]`, and `input.repo.staged_diff_path` is then the path of a file that holds the whole diff.
 
@@ -74,6 +76,8 @@ What the function returns depends on the phase it runs in:
 | `before.<operation>` (gate) | `ctx.block(reason)` ends the run as blocked and stops the operation. An error also stops the operation. |
 | `transform.<field>` | The returned value becomes the value of the field. Return `nil` for no suggestion. |
 | `after.<operation>` | Observed only. A failure produces a warning and nothing else. |
+
+> **Planned.** The `before`, `transform` and `after` phases are not available yet. A manual run ignores the return value.
 
 `ctx.fail(reason)` ends any run as failed, with the reason.
 
@@ -133,6 +137,8 @@ The script can ask for approval, but GitMaster decides what needs approval, and 
 
 `ctx.wait(event, { timeout = "24h" })` pauses the run until the named event happens. It returns `resumed`, `aborted` or `timeout`. A wait lasts only while GitMaster is open. Closing the app ends the run.
 
+> **Planned.** No event resumes a wait yet. A wait ends only at its timeout or when you cancel the run.
+
 ## Loops and control flow
 
 Conditions, loops and functions are ordinary Lua. A loop must end. GitMaster stops any run that exceeds its limits, so a loop that never ends is stopped rather than left running. The transform example below uses a bounded retry loop.
@@ -158,7 +164,7 @@ The global environment is read-only, and each run starts with a fresh one, so no
 
 ### Branch from a ticket
 
-This is a manual workflow with one input.
+This is a manual workflow with one input. Run it from the command palette, with **Run Workflow…**.
 
 ```lua
 local M = {}
@@ -185,6 +191,8 @@ The workflow runs a naming program with the ticket key, and the program's output
 
 ### Block restack on a protected branch
 
+> **Planned.** The `before.restack` phase is not available yet, so this gate does not run.
+
 This gate runs before every restack.
 
 ```lua
@@ -205,6 +213,8 @@ return M
 When the root of the restack is `main` or `release`, the script blocks the restack, and the reason is the message you see. In any other case the script finishes without blocking, and the restack goes ahead.
 
 ### Commit message from an LLM
+
+> **Planned.** The `transform.commit_message` phase is not available yet, so this transform does not run.
 
 This transform runs when GitMaster builds the commit message.
 
@@ -227,6 +237,8 @@ return M
 The staged diff goes to the command-line LLM on standard input. The script returns the first non-empty answer, and it tries up to three times. If every try is empty, the function returns nothing, which means no suggestion. Replace `llm-cli` with the tool you use.
 
 ### Restack children when the parent moves
+
+> **Planned.** The `stack.parent_moved` trigger, `concurrency`, `ctx.wait` and the restack calls are not available yet, so this workflow does not run.
 
 This event runs when the parent branch of a stack gets new commits. It uses `concurrency = "replace"`, so a newer event replaces this run if the run has not reached its apply step yet.
 

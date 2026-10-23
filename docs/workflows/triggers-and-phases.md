@@ -5,8 +5,6 @@ status: partial
 order: 30
 ---
 
-> **Planned.** Only the `manual` trigger is available in the app. Event triggers, the `match` filter, debounce, concurrency and the before, transform and after phases are not available yet.
-
 A workflow runs when one of its triggers fires. A trigger is either an event in GitMaster, such as a commit being created or a branch being checked out, or your own request from the command palette. Some operations also offer three phases for a workflow: **before** the operation, where a workflow can veto it; **transform**, where a workflow fills in the value of a field; and **after** the operation, where a workflow only observes. This page lists the triggers, the `match` filter and the phases. For the script API, see [Writing workflows](writing-workflows.md) and the [Workflow API](../reference/workflow-api.md).
 
 ## Triggers
@@ -19,6 +17,8 @@ M.meta = {
   trigger = { on = "refs.changed", match = "branch:feat/*" },
 }
 ```
+
+> **Planned.** Only `manual` is available in the app. The other triggers in the table below, and the `match` filter in the example, are not available yet.
 
 | Trigger | Fires when |
 |---|---|
@@ -42,17 +42,25 @@ No trigger runs on a clock or after a delay. The `timeout` of `ctx.wait` ends th
 
 ### The match filter
 
+> **Planned.** The `match` filter is not available yet.
+
 Use `match` to narrow a trigger to branches. The syntax is `branch:` followed by a pattern, the same syntax that hook filters use. `branch:feat/*` matches the branches whose names start with `feat/`. A trigger without `match` is not filtered.
 
 ### Events from a run do not trigger workflows
+
+> **Planned.** Event triggers are not available yet, so this rule has no effect yet.
 
 Events that a run produces carry the ID of that run and never trigger a workflow. A commit that a workflow creates does not start a `commit.created` workflow, so a workflow cannot start another one through the events it causes. There are no cascades.
 
 ### Debounce
 
+> **Planned.** Debounce is not available yet, because the file watcher triggers are not.
+
 Triggers that come from the file watcher, such as `refs.changed`, are debounced. A run starts once the changes stop arriving, not once for each file change.
 
 ## Concurrency
+
+> **Planned.** Concurrency is not available yet. Every manual run starts when you start it.
 
 Set `concurrency` in `M.meta`. The default is `queue`.
 
@@ -65,6 +73,8 @@ Set `concurrency` in `M.meta`. The default is `queue`.
 An applying action is an action at the `apply` level. See [Approvals and security](approvals-and-security.md).
 
 ## Phases
+
+> **Planned.** The before, transform and after phases are not available yet. Only `manual` runs.
 
 The phases apply to the operations listed in the table of operations and fields, further down this page. Each phase is a workflow whose trigger is the phase name, such as `before.restack`.
 
@@ -124,6 +134,8 @@ An `after.<operation>` workflow runs after the operation finishes. It returns no
 
 ## Operations and fields
 
+> **Planned.** The phases of these operations are not available yet.
+
 | Operation | Phases | Field for `transform` |
 |---|---|---|
 | `commit` | `before.commit`, `after.commit` | `transform.commit_message`: the message in the composer |
@@ -134,6 +146,8 @@ An `after.<operation>` workflow runs after the operation finishes. It returns no
 See also [Branches](../guide/branches.md), [Stacks](../guide/stacks.md) and [Conflicts](../guide/conflicts.md).
 
 ## Reconciliation of effects
+
+> **Planned.** The `stale` outcome is returned by the restack calls, which are not available yet.
 
 An applying action checks its target before it acts. The target is the set of references, the index, or the commit message that the script used to compute the action. If the target changed after the inputs were computed, the action ends with the outcome `stale`.
 

@@ -5,8 +5,6 @@ status: partial
 order: 40
 ---
 
-> **Planned.** The stack, restack, reparent, fetch and push calls, the phases other than manual and the wake-up of `ctx.wait` by an event are not available in the app yet. A call to one of those ends with the outcome `failed`. The other calls work.
-
 A workflow is a Lua script. The script receives two values: `ctx`, the only way it can act in GitMaster, and `input`, which holds data only. Each call on `ctx` runs one GitMaster command, the same kind of command the window and the MCP server run, and each call is recorded in the run journal. For the file layout and how a run starts, see [Writing workflows](../workflows/writing-workflows.md). For the triggers and the rules of each phase, see [Triggers and phases](../workflows/triggers-and-phases.md).
 
 ## The module
@@ -38,6 +36,8 @@ return M
 
 GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It uses the table to list the workflow and its triggers. No script logic runs at that point.
 
+> **Planned.** Only the `manual` trigger runs. The `match` filter and `concurrency` are not available yet.
+
 | Field | Meaning |
 |---|---|
 | `name` | The name of the workflow. |
@@ -48,6 +48,8 @@ GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It 
 
 ### `input`
 
+> **Planned.** `input.trigger` carries a payload only for the triggers other than `manual`, which are not available yet.
+
 | Field | Holds |
 |---|---|
 | `input.inputs` | The values you entered for the `inputs` declared in `M.meta`, by name. |
@@ -57,6 +59,8 @@ GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It 
 ## Effect levels
 
 Every call has an effect level. The level tells you what the call can change.
+
+> **Planned.** The event and agent rules of the apply level are not available yet.
 
 | Level | Meaning |
 |---|---|
@@ -75,6 +79,8 @@ A dash (—) in the Result column means the call returns no fields that scripts 
 Outcomes are the values a call can end with, as listed in the action catalog. A value other than `done` raises an error unless the call runs inside `ctx.try`. The section Outcomes and errors below gives the rules.
 
 ### Interaction
+
+> **Planned.** No event resumes a wait yet. A `ctx.wait` ends only at its timeout or when the run is cancelled.
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
@@ -172,6 +178,8 @@ These calls do not act on the repository, so they have no effect level or outcom
 | `ctx.random()` | None. | A number from 0 up to, but not including, 1. A run draws from a sequence seeded for that run, and each value is recorded in the run journal. |
 
 ## Outcomes and errors
+
+> **Planned.** The example below uses the restack calls and `ctx.wait`, which are not available yet.
 
 - A call that ends with an outcome other than `done` raises an error. The run stops there. An outcome such as `conflict` or `stale` never passes silently.
 - `ctx.try(fn)` returns the outcome instead of raising. Use it when the script handles the outcome itself:

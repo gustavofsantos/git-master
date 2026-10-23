@@ -45,6 +45,8 @@ The exit status is `0` when the file has no problem, `1` when it has one, and `2
 
 ## Dry run a workflow
 
+> **Planned.** The stack reads, `ctx.stack.tree` and `ctx.stack.stale`, are simulated until the stack calls are available.
+
 ```sh
 gitmaster workflow dry-run <file> [--input k=v] [--repo <path>]
 ```
@@ -56,7 +58,6 @@ Runs the script and prints the list of calls it makes, one numbered line each, w
 - Calls that propose or apply a change are recorded, and each returns a result of the same shape, so the script continues. Nothing is applied.
 - `ctx.exec` never runs a program in a dry run.
 - `ctx.approve` is answered as if you approved.
-- The calls that read the stack, `ctx.stack.tree` and `ctx.stack.stale`, are simulated like the rest until stacks are available.
 - Anything that follows a simulated result is an estimate, and the line says so.
 
 The last line says how the run ended: `returned: <value>`, `ended: blocked: <reason>`, `ended: failed: <reason>` or `ended: cancelled`. The exit status is `0` when the run returned or was blocked, `1` when it failed or the file has a problem, and `2` for a wrong command line.

@@ -5,13 +5,13 @@ status: partial
 order: 40
 ---
 
-> **Planned.** Event runs, agent runs and automatic approval of a version are not available in the app yet, because nothing starts them. Manual runs follow every rule on this page.
-
 Workflows can change your repository, so GitMaster decides what a run may do on its own and what needs you. This page covers who starts a run, the effect level of each action, when you approve, how a script is reviewed, and what the sandbox protects. A script is untrusted logic. It has no authority of its own: GitMaster is the only actor, and every action the script takes goes through a `ctx` call that GitMaster carries out.
 
 ## Who started a run
 
 Each run records who started it. The Runs tab shows the starter for every run.
+
+> **Planned.** Event runs and agent runs are not available yet, because nothing starts them. Every run is started by you.
 
 | Starter | Shown as | Started by |
 |---|---|---|
@@ -23,6 +23,8 @@ Each run records who started it. The Runs tab shows the starter for every run.
 
 Every action has one effect level. The level tells you whether the action can change anything.
 
+> **Planned.** The `fetch`, `push.lease` and stack calls are listed by their level here. They are not available yet.
+
 | Level | Meaning | Examples |
 |---|---|---|
 | `read` | Only reads state. Runs without asking. | `ctx.notify`, `ctx.stack.tree`, `ctx.exec` (its output is untrusted) |
@@ -32,6 +34,8 @@ Every action has one effect level. The level tells you whether the action can ch
 `ctx.approve(summary)` pauses the run and shows you the summary. It returns `true` or `false`. It pauses in every mode.
 
 ## Rules for applying actions
+
+> **Planned.** The event and agent columns, and the `ctx.push.lease` row, are not available yet.
 
 The table shows what happens to an `apply` action, depending on who started the run.
 
@@ -47,16 +51,18 @@ A script can take a value from the output of a program and pass it to a change. 
 
 ## Review by hash
 
+> **Planned.** Automatic approval, and the review rules of event and agent runs, are not available yet.
+
 GitMaster identifies each version of a script by the hash of its text.
 
 1. A version you have not reviewed is **unreviewed**.
-2. The first run of an unreviewed version, whether manual or by an event, shows you the script and asks **Run this version?**.
-3. Confirm to mark that version as reviewed. This is also where you can grant automatic approval for the applying actions of event runs.
+2. The first run of an unreviewed version shows you the script and asks **Run this version?**.
+3. Confirm to mark that version as reviewed.
 4. Any edit to the script, by you or by an agent, makes it unreviewed again. Automatic approval is tied to the hash, so an edit ends it.
 
 Reviewing a version also approves the `ctx.exec` calls that the script contains. Event runs and agent runs call `ctx.exec` only for a reviewed version.
 
-> **Note.** A script that an agent writes to your workflows folder is unreviewed until you review it. Its first manual or event run asks you before it does anything.
+> **Note.** A script that an agent writes to your workflows folder is unreviewed until you review it. Its first manual run asks you before it does anything.
 
 ## The sandbox
 
@@ -81,14 +87,16 @@ Each run has budgets for instructions, elapsed time, memory, string size, call d
 
 ### Cancellation
 
-You can cancel a run at any time. Cancelling stops the script. A call that is waiting, such as `ctx.approve`, `ctx.wait` or `ctx.exec`, ends at once. Cancelling `ctx.exec` also kills the program it started.
+You can cancel a run at any time, with **Cancel Workflow Run** in the command palette. Cancelling stops the script. A call that is waiting, such as `ctx.approve` or `ctx.exec`, ends at once. Cancelling `ctx.exec` also kills the program it started. A cancelled run ends as `Cancelled`.
 
 ### Closing the app
 
-Closing GitMaster ends the runs in progress. Waits and their timeouts are kept in memory, so they do not survive a restart. When GitMaster starts again:
+Closing GitMaster ends the runs in progress. When GitMaster starts again:
 
 - A run that did not finish is shown as `interrupted`.
 - An applying action that started but has no recorded result is shown as `interrupted`. It never runs again.
+
+> **Planned.** Waits and their timeouts are not available yet. When they are, they are kept in memory, so they do not survive a restart.
 
 ## Run journal
 
