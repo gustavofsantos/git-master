@@ -47,6 +47,35 @@ pub type GrepRead = Box<dyn FnOnce(&AtomicBool) -> Result<GrepResult, GitError> 
 /// runs on a thread of its own, and its error is Git's own text.
 pub type RemoteRun = Box<dyn FnOnce() -> Result<(), GitError> + Send>;
 
+/// The result of merging two trees without a worktree (`merge_trees`): the
+/// merged tree when everything merged, or the paths that conflict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TreeMerge {
+    Clean { tree: String },
+    Conflict { paths: Vec<String> },
+}
+
+/// The result of a three-way merge of one file's content (`merge_file`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileMerge {
+    /// The merged content, with no conflict markers.
+    Clean(Vec<u8>),
+    /// The content has conflict markers; the merge did not finish.
+    Conflict,
+    /// One of the inputs looks binary, so it is not merged.
+    Binary,
+}
+
+/// What `discard_moved` did to the source working copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiscardOutcome {
+    Discarded,
+    /// The file was left alone; `reason` says why.
+    Kept {
+        reason: String,
+    },
+}
+
 /// What the core needs from Git. Adapters implement it; the core tests with fakes.
 pub trait GitPort: Send {
     /// The working tree root that contains `path`.
@@ -323,6 +352,101 @@ pub trait GitPort: Send {
     fn snapshot_worktree(&self, _root: &Path) -> Result<String, GitError> {
         Err(GitError(
             "snapshots are not supported by this adapter".into(),
+        ))
+    }
+
+    /// Builds a commit that is HEAD with only `paths` taken from the working
+    /// tree (`add -A` on those paths alone). It is the move snapshot of D109:
+    /// the other paths are HEAD's, whatever the index holds. The real index,
+    /// HEAD, the working tree and every public ref stay as they are. Returns the
+    /// commit id; nothing points at it yet.
+    fn snapshot_paths(&self, _root: &Path, _paths: &[String]) -> Result<String, GitError> {
+        Err(GitError(
+            "snapshots are not supported by this adapter".into(),
+        ))
+    }
+
+    /// The version of the `git` the app runs, as `git --version` prints it.
+    /// Never records anything.
+    fn git_version(&self) -> Result<String, GitError> {
+        Err(GitError(
+            "git version is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Merges `ours` and `theirs` over `base` into a tree, without touching the
+    /// index or the working tree (`git merge-tree --write-tree`, Git 2.38 or
+    /// later). It writes objects but records no command. Never takes
+    /// `index.lock`.
+    fn merge_trees(
+        &self,
+        _root: &Path,
+        _base: &str,
+        _ours: &str,
+        _theirs: &str,
+    ) -> Result<TreeMerge, GitError> {
+        Err(GitError(
+            "tree merge is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Creates a commit of `tree` with `parent` (none for a root commit) and
+    /// `message`, under the user's own identity. Git's refusal, for lack of an
+    /// identity for one, is the error. Returns the commit id.
+    fn commit_tree(
+        &self,
+        _root: &Path,
+        _tree: &str,
+        _parent: Option<&str>,
+        _message: &str,
+    ) -> Result<String, GitError> {
+        Err(GitError(
+            "commit tree is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Points the full ref `name` at `new`, if it is at `old`. `old` of `None`
+    /// means the ref must not exist yet. `name` must start with `refs/`. Git's
+    /// refusal is the error.
+    fn update_ref(
+        &self,
+        _root: &Path,
+        _name: &str,
+        _new: &str,
+        _old: Option<&str>,
+    ) -> Result<(), GitError> {
+        Err(GitError(
+            "update ref is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Three-way merge of one file's content with `git merge-file`. Content with
+    /// a NUL byte near its start is `Binary` and git is not run. Never records
+    /// anything: it is a computation.
+    fn merge_file(
+        &self,
+        _root: &Path,
+        _base: &[u8],
+        _ours: &[u8],
+        _theirs: &[u8],
+    ) -> Result<FileMerge, GitError> {
+        Err(GitError(
+            "file merge is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Discards the change of `path` in the working copy, but only when it still
+    /// matches `snapshot` (the move snapshot of D109): the blob of `path` in the
+    /// snapshot, or no file in both. Otherwise nothing changes and the outcome
+    /// says why. A symlink or a path outside the working tree is an error.
+    fn discard_moved(
+        &self,
+        _root: &Path,
+        _path: &str,
+        _snapshot: &str,
+    ) -> Result<DiscardOutcome, GitError> {
+        Err(GitError(
+            "discard moved is not supported by this adapter".into(),
         ))
     }
 

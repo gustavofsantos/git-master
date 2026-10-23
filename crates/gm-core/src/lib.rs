@@ -36,6 +36,9 @@ pub use files::{
     IndexJob, IndexReport, ReadJob, ReadReport, SearchJob, SearchReport, TextJob, TextReport,
 };
 pub use history::{HistoryJob, HistoryOutcome, HistoryPage, HistoryReport, HistoryStream};
-pub use port::{DetailRead, FileListRead, GitError, GitPort, GrepRead, RemoteRun};
+pub use port::{
+    DetailRead, DiscardOutcome, FileListRead, FileMerge, GitError, GitPort, GrepRead, RemoteRun,
+    TreeMerge,
+};
 pub use runner::{EngineHandle, spawn, spawn_with};
 pub use script_session::{EffectRequest, ScriptLink};

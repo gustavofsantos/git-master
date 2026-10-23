@@ -2,7 +2,7 @@
 //! stable, machine-readable, and it honors fsmonitor and the untracked cache.
 
 use std::io::{BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -25,6 +25,7 @@ use crate::grep::{Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
 use crate::port::{DetailRead, FileListRead, GrepRead, RemoteRun, StackRead};
+use crate::port::{DiscardOutcome, FileMerge, TreeMerge};
 use crate::reflog;
 use crate::remote;
 use crate::stage_math;
@@ -329,12 +330,7 @@ impl SubprocessGit {
 
     /// The commit HEAD names, `None` on an unborn branch. Never records anything.
     fn head_commit(&self, root: &Path) -> Result<Option<String>, GitError> {
-        let mut command = self.git(root);
-        command.args(["rev-parse", "--verify", "-q", "HEAD"]);
-        // Exit 1 is git's answer for an unborn HEAD.
-        let out = Self::run_allowing(command, &[0, 1])?;
-        let text = String::from_utf8_lossy(&out).trim().to_owned();
-        Ok((!text.is_empty()).then_some(text))
+        self.verify_rev(root, "HEAD")
     }
 
     /// Starts the snapshot index `index` as a copy of the index of the worktree
@@ -349,13 +345,39 @@ impl SubprocessGit {
             std::fs::copy(&real, index)
                 .map_err(|e| GitError(format!("cannot copy the index: {e}")))?;
         } else if let Some(head) = head {
-            let mut command = self.git(root);
-            command
-                .env("GIT_INDEX_FILE", index)
-                .args(["read-tree", head]);
-            self.logged(command, None)?;
+            self.read_tree(root, index, head)?;
         }
         Ok(())
+    }
+
+    /// Fills the snapshot index `index` with the tree `tree` (`read-tree`).
+    fn read_tree(&self, root: &Path, index: &Path, tree: &str) -> Result<(), GitError> {
+        let mut command = self.git(root);
+        command
+            .env("GIT_INDEX_FILE", index)
+            .args(["read-tree", tree]);
+        self.logged(command, None).map(drop)
+    }
+
+    /// A folder under `<common_dir>/gitmaster/tmp` for scratch files. It and its
+    /// contents go when the returned value drops, on every way out.
+    fn scratch_dir(&self, root: &Path) -> Result<tempfile::TempDir, GitError> {
+        let common = self.common_dir(root)?;
+        let tmp = common.join("gitmaster").join("tmp");
+        std::fs::create_dir_all(&tmp)
+            .map_err(|e| GitError(format!("cannot create {}: {e}", tmp.display())))?;
+        tempfile::TempDir::new_in(&tmp)
+            .map_err(|e| GitError(format!("cannot create a scratch folder: {e}")))
+    }
+
+    /// The id `rev` names, `None` when it names nothing. Never records anything.
+    fn verify_rev(&self, root: &Path, rev: &str) -> Result<Option<String>, GitError> {
+        let mut command = self.git(root);
+        command.args(["rev-parse", "--verify", "-q", rev]);
+        // Exit 1 is git's answer for a revision that is not there.
+        let out = Self::run_allowing(command, &[0, 1])?;
+        let text = String::from_utf8_lossy(&out).trim().to_owned();
+        Ok((!text.is_empty()).then_some(text))
     }
 
     /// Whether the index differs from HEAD (from the empty tree on an unborn branch).
@@ -461,6 +483,58 @@ impl SubprocessGit {
         } else {
             self.put_content(root, mode, path, &next)
         }
+    }
+    /// Builds a commit of the working tree (`paths` of `None`) or of HEAD with
+    /// only `paths` taken from the working tree (`Some`), for `message`. The work
+    /// is done in a copy of the index, which is removed afterwards.
+    fn snapshot(
+        &self,
+        root: &Path,
+        paths: Option<&[String]>,
+        message: &str,
+    ) -> Result<String, GitError> {
+        // The folder and the copy of the index in it go when `scratch` drops, on
+        // every way out of this function.
+        let scratch = self.scratch_dir(root)?;
+        let index = scratch.path().join("index");
+        let head = self.head_commit(root)?;
+        match paths {
+            None => self.seed_index(root, &index, head.as_deref())?,
+            // A move snapshot holds HEAD everywhere except the chosen paths, so it
+            // starts from HEAD rather than from the real index.
+            Some(_) => {
+                if let Some(head) = head.as_deref() {
+                    self.read_tree(root, &index, head)?;
+                }
+            }
+        }
+        let mut add = self.git(root);
+        add.env("GIT_INDEX_FILE", &index);
+        match paths {
+            None => add.args(["add", "-A"]),
+            Some(paths) => add
+                .args(["--literal-pathspecs", "add", "-A", "--"])
+                .args(paths),
+        };
+        self.logged(add, None)?;
+        let mut write = self.git(root);
+        write.env("GIT_INDEX_FILE", &index).arg("write-tree");
+        let tree = String::from_utf8_lossy(&self.logged(write, None)?)
+            .trim()
+            .to_owned();
+        let mut commit = self.git(root);
+        commit.args(["-c", "commit.gpgsign=false", "commit-tree", &tree]);
+        if let Some(head) = &head {
+            commit.args(["-p", head]);
+        }
+        commit
+            .args(["-m", message])
+            .env("GIT_AUTHOR_NAME", SNAPSHOT_NAME)
+            .env("GIT_AUTHOR_EMAIL", SNAPSHOT_EMAIL)
+            .env("GIT_COMMITTER_NAME", SNAPSHOT_NAME)
+            .env("GIT_COMMITTER_EMAIL", SNAPSHOT_EMAIL);
+        let out = self.logged(commit, None)?;
+        Ok(String::from_utf8_lossy(&out).trim().to_owned())
     }
 }
 
@@ -744,38 +818,172 @@ impl GitPort for SubprocessGit {
     }
 
     fn snapshot_worktree(&self, root: &Path) -> Result<String, GitError> {
-        let common = self.common_dir(root)?;
-        let tmp = common.join("gitmaster").join("tmp");
-        std::fs::create_dir_all(&tmp)
-            .map_err(|e| GitError(format!("cannot create {}: {e}", tmp.display())))?;
-        // The folder and the copy of the index in it go when `scratch` drops, on
-        // every way out of this function.
-        let scratch = tempfile::TempDir::new_in(&tmp)
-            .map_err(|e| GitError(format!("cannot create a snapshot folder: {e}")))?;
-        let index = scratch.path().join("index");
-        let head = self.head_commit(root)?;
-        self.seed_index(root, &index, head.as_deref())?;
-        let mut add = self.git(root);
-        add.env("GIT_INDEX_FILE", &index).args(["add", "-A"]);
-        self.logged(add, None)?;
-        let mut write = self.git(root);
-        write.env("GIT_INDEX_FILE", &index).arg("write-tree");
-        let tree = String::from_utf8_lossy(&self.logged(write, None)?)
+        self.snapshot(root, None, "gitmaster review snapshot")
+    }
+
+    fn snapshot_paths(&self, root: &Path, paths: &[String]) -> Result<String, GitError> {
+        self.snapshot(root, Some(paths), "gitmaster move snapshot")
+    }
+
+    fn git_version(&self) -> Result<String, GitError> {
+        // Not in a repository: the process's own folder is as good as any.
+        let mut command = self.git(Path::new("."));
+        command.arg("--version");
+        Ok(String::from_utf8_lossy(&Self::run(command)?)
             .trim()
-            .to_owned();
-        let mut commit = self.git(root);
-        commit.args(["-c", "commit.gpgsign=false", "commit-tree", &tree]);
-        if let Some(head) = &head {
-            commit.args(["-p", head]);
+            .to_owned())
+    }
+
+    fn merge_trees(
+        &self,
+        root: &Path,
+        base: &str,
+        ours: &str,
+        theirs: &str,
+    ) -> Result<TreeMerge, GitError> {
+        for id in [base, ours, theirs] {
+            require_commit_id(id)?;
         }
-        commit
-            .args(["-m", "gitmaster review snapshot"])
-            .env("GIT_AUTHOR_NAME", SNAPSHOT_NAME)
-            .env("GIT_AUTHOR_EMAIL", SNAPSHOT_EMAIL)
-            .env("GIT_COMMITTER_NAME", SNAPSHOT_NAME)
-            .env("GIT_COMMITTER_EMAIL", SNAPSHOT_EMAIL);
-        let out = self.logged(commit, None)?;
+        let mut command = self.git(root);
+        command
+            .args(["merge-tree", "--write-tree", "--name-only", "-z"])
+            .arg(format!("--merge-base={base}"))
+            .args([ours, theirs]);
+        // Not logged: it writes objects only, no ref and no index.
+        let output = command
+            .output()
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        match output.status.code() {
+            Some(0) => parse_merge_tree(&output.stdout, false),
+            Some(1) => parse_merge_tree(&output.stdout, true),
+            _ => Err(GitError(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            )),
+        }
+    }
+
+    fn commit_tree(
+        &self,
+        root: &Path,
+        tree: &str,
+        parent: Option<&str>,
+        message: &str,
+    ) -> Result<String, GitError> {
+        require_commit_id(tree)?;
+        if let Some(parent) = parent {
+            require_commit_id(parent)?;
+        }
+        // The user's own identity: no snapshot identity is set here.
+        let mut command = self.git(root);
+        command.args(["commit-tree", tree]);
+        if let Some(parent) = parent {
+            command.args(["-p", parent]);
+        }
+        command.args(["-m", message]);
+        let out = self.logged(command, None)?;
         Ok(String::from_utf8_lossy(&out).trim().to_owned())
+    }
+
+    fn update_ref(
+        &self,
+        root: &Path,
+        name: &str,
+        new: &str,
+        old: Option<&str>,
+    ) -> Result<(), GitError> {
+        if !name.starts_with("refs/") {
+            return Err(GitError(format!("{name} is not a ref under refs/")));
+        }
+        require_commit_id(new)?;
+        if let Some(old) = old {
+            require_commit_id(old)?;
+        }
+        // An empty old value makes Git require that the ref does not exist.
+        let mut command = self.git(root);
+        command.args(["update-ref", name, new, old.unwrap_or("")]);
+        self.logged(command, None).map(drop)
+    }
+
+    fn merge_file(
+        &self,
+        root: &Path,
+        base: &[u8],
+        ours: &[u8],
+        theirs: &[u8],
+    ) -> Result<FileMerge, GitError> {
+        if [base, ours, theirs]
+            .iter()
+            .any(|content| looks_binary(content))
+        {
+            return Ok(FileMerge::Binary);
+        }
+        let scratch = self.scratch_dir(root)?;
+        let write = |name: &str, content: &[u8]| -> Result<PathBuf, GitError> {
+            let path = scratch.path().join(name);
+            std::fs::write(&path, content)
+                .map_err(|e| GitError(format!("cannot write {}: {e}", path.display())))?;
+            Ok(path)
+        };
+        let base_path = write("base", base)?;
+        let ours_path = write("ours", ours)?;
+        let theirs_path = write("theirs", theirs)?;
+        // Not logged: a computation that changes nothing in the repository.
+        let mut command = self.git(root);
+        command
+            .args(["merge-file", "-p"])
+            .arg(&ours_path)
+            .arg(&base_path)
+            .arg(&theirs_path);
+        let output = command
+            .output()
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        match output.status.code() {
+            Some(0) => Ok(FileMerge::Clean(output.stdout)),
+            // merge-file exits with the number of conflicts, at most 127.
+            Some(1..=127) => Ok(FileMerge::Conflict),
+            _ => Err(GitError(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            )),
+        }
+    }
+
+    fn discard_moved(
+        &self,
+        root: &Path,
+        path: &str,
+        snapshot: &str,
+    ) -> Result<DiscardOutcome, GitError> {
+        require_commit_id(snapshot)?;
+        check_worktree_path(root, path)?;
+        let in_snapshot = self.verify_rev(root, &format!("{snapshot}:{path}"))?;
+        let file = root.join(path);
+        let on_disk = match file.symlink_metadata() {
+            Ok(meta) if meta.is_file() => {
+                let mut command = self.git(root);
+                command.args(["hash-object", "--", path]);
+                Some(
+                    String::from_utf8_lossy(&Self::run(command)?)
+                        .trim()
+                        .to_owned(),
+                )
+            }
+            // A folder or another non-file now sits at `path`: it is not the file
+            // the snapshot holds, so nothing is discarded.
+            Ok(_) => {
+                return Ok(DiscardOutcome::Kept {
+                    reason: MOVED_CHANGED.into(),
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(GitError(format!("cannot read {path}: {e}"))),
+        };
+        if in_snapshot != on_disk {
+            return Ok(DiscardOutcome::Kept {
+                reason: MOVED_CHANGED.into(),
+            });
+        }
+        self.discard_file(root, path, true)?;
+        Ok(DiscardOutcome::Discarded)
     }
 
     fn set_review_ref(&self, root: &Path, comment: i64, oid: &str) -> Result<(), GitError> {
@@ -1402,6 +1610,65 @@ impl GitPort for SubprocessGit {
     }
 }
 
+/// The reason `discard_moved` gives when the file changed after the move started.
+const MOVED_CHANGED: &str = "the file changed after the move started";
+
+/// Parses `git merge-tree --write-tree --name-only -z` (D109). The first
+/// NUL-terminated token is the merged tree. On a conflict the conflicted file
+/// names follow, up to an empty token; the informational messages after that
+/// empty token are not used.
+fn parse_merge_tree(stdout: &[u8], conflicted: bool) -> Result<TreeMerge, GitError> {
+    let mut tokens = stdout.split(|byte| *byte == 0);
+    let tree = match tokens.next() {
+        Some(tree) if !tree.is_empty() => String::from_utf8_lossy(tree).into_owned(),
+        _ => return Err(GitError("merge-tree printed no tree".into())),
+    };
+    if !conflicted {
+        return Ok(TreeMerge::Clean { tree });
+    }
+    let mut paths = Vec::new();
+    for token in tokens {
+        if token.is_empty() {
+            return Ok(TreeMerge::Conflict { paths });
+        }
+        paths.push(String::from_utf8_lossy(token).into_owned());
+    }
+    Err(GitError(
+        "merge-tree listed its conflicts without an end".into(),
+    ))
+}
+
+/// Git's own rule for binary content: a NUL byte in the first 8000 bytes.
+fn looks_binary(content: &[u8]) -> bool {
+    content.iter().take(8000).any(|byte| *byte == 0)
+}
+
+/// Refuses a `path` that is not a plain relative path inside `root`, or that
+/// goes through a symbolic link on the way (a folder or the file itself).
+fn check_worktree_path(root: &Path, path: &str) -> Result<(), GitError> {
+    let relative = Path::new(path);
+    let plain = !path.is_empty()
+        && relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)));
+    if !plain {
+        return Err(GitError(format!(
+            "{path} is not a path in the working tree"
+        )));
+    }
+    let mut current = root.to_path_buf();
+    for part in relative.components() {
+        current.push(part);
+        if current
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            return Err(GitError(format!("{path} goes through a symbolic link")));
+        }
+    }
+    Ok(())
+}
+
 /// Keys of every prepare-commit hook section, as a regular expression.
 const HOOK_KEYS: &str = r"^gitmaster\.prepare-commit\.";
 
@@ -1859,6 +2126,44 @@ u UU N... 100644 100644 100644 100644 a b c both.rs\0\
             clean_email("  ana@example.com \n").as_deref(),
             Some("ana@example.com")
         );
+    }
+
+    #[test]
+    fn a_clean_merge_tree_answer_is_its_first_token() {
+        assert_eq!(
+            parse_merge_tree(b"b736e46\0", false),
+            Ok(TreeMerge::Clean {
+                tree: "b736e46".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_conflicted_merge_tree_answer_lists_the_files_before_the_empty_token() {
+        let raw = b"5356250\0f.txt\0g.txt\0\x001\0f.txt\0Auto-merging f.txt\n\0\
+1\0f.txt\0CONFLICT (content)\0CONFLICT (content): Merge conflict in f.txt\n\0";
+        assert_eq!(
+            parse_merge_tree(raw, true),
+            Ok(TreeMerge::Conflict {
+                paths: vec!["f.txt".into(), "g.txt".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn a_merge_tree_answer_without_a_tree_or_an_end_is_an_error() {
+        assert!(parse_merge_tree(b"", false).is_err());
+        assert!(parse_merge_tree(b"\0", true).is_err());
+        assert!(parse_merge_tree(b"tree\0f.txt", true).is_err());
+    }
+
+    #[test]
+    fn only_a_nul_in_the_first_8000_bytes_makes_content_binary() {
+        assert!(looks_binary(b"ab\0cd"));
+        let mut late = vec![b'a'; 8000];
+        late.push(0);
+        assert!(!looks_binary(&late));
+        assert!(looks_binary(&[b'a', 0]));
     }
 
     #[test]
