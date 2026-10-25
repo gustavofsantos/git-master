@@ -498,6 +498,7 @@ impl StatusView {
         if self.model.take_conflict_opened().is_some() {
             self.show_conflicts(cx);
         }
+        self.reread_forgotten_conflict();
         self.follow_review(review_listed, reload, cx);
         if stash_stale {
             self.request_stash_list();

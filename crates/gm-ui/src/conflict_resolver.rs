@@ -5,13 +5,21 @@
 //! the pane, and a text that does not parse is kept as typed until it does.
 
 use gm_core::conflict::{self, ConflictDoc, Hunk, Resolution, Segment};
-use gm_schema::{ConflictFileRead, ConflictOperation, ConflictSide, Event};
+use gm_schema::{
+    ConflictFileRead, ConflictOperation, ConflictSide, Event, HunkOrigin, RecordedResolution,
+};
 
 /// The note when a choice is made while the Result pane cannot be read.
 const UNREADABLE_CHOICE: &str = "Fix the conflict markers in the result before choosing.";
 
 /// The note after the engine staged the file.
 const STAGED: &str = "Resolved and staged.";
+
+/// The banner above the panes while Git has a recorded resolution for the file (D117).
+const RECORDED_BANNER: &str = "Resolved by recorded resolution";
+
+/// The note after the recorded resolution was forgotten. The file is read again.
+const FORGOTTEN: &str = "Recorded resolution forgotten. The conflict is open again.";
 
 /// Which side of a conflict a pane shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +46,8 @@ pub(crate) struct HunkView {
     /// The common ancestor, only when the base is shown and the file has one.
     pub base: Option<String>,
     pub resolution_label: &'static str,
+    /// Who made the choice: "human", "recorded resolution" or "script". Empty while unresolved.
+    pub origin_label: &'static str,
     pub resolved: bool,
 }
 
@@ -69,6 +79,34 @@ pub(crate) struct ResolverState {
     applied_note: Option<String>,
     /// Set once the engine has staged the file.
     resolved: bool,
+    /// The resolution Git recorded for the file (D117).
+    recorded: Recorded,
+    /// Who made each hunk's choice, by hunk index. `None` for a hunk with no choice.
+    origins: Vec<Option<HunkOrigin>>,
+    /// Whether the Result pane still holds the recorded text as Review loaded it.
+    from_recorded: bool,
+}
+
+/// Git's recorded resolution of the file, as the resolver holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Recorded {
+    /// Nothing is recorded for the file.
+    Absent,
+    /// Git recorded a resolution and applied it to the working tree file.
+    Present(RecordedResolution),
+    /// The resolution was forgotten. The file must be read again.
+    Forgotten,
+}
+
+/// Parses the text of the Result pane. Text that does not parse is kept as typed.
+fn parse_doc(text: String) -> Doc {
+    match conflict::parse(&text) {
+        Ok(doc) => Doc::Parsed(doc),
+        Err(error) => Doc::Unreadable {
+            message: error.to_string(),
+            text,
+        },
+    }
 }
 
 impl ResolverState {
@@ -76,24 +114,54 @@ impl ResolverState {
     /// kept as an `Unreadable` document, never a panic.
     #[must_use]
     pub(crate) fn new(read: &ConflictFileRead) -> Self {
-        let doc = match conflict::parse(&read.text) {
-            Ok(doc) => Doc::Parsed(doc),
-            Err(error) => Doc::Unreadable {
-                text: read.text.clone(),
-                message: error.to_string(),
-            },
-        };
         Self {
             path: read.path.clone(),
             operation: read.operation,
             left: read.left.clone(),
             right: read.right.clone(),
-            doc,
+            doc: parse_doc(read.text.clone()),
             show_base: false,
             selected: 0,
             applied_note: None,
             resolved: false,
+            recorded: read
+                .recorded
+                .clone()
+                .map_or(Recorded::Absent, Recorded::Present),
+            origins: Vec::new(),
+            from_recorded: false,
         }
+    }
+
+    /// The resolver of a file read again after its recorded resolution was
+    /// forgotten: the same as `new`, with the note that says the conflict is open.
+    #[must_use]
+    pub(crate) fn reread_after_forget(read: &ConflictFileRead) -> Self {
+        let mut state = Self::new(read);
+        state.applied_note = Some(FORGOTTEN.to_owned());
+        state
+    }
+
+    /// The banner above the panes, while Git has a recorded resolution for the file.
+    #[must_use]
+    pub(crate) fn recorded_banner(&self) -> Option<&'static str> {
+        self.has_recorded().then_some(RECORDED_BANNER)
+    }
+
+    /// The path of `ForgetRecordedResolution`, when the file has a recorded resolution.
+    #[must_use]
+    pub(crate) fn forget_request(&self) -> Option<String> {
+        self.has_recorded().then(|| self.path.clone())
+    }
+
+    /// Whether the file was forgotten and must be read again (the view sends `ReadConflict`).
+    #[must_use]
+    pub(crate) fn needs_reread(&self) -> bool {
+        matches!(self.recorded, Recorded::Forgotten)
+    }
+
+    fn has_recorded(&self) -> bool {
+        matches!(self.recorded, Recorded::Present(_))
     }
 
     #[must_use]
@@ -190,13 +258,45 @@ impl ResolverState {
     }
 
     fn set_resolution(&mut self, index: usize, resolution: Option<Resolution>) {
-        match &mut self.doc {
-            Doc::Parsed(doc) => {
-                doc.set_resolution(index, resolution);
-                self.applied_note = None;
-            }
-            Doc::Unreadable { .. } => self.applied_note = Some(UNREADABLE_CHOICE.to_owned()),
+        let origin = resolution.as_ref().map(|_| HunkOrigin::Human);
+        let count = self.conflict_count();
+        let Doc::Parsed(doc) = &mut self.doc else {
+            self.applied_note = Some(UNREADABLE_CHOICE.to_owned());
+            return;
+        };
+        doc.set_resolution(index, resolution);
+        self.applied_note = None;
+        if index < count {
+            self.set_origin(index, origin);
         }
+    }
+
+    /// Loads the recorded text into the Result pane (Review). Its hunks are marked
+    /// Rerere; the user can still edit the text. Does nothing without a recorded
+    /// resolution.
+    pub(crate) fn use_recorded(&mut self) {
+        let Recorded::Present(recorded) = &self.recorded else {
+            return;
+        };
+        let text = recorded.text.clone();
+        self.doc = parse_doc(text);
+        self.origins = vec![Some(HunkOrigin::Rerere); self.conflict_count()];
+        self.from_recorded = true;
+        self.clamp_selected();
+    }
+
+    fn set_origin(&mut self, index: usize, origin: Option<HunkOrigin>) {
+        self.origins.resize(self.origins.len().max(index + 1), None);
+        self.origins[index] = origin;
+    }
+
+    fn origin_at(&self, index: usize) -> Option<HunkOrigin> {
+        self.origins.get(index).copied().flatten()
+    }
+
+    /// Keeps the selected conflict among the conflicts the Result pane holds.
+    fn clamp_selected(&mut self) {
+        self.selected = self.selected.min(self.conflict_count().saturating_sub(1));
     }
 
     /// Points the panes at the conflict `index`, when there is one.
@@ -274,15 +374,31 @@ impl ResolverState {
     /// counts follow it. A text that does not parse is kept as typed, and Apply
     /// says why until the markers are fixed.
     pub(crate) fn set_result_text(&mut self, text: String) {
-        self.doc = match conflict::parse(&text) {
-            Ok(doc) => Doc::Parsed(doc),
-            Err(error) => Doc::Unreadable {
-                text,
-                message: error.to_string(),
-            },
-        };
-        let total = self.conflict_count();
-        self.selected = self.selected.min(total.saturating_sub(1));
+        if text != self.result_text() {
+            // Text that came from the recorded resolution is no longer as Git left it.
+            self.origins.clear();
+            self.from_recorded = false;
+        }
+        self.doc = parse_doc(text);
+        self.clamp_selected();
+    }
+
+    /// Who resolved each conflict, in file order: one entry per conflict. A file
+    /// with no conflict markers left has none, unless its whole text is the
+    /// recorded resolution and unchanged, which is one `Rerere` entry.
+    #[must_use]
+    pub(crate) fn origins(&self) -> Vec<HunkOrigin> {
+        let count = self.conflict_count();
+        if count == 0 {
+            return if self.from_recorded {
+                vec![HunkOrigin::Rerere]
+            } else {
+                Vec::new()
+            };
+        }
+        (0..count)
+            .map(|index| self.origin_at(index).unwrap_or(HunkOrigin::Human))
+            .collect()
     }
 
     /// What Apply does now: `Ready` with the text when every conflict is
@@ -313,11 +429,11 @@ impl ResolverState {
         }
     }
 
-    /// Apply: the path and text of the `ResolveConflict` command when every
+    /// Apply: the path, text and origins of the `ResolveConflict` command when every
     /// conflict is resolved. Otherwise nothing is sent, and the note says what remains.
-    pub(crate) fn apply(&mut self) -> Option<(String, String)> {
+    pub(crate) fn apply(&mut self) -> Option<(String, String, Vec<HunkOrigin>)> {
         match self.apply_request() {
-            ApplyDecision::Ready { text } => Some((self.path.clone(), text)),
+            ApplyDecision::Ready { text } => Some((self.path.clone(), text, self.origins())),
             ApplyDecision::Pending { message } => {
                 self.applied_note = Some(message);
                 None
@@ -341,6 +457,7 @@ impl ResolverState {
                     None
                 },
                 resolution_label: resolution_label(hunk.resolution.as_ref()),
+                origin_label: origin_label(hunk.resolution.is_some(), self.origin_at(index)),
                 resolved: hunk.resolution.is_some(),
             })
             .collect()
@@ -352,6 +469,11 @@ impl ResolverState {
             Event::ConflictResolved { path, .. } if *path == self.path => {
                 self.resolved = true;
                 self.applied_note = Some(STAGED.to_owned());
+                true
+            }
+            Event::RecordedResolutionForgotten { path, .. } if *path == self.path => {
+                self.recorded = Recorded::Forgotten;
+                self.applied_note = Some(FORGOTTEN.to_owned());
                 true
             }
             _ => false,
@@ -377,6 +499,19 @@ impl ResolverState {
                 Segment::Text(_) => None,
             })
             .collect()
+    }
+}
+
+/// Who made a hunk's choice, as its card names it. Empty while the hunk is
+/// unresolved. The labels name the people and Git, never the sides.
+fn origin_label(resolved: bool, origin: Option<HunkOrigin>) -> &'static str {
+    if !resolved {
+        return "";
+    }
+    match origin.unwrap_or(HunkOrigin::Human) {
+        HunkOrigin::Human => "human",
+        HunkOrigin::Rerere => "recorded resolution",
+        HunkOrigin::Script => "script",
     }
 }
 
@@ -619,7 +754,11 @@ mod tests {
         );
         assert_eq!(
             state.apply(),
-            Some(("src/lib.rs".to_owned(), expected.to_owned()))
+            Some((
+                "src/lib.rs".to_owned(),
+                expected.to_owned(),
+                vec![HunkOrigin::Human, HunkOrigin::Human]
+            ))
         );
     }
 
@@ -685,5 +824,200 @@ mod tests {
         assert!(state.on_event(&ours));
         assert!(state.is_staged());
         assert_eq!(state.applied_note(), Some(STAGED));
+    }
+
+    /// A read whose file has a recorded resolution with `recorded` as its text.
+    fn read_recorded(text: &str, recorded: &str) -> ConflictFileRead {
+        let mut file = read(text);
+        file.recorded = Some(RecordedResolution {
+            text: recorded.into(),
+        });
+        file
+    }
+
+    fn forgotten(path: &str) -> Event {
+        Event::RecordedResolutionForgotten {
+            id: OperationId(6),
+            path: path.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_recorded_resolution_shows_the_banner_until_it_is_forgotten() {
+        let mut state = ResolverState::new(&read_recorded(TWO, "plain\n"));
+        assert_eq!(
+            state.recorded_banner(),
+            Some("Resolved by recorded resolution")
+        );
+        assert_eq!(state.forget_request().as_deref(), Some("src/lib.rs"));
+        assert!(!state.needs_reread());
+        assert!(!state.on_event(&forgotten("other.rs")));
+        assert!(state.recorded_banner().is_some());
+        assert!(!state.needs_reread());
+        assert!(state.on_event(&forgotten("src/lib.rs")));
+        assert_eq!(state.recorded_banner(), None);
+        assert_eq!(state.forget_request(), None);
+        assert!(state.needs_reread());
+        assert_eq!(
+            state.applied_note(),
+            Some("Recorded resolution forgotten. The conflict is open again.")
+        );
+    }
+
+    #[test]
+    fn a_file_without_a_recorded_resolution_has_no_banner_and_nothing_to_review() {
+        let mut state = ResolverState::new(&read(TWO));
+        assert_eq!(state.recorded_banner(), None);
+        assert_eq!(state.forget_request(), None);
+        state.use_recorded();
+        assert_eq!(state.result_text(), TWO);
+        assert!(
+            state
+                .origins()
+                .iter()
+                .all(|origin| *origin == HunkOrigin::Human)
+        );
+    }
+
+    #[test]
+    fn review_loads_the_recorded_text_and_the_user_can_still_edit_it() {
+        let mut state = ResolverState::new(&read_recorded(TWO, "plain\n"));
+        state.use_recorded();
+        assert_eq!(state.result_text(), "plain\n");
+        assert_eq!(state.conflict_count(), 0);
+        state.set_result_text("plain, edited\n".to_owned());
+        assert_eq!(state.result_text(), "plain, edited\n");
+        assert_eq!(
+            state.apply(),
+            Some((
+                "src/lib.rs".to_owned(),
+                "plain, edited\n".to_owned(),
+                Vec::new()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_recorded_text_without_markers_is_one_rerere_origin_until_it_changes() {
+        let mut state = ResolverState::new(&read_recorded(TWO, "plain\n"));
+        state.use_recorded();
+        assert_eq!(state.origins(), vec![HunkOrigin::Rerere]);
+        assert_eq!(
+            state.apply(),
+            Some((
+                "src/lib.rs".to_owned(),
+                "plain\n".to_owned(),
+                vec![HunkOrigin::Rerere]
+            ))
+        );
+        state.set_result_text("plain, edited\n".to_owned());
+        assert_eq!(state.origins(), Vec::<HunkOrigin>::new());
+    }
+
+    #[test]
+    fn a_file_with_no_conflict_and_no_recorded_text_has_no_origins() {
+        let state = ResolverState::new(&read("plain\n"));
+        assert_eq!(state.origins(), Vec::<HunkOrigin>::new());
+    }
+
+    #[test]
+    fn origins_are_one_per_conflict_in_file_order() {
+        let mut state = ResolverState::new(&read(THREE));
+        assert_eq!(state.origins().len(), 3);
+        state.choose(0, Resolution::Left);
+        state.choose(1, Resolution::Right);
+        state.choose(2, Resolution::Both);
+        assert_eq!(state.origins(), vec![HunkOrigin::Human; 3]);
+    }
+
+    #[test]
+    fn a_choice_after_review_is_human_and_the_others_keep_their_origin() {
+        let mut state = ResolverState::new(&read_recorded(TWO, TWO));
+        state.use_recorded();
+        assert_eq!(
+            state.origins(),
+            vec![HunkOrigin::Rerere, HunkOrigin::Rerere]
+        );
+        assert_eq!(
+            state
+                .hunk_views()
+                .iter()
+                .map(|v| v.origin_label)
+                .collect::<Vec<_>>(),
+            vec!["", ""],
+            "an unresolved hunk has no origin label"
+        );
+        state.choose(0, Resolution::Left);
+        let views = state.hunk_views();
+        assert_eq!(views[0].origin_label, "human");
+        assert_eq!(views[1].origin_label, "");
+        assert_eq!(state.origins(), vec![HunkOrigin::Human, HunkOrigin::Rerere]);
+    }
+
+    #[test]
+    fn a_cleared_choice_has_no_origin_label_and_a_new_choice_is_human() {
+        let mut state = ResolverState::new(&read(TWO));
+        state.choose(0, Resolution::Left);
+        assert_eq!(state.hunk_views()[0].origin_label, "human");
+        state.clear(0);
+        assert_eq!(state.hunk_views()[0].origin_label, "");
+        state.choose(0, Resolution::Right);
+        assert_eq!(state.hunk_views()[0].origin_label, "human");
+    }
+
+    #[test]
+    fn a_free_edit_that_changes_the_text_drops_the_rerere_origins() {
+        let mut state = ResolverState::new(&read_recorded(TWO, TWO));
+        state.use_recorded();
+        state.set_result_text(format!("{TWO}extra\n"));
+        assert_eq!(state.origins(), vec![HunkOrigin::Human, HunkOrigin::Human]);
+        state.choose(0, Resolution::Left);
+        assert_eq!(state.origins(), vec![HunkOrigin::Human, HunkOrigin::Human]);
+    }
+
+    #[test]
+    fn an_origin_label_is_empty_while_unresolved_and_never_names_a_side() {
+        assert_eq!(origin_label(false, Some(HunkOrigin::Rerere)), "");
+        assert_eq!(origin_label(true, None), "human");
+        assert_eq!(origin_label(true, Some(HunkOrigin::Human)), "human");
+        assert_eq!(
+            origin_label(true, Some(HunkOrigin::Rerere)),
+            "recorded resolution"
+        );
+        assert_eq!(origin_label(true, Some(HunkOrigin::Script)), "script");
+        let mut state = ResolverState::new(&read_recorded(TWO, TWO));
+        state.use_recorded();
+        state.choose(0, Resolution::Left);
+        let mut texts = vec![
+            state.recorded_banner().unwrap_or_default().to_owned(),
+            FORGOTTEN.to_owned(),
+        ];
+        texts.extend(
+            state
+                .hunk_views()
+                .into_iter()
+                .map(|v| v.origin_label.to_owned()),
+        );
+        for text in texts {
+            let lower = text.to_lowercase();
+            assert!(!lower.contains("ours"), "{text}");
+            assert!(!lower.contains("theirs"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_forgotten_resolution_asks_for_a_read_and_the_new_read_keeps_the_note() {
+        let mut state = ResolverState::new(&read_recorded(TWO, "plain\n"));
+        assert!(!state.needs_reread());
+        assert!(state.on_event(&forgotten("src/lib.rs")));
+        assert!(state.needs_reread());
+        let reread = ResolverState::reread_after_forget(&read(TWO));
+        assert!(!reread.needs_reread());
+        assert_eq!(reread.recorded_banner(), None);
+        assert_eq!(
+            reread.applied_note(),
+            Some("Recorded resolution forgotten. The conflict is open again.")
+        );
+        assert_eq!(reread.conflict_count(), 2);
     }
 }

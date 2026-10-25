@@ -139,6 +139,8 @@ pub struct Model {
     pub conflict: Option<ResolverState>,
     /// The read that opened the resolver, until the view takes it and shows the page.
     conflict_opened: Option<OperationId>,
+    /// The file to read again after its recorded resolution was forgotten (D117).
+    conflict_reread: Option<String>,
     /// Moving a changed file to a branch or a worktree: the drag, the hover check,
     /// the popover and the move in flight (D109).
     pub move_file: MoveFile,
@@ -1036,12 +1038,19 @@ impl Model {
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
-            | Event::WorkflowMessageSuggested { .. }
-            // The resolver does not show recorded resolutions yet, so nothing changes.
-            | Event::RecordedResolutionForgotten { .. } => None,
+            | Event::WorkflowMessageSuggested { .. } => None,
             // The read opens the resolver; the staged note is the resolver's own.
             Event::ConflictRead { id, read } => {
-                self.conflict = Some(ResolverState::new(&read));
+                // A read after a forget keeps the note that says so.
+                let after_forget = self
+                    .conflict
+                    .as_ref()
+                    .is_some_and(|conflict| conflict.needs_reread() && conflict.path() == read.path);
+                self.conflict = Some(if after_forget {
+                    ResolverState::reread_after_forget(&read)
+                } else {
+                    ResolverState::new(&read)
+                });
                 self.conflict_opened = Some(id);
                 None
             }
@@ -1051,6 +1060,20 @@ impl Model {
                 }
                 None
             }
+            Event::RecordedResolutionForgotten { .. } => {
+                self.recorded_forgotten(&event);
+                None
+            }
+        }
+    }
+
+    /// Folds a forgotten recorded resolution into the resolver. When it is the
+    /// resolver's file, the file is asked for again (see `take_conflict_reread`).
+    fn recorded_forgotten(&mut self, event: &Event) {
+        if let Some(conflict) = self.conflict.as_mut()
+            && conflict.on_event(event)
+        {
+            self.conflict_reread = Some(conflict.path().to_owned());
         }
     }
 
@@ -1108,11 +1131,18 @@ impl Model {
         self.conflict_opened.take()
     }
 
+    /// The file whose recorded resolution was forgotten and must be read again, since
+    /// the last ask. The view sends `ReadConflict` for it, once.
+    pub fn take_conflict_reread(&mut self) -> Option<String> {
+        self.conflict_reread.take()
+    }
+
     /// Clears what belonged to the repository being left. The status stays
     /// until the new one replaces it.
     fn reset_for_repo(&mut self) {
         self.conflict = None;
         self.conflict_opened = None;
+        self.conflict_reread = None;
         self.selected = None;
         self.diffs = None;
         self.notice = None;
@@ -2910,5 +2940,59 @@ mod move_file_tests {
         });
         assert!(model.conflict.is_none());
         assert_eq!(model.error, None);
+    }
+
+    fn conflict_read_recorded(path: &str, id: u64) -> Event {
+        let Event::ConflictRead { id, mut read } = conflict_read(path, id) else {
+            unreachable!("conflict_read builds a ConflictRead");
+        };
+        read.recorded = Some(gm_schema::RecordedResolution {
+            text: "plain\n".into(),
+        });
+        Event::ConflictRead { id, read }
+    }
+
+    #[test]
+    fn a_forgotten_resolution_of_the_open_file_asks_for_one_read_and_the_read_keeps_the_note() {
+        let mut model = Model::default();
+        let _ = model.apply(conflict_read_recorded("a.txt", 3));
+        let conflict = model.conflict.as_ref().expect("the resolver is open");
+        assert_eq!(
+            conflict.recorded_banner(),
+            Some("Resolved by recorded resolution")
+        );
+        let _ = model.apply(Event::RecordedResolutionForgotten {
+            id: OperationId(4),
+            path: "a.txt".into(),
+        });
+        assert_eq!(model.take_conflict_reread(), Some("a.txt".to_owned()));
+        assert_eq!(
+            model.take_conflict_reread(),
+            None,
+            "the read is asked for once"
+        );
+        let conflict = model.conflict.as_ref().expect("the resolver is open");
+        assert_eq!(conflict.recorded_banner(), None);
+        assert!(conflict.needs_reread());
+        let _ = model.apply(conflict_read("a.txt", 5));
+        let conflict = model.conflict.as_ref().expect("the resolver is open");
+        assert!(!conflict.needs_reread());
+        assert_eq!(
+            conflict.applied_note(),
+            Some("Recorded resolution forgotten. The conflict is open again.")
+        );
+    }
+
+    #[test]
+    fn a_forgotten_resolution_of_another_file_asks_for_no_read() {
+        let mut model = Model::default();
+        let _ = model.apply(conflict_read_recorded("a.txt", 3));
+        let _ = model.apply(Event::RecordedResolutionForgotten {
+            id: OperationId(4),
+            path: "b.txt".into(),
+        });
+        assert_eq!(model.take_conflict_reread(), None);
+        let conflict = model.conflict.as_ref().expect("the resolver is open");
+        assert!(conflict.recorded_banner().is_some());
     }
 }

@@ -6,7 +6,7 @@
 //! the engine, the way the other commands are sent.
 
 use gm_core::conflict::Resolution;
-use gm_schema::{Actor, CommandKind, HunkOrigin};
+use gm_schema::{Actor, CommandKind};
 use gpui::{
     Context, Div, ElementId, FontWeight, MouseButton, MouseDownEvent, Stateful, div, prelude::*, px,
 };
@@ -107,22 +107,54 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Apply: sends the resolution when every conflict is resolved. Otherwise the
-    /// resolver's note says what remains, and nothing is sent.
+    /// Apply: sends the resolution, with who resolved each hunk, when every conflict
+    /// is resolved. Otherwise the resolver's note says what remains, and nothing is sent.
     pub(crate) fn apply_conflict(&mut self, cx: &mut Context<Self>) {
+        if let Some(conflict) = self.model.conflict.as_mut()
+            && let Some((path, text, origins)) = conflict.apply()
+        {
+            self.engine.dispatch(
+                Actor::Human,
+                CommandKind::ResolveConflict {
+                    path,
+                    text,
+                    origins,
+                },
+            );
+        }
+        cx.notify();
+    }
+
+    /// Review: loads the recorded resolution into the Result pane. The text stays
+    /// editable, and the pane shows it at once.
+    pub(crate) fn review_recorded(&mut self, cx: &mut Context<Self>) {
         if let Some(conflict) = self.model.conflict.as_mut() {
-            // The resolver takes every hunk from the engineer's choices, so each is Human.
-            let origins = vec![HunkOrigin::Human; conflict.conflict_count()];
-            if let Some((path, text)) = conflict.apply() {
-                self.engine.dispatch(
-                    Actor::Human,
-                    CommandKind::ResolveConflict {
-                        path,
-                        text,
-                        origins,
-                    },
-                );
-            }
+            conflict.use_recorded();
+        }
+        self.sync_conflict_result(cx);
+        cx.notify();
+    }
+
+    /// Reads again the file whose recorded resolution was forgotten, once. The
+    /// engine has restored its markers, so the read shows them.
+    pub(crate) fn reread_forgotten_conflict(&mut self) {
+        if let Some(path) = self.model.take_conflict_reread() {
+            self.engine
+                .dispatch(Actor::Human, CommandKind::ReadConflict { path });
+        }
+    }
+
+    /// Forget: asks the engine to drop the recorded resolution. The file is read
+    /// again when the engine confirms it.
+    pub(crate) fn forget_recorded(&mut self, cx: &mut Context<Self>) {
+        let request = self
+            .model
+            .conflict
+            .as_ref()
+            .and_then(ResolverState::forget_request);
+        if let Some(path) = request {
+            self.engine
+                .dispatch(Actor::Human, CommandKind::ForgetRecordedResolution { path });
         }
         cx.notify();
     }
@@ -149,6 +181,11 @@ impl StatusView {
             .flex_col()
             .bg(theme::ground())
             .child(Self::conflict_header(conflict, cx))
+            .children(
+                conflict
+                    .recorded_banner()
+                    .map(|text| recorded_banner_row(text, cx)),
+            )
             .children(conflict_note(conflict))
             .child(
                 div()
@@ -441,11 +478,12 @@ fn hunk_card(
                 .justify_between()
                 .gap_2()
                 .pb_1()
-                .child(div().text_xs().text_color(theme::muted()).child(format!(
-                    "Conflict {} · {}",
-                    index + 1,
-                    hunk.resolution_label
-                )))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .child(hunk_status(hunk)),
+                )
                 .child(buttons),
         )
         .children(hunk.base.as_deref().map(|base| {
@@ -455,6 +493,54 @@ fn hunk_card(
                 .child(code_lines(base))
         }))
         .child(code_lines(lines))
+}
+
+/// The heading of a conflict's card: its number, its choice and who made it, for
+/// example "Conflict 1 · Left · human". The origin is left out while unresolved.
+fn hunk_status(hunk: &HunkView) -> String {
+    let heading = format!("Conflict {} · {}", hunk.index + 1, hunk.resolution_label);
+    if hunk.origin_label.is_empty() {
+        heading
+    } else {
+        format!("{heading} · {}", hunk.origin_label)
+    }
+}
+
+/// The banner under the header while Git has a recorded resolution for the file:
+/// Review loads it into the Result pane, Forget removes it.
+fn recorded_banner_row(text: &'static str, cx: &Context<StatusView>) -> Div {
+    div()
+        .px_4()
+        .py_1p5()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .border_b_1()
+        .border_color(theme::hairline())
+        .child(div().text_sm().child(text))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .flex_none()
+                .child(header_button(
+                    "conflict-recorded-review",
+                    "Review",
+                    cx,
+                    StatusView::review_recorded,
+                ))
+                .child(header_button(
+                    "conflict-recorded-forget",
+                    "Forget",
+                    cx,
+                    StatusView::forget_recorded,
+                )),
+        )
 }
 
 /// The element ids of one side's buttons, Left, Right, Both and Clear. Ids must be

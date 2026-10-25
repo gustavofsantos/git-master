@@ -36,7 +36,7 @@ In the Working Copy, right-click a conflicted file and choose **Resolve Conflict
 1. Read each conflict in the left and right panes. The selected conflict is highlighted.
 2. For each conflict, choose **Left**, **Right** or **Both**. Each action applies to that conflict only. **Clear** takes a choice back, so the conflict shows its markers again.
 3. To write different text, edit the result pane directly.
-4. Choose **Show base** when you need the common ancestor. Conflicts use Git's `zdiff3` style, set by `merge.conflictStyle`, and the base is shown on demand.
+4. Choose **Show base** when you need the common ancestor. Conflicts use Git's `zdiff3` style, whatever `merge.conflictStyle` says, and the base is shown on demand.
 5. Use **Previous unresolved** and **Next unresolved** to move between the conflicts that still need a choice.
 6. Watch the counter **N of M conflicts resolved**.
 7. Choose **Apply**. If conflicts remain, Apply answers with a message that tells you what is still unresolved. It does not sit disabled. When every conflict is resolved, GitMaster writes the file and stages it, and the resolver shows **Resolved and staged.** Choose **Back** to return to the Working Copy.
@@ -49,11 +49,12 @@ When a restack pauses on a conflict, choose **Resolve conflict** to open the res
 
 ## Recorded resolutions
 
-> **Planned.** Recorded resolutions (rerere) are not applied yet, so a conflict that comes back is resolved from the start.
+Git's rerere records how you resolved a conflict, and reapplies that resolution when the same conflict appears again. GitMaster uses rerere on each Git command it runs for the resolver. It does not change the repository's rerere setting.
 
-Git's rerere records how you resolved a conflict, and reapplies that resolution when the same conflict appears again. GitMaster enables rerere, so a restack reapplies the resolutions it has recorded.
+When Git has a recorded resolution for the file, the resolver shows the banner **Resolved by recorded resolution** above the panes. The Result pane still shows the conflict as Git wrote it, so the banner has two actions:
 
-A hunk resolved this way is labeled **resolved by recorded resolution**. For each one you can review the resolution, or forget it so the conflict is resolved again from the start.
+- **Review** loads the recorded text into the Result pane, in place of the text it held. You can then edit it, and Apply writes it as usual.
+- **Forget** removes the recorded resolution and restores the conflict markers, so the conflict is open again. The resolver reads the file once more.
 
 ## Script suggestions
 
@@ -65,6 +66,6 @@ An agent can propose a resolution in the same way, through MCP. See the [MCP ser
 
 ## Who resolved each hunk
 
-> **Planned.** The operation log does not record how each hunk was resolved yet.
+> **Planned.** No workflow suggests a resolution yet, so no hunk is recorded as **script**.
 
-The operation log records how every hunk was resolved: by you (**human**), by a recorded resolution (**rerere**), or by a script suggestion (**script**). You can check the origin of any resolution after the fact.
+The operation log records how every hunk was resolved: by you (**human**), or by a recorded resolution (**recorded resolution**). A hunk you choose or edit is **human**. A hunk whose text came from the recorded resolution, and that you have not changed since, is **recorded resolution**. Each hunk card shows its origin next to its choice.

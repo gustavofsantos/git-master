@@ -538,7 +538,7 @@ Done when: a complete restack runs, can be undone, and survives closing the app.
 
 Done when: the conflicts of a restack are resolved without leaving the app.
 
-**Status:** C1 to C3 built (parser, engine commands `ReadConflict` and `ResolveConflict`, the resolver page wired from the Working Copy's file menu). Nothing seen in a window; no smoke scenario, at the author's request.
+**Status:** C1 to C4 built except script suggestions (parser, engine commands, the resolver page from the Working Copy's file menu, recorded resolutions with the Review and Forget banner, and the origin of each hunk: human or recorded resolution). Nothing seen in a window; no smoke scenario, at the author's request.
 
 Known gaps:
 
@@ -546,8 +546,11 @@ Known gaps:
 - No count of the non-conflicting changes Git applied on its own ("N changes applied").
 - No keyboard shortcuts in the resolver; Escape and focus behaviour not seen in a window; the dark theme not seen.
 - The restack's **Resolve conflict** entry is not built, and the restack itself is not available.
-- The unified or stacked layout (Q9), rerere, script suggestions and the who-resolved log are not built.
+- The unified or stacked layout (Q9) and script suggestions are not built.
 - The rebase's left-side label names `onto`, while stage 2 is the partially rebased HEAD.
+- Recorded resolutions (D117): a hand resolution identical to a postimage reads as recorded; forget restores markers in the user's conflict style; resolving a recorded file to different text is not recorded; `ReadConflict` fails when the rerere pass fails.
+- Review replaces the Result pane text, so edits made there before Review are lost.
+- A recorded text that still has markers leaves its hunks unresolved, so no card shows the recorded origin; the banner carries it. A free edit that changes the text makes every origin human (D118).
 
 ## Slice 7: MCP
 
