@@ -8,6 +8,15 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Syntax highlighting (N4, D92, D111): one grammar per language, so each one can be left out of a build.
+default = ["syntax-rust", "syntax-python", "syntax-go", "syntax-typescript", "syntax-javascript"]
+syntax-rust = ["dep:tree-sitter-rust"]
+syntax-python = ["dep:tree-sitter-python"]
+syntax-go = ["dep:tree-sitter-go"]
+syntax-typescript = ["dep:tree-sitter-typescript"]
+syntax-javascript = ["dep:tree-sitter-javascript"]
+
 [dependencies]
 gm-schema.workspace = true
 async-channel.workspace = true
@@ -20,6 +29,12 @@ sha2.workspace = true
 tempfile.workspace = true
 rusqlite.workspace = true
 mlua.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust = { workspace = true, optional = true }
+tree-sitter-python = { workspace = true, optional = true }
+tree-sitter-go = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true

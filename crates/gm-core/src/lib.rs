@@ -29,13 +29,15 @@ pub mod script;
 mod script_session;
 pub mod stage_math;
 mod stash;
+pub mod syntax;
 pub mod watch;
 mod workflow_session;
 pub mod worktree;
 
 pub use engine::{Engine, LogEntry};
 pub use files::{
-    IndexJob, IndexReport, ReadJob, ReadReport, SearchJob, SearchReport, TextJob, TextReport,
+    HighlightJob, HighlightReport, IndexJob, IndexReport, ReadJob, ReadReport, SearchJob,
+    SearchReport, TextJob, TextReport,
 };
 pub use history::{HistoryJob, HistoryOutcome, HistoryPage, HistoryReport, HistoryStream};
 pub use port::{

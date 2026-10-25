@@ -8,11 +8,12 @@ use std::ops::Range;
 
 use gm_schema::{Actor, CommandKind};
 use gpui::{
-    AnyElement, Context, Div, MouseButton, MouseDownEvent, ScrollStrategy, ScrollWheelEvent,
-    Stateful, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    AnyElement, Context, Div, HighlightStyle, MouseButton, MouseDownEvent, ScrollStrategy,
+    ScrollWheelEvent, Stateful, StyledText, UniformListScrollHandle, Window, div, prelude::*, px,
+    uniform_list,
 };
 
-use crate::code_page::{Content, Shown, TreeRow, Viewer, visible};
+use crate::code_page::{Content, Piece, Shown, TreeRow, Viewer, styled};
 use crate::theme;
 use crate::view::{Screen, StatusView};
 
@@ -346,21 +347,23 @@ impl StatusView {
                               range: Range<usize>,
                               _window: &mut Window,
                               _cx: &mut Context<StatusView>| {
-                            let Some(Content::Text(text)) =
-                                this.model.code.on_screen().map(|s| &s.content)
-                            else {
+                            let Some(shown) = this.model.code.on_screen() else {
+                                return Vec::new();
+                            };
+                            let Content::Text(text) = &shown.content else {
                                 return Vec::new();
                             };
                             let columns = this.code_view.columns;
                             let marked = this.code_view.marked;
                             range
                                 .map(|index| {
-                                    code_line(
-                                        index,
-                                        &visible(text.line(index), columns),
-                                        gutter,
-                                        marked == Some(index),
-                                    )
+                                    let pieces = styled(
+                                        text.line(index),
+                                        text.line_start(index),
+                                        columns,
+                                        &shown.spans,
+                                    );
+                                    code_line(index, &pieces, gutter, marked == Some(index))
                                 })
                                 .collect()
                         },
@@ -480,8 +483,28 @@ fn tree_row(
         )
 }
 
-/// One line of the file: its number, then its text from the scrolled column.
-fn code_line(index: usize, text: &str, gutter: f32, marked: bool) -> AnyElement {
+/// The pieces of a line as one run of text with a color per piece that has a role.
+fn colored(pieces: &[Piece]) -> StyledText {
+    let mut text = String::new();
+    let mut highlights = Vec::new();
+    for piece in pieces {
+        let start = text.len();
+        text.push_str(&piece.text);
+        if let Some(role) = piece.role {
+            highlights.push((
+                start..text.len(),
+                HighlightStyle {
+                    color: Some(theme::syntax(role)),
+                    ..HighlightStyle::default()
+                },
+            ));
+        }
+    }
+    StyledText::new(text).with_highlights(highlights)
+}
+
+/// One line of the file: its number, then its text from the scrolled column, colored by role.
+fn code_line(index: usize, pieces: &[Piece], gutter: f32, marked: bool) -> AnyElement {
     div()
         .h(px(LINE_HEIGHT))
         .flex()
@@ -504,7 +527,7 @@ fn code_line(index: usize, text: &str, gutter: f32, marked: bool) -> AnyElement 
                 .min_w(px(0.))
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .child(text.to_owned()),
+                .child(colored(pieces)),
         )
         .into_any_element()
 }

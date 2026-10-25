@@ -5,8 +5,9 @@
 //! newer one superseded is dropped, as everywhere else.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use gm_schema::{DirEntry, DirListing, FileBody, FileView, OperationId};
+use gm_schema::{DirEntry, DirListing, FileBody, FileView, HighlightSpan, OperationId, SyntaxRole};
 use unicode_width::UnicodeWidthStr;
 
 /// One row of the tree as drawn.
@@ -82,6 +83,12 @@ impl Text {
             .trim_end_matches('\r')
     }
 
+    /// Where line `index` starts in the text, in bytes.
+    #[must_use]
+    pub fn line_start(&self, index: usize) -> usize {
+        self.starts.get(index).copied().unwrap_or(self.source.len())
+    }
+
     /// The width of the widest line, in columns.
     #[must_use]
     pub fn columns(&self) -> usize {
@@ -137,6 +144,76 @@ pub fn visible(line: &str, from: usize) -> String {
     out
 }
 
+/// A piece of a drawn line: its text and the role it is colored with, if any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Piece {
+    pub text: String,
+    pub role: Option<SyntaxRole>,
+}
+
+/// `line` as `visible` draws it, in pieces of one role each. `line_start` is the byte offset
+/// of the line in the file text that `spans` are relative to. Adjacent pieces of the same role
+/// are one. The pieces always join to exactly `visible(line, from)`.
+#[must_use]
+pub fn styled(line: &str, line_start: usize, from: usize, spans: &[HighlightSpan]) -> Vec<Piece> {
+    if spans.is_empty() {
+        let text = visible(line, from);
+        return if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![Piece { text, role: None }]
+        };
+    }
+    // The first span that ends after the line starts; spans are in order and apart.
+    let mut next = spans.partition_point(|span| span.end <= line_start);
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut push = |text: &str, role: Option<SyntaxRole>| {
+        if text.is_empty() {
+            return;
+        }
+        match pieces.last_mut() {
+            Some(last) if last.role == role => last.text.push_str(text),
+            _ => pieces.push(Piece {
+                text: text.to_owned(),
+                role,
+            }),
+        }
+    };
+    let mut column = 0;
+    let mut buffer = String::new();
+    for (offset, ch) in line.char_indices() {
+        let at = line_start + offset;
+        while next < spans.len() && spans[next].end <= at {
+            next += 1;
+        }
+        let role = spans
+            .get(next)
+            .filter(|span| span.start <= at)
+            .map(|span| span.role);
+        let width = if ch == '\t' {
+            TAB - column % TAB
+        } else {
+            unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+        };
+        let end = column + width;
+        buffer.clear();
+        if end <= from {
+            column = end;
+            continue;
+        }
+        if column < from {
+            buffer.extend(std::iter::repeat_n(' ', end - from));
+        } else if ch == '\t' {
+            buffer.extend(std::iter::repeat_n(' ', width));
+        } else {
+            buffer.push(ch);
+        }
+        push(&buffer, role);
+        column = end;
+    }
+    pieces
+}
+
 /// What the viewer shows of a file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Content {
@@ -150,15 +227,20 @@ pub enum Content {
 /// A file as the viewer holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shown {
+    /// The read that brought it, which its colors answer to.
+    pub read: OperationId,
     pub path: String,
     pub size: u64,
     pub content: Content,
     /// The text is the start of a larger file.
     pub truncated: bool,
+    /// The colors of the text, once they arrive; empty until then and for a language with no
+    /// grammar. Byte ranges of the text, in order.
+    pub spans: Arc<[HighlightSpan]>,
 }
 
 impl Shown {
-    fn new(view: FileView) -> Self {
+    fn new(read: OperationId, view: FileView) -> Self {
         let content = match view.body {
             FileBody::Text { text } => Content::Text(Text::new(text)),
             FileBody::Binary => Content::Binary,
@@ -167,10 +249,12 @@ impl Shown {
             FileBody::Directory => Content::Directory,
         };
         Self {
+            read,
             path: view.path,
             size: view.size,
             content,
             truncated: view.truncated,
+            spans: Arc::from([]),
         }
     }
 }
@@ -362,10 +446,30 @@ impl CodePage {
         if !matches!(&self.viewer, Viewer::Loading { id: waiting, .. } if *waiting == id) {
             return false;
         }
-        let shown = Shown::new(view);
+        let shown = Shown::new(id, view);
         self.shown = Some(shown.clone());
         self.viewer = Viewer::Shown(shown);
         true
+    }
+
+    /// Colors the file on screen when they answer its read. Colors of a file that is no longer
+    /// on screen are dropped. Returns whether anything changed.
+    pub fn file_highlighted(&mut self, id: OperationId, spans: Vec<HighlightSpan>) -> bool {
+        let spans: Arc<[HighlightSpan]> = spans.into();
+        let mut changed = false;
+        if let Viewer::Shown(shown) = &mut self.viewer
+            && shown.read == id
+        {
+            shown.spans = Arc::clone(&spans);
+            changed = true;
+        }
+        if let Some(shown) = &mut self.shown
+            && shown.read == id
+        {
+            shown.spans = spans;
+            changed = true;
+        }
+        changed
     }
 
     /// The read in flight failed, with the engine's reason.
@@ -575,6 +679,128 @@ mod tests {
         // And does not keep waiting: a later listing does not open anything.
         page.listing_requested(OperationId(9), "src");
         assert!(page.listed(OperationId(9), listing("src", &[])).is_empty());
+    }
+
+    fn span(start: usize, end: usize, role: SyntaxRole) -> HighlightSpan {
+        HighlightSpan { start, end, role }
+    }
+
+    fn joined(pieces: &[Piece]) -> String {
+        pieces.iter().map(|p| p.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_line_with_no_colors_is_one_plain_piece() {
+        assert_eq!(
+            styled("let x = 1;", 0, 0, &[]),
+            [Piece {
+                text: "let x = 1;".into(),
+                role: None
+            }]
+        );
+        assert!(styled("", 0, 0, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_line_is_cut_into_pieces_at_the_spans() {
+        // "let x = 1;" with `let` and `1` colored.
+        let spans = [
+            span(0, 3, SyntaxRole::Keyword),
+            span(8, 9, SyntaxRole::Number),
+        ];
+        let pieces = styled("let x = 1;", 0, 0, &spans);
+        let seen: Vec<_> = pieces.iter().map(|p| (p.text.as_str(), p.role)).collect();
+        assert_eq!(
+            seen,
+            [
+                ("let", Some(SyntaxRole::Keyword)),
+                (" x = ", None),
+                ("1", Some(SyntaxRole::Number)),
+                (";", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn spans_are_found_by_the_offset_of_the_line_in_the_file() {
+        let text = Text::new("fn a() {}\nlet b = 2;\n".into());
+        // `let` is at bytes 10..13 of the file, on the second line.
+        let spans = [
+            span(0, 2, SyntaxRole::Keyword),
+            span(10, 13, SyntaxRole::Keyword),
+        ];
+        let pieces = styled(text.line(1), text.line_start(1), 0, &spans);
+        assert_eq!(pieces[0].role, Some(SyntaxRole::Keyword));
+        assert_eq!(pieces[0].text, "let");
+        assert_eq!(joined(&pieces), "let b = 2;");
+        // The first line is not touched by the second's span.
+        let first = styled(text.line(0), text.line_start(0), 0, &spans);
+        assert_eq!(first[0].text, "fn");
+    }
+
+    #[test]
+    fn a_span_that_started_on_an_earlier_line_colors_the_start_of_the_next() {
+        // A block comment over two lines.
+        let text = Text::new("/* a\nb */ x\n".into());
+        let spans = [span(0, 9, SyntaxRole::Comment)];
+        let second = styled(text.line(1), text.line_start(1), 0, &spans);
+        assert_eq!(second[0].text, "b */");
+        assert_eq!(second[0].role, Some(SyntaxRole::Comment));
+        assert_eq!(second[1].role, None);
+    }
+
+    #[test]
+    fn colors_follow_the_text_when_the_view_is_scrolled_and_tabs_are_spaces() {
+        let line = "\tlet x";
+        let spans = [span(1, 4, SyntaxRole::Keyword)];
+        let pieces = styled(line, 0, 2, &spans);
+        assert_eq!(joined(&pieces), visible(line, 2));
+        assert_eq!(pieces[0].role, None, "the tab's remaining spaces are plain");
+        assert_eq!(pieces[0].text, "  ");
+        assert_eq!(pieces[1].text, "let");
+        assert_eq!(pieces[1].role, Some(SyntaxRole::Keyword));
+    }
+
+    #[test]
+    fn pieces_always_join_to_what_the_plain_view_draws() {
+        let line = "\tfn ação(日本: u8) {\t}";
+        let spans = [
+            span(1, 3, SyntaxRole::Keyword),
+            span(4, 10, SyntaxRole::Function),
+            span(11, 17, SyntaxRole::Type),
+        ];
+        for from in 0..30 {
+            assert_eq!(joined(&styled(line, 0, from, &spans)), visible(line, from));
+        }
+    }
+
+    #[test]
+    fn colors_of_a_file_that_is_not_on_screen_are_dropped() {
+        let mut page = CodePage::default();
+        page.file_requested(OperationId(1), "a.rs", None);
+        page.file_received(OperationId(1), text_view("a.rs", "fn a() {}\n"));
+        let spans = vec![span(0, 2, SyntaxRole::Keyword)];
+
+        assert!(!page.file_highlighted(OperationId(9), spans.clone()));
+        assert!(page.on_screen().unwrap().spans.is_empty());
+        assert!(page.file_highlighted(OperationId(1), spans));
+        assert_eq!(page.on_screen().unwrap().spans.len(), 1);
+    }
+
+    #[test]
+    fn the_colors_stay_with_the_file_kept_on_screen_while_the_next_loads() {
+        let mut page = CodePage::default();
+        page.file_requested(OperationId(1), "a.rs", None);
+        page.file_received(OperationId(1), text_view("a.rs", "fn a() {}\n"));
+        page.file_requested(OperationId(2), "b.rs", None);
+        assert!(page.file_highlighted(OperationId(1), vec![span(0, 2, SyntaxRole::Keyword)]));
+        assert_eq!(page.on_screen().unwrap().spans.len(), 1);
+
+        // The next file arrives with no colors, never with the previous file's.
+        page.file_received(OperationId(2), text_view("b.rs", "let b = 1;\n"));
+        assert!(page.on_screen().unwrap().spans.is_empty());
+        assert!(!page.file_highlighted(OperationId(1), vec![span(0, 2, SyntaxRole::Keyword)]));
+        assert!(page.on_screen().unwrap().spans.is_empty());
     }
 
     fn view(path: &str, body: FileBody) -> FileView {

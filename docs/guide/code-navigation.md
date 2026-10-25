@@ -101,9 +101,28 @@ The viewer reads only regular files inside the active worktree. Paths that point
 
 ### Syntax highlighting
 
-> **Planned.** Syntax highlighting is not available in the app yet.
+The viewer colours code by language. The text appears first, and the colours follow a moment later, so opening a file never waits for them.
 
-Syntax highlighting colours the code by language for Rust, Python, Go, TypeScript and TSX, and JavaScript. Only the lines on screen are coloured, so scrolling stays smooth. Files in other languages stay plain.
+| Language | Files |
+|---|---|
+| Rust | `.rs` |
+| Python | `.py`, `.pyi`, `.pyw` |
+| Go | `.go` |
+| JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx` |
+| TypeScript | `.ts`, `.mts`, `.cts` |
+| TSX | `.tsx` |
+
+Files in other languages stay plain, and so do binary files.
+
+Twelve roles are coloured: comments, strings, numbers, keywords, operators, functions, types, constants, parameters and names the language reserves (such as `self` and `this`), properties, punctuation, and attributes, macros, decorators and tags. A plain name that is none of these keeps the text colour, so the code does not turn into a wall of colour. Every role keeps a contrast of at least 4.5 to 1 against the viewer background, the selected line and a text selection, in both the light and the dark theme.
+
+Colouring gives up, and the file shows in plain text, in these cases:
+
+- The file needs more than 2 seconds to read. A 2 MiB file of ordinary code takes under 1 second.
+- A line is longer than 2,000 characters. Such a line, typical of a minified bundle, stays plain while the rest of the file is coloured.
+- Another file is opened before the colours arrive. The colours of the file you left are dropped.
+
+A file with a syntax error is still coloured as far as the parser can read it.
 
 ### Keyboard in the file tree
 

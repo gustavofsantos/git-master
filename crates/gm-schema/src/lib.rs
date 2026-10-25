@@ -12,6 +12,7 @@ mod reflog;
 mod review;
 mod stash;
 mod status;
+mod syntax;
 mod workflow;
 
 pub use diff::{DiffLine, DiffSide, FileDiff, Hunk, HunkId, LineKind, StageTarget};
@@ -42,6 +43,7 @@ pub use status::{
     Blocker, BranchEntry, BranchFailure, BranchInfo, Change, MergedBranch, PruneCandidate,
     RepoStatus, StatusEntry, WorktreeEntry, WorktreeInspection,
 };
+pub use syntax::{HighlightSpan, SyntaxRole};
 pub use workflow::{
     WorkflowCallRecord, WorkflowDiagnostic, WorkflowDryCall, WorkflowDryRun, WorkflowEnd,
     WorkflowInfo, WorkflowInput, WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,

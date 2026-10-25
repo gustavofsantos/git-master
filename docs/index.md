@@ -19,7 +19,7 @@ GitMaster covers the work you do every day in a repository. The **Working Copy**
 
 You can move around a repository without leaving the app. **Quick Open** (`Ctrl+P`, `⌘P` on macOS) finds a file by name in the active worktree. The **Code** page shows the folder tree and a read-only file viewer. The **Search** page runs a text search with case, whole word and regular expression options, and groups the matches by file.
 
-> **Planned.** Syntax highlighting, symbol search, the file outline, go to definition and find usages are not available in the app yet.
+> **Planned.** Symbol search, the file outline, go to definition and find usages are not available in the app yet.
 
 ### Agents under human accountability
 

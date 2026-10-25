@@ -878,6 +878,10 @@ impl Model {
                 self.code.file_received(id, file);
                 None
             }
+            Event::FileHighlighted { id, spans } => {
+                self.code.file_highlighted(id, spans);
+                None
+            }
             Event::TextFound { id, result } => {
                 self.text_search.received(id, result);
                 None
@@ -1312,6 +1316,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::FilesFound { id, .. }
         | Event::DirectoryListed { id, .. }
         | Event::FileRead { id, .. }
+        | Event::FileHighlighted { id, .. }
         | Event::TextFound { id, .. }
         | Event::FilesIndexed { id, .. }
         | Event::WorktreesLoaded { id, .. }

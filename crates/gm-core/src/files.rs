@@ -10,10 +10,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gm_schema::{FILE_VIEW_LIMIT, FileBody, FileSearch, FileView, GrepResult, OperationId};
+use gm_schema::{
+    FILE_VIEW_LIMIT, FileBody, FileSearch, FileView, GrepResult, HighlightSpan, OperationId,
+};
 
 use crate::file_index::FileIndex;
 use crate::port::{FileListRead, GrepRead};
+use crate::syntax::{self, Language};
 
 /// How many bytes at the start of a file are looked at for a NUL: Git's own
 /// test for a binary file.
@@ -139,6 +142,29 @@ impl ReadJob {
             id: self.id,
             outcome,
         }
+    }
+}
+
+/// The coloring of the text a file read returned (N4), on a thread of its own so the text shows
+/// first. `id` is the read's.
+pub struct HighlightJob {
+    pub id: OperationId,
+    pub language: Language,
+    pub text: String,
+    pub stop: Arc<AtomicBool>,
+}
+
+pub struct HighlightReport {
+    pub id: OperationId,
+    /// `None` when the work was stopped, ran out of time, or the language has no grammar.
+    pub spans: Option<Vec<HighlightSpan>>,
+}
+
+impl HighlightJob {
+    #[must_use]
+    pub fn run(self) -> HighlightReport {
+        let spans = syntax::highlight(self.language, &self.text, &self.stop);
+        HighlightReport { id: self.id, spans }
     }
 }
 

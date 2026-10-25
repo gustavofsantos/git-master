@@ -466,13 +466,7 @@ impl StatusView {
         let stash_stale = stashes::is_stale_refusal(&event);
         let committed = matches!(event, Event::Committed { .. });
         let detail_loaded = matches!(event, Event::CommitDetailLoaded { .. });
-        let file_event = matches!(
-            event,
-            Event::FilesFound { .. }
-                | Event::DirectoryListed { .. }
-                | Event::FileRead { .. }
-                | Event::FilesIndexed { .. }
-        );
+        let file_event = is_file_event(&event);
         let finished = matches!(event, Event::HookFinished { .. });
         let workflow_refresh = self.on_workflow_event(&event, cx);
         let workflows_listed = matches!(event, Event::WorkflowsListed { .. });
@@ -1571,4 +1565,16 @@ impl StatusView {
         }
         layers
     }
+}
+
+/// Whether the event is one of the file list, folder or viewer: those change the Code page.
+fn is_file_event(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::FilesFound { .. }
+            | Event::DirectoryListed { .. }
+            | Event::FileRead { .. }
+            | Event::FileHighlighted { .. }
+            | Event::FilesIndexed { .. }
+    )
 }

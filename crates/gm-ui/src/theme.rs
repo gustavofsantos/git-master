@@ -77,7 +77,14 @@ pub struct Palette {
     /// The colours of the history graph's lanes (`GRAPH_SLOTS` of them): the
     /// accents of design/visual-identity.md that are not state colours (not red, yellow, green).
     pub graph_lanes: [u32; GRAPH_SLOTS],
+    /// The colours of source code in the file viewer, one per `SyntaxRole` in the order of that
+    /// enum (N4, D111). Text with no role keeps `text`. Each keeps 4.5:1 on every background
+    /// the viewer draws code on.
+    pub syntax: [u32; SYNTAX_ROLES],
 }
+
+/// How many colours `syntax` holds: one per `SyntaxRole`.
+pub const SYNTAX_ROLES: usize = 12;
 
 /// How many colours `lane` picks from.
 pub const LANE_COUNT: usize = 6;
@@ -120,6 +127,12 @@ pub const LIGHT: Palette = Palette {
         0x00_6cbc, 0x78_56c0, 0x00_7b2f, 0x8a_8882, 0x84_6600, 0xba_3e4b,
     ],
     graph_lanes: [0x00_6cbc, 0x78_56c0, 0x00_7677, 0xa9_438d, 0xaa_5100],
+    // Comment, string, number, keyword, operator, function, type, constant, variable, property,
+    // punctuation, attribute.
+    syntax: [
+        0x5d_6159, 0x1a_6e32, 0xa8_3e00, 0x8f_2d9c, 0x6a_4f86, 0x0b_5cad, 0x00_6d69, 0x75_5e00,
+        0x8a_3b5e, 0x2f_5f7a, 0x61_605a, 0xa8_2e75,
+    ],
 };
 
 pub const DARK: Palette = Palette {
@@ -157,6 +170,10 @@ pub const DARK: Palette = Palette {
         0x64_b2ff, 0xb9_9cf0, 0x82_cc8e, 0x9d_9b92, 0xdb_b855, 0xfe_a1a4,
     ],
     graph_lanes: [0x64_b2ff, 0xb8_9fff, 0x00_c0c0, 0xed_8ecf, 0xf6_9557],
+    syntax: [
+        0x94_9a8f, 0x8f_cf8a, 0xf0_a070, 0xd6_9be8, 0xc2_a8e0, 0x7c_b8ff, 0x5f_d0c8, 0xe0_c46a,
+        0xf0_a0c0, 0x9a_c4dc, 0x9d_9b92, 0xf0_8fc4,
+    ],
 };
 
 /// The setting the user chose. `System` follows the OS appearance.
@@ -233,6 +250,12 @@ pub fn is_dark() -> bool {
 #[must_use]
 pub fn palette() -> &'static Palette {
     if is_dark() { &DARK } else { &LIGHT }
+}
+
+/// The colour of source code with `role` in the file viewer.
+#[must_use]
+pub fn syntax(role: gm_schema::SyntaxRole) -> Hsla {
+    color(palette().syntax[role as usize])
 }
 
 macro_rules! accessors {
@@ -408,6 +431,45 @@ mod tests {
             ("warning text on ground", p.warn_fg, p.ground),
             ("text on accent", p.on_accent, p.accent),
         ]
+    }
+
+    #[test]
+    fn every_syntax_colour_keeps_4_5_to_1_on_each_background_code_is_drawn_on() {
+        for (name, palette) in [("light", LIGHT), ("dark", DARK)] {
+            let backgrounds = [
+                ("editor", palette.editor),
+                ("selected row", palette.selected_row),
+                ("cursor row", palette.cursor_row),
+                ("selection", palette.selection),
+            ];
+            for (role, fg) in palette.syntax.iter().enumerate() {
+                for (on, bg) in backgrounds {
+                    let ratio = contrast(*fg, bg);
+                    assert!(ratio >= 4.5, "{name}: role {role} on {on} is {ratio:.2}:1");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn syntax_colours_differ_from_each_other_and_from_plain_text() {
+        for (name, palette) in [("light", LIGHT), ("dark", DARK)] {
+            for (i, a) in palette.syntax.iter().enumerate() {
+                assert_ne!(*a, palette.text, "{name}: role {i} looks like plain text");
+                for (j, b) in palette.syntax.iter().enumerate().skip(i + 1) {
+                    assert_ne!(a, b, "{name}: roles {i} and {j} share a colour");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn there_is_one_syntax_colour_per_role() {
+        assert_eq!(
+            gm_schema::SyntaxRole::Attribute as usize + 1,
+            SYNTAX_ROLES,
+            "the palette holds a colour per SyntaxRole, in its order"
+        );
     }
 
     #[test]

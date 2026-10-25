@@ -2,7 +2,7 @@
 
 The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `make docs-status` lists what the docs still mark as planned.
 
-Last updated: 2026-10-23 (slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
+Last updated: 2026-10-25 (slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
 
 ## Order criteria
 
@@ -218,28 +218,18 @@ Known gaps:
 
 ## Slice 3: history and branches (by-name view) (in progress: H1 to H5 done, with H4b-A, H4b-B and H4c)
 
-**Next step (author's decision, 2026-10-21; updated at the end of the 2026-10-22 session):** Slice 3c (code navigation, see the Slice 3c section) comes now. Spikes S-A, S-B and S-C and sub-slices N1, N2 and N3 are done. **N4 (syntax highlighting)** is next and already has a spike. H6, H7 and H8 are postponed. The replacement of workflows with scripts is done (S-D, WS0 to WS2); WF3 has not started. H5 is done. See "How to continue" below.
+**Next step (author's decision, 2026-10-21; updated at the end of the 2026-10-22 session):** Slice 3c (code navigation, see the Slice 3c section) comes now. Spikes S-A, S-B and S-C and sub-slices N1 to N4 are done. **N5 (symbols and the single box)** is next. H6, H7 and H8 are postponed. The replacement of workflows with scripts is done (S-D, WS0 to WS2); WF3 has not started. H5 is done. See "How to continue" below.
 
-### How to continue (end of the 2026-10-22 session)
+### How to continue (end of the 2026-10-25 session)
 
-**Where the code is.** Everything is on branch `develop` and pushed. This session delivered, in order: H5 (lane graph), spikes S-A and S-C, N1 (Quick Open), N2 (Code page and file viewer), N3 (Search page with `git grep`) and spike S-B. The agent did not see any of this in a window, because the container has no display. The author used the graph and the UI on macOS and confirmed they work. The author has not tried Quick Open, Code and Search yet. `make lint` and `cargo test --workspace` pass (about 1,520 tests). There are no new smoke scenarios (D88).
+**Where the code is.** Everything is on the working branch of the session. Before this session: H5 (lane graph), spikes S-A to S-C, N1 to N3. This session added N4 (syntax highlighting, D111). The agent did not see any of it in a window, because the container has no display. `make lint`, `make docs` and `cargo test --workspace` are the checks; there are no new smoke scenarios (D88).
 
-**Next work: N4, syntax highlighting in the viewer.** S-B answers the risk question (D92). Before writing code, agree with the author:
+**Next work: N5, symbols and the single box.** It reuses the tree-sitter of N4 and the proposals of D92: definitions by tree walk where the language allows it (Rust, Python, Go) and by query for TypeScript and JavaScript, an index in `.git/gitmaster/symbols.db` keyed by blob, language and query version, and the single search box of D50. D45 stays Proposed for the symbol index: confirm it with the author, and agree the "Done when" of N5 in `design/code-navigation.md`, before writing code.
 
-1. **Confirm D45 and D92** (tree-sitter compiled into the binary; our own queries; the five first-wave languages: Rust, Python, Go, TypeScript/TSX and JavaScript).
-2. **Accept the binary cost**: about +5 MB with the five grammars, measured on Linux only. Run `measure.sh` of the nav-b-treesitter spike (git history, 7932c61) on macOS to get that number before deciding.
-3. **Colors**: the 26 capture names in the `highlights.scm` files (list in `FINDINGS.md`) become about ten roles (comment, text, number, keyword, operator, function, type, constant, variable or property, punctuation, attribute or macro). Reuse the colors in `theme.rs`, or create new tokens in design/visual-identity.md? The theme contrast tests (4.5:1 for text) then have to cover the roles in both themes.
-4. **Where the query files live**: proposed `crates/gm-core/queries/`, one folder per language, seeded from `queries/` of the nav-b-treesitter spike (git history, 7932c61) (`typescript-highlights-combined.scm`, `typescript-overlay-all.scm`, `rust-defs.scm`, `go-overlay.scm`).
+**Owed after N4:**
 
-**Proposed done-when for N4 (to agree):**
-
-- `gm-core` gets a pure syntax module. The language comes from the file extension (a pure, tested function). `highlight(language, text) -> Vec<Span { start, end, role }>` is deterministic, with spans in order, without overlap and on character boundaries (property test). Grammars sit behind Cargo features. A file whose language has no grammar stays uncolored.
-- It runs like the other reads: a job on its own thread with an `OperationId`, stopping when the file changes. It reuses `ReadFile`: the file event carries the spans, or a `FileHighlighted` event follows right after. Measured times: 0.1 to 0.6 ms for 60 lines, 0.4 s for a 1.5 MB file, 3.6 s for an 11 MB minified file. Limits: the existing 2 MiB limit; a line over about 2,000 bytes is not highlighted (the viewer already cuts it); parsing has a maximum time (`Parser::set_timeout_micros`), and a file that exceeds it shows its text without color.
-- The viewer paints the spans on visible lines with the role colors. No color until the answer arrives, and no flicker.
-- Tests: capture-name to role mapping (pure); a small sample per language with the expected roles; span properties; the engine drops the answer for a superseded file; contrast of the roles in both themes; `make lint` and `cargo test --workspace`. No smoke (D88).
-- Out of N4: highlighting in the diff (D42), injections (code inside markdown), semantic highlighting, C and C++ (quality not verified), a user-chosen theme.
-
-**After N4:** N5 (symbols and the single box, D45, D50) uses the same tree-sitter and the `symbols.db` of D92. N6 covers reviews, MCP and the gate. H6 to H8 remain postponed. WF3 (slice 3w) has not started; it builds on the scripts of S-D and WS0 to WS2.
+- Look at the colors in a window, in both themes, on real files of each language, and tune the queries in `crates/gm-core/queries/` where a role looks wrong. A change there is a change of product: keep the tests of `syntax.rs` green and add a sample for a fix.
+- Measure the binary growth and the build on macOS (`measure.sh` of the nav-b-treesitter spike, git history, 7932c61).
 
 **Minor pending items, by value** (all details are in the known gaps of each sub-slice):
 
@@ -463,7 +453,7 @@ Proposal of 2026-10-19, detailed in the TOML workflow specification (available i
 - **WF4, stack actions and templates (with slices 4 and 5).** `ctx.stack.*`, `ctx.restack.*`, `ctx.reparent.*`, `ctx.push.lease`, the events `stack.parent_moved` and `stack.parent_merged`, and three built-in templates, in Lua. Done when: turning on "Restack children when parent moves" restacks the subtree after a commit on the parent, with a plan, undo and a pause on conflict, and with no code specific to this policy.
 - **WF5, MCP (with slice 7).** `workflow_list` and `workflow_run`. There is no tool to create or edit scripts (D102). Done when: an agent lists the workflows and fires one; the `apply` steps of the run wait for the human's approval in the UI (D64(c)).
 
-## Slice 3c: code navigation (in progress: S-A, S-B, S-C, N1, N2 and N3 done; N4 next)
+## Slice 3c: code navigation (in progress: S-A, S-B, S-C, N1, N2, N3 and N4 done; N5 next)
 
 Details, engines and risks are in `design/code-navigation.md`. Decisions D43 to D51 are in `design/decisions.md`: D43 is decided; D44 to D51 are proposed, with D44 and D46 supported by the spikes (D89). The slice adds a Code page with Quick Open for files, grep and symbols, on top of a read-only viewer. Each sub-slice has its "Done when" in `design/code-navigation.md`.
 
@@ -511,7 +501,11 @@ Details, engines and risks are in `design/code-navigation.md`. Decisions D43 to 
     - the results list has no keyboard support and no text selection;
     - `--threads` must be measured on the Mac;
     - the Code page's search field and Quick Open are still separate boxes (the single box is N5, D50).
-- **N4, syntax highlighting** (S-B done, D92; proposed "Done when" in "How to continue", above, to be agreed with the author before starting).
+- **N4, syntax highlighting** (done on 2026-10-25, D111; no smoke scenario, per D88; nothing seen in a window).
+  - The viewer colors Rust, Python, Go, TypeScript with TSX, and JavaScript, in twelve roles with palette tokens in both themes (design/visual-identity.md). The text shows first and the colors follow in a `FileHighlighted` event; a file in another language, a binary and a missing file stay plain.
+  - Built: pure module `gm-core/src/syntax.rs` (language by extension, capture name to role, `highlight(language, text, stop)` with a 2 s budget checked by the parser and the query cursor, long lines left plain), the product's queries in `gm-core/queries/`, one Cargo feature per grammar, `HighlightJob` on its own thread stopped by a newer read, `SyntaxRole` and `HighlightSpan` in `gm-schema`, `Shown.spans` and `styled()` in `gm-ui/src/code_page.rs`, and the painter in `shell_code.rs`.
+  - Checked: 20 unit and property tests of the module (samples per language, span order and character boundaries, determinism, stop, budget, long lines, multibyte, syntax errors, every capture of every query has a role), 4 engine tests (text before colors, no job for plain files, a newer read stops and drops the colors), 8 model tests for the pieces of a line (scroll, tabs, spans from earlier lines, the colors of a file no longer on screen are dropped), and 3 theme tests (4.5:1 on four backgrounds in both themes, distinct colors, one per role). Release build on Linux: 2 MiB of Rust (58,000 lines) in 0.9 s, first-use query compile 37 ms (`cargo test --release -p gm-core --lib syntax::tests::timing -- --ignored --nocapture`).
+  - Known gaps: nothing was seen in a window, so the actual look of the colors and the legibility on a real screen are unchecked; the binary growth (about 5 MB) and the macOS and Windows builds were not measured; the whole file is parsed on every read (no incremental parsing, the viewer is read-only); there is no text selection, so the `selection` background is checked in theme tests only; the queries are the crates' seeds with a few corrections, not yet tuned on real code (for example Rust `self` and attribute items, Python decorators, TypeScript generics), and an unlisted capture name is silent (a test lists them); `.d.ts` files go through the TypeScript grammar, and no extensionless file (a shebang script) gets a language; highlighting in the diff is separate (D42); injections (code in markdown) are out; C and C++ are out.
 - **N5, symbols and single box**: index by blob, single search box (D50), outline, go to definition.
 - **N6, revisions, MCP Read tools and performance gate.**
 

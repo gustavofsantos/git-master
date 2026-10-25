@@ -7,9 +7,9 @@ use std::time::Duration;
 use serde_json::{Map, json};
 
 use gm_schema::{
-    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event,
-    GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch, OperationId,
-    OperationState, REFLOG_PAGE, ReviewComment, ReviewStatus, STASH_LIST_CHANGED,
+    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event, FileBody,
+    FileView, GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch,
+    OperationId, OperationState, REFLOG_PAGE, ReviewComment, ReviewStatus, STASH_LIST_CHANGED,
     WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
 
@@ -18,8 +18,8 @@ use crate::branch;
 use crate::commit_detail::{DetailJob, DetailReport};
 use crate::commit_diff::{StackJob, StackReport};
 use crate::files::{
-    Building, FilesSession, IndexJob, IndexReport, ReadJob, ReadReport, SearchJob, SearchReport,
-    TextJob, TextReport,
+    Building, FilesSession, HighlightJob, HighlightReport, IndexJob, IndexReport, ReadJob,
+    ReadReport, SearchJob, SearchReport, TextJob, TextReport,
 };
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
@@ -42,6 +42,7 @@ use crate::script::run::{RunSpec, Runtime};
 use crate::script::trust::{self, TrustStore};
 use crate::script::{api_docs, input as script_input, templates as script_templates};
 use crate::script_session::{self, EffectRequest, ScriptLink, ScriptSession};
+use crate::syntax;
 use crate::workflow_session;
 use crate::worktree;
 
@@ -93,6 +94,10 @@ pub struct Engine {
     files_read: Option<ActiveDetail>,
     /// File reads accepted since the last call; see `take_read_jobs`.
     read_jobs: Vec<ReadJob>,
+    /// The coloring in flight, by the id of the read it follows (N4). A newer read stops it.
+    highlight: Option<(OperationId, Arc<AtomicBool>)>,
+    /// Colorings accepted since the last call; see `take_highlight_jobs`.
+    highlight_jobs: Vec<HighlightJob>,
     /// The text search in flight, if any. A new request supersedes it.
     text_search: Option<ActiveDetail>,
     /// Text searches accepted since the last call; see `take_text_jobs`.
@@ -206,6 +211,8 @@ impl Engine {
             search_jobs: Vec::new(),
             files_read: None,
             read_jobs: Vec::new(),
+            highlight: None,
+            highlight_jobs: Vec::new(),
             text_search: None,
             text_jobs: Vec::new(),
             remote: None,
@@ -276,6 +283,12 @@ impl Engine {
     /// thread and passes its report to `read_report`.
     pub fn take_read_jobs(&mut self) -> Vec<ReadJob> {
         std::mem::take(&mut self.read_jobs)
+    }
+
+    /// The colorings accepted since the last call. The caller runs each on a
+    /// thread and passes its report to `highlight_report`.
+    pub fn take_highlight_jobs(&mut self) -> Vec<HighlightJob> {
+        std::mem::take(&mut self.highlight_jobs)
     }
 
     /// The commit detail reads accepted since the last call. The caller runs
@@ -535,13 +548,16 @@ impl Engine {
     pub fn read_report(&mut self, report: ReadReport) -> Vec<Event> {
         match self.files_read.take() {
             Some(active) if active.op.id == report.id => match report.outcome {
-                Ok(file) => vec![
-                    self.finish_op(&active.op, OperationState::Done, None),
-                    Event::FileRead {
-                        id: report.id,
-                        file,
-                    },
-                ],
+                Ok(file) => {
+                    self.start_highlight(report.id, &file);
+                    vec![
+                        self.finish_op(&active.op, OperationState::Done, None),
+                        Event::FileRead {
+                            id: report.id,
+                            file,
+                        },
+                    ]
+                }
                 Err(message) => {
                     vec![self.finish_op(&active.op, OperationState::Failed, Some(message))]
                 }
@@ -550,6 +566,51 @@ impl Engine {
                 self.files_read = other;
                 Vec::new()
             }
+        }
+    }
+
+    /// Turns the answer of a coloring into an event. A report for a read that was superseded, or
+    /// for a coloring that gave up, is dropped.
+    pub fn highlight_report(&mut self, report: HighlightReport) -> Vec<Event> {
+        match self.highlight.take() {
+            Some((id, _)) if id == report.id => report
+                .spans
+                .map(|spans| Event::FileHighlighted {
+                    id: report.id,
+                    spans,
+                })
+                .into_iter()
+                .collect(),
+            other => {
+                self.highlight = other;
+                Vec::new()
+            }
+        }
+    }
+
+    /// Queues the coloring of the text of `file`, when its language has a grammar. The text is
+    /// copied so the viewer shows it first and the colors follow.
+    fn start_highlight(&mut self, id: OperationId, file: &FileView) {
+        self.stop_highlight();
+        let FileBody::Text { text } = &file.body else {
+            return;
+        };
+        let Some(language) = syntax::language_for_path(&file.path) else {
+            return;
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        self.highlight = Some((id, Arc::clone(&stop)));
+        self.highlight_jobs.push(HighlightJob {
+            id,
+            language,
+            text: text.clone(),
+            stop,
+        });
+    }
+
+    fn stop_highlight(&mut self) {
+        if let Some((_, stop)) = self.highlight.take() {
+            stop.store(true, Ordering::SeqCst);
         }
     }
 
@@ -1345,6 +1406,7 @@ impl Engine {
 
     /// Ends the file read: it is stopped, and a request in flight is cancelled.
     fn drop_files_read(&mut self) -> Vec<Event> {
+        self.stop_highlight();
         let Some(active) = self.files_read.take() else {
             return Vec::new();
         };

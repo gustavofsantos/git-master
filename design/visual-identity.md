@@ -44,6 +44,27 @@ Theme rules: ink first (code is almost all `fg`), eight accents with the same OK
 - Background tints: the accent mixed over `bg` (9 to 13%). Text on a tint = the accent darkened 20 to 45% toward `fg_emph`.
 - The window dots use the accents of the dark variant.
 
+### Source code colors (D111)
+
+The file viewer colors twelve roles (`SyntaxRole`): comment, string, number, keyword, operator, function, type, constant, variable (parameters and reserved names such as `self`), property, punctuation and attribute (macros, decorators, tags and labels). Plain names keep `text`. The colors are the `syntax` array of `theme.rs`, in the order of the enum, and no view holds a literal.
+
+| Role | Light | Dark |
+|---|---|---|
+| comment | `#5d6159` | `#949a8f` |
+| string | `#1a6e32` | `#8fcf8a` |
+| number | `#a83e00` | `#f0a070` |
+| keyword | `#8f2d9c` | `#d69be8` |
+| operator | `#6a4f86` | `#c2a8e0` |
+| function | `#0b5cad` | `#7cb8ff` |
+| type | `#006d69` | `#5fd0c8` |
+| constant | `#755e00` | `#e0c46a` |
+| variable | `#8a3b5e` | `#f0a0c0` |
+| property | `#2f5f7a` | `#9ac4dc` |
+| punctuation | `#61605a` | `#9d9b92` |
+| attribute | `#a82e75` | `#f08fc4` |
+
+Rules: every color keeps 4.5:1 on the editor, the selected row, the cursor row and the selection, in both themes; no two roles share a color and none equals `text`. Comments and punctuation are the quietest, but still pass the same test: legibility comes first, and the color distinguishes, it does not hide. The tests in `theme.rs` enforce these rules.
+
 ### Roles in `crates/gm-ui/src/theme.rs`
 
 `ground` = `bg_hl` (window background and sidebar); `editor` and `panel` = `bg` (diff, bars, headers, floating panels); `hairline` = `border`; `muted`, `faint`, `placeholder` and `gutter` = `fg_comment` (`fg_faint` does not pass 4.5:1 as text, so it stays only for elements without text); `caret` = signature. Background tints follow the rule above (9 to 13% of the accent over `bg`); text on a tint = the accent mixed with `fg_emph` (30% in light, 20% in dark). The contrast tests in `theme.rs` (4.5:1 for text, 3:1 for marks) cover every pair.

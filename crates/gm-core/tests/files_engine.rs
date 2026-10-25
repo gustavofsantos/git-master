@@ -7,8 +7,8 @@ use std::sync::atomic::Ordering;
 use gm_core::fake::FakeGit;
 use gm_core::{Engine, GitError};
 use gm_schema::{
-    Actor, Command, CommandKind, Event, FileBody, FileSearch, OperationId, OperationState,
-    RepoStatus,
+    Actor, Command, CommandKind, Event, FileBody, FileSearch, HighlightSpan, OperationId,
+    OperationState, RepoStatus, SyntaxRole,
 };
 
 fn command(kind: CommandKind) -> Command {
@@ -48,7 +48,8 @@ fn drain(engine: &mut Engine) -> Vec<Event> {
         let index = engine.take_index_jobs();
         let searches = engine.take_search_jobs();
         let reads = engine.take_read_jobs();
-        if index.is_empty() && searches.is_empty() && reads.is_empty() {
+        let colors = engine.take_highlight_jobs();
+        if index.is_empty() && searches.is_empty() && reads.is_empty() && colors.is_empty() {
             return events;
         }
         for job in index {
@@ -59,6 +60,9 @@ fn drain(engine: &mut Engine) -> Vec<Event> {
         }
         for job in reads {
             events.extend(engine.read_report(job.run()));
+        }
+        for job in colors {
+            events.extend(engine.highlight_report(job.run()));
         }
     }
 }
@@ -374,4 +378,101 @@ fn a_path_outside_the_worktree_fails_the_read_with_a_reason() {
         Event::OperationChanged { state: OperationState::Failed, detail: Some(d), .. }
             if d.contains("not a path inside the worktree")
     )));
+}
+
+fn read_command(path: &str) -> Command {
+    command(CommandKind::ReadFile { path: path.into() })
+}
+
+fn highlighted(events: &[Event]) -> Vec<(OperationId, Vec<HighlightSpan>)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::FileHighlighted { id, spans } => Some((*id, spans.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_source_file_is_read_first_and_its_colors_follow() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn a() {} // note\n").unwrap();
+    let (mut engine, _) = engine_over(dir.path().to_str().unwrap(), &[]);
+
+    engine.handle(OperationId(2), &read_command("a.rs"));
+    let events = drain(&mut engine);
+
+    let read = events
+        .iter()
+        .position(|e| matches!(e, Event::FileRead { .. }))
+        .expect("the text");
+    let colors = events
+        .iter()
+        .position(|e| matches!(e, Event::FileHighlighted { .. }))
+        .expect("the colors");
+    assert!(read < colors, "the text shows before its colors");
+    let (id, spans) = highlighted(&events).remove(0);
+    assert_eq!(id, OperationId(2));
+    assert!(spans.iter().any(|s| s.role == SyntaxRole::Keyword));
+    assert!(spans.iter().any(|s| s.role == SyntaxRole::Comment));
+}
+
+#[test]
+fn a_file_with_no_grammar_or_no_text_asks_for_no_colors() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.path().join("b.rs"), b"fn a() {}\0\n").unwrap();
+    let (mut engine, _) = engine_over(dir.path().to_str().unwrap(), &[]);
+
+    for (id, path) in [(2, "notes.txt"), (3, "b.rs"), (4, "missing.rs")] {
+        engine.handle(OperationId(id), &read_command(path));
+        let events = drain(&mut engine);
+        assert!(highlighted(&events).is_empty(), "{path}");
+        assert!(engine.take_highlight_jobs().is_empty(), "{path}");
+    }
+}
+
+#[test]
+fn colors_of_a_file_that_a_newer_read_replaced_are_stopped_and_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+    let (mut engine, _) = engine_over(dir.path().to_str().unwrap(), &[]);
+    engine.handle(OperationId(2), &read_command("a.rs"));
+    let first = engine.take_read_jobs().remove(0);
+    engine.read_report(first.run());
+    let stale = engine.take_highlight_jobs().remove(0);
+    assert!(!stale.stop.load(Ordering::SeqCst));
+
+    engine.handle(OperationId(3), &read_command("b.rs"));
+
+    assert!(stale.stop.load(Ordering::SeqCst), "the newer read stops it");
+    assert!(engine.highlight_report(stale.run()).is_empty());
+    let events = drain(&mut engine);
+    assert_eq!(
+        highlighted(&events)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        [OperationId(3)]
+    );
+}
+
+#[test]
+fn a_late_coloring_of_a_file_already_replaced_by_the_next_one_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+    let (mut engine, _) = engine_over(dir.path().to_str().unwrap(), &[]);
+    engine.handle(OperationId(2), &read_command("a.rs"));
+    let first = engine.take_read_jobs().remove(0);
+    engine.read_report(first.run());
+    let mut late = engine.take_highlight_jobs().remove(0);
+    // The job was finished before the stop reached it: the report still arrives.
+    late.stop = std::sync::Arc::default();
+
+    engine.handle(OperationId(3), &read_command("b.rs"));
+
+    assert!(engine.highlight_report(late.run()).is_empty());
 }

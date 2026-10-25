@@ -12,7 +12,8 @@ use gm_schema::{Actor, Command, CommandKind, Event, OperationId};
 use crate::commit_detail::DetailReport;
 use crate::commit_diff::StackReport;
 use crate::files::{
-    IndexJob, IndexReport, ReadJob, ReadReport, SearchJob, SearchReport, TextJob, TextReport,
+    HighlightJob, HighlightReport, IndexJob, IndexReport, ReadJob, ReadReport, SearchJob,
+    SearchReport, TextJob, TextReport,
 };
 use crate::history::HistoryReport;
 use crate::hook::{ApprovalStore, Report};
@@ -35,7 +36,9 @@ enum Message {
     /// The file list was read. The sender is for the search that waited for it.
     Index(IndexReport, Sender<Message>),
     Search(SearchReport),
-    Read(ReadReport),
+    /// A file was read. The sender is for the coloring that follows it.
+    Read(ReadReport, Sender<Message>),
+    Highlight(HighlightReport),
     Text(TextReport),
     /// A script run asks the engine to carry out an effect. The run waits for the answer.
     ScriptEffect(EffectRequest),
@@ -197,8 +200,13 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                 let events = engine.search_report(report);
                 broadcast(events, &mut subscribers);
             }
-            Message::Read(report) => {
+            Message::Read(report, reports) => {
                 let events = engine.read_report(report);
+                broadcast(events, &mut subscribers);
+                spawn_file_jobs(&mut engine, &reports);
+            }
+            Message::Highlight(report) => {
+                let events = engine.highlight_report(report);
                 broadcast(events, &mut subscribers);
             }
             Message::Text(report) => {
@@ -266,9 +274,22 @@ fn spawn_file_jobs(engine: &mut Engine, reports: &Sender<Message>) {
     for job in engine.take_read_jobs() {
         spawn_read(job, reports.clone());
     }
+    for job in engine.take_highlight_jobs() {
+        spawn_highlight(job, reports.clone());
+    }
     for job in engine.take_text_jobs() {
         spawn_text(job, reports.clone());
     }
+}
+
+fn spawn_highlight(job: HighlightJob, reports: Sender<Message>) {
+    std::thread::Builder::new()
+        .name("gm-highlight".into())
+        .spawn(move || {
+            let report = job.run();
+            let _ = reports.send_blocking(Message::Highlight(report));
+        })
+        .expect("spawn a highlight thread");
 }
 
 fn spawn_text(job: TextJob, reports: Sender<Message>) {
@@ -307,7 +328,8 @@ fn spawn_read(job: ReadJob, reports: Sender<Message>) {
         .name("gm-read".into())
         .spawn(move || {
             let report = job.run();
-            let _ = reports.send_blocking(Message::Read(report));
+            let next = reports.clone();
+            let _ = reports.send_blocking(Message::Read(report, next));
         })
         .expect("spawn a file read thread");
 }

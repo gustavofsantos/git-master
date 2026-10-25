@@ -16,6 +16,7 @@ use crate::status::{
     BranchEntry, BranchFailure, MergedBranch, PruneCandidate, RepoStatus, WorktreeEntry,
     WorktreeInspection,
 };
+use crate::syntax::HighlightSpan;
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
     WorkflowRunStatus, WorkflowRunSummary,
@@ -570,6 +571,15 @@ pub enum Event {
     FileRead {
         id: OperationId,
         file: FileView,
+    },
+    /// The colors of the file `FileRead` carried, sent right after it when the
+    /// language has a grammar (N4). `id` is the read's. Spans are in order, do
+    /// not overlap, and fall on character boundaries of the text. Not sent when
+    /// the file is superseded, too large to parse in time, or in a language
+    /// with no grammar.
+    FileHighlighted {
+        id: OperationId,
+        spans: Vec<HighlightSpan>,
     },
     /// The file list was (re)read: `files` paths now. Asked for by `IndexFiles`;
     /// whoever shows a search or a folder listing asks again.

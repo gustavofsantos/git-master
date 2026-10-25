@@ -2,7 +2,7 @@
 
 The user-facing behavior is specified in `docs/guide/code-navigation.md`; this file keeps the engineering rationale.
 
-Last updated: 2026-10-22. Status: scope decided (D43). S-A, S-B, S-C, N1, N2 and N3 are done (`design/roadmap.md`, D89 to D92). D44 and D46 were backed by the spikes and by N3. D45 has the spike (D92) but stays **proposed** until the author confirms. The rest (N4 to N6, D47 to D51) stays **proposed** in `design/decisions.md`.
+Last updated: 2026-10-25. Status: scope decided (D43). S-A, S-B, S-C, N1, N2, N3 and N4 are done (`design/roadmap.md`, D89 to D92). D44 and D46 were backed by the spikes and by N3. D45 has the spike (D92); the author confirmed it for highlighting (D111) and it stays **proposed** for the symbol index until N5. The rest (N5 and N6, D47 to D51) stays **proposed** in `design/decisions.md`.
 
 ## Why
 
@@ -148,7 +148,7 @@ Each one is vertical, usable on its own, and has a "Done when" with real Git, li
 1. **N1, Quick Open.** Worktree list, path matcher, `file:line`, refresh by the watcher. *Done when:* matcher tests (order, tie-break, Unicode); the list is identical to that of `git ls-files` in a repository with ignored, renamed and sparse-checked-out files; superseded requests are dropped; the smoke scenario passes in both themes. Delivered together with N2 (2026-10-21): the click opens the file in the viewer.
 2. **N2, viewer and tree.** Code page, tree, worktree reading, limits for large files and binaries, "View file" from the diff and the commit detail. *Done when:* UTF-8, non-UTF-8, binary, empty, no final newline, and very large files behave without freezing; scrolling is smooth over 100 thousand lines.
 3. **N3, grep.** `git grep` with the options above, limits, cancellation, grouped results, and a click that opens N2 at the line. *Done when:* tests with real Git for unusual names, a pattern that looks like an option (`-v`, `--help`), invalid regex, binaries, limits and deterministic order; the S-A benchmark repeated in the app.
-4. **N4, syntax highlighting** (depends on S-B). Four languages first. *Done when:* highlighting only covers the visible range, without touching scroll time; a file in an unknown language stays uncolored.
+4. **N4, syntax highlighting** (done 2026-10-25, D111). Five languages (Rust, Python, Go, TypeScript with TSX, JavaScript). *Done when:* the spans cover the file but only the visible lines are built and painted, without touching scroll time; a file in an unknown language stays uncolored.
 5. **N5, symbols.** Index by blob, search, file outline, go to definition with candidates, usages as text. *Done when:* the same blob on two branches is indexed once; a partial index is flagged; deleting the index and reopening rebuilds the same result (determinism); the index never lives inside the working tree.
 6. **N6, revisions, MCP and gate.** Revision selector on the Code page (reuses the scope pill from H6), "Browse files at this commit" in the commit menu (together with the part of 1c that waits for the menu), the Read tools of MCP, and the D49 benchmarks.
 
