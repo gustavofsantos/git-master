@@ -321,6 +321,14 @@ impl GitPort for FakeGit {
         Ok(())
     }
 
+    fn forget_recorded_resolution(&self, _root: &Path, _path: &str) -> Result<(), GitError> {
+        self.writes
+            .lock()
+            .unwrap()
+            .push("forget_recorded_resolution");
+        Ok(())
+    }
+
     /// The `.git` folder under the fake root, as a normal checkout has it.
     fn common_dir(&self, _root: &Path) -> Result<PathBuf, GitError> {
         Ok(self.root.join(".git"))

@@ -41,4 +41,29 @@ pub struct ConflictFileRead {
     pub text: String,
     /// Whether the common ancestor (stage 1) exists. An add/add conflict has none.
     pub has_base: bool,
+    /// The resolution Git recorded for this conflict (rerere), when there is one.
+    /// Git has already applied it to the working tree file, so the file holds it
+    /// now. `None` when nothing is recorded.
+    pub recorded: Option<RecordedResolution>,
+}
+
+/// A resolution Git recorded for a conflict (rerere) and applied to the working
+/// tree file when the conflict was read. `text` is that file as it is now, not
+/// the zdiff3 text of `ConflictFileRead::text`, which stays the conflict so the
+/// engineer can compare the two.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordedResolution {
+    pub text: String,
+}
+
+/// Who resolved one hunk of a conflict (the operation log records it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HunkOrigin {
+    /// Chosen by the engineer in the resolver.
+    Human,
+    /// Taken from a resolution Git recorded (rerere).
+    Rerere,
+    /// Taken from a workflow script's suggestion. No script produces one yet.
+    Script,
 }

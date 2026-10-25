@@ -1036,7 +1036,9 @@ impl Model {
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
-            | Event::WorkflowMessageSuggested { .. } => None,
+            | Event::WorkflowMessageSuggested { .. }
+            // The resolver does not show recorded resolutions yet, so nothing changes.
+            | Event::RecordedResolutionForgotten { .. } => None,
             // The read opens the resolver; the staged note is the resolver's own.
             Event::ConflictRead { id, read } => {
                 self.conflict = Some(ResolverState::new(&read));
@@ -1372,7 +1374,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ReviewSnapshotText { id, .. }
         | Event::ReviewCurrentText { id, .. }
         | Event::ConflictRead { id, .. }
-        | Event::ConflictResolved { id, .. } => Some(*id),
+        | Event::ConflictResolved { id, .. }
+        | Event::RecordedResolutionForgotten { id, .. } => Some(*id),
         Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }
         | Event::WorkflowNotice { .. }
@@ -2858,6 +2861,7 @@ mod move_file_tests {
                 right: side("feature/x", "merged branch"),
                 text: "<<<<<<< main\nleft\n=======\nright\n>>>>>>> feature/x\n".into(),
                 has_base: false,
+                recorded: None,
             },
         }
     }

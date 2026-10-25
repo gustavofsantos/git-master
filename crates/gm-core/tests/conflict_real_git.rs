@@ -11,7 +11,7 @@ use gm_core::conflict::parse;
 use gm_core::git::SubprocessGit;
 use gm_schema::{
     Actor, Command, CommandKind, ConflictFileRead, ConflictOperation, ConflictSide, Event,
-    OperationId, OperationState,
+    HunkOrigin, OperationId, OperationState, RecordedResolution,
 };
 
 fn git_in(dir: &Path, args: &[&str]) -> String {
@@ -149,6 +149,7 @@ fn resolve(engine: &mut Engine, path: &str, text: &str) -> Result<(), String> {
         &human(CommandKind::ResolveConflict {
             path: path.to_owned(),
             text: text.to_owned(),
+            origins: Vec::new(),
         }),
     );
     if let Some(detail) = failure(&events) {
@@ -379,6 +380,7 @@ fn resolving_writes_the_file_and_stages_it() {
         &human(CommandKind::ResolveConflict {
             path: "a.txt".into(),
             text: "resolved\n".into(),
+            origins: Vec::new(),
         }),
     );
 
@@ -465,4 +467,168 @@ fn resolving_keeps_the_file_mode() {
 
     let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o755);
+}
+
+/// The number of resolutions rerere has recorded in the repository of `root`.
+fn recorded_postimages(root: &Path) -> usize {
+    let cache = root.join(".git").join("rr-cache");
+    std::fs::read_dir(cache).map_or(0, |entries| {
+        entries
+            .flatten()
+            .filter(|entry| entry.path().join("postimage").is_file())
+            .count()
+    })
+}
+
+/// Forgets the recorded resolution of `path`, or returns Git's refusal.
+fn forget(engine: &mut Engine, path: &str) -> Result<(), String> {
+    let events = engine.handle(
+        next_id(),
+        &human(CommandKind::ForgetRecordedResolution {
+            path: path.to_owned(),
+        }),
+    );
+    if let Some(detail) = failure(&events) {
+        return Err(detail);
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::RecordedResolutionForgotten { path: p, .. } if p == path)),
+        "no RecordedResolutionForgotten: {events:?}"
+    );
+    Ok(())
+}
+
+/// Resolves the merge of `merge_stopped` to `resolved`, undoes it and merges the
+/// same two branches again, so the same conflict is back.
+fn conflict_resolved_then_back(repo: &Repo, engine: &mut Engine) {
+    resolve(engine, "a.txt", "resolved\n").unwrap();
+    git_in(&repo.root, &["reset", "-q", "--hard"]);
+    let output = git_output(&repo.root, &["merge", "--no-edit", "feature"]);
+    assert!(!output.status.success(), "the merge should conflict again");
+}
+
+#[test]
+fn a_resolution_is_recorded_for_the_next_identical_conflict() {
+    let repo = repo();
+    merge_stopped(&repo);
+    let mut engine = engine_on(&repo.root);
+    assert_eq!(read(&mut engine, "a.txt").unwrap().recorded, None);
+
+    resolve(&mut engine, "a.txt", "resolved\n").unwrap();
+
+    assert_eq!(recorded_postimages(&repo.root), 1);
+}
+
+#[test]
+fn a_resolution_is_recorded_even_when_the_conflict_was_not_read_first() {
+    let repo = repo();
+    merge_stopped(&repo);
+    let mut engine = engine_on(&repo.root);
+
+    resolve(&mut engine, "a.txt", "resolved\n").unwrap();
+
+    assert_eq!(recorded_postimages(&repo.root), 1);
+}
+
+#[test]
+fn an_identical_conflict_is_read_with_its_recorded_resolution() {
+    let repo = repo();
+    merge_stopped(&repo);
+    let mut engine = engine_on(&repo.root);
+    conflict_resolved_then_back(&repo, &mut engine);
+
+    let first = read(&mut engine, "a.txt").unwrap();
+
+    let expected = Some(RecordedResolution {
+        text: "resolved\n".into(),
+    });
+    assert_eq!(first.recorded, expected);
+    // Reading again, as when the resolver is reopened, still finds it.
+    let again = read(&mut engine, "a.txt").unwrap();
+    assert_eq!(again.recorded, expected);
+    // The stage-based text stays the conflict, so the engineer can compare.
+    assert_eq!(first.text, MERGE_TEXT);
+    // Git applied the resolution to the working tree and left the file unmerged.
+    assert_eq!(
+        std::fs::read_to_string(repo.root.join("a.txt")).unwrap(),
+        "resolved\n"
+    );
+    assert_ne!(git_in(&repo.root, &["ls-files", "-u"]), "");
+}
+
+#[test]
+fn forgetting_a_recorded_resolution_brings_the_markers_back() {
+    let repo = repo();
+    merge_stopped(&repo);
+    let mut engine = engine_on(&repo.root);
+    conflict_resolved_then_back(&repo, &mut engine);
+    assert!(read(&mut engine, "a.txt").unwrap().recorded.is_some());
+
+    forget(&mut engine, "a.txt").unwrap();
+
+    let file = std::fs::read_to_string(repo.root.join("a.txt")).unwrap();
+    assert!(file.contains("<<<<<<<"), "{file}");
+    assert_eq!(parse(&file).unwrap().conflict_count(), 1);
+    assert_ne!(git_in(&repo.root, &["ls-files", "-u"]), "");
+    assert_eq!(recorded_postimages(&repo.root), 0);
+    assert_eq!(read(&mut engine, "a.txt").unwrap().recorded, None);
+}
+
+#[test]
+fn forgetting_with_nothing_recorded_or_on_a_resolved_file_is_refused() {
+    let repo = repo();
+    merge_stopped(&repo);
+    let mut engine = engine_on(&repo.root);
+    let before = std::fs::read(repo.root.join("a.txt")).unwrap();
+
+    let error = forget(&mut engine, "a.txt").unwrap_err();
+    assert!(error.contains("no recorded resolution"), "{error}");
+    assert_eq!(std::fs::read(repo.root.join("a.txt")).unwrap(), before);
+
+    resolve(&mut engine, "a.txt", "resolved\n").unwrap();
+    let error = forget(&mut engine, "a.txt").unwrap_err();
+    assert!(error.contains("not conflicted"), "{error}");
+}
+
+#[test]
+fn rerere_never_writes_the_users_config() {
+    let repo = repo();
+    let config = repo.root.join(".git").join("config");
+    let before = std::fs::read(&config).unwrap();
+    merge_stopped(&repo);
+    let mut engine = engine_on(&repo.root);
+    conflict_resolved_then_back(&repo, &mut engine);
+    read(&mut engine, "a.txt").unwrap();
+    forget(&mut engine, "a.txt").unwrap();
+
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    assert!(
+        !git_output(&repo.root, &["config", "--get", "rerere.enabled"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn the_origins_of_a_resolution_are_in_the_operation_log() {
+    let repo = repo();
+    merge_stopped(&repo);
+    let mut engine = engine_on(&repo.root);
+
+    let events = engine.handle(
+        next_id(),
+        &human(CommandKind::ResolveConflict {
+            path: "a.txt".into(),
+            text: "resolved\n".into(),
+            origins: vec![HunkOrigin::Human],
+        }),
+    );
+
+    assert_eq!(failure(&events), None);
+    assert!(engine.log().iter().any(|entry| matches!(
+        &entry.kind,
+        CommandKind::ResolveConflict { origins, .. } if *origins == [HunkOrigin::Human]
+    )));
 }

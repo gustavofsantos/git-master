@@ -971,9 +971,7 @@ impl Engine {
             }
             CommandKind::CancelHook { run } => self.cancel_hook(*run),
             CommandKind::StageAll => self.stage_all(id),
-            CommandKind::ReadConflict { .. } | CommandKind::ResolveConflict { .. } => {
-                self.conflict_command(id, actor, kind)
-            }
+            _ if is_conflict_command(kind) => self.conflict_command(id, actor, kind),
             CommandKind::ListWorkflows
             | CommandKind::RunWorkflow { .. }
             | CommandKind::ReviewWorkflow { .. }
@@ -1990,7 +1988,7 @@ impl Engine {
                 let read = self.git.read_conflict(&root, path).map_err(|e| e.0)?;
                 Ok(vec![Event::ConflictRead { id, read }])
             }
-            CommandKind::ResolveConflict { path, text } => {
+            CommandKind::ResolveConflict { path, text, .. } => {
                 only_a_human(actor, "resolve a conflict")?;
                 let root = self.open_root()?;
                 self.git
@@ -2002,6 +2000,17 @@ impl Engine {
                     path: path.clone(),
                 });
                 Ok(events)
+            }
+            CommandKind::ForgetRecordedResolution { path } => {
+                only_a_human(actor, "forget a recorded resolution")?;
+                let root = self.open_root()?;
+                self.git
+                    .forget_recorded_resolution(&root, path)
+                    .map_err(|e| e.0)?;
+                Ok(vec![Event::RecordedResolutionForgotten {
+                    id,
+                    path: path.clone(),
+                }])
             }
             _ => Err("not a conflict command".to_owned()),
         }
@@ -2912,6 +2921,16 @@ fn check_workflow_script(id: OperationId, source: &str) -> Vec<Event> {
     vec![Event::WorkflowChecked { id, diagnostics }]
 }
 
+/// The conflict commands (D114, D115): reads and writes of a conflicted file.
+fn is_conflict_command(kind: &CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::ReadConflict { .. }
+            | CommandKind::ResolveConflict { .. }
+            | CommandKind::ForgetRecordedResolution { .. }
+    )
+}
+
 fn only_a_human(actor: &Actor, what: &str) -> Result<(), String> {
     if matches!(actor, Actor::Human) {
         Ok(())
@@ -2983,7 +3002,7 @@ mod tests {
     use super::*;
     use crate::GitError;
     use crate::fake::FakeGit;
-    use gm_schema::{ConflictFileRead, RepoStatus, WorktreeMode};
+    use gm_schema::{ConflictFileRead, HunkOrigin, RepoStatus, WorktreeMode};
     use proptest::prelude::*;
 
     fn engine() -> Engine {
@@ -3975,6 +3994,7 @@ mod tests {
             },
             text: "<<<<<<< main\n=======\n>>>>>>> feature\n".into(),
             has_base: false,
+            recorded: None,
         };
         fake.set_conflict(Ok(read.clone()));
         let logged = engine.log().len();
@@ -4006,6 +4026,7 @@ mod tests {
                 kind: CommandKind::ResolveConflict {
                     path: "a.txt".into(),
                     text: "ok\n".into(),
+                    origins: Vec::new(),
                 },
             },
         );
@@ -4017,6 +4038,7 @@ mod tests {
             &command(CommandKind::ResolveConflict {
                 path: "a.txt".into(),
                 text: "ok\n".into(),
+                origins: vec![HunkOrigin::Human, HunkOrigin::Rerere],
             }),
         );
         assert_eq!(failure(&events), None);
@@ -4025,11 +4047,49 @@ mod tests {
             Event::ConflictResolved { path, .. } if path == "a.txt"
         )));
         assert_eq!(fake.writes(), ["resolve_conflict"]);
+        // The operation log keeps the origins of each hunk with the command.
+        assert!(engine.log().iter().any(|entry| matches!(
+            &entry.kind,
+            CommandKind::ResolveConflict { origins, .. }
+                if *origins == [HunkOrigin::Human, HunkOrigin::Rerere]
+        )));
+    }
+
+    #[test]
+    fn a_recorded_resolution_is_forgotten_only_by_a_human_and_logged() {
+        let (mut engine, fake) = stash_engine();
+        let agent = Actor::Agent {
+            name: "agent".into(),
+        };
+        let events = engine.handle(
+            OperationId(2),
+            &Command {
+                actor: agent,
+                kind: CommandKind::ForgetRecordedResolution {
+                    path: "a.txt".into(),
+                },
+            },
+        );
+        assert!(failure(&events).is_some());
+        assert!(fake.writes().is_empty());
+
+        let events = engine.handle(
+            OperationId(3),
+            &command(CommandKind::ForgetRecordedResolution {
+                path: "a.txt".into(),
+            }),
+        );
+        assert_eq!(failure(&events), None);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::RecordedResolutionForgotten { path, .. } if path == "a.txt"
+        )));
+        assert_eq!(fake.writes(), ["forget_recorded_resolution"]);
         assert!(
             engine
                 .log()
                 .iter()
-                .any(|entry| matches!(entry.kind, CommandKind::ResolveConflict { .. }))
+                .any(|entry| matches!(entry.kind, CommandKind::ForgetRecordedResolution { .. }))
         );
     }
 

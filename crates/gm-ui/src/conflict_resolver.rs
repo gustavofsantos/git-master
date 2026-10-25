@@ -412,6 +412,7 @@ mod tests {
             right: side("feature/x", "merged branch", "Rewrite the parser"),
             text: text.into(),
             has_base,
+            recorded: None,
         }
     }
 

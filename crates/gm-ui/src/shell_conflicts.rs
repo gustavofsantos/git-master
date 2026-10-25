@@ -6,7 +6,7 @@
 //! the engine, the way the other commands are sent.
 
 use gm_core::conflict::Resolution;
-use gm_schema::{Actor, CommandKind};
+use gm_schema::{Actor, CommandKind, HunkOrigin};
 use gpui::{
     Context, Div, ElementId, FontWeight, MouseButton, MouseDownEvent, Stateful, div, prelude::*, px,
 };
@@ -110,11 +110,19 @@ impl StatusView {
     /// Apply: sends the resolution when every conflict is resolved. Otherwise the
     /// resolver's note says what remains, and nothing is sent.
     pub(crate) fn apply_conflict(&mut self, cx: &mut Context<Self>) {
-        if let Some(conflict) = self.model.conflict.as_mut()
-            && let Some((path, text)) = conflict.apply()
-        {
-            self.engine
-                .dispatch(Actor::Human, CommandKind::ResolveConflict { path, text });
+        if let Some(conflict) = self.model.conflict.as_mut() {
+            // The resolver takes every hunk from the engineer's choices, so each is Human.
+            let origins = vec![HunkOrigin::Human; conflict.conflict_count()];
+            if let Some((path, text)) = conflict.apply() {
+                self.engine.dispatch(
+                    Actor::Human,
+                    CommandKind::ResolveConflict {
+                        path,
+                        text,
+                        origins,
+                    },
+                );
+            }
         }
         cx.notify();
     }

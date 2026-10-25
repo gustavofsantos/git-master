@@ -571,7 +571,9 @@ pub trait GitPort: Send {
     }
 
     /// Reads the conflicted file `path` for the resolver: its three stages merged
-    /// into zdiff3 text, with the sides named by role. Never records anything.
+    /// into zdiff3 text, with the sides named by role. Runs rerere, which records
+    /// new conflicts and applies a recorded resolution to the working tree file:
+    /// that is the only change it makes, and the answer says whether there is one.
     fn read_conflict(&self, _root: &Path, _path: &str) -> Result<ConflictFileRead, GitError> {
         Err(GitError(
             "conflict resolution is not supported by this adapter".into(),
@@ -582,6 +584,15 @@ pub trait GitPort: Send {
     /// Refused while `text` still holds conflict markers. Recorded in the command
     /// log: it changes the index.
     fn resolve_conflict(&self, _root: &Path, _path: &str, _text: &str) -> Result<(), GitError> {
+        Err(GitError(
+            "conflict resolution is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Forgets the resolution Git recorded for the conflicted file `path` (rerere)
+    /// and restores its conflict markers. Refused when nothing is recorded. Recorded
+    /// in the command log: it changes the working tree and the rerere cache.
+    fn forget_recorded_resolution(&self, _root: &Path, _path: &str) -> Result<(), GitError> {
         Err(GitError(
             "conflict resolution is not supported by this adapter".into(),
         ))

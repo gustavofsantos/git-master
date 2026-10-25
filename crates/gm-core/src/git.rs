@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, CommitFile, ConflictFileRead, ConflictOperation, DiffSide,
-    FileDiff, HookScope, Hunk, HunkId, MergedBranch, PruneCandidate, ReflogEntry, RepoStatus,
-    StageTarget, StashEntry, StatusEntry, WorktreeEntry, WorktreeMode,
+    FileDiff, HookScope, Hunk, HunkId, MergedBranch, PruneCandidate, RecordedResolution,
+    ReflogEntry, RepoStatus, StageTarget, StashEntry, StatusEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::branch;
@@ -1682,6 +1682,9 @@ impl GitPort for SubprocessGit {
                 "{path} is binary; the resolver handles text files only"
             )));
         }
+        // Records the conflicts not yet known and applies a recorded resolution to
+        // the working tree, so the file below is read after that (rerere).
+        self.rerere(root)?;
         let operation = self.operation_in_progress(root)?;
         let facts = self.side_facts(root, operation)?;
         let labels = conflict_sides::conflict_labels(&facts);
@@ -1692,6 +1695,7 @@ impl GitPort for SubprocessGit {
             &theirs_content,
             [&labels.left.branch, "base", &labels.right.branch],
         )?;
+        let recorded = self.recorded_resolution(root, path)?;
         Ok(ConflictFileRead {
             path: path.to_owned(),
             operation,
@@ -1699,6 +1703,7 @@ impl GitPort for SubprocessGit {
             right: labels.right,
             text,
             has_base: base.is_some(),
+            recorded,
         })
     }
 
@@ -1724,6 +1729,9 @@ impl GitPort for SubprocessGit {
                 )));
             }
         }
+        // Records the conflict before its markers are replaced, so the resolution
+        // can be recorded below (rerere). A failure here fails nothing.
+        let _ = self.rerere(root);
         let file = root.join(path);
         let mode = match file.metadata() {
             Ok(meta) => Some(meta.permissions()),
@@ -1747,7 +1755,86 @@ impl GitPort for SubprocessGit {
             .map_err(|e| GitError(format!("cannot write {path}: {}", e.error)))?;
         let mut command = self.git(root);
         command.args(["--literal-pathspecs", "add", "--", path]);
+        self.logged(command, None)?;
+        // Records the resolution for the next identical conflict (rerere). The file
+        // is staged already, so a failure here does not fail the resolution: the
+        // conflict then comes back unrecorded and is resolved from the start.
+        let _ = self.rerere(root);
+        Ok(())
+    }
+
+    /// Forgets the recorded resolution of `path` and restores its conflict markers.
+    /// `rerere forget` drops the postimage; `checkout --merge` recreates the
+    /// conflict from the stages. Both are logged.
+    fn forget_recorded_resolution(&self, root: &Path, path: &str) -> Result<(), GitError> {
+        check_worktree_path(root, path)?;
+        if self.unmerged_entries(root, path)?.is_empty() {
+            return Err(GitError(format!("{path} is not conflicted")));
+        }
+        // Applies a recorded resolution first, so the check sees the file as the
+        // resolver would (rerere).
+        self.rerere(root)?;
+        if self.recorded_resolution(root, path)?.is_none() {
+            return Err(GitError(format!("{path} has no recorded resolution")));
+        }
+        let mut command = self.git(root);
+        command.args([
+            "-c",
+            "rerere.enabled=true",
+            "--literal-pathspecs",
+            "rerere",
+            "forget",
+            "--",
+            path,
+        ]);
+        self.logged(command, None)?;
+        let mut command = self.git(root);
+        command.args(["--literal-pathspecs", "checkout", "--merge", "--", path]);
         self.logged(command, None).map(drop)
+    }
+}
+
+impl SubprocessGit {
+    /// `git rerere` with rerere on for this process only: the user's config is
+    /// never written. Logged, since it can change the rerere cache and the working
+    /// tree. It records the conflicts not yet known, records the resolution of the
+    /// resolved ones and applies a recorded resolution to the conflicts it knows.
+    fn rerere(&self, root: &Path) -> Result<(), GitError> {
+        let mut command = self.git(root);
+        command.args(["-c", "rerere.enabled=true", "rerere"]);
+        self.logged(command, None).map(drop)
+    }
+
+    /// The text of the working tree file of `path` when it is a recorded
+    /// resolution: it holds no conflict and is the postimage of a rerere entry.
+    /// Git writes the postimage into the file when it applies a resolution, and the
+    /// file stays unmerged in the index until it is staged. Never records anything.
+    fn recorded_resolution(
+        &self,
+        root: &Path,
+        path: &str,
+    ) -> Result<Option<RecordedResolution>, GitError> {
+        let bytes = match std::fs::read(root.join(path)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(GitError(format!("cannot read {path}: {error}"))),
+        };
+        let mut command = self.git(root);
+        command.args(["rev-parse", "--git-path", "rr-cache"]);
+        let out = String::from_utf8_lossy(&Self::run(command)?).into_owned();
+        let cache = root.join(out.trim());
+        let entries = match std::fs::read_dir(&cache) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(GitError(format!("cannot read the rerere cache: {error}"))),
+        };
+        let recorded = entries.flatten().any(|entry| {
+            std::fs::read(entry.path().join("postimage")).is_ok_and(|postimage| postimage == bytes)
+        });
+        Ok(recorded
+            .then(|| String::from_utf8(bytes).ok())
+            .flatten()
+            .map(|text| RecordedResolution { text }))
     }
 }
 

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::conflict::ConflictFileRead;
+use crate::conflict::{ConflictFileRead, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
 use crate::grep::{GrepOptions, GrepResult};
@@ -445,11 +445,21 @@ pub enum CommandKind {
         path: String,
     },
     /// Writes `text` as the resolution of the conflicted file `path`, refused
-    /// while markers remain, then stages it. Human only, and recorded in the
-    /// command log. Answers `ConflictResolved`.
+    /// while markers remain, then stages it. `origins` holds who resolved each
+    /// hunk, in order; an older payload without it has none. Human only, and
+    /// recorded in the command log. Answers `ConflictResolved`.
     ResolveConflict {
         path: String,
         text: String,
+        #[serde(default)]
+        origins: Vec<HunkOrigin>,
+    },
+    /// Forgets the resolution Git recorded for the conflicted file `path` and
+    /// restores its conflict markers in the working tree. Refused when nothing is
+    /// recorded or the file is not conflicted. Human only, and recorded in the
+    /// command log. Answers `RecordedResolutionForgotten`.
+    ForgetRecordedResolution {
+        path: String,
     },
 }
 
@@ -808,6 +818,12 @@ pub enum Event {
     /// Answers `ResolveConflict`: the file is staged with the resolution. Follows
     /// the status, as after any stage.
     ConflictResolved {
+        id: OperationId,
+        path: String,
+    },
+    /// Answers `ForgetRecordedResolution`: the conflict markers are back in the
+    /// working tree file.
+    RecordedResolutionForgotten {
         id: OperationId,
         path: String,
     },
