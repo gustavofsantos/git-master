@@ -331,7 +331,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 78] = [
+const SPECS: [Spec; 79] = [
     spec(
         "file.stage",
         "Stage File",
@@ -872,6 +872,13 @@ const SPECS: [Spec; 78] = [
         ArgKind::ReviewComment,
         Category::WorkingCopy,
     ),
+    spec(
+        "file.resolve_conflict",
+        "Resolve Conflict",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
+    ),
 ];
 
 const fn spec(
@@ -972,6 +979,7 @@ pub enum Action {
     EditReviewComment,
     ShowLocalReview,
     OpenReviewComment,
+    ResolveConflict,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1019,12 +1027,35 @@ fn navigation_effect(action: Action, args: &Args) -> Effect {
     }
 }
 
+/// The rule of Resolve Conflict: an open repository and a listed file that is
+/// conflicted. Reading the conflict changes nothing, so a change in flight does not refuse it.
+fn resolve_conflict_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    if !ctx.repo_open {
+        return Err("No repository is open.");
+    }
+    if file_entry(args, ctx)?.conflicted {
+        Ok(())
+    } else {
+        Err("This file has no conflict.")
+    }
+}
+
 /// The rule of Reveal in File Manager: a repository is open and the file is in it.
 fn reveal_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
     if ctx.root.is_none() {
         return Err("No repository is open.");
     }
     file_entry(args, ctx).map(|_| ())
+}
+
+/// Resolve Conflict reads the file; the resolver's page opens when the answer comes.
+fn resolve_conflict_effect(args: &Args) -> Result<Effect, Reason> {
+    let Args::File(path) = args else {
+        return Err("No target for this action");
+    };
+    Ok(Effect::Send(vec![CommandKind::ReadConflict {
+        path: path.clone(),
+    }]))
 }
 
 /// Whether the action sets a preference of the window (the sidebar scope, the pictures).
@@ -1120,7 +1151,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 78] = [
+    pub const ALL: [Action; 79] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1199,6 +1230,7 @@ impl Action {
         Action::EditReviewComment,
         Action::ShowLocalReview,
         Action::OpenReviewComment,
+        Action::ResolveConflict,
     ];
 
     #[must_use]
@@ -1414,6 +1446,7 @@ impl Action {
             | Action::DeleteReviewComment
             | Action::EditReviewComment => review_entry_rule(self, args, ctx),
             Action::OpenReviewComment => open_target(args, ctx).map(|_| ()),
+            Action::ResolveConflict => resolve_conflict_rule(args, ctx),
             // The placeholders, refused above by `available`.
             _ => Err(NOT_AVAILABLE),
         }
@@ -1486,6 +1519,7 @@ impl Action {
             (Action::MoveFileToBranch | Action::MoveFileToWorktree, _) => {
                 move_effect(self, args, ctx)?
             }
+            (Action::ResolveConflict, _) => resolve_conflict_effect(args)?,
             (action, _) if action.opens_a_page() => navigation_effect(action, args),
             (action, _) if is_choice(action) => choice_effect(action),
             (Action::CopyCommitMessage, Args::Commit(text)) => Effect::CopyMessage(text.clone()),
@@ -4722,5 +4756,74 @@ mod tests {
         assert_eq!(SAME_BRANCH, "This is the branch you are on");
         assert_eq!(SAME_WORKTREE, "This is the worktree you are in");
         assert_eq!(MISSING_FOLDER, "the worktree folder is missing");
+    }
+
+    #[test]
+    fn resolve_conflict_is_enabled_only_for_a_conflicted_file_entry() {
+        let file = Args::File("a.txt".into());
+        let conflicted = [StatusEntry {
+            conflicted: true,
+            ..entry("a.txt", None, Some(Change::Modified))
+        }];
+        assert_eq!(
+            Action::ResolveConflict.enabled(&file, &ctx(&conflicted, "")),
+            Ok(())
+        );
+        let modified = [entry("a.txt", None, Some(Change::Modified))];
+        assert_eq!(
+            Action::ResolveConflict.enabled(&file, &ctx(&modified, "")),
+            Err("This file has no conflict.")
+        );
+        assert_eq!(
+            Action::ResolveConflict.enabled(&Args::File("gone.txt".into()), &ctx(&conflicted, "")),
+            Err("That file is not in the working copy")
+        );
+        assert_eq!(
+            Action::ResolveConflict.enabled(&Args::None, &ctx(&conflicted, "")),
+            Err("No target for this action")
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&conflicted, "")
+        };
+        assert_eq!(
+            Action::ResolveConflict.enabled(&file, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn resolve_conflict_reads_the_file_even_while_a_change_is_in_flight() {
+        let file = Args::File("a.txt".into());
+        let conflicted = [StatusEntry {
+            conflicted: true,
+            ..entry("a.txt", None, Some(Change::Modified))
+        }];
+        let busy = Context {
+            busy: Some("Wait for the repository to open."),
+            ..ctx(&conflicted, "")
+        };
+        assert_eq!(Action::ResolveConflict.enabled(&file, &busy), Ok(()));
+        assert_eq!(
+            Action::ResolveConflict.plan(&file, &ctx(&conflicted, "")),
+            Ok(Effect::Send(vec![CommandKind::ReadConflict {
+                path: "a.txt".into(),
+            }]))
+        );
+    }
+
+    #[test]
+    fn resolve_conflict_has_its_id_title_target_and_no_keys() {
+        assert_eq!(Action::ResolveConflict.id(), "file.resolve_conflict");
+        assert_eq!(Action::ResolveConflict.spec().title, "Resolve Conflict");
+        assert_eq!(Action::ResolveConflict.spec().args, ArgKind::File);
+        assert_eq!(
+            Action::ResolveConflict.spec().category,
+            Category::WorkingCopy
+        );
+        assert_eq!(Action::ResolveConflict.spec().shortcut, None);
+        assert!(Action::ResolveConflict.available());
+        assert!(!Action::ResolveConflict.destructive());
+        assert!(!Action::ResolveConflict.opens_dialog());
     }
 }

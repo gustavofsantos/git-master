@@ -11,6 +11,7 @@ use crate::branch_delete::Deleting;
 use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
 use crate::code_page::CodePage;
+use crate::conflict_resolver::ResolverState;
 use crate::file_discard::Discarding;
 use crate::history_graph::GraphLayout;
 use crate::hook_run::Hooks;
@@ -134,6 +135,10 @@ pub struct Model {
     pub review_write: ReviewWrite,
     /// The Local review page: its filter, the selected comment and its texts (B4d).
     pub local_review: LocalReview,
+    /// The conflict resolver of the file read last: its panes, choices and staged note (C3b).
+    pub conflict: Option<ResolverState>,
+    /// The read that opened the resolver, until the view takes it and shows the page.
+    conflict_opened: Option<OperationId>,
     /// Moving a changed file to a branch or a worktree: the drag, the hover check,
     /// the popover and the move in flight (D109).
     pub move_file: MoveFile,
@@ -1031,9 +1036,19 @@ impl Model {
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
-            | Event::WorkflowMessageSuggested { .. }
-            | Event::ConflictRead { .. }
-            | Event::ConflictResolved { .. } => None,
+            | Event::WorkflowMessageSuggested { .. } => None,
+            // The read opens the resolver; the staged note is the resolver's own.
+            Event::ConflictRead { id, read } => {
+                self.conflict = Some(ResolverState::new(&read));
+                self.conflict_opened = Some(id);
+                None
+            }
+            Event::ConflictResolved { .. } => {
+                if let Some(conflict) = self.conflict.as_mut() {
+                    conflict.on_event(&event);
+                }
+                None
+            }
         }
     }
 
@@ -1085,9 +1100,17 @@ impl Model {
         self.switched.take()
     }
 
+    /// The read that opened the resolver since the view last asked, if one did. The
+    /// view then shows the Conflicts page; it is taken, so it acts once.
+    pub fn take_conflict_opened(&mut self) -> Option<OperationId> {
+        self.conflict_opened.take()
+    }
+
     /// Clears what belonged to the repository being left. The status stays
     /// until the new one replaces it.
     fn reset_for_repo(&mut self) {
+        self.conflict = None;
+        self.conflict_opened = None;
         self.selected = None;
         self.diffs = None;
         self.notice = None;
@@ -2817,5 +2840,71 @@ mod move_file_tests {
         assert!(model.move_file.owns(OperationId(10)));
         let _ = model.apply(done(11));
         assert!(model.move_file.owns(OperationId(10)));
+    }
+
+    fn conflict_read(path: &str, id: u64) -> Event {
+        use gm_schema::{ConflictFileRead, ConflictOperation, ConflictSide};
+        let side = |branch: &str, role: &str| ConflictSide {
+            branch: branch.into(),
+            role: role.into(),
+            subject: "Add the parser".into(),
+        };
+        Event::ConflictRead {
+            id: OperationId(id),
+            read: ConflictFileRead {
+                path: path.into(),
+                operation: ConflictOperation::Merge,
+                left: side("main", "current branch"),
+                right: side("feature/x", "merged branch"),
+                text: "<<<<<<< main\nleft\n=======\nright\n>>>>>>> feature/x\n".into(),
+                has_base: false,
+            },
+        }
+    }
+
+    #[test]
+    fn a_conflict_read_opens_the_resolver_on_its_file_and_asks_for_the_page() {
+        let mut model = Model::default();
+        let _ = model.apply(conflict_read("a.txt", 3));
+        let conflict = model.conflict.as_ref().expect("the resolver is open");
+        assert_eq!(conflict.path(), "a.txt");
+        assert_eq!(conflict.counter_label(), "0 of 1 conflict resolved");
+        assert_eq!(model.take_conflict_opened(), Some(OperationId(3)));
+        assert_eq!(
+            model.take_conflict_opened(),
+            None,
+            "the page is asked for once"
+        );
+    }
+
+    #[test]
+    fn a_resolved_event_marks_only_the_resolvers_own_file_as_staged() {
+        let mut model = Model::default();
+        let _ = model.apply(conflict_read("a.txt", 3));
+        let _ = model.apply(Event::ConflictResolved {
+            id: OperationId(4),
+            path: "b.txt".into(),
+        });
+        let conflict = model.conflict.as_ref().expect("the resolver is open");
+        assert!(!conflict.is_staged());
+        assert_eq!(conflict.applied_note(), None);
+        let _ = model.apply(Event::ConflictResolved {
+            id: OperationId(5),
+            path: "a.txt".into(),
+        });
+        let conflict = model.conflict.as_ref().expect("the resolver is open");
+        assert!(conflict.is_staged());
+        assert_eq!(conflict.applied_note(), Some("Resolved and staged."));
+    }
+
+    #[test]
+    fn a_resolved_event_with_no_resolver_open_is_ignored() {
+        let mut model = Model::default();
+        let _ = model.apply(Event::ConflictResolved {
+            id: OperationId(4),
+            path: "a.txt".into(),
+        });
+        assert!(model.conflict.is_none());
+        assert_eq!(model.error, None);
     }
 }

@@ -101,9 +101,16 @@ impl ResolverState {
         &self.path
     }
 
+    /// The operation's name as the header shows it.
     #[must_use]
-    pub(crate) fn operation(&self) -> ConflictOperation {
-        self.operation
+    pub(crate) fn operation_label(&self) -> &'static str {
+        match self.operation {
+            ConflictOperation::Merge => "Merge",
+            ConflictOperation::Rebase => "Rebase",
+            ConflictOperation::CherryPick => "Cherry-pick",
+            ConflictOperation::Revert => "Revert",
+            ConflictOperation::Unknown => "Conflict",
+        }
     }
 
     /// The index of the conflict the panes point at.
@@ -126,6 +133,12 @@ impl ResolverState {
     #[must_use]
     pub(crate) fn is_staged(&self) -> bool {
         self.resolved
+    }
+
+    /// Whether the Result pane parses, so its conflicts can be listed.
+    #[must_use]
+    pub(crate) fn is_readable(&self) -> bool {
+        matches!(self.doc, Doc::Parsed(_))
     }
 
     /// How many conflicts the Result pane holds, resolved or not. A text that
@@ -183,6 +196,13 @@ impl ResolverState {
                 self.applied_note = None;
             }
             Doc::Unreadable { .. } => self.applied_note = Some(UNREADABLE_CHOICE.to_owned()),
+        }
+    }
+
+    /// Points the panes at the conflict `index`, when there is one.
+    pub(crate) fn select(&mut self, index: usize) {
+        if index < self.conflict_count() {
+            self.selected = index;
         }
     }
 
@@ -293,12 +313,15 @@ impl ResolverState {
         }
     }
 
-    /// The path and text of the `ResolveConflict` command, when Apply is ready.
-    #[must_use]
-    pub(crate) fn resolve_command(&self) -> Option<(String, String)> {
+    /// Apply: the path and text of the `ResolveConflict` command when every
+    /// conflict is resolved. Otherwise nothing is sent, and the note says what remains.
+    pub(crate) fn apply(&mut self) -> Option<(String, String)> {
         match self.apply_request() {
             ApplyDecision::Ready { text } => Some((self.path.clone(), text)),
-            ApplyDecision::Pending { .. } => None,
+            ApplyDecision::Pending { message } => {
+                self.applied_note = Some(message);
+                None
+            }
         }
     }
 
@@ -403,10 +426,18 @@ mod tests {
     const WITH_BASE: &str = "<<<<<<< main\nleft\n||||||| merged common ancestors\nbase text\n=======\nright\n>>>>>>> feature/x\n";
 
     #[test]
+    fn a_result_that_does_not_parse_is_not_readable() {
+        let mut state = ResolverState::new(&read(TWO));
+        assert!(state.is_readable());
+        state.set_result_text("<<<<<<< x\n".to_owned());
+        assert!(!state.is_readable());
+    }
+
+    #[test]
     fn the_counter_counts_resolved_conflicts_of_the_result() {
         let mut state = ResolverState::new(&read(TWO));
         assert_eq!(state.path(), "src/lib.rs");
-        assert_eq!(state.operation(), ConflictOperation::Merge);
+        assert_eq!(state.operation_label(), "Merge");
         assert_eq!(state.counter_label(), "0 of 2 conflicts resolved");
         state.choose(0, Resolution::Left);
         assert_eq!(state.counter_label(), "1 of 2 conflicts resolved");
@@ -546,7 +577,7 @@ mod tests {
             state.apply_request(),
             ApplyDecision::Pending { .. }
         ));
-        assert_eq!(state.resolve_command(), None);
+        assert_eq!(state.apply(), None);
         state.choose(0, Resolution::Left);
         assert_eq!(state.result_text(), broken);
         assert!(state.applied_note().is_some());
@@ -572,7 +603,11 @@ mod tests {
                     .to_owned()
             }
         );
-        assert_eq!(state.resolve_command(), None);
+        assert_eq!(state.apply(), None);
+        assert_eq!(
+            state.applied_note(),
+            Some("1 conflict is still unresolved. Resolve it or edit the result.")
+        );
         state.choose(1, Resolution::Right);
         let expected = "top\nleft one\nmiddle\nright two\nend\n";
         assert_eq!(
@@ -582,7 +617,7 @@ mod tests {
             }
         );
         assert_eq!(
-            state.resolve_command(),
+            state.apply(),
             Some(("src/lib.rs".to_owned(), expected.to_owned()))
         );
     }
@@ -601,7 +636,7 @@ mod tests {
     #[test]
     fn an_unreadable_file_keeps_its_text_and_never_panics() {
         let text = "<<<<<<< main\nleft\n";
-        let state = ResolverState::new(&read(text));
+        let mut state = ResolverState::new(&read(text));
         assert_eq!(state.result_text(), text);
         assert_eq!(state.conflict_count(), 0);
         assert!(state.hunk_views().is_empty());
@@ -610,7 +645,27 @@ mod tests {
             panic!("an unreadable file is never ready");
         };
         assert!(message.contains("line 1"), "{message}");
-        assert_eq!(state.resolve_command(), None);
+        assert_eq!(state.apply(), None);
+        assert_eq!(state.applied_note(), Some(message.as_str()));
+    }
+
+    #[test]
+    fn select_points_at_a_conflict_that_exists_and_ignores_the_rest() {
+        let mut state = ResolverState::new(&read(THREE));
+        state.select(2);
+        assert_eq!(state.selected(), 2);
+        state.select(9);
+        assert_eq!(state.selected(), 2);
+    }
+
+    #[test]
+    fn the_operation_has_a_name_for_the_header() {
+        let mut state = ResolverState::new(&read(TWO));
+        assert_eq!(state.operation_label(), "Merge");
+        state.operation = ConflictOperation::CherryPick;
+        assert_eq!(state.operation_label(), "Cherry-pick");
+        state.operation = ConflictOperation::Unknown;
+        assert_eq!(state.operation_label(), "Conflict");
     }
 
     #[test]

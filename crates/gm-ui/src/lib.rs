@@ -14,8 +14,6 @@ mod changes;
 mod code_page;
 mod command_panel;
 mod composer;
-// Test-only until the resolver panes (C3b) use it: nothing in the binary reads it yet.
-#[cfg(test)]
 mod conflict_resolver;
 mod context_menu;
 mod diff_pane;
@@ -49,6 +47,7 @@ mod review;
 mod review_composer;
 mod shell_code;
 mod shell_commit;
+mod shell_conflicts;
 mod shell_history;
 mod shell_list;
 mod shell_reflog;

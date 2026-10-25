@@ -105,6 +105,8 @@ pub(crate) enum Screen {
     Reflog,
     /// The review comments of the repository, with one comment's Before and After (B4d).
     LocalReview,
+    /// The conflict resolver of one conflicted file: the two sides, the result and Apply (C3b).
+    Conflicts,
 }
 
 pub struct StatusView {
@@ -171,6 +173,8 @@ pub struct StatusView {
     pub(crate) workflow_review_dialog: Option<WorkflowReviewDialog>,
     /// The editor of the Workflows page's Script tab; its text is the page's buffer.
     pub(crate) workflow_source: Entity<TextArea>,
+    /// The Result pane of the conflict resolver; its text is the resolver's result (C3b).
+    pub(crate) conflict_result: Entity<TextArea>,
     /// The delete-branch dialog, while it is open.
     pub(crate) delete_dialog: Option<DeleteDialog>,
     /// The discard dialog, while it is open.
@@ -264,6 +268,14 @@ impl StatusView {
                     ..TextStyle::default()
                 })
         });
+        let conflict_result = cx.new(|cx| {
+            TextArea::new("Result", cx)
+                .with_lines(24, usize::MAX)
+                .with_style(TextStyle {
+                    mono: true,
+                    ..TextStyle::default()
+                })
+        });
         // The saved preferences are read here, before the first frame, so the
         // commit diff opens in the layout the user last chose (D40).
         let settings_store =
@@ -289,6 +301,9 @@ impl StatusView {
             }),
             cx.observe(&workflow_source, |this, _, cx| {
                 this.on_workflow_source_changed(cx);
+            }),
+            cx.observe(&conflict_result, |this, _, cx| {
+                this.on_conflict_result_changed(cx);
             }),
             cx.subscribe_in(
                 &branch_filter,
@@ -383,6 +398,7 @@ impl StatusView {
             workflow_inputs_dialog: None,
             workflow_review_dialog: None,
             workflow_source,
+            conflict_result,
             delete_dialog: None,
             discard_dialog: None,
             move_popover: None,
@@ -478,6 +494,10 @@ impl StatusView {
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
+        // A read that opened the resolver shows its page.
+        if self.model.take_conflict_opened().is_some() {
+            self.show_conflicts(cx);
+        }
         self.follow_review(review_listed, reload, cx);
         if stash_stale {
             self.request_stash_list();
@@ -656,6 +676,7 @@ impl StatusView {
             .children((self.screen == Screen::Stashes).then(|| self.stashes_page(cx)))
             .children((self.screen == Screen::Reflog).then(|| self.reflog_page(cx)))
             .children((self.screen == Screen::LocalReview).then(|| self.local_review_page(cx)))
+            .children((self.screen == Screen::Conflicts).then(|| self.conflicts_page(cx)))
     }
 
     fn head_name(&self) -> Option<String> {

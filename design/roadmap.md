@@ -538,6 +538,17 @@ Done when: a complete restack runs, can be undone, and survives closing the app.
 
 Done when: the conflicts of a restack are resolved without leaving the app.
 
+**Status:** C1 to C3 built (parser, engine commands `ReadConflict` and `ResolveConflict`, the resolver page wired from the Working Copy's file menu). Nothing seen in a window; no smoke scenario, at the author's request.
+
+Known gaps:
+
+- The Result pane re-shapes its whole text on each change, and the conflict list is not virtualized, so large files with many conflicts are slow.
+- No count of the non-conflicting changes Git applied on its own ("N changes applied").
+- No keyboard shortcuts in the resolver; Escape and focus behaviour not seen in a window; the dark theme not seen.
+- The restack's **Resolve conflict** entry is not built, and the restack itself is not available.
+- The unified or stacked layout (Q9), rerere, script suggestions and the who-resolved log are not built.
+- The rebase's left-side label names `onto`, while stage 2 is the partially rebased HEAD.
+
 ## Slice 7: MCP
 
 - Server in the app, plus a socket shim.

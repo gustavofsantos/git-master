@@ -114,7 +114,7 @@ pub(crate) fn branch_items(name: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
 pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     let target = Args::File(path.to_owned());
     let item = |action, group| Item::new(action, target.clone(), group, ctx);
-    vec![
+    let mut items = vec![
         item(Action::StageFile, 0),
         item(Action::UnstageFile, 0),
         item(Action::DiscardFile, 1),
@@ -124,7 +124,16 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         item(Action::MoveFileToWorktree, 2),
         item(Action::CopyFilePath, 2),
         item(Action::RevealFile, 2),
-    ]
+    ];
+    // Only a conflicted file lists its resolver, which leads the menu.
+    if ctx
+        .entries
+        .iter()
+        .any(|entry| entry.path == path && entry.conflicted)
+    {
+        items.insert(0, item(Action::ResolveConflict, 0));
+    }
+    items
 }
 
 /// The menu of a stash row: apply and pop, then drop in its own group. Drop
@@ -821,6 +830,18 @@ mod tests {
             Err("Nothing unstaged in this file")
         );
         assert_eq!(find(&staged, Action::UnstageFile).state, Ok(()));
+    }
+
+    #[test]
+    fn file_menu_lists_resolve_conflict_first_and_only_for_a_conflicted_file() {
+        let mut conflicted = entry("a.txt", None, Some(Change::Modified));
+        conflicted.conflicted = true;
+        let entries = [conflicted, entry("b.txt", None, Some(Change::Modified))];
+        let items = file_items("a.txt", &ctx(&entries));
+        assert_eq!(items[0].label(), "Resolve Conflict");
+        assert_eq!(items[0].state, Ok(()));
+        let plain = file_items("b.txt", &ctx(&entries));
+        assert!(plain.iter().all(|item| item.label() != "Resolve Conflict"));
     }
 
     #[test]
