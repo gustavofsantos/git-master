@@ -38,9 +38,10 @@ pub enum Language {
     Bash,
     Html,
     Css,
+    Clojure,
 }
 
-const LANGUAGES: [Language; 17] = [
+const LANGUAGES: [Language; 18] = [
     Language::Rust,
     Language::Python,
     Language::Go,
@@ -58,6 +59,7 @@ const LANGUAGES: [Language; 17] = [
     Language::Bash,
     Language::Html,
     Language::Css,
+    Language::Clojure,
 ];
 
 impl Language {
@@ -102,6 +104,8 @@ impl Language {
             Language::Html => Some(tree_sitter_html::LANGUAGE.into()),
             #[cfg(feature = "syntax-css")]
             Language::Css => Some(tree_sitter_css::LANGUAGE.into()),
+            #[cfg(feature = "syntax-clojure-orchard")]
+            Language::Clojure => Some(tree_sitter_clojure_orchard::LANGUAGE.into()),
             #[allow(unreachable_patterns)]
             _ => None,
         }
@@ -133,6 +137,7 @@ impl Language {
             Language::Bash => include_str!("../queries/bash/highlights.scm").to_owned(),
             Language::Html => include_str!("../queries/html/highlights.scm").to_owned(),
             Language::Css => include_str!("../queries/css/highlights.scm").to_owned(),
+            Language::Clojure => include_str!("../queries/clojure/highlights.scm").to_owned(),
         }
     }
 }
@@ -170,6 +175,7 @@ pub fn language_for_path(path: &str) -> Option<Language> {
                 "sh" | "bash" | "zsh" => Language::Bash,
                 "html" | "htm" => Language::Html,
                 "css" => Language::Css,
+                "clj" | "cljs" | "cljc" | "cljd" | "edn" | "bb" => Language::Clojure,
                 _ => return None,
             }
         }
@@ -181,6 +187,10 @@ pub fn language_for_path(path: &str) -> Option<Language> {
 /// `@variable` is an identifier, and coloring every one would drown the code.
 #[must_use]
 pub fn role_for_capture(name: &str) -> Option<SyntaxRole> {
+    // A capture named `_x` only feeds a predicate of its pattern.
+    if name.starts_with('_') {
+        return None;
+    }
     match name {
         "variable.builtin" | "variable.parameter" => return Some(SyntaxRole::Variable),
         "function.macro" => return Some(SyntaxRole::Attribute),
@@ -455,7 +465,7 @@ mod tests {
             };
             for (name, role) in compiled.query.capture_names().iter().zip(&compiled.roles) {
                 assert!(
-                    role.is_some() || silent.contains(name),
+                    role.is_some() || name.starts_with('_') || silent.contains(name),
                     "{language:?}: capture @{name} has no role"
                 );
             }
@@ -551,6 +561,10 @@ mod tests {
             (".bashrc", Language::Bash),
             ("index.html", Language::Html),
             ("site.css", Language::Css),
+            ("core.clj", Language::Clojure),
+            ("app.cljs", Language::Clojure),
+            ("shared.cljc", Language::Clojure),
+            ("deps.edn", Language::Clojure),
         ];
         for (path, language) in cases {
             assert_eq!(language_for_path(path), Some(language), "{path}");
@@ -680,6 +694,32 @@ mod tests {
                 .iter()
                 .any(|n| n.starts_with('4'))
         );
+    }
+
+    #[test]
+    fn clojure_is_colored_by_role() {
+        let text = ";; note\n(ns app.core (:require [clojure.string :as str]))\n\n(defn greet\n  [name]\n  (str \"hi \" name 42 true nil))\n\n(def ^:private limit 10)\n#_(ignored)\n";
+        let spans = run(Language::Clojure, text);
+        // This grammar's comment node ends after the line break.
+        assert_eq!(
+            first(text, &spans, SyntaxRole::Comment).map(str::trim_end),
+            Some(";; note")
+        );
+        // Only the `#_` marker: the form inside keeps its own colors, as the smaller range wins.
+        assert!(texts(text, &spans, SyntaxRole::Comment).contains(&"#_"));
+        let keywords = texts(text, &spans, SyntaxRole::Keyword);
+        for word in ["ns", "defn", "def"] {
+            assert!(keywords.contains(&word), "{word}: {keywords:?}");
+        }
+        assert!(texts(text, &spans, SyntaxRole::Function).contains(&"greet"));
+        assert!(texts(text, &spans, SyntaxRole::Function).contains(&"str"));
+        assert!(texts(text, &spans, SyntaxRole::Type).contains(&"app.core"));
+        assert!(texts(text, &spans, SyntaxRole::Constant).contains(&"limit"));
+        assert!(texts(text, &spans, SyntaxRole::Constant).contains(&":require"));
+        assert!(texts(text, &spans, SyntaxRole::Constant).contains(&"nil"));
+        assert!(texts(text, &spans, SyntaxRole::String).contains(&"\"hi \""));
+        assert!(texts(text, &spans, SyntaxRole::Number).contains(&"42"));
+        assert!(texts(text, &spans, SyntaxRole::Attribute).contains(&"^:private"));
     }
 
     #[test]

@@ -122,6 +122,7 @@ The viewer colours code by language. The text appears first, and the colours fol
 | YAML | `.yml`, `.yaml` |
 | HTML | `.html`, `.htm` |
 | CSS | `.css` |
+| Clojure | `.clj`, `.cljs`, `.cljc`, `.cljd`, `.edn`, `.bb` |
 
 A header with the `.h` extension is read as C, which also reads most C++ headers.
 

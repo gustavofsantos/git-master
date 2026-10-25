@@ -24,12 +24,14 @@ and was then corrected for GitMaster:
 | `bash/` | `tree-sitter-bash` 0.25.1 | MIT, as declared in the crate manifest |
 | `html/` | `tree-sitter-html` 0.23.2 | MIT, as declared in the crate manifest |
 | `css/` | `tree-sitter-css` 0.25.0 | MIT, as declared in the crate manifest |
+| `clojure/` | `tree-sitter-clojure-orchard` 0.2.8 (its literals, comments and quote operators; the rest is written for GitMaster) | CC0 1.0, public domain |
 
 TypeScript's query only adds to JavaScript's, and C++'s to C's, so `syntax.rs` layers them:
 JavaScript then TypeScript (for TSX: JavaScript, JSX, then TypeScript), and C then C++.
 
 Rules for a query:
 
+- A capture named `_x` is a helper for a predicate (`#match?`) of its pattern and paints nothing.
 - A capture name maps to a role by its dotted name (`role_for_capture`). A name with no role
   paints nothing; a test lists the ones that are silent on purpose.
 - Where captures overlap, the smaller range wins, and of equal ranges the later pattern.

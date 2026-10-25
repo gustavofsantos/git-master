@@ -40,6 +40,7 @@ tree-sitter-yaml = "0.7"
 tree-sitter-bash = "0.25"
 tree-sitter-html = "0.23"
 tree-sitter-css = "0.25"
+tree-sitter-clojure-orchard = "0.2"
 mlua = { version = "0.11", features = ["luau", "send", "serialize"] }
 gm-schema = { path = "crates/gm-schema" }
 gm-core = { path = "crates/gm-core" }
