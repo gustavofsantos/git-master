@@ -971,6 +971,9 @@ impl Engine {
             }
             CommandKind::CancelHook { run } => self.cancel_hook(*run),
             CommandKind::StageAll => self.stage_all(id),
+            CommandKind::ReadConflict { .. } | CommandKind::ResolveConflict { .. } => {
+                self.conflict_command(id, actor, kind)
+            }
             CommandKind::ListWorkflows
             | CommandKind::RunWorkflow { .. }
             | CommandKind::ReviewWorkflow { .. }
@@ -1973,6 +1976,37 @@ impl Engine {
         Ok(vec![Event::StashesListed { id, stashes }])
     }
 
+    /// The conflict commands (D114). A read answers with the file's stages merged
+    /// into markers. The resolution is human only and changes the index.
+    fn conflict_command(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        match kind {
+            CommandKind::ReadConflict { path } => {
+                let root = self.open_root()?;
+                let read = self.git.read_conflict(&root, path).map_err(|e| e.0)?;
+                Ok(vec![Event::ConflictRead { id, read }])
+            }
+            CommandKind::ResolveConflict { path, text } => {
+                only_a_human(actor, "resolve a conflict")?;
+                let root = self.open_root()?;
+                self.git
+                    .resolve_conflict(&root, path, text)
+                    .map_err(|e| e.0)?;
+                let mut events = self.reload_status(id, &root)?;
+                events.push(Event::ConflictResolved {
+                    id,
+                    path: path.clone(),
+                });
+                Ok(events)
+            }
+            _ => Err("not a conflict command".to_owned()),
+        }
+    }
+
     /// The stash writes (B2, D94). Human only. An apply, a pop or a drop first
     /// checks that `stash@{index}` still is the stash the human listed, so a
     /// stale index never acts on another stash.
@@ -2806,6 +2840,7 @@ impl Engine {
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }
                 | CommandKind::PreviewMoveChanges { .. }
+                | CommandKind::ReadConflict { .. }
         ) {
             self.log.push(LogEntry {
                 id: op.id,
@@ -2948,7 +2983,7 @@ mod tests {
     use super::*;
     use crate::GitError;
     use crate::fake::FakeGit;
-    use gm_schema::{RepoStatus, WorktreeMode};
+    use gm_schema::{ConflictFileRead, RepoStatus, WorktreeMode};
     use proptest::prelude::*;
 
     fn engine() -> Engine {
@@ -3920,6 +3955,82 @@ mod tests {
             _ => None,
         });
         assert_eq!(listed, Some(1));
+    }
+
+    #[test]
+    fn a_conflict_read_is_answered_and_never_logged() {
+        let (mut engine, fake) = stash_engine();
+        let read = ConflictFileRead {
+            path: "a.txt".into(),
+            operation: gm_schema::ConflictOperation::Merge,
+            left: gm_schema::ConflictSide {
+                branch: "main".into(),
+                role: "current branch".into(),
+                subject: "x".into(),
+            },
+            right: gm_schema::ConflictSide {
+                branch: "feature".into(),
+                role: "merged branch".into(),
+                subject: "y".into(),
+            },
+            text: "<<<<<<< main\n=======\n>>>>>>> feature\n".into(),
+            has_base: false,
+        };
+        fake.set_conflict(Ok(read.clone()));
+        let logged = engine.log().len();
+        let events = engine.handle(
+            OperationId(2),
+            &command(CommandKind::ReadConflict {
+                path: "a.txt".into(),
+            }),
+        );
+        assert_eq!(failure(&events), None);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::ConflictRead { read: got, .. } if *got == read
+        )));
+        assert_eq!(engine.log().len(), logged);
+        assert!(fake.writes().is_empty());
+    }
+
+    #[test]
+    fn a_conflict_resolution_is_logged_and_only_a_human_may_make_it() {
+        let (mut engine, fake) = stash_engine();
+        let agent = Actor::Agent {
+            name: "agent".into(),
+        };
+        let events = engine.handle(
+            OperationId(2),
+            &Command {
+                actor: agent,
+                kind: CommandKind::ResolveConflict {
+                    path: "a.txt".into(),
+                    text: "ok\n".into(),
+                },
+            },
+        );
+        assert!(failure(&events).is_some());
+        assert!(fake.writes().is_empty());
+
+        let events = engine.handle(
+            OperationId(3),
+            &command(CommandKind::ResolveConflict {
+                path: "a.txt".into(),
+                text: "ok\n".into(),
+            }),
+        );
+        assert_eq!(failure(&events), None);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::ConflictResolved { path, .. } if path == "a.txt"
+        )));
+        assert_eq!(fake.writes(), ["resolve_conflict"]);
+        assert!(
+            engine
+                .log()
+                .iter()
+                .any(|entry| matches!(entry.kind, CommandKind::ResolveConflict { .. }))
+        );
     }
 
     #[test]

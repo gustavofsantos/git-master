@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use gm_schema::{
-    BranchEntry, CommitDetail, CommitFile, CommitSummary, FileDiff, GrepResult, History,
-    ReflogEntry, RepoStatus, StashEntry, WorktreeEntry, WorktreeMode,
+    BranchEntry, CommitDetail, CommitFile, CommitSummary, ConflictFileRead, FileDiff, GrepResult,
+    History, ReflogEntry, RepoStatus, StashEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::file_index::FileIndex;
@@ -41,6 +41,7 @@ pub struct FakeGit {
     writes: Arc<Mutex<Vec<&'static str>>>,
     stashes: Arc<Mutex<Result<Vec<StashEntry>, GitError>>>,
     reflog: Arc<Mutex<Result<Vec<ReflogEntry>, GitError>>>,
+    conflict: Arc<Mutex<Result<ConflictFileRead, GitError>>>,
 }
 
 impl FakeGit {
@@ -64,6 +65,7 @@ impl FakeGit {
             writes: Arc::new(Mutex::new(Vec::new())),
             stashes: Arc::new(Mutex::new(Ok(Vec::new()))),
             reflog: Arc::new(Mutex::new(Ok(Vec::new()))),
+            conflict: Arc::new(Mutex::new(Err(GitError("no conflict is set".into())))),
         }
     }
 
@@ -111,6 +113,15 @@ impl FakeGit {
     /// If another thread panicked while holding the stashes lock.
     pub fn set_stashes(&self, stashes: Result<Vec<StashEntry>, GitError>) {
         *self.stashes.lock().unwrap() = stashes;
+    }
+
+    /// The answer of the next `read_conflict`.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the conflict lock.
+    pub fn set_conflict(&self, read: Result<ConflictFileRead, GitError>) {
+        *self.conflict.lock().unwrap() = read;
     }
 
     /// What the reflog reads answer: the entries, sliced by `skip` and `limit`.
@@ -298,6 +309,15 @@ impl GitPort for FakeGit {
 
     fn stage_all(&self, _root: &Path) -> Result<(), GitError> {
         self.writes.lock().unwrap().push("stage_all");
+        Ok(())
+    }
+
+    fn read_conflict(&self, _root: &Path, _path: &str) -> Result<ConflictFileRead, GitError> {
+        self.conflict.lock().unwrap().clone()
+    }
+
+    fn resolve_conflict(&self, _root: &Path, _path: &str, _text: &str) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("resolve_conflict");
         Ok(())
     }
 

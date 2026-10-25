@@ -3,9 +3,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
-    BranchEntry, CommitDetail, CommitFile, DiffSide, FileDiff, GrepResult, HookScope, HunkId,
-    MergedBranch, PruneCandidate, ReflogEntry, RepoStatus, StageTarget, StashEntry, WorktreeEntry,
-    WorktreeMode,
+    BranchEntry, CommitDetail, CommitFile, ConflictFileRead, ConflictOperation, DiffSide, FileDiff,
+    GrepResult, HookScope, HunkId, MergedBranch, PruneCandidate, ReflogEntry, RepoStatus,
+    StageTarget, StashEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::command_log::CommandLog;
@@ -558,6 +558,32 @@ pub trait GitPort: Send {
     fn staged_diff(&self, _root: &Path) -> Result<String, GitError> {
         Err(GitError(
             "staged diff is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The operation that stopped on conflicts (D114), from the state files Git
+    /// keeps in the git directory of the worktree at `root`. `Unknown` when none
+    /// is there. Never records anything.
+    fn conflict_operation(&self, _root: &Path) -> Result<ConflictOperation, GitError> {
+        Err(GitError(
+            "conflict resolution is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Reads the conflicted file `path` for the resolver: its three stages merged
+    /// into zdiff3 text, with the sides named by role. Never records anything.
+    fn read_conflict(&self, _root: &Path, _path: &str) -> Result<ConflictFileRead, GitError> {
+        Err(GitError(
+            "conflict resolution is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Writes `text` as the content of the conflicted file `path` and stages it.
+    /// Refused while `text` still holds conflict markers. Recorded in the command
+    /// log: it changes the index.
+    fn resolve_conflict(&self, _root: &Path, _path: &str, _text: &str) -> Result<(), GitError> {
+        Err(GitError(
+            "conflict resolution is not supported by this adapter".into(),
         ))
     }
 

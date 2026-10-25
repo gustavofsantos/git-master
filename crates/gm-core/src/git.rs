@@ -10,15 +10,17 @@ use std::time::{Duration, Instant};
 
 use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
-    BranchEntry, BranchInfo, Change, CommitFile, DiffSide, FileDiff, HookScope, Hunk, HunkId,
-    MergedBranch, PruneCandidate, ReflogEntry, RepoStatus, StageTarget, StashEntry, StatusEntry,
-    WorktreeEntry, WorktreeMode,
+    BranchEntry, BranchInfo, Change, CommitFile, ConflictFileRead, ConflictOperation, DiffSide,
+    FileDiff, HookScope, Hunk, HunkId, MergedBranch, PruneCandidate, ReflogEntry, RepoStatus,
+    StageTarget, StashEntry, StatusEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::branch;
 use crate::command_log::{CommandLog, CommandRecord, Source, bounded_text};
 use crate::commit_detail;
 use crate::commit_diff;
+use crate::conflict;
+use crate::conflict_sides::{self, SideCommit, SideFacts};
 use crate::diff::{hunk_patch, parse_unified};
 use crate::file_index::FileIndex;
 use crate::grep::{Collector, Flow, GrepRequest};
@@ -1644,6 +1646,364 @@ impl GitPort for SubprocessGit {
             "--no-textconv",
         ]);
         Ok(String::from_utf8_lossy(&Self::run(command)?).into_owned())
+    }
+
+    fn conflict_operation(&self, root: &Path) -> Result<ConflictOperation, GitError> {
+        self.operation_in_progress(root)
+    }
+
+    /// Merges the stages of `path` with `git merge-file`, so the text does not
+    /// depend on `merge.conflictStyle`. It is built from the stages, not the
+    /// working tree: edits already made in the file are not in it.
+    fn read_conflict(&self, root: &Path, path: &str) -> Result<ConflictFileRead, GitError> {
+        check_worktree_path(root, path)?;
+        let entries = self.unmerged_entries(root, path)?;
+        if entries.is_empty() {
+            return Err(GitError(format!("{path} is not conflicted")));
+        }
+        let stage = |number: u8| entries.iter().find(|entry| entry.stage == number);
+        let (Some(ours), Some(theirs)) = (stage(2), stage(3)) else {
+            return Err(GitError(format!(
+                "{path} is a conflict with a deleted side; the resolver handles only files edited on both sides"
+            )));
+        };
+        let base = stage(1);
+        let ours_content = self.blob(root, &ours.oid)?;
+        let theirs_content = self.blob(root, &theirs.oid)?;
+        let base_content = match base {
+            Some(entry) => self.blob(root, &entry.oid)?,
+            None => Vec::new(),
+        };
+        if [&ours_content, &theirs_content, &base_content]
+            .iter()
+            .any(|content| looks_binary(content))
+        {
+            return Err(GitError(format!(
+                "{path} is binary; the resolver handles text files only"
+            )));
+        }
+        let operation = self.operation_in_progress(root)?;
+        let facts = self.side_facts(root, operation)?;
+        let labels = conflict_sides::conflict_labels(&facts);
+        let text = self.merge_with_markers(
+            root,
+            &base_content,
+            &ours_content,
+            &theirs_content,
+            [&labels.left.branch, "base", &labels.right.branch],
+        )?;
+        Ok(ConflictFileRead {
+            path: path.to_owned(),
+            operation,
+            left: labels.left,
+            right: labels.right,
+            text,
+            has_base: base.is_some(),
+        })
+    }
+
+    /// Refuses text that still holds conflict markers, then writes it into the
+    /// working tree file (atomically, keeping its mode) and stages it.
+    fn resolve_conflict(&self, root: &Path, path: &str, text: &str) -> Result<(), GitError> {
+        check_worktree_path(root, path)?;
+        let entries = self.unmerged_entries(root, path)?;
+        if entries.is_empty() {
+            return Err(GitError(format!("{path} is already resolved")));
+        }
+        match conflict::parse(text) {
+            Ok(doc) if doc.conflict_count() == 0 => {}
+            Ok(doc) => {
+                return Err(GitError(format!(
+                    "{path} still has {} conflict(s) to resolve",
+                    doc.conflict_count()
+                )));
+            }
+            Err(error) => {
+                return Err(GitError(format!(
+                    "{path} still has a conflict marker ({error}); remove it before resolving"
+                )));
+            }
+        }
+        let file = root.join(path);
+        let mode = match file.metadata() {
+            Ok(meta) => Some(meta.permissions()),
+            Err(_) => entries
+                .iter()
+                .find(|entry| entry.stage == 2)
+                .and_then(|entry| default_permissions(&entry.mode)),
+        };
+        let parent = file.parent().unwrap_or(root);
+        let mut temp = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| GitError(format!("cannot write {path}: {e}")))?;
+        temp.write_all(text.as_bytes())
+            .and_then(|()| temp.as_file().sync_all())
+            .map_err(|e| GitError(format!("cannot write {path}: {e}")))?;
+        if let Some(mode) = mode {
+            temp.as_file()
+                .set_permissions(mode)
+                .map_err(|e| GitError(format!("cannot write {path}: {e}")))?;
+        }
+        temp.persist(&file)
+            .map_err(|e| GitError(format!("cannot write {path}: {}", e.error)))?;
+        let mut command = self.git(root);
+        command.args(["--literal-pathspecs", "add", "--", path]);
+        self.logged(command, None).map(drop)
+    }
+}
+
+/// One unmerged index entry of a path: the stage (1 is the base, 2 the current
+/// side, 3 the other side), its mode and the id of its blob.
+struct Unmerged {
+    mode: String,
+    oid: String,
+    stage: u8,
+}
+
+impl SubprocessGit {
+    /// The unmerged entries of `path`, none when it is not conflicted. Never
+    /// records anything.
+    fn unmerged_entries(&self, root: &Path, path: &str) -> Result<Vec<Unmerged>, GitError> {
+        let mut command = self.git(root);
+        command.args(["--literal-pathspecs", "ls-files", "-u", "-z", "--", path]);
+        let out = Self::run(command)?;
+        // One record per stage: `<mode> SP <object> SP <stage> TAB <path>`, then a NUL.
+        let mut entries = Vec::new();
+        for record in out.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
+            let text = String::from_utf8_lossy(record);
+            let Some((header, file)) = text.split_once('\t') else {
+                return Err(GitError(format!("unexpected index record: {text}")));
+            };
+            if file != path {
+                continue;
+            }
+            let mut fields = header.split(' ');
+            let (Some(mode), Some(oid), Some(stage)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return Err(GitError(format!("unexpected index record: {text}")));
+            };
+            let stage = stage
+                .parse::<u8>()
+                .map_err(|_| GitError(format!("unexpected index record: {text}")))?;
+            entries.push(Unmerged {
+                mode: mode.to_owned(),
+                oid: oid.to_owned(),
+                stage,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// The content of blob `oid`. Never records anything.
+    fn blob(&self, root: &Path, oid: &str) -> Result<Vec<u8>, GitError> {
+        let mut command = self.git(root);
+        command.args(["cat-file", "blob", oid]);
+        Self::run(command)
+    }
+
+    /// The path of the git directory entry `name` (`MERGE_HEAD`, `rebase-merge`
+    /// and so on) for the worktree at `root`. Per worktree for these names.
+    fn git_path(&self, root: &Path, name: &str) -> Result<PathBuf, GitError> {
+        let mut command = self.git(root);
+        command.args(["rev-parse", "--path-format=absolute", "--git-path", name]);
+        let out = Self::run(command)?;
+        Ok(PathBuf::from(
+            String::from_utf8_lossy(&out).trim_end_matches('\n'),
+        ))
+    }
+
+    /// The trimmed text of the state file `name`, `None` when it is not there.
+    fn state_text(&self, root: &Path, name: &str) -> Result<Option<String>, GitError> {
+        let file = self.git_path(root, name)?;
+        match std::fs::read_to_string(&file) {
+            Ok(text) => Ok(Some(text.trim().to_owned())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(GitError(format!("cannot read {}: {e}", file.display()))),
+        }
+    }
+
+    /// Which operation stopped. A rebase is recognised by its state folders, then
+    /// merge, cherry-pick and revert by their `*_HEAD` files.
+    fn operation_in_progress(&self, root: &Path) -> Result<ConflictOperation, GitError> {
+        let present =
+            |name: &str| -> Result<bool, GitError> { Ok(self.git_path(root, name)?.exists()) };
+        Ok(if present("rebase-merge")? || present("rebase-apply")? {
+            ConflictOperation::Rebase
+        } else if present("MERGE_HEAD")? {
+            ConflictOperation::Merge
+        } else if present("CHERRY_PICK_HEAD")? {
+            ConflictOperation::CherryPick
+        } else if present("REVERT_HEAD")? {
+            ConflictOperation::Revert
+        } else {
+            ConflictOperation::Unknown
+        })
+    }
+
+    /// Reads what the labels need: HEAD, the commit the operation brings in, and
+    /// the rebase's onto. Never records anything.
+    fn side_facts(&self, root: &Path, operation: ConflictOperation) -> Result<SideFacts, GitError> {
+        let head_oid = self.verify_rev(root, "HEAD")?.unwrap_or_default();
+        let head = SideCommit {
+            branch: self.current_branch(root)?,
+            short: short_id(&head_oid),
+            subject: self.subject(root, &head_oid)?,
+        };
+        let incoming_oid = match operation {
+            ConflictOperation::Merge => self.state_text(root, "MERGE_HEAD")?,
+            ConflictOperation::CherryPick => self.state_text(root, "CHERRY_PICK_HEAD")?,
+            ConflictOperation::Revert => self.state_text(root, "REVERT_HEAD")?,
+            ConflictOperation::Rebase => match self.state_text(root, "REBASE_HEAD")? {
+                Some(oid) => Some(oid),
+                None => match self.state_text(root, "rebase-merge/stopped-sha")? {
+                    Some(oid) => Some(oid),
+                    None => self.state_text(root, "rebase-apply/original-commit")?,
+                },
+            },
+            ConflictOperation::Unknown => None,
+        };
+        let incoming = match incoming_oid {
+            Some(oid) => Some(self.side_commit(root, &oid)?),
+            None => None,
+        };
+        let onto = match operation {
+            ConflictOperation::Rebase => match self.state_text(root, "rebase-merge/onto")? {
+                Some(oid) => Some(self.side_commit(root, &oid)?),
+                None => match self.state_text(root, "rebase-apply/onto")? {
+                    Some(oid) => Some(self.side_commit(root, &oid)?),
+                    None => None,
+                },
+            },
+            _ => None,
+        };
+        Ok(SideFacts {
+            operation,
+            head,
+            incoming,
+            onto,
+        })
+    }
+
+    /// A commit named by a state file: its branch when one names it (best
+    /// effort), its short id and its subject.
+    fn side_commit(&self, root: &Path, oid: &str) -> Result<SideCommit, GitError> {
+        require_commit_id(oid)?;
+        let mut command = self.git(root);
+        command.args([
+            "name-rev",
+            "--name-only",
+            "--refs=refs/heads/*",
+            "--refs=refs/remotes/*",
+            oid,
+        ]);
+        let named = String::from_utf8_lossy(&Self::run(command)?)
+            .trim()
+            .to_owned();
+        // A commit below a branch tip is named `main~2`; the branch is what counts.
+        let branch = named
+            .split(['~', '^'])
+            .next()
+            .map(|name| {
+                name.trim_start_matches("refs/heads/")
+                    .trim_start_matches("refs/remotes/")
+            })
+            .filter(|name| !name.is_empty() && *name != "undefined")
+            .map(str::to_owned);
+        Ok(SideCommit {
+            branch,
+            short: short_id(oid),
+            subject: self.subject(root, oid)?,
+        })
+    }
+
+    /// The short name of the branch HEAD is on, `None` when detached. Never
+    /// records anything.
+    fn current_branch(&self, root: &Path) -> Result<Option<String>, GitError> {
+        let mut command = self.git(root);
+        command.args(["symbolic-ref", "-q", "--short", "HEAD"]);
+        // Exit 1 is git's answer for a detached HEAD.
+        let out = Self::run_allowing(command, &[0, 1])?;
+        let name = String::from_utf8_lossy(&out).trim().to_owned();
+        Ok((!name.is_empty()).then_some(name))
+    }
+
+    /// The subject line of commit `oid`, empty for an empty id.
+    fn subject(&self, root: &Path, oid: &str) -> Result<String, GitError> {
+        if oid.is_empty() {
+            return Ok(String::new());
+        }
+        require_commit_id(oid)?;
+        let mut command = self.git(root);
+        command.args(["show", "-s", "--format=%s", oid]);
+        Ok(String::from_utf8_lossy(&Self::run(command)?)
+            .trim()
+            .to_owned())
+    }
+
+    /// Merges the three contents with `git merge-file` in zdiff3 form, the labels
+    /// given by `labels` (left, base, right). Exit codes 1 to 127 are the number
+    /// of conflicts, which is the answer, not an error.
+    fn merge_with_markers(
+        &self,
+        root: &Path,
+        base: &[u8],
+        ours: &[u8],
+        theirs: &[u8],
+        labels: [&str; 3],
+    ) -> Result<String, GitError> {
+        let scratch = self.scratch_dir(root)?;
+        let write = |name: &str, content: &[u8]| -> Result<PathBuf, GitError> {
+            let path = scratch.path().join(name);
+            std::fs::write(&path, content)
+                .map_err(|e| GitError(format!("cannot write {}: {e}", path.display())))?;
+            Ok(path)
+        };
+        let base_path = write("base", base)?;
+        let ours_path = write("ours", ours)?;
+        let theirs_path = write("theirs", theirs)?;
+        // Not logged: a computation that changes nothing in the repository.
+        let mut command = self.git(root);
+        command.args(["merge-file", "-p", "--zdiff3"]);
+        for label in labels {
+            command.args(["-L", label]);
+        }
+        command.arg(&ours_path).arg(&base_path).arg(&theirs_path);
+        let output = command
+            .output()
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        match output.status.code() {
+            Some(0..=127) => String::from_utf8(output.stdout)
+                .map_err(|_| GitError("the conflicted file is not UTF-8 text".into())),
+            _ => Err(GitError(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            )),
+        }
+    }
+}
+
+/// The first seven characters of a commit id, or the whole of a shorter one.
+fn short_id(oid: &str) -> String {
+    oid.chars().take(7).collect()
+}
+
+/// The permissions a file of index `mode` gets when it is created: executable
+/// for `100755`, `0644` for `100644`, none for anything else (a symlink, say).
+/// `None` off Unix.
+fn default_permissions(mode: &str) -> Option<std::fs::Permissions> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bits = match mode {
+            "100755" => 0o755,
+            "100644" => 0o644,
+            _ => return None,
+        };
+        Some(std::fs::Permissions::from_mode(bits))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        None
     }
 }
 

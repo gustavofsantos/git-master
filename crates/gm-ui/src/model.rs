@@ -856,6 +856,7 @@ impl Model {
                 self.local_review.received_after(id, comment, lines);
                 None
             }
+            // The conflict resolver's view is not built yet (D114, slice C3).
             Event::ReflogLoaded {
                 id,
                 skip,
@@ -1030,7 +1031,9 @@ impl Model {
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
-            | Event::WorkflowMessageSuggested { .. } => None,
+            | Event::WorkflowMessageSuggested { .. }
+            | Event::ConflictRead { .. }
+            | Event::ConflictResolved { .. } => None,
         }
     }
 
@@ -1344,7 +1347,9 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkflowFileDeleted { id, .. }
         | Event::ReviewCommentsListed { id, .. }
         | Event::ReviewSnapshotText { id, .. }
-        | Event::ReviewCurrentText { id, .. } => Some(*id),
+        | Event::ReviewCurrentText { id, .. }
+        | Event::ConflictRead { id, .. }
+        | Event::ConflictResolved { id, .. } => Some(*id),
         Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }
         | Event::WorkflowNotice { .. }

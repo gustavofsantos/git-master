@@ -1,6 +1,7 @@
 //! Types shared by the UI, the MCP server and (later) hooks: commands going in,
 //! events coming out, and the repository status they carry.
 
+mod conflict;
 mod diff;
 mod files;
 mod grep;
@@ -15,6 +16,7 @@ mod status;
 mod syntax;
 mod workflow;
 
+pub use conflict::{ConflictFileRead, ConflictOperation, ConflictSide};
 pub use diff::{DiffLine, DiffSide, FileDiff, Hunk, HunkId, LineKind, StageTarget};
 pub use files::{
     DirEntry, DirListing, FILE_HIT_LIMIT, FILE_VIEW_LIMIT, FileBody, FileHit, FileSearch, FileView,

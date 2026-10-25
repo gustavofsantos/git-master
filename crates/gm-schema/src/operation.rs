@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::conflict::ConflictFileRead;
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
 use crate::grep::{GrepOptions, GrepResult};
@@ -437,6 +438,19 @@ pub enum CommandKind {
     LoadReviewCurrentText {
         id: i64,
     },
+    /// Reads the conflicted file `path` of the operation that stopped (D114):
+    /// the three stages merged into zdiff3 text, with the sides named by role.
+    /// Answers `ConflictRead`. A read: never recorded (D28).
+    ReadConflict {
+        path: String,
+    },
+    /// Writes `text` as the resolution of the conflicted file `path`, refused
+    /// while markers remain, then stages it. Human only, and recorded in the
+    /// command log. Answers `ConflictResolved`.
+    ResolveConflict {
+        path: String,
+        text: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -785,6 +799,17 @@ pub enum Event {
         comment: i64,
         path: String,
         lines: Vec<String>,
+    },
+    /// Answers `ReadConflict`.
+    ConflictRead {
+        id: OperationId,
+        read: ConflictFileRead,
+    },
+    /// Answers `ResolveConflict`: the file is staged with the resolution. Follows
+    /// the status, as after any stage.
+    ConflictResolved {
+        id: OperationId,
+        path: String,
     },
 }
 
