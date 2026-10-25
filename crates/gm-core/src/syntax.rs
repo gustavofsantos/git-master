@@ -27,15 +27,37 @@ pub enum Language {
     JavaScript,
     TypeScript,
     Tsx,
+    Java,
+    C,
+    Cpp,
+    Ruby,
+    CSharp,
+    Json,
+    Toml,
+    Yaml,
+    Bash,
+    Html,
+    Css,
 }
 
-const LANGUAGES: [Language; 6] = [
+const LANGUAGES: [Language; 17] = [
     Language::Rust,
     Language::Python,
     Language::Go,
     Language::JavaScript,
     Language::TypeScript,
     Language::Tsx,
+    Language::Java,
+    Language::C,
+    Language::Cpp,
+    Language::Ruby,
+    Language::CSharp,
+    Language::Json,
+    Language::Toml,
+    Language::Yaml,
+    Language::Bash,
+    Language::Html,
+    Language::Css,
 ];
 
 impl Language {
@@ -58,16 +80,41 @@ impl Language {
             Language::TypeScript => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
             #[cfg(feature = "syntax-typescript")]
             Language::Tsx => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
+            #[cfg(feature = "syntax-java")]
+            Language::Java => Some(tree_sitter_java::LANGUAGE.into()),
+            #[cfg(feature = "syntax-c")]
+            Language::C => Some(tree_sitter_c::LANGUAGE.into()),
+            #[cfg(feature = "syntax-cpp")]
+            Language::Cpp => Some(tree_sitter_cpp::LANGUAGE.into()),
+            #[cfg(feature = "syntax-ruby")]
+            Language::Ruby => Some(tree_sitter_ruby::LANGUAGE.into()),
+            #[cfg(feature = "syntax-c-sharp")]
+            Language::CSharp => Some(tree_sitter_c_sharp::LANGUAGE.into()),
+            #[cfg(feature = "syntax-json")]
+            Language::Json => Some(tree_sitter_json::LANGUAGE.into()),
+            #[cfg(feature = "syntax-toml-ng")]
+            Language::Toml => Some(tree_sitter_toml_ng::LANGUAGE.into()),
+            #[cfg(feature = "syntax-yaml")]
+            Language::Yaml => Some(tree_sitter_yaml::LANGUAGE.into()),
+            #[cfg(feature = "syntax-bash")]
+            Language::Bash => Some(tree_sitter_bash::LANGUAGE.into()),
+            #[cfg(feature = "syntax-html")]
+            Language::Html => Some(tree_sitter_html::LANGUAGE.into()),
+            #[cfg(feature = "syntax-css")]
+            Language::Css => Some(tree_sitter_css::LANGUAGE.into()),
             #[allow(unreachable_patterns)]
             _ => None,
         }
     }
 
-    /// The highlight query, layered where the grammar extends another (TypeScript on JavaScript).
+    /// The highlight query, layered where the grammar extends another (TypeScript on
+    /// JavaScript, C++ on C).
     fn query_source(self) -> String {
         const JAVASCRIPT: &str = include_str!("../queries/javascript/highlights.scm");
         const JSX: &str = include_str!("../queries/javascript/jsx.scm");
         const TYPESCRIPT: &str = include_str!("../queries/typescript/highlights.scm");
+        const C: &str = include_str!("../queries/c/highlights.scm");
+        const CPP: &str = include_str!("../queries/cpp/highlights.scm");
         match self {
             Language::Rust => include_str!("../queries/rust/highlights.scm").to_owned(),
             Language::Python => include_str!("../queries/python/highlights.scm").to_owned(),
@@ -75,23 +122,57 @@ impl Language {
             Language::JavaScript => format!("{JAVASCRIPT}\n{JSX}"),
             Language::TypeScript => format!("{JAVASCRIPT}\n{TYPESCRIPT}"),
             Language::Tsx => format!("{JAVASCRIPT}\n{JSX}\n{TYPESCRIPT}"),
+            Language::Java => include_str!("../queries/java/highlights.scm").to_owned(),
+            Language::C => C.to_owned(),
+            Language::Cpp => format!("{C}\n{CPP}"),
+            Language::Ruby => include_str!("../queries/ruby/highlights.scm").to_owned(),
+            Language::CSharp => include_str!("../queries/csharp/highlights.scm").to_owned(),
+            Language::Json => include_str!("../queries/json/highlights.scm").to_owned(),
+            Language::Toml => include_str!("../queries/toml/highlights.scm").to_owned(),
+            Language::Yaml => include_str!("../queries/yaml/highlights.scm").to_owned(),
+            Language::Bash => include_str!("../queries/bash/highlights.scm").to_owned(),
+            Language::Html => include_str!("../queries/html/highlights.scm").to_owned(),
+            Language::Css => include_str!("../queries/css/highlights.scm").to_owned(),
         }
     }
 }
 
-/// The language of the file at `path`, by its extension, when the build has its grammar.
+/// The language of the file at `path`, by its name or extension, when the build has its
+/// grammar. A header (`.h`) is read as C, which also reads most C++ headers.
 #[must_use]
 pub fn language_for_path(path: &str) -> Option<Language> {
     let name = path.rsplit('/').next().unwrap_or(path);
-    let (_, extension) = name.rsplit_once('.')?;
-    let language = match extension.to_ascii_lowercase().as_str() {
-        "rs" => Language::Rust,
-        "py" | "pyi" | "pyw" => Language::Python,
-        "go" => Language::Go,
-        "js" | "mjs" | "cjs" | "jsx" => Language::JavaScript,
-        "ts" | "mts" | "cts" => Language::TypeScript,
-        "tsx" => Language::Tsx,
-        _ => return None,
+    let language = match name {
+        "Rakefile" | "Gemfile" | "Brewfile" | "Podfile" => Language::Ruby,
+        "Cargo.lock" | "Pipfile" => Language::Toml,
+        ".bashrc" | ".bash_profile" | ".bash_logout" | ".profile" | ".zshrc" | ".zprofile" => {
+            Language::Bash
+        }
+        _ => {
+            let (_, extension) = name.rsplit_once('.')?;
+            match extension.to_ascii_lowercase().as_str() {
+                "rs" => Language::Rust,
+                "py" | "pyi" | "pyw" => Language::Python,
+                "go" => Language::Go,
+                "js" | "mjs" | "cjs" | "jsx" => Language::JavaScript,
+                "ts" | "mts" | "cts" => Language::TypeScript,
+                "tsx" => Language::Tsx,
+                "java" => Language::Java,
+                "c" | "h" => Language::C,
+                "cc" | "cpp" | "cxx" | "c++" | "hh" | "hpp" | "hxx" | "h++" | "ipp" => {
+                    Language::Cpp
+                }
+                "rb" | "rake" | "gemspec" | "ru" => Language::Ruby,
+                "cs" => Language::CSharp,
+                "json" | "jsonc" | "geojson" => Language::Json,
+                "toml" => Language::Toml,
+                "yml" | "yaml" => Language::Yaml,
+                "sh" | "bash" | "zsh" => Language::Bash,
+                "html" | "htm" => Language::Html,
+                "css" => Language::Css,
+                _ => return None,
+            }
+        }
     };
     language.grammar().map(|_| language)
 }
@@ -103,6 +184,8 @@ pub fn role_for_capture(name: &str) -> Option<SyntaxRole> {
     match name {
         "variable.builtin" | "variable.parameter" => return Some(SyntaxRole::Variable),
         "function.macro" => return Some(SyntaxRole::Attribute),
+        // A key of a JSON object is a name, not a string to read.
+        "string.special.key" => return Some(SyntaxRole::Property),
         _ => {}
     }
     let head = name.split('.').next().unwrap_or(name);
@@ -110,13 +193,15 @@ pub fn role_for_capture(name: &str) -> Option<SyntaxRole> {
         "comment" => Some(SyntaxRole::Comment),
         "string" | "escape" => Some(SyntaxRole::String),
         "number" => Some(SyntaxRole::Number),
-        "keyword" | "tag" => Some(SyntaxRole::Keyword),
+        // The at-rules of CSS (`@media`, `@import`) are captured under their own names.
+        "keyword" | "tag" | "charset" | "import" | "keyframes" | "media" | "supports"
+        | "namespace" => Some(SyntaxRole::Keyword),
         "operator" => Some(SyntaxRole::Operator),
         "function" => Some(SyntaxRole::Function),
-        "type" | "constructor" => Some(SyntaxRole::Type),
-        "constant" => Some(SyntaxRole::Constant),
+        "type" | "constructor" | "module" => Some(SyntaxRole::Type),
+        "constant" | "boolean" => Some(SyntaxRole::Constant),
         "property" => Some(SyntaxRole::Property),
-        "punctuation" => Some(SyntaxRole::Punctuation),
+        "punctuation" | "delimiter" => Some(SyntaxRole::Punctuation),
         "attribute" | "label" => Some(SyntaxRole::Attribute),
         _ => None,
     }
@@ -366,7 +451,7 @@ mod tests {
         let silent = ["variable", "embedded"];
         for language in LANGUAGES {
             let Some(compiled) = compiled(language) else {
-                continue;
+                panic!("{language:?}: the query does not compile");
             };
             for (name, role) in compiled.query.capture_names().iter().zip(&compiled.roles) {
                 assert!(
@@ -442,6 +527,159 @@ mod tests {
         let spans = run(Language::Tsx, text);
         assert!(texts(text, &spans, SyntaxRole::Keyword).contains(&"div"));
         assert!(texts(text, &spans, SyntaxRole::Attribute).contains(&"className"));
+    }
+
+    #[test]
+    fn language_comes_from_the_name_or_extension_for_the_wider_set() {
+        let cases = [
+            ("A.java", Language::Java),
+            ("x.c", Language::C),
+            ("x.h", Language::C),
+            ("x.cpp", Language::Cpp),
+            ("x.hpp", Language::Cpp),
+            ("x.cc", Language::Cpp),
+            ("x.rb", Language::Ruby),
+            ("Gemfile", Language::Ruby),
+            ("Rakefile", Language::Ruby),
+            ("X.cs", Language::CSharp),
+            ("package.json", Language::Json),
+            ("Cargo.toml", Language::Toml),
+            ("Cargo.lock", Language::Toml),
+            ("ci.yml", Language::Yaml),
+            ("ci.yaml", Language::Yaml),
+            ("run.sh", Language::Bash),
+            (".bashrc", Language::Bash),
+            ("index.html", Language::Html),
+            ("site.css", Language::Css),
+        ];
+        for (path, language) in cases {
+            assert_eq!(language_for_path(path), Some(language), "{path}");
+        }
+        assert_eq!(language_for_path("x.scss"), None);
+        assert_eq!(language_for_path("x.md"), None);
+        assert_eq!(language_for_path("Makefile"), None);
+    }
+
+    #[test]
+    fn java_is_colored_by_role() {
+        let text = "// note\npublic class A {\n  int f(String s) { return 42; }\n}\n";
+        let spans = run(Language::Java, text);
+        assert_eq!(first(text, &spans, SyntaxRole::Comment), Some("// note"));
+        assert!(texts(text, &spans, SyntaxRole::Keyword).contains(&"class"));
+        assert!(texts(text, &spans, SyntaxRole::Type).contains(&"String"));
+        assert_eq!(first(text, &spans, SyntaxRole::Number), Some("42"));
+    }
+
+    #[test]
+    fn c_is_colored_by_role() {
+        let text = "/* note */\nstatic int add(int a) { return a + 1; }\nconst char *s = \"hi\";\n";
+        let spans = run(Language::C, text);
+        assert_eq!(first(text, &spans, SyntaxRole::Comment), Some("/* note */"));
+        assert!(texts(text, &spans, SyntaxRole::Keyword).contains(&"return"));
+        assert!(texts(text, &spans, SyntaxRole::Function).contains(&"add"));
+        assert!(texts(text, &spans, SyntaxRole::Type).contains(&"int"));
+        assert_eq!(first(text, &spans, SyntaxRole::String), Some("\"hi\""));
+    }
+
+    #[test]
+    fn cpp_adds_its_own_keywords_to_c() {
+        let text = "// note\nnamespace n { class A { public: virtual int f() const; }; }\n";
+        let spans = run(Language::Cpp, text);
+        assert_eq!(first(text, &spans, SyntaxRole::Comment), Some("// note"));
+        let keywords = texts(text, &spans, SyntaxRole::Keyword);
+        assert!(keywords.contains(&"namespace"));
+        assert!(keywords.contains(&"class"));
+        assert!(keywords.contains(&"virtual"));
+    }
+
+    #[test]
+    fn ruby_is_colored_by_role() {
+        let text = "# note\ndef greet(name)\n  puts \"hi #{name}\" + 3.to_s\nend\n";
+        let spans = run(Language::Ruby, text);
+        assert_eq!(first(text, &spans, SyntaxRole::Comment), Some("# note"));
+        assert!(texts(text, &spans, SyntaxRole::Keyword).contains(&"def"));
+        assert!(texts(text, &spans, SyntaxRole::Number).contains(&"3"));
+    }
+
+    #[test]
+    fn csharp_is_colored_by_role() {
+        let text = "// note\nclass A { public int F(string s) { return 7; } }\n";
+        let spans = run(Language::CSharp, text);
+        assert_eq!(first(text, &spans, SyntaxRole::Comment), Some("// note"));
+        assert!(texts(text, &spans, SyntaxRole::Keyword).contains(&"class"));
+        assert_eq!(first(text, &spans, SyntaxRole::Number), Some("7"));
+    }
+
+    #[test]
+    fn json_keys_are_properties_and_values_keep_their_own_roles() {
+        let text = "{\"name\": \"gm\", \"n\": 12, \"ok\": true, \"x\": null}\n";
+        let spans = run(Language::Json, text);
+        let keys = texts(text, &spans, SyntaxRole::Property);
+        assert!(
+            keys.contains(&"\"name\"") && keys.contains(&"\"n\""),
+            "{keys:?}"
+        );
+        assert!(texts(text, &spans, SyntaxRole::String).contains(&"\"gm\""));
+        assert_eq!(first(text, &spans, SyntaxRole::Number), Some("12"));
+        assert!(texts(text, &spans, SyntaxRole::Constant).contains(&"true"));
+    }
+
+    #[test]
+    fn toml_is_colored_by_role() {
+        let text = "# note\n[package]\nname = \"gm\"\nversion = 3\nok = true\n";
+        let spans = run(Language::Toml, text);
+        assert_eq!(first(text, &spans, SyntaxRole::Comment), Some("# note"));
+        assert!(texts(text, &spans, SyntaxRole::Property).contains(&"name"));
+        assert!(texts(text, &spans, SyntaxRole::String).contains(&"\"gm\""));
+        assert_eq!(first(text, &spans, SyntaxRole::Number), Some("3"));
+        assert!(texts(text, &spans, SyntaxRole::Constant).contains(&"true"));
+    }
+
+    #[test]
+    fn yaml_is_colored_by_role() {
+        let text = "# note\nname: gm\ncount: 3\non: true\nlist:\n  - \"a\"\n";
+        let spans = run(Language::Yaml, text);
+        assert_eq!(first(text, &spans, SyntaxRole::Comment), Some("# note"));
+        assert!(texts(text, &spans, SyntaxRole::Property).contains(&"name"));
+        assert!(texts(text, &spans, SyntaxRole::Number).contains(&"3"));
+        assert!(texts(text, &spans, SyntaxRole::String).contains(&"\"a\""));
+    }
+
+    #[test]
+    fn bash_is_colored_by_role() {
+        let text = "# note\nif [ -f x ]; then\n  echo \"hi $USER\"\nfi\n";
+        let spans = run(Language::Bash, text);
+        assert_eq!(first(text, &spans, SyntaxRole::Comment), Some("# note"));
+        let keywords = texts(text, &spans, SyntaxRole::Keyword);
+        assert!(keywords.contains(&"if") && keywords.contains(&"fi"));
+        assert!(texts(text, &spans, SyntaxRole::Function).contains(&"echo"));
+    }
+
+    #[test]
+    fn html_colors_tags_attributes_and_comments() {
+        let text = "<!-- note -->\n<div class=\"a\">hi</div>\n";
+        let spans = run(Language::Html, text);
+        assert_eq!(
+            first(text, &spans, SyntaxRole::Comment),
+            Some("<!-- note -->")
+        );
+        assert!(texts(text, &spans, SyntaxRole::Keyword).contains(&"div"));
+        assert!(texts(text, &spans, SyntaxRole::Attribute).contains(&"class"));
+        assert!(texts(text, &spans, SyntaxRole::String).contains(&"\"a\""));
+    }
+
+    #[test]
+    fn css_is_colored_by_role() {
+        let text = "/* note */\n@media (min-width: 10px) { a.b { color: #fff; margin: 4px; } }\n";
+        let spans = run(Language::Css, text);
+        assert_eq!(first(text, &spans, SyntaxRole::Comment), Some("/* note */"));
+        assert!(texts(text, &spans, SyntaxRole::Keyword).contains(&"@media"));
+        assert!(texts(text, &spans, SyntaxRole::Property).contains(&"color"));
+        assert!(
+            texts(text, &spans, SyntaxRole::Number)
+                .iter()
+                .any(|n| n.starts_with('4'))
+        );
     }
 
     #[test]

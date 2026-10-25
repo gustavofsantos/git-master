@@ -111,10 +111,23 @@ The viewer colours code by language. The text appears first, and the colours fol
 | JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx` |
 | TypeScript | `.ts`, `.mts`, `.cts` |
 | TSX | `.tsx` |
+| Java | `.java` |
+| C | `.c`, `.h` |
+| C++ | `.cc`, `.cpp`, `.cxx`, `.c++`, `.hh`, `.hpp`, `.hxx`, `.h++`, `.ipp` |
+| C# | `.cs` |
+| Ruby | `.rb`, `.rake`, `.gemspec`, `.ru`, `Rakefile`, `Gemfile` |
+| Bash | `.sh`, `.bash`, `.zsh`, `.bashrc`, `.bash_profile`, `.profile`, `.zshrc` |
+| JSON | `.json`, `.jsonc`, `.geojson` |
+| TOML | `.toml`, `Cargo.lock` |
+| YAML | `.yml`, `.yaml` |
+| HTML | `.html`, `.htm` |
+| CSS | `.css` |
+
+A header with the `.h` extension is read as C, which also reads most C++ headers.
 
 Files in other languages stay plain, and so do binary files.
 
-Twelve roles are coloured: comments, strings, numbers, keywords, operators, functions, types, constants, parameters and names the language reserves (such as `self` and `this`), properties, punctuation, and attributes, macros, decorators and tags. A plain name that is none of these keeps the text colour, so the code does not turn into a wall of colour. Every role keeps a contrast of at least 4.5 to 1 against the viewer background, the selected line and a text selection, in both the light and the dark theme.
+Twelve roles are coloured, in code and in data and markup files alike: comments, strings, numbers, keywords, operators, functions, types, constants, parameters and names the language reserves (such as `self` and `this`), properties, punctuation, and attributes, macros, decorators and tags. A plain name that is none of these keeps the text colour, so the code does not turn into a wall of colour. Every role keeps a contrast of at least 4.5 to 1 against the viewer background, the selected line and a text selection, in both the light and the dark theme.
 
 Colouring gives up, and the file shows in plain text, in these cases:
 

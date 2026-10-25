@@ -13,9 +13,20 @@ and was then corrected for GitMaster:
 | `go/` | `tree-sitter-go` 0.25.0 | 2014 Max Brunsfeld |
 | `javascript/` | `tree-sitter-javascript` 0.25.0 (`highlights.scm`, and `highlights-jsx.scm` as `jsx.scm`) | 2014 Max Brunsfeld |
 | `typescript/` | `tree-sitter-typescript` 0.23.2 | MIT, as declared in the crate manifest |
+| `java/` | `tree-sitter-java` 0.23.5 | MIT, as declared in the crate manifest |
+| `c/` | `tree-sitter-c` 0.24.2 | MIT, as declared in the crate manifest |
+| `cpp/` | `tree-sitter-cpp` 0.23.4 | MIT, as declared in the crate manifest |
+| `ruby/` | `tree-sitter-ruby` 0.23.1 | MIT, as declared in the crate manifest |
+| `csharp/` | `tree-sitter-c-sharp` 0.23.5 | MIT, as declared in the crate manifest |
+| `json/` | `tree-sitter-json` 0.24.8 | MIT, as declared in the crate manifest |
+| `toml/` | `tree-sitter-toml-ng` 0.7.0 | MIT, as declared in the crate manifest |
+| `yaml/` | `tree-sitter-yaml` 0.7.2 | MIT, as declared in the crate manifest |
+| `bash/` | `tree-sitter-bash` 0.25.1 | MIT, as declared in the crate manifest |
+| `html/` | `tree-sitter-html` 0.23.2 | MIT, as declared in the crate manifest |
+| `css/` | `tree-sitter-css` 0.25.0 | MIT, as declared in the crate manifest |
 
-TypeScript's query only adds to JavaScript's, so `syntax.rs` layers them: JavaScript then
-TypeScript, and for TSX JavaScript, JSX, then TypeScript.
+TypeScript's query only adds to JavaScript's, and C++'s to C's, so `syntax.rs` layers them:
+JavaScript then TypeScript (for TSX: JavaScript, JSX, then TypeScript), and C then C++.
 
 Rules for a query:
 

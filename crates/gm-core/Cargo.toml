@@ -10,12 +10,40 @@ workspace = true
 
 [features]
 # Syntax highlighting (N4, D92, D111): one grammar per language, so each one can be left out of a build.
-default = ["syntax-rust", "syntax-python", "syntax-go", "syntax-typescript", "syntax-javascript"]
+default = [
+    "syntax-rust",
+    "syntax-python",
+    "syntax-go",
+    "syntax-typescript",
+    "syntax-javascript",
+    "syntax-java",
+    "syntax-c",
+    "syntax-cpp",
+    "syntax-ruby",
+    "syntax-c-sharp",
+    "syntax-json",
+    "syntax-toml-ng",
+    "syntax-yaml",
+    "syntax-bash",
+    "syntax-html",
+    "syntax-css",
+]
 syntax-rust = ["dep:tree-sitter-rust"]
 syntax-python = ["dep:tree-sitter-python"]
 syntax-go = ["dep:tree-sitter-go"]
 syntax-typescript = ["dep:tree-sitter-typescript"]
 syntax-javascript = ["dep:tree-sitter-javascript"]
+syntax-java = ["dep:tree-sitter-java"]
+syntax-c = ["dep:tree-sitter-c"]
+syntax-cpp = ["dep:tree-sitter-cpp"]
+syntax-ruby = ["dep:tree-sitter-ruby"]
+syntax-c-sharp = ["dep:tree-sitter-c-sharp"]
+syntax-json = ["dep:tree-sitter-json"]
+syntax-toml-ng = ["dep:tree-sitter-toml-ng"]
+syntax-yaml = ["dep:tree-sitter-yaml"]
+syntax-bash = ["dep:tree-sitter-bash"]
+syntax-html = ["dep:tree-sitter-html"]
+syntax-css = ["dep:tree-sitter-css"]
 
 [dependencies]
 gm-schema.workspace = true
@@ -35,6 +63,17 @@ tree-sitter-python = { workspace = true, optional = true }
 tree-sitter-go = { workspace = true, optional = true }
 tree-sitter-typescript = { workspace = true, optional = true }
 tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-java = { workspace = true, optional = true }
+tree-sitter-c = { workspace = true, optional = true }
+tree-sitter-cpp = { workspace = true, optional = true }
+tree-sitter-ruby = { workspace = true, optional = true }
+tree-sitter-c-sharp = { workspace = true, optional = true }
+tree-sitter-json = { workspace = true, optional = true }
+tree-sitter-toml-ng = { workspace = true, optional = true }
+tree-sitter-yaml = { workspace = true, optional = true }
+tree-sitter-bash = { workspace = true, optional = true }
+tree-sitter-html = { workspace = true, optional = true }
+tree-sitter-css = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
