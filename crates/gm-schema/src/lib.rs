@@ -14,6 +14,7 @@ mod review;
 mod stash;
 mod status;
 mod syntax;
+pub mod threads;
 mod workflow;
 
 pub use conflict::{

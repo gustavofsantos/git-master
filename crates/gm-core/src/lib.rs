@@ -32,6 +32,7 @@ mod script_session;
 pub mod stage_math;
 mod stash;
 pub mod syntax;
+pub mod threads;
 pub mod watch;
 mod workflow_session;
 pub mod worktree;
