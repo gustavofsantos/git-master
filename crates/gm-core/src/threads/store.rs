@@ -217,8 +217,17 @@ impl From<std::io::Error> for StoreError {
     }
 }
 
+impl StoreError {
+    /// True when the database is locked by another connection (`SQLITE_BUSY` or
+    /// `SQLITE_LOCKED`), so the same write may succeed later.
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Sqlite(error) if is_busy(error))
+    }
+}
+
 /// One batch of canonical events for one session, as the pipeline hands it over.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Batch {
     pub harness: String,
     pub session_id: String,
@@ -233,15 +242,12 @@ pub struct Batch {
     pub at: i64,
     pub ended: Option<i64>,
     pub entries: Vec<NewEntry>,
-    /// Per-pattern counts for this batch. Added to the thread only when at least one entry
-    /// of the batch is new, so a replay adds nothing.
-    pub redactions: Vec<(String, u32)>,
     /// `(at, reason)` for events dropped before storage. A repeated row is not added again.
     pub gaps: Vec<(i64, String)>,
 }
 
 /// One entry of a batch, redacted and capped by the pipeline.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewEntry {
     pub source_id: String,
     pub kind: EntryKind,
@@ -252,13 +258,17 @@ pub struct NewEntry {
     pub is_error: bool,
     pub truncated: bool,
     pub orig_bytes: Option<u64>,
+    /// Total of `hits`, as stored on the entry.
     pub redactions: u32,
+    /// Per-pattern counts of the redactions made in this entry's fields. Added to the thread
+    /// only when the entry is newly inserted, so a replayed batch counts nothing twice.
+    pub hits: Vec<(String, u32)>,
     pub at: i64,
     pub edit: Option<NewEdit>,
 }
 
 /// A file edit carried by an entry.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewEdit {
     pub path: String,
     pub old_path: Option<String>,
@@ -269,6 +279,8 @@ pub struct NewEdit {
     pub pre_oid: Option<String>,
     pub post_oid: Option<String>,
     pub from_input: bool,
+    /// Redactions made in the path and the patch. Added when the edit is stored as a new row.
+    pub hits: Vec<(String, u32)>,
 }
 
 /// What `apply` did with a batch.
@@ -383,9 +395,6 @@ impl ThreadStore {
                 applied.inserted += 1;
             }
         }
-        if applied.inserted > 0 {
-            add_redactions(&tx, thread, &batch.redactions)?;
-        }
         for (at, reason) in &batch.gaps {
             record_gap(&tx, thread, *at, reason)?;
         }
@@ -394,27 +403,27 @@ impl ThreadStore {
         Ok(applied)
     }
 
-    /// Thread summaries, newest `last_event_at` first. `before` is the `(last_event_at, id)`
-    /// of the last row of the previous page.
+    /// Thread summaries, newest `last_event_at` first, then by uid. `before` is the
+    /// `(last_event_at, uid)` of the last row of the previous page.
     pub fn list_threads(
         &self,
         filter: &ThreadFilter,
-        before: Option<(i64, i64)>,
+        before: Option<(i64, String)>,
         limit: u32,
     ) -> Result<Vec<ThreadSummary>, StoreError> {
-        let (before_at, before_id) = match before {
-            Some((at, id)) => (Some(at), Some(id)),
+        let (before_at, before_uid) = match before {
+            Some((at, uid)) => (Some(at), Some(uid)),
             None => (None, None),
         };
         let limit = i64::from(limit);
         let sql = format!(
             "{SUMMARY_SQL} WHERE 1 = 1{FILTER_SQL}
-             AND (:before_at IS NULL OR (t.last_event_at, t.id) < (:before_at, :before_id))
-             ORDER BY t.last_event_at DESC, t.id DESC LIMIT :limit"
+             AND (:before_at IS NULL OR (t.last_event_at, t.uid) < (:before_at, :before_uid))
+             ORDER BY t.last_event_at DESC, t.uid DESC LIMIT :limit"
         );
         let mut bindings = thread_bindings(filter);
         bindings.push((":before_at", &before_at));
-        bindings.push((":before_id", &before_id));
+        bindings.push((":before_uid", &before_uid));
         bindings.push((":limit", &limit));
         let mut statement = self.conn.prepare(&sql)?;
         let rows = statement
@@ -690,6 +699,120 @@ impl ThreadStore {
             Ok((offset, path))
         })
         .transpose()
+    }
+
+    /// Attaches an edit to the entry `entry_source_id` of a thread. An entry with no edit gets
+    /// this one. An entry whose edit came from the tool input (`from_input`) gets it replaced
+    /// by a measured edit; any other existing edit is kept. Returns whether the edit was stored.
+    /// Only a new row counts toward the thread's edit count and redactions.
+    pub fn attach_edit(
+        &mut self,
+        uid: &str,
+        entry_source_id: &str,
+        edit: &NewEdit,
+    ) -> Result<bool, StoreError> {
+        let tx = begin(&mut self.conn)?;
+        let thread = thread_id(&tx, uid)?;
+        let (entry, at): (i64, i64) = tx
+            .query_row(
+                "SELECT id, at FROM entry WHERE thread_id = ?1 AND source_id = ?2",
+                params![thread, entry_source_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+        let existing: Option<(i64, bool)> = tx
+            .query_row(
+                "SELECT id, from_input FROM edit WHERE entry_id = ?1 ORDER BY id LIMIT 1",
+                params![entry],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let stored = match existing {
+            None => {
+                insert_edit(&tx, thread, entry, at, edit)?;
+                tx.execute(
+                    "UPDATE thread SET edit_count = edit_count + 1 WHERE id = ?1",
+                    params![thread],
+                )?;
+                true
+            }
+            Some((old, true)) if !edit.from_input => {
+                tx.execute("DELETE FROM edit WHERE id = ?1", params![old])?;
+                insert_edit(&tx, thread, entry, at, edit)?;
+                purge_search_index(&tx)?;
+                true
+            }
+            Some(_) => false,
+        };
+        tx.commit()?;
+        Ok(stored)
+    }
+
+    /// The arguments JSON stored for a tool call, if the call is stored. The outer `None` means
+    /// no such entry; the inner one that the call has no arguments stored.
+    pub fn entry_args(
+        &self,
+        harness: &str,
+        session_id: &str,
+        source_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let args: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT e.args_json FROM entry e JOIN thread t ON t.id = e.thread_id
+                 WHERE t.harness = ?1 AND t.session_id = ?2 AND e.source_id = ?3",
+                params![harness, session_id, source_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(args.flatten())
+    }
+
+    /// The native tool name stored for a tool call, if the call is stored.
+    pub fn entry_tool(
+        &self,
+        harness: &str,
+        session_id: &str,
+        source_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let tool: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT e.tool FROM entry e JOIN thread t ON t.id = e.thread_id
+                 WHERE t.harness = ?1 AND t.session_id = ?2 AND e.source_id = ?3",
+                params![harness, session_id, source_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(tool.flatten())
+    }
+
+    /// The first and last commit seen for a thread: `(head_start, head_end)`.
+    pub fn heads(&self, uid: &str) -> Result<(Option<String>, Option<String>), StoreError> {
+        let thread = thread_id(&self.conn, uid)?;
+        Ok(self.conn.query_row(
+            "SELECT head_start, head_end FROM thread WHERE id = ?1",
+            params![thread],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
+    }
+
+    /// Whether the entry `entry_source_id` of a session already carries an edit.
+    pub fn has_edit(
+        &self,
+        harness: &str,
+        session_id: &str,
+        entry_source_id: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM edit ed
+                JOIN entry e ON e.id = ed.entry_id
+                JOIN thread t ON t.id = e.thread_id
+                WHERE t.harness = ?1 AND t.session_id = ?2 AND e.source_id = ?3)",
+            params![harness, session_id, entry_source_id],
+            |row| row.get(0),
+        )?)
     }
 
     /// The capture gaps of a thread, one per reason.
@@ -1195,6 +1318,7 @@ fn insert_entry(
     let entry_id = conn.last_insert_rowid();
     state.next_seq += 1;
     state.entry_count += 1;
+    add_redactions(conn, thread, &entry.hits)?;
 
     let title = (first_prompt && !state.title_edited)
         .then(|| derive_title(&entry.text))
@@ -1206,28 +1330,40 @@ fn insert_entry(
         )?;
     }
     if let Some(edit) = &entry.edit {
-        conn.execute(
-            "INSERT INTO edit (thread_id, entry_id, path, old_path, change, patch, added, removed,
-                pre_oid, post_oid, from_input, at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                thread,
-                entry_id,
-                edit.path,
-                edit.old_path,
-                change_text(edit.change),
-                edit.patch,
-                edit.added,
-                edit.removed,
-                edit.pre_oid,
-                edit.post_oid,
-                edit.from_input,
-                entry.at
-            ],
-        )?;
+        insert_edit(conn, thread, entry_id, entry.at, edit)?;
         state.edit_count += 1;
     }
     Ok(())
+}
+
+/// Stores one edit row for an entry, with its redaction counts.
+fn insert_edit(
+    conn: &Connection,
+    thread: i64,
+    entry_id: i64,
+    at: i64,
+    edit: &NewEdit,
+) -> Result<(), StoreError> {
+    conn.execute(
+        "INSERT INTO edit (thread_id, entry_id, path, old_path, change, patch, added, removed,
+            pre_oid, post_oid, from_input, at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            thread,
+            entry_id,
+            edit.path,
+            edit.old_path,
+            change_text(edit.change),
+            edit.patch,
+            edit.added,
+            edit.removed,
+            edit.pre_oid,
+            edit.post_oid,
+            edit.from_input,
+            at
+        ],
+    )?;
+    add_redactions(conn, thread, &edit.hits)
 }
 
 /// Records the entry-limit gap once per thread.
@@ -1373,7 +1509,6 @@ mod tests {
             at,
             ended: None,
             entries,
-            redactions: Vec::new(),
             gaps: Vec::new(),
         }
     }
@@ -1390,13 +1525,19 @@ mod tests {
             truncated: false,
             orig_bytes: None,
             redactions: 0,
+            hits: Vec::new(),
             at,
             edit: None,
         }
     }
 
     fn with_edit(mut entry: NewEntry, path: &str) -> NewEntry {
-        entry.edit = Some(NewEdit {
+        entry.edit = Some(measured_edit(path));
+        entry
+    }
+
+    fn measured_edit(path: &str) -> NewEdit {
+        NewEdit {
             path: path.to_owned(),
             old_path: None,
             change: EditChange::Modify,
@@ -1406,8 +1547,8 @@ mod tests {
             pre_oid: None,
             post_oid: None,
             from_input: false,
-        });
-        entry
+            hits: Vec::new(),
+        }
     }
 
     fn uid(session: &str) -> String {
@@ -1693,19 +1834,13 @@ mod tests {
         let first = store.list_threads(&filter, None, 2).expect("page 1");
         assert_eq!(titles(&first), vec!["t4", "t3"]);
         let last = &first[1];
-        let cursor = (
-            last.last_event_at,
-            row_id(&store, "SELECT id FROM thread WHERE uid = ?1", &last.uid),
-        );
+        let cursor = (last.last_event_at, last.uid.clone());
         let second = store
             .list_threads(&filter, Some(cursor), 2)
             .expect("page 2");
         assert_eq!(titles(&second), vec!["t2", "t1"]);
         let last = &second[1];
-        let cursor = (
-            last.last_event_at,
-            row_id(&store, "SELECT id FROM thread WHERE uid = ?1", &last.uid),
-        );
+        let cursor = (last.last_event_at, last.uid.clone());
         let third = store
             .list_threads(&filter, Some(cursor), 2)
             .expect("page 3");
@@ -2105,14 +2240,158 @@ mod tests {
     }
 
     #[test]
-    fn redaction_counts_are_added_once_per_new_batch() {
+    fn redaction_counts_are_added_once_per_new_entry() {
         let mut store = ThreadStore::open_memory().expect("open");
-        let mut b = batch("s", 1, vec![new_entry("u", EntryKind::User, "x", 1)]);
-        b.redactions = vec![("token".to_owned(), 2)];
+        let mut entry = new_entry("u", EntryKind::User, "x", 1);
+        entry.hits = vec![("token".to_owned(), 2), ("jwt".to_owned(), 1)];
+        entry.redactions = 3;
+        let b = batch("s", 1, vec![entry]);
         store.apply(&b).expect("first");
-        store.apply(&b).expect("replay");
+        let replay = store.apply(&b).expect("replay");
+        assert_eq!(replay.duplicates, 1);
+        let detail = store.read_thread(&uid("s"), 0, 10).expect("read");
+        assert_eq!(detail.summary.redaction_count, 3);
+        assert_eq!(
+            detail.redactions,
+            vec![("jwt".to_owned(), 1), ("token".to_owned(), 2)]
+        );
+    }
+
+    #[test]
+    fn attach_edit_stores_once_and_a_measured_edit_replaces_one_from_input() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "s",
+                2,
+                vec![new_entry("t1", EntryKind::ToolCall, "edit a.rs", 2)],
+            ))
+            .expect("apply");
+        let from_input = NewEdit {
+            from_input: true,
+            patch: "+guess\n".to_owned(),
+            ..measured_edit("a.rs")
+        };
+        assert!(
+            store
+                .attach_edit(&uid("s"), "t1", &from_input)
+                .expect("input")
+        );
+        assert!(store.has_edit("claude-code", "s", "t1").expect("has"));
+
+        let measured = measured_edit("a.rs");
+        assert!(
+            store
+                .attach_edit(&uid("s"), "t1", &measured)
+                .expect("measured")
+        );
+        assert!(
+            !store
+                .attach_edit(&uid("s"), "t1", &from_input)
+                .expect("late input")
+        );
+        assert!(
+            !store
+                .attach_edit(&uid("s"), "t1", &measured)
+                .expect("again")
+        );
+
+        let detail = store.read_thread(&uid("s"), 0, 10).expect("read");
+        assert_eq!(detail.edits.len(), 1);
+        assert!(!detail.edits[0].from_input);
+        assert_eq!(detail.summary.edit_count, 1);
+    }
+
+    #[test]
+    fn attach_edit_counts_redactions_only_for_a_new_row() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "s",
+                2,
+                vec![new_entry("t1", EntryKind::ToolCall, "edit", 2)],
+            ))
+            .expect("apply");
+        let mut edit = measured_edit("a.rs");
+        edit.hits = vec![("github-token".to_owned(), 1)];
+        store.attach_edit(&uid("s"), "t1", &edit).expect("attach");
+        store.attach_edit(&uid("s"), "t1", &edit).expect("again");
         let summary = store.read_thread(&uid("s"), 0, 10).expect("read").summary;
-        assert_eq!(summary.redaction_count, 2);
+        assert_eq!(summary.redaction_count, 1);
+    }
+
+    #[test]
+    fn attach_edit_to_an_unknown_entry_or_thread_is_not_found() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store.apply(&batch("s", 1, vec![])).expect("apply");
+        assert!(matches!(
+            store.attach_edit(&uid("s"), "missing", &measured_edit("a.rs")),
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.attach_edit("0000000000000000", "t1", &measured_edit("a.rs")),
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn entry_args_heads_and_has_edit_read_what_was_stored() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        let mut call = new_entry("t1", EntryKind::ToolCall, "Read x", 2);
+        call.args_json = Some("{\"file_path\":\"x\"}".to_owned());
+        let mut b = batch(
+            "s",
+            2,
+            vec![call, new_entry("t2", EntryKind::ToolCall, "Bash", 3)],
+        );
+        b.head = Some("abc".to_owned());
+        store.apply(&b).expect("apply");
+        assert_eq!(
+            store.entry_args("claude-code", "s", "t1").expect("args"),
+            Some("{\"file_path\":\"x\"}".to_owned())
+        );
+        assert_eq!(
+            store.entry_args("claude-code", "s", "t2").expect("none"),
+            None
+        );
+        assert_eq!(
+            store.entry_args("claude-code", "s", "zz").expect("absent"),
+            None
+        );
+        assert_eq!(
+            store.heads(&uid("s")).expect("heads"),
+            (Some("abc".to_owned()), Some("abc".to_owned()))
+        );
+        assert!(!store.has_edit("claude-code", "s", "t1").expect("has"));
+    }
+
+    #[test]
+    fn a_locked_database_reports_busy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ThreadStore::open(dir.path()).expect("open");
+        let other = Connection::open(dir.path().join("gitmaster").join("threads.db"))
+            .expect("second connection");
+        other
+            .busy_timeout(Duration::from_millis(1))
+            .expect("timeout");
+        other
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold the write lock");
+        let error = store.apply(&batch("s", 1, vec![])).expect_err("locked");
+        assert!(error.is_busy());
+        assert!(!StoreError::NotFound.is_busy());
+        other.execute_batch("COMMIT").expect("release");
+        store.apply(&batch("s", 1, vec![])).expect("after release");
+    }
+
+    #[test]
+    fn a_batch_round_trips_through_json() {
+        let mut entry = with_edit(new_entry("t1", EntryKind::ToolCall, "Edit a", 2), "a.rs");
+        entry.hits = vec![("jwt".to_owned(), 1)];
+        let original = batch("s", 2, vec![entry]);
+        let text = serde_json::to_string(&original).expect("serialize");
+        let back: Batch = serde_json::from_str(&text).expect("deserialize");
+        assert_eq!(back, original);
     }
 
     #[test]
