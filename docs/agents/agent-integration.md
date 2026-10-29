@@ -9,7 +9,13 @@ order: 5
 
 The agent integration connects your coding agent to GitMaster. It is a plugin that GitMaster generates for the agent. The plugin's hooks report each step of a session to GitMaster, which stores it as a [thread](../guide/threads.md). The plugin also carries the MCP server settings and a skill for the agent, so an agent can search your earlier threads.
 
-The only agent supported is Claude Code. GitMaster does not need the agent to be installed, and it never changes the agent's settings files by itself.
+## Supported agents
+
+| Agent | Name in commands |
+|---|---|
+| Claude Code | `claude-code` |
+
+Run `gitmaster harness list` to see the names this version knows. GitMaster does not need the agent to be installed, and it never changes the agent's settings files by itself.
 
 ## What the plugin contains
 
@@ -28,7 +34,7 @@ GitMaster writes the plugin into its own data directory, `agents/claude-code/` u
 Open the **Threads** page and choose **Install Agent Integration**, or run **Install Agent Integration** from the command palette. From a terminal:
 
 ```sh
-gitmaster agent install claude-code
+gitmaster harness install claude-code
 ```
 
 GitMaster generates the plugin and shows the exact commands that add it to the agent. Run them yourself, or, if the `claude` command is on your `PATH`, choose **Run Commands** and GitMaster runs them for you. Nothing is changed in the agent until you do one of these.
@@ -38,7 +44,7 @@ After the install, start a new agent session in a repository. The session appear
 ## Check the integration
 
 ```sh
-gitmaster agent status claude-code
+gitmaster harness status claude-code
 ```
 
 The status reports:
@@ -66,7 +72,7 @@ Choose **Import Existing Sessions** on the Threads page to read the agent's sess
 ## Remove the integration
 
 ```sh
-gitmaster agent uninstall claude-code
+gitmaster harness uninstall claude-code
 ```
 
 This shows the commands that remove the plugin from the agent, in the same way as the install. Removing the plugin stops new capture. Threads already stored stay until you delete them.
@@ -75,5 +81,5 @@ This shows the commands that remove the plugin from the agent, in the same way a
 
 - [Threads](../guide/threads.md): read, search and delete what was captured.
 - [MCP server](mcp-server.md): how an agent connects to the app.
-- [Command line](../reference/cli.md): `gitmaster agent` and `gitmaster thread`.
+- [Command line](../reference/cli.md): `gitmaster harness` and `gitmaster thread`.
 - [Trust and safety](../concepts/trust-and-safety.md): what the app records and where.

@@ -554,7 +554,7 @@ Known gaps:
 
 ## Slice 6t: threads, agent session capture (planned; T0 first)
 
-Requested by the author on 2026-10-29. Decisions D119 to D128 and open questions Q25 to Q31 in `design/decisions.md`; the engineering design, schema, redaction rules and sub-slice plan are in `design/threads.md`; the behavior is in `docs/guide/threads.md` and `docs/agents/agent-integration.md`, marked `Planned`. It sits before slice 7 because the MCP search tools (T9) need the store, and it needs no MCP to be useful: the window searches and reads threads on its own. Pillar 3.
+Requested by the author on 2026-10-29. Decisions D119 to D129 and open questions Q25 to Q31 in `design/decisions.md`; the engineering design, schema, redaction rules and sub-slice plan are in `design/threads.md`; the behavior is in `docs/guide/threads.md` and `docs/agents/agent-integration.md`, marked `Planned`. It sits before slice 7 because the MCP search tools (T9) need the store, and it needs no MCP to be useful: the window searches and reads threads on its own. Pillar 3.
 
 **Goal.** Capture agent sessions per repository into SQLite (the conversation, every tool call and every file edit), redact secrets before anything is stored, and let the user browse, search and curate them in the window. Search is an engine command, so the MCP server exposes it later without new logic.
 
@@ -563,15 +563,16 @@ Requested by the author on 2026-10-29. Decisions D119 to D128 and open questions
 1. **T0, contract and measurements (spike).** Real hook payloads, transcripts and plugin layout of the harness as fixtures; cold start of the hook command; FTS5 and tokenizer; redaction throughput. Resolves Q25 and Q26. Needs a machine with the harness.
 2. **T1, model and redaction (pure).** Types and commands in `gm-schema`; redaction engine with built-in patterns, user patterns, path rules, fail-closed validation and scrub; query builder; `settings.json` key `threads`.
 3. **T2, store and search.** `threads.db` (WAL, FTS5, `secure_delete`, caps, migrations), `ListThreads`, `SearchThreads`, `ReadThread`, `ReadThreadEdit`, the watcher and `ThreadsChanged`.
-4. **T3, capture.** `gitmaster thread hook`, the Claude Code adapter (hooks plus transcript with an offset cursor), edit pre and post images, spool, import of existing sessions.
-5. **T4, integration installer.** Generated plugin, `gitmaster agent install | status | uninstall`, palette actions, stale-path detection.
+4. **T3a, harness-neutral capture.** The `HarnessAdapter` trait, canonical events, registry and `--harness` argument (D129); `gitmaster thread hook`; the pipeline (redact, cap, idempotent upsert, offset cursor, spool, edit pre and post images); capture gaps; the conformance kit, proven with a fake harness.
+   **T3b, Claude Code adapter.** Hook and transcript parsing, tool mapping, sub-agents, resumed sessions, import of existing sessions.
+5. **T4, integration installer.** Each adapter's generated plugin, `gitmaster harness list | install | status | uninstall <harness>`, palette actions, stale-path detection.
 6. **T5, Threads page.** List, filters, search, detail by turn, edit cards with **Open Diff** and **View File**, empty and paused states.
 7. **T6, curate and link.** Rename, note, star, tags, delete, export, manual and observed links, derived edit state, **Show Threads** on a file and a commit.
 8. **T7, redaction settings.** Patterns, path rules, test field, per-repository pause, **Scrub Threads**.
 9. **T8, observed turn changes (optional).** Per-turn working-tree snapshot for edits no tool event covers; ships only if a release-build measurement fits the bar.
 10. **T9, MCP read tools (with slice 7).** `threads_search`, `thread_get`, `thread_read`, the skill in the plugin and the policy switch.
 
-**Done when:** a Claude Code session in a repository appears as a thread within a second of each event, with its prompts, replies, tool calls and edits; no string matching a built-in or user pattern exists anywhere in `threads.db`, the spool or the log; the hook never fails or noticeably slows the agent; the user finds a past decision by searching, opens the agent's edit as a diff and links the thread to a commit; deleting a thread removes its text from the file; the working tree is never written. T0 to T7 each have their own done-when in `design/threads.md`.
+**Done when:** a Claude Code session in a repository appears as a thread within a second of each event, with its prompts, replies, tool calls and edits; no string matching a built-in or user pattern exists anywhere in `threads.db`, the spool or the log; the hook never fails or noticeably slows the agent; the user finds a past decision by searching, opens the agent's edit as a diff and links the thread to a commit; deleting a thread removes its text from the file; the working tree is never written. T0 to T7 (T3 as T3a and T3b) each have their own done-when in `design/threads.md`.
 
 **Known gaps:** none yet; nothing is built. Open before T3 starts: the six confirmations at the end of `design/threads.md`.
 

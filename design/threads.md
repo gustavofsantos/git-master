@@ -38,11 +38,120 @@ This serves pillar 3 only. It must not slow pillars 1 and 2: capture runs outsid
 | Term | Meaning |
 |---|---|
 | Harness | The agent program the human runs: Claude Code first, others later. |
-| Adapter | The code in GitMaster that understands one harness: its hook payloads, its transcript format and its plugin layout. |
-| Thread | One agent session in one repository: from the harness's first event for a session id to its last. Identified by `(agent, session id)`. |
+| Harness id | A stable lowercase name, `claude-code`, chosen by GitMaster, stored with every thread and passed as `--harness` to the hook command. It is a string, not a Rust enum, so a thread from a harness this build does not know still opens. |
+| Adapter | The code in GitMaster that understands one harness: its hook payloads, its transcript format and its plugin layout. It is the only place that knows the harness's names and shapes. |
+| Canonical event | GitMaster's own description of something that happened in a session, independent of any harness. Adapters produce them; everything else consumes them. |
+| Thread | One agent session in one repository: from the harness's first event for a session id to its last. Identified by `(harness, session id)`. |
 | Turn | One human prompt and everything the agent does until it stops. |
 | Entry | One item of a thread in order: a prompt, an assistant message, a tool call, a tool result, a note from the harness. |
 | Edit | A change an agent tool made to one file, with its patch. |
+
+## Harnesses and the canonical model (D129)
+
+Claude Code is the first harness. More will follow (Q27), so the capture is built around a harness-neutral core and a thin adapter per harness. The rule: **only an adapter knows a harness's event names, payload fields, transcript format, tool names and plugin layout; nothing downstream of the canonical events does.** Redaction, the store, search, the UI and MCP never see a harness-specific shape.
+
+```text
+ harness payload / transcript line
+        │  HarnessAdapter (pure parse, per harness)
+        ▼
+ CanonicalEvent ──▶ redact ──▶ cap ──▶ ThreadStore (idempotent upsert) ──▶ UI / MCP
+```
+
+### Selecting the harness
+
+`gitmaster thread hook --harness <id>` and `gitmaster harness install <id>` take the harness id. A registry in `gm-core` maps ids to adapters at compile time (`harness::lookup(id)`); `gitmaster harness list` prints the known ids. An unknown id in the hook exits 0 and logs the id (rule 1 of the hook); in `install` it exits 2 and lists the known ids. The id is part of the thread's identity, so two harnesses can never collide on a session id.
+
+### The adapter
+
+Defined in `gm-core`, implemented per harness. The parse side is pure (bytes in, events out) so it is tested from fixtures without a database, a process or a repository.
+
+```rust
+pub trait HarnessAdapter: Send + Sync {
+    /// Stable id stored with every thread, e.g. "claude-code".
+    fn id(&self) -> &'static str;
+    fn capabilities(&self) -> Capabilities;
+
+    /// One hook invocation: the stdin document to canonical events. Pure.
+    fn parse_hook(&self, payload: &[u8]) -> Result<HookInput, ParseError>;
+
+    /// Complete records of the harness's own session log from `from`. Reads a file, bounded.
+    fn read_session_log(&self, path: &Path, from: u64) -> Result<LogChunk, ParseError>;
+
+    /// The plugin or config files to generate, and the steps the user runs to add them.
+    fn integration(&self, ctx: &InstallContext) -> Integration;
+
+    /// Where existing sessions for a repository live, for import.
+    fn discover(&self, worktree: &Path) -> Vec<SessionLog>;
+}
+```
+
+`HookInput` carries the session id, the working directory, the log path when the harness gives one, a list of `CanonicalEvent`, and an optional `EditPhase` (`Before` or `After`, the call id and the path). `LogChunk` carries events and the new offset. Neither type has a harness-specific field.
+
+`Capabilities` says what the harness can provide, so the pipeline degrades per harness instead of failing: `session_log` (a transcript to read), `pre_edit_event` (a hook before an edit, so a pre-image is possible), `tool_results` (hooks carry results), `subagents`, `resume_same_id`, `plugin_install` (GitMaster can generate an integration at all). A harness without `pre_edit_event` gets `from_input` edits (D123); one without `session_log` gets no assistant text unless its hooks carry it, and the page says which parts are missing for that harness.
+
+Adapters do no redaction, no database access and no writes. They return events; the core redacts and stores them. This keeps the secrecy guarantee in one place, where a new adapter cannot forget it.
+
+### Canonical events
+
+These are the only input of the pipeline. Fields common to all: `harness`, `session_id`, `at` (ms), and a `source_id` that is the harness's own id for the item (a tool-use id, a log line id) or, when it has none, a hash of the harness id, session id and item position, so replays stay idempotent.
+
+| Event | Fields | Becomes |
+|---|---|---|
+| `SessionStarted` | `cwd`, `model?`, `harness_version?`, `log_path?`, `origin` (`new`, `resumed`, `cleared`, `compacted`, `unknown`) | the thread row |
+| `PromptSubmitted` | `text` | a `user` entry; opens a turn |
+| `AssistantMessage` | `text`, `model?` | an `assistant` entry |
+| `ToolCalled` | `tool: ToolKind`, `native_tool`, `args` (JSON), `parent_call?` | a `tool_call` entry |
+| `ToolReturned` | `call_source_id`, `text`, `is_error` | a `tool_result` entry |
+| `TurnEnded` | `parent_call?` (set for a sub-agent) | closes the turn; reads `HEAD` for links |
+| `SessionEnded` | `reason` | `ended_at` |
+| `Notice` | `text` | a `notice` entry (compaction, interruption) |
+
+`ToolKind` is the canonical tool class: `Read`, `Edit`, `Write`, `Shell`, `Search`, `Web`, `Agent` (a sub-agent), `Other`. The adapter maps the native name to it and keeps the native name in `native_tool` so nothing is lost. The pipeline uses the kind, not the name: `Edit` and `Write` are what trigger pre and post images, and `Shell` is what T8 watches.
+
+For an edit the adapter also provides an **edit intent** inside `ToolCalled.args` normalization: the repository-relative or absolute `path`, the change kind, and the old and new text when the harness gives them. The pipeline decides what to measure from the file (D123); the intent is the fallback.
+
+### Mapping for Claude Code
+
+The first adapter. The left column is the harness's contract and **unverified until T0** (Q26); the right is canonical.
+
+| Claude Code | Canonical |
+|---|---|
+| hook `SessionStart` (`source`: startup, resume, clear, compact) | `SessionStarted` with `origin` |
+| hook `UserPromptSubmit` | `PromptSubmitted` |
+| hook `PreToolUse` on `Edit`, `MultiEdit`, `Write`, `NotebookEdit` | `EditPhase::Before` and `ToolCalled` |
+| hook `PostToolUse` | `ToolReturned`, `ToolCalled` if not seen, and `EditPhase::After` for edit tools |
+| hook `Stop` | `TurnEnded` |
+| hook `SubagentStop` | `TurnEnded` with `parent_call` |
+| hook `SessionEnd` | `SessionEnded` |
+| transcript `assistant` text block | `AssistantMessage` |
+| transcript `tool_use`, `tool_result` | `ToolCalled`, `ToolReturned` (reconciliation) |
+| transcript thinking block | dropped (Q31) |
+| transcript compaction or summary record | `Notice` |
+| tool `Read` | `ToolKind::Read` |
+| tool `Edit`, `MultiEdit`, `NotebookEdit` | `ToolKind::Edit` |
+| tool `Write` | `ToolKind::Write` |
+| tool `Bash` | `ToolKind::Shell` |
+| tool `Grep`, `Glob` | `ToolKind::Search` |
+| tool `WebFetch`, `WebSearch` | `ToolKind::Web` |
+| tool `Task` | `ToolKind::Agent` |
+| any other tool, or an MCP tool | `ToolKind::Other`, name kept |
+
+An event or record the adapter does not recognize is **not an error**: it is skipped, counted in a `capture_gap` row with the native type name, and visible in `harness status`. A payload that does not parse at all is a gap too. That makes harness version drift visible instead of silent.
+
+### Adding a harness
+
+A new harness is: one module implementing `HarnessAdapter`, its fixtures, one line in the registry, and a row in the docs. No change is needed in `gm-schema` commands, the store, redaction, search, the Threads page or the MCP tools. If a harness has a concept the canonical model lacks, the model is extended first, for all harnesses, by a decision (D129), not by a harness-specific column.
+
+### Conformance kit
+
+`crates/gm-core/tests/harness_conformance.rs` runs once per registered adapter, over `tests/fixtures/threads/<harness id>/`:
+
+- **Golden:** each payload fixture parses to the expected canonical events (stored as JSON beside it).
+- **Generic properties, same for every adapter:** parsing never panics on arbitrary bytes; it is deterministic; every event has a session id and a stable `source_id`; no event is produced twice from one payload; reading a log from offset 0 in one pass equals reading it in arbitrary chunks; every native tool name in the fixtures maps to a `ToolKind` or to `Other`.
+- **Pipeline:** replaying the fixtures through the real pipeline twice gives one identical database, and the repository is unchanged outside `.git/gitmaster/`.
+- **Capabilities honesty:** an adapter that declares `pre_edit_event` must emit `EditPhase::Before` in a fixture, and so on.
+
+A harness is not merged until its adapter passes the kit.
 
 ## Capture pipeline
 
@@ -59,10 +168,10 @@ agent harness ──hook event (JSON on stdin)──▶ gitmaster thread hook
 
 ### The integration (D120)
 
-GitMaster generates a plugin directory for the harness. For Claude Code it holds:
+The adapter's `integration()` generates the plugin or configuration for its harness. For Claude Code it is a plugin directory that holds:
 
 - `.claude-plugin/plugin.json`: name `gitmaster`, version equal to the app's.
-- `hooks/hooks.json`: one command hook per event: `SessionStart`, `UserPromptSubmit`, `PreToolUse` (matcher: the file-editing tools), `PostToolUse` (all tools), `Stop`, `SubagentStop`, `SessionEnd`. Every command is `<absolute path of gitmaster> thread hook --agent claude-code`, with a short `timeout`. The path is absolute so the hook does not depend on `PATH`; `agent status` reports a stale path after the app moves.
+- `hooks/hooks.json`: one command hook per event: `SessionStart`, `UserPromptSubmit`, `PreToolUse` (matcher: the file-editing tools), `PostToolUse` (all tools), `Stop`, `SubagentStop`, `SessionEnd`. Every command is `<absolute path of gitmaster> thread hook --harness claude-code`, with a short `timeout`. The path is absolute so the hook does not depend on `PATH`; `agent status` reports a stale path after the app moves.
 - `skills/gitmaster-threads/SKILL.md`: added in T9, together with the MCP tools it explains. Until then the plugin carries hooks only.
 - `.mcp.json`: added in slice 7; it starts `gitmaster mcp`.
 
@@ -86,6 +195,8 @@ Rules, in order of priority:
 If the database is locked beyond a 500 ms busy timeout, or the disk is full, the already-redacted event is written to `.git/gitmaster/threads-spool/<time>-<random>.json` (at most 100 files, oldest dropped first, each at most 8 MiB) and drained by the next hook run or by the app when the repository opens.
 
 ### Hooks and the transcript (D120)
+
+The description below is the Claude Code adapter's; the pipeline treats the hook and the log through the capabilities above.
 
 Hooks tell us about tool calls reliably and in time. They do not carry the assistant's text. The transcript the harness writes (`transcript_path` in the payload) has both. So:
 
@@ -187,8 +298,9 @@ Stated in the docs as well:
 ```text
 thread(
   id            INTEGER PRIMARY KEY,
-  uid           TEXT UNIQUE NOT NULL,   -- first 16 hex of sha256(agent || 0x00 || session_id)
-  agent         TEXT NOT NULL,          -- 'claude-code'
+  uid           TEXT UNIQUE NOT NULL,   -- first 16 hex of sha256(harness || 0x00 || session_id)
+  harness       TEXT NOT NULL,          -- harness id, 'claude-code'
+  harness_version TEXT,                 -- as reported by the harness, if it does
   session_id    TEXT NOT NULL,
   worktree      TEXT NOT NULL,          -- cwd's worktree root at the first event
   branch        TEXT,                   -- at the first event; NULL when detached
@@ -205,7 +317,7 @@ thread(
   cursor        INTEGER NOT NULL DEFAULT 0,  -- byte offset read in the transcript
   entry_count   INTEGER NOT NULL DEFAULT 0,
   edit_count    INTEGER NOT NULL DEFAULT 0,
-  UNIQUE(agent, session_id))
+  UNIQUE(harness, session_id))
 
 entry(
   id         INTEGER PRIMARY KEY,
@@ -324,7 +436,7 @@ See `design/screens.md` (Threads page) and `docs/guide/threads.md`. The page fol
 
 ## Sub-slices
 
-Each is usable on its own and ends with `make check` green. Order: T0, T1, T2, T3, T4, T5, T6, T7; T8 and T9 follow their own gates.
+Each is usable on its own and ends with `make check` green. Order: T0, T1, T2, T3a, T3b, T4, T5, T6, T7; T8 and T9 follow their own gates.
 
 ### T0: contract and measurements (spike; no product code)
 
@@ -349,15 +461,21 @@ Done when: the vectors, the property tests above, and the invalid-pattern behavi
 
 Done when: real SQLite tests (migrations, idempotent ingest, two writers, killed writer, caps, delete leaves no text in the file), search relevance tests, and a benchmark (ignored by default) on 1 million entries meeting the target; reads are not in the command log.
 
-### T3: capture
+### T3a: harness-neutral capture
 
-The `thread hook` subcommand, the Claude Code adapter (hook events, transcript reader with cursor, edit pre and post images, sub-agents, resumed sessions), the spool, and `ImportThreads` for existing sessions.
+The `HarnessAdapter` trait and its types, the canonical events, the registry and `--harness` selection, the `thread hook` subcommand and pipeline (redact, cap, idempotent upsert, cursor, spool, edit pre and post images driven by `ToolKind` and `EditPhase`), `capture_gap` for unknown events, and the conformance kit with a test adapter of its own (a tiny fake harness in the tests), so the core is proven before any real harness.
 
-Done when: replaying the T0 fixtures through the hook process reproduces the expected database; the idempotence and order properties pass; a real Git repository is unchanged outside `.git/gitmaster/`; the hook exits 0 in every failure test; the measured p95 meets the budget or Q25's fallback is built.
+Done when: the conformance kit passes for the fake adapter; the idempotence and order properties pass; an unknown harness id exits 0; a real Git repository is unchanged outside `.git/gitmaster/`; the hook exits 0 in every failure test.
+
+### T3b: Claude Code adapter
+
+The adapter from T0's fixtures: hook parsing, transcript reader, tool mapping, sub-agents, resumed sessions, `discover` and `ImportThreads`.
+
+Done when: the conformance kit passes for `claude-code` with the real fixtures; the idempotence and order properties pass; a real Git repository is unchanged outside `.git/gitmaster/`; the measured p95 of the hook process meets the budget or Q25's fallback is built.
 
 ### T4: integration installer
 
-The plugin generator, `gitmaster agent install | status | uninstall claude-code`, `ThreadIntegrationStatus` and the install commands, stale-path detection, and the palette actions **Install Agent Integration…** and **Remove Agent Integration**. Until the settings dialog exists (slice 9), the Threads page empty state carries the install step.
+Per-adapter `integration()` output (Claude Code's first), `gitmaster harness list | install | status | uninstall <harness>`, `ThreadIntegrationStatus` and the install commands, stale-path detection, and the palette actions **Install Agent Integration…** and **Remove Agent Integration**. Until the settings dialog exists (slice 9), the Threads page empty state carries the install step.
 
 Done when: the generated plugin matches a golden copy; install, status and uninstall work against a temporary harness configuration directory in tests; nothing is written into any repository; the commands shown are the ones T0 verified.
 
@@ -392,8 +510,8 @@ A working-tree snapshot at `UserPromptSubmit` and at `Stop` through the temporar
 Marked **proposed** in `design/decisions.md`; the slice named in brackets waits for the answer:
 
 1. Fail closed when a user pattern is invalid: capture pauses everywhere (D121) [T1].
-2. Capture is on for every repository once the integration is installed, with a per-repository pause kept in `gitmaster.db` (D127) [T3].
+2. Capture is on for every repository once the integration is installed, with a per-repository pause kept in `gitmaster.db` (D127) [T3a].
 3. Tool results are stored, capped at 64 KiB each (D122) [T2].
-4. Thinking blocks are not stored (Q31) [T3].
-5. A separate small hook binary if the full binary's cold start misses the budget (Q25) [T3].
-6. `gitmaster thread hook` and `gitmaster agent …` as one-shot subcommands are consistent with D02 (D124) [T3].
+4. Thinking blocks are not stored (Q31) [T3a].
+5. A separate small hook binary if the full binary's cold start misses the budget (Q25) [T3a].
+6. `gitmaster thread hook` and `gitmaster harness …` as one-shot subcommands are consistent with D02 (D124) [T3a].

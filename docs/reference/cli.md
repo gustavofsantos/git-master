@@ -99,11 +99,13 @@ For the calls the script can make, see [Workflow API](workflow-api.md).
 
 ## Capture a thread event
 
-> **Planned.** The `gitmaster thread` and `gitmaster agent` subcommands are not available in the app yet.
+> **Planned.** The `gitmaster thread` and `gitmaster harness` subcommands are not available in the app yet.
 
 ```sh
-gitmaster thread hook --agent claude-code
+gitmaster thread hook --harness claude-code
 ```
+
+`--harness` names the agent that sent the event. The integration sets it; an id this version does not know is logged and the event is dropped.
 
 The agent integration runs this command from the agent's hooks. You do not run it yourself. It reads one JSON event from the standard input, redacts it, stores it in the thread database of the repository named in the event, and exits. It starts no resident process and opens no window.
 
@@ -111,7 +113,7 @@ The command always exits with status `0` and prints nothing, even when it cannot
 
 ## Test a redaction pattern
 
-> **Planned.** The `gitmaster thread` and `gitmaster agent` subcommands are not available in the app yet.
+> **Planned.** The `gitmaster thread` and `gitmaster harness` subcommands are not available in the app yet.
 
 ```sh
 gitmaster thread redact-test [--text <text>]
@@ -121,12 +123,15 @@ Reads a sample from the standard input, or from `--text`, applies the patterns o
 
 ## Manage the agent integration
 
-> **Planned.** The `gitmaster thread` and `gitmaster agent` subcommands are not available in the app yet.
+The name after the subcommand is the agent's id. `gitmaster harness list` prints the ids this version knows. An id it does not know exits with status `2` and lists the valid ones.
+
+> **Planned.** The `gitmaster thread` and `gitmaster harness` subcommands are not available in the app yet.
 
 ```sh
-gitmaster agent install claude-code
-gitmaster agent status claude-code
-gitmaster agent uninstall claude-code
+gitmaster harness list
+gitmaster harness install claude-code
+gitmaster harness status claude-code
+gitmaster harness uninstall claude-code
 ```
 
 - `install` generates the plugin in the user data directory and prints the commands that add it to the agent. Run them, or add `--run` to have GitMaster run them when the agent's command is on your `PATH`.
