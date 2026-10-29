@@ -1,1 +1,1 @@
-//! threads::pipeline (design/threads.md).
+//! `threads::pipeline` (design/threads.md).

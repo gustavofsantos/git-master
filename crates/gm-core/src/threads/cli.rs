@@ -1,1 +1,1 @@
-//! threads::cli (design/threads.md).
+//! `threads::cli` (design/threads.md).
