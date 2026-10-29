@@ -240,6 +240,7 @@ impl StatusView {
             Mode::Results if page.hits_shown() => threads::hits_label(page.hits().len()),
             _ => String::new(),
         };
+        let ctx = self.action_context("");
         let header = div()
             .h(px(44.))
             .px_4()
@@ -251,7 +252,22 @@ impl StatusView {
             .border_b_1()
             .border_color(theme::hairline())
             .child(div().font_weight(FontWeight::MEDIUM).child("Threads"))
-            .child(div().text_xs().text_color(theme::muted()).child(count));
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(div().text_xs().text_color(theme::muted()).child(count))
+                    .child(action_button(
+                        Action::ThreadsSettings,
+                        "threads-settings",
+                        "Settings…",
+                        &Args::None,
+                        &ctx,
+                        cx,
+                    )),
+            );
         let toolbar = div()
             .h(px(40.))
             .px_4()
@@ -357,7 +373,7 @@ impl StatusView {
         let body: AnyElement = match page.mode() {
             Mode::Results if !page.hits_shown() => note("Searching…".to_owned()).into_any_element(),
             Mode::Results if page.hits().is_empty() => {
-                empty_view(Empty::Matches).into_any_element()
+                self.empty_view(Empty::Matches, cx).into_any_element()
             }
             Mode::Results => {
                 hit_rows(page.hits().len(), self.threads_view.list.clone(), cx).into_any_element()
@@ -366,7 +382,7 @@ impl StatusView {
                 note("Loading threads…".to_owned()).into_any_element()
             }
             Mode::Threads => match page.empty() {
-                Some(empty) => empty_view(empty).into_any_element(),
+                Some(empty) => self.empty_view(empty, cx).into_any_element(),
                 None => thread_rows(page.threads().len(), self.threads_view.list.clone(), cx)
                     .into_any_element(),
             },
@@ -983,29 +999,49 @@ fn note(text: String) -> Div {
 }
 
 /// What an empty list says, with the install command under the no-integration state.
-fn empty_view(empty: Empty) -> Div {
-    div()
-        .flex_1()
-        .min_h(px(0.))
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap_1()
-        .px_4()
-        .child(
-            div()
-                .text_color(theme::text())
-                .font_weight(FontWeight::MEDIUM)
-                .child(threads::empty_text(empty)),
-        )
-        .children((empty == Empty::Integration).then(|| {
-            div()
-                .font_family(theme::code_font())
-                .text_xs()
-                .text_color(theme::muted())
-                .child(INSTALL_HINT_TEXT)
-        }))
+impl StatusView {
+    /// The text of an empty list. The missing integration also gets the button that
+    /// installs it, above the command that does the same from a terminal.
+    fn empty_view(&self, empty: Empty, cx: &mut Context<Self>) -> Div {
+        let ctx = self.action_context("");
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .px_4()
+            .child(
+                div()
+                    .text_color(theme::text())
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(threads::empty_text(empty)),
+            )
+            .children((empty == Empty::Integration).then(|| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(action_button(
+                        Action::ThreadsInstall,
+                        "threads-install-empty",
+                        "Install Agent Integration…",
+                        &Args::None,
+                        &ctx,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .font_family(theme::code_font())
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .child(INSTALL_HINT_TEXT),
+                    )
+            }))
+    }
 }
 
 /// The threads, read from the list as they are drawn. Reaching near the end asks for the next page.

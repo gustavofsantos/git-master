@@ -12,11 +12,13 @@ use std::sync::{Mutex, PoisonError};
 
 use serde_json::{Map, Value, json};
 
+use gm_core::threads::config::{RedactConfig, ThreadsConfig, UserPattern};
+
 use crate::branch_filter::Scope;
 use crate::diff_rows::Layout;
 
 /// The preferences the app keeps. Each field has its default when unset.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AppSettings {
     /// The layout of the read-only commit diff (D39). Unified by default.
     pub diff_layout: Layout,
@@ -26,6 +28,8 @@ pub struct AppSettings {
     /// Whether author pictures are looked up on Gravatar (D110). Off until chosen,
     /// because a lookup sends a hash of the author's email to a third party.
     pub author_pictures: bool,
+    /// Capture and redaction of threads, the `threads` object (configuration.md).
+    pub threads: ThreadsConfig,
 }
 
 impl AppSettings {
@@ -48,10 +52,12 @@ impl AppSettings {
             .get("author_pictures")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let threads = ThreadsConfig::from_settings(&Value::Object(fields));
         Self {
             diff_layout,
             branch_scope,
             author_pictures,
+            threads,
         }
     }
 
@@ -60,7 +66,7 @@ impl AppSettings {
     /// kept as it is. Text that is not a JSON object (or no text) starts from an
     /// empty object, so a corrupt file is replaced by a valid one.
     #[must_use]
-    pub fn merge_into(self, existing: &str) -> String {
+    pub fn merge_into(&self, existing: &str) -> String {
         let mut fields = match serde_json::from_str::<Value>(existing) {
             Ok(Value::Object(fields)) => fields,
             _ => Map::new(),
@@ -75,8 +81,102 @@ impl AppSettings {
             None => fields.remove("branch_scope"),
         };
         fields.insert("author_pictures".to_owned(), json!(self.author_pictures));
+        let threads = threads_value(fields.get("threads"), &self.threads);
+        fields.insert("threads".to_owned(), threads);
         // An object of JSON values always serializes.
         serde_json::to_string_pretty(&Value::Object(fields)).unwrap_or_else(|_| "{}".to_owned())
+    }
+}
+
+/// The `threads` object once `config` is written into `existing`. The keys and
+/// the redaction fields this app reads are replaced. Items of a list that the
+/// app does not read as a pattern, path or built-in name are kept after the
+/// ones it writes, and so is every other key, inside `threads`, `threads.redact`
+/// and each pattern object (matched by name).
+fn threads_value(existing: Option<&Value>, config: &ThreadsConfig) -> Value {
+    let mut threads = object_of(existing);
+    threads.insert("capture".to_owned(), json!(config.capture));
+    threads.insert(
+        "max_result_bytes".to_owned(),
+        json!(config.max_result_bytes),
+    );
+    let redact = redact_value(threads.get("redact"), &config.redact);
+    threads.insert("redact".to_owned(), Value::Object(redact));
+    Value::Object(threads)
+}
+
+fn redact_value(existing: Option<&Value>, redact: &RedactConfig) -> Map<String, Value> {
+    let mut object = object_of(existing);
+    object.insert("builtin".to_owned(), json!(redact.builtin));
+    let disabled = kept_items(existing, "disabled_builtins", Value::is_string, |items| {
+        items.extend(redact.disabled_builtins.iter().map(|name| json!(name)));
+    });
+    object.insert("disabled_builtins".to_owned(), Value::Array(disabled));
+    let patterns = pattern_values(existing, &redact.patterns);
+    object.insert("patterns".to_owned(), Value::Array(patterns));
+    let paths = kept_items(existing, "paths", Value::is_string, |items| {
+        items.extend(redact.paths.iter().map(|path| json!(path)));
+    });
+    object.insert("paths".to_owned(), Value::Array(paths));
+    object
+}
+
+/// The pattern objects of `patterns`, each with the extra keys of the object of the
+/// same name already in the file. Items that are not patterns are kept at the end.
+fn pattern_values(existing: Option<&Value>, patterns: &[UserPattern]) -> Vec<Value> {
+    let old = existing
+        .and_then(|value| value.get("patterns"))
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let mut values: Vec<Value> = patterns
+        .iter()
+        .map(|pattern| {
+            let mut object = old
+                .iter()
+                .filter_map(Value::as_object)
+                .find(|object| object.get("name").and_then(Value::as_str) == Some(&pattern.name))
+                .cloned()
+                .unwrap_or_default();
+            object.insert("name".to_owned(), json!(pattern.name));
+            object.insert("regex".to_owned(), json!(pattern.regex));
+            object.insert("group".to_owned(), json!(pattern.group));
+            Value::Object(object)
+        })
+        .collect();
+    values.extend(old.iter().filter(|item| !is_pattern(item)).cloned());
+    values
+}
+
+/// A pattern object as the config reader takes it: a string name and regex.
+fn is_pattern(value: &Value) -> bool {
+    value.get("name").is_some_and(Value::is_string)
+        && value.get("regex").is_some_and(Value::is_string)
+}
+
+/// The items of the array `key` of `existing` that `is_ours` does not claim, then
+/// the items `ours` adds. Used for lists whose claimed items the app rewrites.
+fn kept_items(
+    existing: Option<&Value>,
+    key: &str,
+    is_ours: fn(&Value) -> bool,
+    ours: impl FnOnce(&mut Vec<Value>),
+) -> Vec<Value> {
+    let mut items = Vec::new();
+    ours(&mut items);
+    if let Some(old) = existing
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_array)
+    {
+        items.extend(old.iter().filter(|item| !is_ours(item)).cloned());
+    }
+    items
+}
+
+/// The object of `value`, or an empty one when it is missing or not an object.
+fn object_of(value: Option<&Value>) -> Map<String, Value> {
+    match value {
+        Some(Value::Object(object)) => object.clone(),
+        _ => Map::new(),
     }
 }
 
@@ -152,7 +252,7 @@ impl Store {
     /// Writes `settings` as generation `generation` (a larger number is newer).
     /// The file is replaced whole, through a temporary file, so a crash leaves
     /// the old settings or the new ones, never half of each.
-    pub fn save(&self, settings: AppSettings, generation: u64) -> io::Result<()> {
+    pub fn save(&self, settings: &AppSettings, generation: u64) -> io::Result<()> {
         let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
         if generation <= *written {
             return Ok(());
@@ -190,7 +290,29 @@ mod tests {
             diff_layout: Layout::Split,
             branch_scope: None,
             author_pictures: false,
+            threads: ThreadsConfig::default(),
         }
+    }
+
+    fn threads_config() -> ThreadsConfig {
+        ThreadsConfig {
+            capture: false,
+            max_result_bytes: 2048,
+            redact: RedactConfig {
+                builtin: true,
+                disabled_builtins: vec!["jwt".into()],
+                patterns: vec![UserPattern {
+                    name: "acme-token".into(),
+                    regex: "acme_[a-z]+".into(),
+                    group: 0,
+                }],
+                paths: vec![".env".into(), "secrets/**".into()],
+            },
+        }
+    }
+
+    fn written(settings: &AppSettings, existing: &str) -> Value {
+        serde_json::from_str(&settings.merge_into(existing)).expect("valid JSON")
     }
 
     #[test]
@@ -332,7 +454,7 @@ mod tests {
         let path = scratch("unknown-key");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, r#"{"theme":"dark","window":{"width":900}}"#).unwrap();
-        Store::new(path.clone()).save(split(), 1).unwrap();
+        Store::new(path.clone()).save(&split(), 1).unwrap();
         let text: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(text["theme"], "dark");
         assert_eq!(text["window"]["width"], 900);
@@ -345,7 +467,7 @@ mod tests {
         let path = scratch("save-corrupt");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{ not json").unwrap();
-        Store::new(path.clone()).save(split(), 1).unwrap();
+        Store::new(path.clone()).save(&split(), 1).unwrap();
         assert_eq!(Store::new(path).load(), split());
     }
 
@@ -353,7 +475,7 @@ mod tests {
     fn save_creates_the_directory_and_loads_back_without_a_temp_file() {
         let path = scratch("round");
         let store = Store::new(path.clone());
-        store.save(split(), 1).unwrap();
+        store.save(&split(), 1).unwrap();
         assert_eq!(Store::new(path.clone()).load(), split());
         assert!(!temp_path(&path).exists());
     }
@@ -362,8 +484,106 @@ mod tests {
     fn an_older_save_does_not_replace_a_newer_one() {
         let path = scratch("generation");
         let store = Store::new(path.clone());
-        store.save(split(), 2).unwrap();
-        store.save(AppSettings::default(), 1).unwrap();
+        store.save(&split(), 2).unwrap();
+        store.save(&AppSettings::default(), 1).unwrap();
         assert_eq!(Store::new(path).load(), split());
+    }
+
+    #[test]
+    fn the_threads_object_round_trips_and_defaults_when_missing() {
+        let on = AppSettings {
+            threads: threads_config(),
+            ..split()
+        };
+        assert_eq!(
+            AppSettings::parse(&on.merge_into("")).threads,
+            threads_config()
+        );
+        assert_eq!(AppSettings::parse("{}").threads, ThreadsConfig::default());
+    }
+
+    #[test]
+    fn a_save_keeps_unknown_keys_inside_threads_and_redact_and_pattern_objects() {
+        let existing = r#"{"threads":{"future":1,"capture":true,"redact":{"note":"x","builtin":true,"paths":[],"patterns":[{"name":"acme-token","regex":"old","group":0,"comment":"keep me"}]}}}"#;
+        let settings = AppSettings {
+            threads: threads_config(),
+            ..split()
+        };
+        let text = written(&settings, existing);
+        assert_eq!(text["threads"]["future"], 1);
+        assert_eq!(text["threads"]["redact"]["note"], "x");
+        assert_eq!(text["threads"]["capture"], false);
+        assert_eq!(
+            text["threads"]["redact"]["patterns"][0]["regex"],
+            "acme_[a-z]+"
+        );
+        assert_eq!(
+            text["threads"]["redact"]["patterns"][0]["comment"],
+            "keep me"
+        );
+        assert_eq!(
+            AppSettings::parse(&settings.merge_into(existing)).threads,
+            threads_config()
+        );
+    }
+
+    #[test]
+    fn items_the_reader_skips_are_kept_after_the_written_ones() {
+        let existing = r#"{"threads":{"redact":{"disabled_builtins":[3,"jwt"],"paths":[".env",false],"patterns":["text",{"name":"no-regex"}]}}}"#;
+        let settings = AppSettings {
+            threads: ThreadsConfig::default(),
+            ..split()
+        };
+        let text = written(&settings, existing);
+        assert_eq!(text["threads"]["redact"]["disabled_builtins"], json!([3]));
+        assert_eq!(
+            text["threads"]["redact"]["paths"],
+            json!([".env", ".env.*", "*.pem", "id_rsa*", false])
+        );
+        assert_eq!(
+            text["threads"]["redact"]["patterns"],
+            json!(["text", {"name": "no-regex"}])
+        );
+        assert_eq!(
+            AppSettings::parse(&settings.merge_into(existing)).threads,
+            ThreadsConfig::default()
+        );
+    }
+
+    #[test]
+    fn a_removed_pattern_is_dropped_and_a_mistyped_threads_key_is_replaced() {
+        let settings = AppSettings {
+            threads: ThreadsConfig::default(),
+            ..split()
+        };
+        let existing =
+            r#"{"threads":{"redact":{"patterns":[{"name":"gone","regex":"x","extra":1}]}}}"#;
+        assert_eq!(
+            written(&settings, existing)["threads"]["redact"]["patterns"],
+            json!([])
+        );
+        let text = written(&settings, r#"{"threads":"on","theme":"dark"}"#);
+        assert_eq!(text["threads"]["capture"], true);
+        assert_eq!(text["theme"], "dark");
+    }
+
+    #[test]
+    fn a_save_to_disk_keeps_the_threads_keys_it_does_not_own() {
+        let path = scratch("threads-keys");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"threads":{"future":true},"window":{"width":900}}"#,
+        )
+        .unwrap();
+        let settings = AppSettings {
+            threads: threads_config(),
+            ..split()
+        };
+        Store::new(path.clone()).save(&settings, 1).unwrap();
+        let text: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(text["threads"]["future"], true);
+        assert_eq!(text["window"]["width"], 900);
+        assert_eq!(Store::new(path).load().threads, threads_config());
     }
 }

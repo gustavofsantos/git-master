@@ -59,6 +59,8 @@ use crate::stashes;
 use crate::text_area::{TextArea, TextAreaEvent, TextStyle};
 use crate::theme;
 use crate::thread_dialogs::{ConfirmDialog, FieldDialog};
+use crate::threads_install::InstallDialog;
+use crate::threads_settings::ThreadsSettingsDialog;
 use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
@@ -193,6 +195,10 @@ pub struct StatusView {
     pub(crate) thread_field: Option<FieldDialog>,
     /// The confirmation of a thread delete or of a scrub, while it is open (T6).
     pub(crate) thread_confirm: Option<ConfirmDialog>,
+    /// The Threads settings dialog, while it is open (T7).
+    pub(crate) threads_settings: Option<ThreadsSettingsDialog>,
+    /// The Install Agent Integration dialog, while it is open (T7).
+    pub(crate) threads_install: Option<InstallDialog>,
     /// The message shown when a stash apply or pop, or a detached checkout, was not done.
     pub(crate) message_dialog: Option<MessageDialog>,
     /// The delete-merged-branches dialog, while it is open.
@@ -418,6 +424,8 @@ impl StatusView {
             drop_stash_dialog: None,
             thread_field: None,
             thread_confirm: None,
+            threads_settings: None,
+            threads_install: None,
             message_dialog: None,
             merged_dialog: None,
             recents,
@@ -897,9 +905,9 @@ impl StatusView {
         };
         self.settings_generation += 1;
         let generation = self.settings_generation;
-        let settings = self.settings;
+        let settings = self.settings.clone();
         cx.background_spawn(async move {
-            if let Err(error) = store.save(settings, generation) {
+            if let Err(error) = store.save(&settings, generation) {
                 eprintln!("gitmaster: could not save the settings: {error}");
             }
         })
@@ -1140,6 +1148,8 @@ impl StatusView {
             }
             Ok(Effect::OpenScrubDialog) => self.open_scrub_dialog(window, cx),
             Ok(Effect::ShowThreadsFor(path)) => self.show_threads_for(&path, window, cx),
+            Ok(Effect::OpenThreadsSettings) => self.open_threads_settings(window, cx),
+            Ok(Effect::OpenThreadsInstall) => self.open_threads_install(window, cx),
             Ok(Effect::ShowWorkflows) => self.show_workflows(cx),
             Ok(Effect::OpenQuickOpen) => self.open_quick_open(window, cx),
             Ok(Effect::ShowCode) => self.show_code(cx),
@@ -1613,6 +1623,8 @@ impl StatusView {
         layers.extend(self.new_branch_layer(window, cx));
         layers.extend(self.stash_layers(window, cx));
         layers.extend(self.thread_layers(window, cx));
+        layers.extend(self.threads_settings_layer(window, cx));
+        layers.extend(self.threads_install_layer(window, cx));
         layers.extend(self.review_composer_layer(window, cx));
         layers.extend(self.workflow_inputs_layer(window, cx));
         layers.extend(self.workflow_review_layer(window, cx));
