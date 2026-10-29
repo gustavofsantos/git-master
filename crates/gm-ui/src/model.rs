@@ -1085,7 +1085,9 @@ impl Model {
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
-            | Event::ThreadsChanged => None,
+            // A Markdown read is answered to its caller; the view has no thread text to show yet.
+            | Event::ThreadsChanged
+            | Event::ThreadMarkdown { .. } => None,
             // The read opens the resolver; the staged note is the resolver's own.
             Event::ConflictRead { id, read } => {
                 // A read after a forget keeps the note that says so.
@@ -1455,6 +1457,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ThreadSearchResults { id, .. }
         | Event::ThreadRead { id, .. }
         | Event::ThreadEditRead { id, .. }
+        | Event::ThreadMarkdown { id, .. }
         | Event::ThreadExported { id, .. }
         | Event::ThreadsScrubbed { id, .. }
         | Event::ConflictRead { id, .. }

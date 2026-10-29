@@ -493,6 +493,11 @@ pub enum CommandKind {
     ReadThreadEdit {
         id: i64,
     },
+    /// Renders thread `uid` as the Markdown `ExportThread` writes, redacted with the
+    /// current patterns, and returns it. Answers `ThreadMarkdown`. A read (D08).
+    ReadThreadMarkdown {
+        uid: String,
+    },
     /// Writes thread `uid` as Markdown to the absolute `path`, outside the worktree,
     /// redacted again with the current patterns. Answers `ThreadExported`. Human only.
     ExportThread {
@@ -917,6 +922,12 @@ pub enum Event {
         edit: ThreadEdit,
         state: EditState,
     },
+    /// Answers `ReadThreadMarkdown`: the same text `ExportThread` writes.
+    ThreadMarkdown {
+        id: OperationId,
+        uid: String,
+        markdown: String,
+    },
     /// Answers `ExportThread` with the file written.
     ThreadExported {
         id: OperationId,
@@ -1163,6 +1174,14 @@ mod tests {
         assert_eq!(unlink["kind"], "file");
         let scrub = serde_json::to_value(CommandKind::ScrubThreads).unwrap();
         assert_eq!(scrub["type"], "scrub_threads");
+        let markdown = serde_json::to_value(CommandKind::ReadThreadMarkdown {
+            uid: "0123456789abcdef".into(),
+        })
+        .unwrap();
+        assert_eq!(markdown["type"], "read_thread_markdown");
+        assert_eq!(markdown["uid"], "0123456789abcdef");
+        let back: CommandKind = serde_json::from_value(markdown).unwrap();
+        assert!(matches!(back, CommandKind::ReadThreadMarkdown { .. }));
     }
 
     #[test]
@@ -1201,6 +1220,17 @@ mod tests {
         assert_eq!(json["state"], "in_working_tree");
         let back: Event = serde_json::from_value(json).unwrap();
         assert_eq!(back, edit);
+
+        let markdown = Event::ThreadMarkdown {
+            id: OperationId(6),
+            uid: "0123456789abcdef".into(),
+            markdown: "# Title\n".into(),
+        };
+        let json = serde_json::to_value(&markdown).unwrap();
+        assert_eq!(json["type"], "thread_markdown");
+        assert_eq!(json["markdown"], "# Title\n");
+        let back: Event = serde_json::from_value(json).unwrap();
+        assert_eq!(back, markdown);
 
         let changed = serde_json::to_value(Event::ThreadsChanged).unwrap();
         assert_eq!(changed, serde_json::json!({ "type": "threads_changed" }));

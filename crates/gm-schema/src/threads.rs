@@ -273,6 +273,9 @@ pub struct ThreadFilter {
     pub has_edits: Option<bool>,
     /// A thread that touched this path.
     pub path: Option<String>,
+    /// A thread linked to this commit. The value is a full id or a short one of at
+    /// least seven hex digits; hex digits match in either case.
+    pub commit: Option<String>,
     pub tag: Option<String>,
 }
 

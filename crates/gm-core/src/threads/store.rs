@@ -169,6 +169,11 @@ const FILTER_SQL: &str = " AND (:harness IS NULL OR t.harness = :harness)
     AND (:starred IS NULL OR t.starred = :starred)
     AND (:has_edits IS NULL OR (t.edit_count > 0) = :has_edits)
     AND (:path IS NULL OR EXISTS (SELECT 1 FROM edit f WHERE f.thread_id = t.id AND f.path = :path))
+    AND (:commit IS NULL OR EXISTS (SELECT 1 FROM thread_link k WHERE k.thread_id = t.id AND k.kind = 'commit' AND (
+        lower(k.ref) = lower(:commit)
+        OR (length(k.ref) >= 7 AND k.ref NOT GLOB '*[^0-9a-fA-F]*'
+            AND substr(lower(:commit), 1, length(k.ref)) = lower(k.ref))
+        OR (length(:commit) >= 7 AND substr(lower(k.ref), 1, length(:commit)) = lower(:commit)))))
     AND (:tag IS NULL OR EXISTS (SELECT 1 FROM thread_tag g WHERE g.thread_id = t.id AND g.tag = :tag))";
 
 const EDIT_COLUMNS: &str = "id, entry_id, path, old_path, change, patch, added, removed, pre_oid, post_oid, from_input, at";
@@ -979,6 +984,7 @@ fn thread_bindings(filter: &ThreadFilter) -> Vec<(&'static str, &dyn ToSql)> {
     bindings.push((":starred", &filter.starred));
     bindings.push((":has_edits", &filter.has_edits));
     bindings.push((":path", &filter.path));
+    bindings.push((":commit", &filter.commit));
     bindings.push((":tag", &filter.tag));
     bindings
 }
@@ -1971,6 +1977,158 @@ mod tests {
                 .expect("list")
                 .is_empty()
         );
+    }
+
+    const OID: &str = "0123456789abcdef0123456789abcdef01234567";
+    const OTHER_OID: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+    fn prompted(session: &str, at: i64, text: &str) -> Batch {
+        batch(session, at, vec![new_entry("u", EntryKind::User, text, at)])
+    }
+
+    fn link_to(store: &mut ThreadStore, session: &str, kind: LinkKind, reference: &str) {
+        let link = ThreadLink {
+            kind,
+            reference: reference.to_owned(),
+            origin: LinkOrigin::Manual,
+        };
+        store.link(&uid(session), &link).expect("link");
+    }
+
+    fn with_commit(commit: &str) -> ThreadFilter {
+        ThreadFilter {
+            commit: Some(commit.to_owned()),
+            ..ThreadFilter::default()
+        }
+    }
+
+    #[test]
+    fn commit_filter_matches_a_full_oid_in_either_case() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store.apply(&prompted("a", 100, "alpha")).expect("a");
+        store.apply(&prompted("b", 200, "beta")).expect("b");
+        link_to(&mut store, "a", LinkKind::Commit, OID);
+        link_to(&mut store, "b", LinkKind::Commit, OTHER_OID);
+        assert_eq!(sorted_titles(&store, &with_commit(OID)), vec!["alpha"]);
+        assert_eq!(
+            sorted_titles(&store, &with_commit(&OID.to_uppercase())),
+            vec!["alpha"]
+        );
+        assert!(sorted_titles(&store, &with_commit("0000000")).is_empty());
+    }
+
+    #[test]
+    fn commit_filter_accepts_a_short_oid_link_for_a_full_filter() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store.apply(&prompted("a", 100, "alpha")).expect("a");
+        store.apply(&prompted("b", 200, "beta")).expect("b");
+        link_to(&mut store, "a", LinkKind::Commit, "0123456");
+        link_to(&mut store, "b", LinkKind::Commit, "012345");
+        assert_eq!(sorted_titles(&store, &with_commit(OID)), vec!["alpha"]);
+        assert_eq!(
+            sorted_titles(&store, &with_commit("0123456")),
+            vec!["alpha"]
+        );
+        // Six digits are too few to name a commit, so only the exact link matches.
+        assert_eq!(sorted_titles(&store, &with_commit("012345")), vec!["beta"]);
+    }
+
+    #[test]
+    fn commit_filter_accepts_a_short_filter_for_a_full_oid_link() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store.apply(&prompted("a", 100, "alpha")).expect("a");
+        link_to(&mut store, "a", LinkKind::Commit, OID);
+        assert_eq!(
+            sorted_titles(&store, &with_commit("0123456")),
+            vec!["alpha"]
+        );
+        assert_eq!(
+            sorted_titles(&store, &with_commit(&OID[..12].to_uppercase())),
+            vec!["alpha"]
+        );
+        assert!(sorted_titles(&store, &with_commit("012345")).is_empty());
+    }
+
+    #[test]
+    fn ref_looking_links_that_are_not_commits_do_not_match() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store.apply(&prompted("a", 100, "alpha")).expect("a");
+        store.apply(&prompted("b", 200, "beta")).expect("b");
+        store.apply(&prompted("c", 300, "gamma")).expect("c");
+        // A branch named like an oid is not a commit link.
+        link_to(&mut store, "a", LinkKind::Branch, OID);
+        // A commit link that is not hex is never a short oid.
+        link_to(&mut store, "b", LinkKind::Commit, "0123456g");
+        link_to(&mut store, "c", LinkKind::Commit, "main");
+        assert!(sorted_titles(&store, &with_commit(OID)).is_empty());
+        assert!(sorted_titles(&store, &with_commit("0123456gfff")).is_empty());
+        assert!(sorted_titles(&store, &with_commit("main-wip")).is_empty());
+        // The exact reference still matches, because it is the same text.
+        assert_eq!(sorted_titles(&store, &with_commit("main")), vec!["gamma"]);
+    }
+
+    #[test]
+    fn commit_filter_ignores_threads_without_links() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store.apply(&prompted("a", 100, "alpha")).expect("a");
+        store.apply(&prompted("b", 200, "beta")).expect("b");
+        link_to(&mut store, "b", LinkKind::File, OID);
+        assert!(sorted_titles(&store, &with_commit(OID)).is_empty());
+        assert!(
+            store
+                .list_threads(&with_commit(OID), None, 10)
+                .expect("list")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn commit_filter_combines_with_other_filters() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store.apply(&prompted("a", 100, "alpha")).expect("a");
+        let mut other = prompted("b", 200, "beta");
+        other.harness = "other".to_owned();
+        store.apply(&other).expect("b");
+        link_to(&mut store, "a", LinkKind::Commit, OID);
+        let other_uid = ThreadStore::thread_uid("other", "b");
+        let link = ThreadLink {
+            kind: LinkKind::Commit,
+            reference: OID.to_owned(),
+            origin: LinkOrigin::Manual,
+        };
+        store.link(&other_uid, &link).expect("link");
+        let in_other = ThreadFilter {
+            harness: Some("other".to_owned()),
+            commit: Some(OID.to_owned()),
+            ..ThreadFilter::default()
+        };
+        assert_eq!(sorted_titles(&store, &in_other), vec!["beta"]);
+        let elsewhere = ThreadFilter {
+            branch: Some("dev".to_owned()),
+            commit: Some(OID.to_owned()),
+            ..ThreadFilter::default()
+        };
+        assert!(sorted_titles(&store, &elsewhere).is_empty());
+    }
+
+    #[test]
+    fn search_applies_the_commit_filter() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&prompted("a", 100, "alpha backoff"))
+            .expect("a");
+        store.apply(&prompted("b", 200, "beta backoff")).expect("b");
+        link_to(&mut store, "a", LinkKind::Commit, "0123456");
+        link_to(&mut store, "b", LinkKind::Commit, OTHER_OID);
+        let hits = store
+            .search("backoff", &with_commit(OID), 10)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].thread_uid, uid("a"));
+        let none = store
+            .search("backoff", &with_commit("ffffffff"), 10)
+            .expect("search");
+        assert!(none.is_empty());
     }
 
     #[test]

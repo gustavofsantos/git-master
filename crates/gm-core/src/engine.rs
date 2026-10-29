@@ -2883,6 +2883,7 @@ impl Engine {
                 | CommandKind::SearchThreads { .. }
                 | CommandKind::ReadThread { .. }
                 | CommandKind::ReadThreadEdit { .. }
+                | CommandKind::ReadThreadMarkdown { .. }
                 | CommandKind::ExportThread { .. }
         ) {
             self.log.push(LogEntry {
