@@ -33,6 +33,7 @@ pub mod stage_math;
 mod stash;
 pub mod syntax;
 pub mod threads;
+mod threads_session;
 pub mod watch;
 mod workflow_session;
 pub mod worktree;

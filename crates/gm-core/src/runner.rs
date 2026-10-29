@@ -44,6 +44,8 @@ enum Message {
     ScriptEffect(EffectRequest),
     /// A script run reports; the front ends hear it as events.
     ScriptEvent(ScriptEvent),
+    /// The thread database changed on disk; the subscribers hear `ThreadsChanged`.
+    ThreadsChanged,
 }
 
 /// Cloneable front door to the engine thread. The thread stops when every
@@ -69,6 +71,11 @@ impl EngineHandle {
             self.tx.clone(),
         ));
         id
+    }
+
+    /// Tells the subscribers that the thread database changed on disk (the watcher calls it).
+    pub fn threads_changed(&self) {
+        let _ = self.tx.send_blocking(Message::ThreadsChanged);
     }
 
     /// Whether the engine thread is handling a command right now. A status
@@ -152,6 +159,7 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                 let events = engine.script_event(event);
                 broadcast(events, &mut subscribers);
             }
+            Message::ThreadsChanged => broadcast(vec![Event::ThreadsChanged], &mut subscribers),
             Message::Dispatch(id, command, reports) => {
                 busy.store(true, Ordering::SeqCst);
                 let events = engine.handle(id, &command);

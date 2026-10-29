@@ -9,6 +9,9 @@
 //! - the worktree registry, `worktrees/` in the common dir, non-recursively:
 //!   a worktree added or removed from any shell changes its direct entries
 //!   (not the files inside them, which belong to the other worktrees);
+//! - the thread folder, `gitmaster/` in the common dir, non-recursively: only
+//!   `threads.db` and `threads.db-wal` count, and they raise `ThreadsChanged`
+//!   through the engine after a quiet period (design/threads.md);
 //! - the worktree: the root and each directory holding tracked files
 //!   (`set::watch_dirs`); changes whose paths `check-ignore` reports as ignored
 //!   are dropped, so `target/` and `node_modules/` cost nothing;
@@ -75,7 +78,8 @@ pub enum Notice {
 
 enum Input {
     Fs(notify::Result<FsEvent>),
-    Engine(Event),
+    /// Boxed: a thread event is large, and every input pays for the largest variant.
+    Engine(Box<Event>),
     Focus,
     Shutdown,
 }
@@ -141,7 +145,7 @@ pub fn spawn_with(
         .name("gm-watch-events".into())
         .spawn(move || {
             while let Ok(event) = events.recv_blocking() {
-                if forward.send(Input::Engine(event)).is_err() {
+                if forward.send(Input::Engine(Box::new(event))).is_err() {
                     break;
                 }
             }
@@ -160,6 +164,9 @@ pub fn spawn_with(
         os: None,
         degraded: false,
         registry: false,
+        threads_dir: false,
+        threads_first: None,
+        threads_last: None,
     };
     std::thread::Builder::new()
         .name("gm-watch".into())
@@ -188,13 +195,25 @@ struct Worker {
     /// Whether the worktree registry is watched. It is created by the first
     /// linked worktree, so it may be watched only after it appears.
     registry: bool,
+    /// Whether the thread folder `gitmaster/` is watched. A capture creates it,
+    /// so it may be watched only after it appears.
+    threads_dir: bool,
+    /// When the first thread database change of the pending burst came.
+    threads_first: Option<Instant>,
+    /// When the last thread database change of the pending burst came.
+    threads_last: Option<Instant>,
 }
 
 impl Worker {
     fn run(mut self, rx: &mpsc::Receiver<Input>) {
         loop {
             let now = Instant::now();
-            let due = self.coalescer.due();
+            let due = self
+                .coalescer
+                .due()
+                .into_iter()
+                .chain(self.threads_due())
+                .min();
             let timeout = due.map(|due| if due <= now { BUSY_POLL } else { due - now });
             let first = match timeout {
                 Some(timeout) => rx.recv_timeout(timeout),
@@ -211,6 +230,11 @@ impl Worker {
                 return;
             }
             let now = Instant::now();
+            if self.threads_due().is_some_and(|due| due <= now) {
+                self.threads_first = None;
+                self.threads_last = None;
+                self.engine.threads_changed();
+            }
             // Without an open repository there is nothing to refresh; the request waits.
             if self.root.is_some() && self.coalescer.should_start(now, self.engine.is_busy()) {
                 let id = self
@@ -243,7 +267,7 @@ impl Worker {
                 }
                 Input::Engine(event) => {
                     self.flush_paths(&mut paths, &mut rescan);
-                    self.on_engine_event(event);
+                    self.on_engine_event(*event);
                 }
             }
         }
@@ -283,6 +307,9 @@ impl Worker {
         self.git = None;
         self.degraded = false;
         self.registry = false;
+        self.threads_dir = false;
+        self.threads_first = None;
+        self.threads_last = None;
         self.root = Some(root.to_path_buf());
         match self.install(root) {
             Ok(dirs) => {
@@ -313,6 +340,12 @@ impl Worker {
             watch(&registry, RecursiveMode::NonRecursive)?;
         }
         self.registry = registered;
+        let threads = git.common_dir.join("gitmaster");
+        let threads_dir = threads.is_dir();
+        if threads_dir {
+            watch(&threads, RecursiveMode::NonRecursive)?;
+        }
+        self.threads_dir = threads_dir;
         self.git = Some(git);
         self.os = Some(os);
         self.sync_worktree(root)
@@ -330,6 +363,34 @@ impl Worker {
         {
             self.registry = true;
         }
+    }
+
+    /// Watches the thread folder once a capture has created it. A failure is not
+    /// fatal: the next capture is seen when the window is focused.
+    fn watch_threads(&mut self, common_dir: &Path) {
+        let Some(os) = self.os.as_mut() else {
+            return;
+        };
+        if os
+            .watch(&common_dir.join("gitmaster"), RecursiveMode::NonRecursive)
+            .is_ok()
+        {
+            self.threads_dir = true;
+        }
+    }
+
+    /// Notes a change of the thread database. The event goes out after a quiet
+    /// period, or once `MAX_WAIT` has passed since the burst began.
+    fn note_threads_change(&mut self, now: Instant) {
+        self.threads_first.get_or_insert(now);
+        self.threads_last = Some(now);
+    }
+
+    /// When the pending thread change is announced, if there is one.
+    fn threads_due(&self) -> Option<Instant> {
+        let first = self.threads_first?;
+        let last = self.threads_last?;
+        Some((last + DEBOUNCE).min(first + MAX_WAIT))
     }
 
     /// Brings the worktree watches in line with the tracked set. Returns the
@@ -395,6 +456,8 @@ impl Worker {
         };
         let mut worktree: BTreeSet<String> = BTreeSet::new();
         let mut registry_appeared = false;
+        let mut threads_touched = false;
+        let mut threads_folder_appeared = false;
         for path in paths.drain(..) {
             if let Ok(rel) = path
                 .strip_prefix(&git_dir)
@@ -405,6 +468,8 @@ impl Worker {
                     tracked_set_changed |= filter::changes_tracked_set(rel);
                 }
                 registry_appeared |= !self.registry && rel == Path::new("worktrees");
+                threads_touched |= filter::threads_database_changed(rel);
+                threads_folder_appeared |= !self.threads_dir && filter::threads_dir_appeared(rel);
             } else if let Ok(rel) = path.strip_prefix(&root)
                 && !filter::is_inside_dot_git(rel)
             {
@@ -419,6 +484,12 @@ impl Worker {
         }
         if registry_appeared {
             self.watch_registry(&common_dir);
+        }
+        if threads_folder_appeared {
+            self.watch_threads(&common_dir);
+        }
+        if threads_touched {
+            self.note_threads_change(now);
         }
         if tracked_set_changed && let Err(reason) = self.sync_worktree(&root) {
             self.degrade(reason);

@@ -43,6 +43,8 @@ use crate::script::trust::{self, TrustStore};
 use crate::script::{api_docs, input as script_input, templates as script_templates};
 use crate::script_session::{self, EffectRequest, ScriptLink, ScriptSession};
 use crate::syntax;
+use crate::threads::config;
+use crate::threads_session::{self, ThreadsSession};
 use crate::workflow_session;
 use crate::worktree;
 
@@ -120,6 +122,8 @@ pub struct Engine {
     api_written: bool,
     /// The review comments of the open repository; see `review_session`.
     review: Option<ReviewSession>,
+    /// The threads of the open repository; see `threads_session`.
+    threads: Option<ThreadsSession>,
 }
 
 /// The walk behind the history list: the stream while no job reads it, how to
@@ -225,6 +229,7 @@ impl Engine {
             trust: None,
             api_written: false,
             review: None,
+            threads: None,
         }
     }
 
@@ -984,6 +989,7 @@ impl Engine {
             | CommandKind::CheckWorkflowScript { .. }
             | CommandKind::SaveWorkflowFile { .. }
             | CommandKind::DeleteWorkflowFile { .. } => self.workflow_command(id, actor, kind),
+            _ if threads_session::is_threads_command(kind) => self.threads_command(id, actor, kind),
             _ if is_review_command(kind) => self.review_command(id, actor, kind),
             // The worktree and branch commands that `execute` does not list above.
             _ => self.manage_worktree(id, actor, kind),
@@ -2162,6 +2168,29 @@ impl Engine {
         self.reload_status(id, &root)
     }
 
+    /// The thread commands (design/threads.md, "Engine surface"). The reads are open
+    /// to any actor; the writes and the export are human only. A write answers
+    /// `ThreadsChanged` in its own events.
+    fn threads_command(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        if let Some(what) = threads_session::human_only(kind) {
+            only_a_human(actor, what)?;
+        }
+        let root = self.open_root()?;
+        let settings = config::settings_path();
+        let store = threads_session::store(&mut self.threads, self.git.as_ref(), &root)?;
+        let ctx = threads_session::Context {
+            git: self.git.as_ref(),
+            root: &root,
+            settings: settings.as_deref(),
+        };
+        threads_session::run(id, store, &ctx, kind)
+    }
+
     /// The review comment commands (B4, D96). The writes are human only; the list
     /// and a snapshot's text are reads.
     fn review_command(
@@ -2850,6 +2879,11 @@ impl Engine {
                 | CommandKind::LoadReviewCurrentText { .. }
                 | CommandKind::PreviewMoveChanges { .. }
                 | CommandKind::ReadConflict { .. }
+                | CommandKind::ListThreads { .. }
+                | CommandKind::SearchThreads { .. }
+                | CommandKind::ReadThread { .. }
+                | CommandKind::ReadThreadEdit { .. }
+                | CommandKind::ExportThread { .. }
         ) {
             self.log.push(LogEntry {
                 id: op.id,

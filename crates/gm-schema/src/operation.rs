@@ -18,6 +18,10 @@ use crate::status::{
     WorktreeInspection,
 };
 use crate::syntax::HighlightSpan;
+use crate::threads::{
+    EditState, LinkKind, ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink,
+    ThreadSummary,
+};
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
     WorkflowRunStatus, WorkflowRunSummary,
@@ -461,6 +465,70 @@ pub enum CommandKind {
     ForgetRecordedResolution {
         path: String,
     },
+    /// Lists thread summaries, newest first, with `total` threads in the store.
+    /// `before_at` and `before_uid` name the last row of the previous page, and
+    /// are both set or both unset. Answers `ThreadsListed`. A read (D08).
+    ListThreads {
+        filter: ThreadFilter,
+        before_at: Option<i64>,
+        before_uid: Option<String>,
+        limit: u32,
+    },
+    /// Searches entry text, tool names and edit paths. Answers `ThreadSearchResults`.
+    /// A read (D08).
+    SearchThreads {
+        query: String,
+        filter: ThreadFilter,
+        limit: u32,
+    },
+    /// Reads the entries of thread `uid` from `from_seq`, with their edits and links.
+    /// Answers `ThreadRead`. A read (D08).
+    ReadThread {
+        uid: String,
+        from_seq: u32,
+        limit: u32,
+    },
+    /// Reads edit `id` with its state in the working tree and at `HEAD`. Answers
+    /// `ThreadEditRead`. A read (D08).
+    ReadThreadEdit {
+        id: i64,
+    },
+    /// Writes thread `uid` as Markdown to the absolute `path`, outside the worktree,
+    /// redacted again with the current patterns. Answers `ThreadExported`. Human only.
+    ExportThread {
+        uid: String,
+        path: String,
+    },
+    /// Edits the metadata of thread `uid`; never its entries. Human only.
+    UpdateThread {
+        uid: String,
+        title: Option<String>,
+        note: Option<String>,
+        starred: Option<bool>,
+        tags: Option<Vec<String>>,
+    },
+    /// Adds a link from thread `uid` to a commit, branch or path. Human only.
+    LinkThread {
+        uid: String,
+        link: ThreadLink,
+    },
+    /// Removes a link of thread `uid`. Human only.
+    UnlinkThread {
+        uid: String,
+        kind: LinkKind,
+        reference: String,
+    },
+    /// Deletes thread `uid` with its entries, edits and links, securely. Human only.
+    DeleteThread {
+        uid: String,
+    },
+    /// Deletes entry `id` and its edits, securely. Human only.
+    DeleteThreadEntry {
+        id: i64,
+    },
+    /// Applies the redaction patterns to every stored text and title, then answers
+    /// `ThreadsScrubbed`. Human only.
+    ScrubThreads,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -827,11 +895,47 @@ pub enum Event {
         id: OperationId,
         path: String,
     },
+    /// Answers `ThreadsListed`. `total` counts every thread in the store, whatever the filter.
+    ThreadsListed {
+        id: OperationId,
+        threads: Vec<ThreadSummary>,
+        total: u32,
+    },
+    /// Answers `SearchThreads`, best match first.
+    ThreadSearchResults {
+        id: OperationId,
+        hits: Vec<ThreadHit>,
+    },
+    /// Answers `ReadThread`.
+    ThreadRead {
+        id: OperationId,
+        detail: ThreadDetail,
+    },
+    /// Answers `ReadThreadEdit`: the edit and where its file is now.
+    ThreadEditRead {
+        id: OperationId,
+        edit: ThreadEdit,
+        state: EditState,
+    },
+    /// Answers `ExportThread` with the file written.
+    ThreadExported {
+        id: OperationId,
+        path: String,
+    },
+    /// Answers `ScrubThreads`: how many texts, titles and notes changed.
+    ThreadsScrubbed {
+        id: OperationId,
+        changed: u32,
+    },
+    /// The thread database changed, by a write of this engine or by new data the
+    /// watcher saw. Carries no operation id: no command asked for it.
+    ThreadsChanged,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::threads::{EditChange, LinkOrigin};
     use proptest::prelude::*;
 
     #[test]
@@ -992,6 +1096,116 @@ mod tests {
         assert_eq!(json["branches"][0]["upstream"], "origin/main");
         assert_eq!(json["branches"][0]["author_email"], "ana@example.com");
         assert_eq!(json["user_email"], "me@example.com");
+    }
+
+    fn thread_summary(uid: &str) -> ThreadSummary {
+        ThreadSummary {
+            uid: uid.into(),
+            harness: "claude-code".into(),
+            harness_version: None,
+            session_id: "s-1".into(),
+            worktree: "/r".into(),
+            branch: Some("main".into()),
+            model: None,
+            title: "retry with backoff".into(),
+            note: String::new(),
+            starred: false,
+            tags: vec!["flaky".into()],
+            started_at: 1,
+            last_event_at: 2,
+            ended_at: None,
+            entry_count: 3,
+            edit_count: 1,
+            redaction_count: 0,
+        }
+    }
+
+    #[test]
+    fn thread_commands_wire_format_is_tagged() {
+        let list = serde_json::to_value(CommandKind::ListThreads {
+            filter: ThreadFilter::default(),
+            before_at: Some(5),
+            before_uid: Some("ab".into()),
+            limit: 20,
+        })
+        .unwrap();
+        assert_eq!(list["type"], "list_threads");
+        assert_eq!(list["before_at"], 5);
+        let back: CommandKind = serde_json::from_value(list).unwrap();
+        assert_eq!(
+            back,
+            CommandKind::ListThreads {
+                filter: ThreadFilter::default(),
+                before_at: Some(5),
+                before_uid: Some("ab".into()),
+                limit: 20,
+            }
+        );
+        let link = serde_json::to_value(CommandKind::LinkThread {
+            uid: "0123456789abcdef".into(),
+            link: ThreadLink {
+                kind: LinkKind::Commit,
+                reference: "a".repeat(40),
+                origin: LinkOrigin::Manual,
+            },
+        })
+        .unwrap();
+        assert_eq!(link["type"], "link_thread");
+        assert_eq!(link["link"]["kind"], "commit");
+        assert_eq!(link["link"]["origin"], "manual");
+        let unlink = serde_json::to_value(CommandKind::UnlinkThread {
+            uid: "u".into(),
+            kind: LinkKind::File,
+            reference: "src/a.rs".into(),
+        })
+        .unwrap();
+        assert_eq!(unlink["type"], "unlink_thread");
+        assert_eq!(unlink["kind"], "file");
+        let scrub = serde_json::to_value(CommandKind::ScrubThreads).unwrap();
+        assert_eq!(scrub["type"], "scrub_threads");
+    }
+
+    #[test]
+    fn thread_events_round_trip_through_json() {
+        let listed = Event::ThreadsListed {
+            id: OperationId(4),
+            threads: vec![thread_summary("0123456789abcdef")],
+            total: 7,
+        };
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["type"], "threads_listed");
+        assert_eq!(json["total"], 7);
+        let back: Event = serde_json::from_value(json).unwrap();
+        assert_eq!(back, listed);
+
+        let edit = Event::ThreadEditRead {
+            id: OperationId(5),
+            edit: ThreadEdit {
+                id: 9,
+                entry_id: 3,
+                path: "src/a.rs".into(),
+                old_path: None,
+                change: EditChange::Modify,
+                patch: "@@ -1 +1 @@\n-a\n+b\n".into(),
+                added: 1,
+                removed: 1,
+                pre_oid: None,
+                post_oid: Some("b".repeat(40)),
+                from_input: false,
+                at: 1,
+            },
+            state: EditState::InWorkingTree,
+        };
+        let json = serde_json::to_value(&edit).unwrap();
+        assert_eq!(json["type"], "thread_edit_read");
+        assert_eq!(json["state"], "in_working_tree");
+        let back: Event = serde_json::from_value(json).unwrap();
+        assert_eq!(back, edit);
+
+        let changed = serde_json::to_value(Event::ThreadsChanged).unwrap();
+        assert_eq!(changed, serde_json::json!({ "type": "threads_changed" }));
+        let back: Event = serde_json::from_value(changed).unwrap();
+        assert_eq!(back, Event::ThreadsChanged);
     }
 
     fn any_state() -> impl Strategy<Value = OperationState> {
