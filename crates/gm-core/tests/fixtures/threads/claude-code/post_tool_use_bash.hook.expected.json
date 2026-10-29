@@ -1,0 +1,31 @@
+[
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "3f1d9c2a-7b4e-4a6d-8e5f-1c2b3a4d5e6f",
+      "source_id": "toolu_04B",
+      "at": 0
+    },
+    "tool": "shell",
+    "native_tool": "Bash",
+    "args": {
+      "command": "cargo test",
+      "description": "Run tests"
+    },
+    "parent_call": null,
+    "edit": null
+  },
+  {
+    "type": "tool_returned",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "3f1d9c2a-7b4e-4a6d-8e5f-1c2b3a4d5e6f",
+      "source_id": "toolu_04B:result",
+      "at": 0
+    },
+    "call_source_id": "toolu_04B",
+    "text": "running 3 tests\ntest result: ok.\nwarning: unused",
+    "is_error": false
+  }
+]

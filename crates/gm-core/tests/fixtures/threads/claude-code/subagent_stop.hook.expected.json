@@ -1,0 +1,12 @@
+[
+  {
+    "type": "turn_ended",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "3f1d9c2a-7b4e-4a6d-8e5f-1c2b3a4d5e6f",
+      "source_id": "substop:47698c2c3463f271",
+      "at": 0
+    },
+    "parent_call": "3f1d9c2a-7b4e-4a6d-8e5f-1c2b3a4d5e6f"
+  }
+]

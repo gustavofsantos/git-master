@@ -1,0 +1,19 @@
+[
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "3f1d9c2a-7b4e-4a6d-8e5f-1c2b3a4d5e6f",
+      "source_id": "800a3398a4fc982595f73050",
+      "at": 0
+    },
+    "tool": "search",
+    "native_tool": "Grep",
+    "args": {
+      "pattern": "fn fetch",
+      "path": "/home/dev/repo/src"
+    },
+    "parent_call": null,
+    "edit": null
+  }
+]

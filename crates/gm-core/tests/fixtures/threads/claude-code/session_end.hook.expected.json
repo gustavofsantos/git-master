@@ -1,0 +1,12 @@
+[
+  {
+    "type": "session_ended",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "3f1d9c2a-7b4e-4a6d-8e5f-1c2b3a4d5e6f",
+      "source_id": "session-end:prompt_input_exit",
+      "at": 0
+    },
+    "reason": "prompt_input_exit"
+  }
+]

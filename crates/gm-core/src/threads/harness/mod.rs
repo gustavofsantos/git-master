@@ -4,6 +4,7 @@
 //! `CanonicalEvent`s. Parsing is pure; redaction, storage and the window never see a harness
 //! shape. See `design/threads.md`, "Harnesses and the canonical model".
 
+pub mod claude_code;
 #[cfg(test)]
 pub mod conformance;
 pub mod fake;
@@ -131,7 +132,7 @@ pub trait HarnessAdapter: Send + Sync {
 }
 
 /// The known adapters. Empty until a harness is added: a harness is one line here.
-static REGISTRY: &[&dyn HarnessAdapter] = &[];
+static REGISTRY: &[&dyn HarnessAdapter] = &[&claude_code::ClaudeCodeAdapter];
 
 /// Every registered harness id, sorted.
 #[must_use]
