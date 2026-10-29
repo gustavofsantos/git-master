@@ -1,6 +1,9 @@
 //! `gitmaster [PATH]` opens the window on the repository at PATH, or on the
 //! working directory. `gitmaster --version` prints the version. `gitmaster workflow …` runs one
 //! of the one-shot workflow commands and exits; it opens no window and keeps no process.
+//! `gitmaster thread …` (the hook and the redaction test) and `gitmaster harness …` (the agent
+//! integration) are one-shot too (docs/reference/cli.md). To open a folder named `thread` or
+//! `harness`, write `./thread` or `./harness`.
 
 mod shell_env;
 
@@ -19,6 +22,27 @@ fn main() {
     if first.as_deref() == Some("workflow") {
         let words: Vec<String> = args.collect();
         std::process::exit(workflow_command(&words));
+    }
+    if first.as_deref() == Some("thread") {
+        let words: Vec<String> = args.collect();
+        let code = gm_core::threads::cli::thread_command(
+            &words,
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        );
+        std::process::exit(code);
+    }
+    if first.as_deref() == Some("harness") {
+        let words: Vec<String> = args.collect();
+        let env = gm_core::threads::cli::Env::from_process();
+        let code = gm_core::threads::cli::harness_command(
+            &words,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+            &env,
+        );
+        std::process::exit(code);
     }
     if args.next().is_some() {
         eprintln!("usage: gitmaster [PATH]");
