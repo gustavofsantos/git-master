@@ -552,6 +552,8 @@ impl StatusView {
         let body = div()
             .flex_1()
             .min_h(px(0.))
+            .flex()
+            .flex_col()
             .px_4()
             .py_3()
             .child(self.detail_list(cx));
@@ -1735,9 +1737,14 @@ fn link_rows(links: &[ThreadLink], uid: &str, cx: &mut Context<StatusView>) -> O
                     .child(reference),
             );
         match link.origin {
-            LinkOrigin::Observed => row
-                .text_color(theme::muted())
-                .child("created during this thread"),
+            LinkOrigin::Observed => {
+                let label = match link.kind {
+                    LinkKind::Commit => "created during this thread",
+                    LinkKind::Branch => "checked out when it started",
+                    LinkKind::File => "edited by the agent",
+                };
+                row.text_color(theme::muted()).child(label)
+            }
             LinkOrigin::Manual => {
                 let uid = uid.to_owned();
                 let link = link.clone();

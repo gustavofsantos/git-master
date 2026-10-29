@@ -67,7 +67,7 @@ Type in the search box above the list. There is no search syntax.
 - Put words in double quotes to match them as a phrase.
 - Identifiers match whole, so `file_index` finds `file_index` and not every `file`.
 
-Results show a snippet around the match. Select one to open the thread at that entry. Narrow the list with the **Starred** and **Has edits** filters, and with a file: choose **Show Threads** on a file to list the threads that edited it. A removable chip shows the file.
+Results show a snippet around the match. Select one to open the thread at that entry. Narrow the list with the **Starred** and **Has edits** filters, and with a file: choose **Show Threads for File** on a file to list the threads that edited it. A removable chip shows the file.
 
 > **Planned.** Filters for the agent, the branch and the dates are not available in the app yet.
 
@@ -77,7 +77,7 @@ Search runs on your machine over what is stored in the repository. Nothing is se
 
 ### Threads for a file or a commit
 
-Choose **Show Threads** in the menu of a file in the Working Copy to list the threads that edited that file.
+Choose **Show Threads for File** in the menu of a file in the Working Copy to list the threads that edited that file.
 
 Select a commit in [History](history.md) and its panel lists the threads linked to it, under **Threads**. Each row shows the title, the agent and how long ago the thread was active. Select a row to open that thread on this page, even when a filter would leave it out. The section lists the newest ten threads.
 

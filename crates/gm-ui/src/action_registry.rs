@@ -987,7 +987,7 @@ const SPECS: [Spec; 92] = [
     ),
     spec(
         "file.show_threads",
-        "Show Threads",
+        "Show Threads for File",
         None,
         ArgKind::File,
         Category::WorkingCopy,
@@ -5175,7 +5175,10 @@ mod tests {
             assert_eq!(action.spec().shortcut, None, "{id}");
             assert!(action.available(), "{id}");
         }
-        assert_eq!(Action::ShowThreadsForFile.spec().title, "Show Threads");
+        assert_eq!(
+            Action::ShowThreadsForFile.spec().title,
+            "Show Threads for File"
+        );
         assert_eq!(
             Action::ShowThreadsForFile.spec().category,
             Category::WorkingCopy
