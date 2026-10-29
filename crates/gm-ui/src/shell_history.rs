@@ -20,9 +20,11 @@ use crate::avatar::{self, Avatars};
 use crate::history_graph::{self, Drawing, GraphRow, Tint};
 use crate::model::{CommitPage, CommitPane, HistoryList};
 use crate::shell_list::change_letter;
+use crate::shell_threads::chip;
 use crate::stashes;
 use crate::text_area::{TextArea, TextStyle};
 use crate::theme;
+use crate::threads;
 use crate::view::{Screen, StatusView};
 use crate::window_chrome;
 
@@ -67,6 +69,7 @@ impl StatusView {
             }
             _ => String::new(),
         };
+        let threads = self.commit_threads_section(cx);
         div()
             .flex_1()
             .min_w(px(0.))
@@ -109,6 +112,7 @@ impl StatusView {
                         &self.commit_texts,
                         &Panel::Commit,
                         None,
+                        threads,
                         cx,
                     ))
             })
@@ -518,6 +522,7 @@ pub(crate) fn commit_panel(
     texts: &CommitTexts,
     panel: &Panel,
     actions: Option<Div>,
+    footer: Option<Div>,
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
     let content = match pane {
@@ -546,6 +551,7 @@ pub(crate) fn commit_panel(
         .text_sm()
         .children(actions)
         .child(content)
+        .children(footer)
 }
 
 fn message_text(text: &'static str) -> Div {
@@ -872,6 +878,7 @@ impl StatusView {
             },
         );
         self.model.commit.request(id);
+        self.request_commit_threads(oid);
         cx.notify();
     }
 
@@ -930,6 +937,78 @@ impl StatusView {
         }
         self.show_commit_texts(cx);
         cx.notify();
+    }
+
+    /// The Threads section of the commit panel (H3): the threads linked to the commit
+    /// shown, each opening its thread on the Threads page. Nothing when it has none.
+    pub(crate) fn commit_threads_section(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let CommitPane::Shown(detail) = &self.model.commit else {
+            return None;
+        };
+        let threads = self.model.commit_threads.threads_of(&detail.oid);
+        if threads.is_empty() {
+            return None;
+        }
+        let now = now_secs();
+        let rows: Vec<Stateful<Div>> = threads
+            .iter()
+            .enumerate()
+            .map(|(index, thread)| {
+                let uid = thread.uid.clone();
+                div()
+                    .id(("commit-thread", index))
+                    .cursor_pointer()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .min_w(px(0.))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            this.open_thread_from_commit(&uid, window, cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .min_w(px(0.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(threads::title(thread).to_owned()),
+                            )
+                            .child(chip(thread.harness.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .child(threads::relative(now, thread.last_event_at)),
+                    )
+            })
+            .collect();
+        let more = self.model.commit_threads.is_full().then(|| {
+            div()
+                .text_xs()
+                .text_color(theme::muted())
+                .child("and more. Open Threads to see them all.")
+        });
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section_label("THREADS"))
+                .child(div().flex().flex_col().gap_3().text_xs().children(rows))
+                .children(more),
+        )
     }
 
     /// The Copy control by the hash: copies the full commit id.

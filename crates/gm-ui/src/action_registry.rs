@@ -228,6 +228,8 @@ pub enum Effect {
         field: ThreadField,
         uid: String,
     },
+    /// Reads thread `uid` as Markdown and copies it to the clipboard once it is read (T6).
+    CopyThreadMarkdown(String),
     /// Opens the confirmation that deletes thread `uid` (T6).
     OpenDeleteThreadDialog(String),
     /// Opens the confirmation of a scrub of every stored thread (T6).
@@ -365,7 +367,7 @@ pub struct ThreadRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 91] = [
+const SPECS: [Spec; 92] = [
     spec(
         "file.stage",
         "Stage File",
@@ -963,6 +965,13 @@ const SPECS: [Spec; 91] = [
         Category::Repository,
     ),
     spec(
+        "threads.copy_markdown",
+        "Copy as Markdown",
+        None,
+        ArgKind::Thread,
+        Category::Repository,
+    ),
+    spec(
         "threads.delete",
         "Delete Thread…",
         None,
@@ -1105,6 +1114,7 @@ pub enum Action {
     ThreadTags,
     ThreadLinkCommit,
     ThreadExport,
+    ThreadCopyMarkdown,
     ThreadDelete,
     ThreadScrub,
     ShowThreadsForFile,
@@ -1202,6 +1212,9 @@ fn thread_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
             field: thread_field(action),
             uid: uid.clone(),
         },
+        (Action::ThreadCopyMarkdown, Args::Thread { uid, .. }) => {
+            Effect::CopyThreadMarkdown(uid.clone())
+        }
         (Action::ThreadDelete, Args::Thread { uid, .. }) => {
             Effect::OpenDeleteThreadDialog(uid.clone())
         }
@@ -1345,7 +1358,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 91] = [
+    pub const ALL: [Action; 92] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1432,6 +1445,7 @@ impl Action {
         Action::ThreadTags,
         Action::ThreadLinkCommit,
         Action::ThreadExport,
+        Action::ThreadCopyMarkdown,
         Action::ThreadDelete,
         Action::ThreadScrub,
         Action::ShowThreadsForFile,
@@ -1564,6 +1578,7 @@ impl Action {
                 | Action::ThreadTags
                 | Action::ThreadLinkCommit
                 | Action::ThreadExport
+                | Action::ThreadCopyMarkdown
                 | Action::ThreadDelete
                 | Action::ThreadScrub
                 | Action::ShowThreadsForFile
@@ -1693,6 +1708,7 @@ impl Action {
             | Action::ThreadTags
             | Action::ThreadLinkCommit
             | Action::ThreadExport
+            | Action::ThreadCopyMarkdown
             | Action::ThreadDelete => thread_rule(args, ctx),
             Action::ThreadScrub | Action::ShowThreadsForFile => repository_open(ctx),
             // The settings and the install dialog need no repository.
@@ -5140,6 +5156,11 @@ mod tests {
                 ArgKind::Thread,
             ),
             (Action::ThreadExport, "threads.export", ArgKind::Thread),
+            (
+                Action::ThreadCopyMarkdown,
+                "threads.copy_markdown",
+                ArgKind::Thread,
+            ),
             (Action::ThreadDelete, "threads.delete", ArgKind::Thread),
             (Action::ThreadScrub, "threads.scrub", ArgKind::None),
             (
@@ -5172,6 +5193,7 @@ mod tests {
             Action::ThreadTags,
             Action::ThreadLinkCommit,
             Action::ThreadExport,
+            Action::ThreadCopyMarkdown,
             Action::ThreadDelete,
         ] {
             assert_eq!(

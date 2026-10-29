@@ -11,6 +11,7 @@ use crate::branch_delete::Deleting;
 use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
 use crate::code_page::CodePage;
+use crate::commit_threads::CommitThreads;
 use crate::conflict_resolver::ResolverState;
 use crate::file_discard::Discarding;
 use crate::history_graph::GraphLayout;
@@ -30,7 +31,7 @@ use crate::stash_drop::Dropping;
 use crate::stashes::StashList;
 use crate::text_search::TextSearch;
 use crate::thread_curate::{Outcome as ThreadOutcome, ThreadWork};
-use crate::threads::ThreadsPage;
+use crate::threads::{MarkdownCopy, ThreadsPage};
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
 use crate::worktree_create::Creating;
@@ -103,6 +104,10 @@ pub struct Model {
     pub reflog_checkout: DetachedCheckout,
     /// The Threads page: the list, the search, the selected thread and its entries (T5).
     pub threads: ThreadsPage,
+    /// The threads linked to the commit the history page shows (H3).
+    pub commit_threads: CommitThreads,
+    /// The copy of a thread as Markdown in flight, and its outcome for the window (T6).
+    pub thread_copy: MarkdownCopy,
     /// The write of a thread's curation in flight, and its outcome (T6).
     pub thread_work: ThreadWork,
     /// Quick Open: its query, the search in flight and the last answer (N1).
@@ -738,6 +743,27 @@ impl Model {
                 self.threads.ended(id, state, detail);
                 None
             }
+            // A commit's threads that could not be read are simply not shown (H3).
+            Event::OperationChanged { id, state, .. }
+                if self.commit_threads.owns(id) && state.is_terminal() =>
+            {
+                self.commit_threads.ended(id);
+                None
+            }
+            // A copy of a thread as Markdown that failed says why, in the notice (T6).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.thread_copy.owns(id)
+                && state.is_terminal()
+                && state != OperationState::Done =>
+            {
+                if matches!(state, OperationState::Failed | OperationState::Vetoed) {
+                    self.thread_copy.failed(id, detail);
+                } else {
+                    self.thread_copy.cancelled(id);
+                }
+                None
+            }
             Event::PrunableListed { id, candidates } if self.pruning.owns(id) => {
                 self.pruning.listed(candidates);
                 None
@@ -861,7 +887,11 @@ impl Model {
                 None
             }
             Event::ThreadsListed { id, threads, total } => {
-                self.threads.listed(id, threads, total);
+                if self.commit_threads.owns(id) {
+                    self.commit_threads.listed(id, threads);
+                } else {
+                    self.threads.listed(id, threads, total);
+                }
                 None
             }
             Event::ThreadSearchResults { id, hits } => {
@@ -874,6 +904,11 @@ impl Model {
             }
             Event::ThreadEditRead { id, edit, state } => {
                 self.threads.edit_read(id, edit.id, state);
+                None
+            }
+            // The Markdown of a copy is kept for the window to put on the clipboard (T6).
+            Event::ThreadMarkdown { id, markdown, .. } => {
+                self.thread_copy.answered(id, markdown);
                 None
             }
             // The payload of an export or a scrub ends its write (T6). The view asks for the list again on a change.
@@ -1085,9 +1120,7 @@ impl Model {
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
-            // A Markdown read is answered to its caller; the view has no thread text to show yet.
-            | Event::ThreadsChanged
-            | Event::ThreadMarkdown { .. } => None,
+            | Event::ThreadsChanged => None,
             // The read opens the resolver; the staged note is the resolver's own.
             Event::ConflictRead { id, read } => {
                 // A read after a forget keeps the note that says so.
@@ -1209,6 +1242,8 @@ impl Model {
         self.reflog_commit = CommitPane::Empty;
         self.reflog_stack = OpenStack::default();
         self.threads = ThreadsPage::default();
+        self.commit_threads = CommitThreads::default();
+        self.thread_copy = MarkdownCopy::default();
         self.quick_open = QuickOpen::default();
         self.code.reset();
         self.text_search = TextSearch::default();
@@ -3052,5 +3087,95 @@ mod move_file_tests {
         assert_eq!(model.take_conflict_reread(), None);
         let conflict = model.conflict.as_ref().expect("the resolver is open");
         assert!(conflict.recorded_banner().is_some());
+    }
+}
+
+#[cfg(test)]
+mod thread_copy_tests {
+    use super::*;
+    use gm_schema::{Actor, OperationState, ThreadSummary};
+
+    fn changed(id: u64, state: OperationState, detail: Option<&str>) -> Event {
+        Event::OperationChanged {
+            id: OperationId(id),
+            actor: Actor::Human,
+            state,
+            detail: detail.map(str::to_owned),
+        }
+    }
+
+    fn summary(uid: &str) -> ThreadSummary {
+        ThreadSummary {
+            uid: uid.to_owned(),
+            harness: "claude-code".to_owned(),
+            harness_version: None,
+            session_id: "s".to_owned(),
+            worktree: "/repo".to_owned(),
+            branch: None,
+            model: None,
+            title: "T".to_owned(),
+            note: String::new(),
+            starred: false,
+            tags: Vec::new(),
+            started_at: 0,
+            last_event_at: 1,
+            ended_at: None,
+            entry_count: 0,
+            edit_count: 0,
+            redaction_count: 0,
+        }
+    }
+
+    #[test]
+    fn a_copied_thread_is_kept_for_the_window_once_its_answer_comes() {
+        let mut model = Model::default();
+        model.thread_copy.sent(OperationId(4));
+        let _ = model.apply(Event::ThreadMarkdown {
+            id: OperationId(4),
+            uid: "u".to_owned(),
+            markdown: "# T\n".to_owned(),
+        });
+        // The success that follows the answer changes nothing.
+        let _ = model.apply(changed(4, OperationState::Done, None));
+        assert_eq!(model.thread_copy.take(), Some(Ok("# T\n".to_owned())));
+        assert_eq!(model.thread_copy.take(), None);
+    }
+
+    #[test]
+    fn a_failed_copy_keeps_the_engines_message_and_leaves_the_status_bar_alone() {
+        let mut model = Model::default();
+        model.thread_copy.sent(OperationId(5));
+        let _ = model.apply(changed(
+            5,
+            OperationState::Failed,
+            Some("invalid redaction pattern"),
+        ));
+        assert_eq!(model.error, None);
+        assert_eq!(
+            model.thread_copy.take(),
+            Some(Err("invalid redaction pattern".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_cancelled_copy_says_nothing() {
+        let mut model = Model::default();
+        model.thread_copy.sent(OperationId(6));
+        let _ = model.apply(changed(6, OperationState::Cancelled, None));
+        assert_eq!(model.thread_copy.take(), None);
+        assert_eq!(model.error, None);
+    }
+
+    #[test]
+    fn a_commit_threads_answer_goes_to_the_commit_panel_and_not_to_the_page() {
+        let mut model = Model::default();
+        model.commit_threads.request("abc", OperationId(7));
+        let _ = model.apply(Event::ThreadsListed {
+            id: OperationId(7),
+            threads: vec![summary("t1")],
+            total: 3,
+        });
+        assert_eq!(model.commit_threads.threads_of("abc").len(), 1);
+        assert_eq!(model.threads.total(), None, "the page's list is untouched");
     }
 }

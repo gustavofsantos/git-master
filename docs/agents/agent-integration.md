@@ -37,6 +37,8 @@ gitmaster harness install claude-code
 
 GitMaster generates the plugin and shows the exact commands that add it to the agent. Run them yourself, or, if the `claude` command is on your `PATH`, choose **Run Commands** and GitMaster runs them for you. Nothing is changed in the agent until you do one of these.
 
+**Copy Commands** copies the same commands to the clipboard, one per line and without their numbers, so you can paste them into a terminal.
+
 After the install, start a new agent session in a repository. The session appears on the Threads page.
 
 ## Check the integration

@@ -8,25 +8,26 @@ use std::ops::Range;
 use std::time::Duration;
 
 use gm_schema::{
-    Actor, Event, LinkKind, LinkOrigin, ThreadDetail, ThreadEdit, ThreadHit, ThreadLink,
+    Actor, CommandKind, Event, LinkKind, LinkOrigin, ThreadDetail, ThreadHit, ThreadLink,
     ThreadSummary,
 };
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, Entity, FontWeight, KeyDownEvent, MouseButton,
-    MouseDownEvent, ScrollStrategy, Stateful, Subscription, UniformListScrollHandle, Window, div,
-    prelude::*, px, uniform_list,
+    AnyElement, ClickEvent, ClipboardItem, Context, Div, Entity, FontWeight, IntoElement,
+    KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent,
+    ScrollStrategy, Stateful, Subscription, UniformListScrollHandle, Window, div, list, prelude::*,
+    px, uniform_list,
 };
 
 use crate::action_registry::{Action, Args, ThreadRef, thread_args};
+use crate::commit_threads;
 use crate::icon::{self, Icon};
 use crate::shell_history::{action_button, now_secs};
 use crate::text_area::TextArea;
 use crate::text_search::DEBOUNCE_MS;
 use crate::theme;
 use crate::thread_curate as curate;
-use crate::threads::{
-    self, Block, Call, Chip, Empty, Message, MessageKind, Mode, Request, Span, Turn,
-};
+use crate::thread_rows::{self, GroupKey, Marker, Row};
+use crate::threads::{self, CallResult, CallStatus, Chip, Empty, MessageKind, Mode, Request, Span};
 use crate::view::{Screen, StatusView};
 
 const THREAD_ROW_HEIGHT: f32 = 64.;
@@ -42,12 +43,22 @@ const RESULT_LINES: usize = 200;
 const ARG_LINES: usize = 40;
 /// Most lines of a patch drawn in an edit card.
 const PATCH_LINES: usize = 400;
+/// How far, in pixels, a nested row is pushed in from its parent.
+const INDENT: f32 = 16.;
+/// The rows the detail list draws beyond the visible ones, so scrolling does not show a gap.
+const DETAIL_OVERDRAW: f32 = 480.;
 const INSTALL_HINT_TEXT: &str = threads::INSTALL_HINT;
 
-/// The window's part of the page: the search box and the list's scroll. Its state is `model.threads`.
+/// The window's part of the page: the search box and the lists' scroll. Its state is `model.threads`.
 pub(crate) struct ThreadsView {
     pub(crate) query: Entity<TextArea>,
     pub(crate) list: UniformListScrollHandle,
+    /// The rows of the thread shown. Its items are the rows the model holds, measured as drawn.
+    pub(crate) rows: ListState,
+    /// The row hashes the list holds, which the model's rows are compared with.
+    pub(crate) shown: Vec<u64>,
+    /// The search hit whose row the list was last scrolled to.
+    pub(crate) focus_scrolled: Option<i64>,
 }
 
 impl ThreadsView {
@@ -55,6 +66,9 @@ impl ThreadsView {
         Self {
             query,
             list: UniformListScrollHandle::new(),
+            rows: ListState::new(0, ListAlignment::Top, px(DETAIL_OVERDRAW)),
+            shown: Vec::new(),
+            focus_scrolled: None,
         }
     }
 }
@@ -84,16 +98,110 @@ impl StatusView {
     /// Follows the engine for the Threads page: a changed thread database reads the
     /// list again, a status refresh does too while the page is shown, and a read
     /// thread asks for its edits' states (T5).
-    pub(crate) fn follow_threads(&mut self, (changed, read): (bool, bool), reload: bool) {
+    pub(crate) fn follow_threads(
+        &mut self,
+        (changed, read, listed): (bool, bool, bool),
+        reload: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(outcome) = self.model.thread_copy.take() {
+            self.finish_thread_copy(outcome, cx);
+        }
         if changed
             || (reload && self.screen == Screen::Threads)
             || (reload && !self.model.threads.is_loaded())
         {
             self.request_threads_refresh();
+            // A commit's threads are read again too, so a link made by the agent shows.
+            if let Some(oid) = self.model.commit_threads.oid().map(str::to_owned) {
+                self.request_commit_threads(&oid);
+            }
+        }
+        // A page of the list says whether the selected thread's entries changed.
+        if listed && let Some(request) = self.model.threads.plan_tail() {
+            self.send_threads(request);
         }
         if read {
             self.after_thread_read();
         }
+    }
+
+    /// Brings the list's rows up to date with the rows of the thread shown. Only the
+    /// span that changed is replaced, so the rows around it keep their heights and the
+    /// list keeps its scroll. A search hit's row is scrolled to once, when it is drawn.
+    pub(crate) fn sync_thread_rows(&mut self) {
+        let keys = self.model.threads.row_keys();
+        let view = &mut self.threads_view;
+        if keys != view.shown.as_slice() {
+            let (span, count) = thread_rows::splice_span(&view.shown, keys);
+            view.rows.splice(span, count);
+            view.shown = keys.to_vec();
+        }
+        match self.model.threads.focus() {
+            None => self.threads_view.focus_scrolled = None,
+            Some(entry) if self.threads_view.focus_scrolled != Some(entry) => {
+                if let Some(ix) = thread_rows::focus_row(self.model.threads.rows(), entry) {
+                    self.threads_view.rows.scroll_to(ListOffset {
+                        item_ix: ix,
+                        offset_in_item: px(0.),
+                    });
+                    self.threads_view.focus_scrolled = Some(entry);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Reads the threads linked to commit `oid`, for the commit panel (H3). A repository
+    /// known to hold no threads asks for none.
+    pub(crate) fn request_commit_threads(&mut self, oid: &str) {
+        if self.model.threads.total() == Some(0) {
+            self.model.commit_threads.clear();
+            return;
+        }
+        let id = self
+            .engine
+            .dispatch(Actor::Human, commit_threads::plan(oid));
+        self.model.commit_threads.request(oid, id);
+    }
+
+    /// Reads thread `uid` as Markdown. Its answer goes to the clipboard when it arrives (T6).
+    pub(crate) fn copy_thread_markdown(&mut self, uid: String, cx: &mut Context<Self>) {
+        let id = self
+            .engine
+            .dispatch(Actor::Human, CommandKind::ReadThreadMarkdown { uid });
+        self.model.thread_copy.sent(id);
+        cx.notify();
+    }
+
+    /// Puts the Markdown of a copy on the clipboard, or says why the copy failed (T6).
+    pub(crate) fn finish_thread_copy(
+        &mut self,
+        outcome: Result<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match outcome {
+            Ok(markdown) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(markdown));
+                self.notify_user("Copied thread as Markdown", cx);
+            }
+            Err(message) => self.notify_user(&message, cx),
+        }
+    }
+
+    /// Opens the Threads page with thread `uid` selected, from a commit's panel. The
+    /// thread shows even when the list's filters leave it out.
+    pub(crate) fn open_thread_from_commit(
+        &mut self,
+        uid: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_threads(window, cx);
+        if let Some(request) = self.model.threads.select(uid, None) {
+            self.send_threads(request);
+        }
+        cx.notify();
     }
 
     /// Reads the threads again. Nothing is asked before a repository is open, or
@@ -222,9 +330,9 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Reads the entries after the ones shown (the detail's button).
-    fn load_more_thread_entries(&mut self, cx: &mut Context<Self>) {
-        if let Some(request) = self.model.threads.plan_more() {
+    /// Reads the entries before the ones shown (the top row of the detail).
+    fn load_earlier_thread_entries(&mut self, cx: &mut Context<Self>) {
+        if let Some(request) = self.model.threads.plan_earlier() {
             self.send_threads(request);
         }
         cx.notify();
@@ -439,42 +547,14 @@ impl StatusView {
             )
             .child(div().text_xs().text_color(theme::muted()).child(meta))
             .children(note_view(&summary.note))
-            .child(self.thread_curation(detail, cx));
-        let turns: Vec<Div> = threads::turns(detail)
-            .iter()
-            .map(|turn| self.turn_view(turn, cx))
-            .collect();
-        let more = page.has_more().then(|| {
-            div()
-                .id("threads-load-more")
-                .cursor_pointer()
-                .flex_none()
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .border_1()
-                .border_color(theme::button_border())
-                .text_xs()
-                .child("Load more entries")
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        this.load_more_thread_entries(cx);
-                    }),
-                )
-        });
+            .child(self.thread_curation(detail, cx))
+            .child(Self::fold_buttons(cx));
         let body = div()
-            .id("threads-turns")
             .flex_1()
             .min_h(px(0.))
-            .overflow_y_scroll()
             .px_4()
             .py_3()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .children(turns)
-            .children(more);
+            .child(self.detail_list(cx));
         div()
             .flex_1()
             .min_w(px(0.))
@@ -543,6 +623,14 @@ impl StatusView {
                 Action::ThreadExport,
                 "thread-export",
                 "Export",
+                &target,
+                &ctx,
+                cx,
+            ))
+            .child(action_button(
+                Action::ThreadCopyMarkdown,
+                "thread-copy-markdown",
+                "Copy as Markdown",
                 &target,
                 &ctx,
                 cx,
@@ -630,21 +718,151 @@ impl StatusView {
         cx.notify();
     }
 
-    /// One turn: its header (a click folds it), the prompt, the blocks, then the edits no call holds.
-    fn turn_view(&self, turn: &Turn, cx: &mut Context<Self>) -> Div {
-        let number = turn.number;
-        let focused_turn = self.model.threads.focus_turn() == Some(number);
-        let collapsed = self.model.threads.is_collapsed(number);
+    /// The buttons over the detail list that open or close every tool-call group.
+    fn fold_buttons(cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(small_button(
+                "threads-expand-all",
+                "Expand all",
+                cx,
+                |this, cx| {
+                    this.model.threads.expand_all_groups();
+                    cx.notify();
+                },
+            ))
+            .child(small_button(
+                "threads-collapse-all",
+                "Collapse all",
+                cx,
+                |this, cx| {
+                    this.model.threads.collapse_all_groups();
+                    cx.notify();
+                },
+            ))
+    }
+
+    /// The rows of the thread shown, in the variable-height list. The list asks for
+    /// each row it draws, so only the visible ones are built.
+    fn detail_list(&self, cx: &mut Context<Self>) -> Div {
+        let view = cx.entity();
+        div().flex_1().min_h(px(0.)).child(
+            list(self.threads_view.rows.clone(), move |ix, _window, cx| {
+                view.update(cx, |this, cx| this.detail_row(ix, cx))
+            })
+            .size_full(),
+        )
+    }
+
+    /// One row of the detail list. Drawing a row near the end of the rows asks for the
+    /// next page of entries; drawing one near the start asks for the entries before.
+    pub(crate) fn detail_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let count = self.model.threads.rows().len();
+        if thread_rows::near_end(ix, count)
+            && let Some(request) = self.model.threads.plan_more()
+        {
+            self.send_threads(request);
+        }
+        if thread_rows::near_start(ix)
+            && let Some(request) = self.model.threads.plan_earlier()
+        {
+            self.send_threads(request);
+        }
+        match self.model.threads.rows().get(ix) {
+            Some(row) => self.row_view(ix, row, cx),
+            None => div().into_any_element(),
+        }
+    }
+
+    /// Draws one row of the thread: a turn's header, a prompt, a text, a group's
+    /// header, a call and its body, an edit and its patch, or a marker.
+    fn row_view(&self, ix: usize, row: &Row, cx: &mut Context<Self>) -> AnyElement {
+        match row {
+            Row::Turn {
+                number,
+                collapsed,
+                focused,
+            } => Self::turn_head(*number, *collapsed, *focused, cx).into_any_element(),
+            Row::Prompt { text, focused, .. } => prompt_block(text, *focused).into_any_element(),
+            Row::Message {
+                entry,
+                kind,
+                text,
+                depth,
+                focused,
+            } => {
+                let body = message_body(*kind, text, *focused);
+                indented(*depth, Self::framed(*entry, body, cx)).into_any_element()
+            }
+            Row::Group {
+                key, label, failed, ..
+            } => Self::group_head(ix, key, label, failed.as_deref(), cx).into_any_element(),
+            Row::Call {
+                entry,
+                depth,
+                tool,
+                summary,
+                status,
+                duration_ms,
+                focused,
+                ..
+            } => {
+                let fields = CallFields {
+                    entry: *entry,
+                    tool,
+                    summary,
+                    status: *status,
+                    duration_ms: *duration_ms,
+                    focused: *focused,
+                };
+                let line = Self::call_line(&fields, cx);
+                indented(*depth, Self::framed(*entry, line, cx)).into_any_element()
+            }
+            Row::CallBody {
+                depth,
+                args,
+                result,
+                ..
+            } => {
+                indented(*depth, call_details(args.as_deref(), result.as_ref())).into_any_element()
+            }
+            Row::Edit {
+                id,
+                depth,
+                path,
+                counts,
+                state,
+                open,
+            } => {
+                let card = self.edit_row(*id, path, counts, state, *open, cx);
+                indented(*depth, card).into_any_element()
+            }
+            Row::Patch { depth, patch, .. } => {
+                indented(*depth, patch_view(patch)).into_any_element()
+            }
+            Row::Marker(marker) => Self::marker_view(*marker, cx),
+        }
+    }
+
+    /// A turn's header. A click folds the turn; the focused turn's label is accent-coloured.
+    fn turn_head(
+        number: u32,
+        collapsed: bool,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let label = if collapsed {
             format!("Turn {number} (collapsed)")
         } else {
             format!("Turn {number}")
         };
-        let head = div()
+        div()
             .id(("turn", u64::from(number)))
             .cursor_pointer()
             .text_xs()
-            .text_color(if focused_turn {
+            .text_color(if focused {
                 theme::accent()
             } else {
                 theme::muted()
@@ -656,46 +874,57 @@ impl StatusView {
                     this.model.threads.toggle_turn(number);
                     cx.notify();
                 }),
-            );
-        let mut column = div().flex().flex_col().gap_2().child(head);
-        if collapsed {
-            return column;
-        }
-        if let Some(prompt) = &turn.prompt {
-            column = column.child(
-                div()
-                    .p_3()
-                    .rounded_md()
-                    .bg(theme::panel())
-                    .border_1()
-                    .border_color(theme::hairline())
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().text_xs().text_color(theme::muted()).child("Prompt"))
-                    .child(text_block(prompt, MESSAGE_LINES)),
-            );
-        }
-        let blocks: Vec<Div> = turn
-            .blocks
-            .iter()
-            .map(|block| self.block_view(block, cx))
-            .collect();
-        let edits: Vec<Div> = turn
-            .edits
-            .iter()
-            .map(|edit| self.edit_card(edit, cx))
-            .collect();
-        column.children(blocks).children(edits)
+            )
     }
 
-    /// A text or a tool call of a turn.
-    /// One block with its entry's delete, which shows while the block is under the pointer (T6).
-    fn block_view(&self, block: &Block, cx: &mut Context<Self>) -> Div {
-        let (body, entry) = match block {
-            Block::Message(message) => (self.message_view(message), message.entry_id),
-            Block::Call(call) => (self.call_view(call, cx), call.entry_id),
-        };
+    /// A tool-call group's header: its label, and its failures in the error colour.
+    /// A click opens or closes the group.
+    fn group_head(
+        ix: usize,
+        key: &GroupKey,
+        label: &str,
+        failed: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let key: GroupKey = key.clone();
+        div()
+            .id(("thread-group", u64::try_from(ix).unwrap_or(0)))
+            .cursor_pointer()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(theme::hairline())
+            .bg(theme::panel())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .min_w(px(0.))
+            .text_xs()
+            .text_color(theme::muted())
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(label.to_owned()),
+            )
+            .children(failed.map(|text| {
+                div()
+                    .flex_none()
+                    .text_color(theme::error())
+                    .child(format!("· {text}"))
+            }))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.model.threads.toggle_group(&key);
+                cx.notify();
+            }))
+    }
+
+    /// Wraps a row's body with its entry's delete, which shows while the row is under the pointer (T6).
+    fn framed(entry: i64, body: impl IntoElement, cx: &mut Context<Self>) -> Div {
         let group = format!("thread-entry-{entry}");
         let key = usize::try_from(entry).unwrap_or(usize::MAX);
         let delete = div()
@@ -721,53 +950,30 @@ impl StatusView {
             .child(div().flex().flex_row().justify_end().child(delete))
     }
 
-    /// A text of the human's or the agent's, styled by its kind.
-    fn message_view(&self, message: &Message) -> Div {
-        let focused = self.model.threads.focus() == Some(message.entry_id);
-        let block = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_1()
-            .rounded_sm()
-            .when(focused, |block| block.bg(theme::selected_row()));
-        match message.kind {
-            MessageKind::Assistant => block.child(text_block(&message.text, MESSAGE_LINES)),
-            MessageKind::Notice => block
-                .text_xs()
-                .text_color(theme::muted())
-                .child(text_block(&message.text, MESSAGE_LINES)),
-            MessageKind::Result => block
-                .font_family(theme::code_font())
-                .text_xs()
-                .text_color(theme::muted())
-                .child(text_block(&message.text, RESULT_LINES)),
-        }
-    }
-
-    /// A tool call: its collapsed line, which a click opens into the arguments and the
-    /// result, then its edits and the calls its sub-agent made, indented.
-    fn call_view(&self, call: &Call, cx: &mut Context<Self>) -> Div {
-        let id = call.entry_id;
-        let expanded = self.model.threads.is_expanded(id);
-        let focused = self.model.threads.focus() == Some(id);
+    /// A tool call's collapsed line, which a click opens into the arguments and the result.
+    fn call_line(call: &CallFields<'_>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let entry = call.entry;
         let status_colour = match call.status {
-            threads::CallStatus::Done => theme::muted(),
-            threads::CallStatus::Failed => theme::error(),
-            threads::CallStatus::Pending => theme::faint(),
+            CallStatus::Done => theme::muted(),
+            CallStatus::Failed => theme::error(),
+            CallStatus::Pending => theme::faint(),
         };
-        let line = div()
-            .id(("call", u64::try_from(id).unwrap_or(0)))
+        div()
+            .id(("call", u64::try_from(entry).unwrap_or(0)))
             .cursor_pointer()
             .px_2()
             .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme::hairline())
+            .when(call.focused, |line| line.bg(theme::selected_row()))
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
             .min_w(px(0.))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.model.threads.toggle_call(id);
+                this.model.threads.toggle_call(entry);
                 cx.notify();
             }))
             .child(
@@ -787,7 +993,7 @@ impl StatusView {
                     .text_xs()
                     .bg(theme::selection())
                     .text_color(theme::text())
-                    .child(call.tool.clone()),
+                    .child(call.tool.to_owned()),
             )
             .child(
                 div()
@@ -798,7 +1004,7 @@ impl StatusView {
                     .text_ellipsis()
                     .text_xs()
                     .text_color(theme::muted())
-                    .child(call.summary.clone()),
+                    .child(call.summary.to_owned()),
             )
             .children(call.duration_ms.map(|ms| {
                 div()
@@ -806,36 +1012,42 @@ impl StatusView {
                     .text_xs()
                     .text_color(theme::muted())
                     .child(threads::duration_label(ms))
-            }));
-        let mut card = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .rounded_md()
-            .border_1()
-            .border_color(theme::hairline())
-            .when(focused, |card| card.bg(theme::selected_row()))
-            .child(line);
-        if expanded {
-            card = card.child(call_details(call));
+            }))
+    }
+
+    /// The row of a thread's marker: a load control at the top, and a line of text at
+    /// the end while entries are read and when the thread is done.
+    fn marker_view(marker: Marker, cx: &mut Context<Self>) -> AnyElement {
+        match marker {
+            Marker::Earlier { loading: true } => {
+                small_note("Loading earlier entries…").into_any_element()
+            }
+            Marker::Earlier { loading: false } => div()
+                .id("threads-load-earlier")
+                .cursor_pointer()
+                .flex_none()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .border_1()
+                .border_color(theme::button_border())
+                .text_xs()
+                .child("Load earlier entries")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.load_earlier_thread_entries(cx);
+                    }),
+                )
+                .into_any_element(),
+            Marker::Loading => small_note("Loading…").into_any_element(),
+            Marker::End => small_note("End of thread").into_any_element(),
         }
-        let edits: Vec<Div> = call
-            .edits
-            .iter()
-            .map(|edit| self.edit_card(edit, cx))
-            .collect();
-        let children: Vec<Div> = call
-            .children
-            .iter()
-            .map(|child| div().pl_4().child(self.block_view(child, cx)))
-            .collect();
-        card.children(edits).children(children)
     }
 
     /// View File: opens the edit's file on the Code page, as Quick Open does. Refused, it reads muted.
-    fn view_file_button(&self, edit: &ThreadEdit, cx: &mut Context<Self>) -> Stateful<Div> {
-        let id = edit.id;
-        let path = edit.path.clone();
+    fn view_file_button(&self, id: i64, path: &str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let path = path.to_owned();
         let view_refusal = Action::ViewFile
             .enabled(&Args::File(path.clone()), &self.action_context(""))
             .err();
@@ -865,12 +1077,17 @@ impl StatusView {
     }
 
     /// An edit: its path, `+n −m`, the state of its file, and the buttons. Open Diff
-    /// shows the patch inline; View File opens the file on the Code page, as Quick Open does.
-    fn edit_card(&self, edit: &ThreadEdit, cx: &mut Context<Self>) -> Div {
-        let id = edit.id;
-        let open = self.model.threads.open_edit() == Some(id);
-        let state = self.model.threads.edit_state(id);
-        let view_button = self.view_file_button(edit, cx);
+    /// shows the patch below the card; View File opens the file on the Code page.
+    fn edit_row(
+        &self,
+        id: i64,
+        path: &str,
+        counts: &str,
+        state: &'static str,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let view_button = self.view_file_button(id, path, cx);
         let diff_button = div()
             .id(("edit-diff", u64::try_from(id).unwrap_or(0)))
             .cursor_pointer()
@@ -906,14 +1123,14 @@ impl StatusView {
                     .text_ellipsis()
                     .font_family(theme::code_font())
                     .text_xs()
-                    .child(edit.path.clone()),
+                    .child(path.to_owned()),
             )
             .child(
                 div()
                     .flex_none()
                     .text_xs()
                     .text_color(theme::muted())
-                    .child(threads::counts_label(edit.added, edit.removed)),
+                    .child(counts.to_owned()),
             );
         let actions = div()
             .flex()
@@ -928,12 +1145,12 @@ impl StatusView {
                     .text_xs()
                     .bg(theme::selection())
                     .text_color(theme::text())
-                    .child(threads::edit_state_label(edit, state)),
+                    .child(state),
             )
             .child(div().flex_1())
             .child(diff_button)
             .child(view_button);
-        let mut card = div()
+        div()
             .flex()
             .flex_col()
             .gap_2()
@@ -943,18 +1160,108 @@ impl StatusView {
             .border_color(theme::hairline())
             .bg(theme::panel())
             .child(head)
-            .child(actions);
-        if open {
-            card = card.child(patch_view(&edit.patch));
-        }
-        card
+            .child(actions)
     }
 }
 
+/// The fields of a tool call's line, as its row holds them.
+struct CallFields<'a> {
+    entry: i64,
+    tool: &'a str,
+    summary: &'a str,
+    status: CallStatus,
+    duration_ms: Option<i64>,
+    focused: bool,
+}
+
+/// A row indented by its depth in the thread: a sub-agent's calls sit under their call.
+fn indented(depth: usize, body: Div) -> Div {
+    let steps = u16::try_from(depth).unwrap_or(u16::MAX);
+    div()
+        .pl(px(INDENT * f32::from(steps)))
+        .min_w(px(0.))
+        .child(body)
+}
+
+/// The text of a message row, styled by its kind and by its focus.
+fn message_body(kind: MessageKind, text: &str, focused: bool) -> Div {
+    let block = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .px_1()
+        .rounded_sm()
+        .when(focused, |block| block.bg(theme::selected_row()));
+    match kind {
+        MessageKind::Assistant => block.child(text_block(text, MESSAGE_LINES)),
+        MessageKind::Notice => block
+            .text_xs()
+            .text_color(theme::muted())
+            .child(text_block(text, MESSAGE_LINES)),
+        MessageKind::Result => block
+            .font_family(theme::code_font())
+            .text_xs()
+            .text_color(theme::muted())
+            .child(text_block(text, RESULT_LINES)),
+    }
+}
+
+/// The human's prompt of a turn, in its panel.
+fn prompt_block(text: &str, focused: bool) -> Div {
+    div()
+        .p_3()
+        .rounded_md()
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::hairline())
+        .when(focused, |block| block.bg(theme::selected_row()))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_xs().text_color(theme::muted()).child("Prompt"))
+        .child(text_block(text, MESSAGE_LINES))
+}
+
+/// A small outlined text button of the detail's header, which runs `on_click`.
+fn small_button(
+    id: &'static str,
+    label: &'static str,
+    cx: &mut Context<StatusView>,
+    on_click: fn(&mut StatusView, &mut Context<StatusView>),
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .cursor_pointer()
+        .flex_none()
+        .px_2()
+        .h(px(22.))
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::button_border())
+        .text_xs()
+        .text_color(theme::muted())
+        .child(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| on_click(this, cx)),
+        )
+}
+
+/// A line of muted small text between the rows of the detail.
+fn small_note(text: &str) -> Div {
+    div()
+        .py_2()
+        .text_xs()
+        .text_color(theme::muted())
+        .child(text.to_owned())
+}
+
 /// The arguments and the result of an open tool call.
-fn call_details(call: &Call) -> Div {
+fn call_details(args: Option<&str>, result: Option<&CallResult>) -> Div {
     let mut details = div().flex().flex_col().gap_1().px_2().pb_1().text_xs();
-    if let Some(args) = &call.args {
+    if let Some(args) = args {
         details = details
             .child(div().text_color(theme::muted()).child("Arguments"))
             .child(
@@ -963,7 +1270,7 @@ fn call_details(call: &Call) -> Div {
                     .child(text_block(args, ARG_LINES)),
             );
     }
-    details = match &call.result {
+    details = match result {
         Some(result) => {
             let mut shown = details
                 .child(div().text_color(theme::muted()).child("Result"))
@@ -1295,7 +1602,7 @@ fn hit_row(
 }
 
 /// A small chip: a code-font label on the selection colour.
-fn chip(text: String) -> Div {
+pub(crate) fn chip(text: String) -> Div {
     div()
         .flex_none()
         .px_1p5()
@@ -1467,10 +1774,11 @@ fn link_rows(links: &[ThreadLink], uid: &str, cx: &mut Context<StatusView>) -> O
 const COMMIT_CHARS: usize = 12;
 
 /// Which of the engine's events the Threads page follows: a changed thread database,
-/// and an answer with a thread's entries.
-pub(crate) fn follow_flags(event: &Event) -> (bool, bool) {
+/// an answer with a thread's entries, and an answer with a page of the list.
+pub(crate) fn follow_flags(event: &Event) -> (bool, bool, bool) {
     (
         matches!(event, Event::ThreadsChanged),
         matches!(event, Event::ThreadRead { .. }),
+        matches!(event, Event::ThreadsListed { .. }),
     )
 }

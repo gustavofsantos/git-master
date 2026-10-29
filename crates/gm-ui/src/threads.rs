@@ -15,6 +15,67 @@ use gm_schema::{
 use serde_json::Value;
 
 use crate::shell_history::relative_time;
+use crate::thread_rows::{self, GroupKey, Row};
+
+/// What a copy of a thread says when the engine gave no reason it failed.
+const NO_COPY: &str = "The thread could not be copied.";
+
+/// The copy of a thread as Markdown in flight, and its outcome for the window to
+/// put on the clipboard. Only the read this names is answered (T6).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MarkdownCopy {
+    pending: Option<OperationId>,
+    outcome: Option<Result<String, String>>,
+}
+
+impl MarkdownCopy {
+    /// Starts the read `id`. A copy in flight is superseded.
+    pub fn sent(&mut self, id: OperationId) {
+        self.pending = Some(id);
+        self.outcome = None;
+    }
+
+    /// Whether `id` is the read in flight.
+    #[must_use]
+    pub fn owns(&self, id: OperationId) -> bool {
+        self.pending == Some(id)
+    }
+
+    /// Keeps the Markdown for the window to copy. Returns false for another read.
+    pub fn answered(&mut self, id: OperationId, markdown: String) -> bool {
+        if !self.owns(id) {
+            return false;
+        }
+        self.pending = None;
+        self.outcome = Some(Ok(markdown));
+        true
+    }
+
+    /// Keeps the failure of the read `id` in flight, with the engine's message when it
+    /// gave one. Returns false for another read.
+    pub fn failed(&mut self, id: OperationId, message: Option<String>) -> bool {
+        if !self.owns(id) {
+            return false;
+        }
+        self.pending = None;
+        self.outcome = Some(Err(message.unwrap_or_else(|| NO_COPY.to_owned())));
+        true
+    }
+
+    /// The read `id` was stopped: nothing is copied and nothing is said. Returns false for another read.
+    pub fn cancelled(&mut self, id: OperationId) -> bool {
+        if !self.owns(id) {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+
+    /// The outcome, once: the Markdown or the failure. The window takes it and acts on it.
+    pub fn take(&mut self) -> Option<Result<String, String>> {
+        self.outcome.take()
+    }
+}
 
 /// Threads per page of the list, and hits per search.
 pub const PAGE: u32 = 50;
@@ -28,6 +89,8 @@ const NO_MESSAGE: &str = "The threads could not be read.";
 const RESULT_SUFFIX: &str = ":result";
 /// The opening of a redaction marker, `[REDACTED:name]`.
 const REDACTED_OPEN: &str = "[REDACTED:";
+/// How many entries before a search hit are read with it, so its turn has its start.
+const FOCUS_CONTEXT: u32 = 20;
 
 /// What the list shows: the threads, or the hits of a search.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,15 +126,27 @@ pub enum Read {
         limit: u32,
     },
     Search,
-    /// The entries of thread `uid` from `from_seq` on.
+    /// The entries of thread `uid` from `from_seq` on, placed as `place` says.
     Detail {
         uid: String,
         from_seq: u32,
+        place: Place,
     },
     /// The state of edit `id`.
     Edit {
         id: i64,
     },
+}
+
+/// Where a page of a thread's entries goes when its answer arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// The window of the thread shown is replaced: the first page, or a read of what is loaded again.
+    Replace,
+    /// The page follows the entries shown.
+    Later,
+    /// The page comes before the entries shown.
+    Earlier,
 }
 
 /// A read to send, with the command and the tag its answer is matched by.
@@ -101,11 +176,13 @@ pub struct ThreadsPage {
     search_pending: Option<OperationId>,
     selected: Option<String>,
     detail: Option<ThreadDetail>,
-    /// The entries read in flight, and the `from_seq` they start at.
-    detail_pending: Option<(OperationId, u32)>,
-    /// The entry a search hit opened the thread at. It is highlighted, not scrolled to.
+    /// The entries read in flight, the `from_seq` they start at and where they go.
+    detail_pending: Option<(OperationId, u32, Place)>,
+    /// The entry a search hit opened the thread at. It is highlighted and scrolled to.
     focus: Option<i64>,
     collapsed: BTreeSet<u32>,
+    /// The tool-call groups that are open. A group is closed until it is opened.
+    groups: BTreeSet<GroupKey>,
     expanded: BTreeSet<i64>,
     edit_states: HashMap<i64, EditState>,
     /// The state reads in flight, by the edit they ask about.
@@ -113,6 +190,9 @@ pub struct ThreadsPage {
     /// The edit whose patch is open inline.
     open_edit: Option<i64>,
     failure: Option<String>,
+    /// The rows of the thread shown, and a hash of each: what the list draws.
+    rows: Vec<Row>,
+    row_keys: Vec<u64>,
 }
 
 impl ThreadsPage {
@@ -230,6 +310,30 @@ impl ThreadsPage {
         self.expanded.contains(&entry)
     }
 
+    /// Whether the tool-call group `key` is open.
+    #[must_use]
+    pub fn is_group_open(&self, key: &GroupKey) -> bool {
+        self.groups.contains(key)
+    }
+
+    /// Which page of entries is in flight, if any, and where it goes.
+    #[must_use]
+    pub fn loading(&self) -> Option<Place> {
+        self.detail_pending.map(|(_, _, place)| place)
+    }
+
+    /// The rows of the thread shown, flattened for the list (see `thread_rows`).
+    #[must_use]
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
+    }
+
+    /// A hash of each row, which the list compares to find the rows that changed.
+    #[must_use]
+    pub fn row_keys(&self) -> &[u64] {
+        &self.row_keys
+    }
+
     /// The edit whose patch is open inline.
     #[must_use]
     pub fn open_edit(&self) -> Option<i64> {
@@ -331,28 +435,53 @@ impl ThreadsPage {
         }
     }
 
-    /// What a refresh asks for: the list, the search when one is shown, and the
-    /// selected thread's entries, read again with the pages already loaded.
+    /// What a refresh asks for: the list and the search when one is shown. The
+    /// selected thread's entries are read again only once the list says its tail
+    /// changed (see `plan_tail`), so a change elsewhere does not read them.
     #[must_use]
     pub fn plan_refresh(&self) -> Vec<Request> {
         let mut requests = vec![self.plan_list()];
         requests.extend(self.plan_search());
-        if let Some(uid) = self.selected.as_deref() {
-            let loaded = self.detail.as_ref().map_or(0, |d| d.entries.len());
-            let limit = u32::try_from(loaded).unwrap_or(u32::MAX).max(ENTRY_PAGE);
-            requests.push(Request {
-                kind: CommandKind::ReadThread {
-                    uid: uid.to_owned(),
-                    from_seq: 0,
-                    limit,
-                },
-                read: Read::Detail {
-                    uid: uid.to_owned(),
-                    from_seq: 0,
-                },
-            });
-        }
         requests
+    }
+
+    /// The read of the loaded window of the selected thread, from its first entry
+    /// on, that replaces what is shown with the same entries as the store has now.
+    fn window_request(&self) -> Option<Request> {
+        let detail = self.detail.as_ref()?;
+        let first = detail.entries.first().map_or(0, |entry| entry.seq);
+        let loaded = u32::try_from(detail.entries.len()).unwrap_or(u32::MAX);
+        Some(detail_request(
+            &detail.summary.uid,
+            first,
+            loaded.max(ENTRY_PAGE),
+            Place::Replace,
+        ))
+    }
+
+    /// After a page of the list is applied: the selected thread's summary is taken
+    /// from its row when the tail of the thread is the same (its entry count, its
+    /// last event, its edits and its redactions). The window is read again when the
+    /// tail changed or the row is not in the list.
+    pub fn plan_tail(&mut self) -> Option<Request> {
+        if self.detail_pending.is_some() {
+            return None;
+        }
+        let detail = self.detail.as_ref()?;
+        let row = self
+            .threads
+            .iter()
+            .find(|row| row.uid == detail.summary.uid)
+            .cloned();
+        match row {
+            Some(row) if same_tail(&row, &detail.summary) => {
+                if let Some(detail) = self.detail.as_mut() {
+                    detail.summary = row;
+                }
+                None
+            }
+            _ => self.window_request(),
+        }
     }
 
     /// The page of the list after the rows shown, when there is one to ask for and
@@ -385,7 +514,33 @@ impl ThreadsPage {
             return None;
         }
         let from_seq = detail.entries.last()?.seq.checked_add(1)?;
-        Some(detail_request(&detail.summary.uid, from_seq, ENTRY_PAGE))
+        Some(detail_request(
+            &detail.summary.uid,
+            from_seq,
+            ENTRY_PAGE,
+            Place::Later,
+        ))
+    }
+
+    /// The entries before the ones shown, when the thread's first entry shown is not
+    /// its first. The page is at most `ENTRY_PAGE` entries, and ends where the shown ones start.
+    #[must_use]
+    pub fn plan_earlier(&self) -> Option<Request> {
+        let detail = self.detail.as_ref()?;
+        if self.detail_pending.is_some() {
+            return None;
+        }
+        let first = detail.entries.first()?.seq;
+        if first == 0 {
+            return None;
+        }
+        let from_seq = first.saturating_sub(ENTRY_PAGE);
+        Some(detail_request(
+            &detail.summary.uid,
+            from_seq,
+            first - from_seq,
+            Place::Earlier,
+        ))
     }
 
     /// The state reads for the edits of the thread shown that have none yet.
@@ -421,9 +576,12 @@ impl ThreadsPage {
                 self.search_pending = Some(id);
                 self.hits_shown = false;
             }
-            Read::Detail { from_seq, .. } => {
+            Read::Detail {
+                from_seq, place, ..
+            } => {
                 self.failure = None;
-                self.detail_pending = Some((id, *from_seq));
+                self.detail_pending = Some((id, *from_seq, *place));
+                self.refresh_rows();
             }
             Read::Edit { id: edit } => self.edit_reads.push((id, *edit)),
         }
@@ -437,7 +595,7 @@ impl ThreadsPage {
             || self.search_pending == Some(id)
             || self
                 .detail_pending
-                .is_some_and(|(pending, _)| pending == id)
+                .is_some_and(|(pending, _, _)| pending == id)
             || self.edit_reads.iter().any(|(pending, _)| *pending == id)
     }
 
@@ -474,41 +632,68 @@ impl ThreadsPage {
         true
     }
 
-    /// Applies the entries answered by `id`. The first page replaces the thread
-    /// shown and keeps the view state; a following page is appended when it starts
-    /// where the entries shown end. Returns false for an answer that does not apply.
+    /// Applies the entries answered by `id`, as the read's `place` says: the window
+    /// shown is replaced, or the page is appended after the entries shown or put
+    /// before them. Returns false for an answer that does not apply. The read in
+    /// flight is over once its answer arrives, whether or not it applies.
     pub fn read(&mut self, id: OperationId, detail: ThreadDetail) -> bool {
-        let Some((pending, from_seq)) = self.detail_pending else {
+        let Some((pending, from_seq, place)) = self.detail_pending else {
             return false;
         };
         if pending != id || self.selected.as_deref() != Some(detail.summary.uid.as_str()) {
             return false;
         }
-        if from_seq == 0 {
-            self.detail_pending = None;
-            self.edit_states.clear();
-            self.detail = Some(detail);
-            return true;
-        }
-        let Some(current) = self.detail.as_mut() else {
-            return false;
-        };
-        if current
-            .entries
-            .last()
-            .map(|entry| entry.seq.saturating_add(1))
-            != Some(from_seq)
-        {
-            return false;
-        }
         self.detail_pending = None;
-        current.entries.extend(detail.entries);
-        current.edits.extend(detail.edits);
-        current.summary = detail.summary;
-        current.links = detail.links;
-        current.redactions = detail.redactions;
-        current.has_more = detail.has_more;
-        true
+        let applied = match place {
+            Place::Replace => {
+                self.edit_states
+                    .retain(|edit, _| detail.edits.iter().any(|shown| shown.id == *edit));
+                self.detail = Some(detail);
+                true
+            }
+            Place::Later => match self.detail.as_mut() {
+                Some(current)
+                    if current
+                        .entries
+                        .last()
+                        .map(|entry| entry.seq.saturating_add(1))
+                        == Some(from_seq) =>
+                {
+                    current.entries.extend(detail.entries);
+                    current.edits.extend(detail.edits);
+                    current.summary = detail.summary;
+                    current.links = detail.links;
+                    current.redactions = detail.redactions;
+                    current.has_more = detail.has_more;
+                    true
+                }
+                _ => false,
+            },
+            Place::Earlier => match self.detail.as_mut() {
+                Some(current)
+                    if detail
+                        .entries
+                        .last()
+                        .map(|entry| entry.seq.saturating_add(1))
+                        == current.entries.first().map(|entry| entry.seq) =>
+                {
+                    let mut entries = detail.entries;
+                    entries.append(&mut current.entries);
+                    current.entries = entries;
+                    current.edits.extend(detail.edits);
+                    current.summary = detail.summary;
+                    current.links = detail.links;
+                    current.redactions = detail.redactions;
+                    true
+                }
+                _ => false,
+            },
+        };
+        if applied {
+            self.open_focus_group();
+            self.refresh_rows();
+        }
+        applied
     }
 
     /// Applies the state of an edit answered by `id`, when the edit is in the thread shown.
@@ -527,6 +712,7 @@ impl ThreadsPage {
             .is_some_and(|detail| detail.edits.iter().any(|shown| shown.id == edit));
         if shown {
             self.edit_states.insert(edit, state);
+            self.refresh_rows();
         }
         true
     }
@@ -548,9 +734,10 @@ impl ThreadsPage {
         }
         if self
             .detail_pending
-            .is_some_and(|(pending, _)| pending == id)
+            .is_some_and(|(pending, _, _)| pending == id)
         {
             self.detail_pending = None;
+            self.refresh_rows();
         }
         self.edit_reads.retain(|(pending, _)| *pending != id);
         if state == OperationState::Failed {
@@ -558,19 +745,35 @@ impl ThreadsPage {
         }
     }
 
-    /// Selects thread `uid`, optionally at the entry `focus`. Returns the read of
-    /// its entries, or `None` when it is the thread already selected.
-    pub fn select(&mut self, uid: &str, focus: Option<i64>) -> Option<Request> {
+    /// Selects thread `uid`, optionally at a search hit: its entry id and its `seq`.
+    /// Returns the read of its entries, or `None` when nothing is to be read. A hit
+    /// reads from the entries before it, so its turn has its start.
+    pub fn select(&mut self, uid: &str, focus: Option<(i64, u32)>) -> Option<Request> {
         if self.selected.as_deref() == Some(uid) {
-            if focus.is_some() {
-                self.focus = focus;
+            let (entry, seq) = focus?;
+            self.focus = Some(entry);
+            self.open_focus_group();
+            self.refresh_rows();
+            let loaded = self
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.entries.iter().any(|shown| shown.id == entry));
+            if loaded || self.detail_pending.is_some() || self.detail.is_none() {
+                return None;
             }
-            return None;
+            return Some(detail_request(
+                uid,
+                seq.saturating_sub(FOCUS_CONTEXT),
+                ENTRY_PAGE,
+                Place::Replace,
+            ));
         }
         self.selected = Some(uid.to_owned());
         self.clear_selection();
-        self.focus = focus;
-        Some(detail_request(uid, 0, ENTRY_PAGE))
+        self.focus = focus.map(|(entry, _)| entry);
+        let from_seq = focus.map_or(0, |(_, seq)| seq.saturating_sub(FOCUS_CONTEXT));
+        self.refresh_rows();
+        Some(detail_request(uid, from_seq, ENTRY_PAGE, Place::Replace))
     }
 
     /// Drops what the page shows of the selected thread, not the selection itself.
@@ -578,6 +781,7 @@ impl ThreadsPage {
         self.detail = None;
         self.detail_pending = None;
         self.collapsed.clear();
+        self.groups.clear();
         self.expanded.clear();
         self.edit_states.clear();
         self.edit_reads.clear();
@@ -622,6 +826,7 @@ impl ThreadsPage {
             self.selected = None;
             self.focus = None;
             self.clear_selection();
+            self.refresh_rows();
         }
     }
 
@@ -635,7 +840,7 @@ impl ThreadsPage {
             }
             Mode::Results => {
                 let hit = self.hits.get(index)?.clone();
-                self.select(&hit.thread_uid, Some(hit.entry_id))
+                self.select(&hit.thread_uid, Some((hit.entry_id, hit.seq)))
             }
         }
     }
@@ -694,6 +899,7 @@ impl ThreadsPage {
         if !self.collapsed.remove(&turn) {
             self.collapsed.insert(turn);
         }
+        self.refresh_rows();
     }
 
     /// Opens or closes a tool call's arguments and result.
@@ -701,6 +907,29 @@ impl ThreadsPage {
         if !self.expanded.remove(&entry) {
             self.expanded.insert(entry);
         }
+        self.refresh_rows();
+    }
+
+    /// Opens or closes a tool-call group, which is closed until it is opened.
+    pub fn toggle_group(&mut self, key: &GroupKey) {
+        if !self.groups.remove(key) {
+            self.groups.insert(key.clone());
+        }
+        self.refresh_rows();
+    }
+
+    /// Opens every tool-call group of the thread shown (Expand all).
+    pub fn expand_all_groups(&mut self) {
+        if let Some(detail) = self.detail.as_ref() {
+            self.groups = thread_rows::group_keys(detail).into_iter().collect();
+        }
+        self.refresh_rows();
+    }
+
+    /// Closes every tool-call group of the thread shown (Collapse all).
+    pub fn collapse_all_groups(&mut self) {
+        self.groups.clear();
+        self.refresh_rows();
     }
 
     /// Opens the patch of an edit, or closes it when it is open.
@@ -710,11 +939,43 @@ impl ThreadsPage {
         } else {
             Some(edit)
         };
+        self.refresh_rows();
+    }
+
+    /// Opens the turn and the tool-call group that hold the focused entry, so a
+    /// search hit is not hidden under a closed one.
+    fn open_focus_group(&mut self) {
+        let (Some(focus), Some(detail)) = (self.focus, self.detail.as_ref()) else {
+            return;
+        };
+        if let Some(turn) = self.focus_turn() {
+            self.collapsed.remove(&turn);
+        }
+        if let Some(key) = thread_rows::group_of(detail, focus) {
+            self.groups.insert(key);
+        }
+    }
+
+    /// Flattens the thread shown into its rows, and keeps a hash of each.
+    fn refresh_rows(&mut self) {
+        let rows = thread_rows::flatten(self);
+        self.row_keys = rows.iter().map(thread_rows::key_of).collect();
+        self.rows = rows;
     }
 }
 
+/// Whether a summary of the list and the summary of the thread shown agree on the
+/// parts that change with the entries: the counts and the last event.
+fn same_tail(listed: &ThreadSummary, shown: &ThreadSummary) -> bool {
+    listed.entry_count == shown.entry_count
+        && listed.edit_count == shown.edit_count
+        && listed.redaction_count == shown.redaction_count
+        && listed.last_event_at == shown.last_event_at
+        && listed.ended_at == shown.ended_at
+}
+
 /// The read of thread `uid`'s entries from `from_seq`, at most `limit` of them.
-fn detail_request(uid: &str, from_seq: u32, limit: u32) -> Request {
+fn detail_request(uid: &str, from_seq: u32, limit: u32, place: Place) -> Request {
     Request {
         kind: CommandKind::ReadThread {
             uid: uid.to_owned(),
@@ -724,6 +985,7 @@ fn detail_request(uid: &str, from_seq: u32, limit: u32) -> Request {
         read: Read::Detail {
             uid: uid.to_owned(),
             from_seq,
+            place,
         },
     }
 }
@@ -950,7 +1212,7 @@ fn one_line(text: &str, max: usize) -> String {
 }
 
 /// How a tool call ended, as its row shows it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CallStatus {
     Done,
     Failed,
@@ -959,7 +1221,7 @@ pub enum CallStatus {
 }
 
 /// The result of a tool call.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CallResult {
     pub text: String,
     /// Whether the entry was cut at the capture limit.
@@ -971,6 +1233,8 @@ pub struct CallResult {
 pub struct Call {
     /// The entry id of the call: what the state and the expansion are keyed by.
     pub entry_id: i64,
+    /// The harness's id of the call, which a tool-call group is keyed by.
+    pub source_id: String,
     pub tool: String,
     pub summary: String,
     /// The arguments as stored, redacted.
@@ -983,7 +1247,7 @@ pub struct Call {
 }
 
 /// The kind of a text entry of a turn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MessageKind {
     Assistant,
     Notice,
@@ -1011,6 +1275,8 @@ pub enum Block {
 pub struct Turn {
     pub number: u32,
     pub prompt: Option<String>,
+    /// The entry id of the prompt, which a search hit can name.
+    pub prompt_id: Option<i64>,
     pub blocks: Vec<Block>,
     /// Edits of this turn whose call is not in it.
     pub edits: Vec<ThreadEdit>,
@@ -1043,10 +1309,9 @@ struct Node {
 }
 
 fn build_turn(number: u32, entries: &[&ThreadEntry], edits: &[ThreadEdit]) -> Turn {
-    let prompt = entries
-        .iter()
-        .find(|entry| entry.kind == EntryKind::User)
-        .map(|entry| entry.text.clone());
+    let prompt_entry = entries.iter().find(|entry| entry.kind == EntryKind::User);
+    let prompt = prompt_entry.map(|entry| entry.text.clone());
+    let prompt_id = prompt_entry.map(|entry| entry.id);
     let calls: HashSet<&str> = entries
         .iter()
         .filter(|entry| entry.kind == EntryKind::ToolCall)
@@ -1107,6 +1372,7 @@ fn build_turn(number: u32, entries: &[&ThreadEntry], edits: &[ThreadEdit]) -> Tu
                 };
                 Block::Call(Call {
                     entry_id: entry.id,
+                    source_id: entry.source_id.clone(),
                     tool: entry.tool.clone().unwrap_or_default(),
                     summary: argument_summary(entry.args_json.as_deref()),
                     args: entry.args_json.clone(),
@@ -1139,6 +1405,7 @@ fn build_turn(number: u32, entries: &[&ThreadEntry], edits: &[ThreadEdit]) -> Tu
     Turn {
         number,
         prompt,
+        prompt_id,
         blocks: placed,
         edits: turn_edits,
     }
@@ -1348,6 +1615,7 @@ mod tests {
             &Read::Detail {
                 uid: uid.to_owned(),
                 from_seq: 0,
+                place: Place::Replace,
             },
             id(50),
         );
@@ -1674,7 +1942,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refresh_keeps_the_selection_and_re_reads_the_loaded_entries() {
+    fn a_refresh_keeps_the_selection_and_reads_the_entries_only_when_the_tail_changed() {
         let mut page = ThreadsPage::default();
         listed_page(&mut page, 1, &["a", "b"], 2);
         let request = page.choose(1).expect("b");
@@ -1691,49 +1959,54 @@ mod tests {
         page.toggle_turn(1);
         page.toggle_call(7);
         let refresh = page.plan_refresh();
-        assert_eq!(refresh.len(), 2, "the list and the selected entries");
-        let read_request = refresh
-            .iter()
-            .find(|request| matches!(request.read, Read::Detail { .. }))
-            .expect("the entries are read again");
-        if let CommandKind::ReadThread {
-            uid,
-            from_seq,
-            limit,
-        } = &read_request.kind
-        {
-            assert_eq!(uid, "b");
-            assert_eq!(*from_seq, 0);
-            assert_eq!(*limit, ENTRY_PAGE);
-        } else {
-            panic!("not a thread read");
-        }
-        // The list answer replaces the rows, and the selection stays.
-        let list = refresh
-            .iter()
-            .find(|r| matches!(r.read, Read::List { .. }))
-            .expect("list");
-        page.sent(&list.read, id(3));
+        assert_eq!(
+            refresh.len(),
+            1,
+            "the list only: the entries wait for its tail"
+        );
+        page.sent(&refresh[0].read, id(3));
         assert!(page.listed(id(3), rows(&["b", "a", "c"]), 3));
+        assert!(
+            page.plan_tail().is_none(),
+            "the tail is the same, so nothing is read again"
+        );
         assert_eq!(page.selected(), Some("b"));
         assert_eq!(page.selected_row(), Some(0));
-        // The entries answer replaces the thread and keeps the collapse state.
-        let read = refresh
-            .iter()
-            .find(|r| matches!(r.read, Read::Detail { .. }))
-            .expect("read");
-        page.sent(&read.read, id(4));
+        assert!(page.is_collapsed(1), "the collapse state survives");
+        assert!(page.is_expanded(7), "the expansion survives");
+
+        // A new entry changes the tail: the window is read again, and the view keeps its state.
+        let mut changed = rows(&["b", "a", "c"]);
+        changed[0].entry_count = 2;
+        changed[0].last_event_at = 2_000;
+        let refresh = page.plan_refresh();
+        page.sent(&refresh[0].read, id(4));
+        assert!(page.listed(id(4), changed, 3));
+        let request = page.plan_tail().expect("the window is read again");
+        assert!(matches!(
+            request.read,
+            Read::Detail {
+                from_seq: 0,
+                place: Place::Replace,
+                ..
+            }
+        ));
+        page.sent(&request.read, id(5));
         assert!(page.read(
-            id(4),
+            id(5),
             detail(
                 "b",
-                vec![entry(1, 0, 1, EntryKind::User, "u")],
+                vec![
+                    entry(1, 0, 1, EntryKind::User, "u"),
+                    entry(2, 1, 1, EntryKind::Assistant, "x"),
+                ],
                 Vec::new(),
                 false
             )
         ));
         assert!(page.is_collapsed(1));
         assert!(page.is_expanded(7));
+        assert_eq!(page.detail().map(|d| d.entries.len()), Some(2));
     }
 
     #[test]
@@ -2302,5 +2575,131 @@ mod tests {
                 .iter()
                 .all(|request| !matches!(request.kind, CommandKind::ReadThread { .. }))
         );
+    }
+
+    #[test]
+    fn a_hit_reads_from_the_entries_before_it_and_the_earlier_part_is_read_on_demand() {
+        let mut page = ThreadsPage::default();
+        listed_page(&mut page, 1, &["a"], 1);
+        page.set_query("needle");
+        let search = page.plan_search().expect("a search");
+        page.sent(&search.read, id(2));
+        let hit_at_30 = ThreadHit {
+            seq: 30,
+            entry_id: 30,
+            ..hit("a", 30)
+        };
+        assert!(page.searched(id(2), vec![hit_at_30]));
+        let request = page.choose(0).expect("the hit opens its thread");
+        assert!(matches!(
+            request.kind,
+            CommandKind::ReadThread {
+                from_seq: 10,
+                limit: ENTRY_PAGE,
+                ..
+            }
+        ));
+        page.sent(&request.read, id(3));
+        let entries: Vec<ThreadEntry> = (10..=30)
+            .map(|seq| {
+                entry(
+                    i64::from(seq),
+                    seq,
+                    1,
+                    EntryKind::Assistant,
+                    &format!("m{seq}"),
+                )
+            })
+            .collect();
+        assert!(page.read(id(3), detail("a", entries, Vec::new(), false)));
+        assert_eq!(page.focus(), Some(30));
+        let earlier = page
+            .plan_earlier()
+            .expect("entries before the first one shown");
+        assert!(matches!(
+            earlier.kind,
+            CommandKind::ReadThread {
+                from_seq: 0,
+                limit: 10,
+                ..
+            }
+        ));
+        page.sent(&earlier.read, id(4));
+        let before: Vec<ThreadEntry> = (0..10)
+            .map(|seq| entry(i64::from(seq) + 100, seq, 1, EntryKind::User, "x"))
+            .collect();
+        assert!(page.read(id(4), detail("a", before, Vec::new(), true)));
+        let shown = page.detail().expect("shown");
+        assert_eq!(
+            shown.entries.len(),
+            31,
+            "the earlier page is put before the hit"
+        );
+        assert_eq!(shown.entries.first().map(|e| e.seq), Some(0));
+        assert_eq!(shown.entries.last().map(|e| e.seq), Some(30));
+        assert!(
+            page.plan_earlier().is_none(),
+            "the thread starts at its first entry"
+        );
+    }
+
+    #[test]
+    fn an_unlisted_selected_thread_has_its_window_read_again_after_a_list_page() {
+        let mut page = ThreadsPage::default();
+        listed_page(&mut page, 1, &["a"], 1);
+        let request = page.choose(0).expect("a");
+        page.sent(&request.read, id(2));
+        assert!(page.read(
+            id(2),
+            detail(
+                "a",
+                vec![entry(1, 0, 1, EntryKind::User, "u")],
+                Vec::new(),
+                false
+            )
+        ));
+        // The filter leaves the selected thread out of the list.
+        listed_page(&mut page, 3, &["b"], 2);
+        let window = page
+            .plan_tail()
+            .expect("the thread is not listed, so it is read again");
+        assert!(matches!(
+            window.read,
+            Read::Detail {
+                from_seq: 0,
+                place: Place::Replace,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_copy_of_a_thread_as_markdown_keeps_only_its_own_answer_and_gives_it_once() {
+        let mut copy = MarkdownCopy::default();
+        copy.sent(id(7));
+        assert!(!copy.answered(id(8), "other".to_owned()));
+        assert!(copy.answered(id(7), "# Title\n".to_owned()));
+        assert_eq!(copy.take(), Some(Ok("# Title\n".to_owned())));
+        assert_eq!(copy.take(), None, "the outcome is taken once");
+    }
+
+    #[test]
+    fn a_failed_copy_says_the_engines_reason_and_a_cancelled_one_says_nothing() {
+        let mut copy = MarkdownCopy::default();
+        copy.sent(id(1));
+        assert!(copy.failed(id(1), Some("invalid redaction pattern".to_owned())));
+        assert_eq!(
+            copy.take(),
+            Some(Err("invalid redaction pattern".to_owned()))
+        );
+        copy.sent(id(2));
+        assert!(copy.failed(id(2), None));
+        assert_eq!(
+            copy.take(),
+            Some(Err("The thread could not be copied.".to_owned()))
+        );
+        copy.sent(id(3));
+        assert!(copy.cancelled(id(3)));
+        assert_eq!(copy.take(), None);
     }
 }

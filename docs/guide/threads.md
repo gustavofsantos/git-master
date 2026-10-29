@@ -39,6 +39,10 @@ The thread is grouped by turn. A turn is one prompt of yours and everything the 
 - Each tool call is one collapsed line with the tool, a short summary of its arguments, whether it worked and how long it took. Select the line to expand the arguments and the result.
 - Each edit is a card with the path, `+n −m`, and its state. Choose **Open Diff** to expand the patch under the card, or **View File** to open the file in the [Code page](code-navigation.md).
 
+The thread loads as you scroll. The first entries appear at once, and the next page is read when you come near the end of what is shown. A search result opens at its entry, and the entries before it are read when you scroll to the top. A line at the end says **Loading…** while a page is read and **End of thread** when there is nothing more.
+
+Tool calls that follow each other in a turn form a group. Its header says how many calls there are and which tools ran, for example `▸ 7 tool calls: Read ×3, Edit ×2, Bash ×2`. A group shows its edits and any failed call even while it is closed. Select the header to open the group, and select a call inside it to see its arguments and result. **Expand all** and **Collapse all** above the thread open or close every group at once. A group is closed when you open a thread, except the one that holds a search result.
+
 An edit has one of these states, worked out each time you open the thread from the files themselves:
 
 | State | Meaning |
@@ -75,7 +79,9 @@ Search runs on your machine over what is stored in the repository. Nothing is se
 
 Choose **Show Threads** in the menu of a file in the Working Copy to list the threads that edited that file.
 
-> **Planned.** The **Threads** section of the commit panel in [History](history.md), which lists the threads linked to a commit, is not available in the app yet.
+Select a commit in [History](history.md) and its panel lists the threads linked to it, under **Threads**. Each row shows the title, the agent and how long ago the thread was active. Select a row to open that thread on this page, even when a filter would leave it out. The section lists the newest ten threads.
+
+> **Planned.** The section does not yet mark the threads that were created during the thread, and it does not say how many threads follow the first ten.
 
 ### How a commit gets linked
 
@@ -95,10 +101,9 @@ GitMaster never guesses that a thread produced a commit because the contents loo
 | **Star** | Marks the thread so you can filter for it. |
 | **Tags** | Adds your own labels. |
 | **Export** | Writes the thread as a Markdown file at a path you choose. Redaction is applied again on the way out. |
+| **Copy as Markdown** | Puts the thread on the clipboard as the Markdown that Export writes, with the same redaction. |
 | **Delete** | Removes the thread from the database. The confirmation says what is removed. |
 | **Delete Entry** | Removes one message or tool call from a thread. |
-
-> **Planned.** **Copy as Markdown**, which puts the thread on the clipboard, is not available in the app yet.
 
 A delete is final. GitMaster overwrites the deleted text in the database file, and it does not keep a copy. It does not touch the agent's own session files; see [What is not removed](#what-is-not-removed).
 

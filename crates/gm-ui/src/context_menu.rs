@@ -174,6 +174,7 @@ pub(crate) fn thread_items(uid: &str, starred: bool, ctx: &ActionContext<'_>) ->
         star,
         item(Action::ThreadLinkCommit, 1),
         item(Action::ThreadExport, 2),
+        item(Action::ThreadCopyMarkdown, 2),
         item(Action::ThreadDelete, 3),
     ]
 }

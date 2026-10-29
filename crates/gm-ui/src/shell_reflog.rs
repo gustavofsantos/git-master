@@ -74,6 +74,7 @@ impl StatusView {
                     &self.commit_texts,
                     &panel,
                     actions,
+                    None,
                     cx,
                 ))
         };

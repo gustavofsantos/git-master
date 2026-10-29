@@ -8,8 +8,8 @@
 use gm_core::threads::cli::{Env, harness_command};
 use gm_core::threads::harness::{known_ids, lookup};
 use gpui::{
-    Context, Div, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, Stateful,
-    Window, div, prelude::*, px,
+    ClipboardItem, Context, Div, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
+    MouseDownEvent, Stateful, Window, div, prelude::*, px,
 };
 
 use crate::FocusNext;
@@ -263,6 +263,16 @@ pub(crate) fn display_name(id: &'static str) -> &'static str {
     lookup(id).map_or(id, |adapter| adapter.display_name())
 }
 
+/// The generated commands as the clipboard gets them: one shell line each, without
+/// the numbers the dialog shows. `None` when no commands were generated.
+#[must_use]
+pub(crate) fn commands_for_clipboard(model: &InstallModel) -> Option<String> {
+    let InstallState::Generated { steps, .. } = &model.state else {
+        return None;
+    };
+    (!steps.is_empty()).then(|| steps.join("\n"))
+}
+
 /// The dialog while it is open: its model and the focus that carries Escape.
 pub(crate) struct InstallDialog {
     pub(crate) model: InstallModel,
@@ -316,6 +326,25 @@ impl StatusView {
             Self::run_threads_install_job(job, cx);
         }
         cx.notify();
+    }
+
+    /// **Copy Commands**: puts the generated commands on the clipboard, one per line.
+    pub(crate) fn copy_threads_install_commands(&mut self, cx: &mut Context<Self>) {
+        let commands = self
+            .threads_install
+            .as_ref()
+            .and_then(|dialog| commands_for_clipboard(&dialog.model));
+        let Some(commands) = commands else {
+            return;
+        };
+        let count = commands.lines().count();
+        cx.write_to_clipboard(ClipboardItem::new_string(commands));
+        let notice = if count == 1 {
+            "Copied 1 command".to_owned()
+        } else {
+            format!("Copied {count} commands")
+        };
+        self.notify_user(&notice, cx);
     }
 
     /// **Status**: runs `status <id>`.
@@ -519,6 +548,14 @@ fn actions(model: &InstallModel, cx: &Context<StatusView>) -> Div {
             !busy,
             cx,
             |this, _, cx| this.check_threads_install(cx),
+        ))
+        .child(button(
+            ("threads-install-copy", 0),
+            "Copy Commands",
+            ButtonStyle::Secondary,
+            commands_for_clipboard(model).is_some(),
+            cx,
+            |this, _, cx| this.copy_threads_install_commands(cx),
         ))
         .child(button(
             ("threads-install-run", 0),
@@ -729,6 +766,45 @@ mod tests {
         model.choose("claude-code").expect("job");
         assert!(model.choose("other").is_none());
         assert_eq!(model.harness, "claude-code");
+    }
+
+    #[test]
+    fn the_commands_are_copied_one_per_line_without_their_numbers() {
+        let model = InstallModel {
+            harness: "claude-code".to_owned(),
+            state: InstallState::Generated {
+                dir: "/d".to_owned(),
+                steps: vec![
+                    "claude plugin marketplace add /x".to_owned(),
+                    "claude plugin install gitmaster@local".to_owned(),
+                ],
+            },
+            request: 0,
+        };
+        assert_eq!(
+            commands_for_clipboard(&model).as_deref(),
+            Some("claude plugin marketplace add /x\nclaude plugin install gitmaster@local")
+        );
+    }
+
+    #[test]
+    fn a_generation_with_no_commands_or_no_generation_copies_nothing() {
+        let empty = InstallModel {
+            harness: "claude-code".to_owned(),
+            state: InstallState::Generated {
+                dir: "/d".to_owned(),
+                steps: Vec::new(),
+            },
+            request: 0,
+        };
+        assert_eq!(commands_for_clipboard(&empty), None);
+        let idle = InstallModel::new("claude-code");
+        assert_eq!(commands_for_clipboard(&idle), None);
+        let running = InstallModel {
+            state: InstallState::Running,
+            ..InstallModel::new("claude-code")
+        };
+        assert_eq!(commands_for_clipboard(&running), None);
     }
 
     #[test]

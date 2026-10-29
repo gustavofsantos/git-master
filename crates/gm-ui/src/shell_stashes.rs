@@ -89,6 +89,7 @@ impl StatusView {
                     &self.commit_texts,
                     &Panel::Stash(index),
                     actions,
+                    None,
                     cx,
                 ))
         };

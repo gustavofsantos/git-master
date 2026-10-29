@@ -527,7 +527,7 @@ impl StatusView {
         if stash_stale {
             self.request_stash_list();
         }
-        self.follow_threads(threads_flags, reload);
+        self.follow_threads(threads_flags, reload, cx);
         if detail_loaded {
             self.show_commit_texts(cx);
         }
@@ -1090,15 +1090,13 @@ impl StatusView {
                 cx,
             ),
             Ok(Effect::OpenReviewEdit { id }) => self.open_review_edit(id, window, cx),
+            Ok(Effect::CopyThreadMarkdown(uid)) => self.copy_thread_markdown(uid, cx),
             Ok(Effect::Copy(text)) => {
                 let notice = format!("Copied {text}");
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.notify_user(&notice, cx);
             }
-            Ok(Effect::CopyMessage(text)) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                self.notify_user("Copied commit message", cx);
-            }
+            Ok(Effect::CopyMessage(text)) => self.copy_text(text, "Copied commit message", cx),
             Ok(Effect::Reveal(path)) => self.reveal(action, &path, cx),
             Ok(Effect::OpenWorkflowInputs { workflow, inputs }) => {
                 self.open_workflow_inputs_dialog(&workflow, &inputs, window, cx);
@@ -1313,6 +1311,12 @@ impl StatusView {
         }
     }
 
+    /// Puts `text` on the clipboard and says `notice`.
+    fn copy_text(&mut self, text: String, notice: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.notify_user(notice, cx);
+    }
+
     pub(crate) fn notify_user(&mut self, text: &str, cx: &mut Context<Self>) {
         let generation = self.model.set_notice(text.to_owned());
         Self::expire_notice_later(generation, cx);
@@ -1520,6 +1524,7 @@ impl StatusView {
 
 impl Render for StatusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_thread_rows();
         let (sidebar_width, left_width, commit_height) = self.fitted_sizes(window);
         window_chrome::sync_client_inset(window);
         let app = div()
