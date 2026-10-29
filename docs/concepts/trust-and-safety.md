@@ -71,8 +71,6 @@ Open the **Git commands** panel from the status bar. It lists every Git command 
 
 ### Threads
 
-> **Planned.** Threads are not available in the app yet.
-
 With the [agent integration](../agents/agent-integration.md) installed, GitMaster records each agent session in the repository as a [thread](../guide/threads.md): your prompts, the agent's replies, its tool calls and results, and every file edit. The record is made from the agent's own hooks and session file, not from a summary the agent writes. Secrets are removed before anything is stored. An agent can read threads through MCP and can never change or delete one.
 
 A thread is an observed record, not a tamper-proof one. An agent that runs as you can write to the same files as any other process.
@@ -92,8 +90,8 @@ The operation log records each operation that changes a repository, what was ask
 | Settings, such as the diff layout and the branch filter | The user config directory, in `settings.json`. | Implemented |
 | Git commands panel | Memory only. | Implemented |
 | Operation log | Outside the working tree. | Planned |
-| Threads | `.git/gitmaster/threads.db` in the Git common directory, readable only by you. | Planned |
-| Agent integration plugin | The `agents/` folder of the app data directory. | Planned |
+| Threads | `.git/gitmaster/threads.db` in the Git common directory, readable only by you. | |
+| Agent integration plugin | The `agents/` folder of the app data directory. | |
 | Local review comments and their snapshots | Outside the working tree. | Planned |
 | Workflow scripts | The workflows directory in your user config: `~/.config/gitmaster/workflows/` on Linux, and `Library/Application Support/gitmaster/workflows/` in your home directory on macOS. Also any directory listed in `gitmaster.workflowPath`. Never a repository. | Implemented |
 | Workflow review record | `gitmaster.db` in the app data directory, keyed by the hash of each script version. | Implemented |

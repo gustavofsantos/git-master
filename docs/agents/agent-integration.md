@@ -1,11 +1,9 @@
 ---
 title: Agent integration
 description: Install the GitMaster plugin into your coding agent so that its sessions are captured as threads, check that it works, and remove it.
-status: planned
+status: partial
 order: 5
 ---
-
-> **Planned.** The agent integration is not available in the app yet.
 
 The agent integration connects your coding agent to GitMaster. It is a plugin that GitMaster generates for the agent. The plugin's hooks report each step of a session to GitMaster, which stores it as a [thread](../guide/threads.md). The plugin also carries the MCP server settings and a skill for the agent, so an agent can search your earlier threads.
 

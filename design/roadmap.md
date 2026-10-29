@@ -552,7 +552,7 @@ Known gaps:
 - Review replaces the Result pane text, so edits made there before Review are lost.
 - A recorded text that still has markers leaves its hunks unresolved, so no card shows the recorded origin; the banner carries it. A free edit that changes the text makes every origin human (D118).
 
-## Slice 6t: threads, agent session capture (planned; T0 first)
+## Slice 6t: threads, agent session capture (built 2026-10-29 except T0, T8, T9, with gaps; nothing seen in a window and never run against a real agent)
 
 Requested by the author on 2026-10-29. Decisions D119 to D129 and open questions Q25 to Q31 in `design/decisions.md`; the engineering design, schema, redaction rules and sub-slice plan are in `design/threads.md`; the behavior is in `docs/guide/threads.md` and `docs/agents/agent-integration.md`, marked `Planned`. It sits before slice 7 because the MCP search tools (T9) need the store, and it needs no MCP to be useful: the window searches and reads threads on its own. Pillar 3.
 
@@ -574,7 +574,17 @@ Requested by the author on 2026-10-29. Decisions D119 to D129 and open questions
 
 **Done when:** a Claude Code session in a repository appears as a thread within a second of each event, with its prompts, replies, tool calls and edits; no string matching a built-in or user pattern exists anywhere in `threads.db`, the spool or the log; the hook never fails or noticeably slows the agent; the user finds a past decision by searching, opens the agent's edit as a diff and links the thread to a commit; deleting a thread removes its text from the file; the working tree is never written. T0 to T7 (T3 as T3a and T3b) each have their own done-when in `design/threads.md`.
 
-**Known gaps:** none yet; nothing is built. Open before T3 starts: the six confirmations at the end of `design/threads.md`.
+**Status (2026-10-29).** Built by the agent in one session, in this order, each checked with clippy `-D warnings` and tests: T1 (canonical types in `gm-schema`, redaction engine, `threads` settings, FTS query builder), T2 (SQLite store with FTS5, `secure_delete`, `0600`; engine commands, events and a watcher for `ThreadsChanged`), T3a (harness trait, registry, canonical events, conformance kit proven with a fake harness; the pipeline: redaction before storage, caps, idempotent upsert, offset cursor, spool, edit pre and post images with libgit2, observed links), T3b (Claude Code adapter), T4 (`gitmaster harness list | install | status | uninstall`, generated plugin), T5 (Threads page), T6 (star, rename, note, tags, link, delete, export, scrub, Show Threads for a file), T7 (Threads Settings dialog, Install Agent Integration dialog). D130 records the choices the design did not cover.
+
+**Known gaps:**
+
+- **T0 was not done.** The Claude Code hook payloads, transcript format, plugin layout and install commands in `harness/claude_code.rs` come from documentation, not from a real session (Q26); the fixtures are hand-written. Until T0 runs on a machine with the harness, assume the adapter may not match. The hook's cold start in a release build was not measured (Q25).
+- Nothing in the UI was seen in a window (no display): layout, colors, scrolling and keyboard paths of the Threads page and its dialogs are unchecked. The thread detail is not virtualized (200 entries per read with **Load more entries**), a search hit highlights its entry but does not scroll to it, patches in a card show 400 lines at most.
+- Not built: per-repository pause of capture (needs `gitmaster.db`), the commit-panel **Threads** section (the filter has no commit field), **Copy as Markdown**, filters for agent, branch and date in the UI, T8 (turn-level snapshot), T9 (MCP read tools, with slice 7) and the plugin's skill and MCP settings.
+- A match that touches a `[REDACTED:…]` marker is ignored, so a secret written directly against a marker with no separator can survive; a token glued to a letter (`x` + token) misses the `\b` of some patterns; a secret no pattern describes is never caught (stated in the docs).
+- Edit patch truncation is not flagged, an over-8 MiB payload is dropped rather than stored as a placeholder, batches drained from the spool get no commit links.
+- `ListThreads.total` is the unfiltered count; edit state is derived against the open repository's worktree, not the thread's own.
+- The prompts of a session appear when the next event of the agent arrives, because the adapter reads prompts only from the session file (D130).
 
 ## Slice 7: MCP
 

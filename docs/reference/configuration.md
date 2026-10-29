@@ -27,7 +27,7 @@ GitMaster keeps its files in three places: your user config directory, your user
 | `~/.local/share/gitmaster/hook-approvals.json` (Linux), `~/Library/Application Support/gitmaster/hook-approvals.json` (macOS) | Your approvals of repository hooks. Each approval covers one repository and one hash of the hook command. |  |
 | `~/.local/share/gitmaster/gitmaster.db` (Linux), `~/Library/Application Support/gitmaster/gitmaster.db` (macOS) | Which versions of a workflow script you reviewed, and your automatic approvals. Each is tied to the hash of the script text. | |
 | `~/.local/share/gitmaster/workflow-trash/` (Linux), `~/Library/Application Support/gitmaster/workflow-trash/` (macOS) | Workflow files you delete. They are moved here instead of being removed. | |
-| `~/.local/share/gitmaster/agents/claude-code/` (Linux), `~/Library/Application Support/gitmaster/agents/claude-code/` (macOS) | The plugin that GitMaster generates for the agent integration. See [Agent integration](../agents/agent-integration.md). | Planned |
+| `~/.local/share/gitmaster/agents/claude-code/` (Linux), `~/Library/Application Support/gitmaster/agents/claude-code/` (macOS) | The plugin that GitMaster generates for the agent integration. See [Agent integration](../agents/agent-integration.md). | |
 
 A repository whose folder no longer exists is dropped from the recent list.
 
@@ -39,8 +39,8 @@ GitMaster keeps per-repository state in `.git/gitmaster/`, inside the Git common
 |---|---|---|
 | `.git/gitmaster/state.db` | Workflow run history: every run and every call it made. | |
 | `.git/gitmaster/` (local review data) | Comments and snapshots of the local review. | Planned |
-| `.git/gitmaster/threads.db` | The [threads](../guide/threads.md) captured from agent sessions in this repository: conversation, tool calls and edits, with a search index. Readable only by you. | Planned |
-| `.git/gitmaster/threads-spool/`, `threads-tmp/`, `threads.log` | Events waiting to be written when the database was busy, temporary copies of files the agent is about to edit, and the capture log. The log keeps at most 256 KiB. | Planned |
+| `.git/gitmaster/threads.db` | The [threads](../guide/threads.md) captured from agent sessions in this repository: conversation, tool calls and edits, with a search index. Readable only by you. | |
+| `.git/gitmaster/threads-spool/`, `threads-tmp/`, `threads.log` | Events waiting to be written when the database was busy, temporary copies of files the agent is about to edit, and the capture log. The log keeps at most 256 KiB. | |
 | `.git/gitmaster/symbols.db` | The symbol index used by code navigation. | Planned |
 | Private refs inside `.git` | Snapshots taken before a restack, which an undo restores. | Planned |
 
@@ -64,8 +64,6 @@ GitMaster keeps its own preferences in `settings.json` in the user config direct
 ```
 
 ### The threads key
-
-> **Planned.** Threads are not available in the app yet.
 
 The `threads` key is an object. Every field is optional, and a missing field has the default shown. The agent integration reads this key each time a hook runs, so a change applies to the next event.
 
@@ -217,12 +215,11 @@ Changes apply as you make them, and there is no **Save** button. A value is save
 
 ### Threads
 
-> **Planned.** Threads are not available in the app yet.
+The settings dialog is not available yet, so these fields are edited today in **Threads Settings…**, which has the same fields.
 
 | Field | What it does |
 |---|---|
 | **Capture Threads** | Turns capture on or off everywhere. |
-| **Paused Repositories** | Lists the repositories where capture is paused, with a button to resume each one. |
 | **Built-in Patterns** | Lists the built-in redaction patterns, each with a switch. |
 | **Your Patterns** | Adds, edits and removes your own patterns. An invalid pattern is flagged inline and pauses capture until it is fixed. |
 | **Sensitive Paths** | Edits the list of paths whose content is never stored. |

@@ -1,11 +1,9 @@
 ---
 title: Threads
 description: Read, search and keep the record of your agent sessions: what you asked, what the agent answered, the tools it ran and the files it edited.
-status: planned
+status: partial
 order: 100
 ---
-
-> **Planned.** Threads are not available in the app yet.
 
 A thread is the record of one agent session in one repository. GitMaster captures the conversation, every tool call the agent made and every file edit, stores it in a database inside the repository's `.git` directory, and shows it on the **Threads** page. You can search old threads, open an agent's edit as a diff, link a thread to a commit, and delete what you do not want to keep.
 
@@ -37,9 +35,9 @@ The title comes from your first prompt. You can rename it.
 
 The thread is grouped by turn. A turn is one prompt of yours and everything the agent did until it stopped.
 
-- Your prompt and the agent's text show in full.
+- Your prompt and the agent's text show in full. A prompt appears when the agent's next event arrives, such as its first tool call or the end of its turn, because GitMaster reads prompts from the agent's session file.
 - Each tool call is one collapsed line with the tool, a short summary of its arguments, whether it worked and how long it took. Select the line to expand the arguments and the result.
-- Each edit is a card with the path, `+n −m`, and its state. Choose **Open Diff** to see the patch in the diff view, or **View File** to open the file in the [Code page](code-navigation.md).
+- Each edit is a card with the path, `+n −m`, and its state. Choose **Open Diff** to expand the patch under the card, or **View File** to open the file in the [Code page](code-navigation.md).
 
 An edit has one of these states, worked out each time you open the thread from the files themselves:
 
@@ -65,7 +63,9 @@ Type in the search box above the list. There is no search syntax.
 - Put words in double quotes to match them as a phrase.
 - Identifiers match whole, so `file_index` finds `file_index` and not every `file`.
 
-Results show a snippet around the match. Select one to open the thread at that entry. Narrow the results with the filters: agent, branch, dates, starred, has edits, and a file path.
+Results show a snippet around the match. Select one to open the thread at that entry. Narrow the list with the **Starred** and **Has edits** filters, and with a file: choose **Show Threads** on a file to list the threads that edited it. A removable chip shows the file.
+
+> **Planned.** Filters for the agent, the branch and the dates are not available in the app yet.
 
 Search runs on your machine over what is stored in the repository. Nothing is sent anywhere.
 
@@ -73,7 +73,9 @@ Search runs on your machine over what is stored in the repository. Nothing is se
 
 ### Threads for a file or a commit
 
-Choose **Show Threads** in the menu of a file in the Working Copy to list the threads that edited that file. The commit panel in [History](history.md) has a **Threads** section that lists the threads linked to that commit.
+Choose **Show Threads** in the menu of a file in the Working Copy to list the threads that edited that file.
+
+> **Planned.** The **Threads** section of the commit panel in [History](history.md), which lists the threads linked to a commit, is not available in the app yet.
 
 ### How a commit gets linked
 
@@ -92,9 +94,11 @@ GitMaster never guesses that a thread produced a commit because the contents loo
 | **Add Note** | Attaches a note of your own to the thread. A note is searchable. |
 | **Star** | Marks the thread so you can filter for it. |
 | **Tags** | Adds your own labels. |
-| **Copy as Markdown** and **Export** | Writes the thread as Markdown. Redaction is applied again on the way out. |
+| **Export** | Writes the thread as a Markdown file at a path you choose. Redaction is applied again on the way out. |
 | **Delete** | Removes the thread from the database. The confirmation says what is removed. |
 | **Delete Entry** | Removes one message or tool call from a thread. |
+
+> **Planned.** **Copy as Markdown**, which puts the thread on the clipboard, is not available in the app yet.
 
 A delete is final. GitMaster overwrites the deleted text in the database file, and it does not keep a copy. It does not touch the agent's own session files; see [What is not removed](#what-is-not-removed).
 
@@ -112,7 +116,7 @@ GitMaster ships patterns for private key blocks, cloud and API keys and tokens f
 
 ### Add your own patterns
 
-Add patterns for secrets that are specific to you, such as an internal token format or a private host name, in `settings.json`, or in the **Threads** section of the settings dialog. See [Configuration](../reference/configuration.md) for the keys.
+Add patterns for secrets that are specific to you, such as an internal token format or a private host name, in **Threads Settings…** from the command palette or the Threads page, or in `settings.json`. See [Configuration](../reference/configuration.md) for the keys.
 
 ```json
 {
@@ -127,7 +131,7 @@ Add patterns for secrets that are specific to you, such as an internal token for
 }
 ```
 
-A pattern is a regular expression. Use the test field in the settings dialog, or `gitmaster thread redact-test`, to try a pattern on sample text before you rely on it.
+A pattern is a regular expression. Use the test field in **Threads Settings…**, or `gitmaster thread redact-test`, to try a pattern on sample text before you rely on it.
 
 A pattern that is not a valid regular expression **pauses capture** in every repository until you fix or remove it. Events that arrive while it is paused are not stored. The Threads page says how many were skipped and which pattern is at fault. GitMaster stops capturing rather than risk storing a secret.
 
@@ -143,8 +147,9 @@ A pattern you add applies to what is captured from then on. To apply it to threa
 
 ## Pause or stop capturing
 
-- Choose **Pause Capture in This Repository** on the Threads page to stop capturing here. Threads already stored stay.
-- Turn off **Capture threads** in settings to stop everywhere.
+- Turn off **Capture Threads** in **Threads Settings…** to stop capturing everywhere. Threads already stored stay.
+
+> **Planned.** **Pause Capture in This Repository**, which stops capturing in one repository only, is not available in the app yet.
 - Remove the integration to stop the agent from reporting at all. See [Agent integration](../agents/agent-integration.md#remove-the-integration).
 
 ## Where threads are stored

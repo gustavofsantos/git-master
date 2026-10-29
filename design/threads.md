@@ -2,7 +2,7 @@
 
 The user-facing behavior is specified in `docs/guide/threads.md` and `docs/agents/agent-integration.md`; this file keeps the engineering rationale and the build plan.
 
-Last updated: 2026-10-29. Status: planned, nothing built. The author decided the direction on 2026-10-29 (D119 to D121); the details below are **proposed** (D122 to D128) and each one is listed in "To confirm" before the slice that depends on it starts.
+Last updated: 2026-10-29. Status: built except T0, T8 and T9 (see `design/roadmap.md`, slice 6t, for status and gaps; D130 for the choices made while building). The text below is the design as planned; where the build differs, D130 and the roadmap win. The author decided the direction on 2026-10-29 (D119 to D121); the details below are **proposed** (D122 to D128) and each one is listed in "To confirm" before the slice that depends on it starts.
 
 ## Why
 

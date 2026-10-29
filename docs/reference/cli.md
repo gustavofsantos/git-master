@@ -99,8 +99,6 @@ For the calls the script can make, see [Workflow API](workflow-api.md).
 
 ## Capture a thread event
 
-> **Planned.** The `gitmaster thread` and `gitmaster harness` subcommands are not available in the app yet.
-
 ```sh
 gitmaster thread hook --harness claude-code
 ```
@@ -113,8 +111,6 @@ The command always exits with status `0` and prints nothing, even when it cannot
 
 ## Test a redaction pattern
 
-> **Planned.** The `gitmaster thread` and `gitmaster harness` subcommands are not available in the app yet.
-
 ```sh
 gitmaster thread redact-test [--text <text>]
 ```
@@ -124,8 +120,6 @@ Reads a sample from the standard input, or from `--text`, applies the patterns o
 ## Manage the agent integration
 
 The name after the subcommand is the agent's id. `gitmaster harness list` prints the ids this version knows. An id it does not know exits with status `2` and lists the valid ones.
-
-> **Planned.** The `gitmaster thread` and `gitmaster harness` subcommands are not available in the app yet.
 
 ```sh
 gitmaster harness list
