@@ -43,6 +43,12 @@ pub(crate) enum Target {
         index: u32,
         oid: String,
     },
+    /// A thread row of the Threads page, with its title and star as the row shows them (T6).
+    Thread {
+        uid: String,
+        title: String,
+        starred: bool,
+    },
 }
 
 impl Target {
@@ -52,6 +58,7 @@ impl Target {
             Self::Branch(name) | Self::File(name) | Self::Worktree(name) => name.clone(),
             Self::Stash { index, .. } => stashes::label(*index),
             Self::ReflogEntry { index, .. } => reflog::label(*index),
+            Self::Thread { title, .. } => title.clone(),
         }
     }
 }
@@ -65,6 +72,8 @@ pub(crate) struct Item {
     pub(crate) group: u8,
     /// `Ok` when the item runs now; otherwise the reason, shown beside it.
     pub(crate) state: Result<(), Reason>,
+    /// The line the item shows: the action's title, unless the menu words it for its state.
+    title: &'static str,
 }
 
 impl Item {
@@ -75,11 +84,18 @@ impl Item {
             args,
             group,
             state,
+            title: action.spec().title,
         }
     }
 
+    /// The same item with another line, for a menu that words it for the state it is in.
+    fn retitled(mut self, title: &'static str) -> Self {
+        self.title = title;
+        self
+    }
+
     pub(crate) fn label(&self) -> &'static str {
-        self.action.spec().title
+        self.title
     }
 
     pub(crate) fn destructive(&self) -> bool {
@@ -122,6 +138,7 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         item(Action::ViewFile, 2),
         item(Action::MoveFileToBranch, 2),
         item(Action::MoveFileToWorktree, 2),
+        item(Action::ShowThreadsForFile, 2),
         item(Action::CopyFilePath, 2),
         item(Action::RevealFile, 2),
     ];
@@ -134,6 +151,31 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         items.insert(0, item(Action::ResolveConflict, 0));
     }
     items
+}
+
+/// The menu of a thread row: rename, note, tags and star, then the link and the
+/// export, and delete last in red. The star's line says what the click does.
+pub(crate) fn thread_items(uid: &str, starred: bool, ctx: &ActionContext<'_>) -> Vec<Item> {
+    let target = Args::Thread {
+        uid: uid.to_owned(),
+        starred,
+    };
+    let item = |action, group| Item::new(action, target.clone(), group, ctx);
+    let star = item(Action::ThreadStar, 0);
+    let star = if starred {
+        star.retitled("Unstar Thread")
+    } else {
+        star
+    };
+    vec![
+        item(Action::ThreadRename, 0),
+        item(Action::ThreadNote, 0),
+        item(Action::ThreadTags, 0),
+        star,
+        item(Action::ThreadLinkCommit, 1),
+        item(Action::ThreadExport, 2),
+        item(Action::ThreadDelete, 3),
+    ]
 }
 
 /// The menu of a stash row: apply and pop, then drop in its own group. Drop
@@ -284,6 +326,26 @@ impl StatusView {
         );
     }
 
+    /// Opens the menu of the thread row `uid`, under the pointer (T6).
+    pub(crate) fn open_thread_menu(
+        &mut self,
+        uid: &str,
+        title: &str,
+        starred: bool,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_menu(
+            Target::Thread {
+                uid: uid.to_owned(),
+                title: title.to_owned(),
+                starred,
+            },
+            position,
+            cx,
+        );
+    }
+
     /// Opens the menu of the Reflog row `index` that names the commit `oid`, under the pointer (B3).
     pub(crate) fn open_reflog_menu(
         &mut self,
@@ -378,6 +440,7 @@ impl StatusView {
             Target::Worktree(path) => worktree_items(path, &ctx),
             Target::Stash { index, oid } => stash_items(*index, oid, &ctx),
             Target::ReflogEntry { oid, .. } => reflog_items(oid, &ctx),
+            Target::Thread { uid, starred, .. } => thread_items(uid, *starred, &ctx),
         }
     }
 
@@ -587,6 +650,7 @@ mod tests {
         ActionContext {
             repo_open: true,
             selected_file: None,
+            selected_thread: None,
             busy: None,
             entries,
             staged_count: 0,
@@ -891,7 +955,7 @@ mod tests {
         assert_eq!(find(&items, Action::RevealFile).state, Ok(()));
         assert_eq!(find(&items, Action::ViewFile).state, Ok(()));
         let sizes: Vec<usize> = sections(&items).iter().map(|s| s.len()).collect();
-        assert_eq!(sizes, [2, 2, 5]);
+        assert_eq!(sizes, [2, 2, 6]);
     }
 
     #[test]
@@ -930,6 +994,7 @@ mod tests {
         let closed = ActionContext {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             root: None,
             ..ctx(&[])
         };

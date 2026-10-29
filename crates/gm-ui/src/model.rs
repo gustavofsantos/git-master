@@ -29,6 +29,7 @@ use crate::stash_apply::Applying;
 use crate::stash_drop::Dropping;
 use crate::stashes::StashList;
 use crate::text_search::TextSearch;
+use crate::thread_curate::{Outcome as ThreadOutcome, ThreadWork};
 use crate::threads::ThreadsPage;
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
@@ -102,6 +103,8 @@ pub struct Model {
     pub reflog_checkout: DetachedCheckout,
     /// The Threads page: the list, the search, the selected thread and its entries (T5).
     pub threads: ThreadsPage,
+    /// The write of a thread's curation in flight, and its outcome (T6).
+    pub thread_work: ThreadWork,
     /// Quick Open: its query, the search in flight and the last answer (N1).
     pub quick_open: QuickOpen,
     /// The Code page: the folder tree and the file viewer (N2).
@@ -683,6 +686,13 @@ impl Model {
                 self.stash_drop.settle(state, detail);
                 None
             }
+            // A thread write's outcome belongs to its dialog, or to the status bar (T6).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.thread_work.owns(id) => {
+                self.thread_work.settle(state, detail);
+                None
+            }
             // A detached checkout's outcome belongs to its message, not to the status bar (B3).
             Event::OperationChanged {
                 id, state, detail, ..
@@ -866,8 +876,13 @@ impl Model {
                 self.threads.edit_read(id, edit.id, state);
                 None
             }
-            // The view asks for the list again on a change; an export or a scrub is not shown here.
-            Event::ThreadExported { .. } | Event::ThreadsScrubbed { .. } | Event::ThreadsChanged => {
+            // The payload of an export or a scrub ends its write (T6). The view asks for the list again on a change.
+            Event::ThreadExported { id, path } => {
+                self.thread_work.payload(id, ThreadOutcome::Exported(path));
+                None
+            }
+            Event::ThreadsScrubbed { id, changed } => {
+                self.thread_work.payload(id, ThreadOutcome::Scrubbed(changed));
                 None
             }
             Event::StashesListed { id, stashes } => {
@@ -1068,7 +1083,9 @@ impl Model {
             | Event::MergedBranchesListed { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
-            | Event::WorkflowMessageSuggested { .. } => None,
+            | Event::WorkflowMessageSuggested { .. }
+            // The list is read again by the view on a change, so the status bar has nothing to say.
+            | Event::ThreadsChanged => None,
             // The read opens the resolver; the staged note is the resolver's own.
             Event::ConflictRead { id, read } => {
                 // A read after a forget keeps the note that says so.

@@ -66,6 +66,8 @@ mod text_area_element;
 mod text_area_math;
 mod text_search;
 mod theme;
+mod thread_curate;
+mod thread_dialogs;
 mod threads;
 mod title_bar;
 mod view;

@@ -12,7 +12,7 @@ use gm_schema::{BranchEntry, WorktreeEntry};
 
 use crate::action_registry::{
     Action, ArgKind, Args, Category, Context as ActionContext, NOT_AVAILABLE, OPEN_STASHES, Reason,
-    stash_args,
+    stash_args, thread_args,
 };
 use crate::fuzzy;
 use crate::stashes;
@@ -404,6 +404,12 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
         // A commit is named by the panel it is shown in (the history's or the Reflog's), so
         // the palette lists it disabled. The palette has no picker of commits to offer.
         ArgKind::Commit => disabled_run(action, commit_reason(action)),
+        // A thread is the one the Threads page has selected; with none, the action says so.
+        ArgKind::Thread => {
+            let args = ctx.selected_thread.map_or(Args::None, thread_args);
+            let state = action.enabled(&args, ctx);
+            (Choice::Run { action, args }, state)
+        }
     };
     // A placeholder says it is not available, whatever its target would be.
     let state = if action.available() {
@@ -574,6 +580,7 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
         | ArgKind::OptionalBranch
         | ArgKind::Chunk
         | ArgKind::Commit
+        | ArgKind::Thread
         | ArgKind::ReviewComment => Vec::new(),
     }
 }
@@ -646,6 +653,7 @@ mod tests {
         ActionContext {
             repo_open: true,
             selected_file: None,
+            selected_thread: None,
             busy: None,
             entries,
             staged_count: entries.iter().filter(|e| e.staged.is_some()).count(),
@@ -1389,5 +1397,30 @@ mod tests {
         let picks = build(Stage::Pick(Action::MoveFileToWorktree), "", &ctx, &[]);
         assert_eq!(find(&picks, "ui").state, Ok(()));
         assert_eq!(find(&picks, "main").state, Err(SAME_WORKTREE));
+    }
+    #[test]
+    fn a_thread_action_runs_on_the_selected_thread_or_says_none_is_selected() {
+        let open = ctx_with(&[], "");
+        let none = action_row(Action::ThreadStar, &open, &[]);
+        assert_eq!(none.state, Err("Select a thread first."));
+        let selected = ActionContext {
+            selected_thread: Some(crate::action_registry::ThreadRef {
+                uid: "u1",
+                starred: true,
+            }),
+            ..open
+        };
+        let candidate = action_row(Action::ThreadStar, &selected, &[]);
+        assert_eq!(candidate.state, Ok(()));
+        assert_eq!(
+            candidate.choice,
+            Choice::Run {
+                action: Action::ThreadStar,
+                args: Args::Thread {
+                    uid: "u1".into(),
+                    starred: true,
+                },
+            }
+        );
     }
 }

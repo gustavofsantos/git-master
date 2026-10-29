@@ -18,6 +18,7 @@ use gm_schema::{
 use crate::branch_filter::Scope;
 use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, SAME_WORKTREE};
 use crate::stashes;
+use crate::thread_curate::{self, ThreadField};
 use crate::workflows_page::PageState;
 
 /// Why an action is not enabled, as a short English sentence for the user.
@@ -68,6 +69,8 @@ pub enum ArgKind {
     Stash,
     /// A review comment of the Working Copy diff, by its id (B4c).
     ReviewComment,
+    /// The thread the Threads page has selected, or the thread a row names (T6).
+    Thread,
 }
 
 /// The target of one run. Its kind must match the action's `ArgKind`.
@@ -100,6 +103,11 @@ pub enum Args {
     },
     /// The review comment with this id, as the listing gave it (B4c).
     ReviewComment(i64),
+    /// A thread, by its uid, with its star as the page shows it (T6).
+    Thread {
+        uid: String,
+        starred: bool,
+    },
 }
 
 /// Static description of an action.
@@ -215,6 +223,17 @@ pub enum Effect {
         oid: String,
         label: String,
     },
+    /// Opens the dialog that edits one field of thread `uid`, or exports it (T6).
+    OpenThreadField {
+        field: ThreadField,
+        uid: String,
+    },
+    /// Opens the confirmation that deletes thread `uid` (T6).
+    OpenDeleteThreadDialog(String),
+    /// Opens the confirmation of a scrub of every stored thread (T6).
+    OpenScrubDialog,
+    /// Opens the Threads page filtered to the threads that touched this path (T6).
+    ShowThreadsFor(String),
     /// Writes the open workflow's buffer to its file.
     SaveWorkflow,
     /// Drops the open workflow's unsaved changes.
@@ -330,10 +349,19 @@ pub struct Context<'a> {
     pub review: ReviewCtx<'a>,
     /// The path of the selected row of the Working Copy list: the file a move takes.
     pub selected_file: Option<&'a str>,
+    /// The thread selected on the Threads page, which the thread actions take (T6).
+    pub selected_thread: Option<ThreadRef<'a>>,
+}
+
+/// The thread the Threads page has selected: its uid and its star.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadRef<'a> {
+    pub uid: &'a str,
+    pub starred: bool,
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 80] = [
+const SPECS: [Spec; 89] = [
     spec(
         "file.stage",
         "Stage File",
@@ -888,6 +916,69 @@ const SPECS: [Spec; 80] = [
         ArgKind::File,
         Category::WorkingCopy,
     ),
+    spec(
+        "threads.star",
+        "Star Thread",
+        None,
+        ArgKind::Thread,
+        Category::Repository,
+    ),
+    spec(
+        "threads.rename",
+        "Rename Thread…",
+        None,
+        ArgKind::Thread,
+        Category::Repository,
+    ),
+    spec(
+        "threads.note",
+        "Add Note…",
+        None,
+        ArgKind::Thread,
+        Category::Repository,
+    ),
+    spec(
+        "threads.tags",
+        "Tags…",
+        None,
+        ArgKind::Thread,
+        Category::Repository,
+    ),
+    spec(
+        "threads.link_commit",
+        "Link Thread to Commit…",
+        None,
+        ArgKind::Thread,
+        Category::Repository,
+    ),
+    spec(
+        "threads.export",
+        "Export Thread…",
+        None,
+        ArgKind::Thread,
+        Category::Repository,
+    ),
+    spec(
+        "threads.delete",
+        "Delete Thread…",
+        None,
+        ArgKind::Thread,
+        Category::Repository,
+    ),
+    spec(
+        "threads.scrub",
+        "Scrub Threads…",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "file.show_threads",
+        "Show Threads",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
+    ),
 ];
 
 const fn spec(
@@ -990,6 +1081,15 @@ pub enum Action {
     ShowLocalReview,
     OpenReviewComment,
     ResolveConflict,
+    ThreadStar,
+    ThreadRename,
+    ThreadNote,
+    ThreadTags,
+    ThreadLinkCommit,
+    ThreadExport,
+    ThreadDelete,
+    ThreadScrub,
+    ShowThreadsForFile,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1048,6 +1148,67 @@ fn resolve_conflict_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
         Ok(())
     } else {
         Err("This file has no conflict.")
+    }
+}
+
+/// The reason of a thread action when no thread is selected.
+pub(crate) const SELECT_THREAD: Reason = "Select a thread first.";
+
+/// The target of a thread action: the thread the page has selected, or the one a row names.
+#[must_use]
+pub(crate) fn thread_args(thread: ThreadRef<'_>) -> Args {
+    Args::Thread {
+        uid: thread.uid.to_owned(),
+        starred: thread.starred,
+    }
+}
+
+/// What the thread actions do with their target: a star is sent, the field
+/// dialogs and the delete open their dialog, and the scrub and the file filter
+/// open the page or its confirmation.
+fn thread_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
+    Ok(match (action, args) {
+        (Action::ThreadStar, Args::Thread { uid, starred }) => {
+            Effect::Send(vec![thread_curate::star_command(uid, *starred)])
+        }
+        (
+            Action::ThreadRename
+            | Action::ThreadNote
+            | Action::ThreadTags
+            | Action::ThreadLinkCommit
+            | Action::ThreadExport,
+            Args::Thread { uid, .. },
+        ) => Effect::OpenThreadField {
+            field: thread_field(action),
+            uid: uid.clone(),
+        },
+        (Action::ThreadDelete, Args::Thread { uid, .. }) => {
+            Effect::OpenDeleteThreadDialog(uid.clone())
+        }
+        (Action::ThreadScrub, _) => Effect::OpenScrubDialog,
+        (Action::ShowThreadsForFile, Args::File(path)) => Effect::ShowThreadsFor(path.clone()),
+        _ => return Err(NOT_AVAILABLE),
+    })
+}
+
+/// The field a thread action's dialog edits. Only the field actions reach it.
+fn thread_field(action: Action) -> ThreadField {
+    match action {
+        Action::ThreadNote => ThreadField::Note,
+        Action::ThreadTags => ThreadField::Tags,
+        Action::ThreadLinkCommit => ThreadField::LinkCommit,
+        Action::ThreadExport => ThreadField::Export,
+        _ => ThreadField::Rename,
+    }
+}
+
+/// The rule of the thread actions: a repository is open and a thread is named.
+/// Changing a thread's text does not touch the worktree, so a change in flight does not refuse it.
+fn thread_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    repository_open(ctx)?;
+    match args {
+        Args::Thread { .. } => Ok(()),
+        _ => Err(SELECT_THREAD),
     }
 }
 
@@ -1162,7 +1323,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 80] = [
+    pub const ALL: [Action; 89] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1243,6 +1404,15 @@ impl Action {
         Action::ShowLocalReview,
         Action::OpenReviewComment,
         Action::ResolveConflict,
+        Action::ThreadStar,
+        Action::ThreadRename,
+        Action::ThreadNote,
+        Action::ThreadTags,
+        Action::ThreadLinkCommit,
+        Action::ThreadExport,
+        Action::ThreadDelete,
+        Action::ThreadScrub,
+        Action::ShowThreadsForFile,
     ];
 
     #[must_use]
@@ -1284,6 +1454,7 @@ impl Action {
                 | Action::DiscardAllChanges
                 | Action::StashDrop
                 | Action::DeleteReviewComment
+                | Action::ThreadDelete
         )
     }
 
@@ -1359,6 +1530,22 @@ impl Action {
         )
     }
 
+    /// Whether the action is one of the Threads page's curation actions (T6), which `thread_effect` plans.
+    fn is_thread_action(self) -> bool {
+        matches!(
+            self,
+            Action::ThreadStar
+                | Action::ThreadRename
+                | Action::ThreadNote
+                | Action::ThreadTags
+                | Action::ThreadLinkCommit
+                | Action::ThreadExport
+                | Action::ThreadDelete
+                | Action::ThreadScrub
+                | Action::ShowThreadsForFile
+        )
+    }
+
     /// Whether the action opens its own dialog, which asks before anything runs.
     /// A menu then does not ask a second time.
     #[must_use]
@@ -1379,6 +1566,13 @@ impl Action {
                 | Action::NewBranchFromCommit
                 | Action::CommentOnSelection
                 | Action::EditReviewComment
+                | Action::ThreadRename
+                | Action::ThreadNote
+                | Action::ThreadTags
+                | Action::ThreadLinkCommit
+                | Action::ThreadExport
+                | Action::ThreadDelete
+                | Action::ThreadScrub
         )
     }
 
@@ -1390,6 +1584,10 @@ impl Action {
 
     /// Whether the action can run now with `args`; the reason when it cannot.
     pub fn enabled(self, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+        // A thread action run with no thread (the palette, with none selected) says so.
+        if self.spec().args == ArgKind::Thread && matches!(args, Args::None) {
+            return Err(SELECT_THREAD);
+        }
         if !self.takes(args) {
             return Err("No target for this action");
         }
@@ -1461,6 +1659,14 @@ impl Action {
             | Action::EditReviewComment => review_entry_rule(self, args, ctx),
             Action::OpenReviewComment => open_target(args, ctx).map(|_| ()),
             Action::ResolveConflict => resolve_conflict_rule(args, ctx),
+            Action::ThreadStar
+            | Action::ThreadRename
+            | Action::ThreadNote
+            | Action::ThreadTags
+            | Action::ThreadLinkCommit
+            | Action::ThreadExport
+            | Action::ThreadDelete => thread_rule(args, ctx),
+            Action::ThreadScrub | Action::ShowThreadsForFile => repository_open(ctx),
             // The placeholders, refused above by `available`.
             _ => Err(NOT_AVAILABLE),
         }
@@ -1568,6 +1774,7 @@ impl Action {
                 _,
             ) => hook_effect(self, ctx)?,
             (action, _) if action.is_workflow_rule() => workflow_effect(action, args, ctx)?,
+            (action, _) if action.is_thread_action() => thread_effect(action, args)?,
             // Only reached when `enabled` said Ok, which no placeholder does.
             _ => return Err(NOT_AVAILABLE),
         })
@@ -1597,6 +1804,7 @@ impl Action {
                 | (ArgKind::Template, Args::Template(_))
                 | (ArgKind::Stash, Args::Stash { .. })
                 | (ArgKind::ReviewComment, Args::ReviewComment(_))
+                | (ArgKind::Thread, Args::Thread { .. })
         )
     }
 }
@@ -2322,6 +2530,7 @@ mod tests {
         Context {
             repo_open: true,
             selected_file: None,
+            selected_thread: None,
             busy: None,
             entries,
             staged_count: entries.iter().filter(|e| e.staged.is_some()).count(),
@@ -2489,6 +2698,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&entries, "")
         };
         assert_eq!(
@@ -2562,6 +2772,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -2617,6 +2828,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -2789,6 +3001,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -2858,6 +3071,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             root: None,
             ..ctx(&entries, "")
         };
@@ -2889,6 +3103,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             root: None,
             ..ctx(&entries, "")
         };
@@ -2912,6 +3127,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             root: None,
             ..ctx(&[], "")
         };
@@ -2953,6 +3169,7 @@ mod tests {
                 Action::DiscardAllChanges,
                 Action::StashDrop,
                 Action::DeleteReviewComment,
+                Action::ThreadDelete,
             ]
         );
     }
@@ -2974,6 +3191,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3161,6 +3379,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3292,6 +3511,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&modified, "")
         };
         for action in [Action::DiscardFile, Action::DiscardAllChanges] {
@@ -3354,6 +3574,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3372,6 +3593,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3394,6 +3616,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3428,6 +3651,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3456,6 +3680,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3469,6 +3694,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3532,6 +3758,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&modified, "")
         };
         assert_eq!(
@@ -3651,6 +3878,7 @@ mod tests {
             let closed = Context {
                 repo_open: false,
                 selected_file: None,
+                selected_thread: None,
                 root: None,
                 ..with_stashes(&stashes)
             };
@@ -3788,6 +4016,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3805,6 +4034,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -4090,6 +4320,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..with_workflows(WorkflowCtx::default())
         };
         assert_eq!(
@@ -4240,6 +4471,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..with_workflows(WorkflowCtx::default())
         };
         assert_eq!(
@@ -4382,6 +4614,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..review_ctx(lines("a.txt", Some((1, 1))), None)
         };
         assert_eq!(
@@ -4478,6 +4711,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..review_ctx(CommentSpot::Nothing, Some(&listed))
         };
         assert_eq!(
@@ -4527,6 +4761,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -4592,6 +4827,7 @@ mod tests {
         let closed = Context {
             repo_open: false,
             selected_file: None,
+            selected_thread: None,
             ..open_ctx(&entries, Some(&current))
         };
         assert_eq!(
@@ -4860,5 +5096,193 @@ mod tests {
         assert!(Action::ResolveConflict.available());
         assert!(!Action::ResolveConflict.destructive());
         assert!(!Action::ResolveConflict.opens_dialog());
+    }
+    #[test]
+    fn the_thread_actions_have_their_ids_and_targets_and_no_shortcut() {
+        let expected = [
+            (Action::ThreadStar, "threads.star", ArgKind::Thread),
+            (Action::ThreadRename, "threads.rename", ArgKind::Thread),
+            (Action::ThreadNote, "threads.note", ArgKind::Thread),
+            (Action::ThreadTags, "threads.tags", ArgKind::Thread),
+            (
+                Action::ThreadLinkCommit,
+                "threads.link_commit",
+                ArgKind::Thread,
+            ),
+            (Action::ThreadExport, "threads.export", ArgKind::Thread),
+            (Action::ThreadDelete, "threads.delete", ArgKind::Thread),
+            (Action::ThreadScrub, "threads.scrub", ArgKind::None),
+            (
+                Action::ShowThreadsForFile,
+                "file.show_threads",
+                ArgKind::File,
+            ),
+        ];
+        for (action, id, args) in expected {
+            assert_eq!(action.id(), id);
+            assert_eq!(action.spec().args, args, "{id}");
+            assert_eq!(action.spec().shortcut, None, "{id}");
+            assert!(action.available(), "{id}");
+        }
+        assert_eq!(Action::ShowThreadsForFile.spec().title, "Show Threads");
+        assert_eq!(
+            Action::ShowThreadsForFile.spec().category,
+            Category::WorkingCopy
+        );
+        assert_eq!(Action::ThreadDelete.spec().title, "Delete Thread…");
+    }
+
+    #[test]
+    fn a_thread_action_with_no_thread_selected_says_so_whatever_the_repository() {
+        let context = ctx(&[], "");
+        for action in [
+            Action::ThreadStar,
+            Action::ThreadRename,
+            Action::ThreadNote,
+            Action::ThreadTags,
+            Action::ThreadLinkCommit,
+            Action::ThreadExport,
+            Action::ThreadDelete,
+        ] {
+            assert_eq!(
+                action.enabled(&Args::None, &context),
+                Err("Select a thread first."),
+                "{action:?}"
+            );
+            assert_eq!(
+                action.plan(&Args::None, &context),
+                Err("Select a thread first.")
+            );
+        }
+    }
+
+    #[test]
+    fn thread_actions_and_the_file_filter_need_an_open_repository() {
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        let thread = thread_args(ThreadRef {
+            uid: "u1",
+            starred: false,
+        });
+        assert_eq!(
+            Action::ThreadStar.enabled(&thread, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::ThreadScrub.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::ShowThreadsForFile.enabled(&Args::File("a.txt".into()), &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn a_star_sends_the_opposite_of_the_star_shown() {
+        let context = ctx(&[], "");
+        let unstarred = thread_args(ThreadRef {
+            uid: "u1",
+            starred: false,
+        });
+        let starred = thread_args(ThreadRef {
+            uid: "u1",
+            starred: true,
+        });
+        assert_eq!(
+            Action::ThreadStar.plan(&unstarred, &context),
+            Ok(Effect::Send(vec![CommandKind::UpdateThread {
+                uid: "u1".into(),
+                title: None,
+                note: None,
+                starred: Some(true),
+                tags: None,
+            }]))
+        );
+        assert!(matches!(
+            Action::ThreadStar.plan(&starred, &context),
+            Ok(Effect::Send(kinds)) if matches!(
+                kinds.as_slice(),
+                [CommandKind::UpdateThread { starred: Some(false), .. }]
+            )
+        ));
+    }
+
+    #[test]
+    fn each_field_action_opens_its_dialog_and_delete_its_confirmation() {
+        let context = ctx(&[], "");
+        let target = thread_args(ThreadRef {
+            uid: "u1",
+            starred: false,
+        });
+        let fields = [
+            (Action::ThreadRename, ThreadField::Rename),
+            (Action::ThreadNote, ThreadField::Note),
+            (Action::ThreadTags, ThreadField::Tags),
+            (Action::ThreadLinkCommit, ThreadField::LinkCommit),
+            (Action::ThreadExport, ThreadField::Export),
+        ];
+        for (action, field) in fields {
+            assert_eq!(
+                action.plan(&target, &context),
+                Ok(Effect::OpenThreadField {
+                    field,
+                    uid: "u1".into(),
+                }),
+                "{action:?}"
+            );
+        }
+        assert_eq!(
+            Action::ThreadDelete.plan(&target, &context),
+            Ok(Effect::OpenDeleteThreadDialog("u1".into()))
+        );
+        assert_eq!(
+            Action::ThreadScrub.plan(&Args::None, &context),
+            Ok(Effect::OpenScrubDialog)
+        );
+        assert_eq!(
+            Action::ShowThreadsForFile.plan(&Args::File("src/a.rs".into()), &context),
+            Ok(Effect::ShowThreadsFor("src/a.rs".into()))
+        );
+    }
+
+    #[test]
+    fn the_thread_dialogs_open_a_dialog_and_only_delete_is_destructive() {
+        for action in [
+            Action::ThreadRename,
+            Action::ThreadNote,
+            Action::ThreadTags,
+            Action::ThreadLinkCommit,
+            Action::ThreadExport,
+            Action::ThreadDelete,
+            Action::ThreadScrub,
+        ] {
+            assert!(action.opens_dialog(), "{action:?}");
+        }
+        assert!(!Action::ThreadStar.opens_dialog());
+        assert!(!Action::ShowThreadsForFile.opens_dialog());
+        assert!(Action::ThreadDelete.destructive());
+        for action in [
+            Action::ThreadStar,
+            Action::ThreadRename,
+            Action::ThreadScrub,
+        ] {
+            assert!(!action.destructive(), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn the_file_filter_needs_a_file_as_its_target() {
+        let context = ctx(&[], "");
+        assert_eq!(
+            Action::ShowThreadsForFile.enabled(&Args::File("a.txt".into()), &context),
+            Ok(())
+        );
+        assert_eq!(
+            Action::ShowThreadsForFile.enabled(&Args::None, &context),
+            Err("No target for this action")
+        );
     }
 }

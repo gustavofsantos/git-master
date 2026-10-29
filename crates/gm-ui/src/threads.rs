@@ -568,15 +568,61 @@ impl ThreadsPage {
             return None;
         }
         self.selected = Some(uid.to_owned());
+        self.clear_selection();
+        self.focus = focus;
+        Some(detail_request(uid, 0, ENTRY_PAGE))
+    }
+
+    /// Drops what the page shows of the selected thread, not the selection itself.
+    fn clear_selection(&mut self) {
         self.detail = None;
         self.detail_pending = None;
-        self.focus = focus;
         self.collapsed.clear();
         self.expanded.clear();
         self.edit_states.clear();
         self.edit_reads.clear();
         self.open_edit = None;
-        Some(detail_request(uid, 0, ENTRY_PAGE))
+    }
+
+    /// The file the list is filtered to: the threads that touched this path.
+    #[must_use]
+    pub fn path(&self) -> Option<&str> {
+        self.filter.path.as_deref()
+    }
+
+    /// Sets or clears the file filter. Returns whether it changed; the caller reads the list again.
+    pub fn set_path(&mut self, path: Option<String>) -> bool {
+        if self.filter.path == path {
+            return false;
+        }
+        self.filter.path = path;
+        true
+    }
+
+    /// The summary of thread `uid`, from the thread shown or from the list.
+    #[must_use]
+    pub fn summary(&self, uid: &str) -> Option<&ThreadSummary> {
+        self.detail
+            .as_ref()
+            .map(|detail| &detail.summary)
+            .filter(|summary| summary.uid == uid)
+            .or_else(|| self.threads.iter().find(|thread| thread.uid == uid))
+    }
+
+    /// The summary of the selected thread, when it is known.
+    #[must_use]
+    pub fn selected_summary(&self) -> Option<&ThreadSummary> {
+        self.summary(self.selected.as_deref()?)
+    }
+
+    /// Drops the selection of thread `uid` when it is selected. Used when the
+    /// thread is deleted, so no read of it is sent after the delete.
+    pub fn forget(&mut self, uid: &str) {
+        if self.selected.as_deref() == Some(uid) {
+            self.selected = None;
+            self.focus = None;
+            self.clear_selection();
+        }
     }
 
     /// Selects the row `index` of the list shown: a thread, or the thread of a hit,
@@ -2212,5 +2258,49 @@ mod tests {
         assert!(page.plan_edit_states().is_empty());
         assert!(page.plan_more().is_none());
         assert_eq!(page.focus_turn(), None);
+    }
+    #[test]
+    fn the_file_filter_is_set_and_cleared_and_only_a_change_says_so() {
+        let mut page = ThreadsPage::default();
+        assert_eq!(page.path(), None);
+        assert!(!page.filter_active());
+        assert!(page.set_path(Some("src/a.rs".to_owned())));
+        assert!(!page.set_path(Some("src/a.rs".to_owned())));
+        assert_eq!(page.path(), Some("src/a.rs"));
+        assert!(page.filter_active());
+        assert!(page.set_path(None));
+        assert_eq!(page.path(), None);
+        assert!(!page.filter_active());
+    }
+
+    #[test]
+    fn a_summary_is_found_in_the_list_and_in_the_thread_shown() {
+        let mut page = ThreadsPage::default();
+        listed_page(&mut page, 1, &["a", "b"], 2);
+        assert_eq!(page.summary("b").map(|s| s.uid.as_str()), Some("b"));
+        assert!(page.summary("zz").is_none());
+        selected_page(&mut page, "a", vec![], false);
+        assert_eq!(page.selected_summary().map(|s| s.uid.as_str()), Some("a"));
+    }
+
+    #[test]
+    fn a_deleted_thread_is_forgotten_so_no_read_of_it_follows() {
+        let mut page = ThreadsPage::default();
+        listed_page(&mut page, 1, &["a", "b"], 2);
+        selected_page(&mut page, "a", vec![], false);
+        page.forget("b");
+        assert_eq!(
+            page.selected(),
+            Some("a"),
+            "another thread leaves the selection"
+        );
+        page.forget("a");
+        assert_eq!(page.selected(), None);
+        assert!(page.detail().is_none());
+        assert!(
+            page.plan_refresh()
+                .iter()
+                .all(|request| !matches!(request.kind, CommandKind::ReadThread { .. }))
+        );
     }
 }

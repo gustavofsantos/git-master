@@ -224,6 +224,7 @@ mod tests {
         let context = RuleContext {
             repo_open: true,
             selected_file: None,
+            selected_thread: None,
             busy: None,
             worktrees: &[],
             branch_scope: crate::branch_filter::Scope::All,
@@ -257,6 +258,7 @@ mod tests {
         let context = RuleContext {
             repo_open: true,
             selected_file: None,
+            selected_thread: None,
             busy: None,
             worktrees: &[],
             entries: &[],

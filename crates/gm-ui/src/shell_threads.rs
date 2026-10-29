@@ -7,19 +7,23 @@
 use std::ops::Range;
 use std::time::Duration;
 
-use gm_schema::{Actor, Event, ThreadEdit, ThreadHit, ThreadSummary};
+use gm_schema::{
+    Actor, Event, LinkKind, LinkOrigin, ThreadDetail, ThreadEdit, ThreadHit, ThreadLink,
+    ThreadSummary,
+};
 use gpui::{
     AnyElement, ClickEvent, Context, Div, Entity, FontWeight, KeyDownEvent, MouseButton,
     MouseDownEvent, ScrollStrategy, Stateful, Subscription, UniformListScrollHandle, Window, div,
     prelude::*, px, uniform_list,
 };
 
-use crate::action_registry::{Action, Args};
+use crate::action_registry::{Action, Args, ThreadRef, thread_args};
 use crate::icon::{self, Icon};
-use crate::shell_history::now_secs;
+use crate::shell_history::{action_button, now_secs};
 use crate::text_area::TextArea;
 use crate::text_search::DEBOUNCE_MS;
 use crate::theme;
+use crate::thread_curate as curate;
 use crate::threads::{
     self, Block, Call, Chip, Empty, Message, MessageKind, Mode, Request, Span, Turn,
 };
@@ -269,7 +273,8 @@ impl StatusView {
                     .child(self.threads_view.query.clone()),
             )
             .child(self.threads_chip(Chip::Starred, "Starred", "threads-chip-starred", cx))
-            .child(self.threads_chip(Chip::HasEdits, "Has edits", "threads-chip-edits", cx));
+            .child(self.threads_chip(Chip::HasEdits, "Has edits", "threads-chip-edits", cx))
+            .children(self.threads_path_chip(cx));
         let body = div()
             .flex_1()
             .min_h(px(0.))
@@ -416,7 +421,9 @@ impl StatusView {
                     .font_weight(FontWeight::MEDIUM)
                     .child(threads::title(summary).to_owned()),
             )
-            .child(div().text_xs().text_color(theme::muted()).child(meta));
+            .child(div().text_xs().text_color(theme::muted()).child(meta))
+            .children(note_view(&summary.note))
+            .child(self.thread_curation(detail, cx));
         let turns: Vec<Div> = threads::turns(detail)
             .iter()
             .map(|turn| self.turn_view(turn, cx))
@@ -460,6 +467,151 @@ impl StatusView {
             .flex_col()
             .child(header)
             .child(body)
+    }
+
+    /// The header's actions of the selected thread, then its tags and its links (T6).
+    fn thread_curation(&self, detail: &ThreadDetail, cx: &mut Context<Self>) -> Div {
+        let summary = &detail.summary;
+        let target = thread_args(ThreadRef {
+            uid: &summary.uid,
+            starred: summary.starred,
+        });
+        let ctx = self.action_context("");
+        let star = if summary.starred { "Unstar" } else { "Star" };
+        let actions = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(action_button(
+                Action::ThreadRename,
+                "thread-rename",
+                "Rename",
+                &target,
+                &ctx,
+                cx,
+            ))
+            .child(action_button(
+                Action::ThreadNote,
+                "thread-note",
+                "Add Note",
+                &target,
+                &ctx,
+                cx,
+            ))
+            .child(action_button(
+                Action::ThreadTags,
+                "thread-tags",
+                "Tags",
+                &target,
+                &ctx,
+                cx,
+            ))
+            .child(action_button(
+                Action::ThreadStar,
+                "thread-star",
+                star,
+                &target,
+                &ctx,
+                cx,
+            ))
+            .child(action_button(
+                Action::ThreadLinkCommit,
+                "thread-link",
+                "Link to Commit",
+                &target,
+                &ctx,
+                cx,
+            ))
+            .child(action_button(
+                Action::ThreadExport,
+                "thread-export",
+                "Export",
+                &target,
+                &ctx,
+                cx,
+            ))
+            .child(action_button(
+                Action::ThreadDelete,
+                "thread-delete",
+                "Delete",
+                &target,
+                &ctx,
+                cx,
+            ));
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(actions)
+            .children(tag_row(&summary.tags))
+            .children(link_rows(&detail.links, &summary.uid, cx))
+    }
+
+    /// The file filter's chip in the toolbar: `File: <path>`, which a click removes.
+    fn threads_path_chip(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let path = self.model.threads.path()?;
+        Some(
+            div()
+                .id("threads-chip-path")
+                .cursor_pointer()
+                .flex_none()
+                .max_w(px(PATH_CHIP_WIDTH))
+                .px_2()
+                .h(px(24.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .rounded_full()
+                .border_1()
+                .border_color(theme::accent())
+                .bg(theme::selection())
+                .text_xs()
+                .text_color(theme::accent())
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(format!("File: {path}")),
+                )
+                .child(icon::view(Icon::Close, icon::SMALL, theme::accent()))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.clear_threads_path(cx);
+                    }),
+                ),
+        )
+    }
+
+    /// Shows the Threads page with the threads that touched `path` (T6).
+    pub(crate) fn show_threads_for(
+        &mut self,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.threads.set_path(Some(path.to_owned()));
+        self.show_threads(window, cx);
+    }
+
+    /// Removes the file filter and reads the list again (T6).
+    fn clear_threads_path(&mut self, cx: &mut Context<Self>) {
+        if self.model.threads.set_path(None) {
+            self.request_threads_refresh();
+        }
+        cx.notify();
+    }
+
+    /// Removes a manual link of the thread shown. Nothing to confirm: a link is
+    /// only a pointer, and the commit it names is untouched.
+    fn unlink_thread(&mut self, uid: &str, link: &ThreadLink, cx: &mut Context<Self>) {
+        self.engine
+            .dispatch(Actor::Human, curate::unlink_command(uid, link));
+        cx.notify();
     }
 
     /// One turn: its header (a click folds it), the prompt, the blocks, then the edits no call holds.
@@ -522,11 +674,35 @@ impl StatusView {
     }
 
     /// A text or a tool call of a turn.
+    /// One block with its entry's delete, which shows while the block is under the pointer (T6).
     fn block_view(&self, block: &Block, cx: &mut Context<Self>) -> Div {
-        match block {
-            Block::Message(message) => self.message_view(message),
-            Block::Call(call) => self.call_view(call, cx),
-        }
+        let (body, entry) = match block {
+            Block::Message(message) => (self.message_view(message), message.entry_id),
+            Block::Call(call) => (self.call_view(call, cx), call.entry_id),
+        };
+        let group = format!("thread-entry-{entry}");
+        let key = usize::try_from(entry).unwrap_or(usize::MAX);
+        let delete = div()
+            .id(("thread-entry-delete", key))
+            .invisible()
+            .group_hover(group.clone(), gpui::Styled::visible)
+            .cursor_pointer()
+            .px_1()
+            .text_xs()
+            .text_color(theme::removed_fg())
+            .child("Delete entry")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    this.open_delete_entry_dialog(entry, window, cx);
+                }),
+            );
+        div()
+            .group(group)
+            .flex()
+            .flex_col()
+            .child(body)
+            .child(div().flex().flex_row().justify_end().child(delete))
     }
 
     /// A text of the human's or the agent's, styled by its kind.
@@ -901,6 +1077,33 @@ fn hit_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Status
     )
 }
 
+/// The star of a thread row: a click toggles the star, and the row keeps its selection.
+fn thread_star(
+    thread: &ThreadSummary,
+    index: usize,
+    cx: &mut Context<StatusView>,
+) -> Stateful<Div> {
+    let uid = thread.uid.clone();
+    let starred = thread.starred;
+    div()
+        .id(("thread-row-star", index))
+        .cursor_pointer()
+        .flex_none()
+        .px_1()
+        .text_color(if starred {
+            theme::accent()
+        } else {
+            theme::muted()
+        })
+        .child(if starred { "★" } else { "☆" })
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            // The star is not a click on the row: the thread stays as it was.
+            cx.stop_propagation();
+            let target = thread_args(ThreadRef { uid: &uid, starred });
+            this.run_action(Action::ThreadStar, &target, window, cx);
+        }))
+}
+
 /// One thread: its title, a dot while it is open, and its agent, branch, time,
 /// edit count and a `redacted` chip. A click selects it.
 fn thread_row(
@@ -921,15 +1124,20 @@ fn thread_row(
                 .bg(theme::accent()),
         );
     }
-    let head = head.child(
-        div()
-            .flex_1()
-            .min_w(px(0.))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(threads::title(thread).to_owned()),
-    );
+    let head = head
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(threads::title(thread).to_owned()),
+        )
+        .child(thread_star(thread, index, cx));
+    let menu_uid = thread.uid.clone();
+    let menu_title = threads::title(thread).to_owned();
+    let menu_starred = thread.starred;
     let meta = div()
         .flex()
         .flex_row()
@@ -982,6 +1190,12 @@ fn thread_row(
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.choose_thread(index, cx);
         }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.open_thread_menu(&menu_uid, &menu_title, menu_starred, event.position, cx);
+            }),
+        )
         .child(head)
         .child(meta)
 }
@@ -1123,6 +1337,98 @@ fn patch_view(patch: &str) -> Div {
                 .child(format!("… {hidden} more lines"))
         }))
 }
+
+/// The width the file filter's chip may take before its text is cut.
+const PATH_CHIP_WIDTH: f32 = 260.;
+
+/// The note of a thread, as the header shows it, or nothing when it has none.
+fn note_view(note: &str) -> Option<Div> {
+    let note = note.trim();
+    (!note.is_empty()).then(|| text_block(note, MESSAGE_LINES))
+}
+
+/// The tags of a thread as chips, or nothing when it has none.
+fn tag_row(tags: &[String]) -> Option<Div> {
+    (!tags.is_empty()).then(|| {
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_1()
+            .children(tags.iter().map(|tag| chip(tag.clone())))
+    })
+}
+
+/// The links of a thread: a manual one with its Unlink, an observed one as the
+/// commit that was made during the thread, with no button.
+fn link_rows(links: &[ThreadLink], uid: &str, cx: &mut Context<StatusView>) -> Option<Div> {
+    if links.is_empty() {
+        return None;
+    }
+    let rows = links.iter().enumerate().map(|(index, link)| {
+        let kind = match link.kind {
+            LinkKind::Commit => "Commit",
+            LinkKind::Branch => "Branch",
+            LinkKind::File => "File",
+        };
+        let reference: String = match link.kind {
+            LinkKind::Commit => link.reference.chars().take(COMMIT_CHARS).collect(),
+            LinkKind::Branch | LinkKind::File => link.reference.clone(),
+        };
+        let row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .child(chip(kind.to_owned()))
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .font_family(theme::code_font())
+                    .child(reference),
+            );
+        match link.origin {
+            LinkOrigin::Observed => row
+                .text_color(theme::muted())
+                .child("created during this thread"),
+            LinkOrigin::Manual => {
+                let uid = uid.to_owned();
+                let link = link.clone();
+                row.child(
+                    div()
+                        .id(("thread-unlink", index))
+                        .cursor_pointer()
+                        .px_2()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(theme::button_border())
+                        .text_color(theme::text())
+                        .child("Unlink")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                this.unlink_thread(&uid, &link, cx);
+                            }),
+                        ),
+                )
+            }
+        }
+    });
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .children(rows.collect::<Vec<_>>()),
+    )
+}
+
+/// The characters of a commit id a link row shows.
+const COMMIT_CHARS: usize = 12;
 
 /// Which of the engine's events the Threads page follows: a changed thread database,
 /// and an answer with a thread's entries.

@@ -18,7 +18,7 @@ use gpui::{
 
 use crate::action_registry::{
     self, Action, Args, CommentSpot, Context as ActionContext, Effect, HookCtx, Reason, ReviewCtx,
-    WorkflowCtx,
+    ThreadRef, WorkflowCtx,
 };
 use crate::app_settings::{self, AppSettings};
 use crate::avatar::Avatars;
@@ -58,6 +58,7 @@ use crate::stash_drop::DropStashDialog;
 use crate::stashes;
 use crate::text_area::{TextArea, TextAreaEvent, TextStyle};
 use crate::theme;
+use crate::thread_dialogs::{ConfirmDialog, FieldDialog};
 use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
@@ -188,6 +189,10 @@ pub struct StatusView {
     pub(crate) move_popover: Option<MovePopover>,
     /// The drop dialog of a stash, while it is open (B2).
     pub(crate) drop_stash_dialog: Option<DropStashDialog>,
+    /// The field dialog of a thread (rename, note, tags, link, export), while it is open (T6).
+    pub(crate) thread_field: Option<FieldDialog>,
+    /// The confirmation of a thread delete or of a scrub, while it is open (T6).
+    pub(crate) thread_confirm: Option<ConfirmDialog>,
     /// The message shown when a stash apply or pop, or a detached checkout, was not done.
     pub(crate) message_dialog: Option<MessageDialog>,
     /// The delete-merged-branches dialog, while it is open.
@@ -411,6 +416,8 @@ impl StatusView {
             discard_dialog: None,
             move_popover: None,
             drop_stash_dialog: None,
+            thread_field: None,
+            thread_confirm: None,
             message_dialog: None,
             merged_dialog: None,
             recents,
@@ -646,6 +653,9 @@ impl StatusView {
         }
         if let Some(outcome) = self.model.stash_apply.take() {
             self.on_stash_applied(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.thread_work.take() {
+            self.on_thread_work(outcome, window, cx);
         }
         if let Some(outcome) = self.model.stash_drop.take() {
             self.on_stash_dropped(outcome, window, cx);
@@ -1122,6 +1132,14 @@ impl StatusView {
             Ok(Effect::OpenDropStashDialog { index, oid, label }) => {
                 self.open_drop_stash_dialog(index, &oid, &label, window, cx);
             }
+            Ok(Effect::OpenThreadField { field, uid }) => {
+                self.open_thread_field(field, &uid, window, cx);
+            }
+            Ok(Effect::OpenDeleteThreadDialog(uid)) => {
+                self.open_delete_thread_dialog(&uid, window, cx);
+            }
+            Ok(Effect::OpenScrubDialog) => self.open_scrub_dialog(window, cx),
+            Ok(Effect::ShowThreadsFor(path)) => self.show_threads_for(&path, window, cx),
             Ok(Effect::ShowWorkflows) => self.show_workflows(cx),
             Ok(Effect::OpenQuickOpen) => self.open_quick_open(window, cx),
             Ok(Effect::ShowCode) => self.show_code(cx),
@@ -1227,6 +1245,14 @@ impl StatusView {
         ActionContext {
             repo_open: self.model.status().is_some(),
             selected_file: self.model.selected_path(),
+            selected_thread: self
+                .model
+                .threads
+                .selected_summary()
+                .map(|thread| ThreadRef {
+                    uid: &thread.uid,
+                    starred: thread.starred,
+                }),
             busy: self.busy_reason(),
             remote_running: self.model.remote.in_flight().is_some(),
             entries: self.model.entries(),
@@ -1586,6 +1612,7 @@ impl StatusView {
         }
         layers.extend(self.new_branch_layer(window, cx));
         layers.extend(self.stash_layers(window, cx));
+        layers.extend(self.thread_layers(window, cx));
         layers.extend(self.review_composer_layer(window, cx));
         layers.extend(self.workflow_inputs_layer(window, cx));
         layers.extend(self.workflow_review_layer(window, cx));
