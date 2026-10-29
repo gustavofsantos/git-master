@@ -1,0 +1,12 @@
+[
+  {
+    "type": "prompt_submitted",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "p1",
+      "at": 1700000001000
+    },
+    "text": "add retry with backoff"
+  }
+]

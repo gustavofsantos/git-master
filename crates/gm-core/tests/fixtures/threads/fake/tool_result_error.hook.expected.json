@@ -1,0 +1,14 @@
+[
+  {
+    "type": "tool_returned",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "r2",
+      "at": 1700000005500
+    },
+    "call_source_id": "c3",
+    "text": "exit status 101",
+    "is_error": true
+  }
+]

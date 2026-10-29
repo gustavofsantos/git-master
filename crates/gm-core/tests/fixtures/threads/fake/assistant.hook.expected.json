@@ -1,0 +1,13 @@
+[
+  {
+    "type": "assistant_message",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "a1",
+      "at": 1700000002000
+    },
+    "text": "I will edit a.txt.",
+    "model": null
+  }
+]

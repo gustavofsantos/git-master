@@ -1,0 +1,14 @@
+[
+  {
+    "type": "tool_returned",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "r1",
+      "at": 1700000005000
+    },
+    "call_source_id": "c1",
+    "text": "edited a.txt",
+    "is_error": false
+  }
+]

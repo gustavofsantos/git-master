@@ -1,0 +1,7 @@
+{"event":"session_start","session":"s1","id":"start1","at":1700000000000,"cwd":"/r"}
+{"event":"prompt","session":"s1","id":"p1","at":1700000001000,"text":"add retry with backoff"}
+{"event":"assistant","session":"s1","id":"a1","at":1700000002000,"text":"I will edit a.txt."}
+{"event":"tool_call","session":"s1","id":"c1","at":1700000003000,"tool":"edit","args":{"path":"a.txt","old":"hello","new":"hello world"}}
+{"event":"tool_result","session":"s1","id":"r1","at":1700000005000,"call":"c1","text":"edited a.txt"}
+{"event":"turn_end","session":"s1","id":"t1","at":1700000007000}
+{"event":"prompt","session":"s1","id":"p2","at":1700000011000,"text":"second prompt, cut off mid-line

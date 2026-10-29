@@ -1,0 +1,1 @@
+{"event":"tool_call","session":"s1","id":"c4","at":1700000004500,"tool":"custom","args":{"name":"lint"},"cwd":"/r"}

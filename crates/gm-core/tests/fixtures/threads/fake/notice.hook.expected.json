@@ -1,0 +1,12 @@
+[
+  {
+    "type": "notice",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "n1",
+      "at": 1700000009000
+    },
+    "text": "context compacted"
+  }
+]

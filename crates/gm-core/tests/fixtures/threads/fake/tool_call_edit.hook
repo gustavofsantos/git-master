@@ -1,0 +1,1 @@
+{"event":"tool_call","session":"s1","id":"c1","at":1700000003000,"tool":"edit","args":{"path":"a.txt","old":"hello","new":"hello world"},"cwd":"/r"}

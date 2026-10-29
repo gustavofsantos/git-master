@@ -1,0 +1,36 @@
+[
+  {
+    "type": "session_started",
+    "header": {
+      "harness": "fake",
+      "session_id": "s2",
+      "source_id": "start2",
+      "at": 1700000100000
+    },
+    "cwd": "/r",
+    "model": null,
+    "harness_version": null,
+    "log_path": null,
+    "origin": "new"
+  },
+  {
+    "type": "prompt_submitted",
+    "header": {
+      "harness": "fake",
+      "session_id": "s2",
+      "source_id": "p3",
+      "at": 1700000101000
+    },
+    "text": "naïve retry"
+  },
+  {
+    "type": "turn_ended",
+    "header": {
+      "harness": "fake",
+      "session_id": "s2",
+      "source_id": "t2",
+      "at": 1700000102000
+    },
+    "parent_call": null
+  }
+]

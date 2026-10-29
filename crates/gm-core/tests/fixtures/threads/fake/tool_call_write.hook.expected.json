@@ -1,0 +1,25 @@
+[
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "c2",
+      "at": 1700000003500
+    },
+    "tool": "write",
+    "native_tool": "write",
+    "args": {
+      "path": "new.txt",
+      "new": "fresh"
+    },
+    "parent_call": null,
+    "edit": {
+      "path": "new.txt",
+      "change": "create",
+      "old_path": null,
+      "old_text": null,
+      "new_text": "fresh"
+    }
+  }
+]

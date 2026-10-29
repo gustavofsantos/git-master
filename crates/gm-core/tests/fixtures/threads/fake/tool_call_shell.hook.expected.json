@@ -1,0 +1,18 @@
+[
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "c3",
+      "at": 1700000004000
+    },
+    "tool": "shell",
+    "native_tool": "bash",
+    "args": {
+      "command": "cargo test"
+    },
+    "parent_call": null,
+    "edit": null
+  }
+]

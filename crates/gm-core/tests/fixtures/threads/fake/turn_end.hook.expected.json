@@ -1,0 +1,12 @@
+[
+  {
+    "type": "turn_ended",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "t1",
+      "at": 1700000007000
+    },
+    "parent_call": null
+  }
+]

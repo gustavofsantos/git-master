@@ -1,0 +1,1 @@
+{"event":"tool_call","session":"s1","id":"c5","at":1700000006000,"tool":"read","args":{"path":"b.txt"},"parent":"c0","cwd":"/r"}

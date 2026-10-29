@@ -1,0 +1,12 @@
+[
+  {
+    "type": "session_ended",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "end1",
+      "at": 1700000008000
+    },
+    "reason": "other"
+  }
+]

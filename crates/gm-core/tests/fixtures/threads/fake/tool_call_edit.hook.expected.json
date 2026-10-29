@@ -1,0 +1,26 @@
+[
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "c1",
+      "at": 1700000003000
+    },
+    "tool": "edit",
+    "native_tool": "edit",
+    "args": {
+      "path": "a.txt",
+      "old": "hello",
+      "new": "hello world"
+    },
+    "parent_call": null,
+    "edit": {
+      "path": "a.txt",
+      "change": "modify",
+      "old_path": null,
+      "old_text": "hello",
+      "new_text": "hello world"
+    }
+  }
+]

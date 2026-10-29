@@ -1,0 +1,18 @@
+[
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "c4",
+      "at": 1700000004500
+    },
+    "tool": "other",
+    "native_tool": "custom",
+    "args": {
+      "name": "lint"
+    },
+    "parent_call": null,
+    "edit": null
+  }
+]

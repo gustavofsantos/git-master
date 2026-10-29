@@ -1,0 +1,18 @@
+[
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "c5",
+      "at": 1700000006000
+    },
+    "tool": "read",
+    "native_tool": "read",
+    "args": {
+      "path": "b.txt"
+    },
+    "parent_call": "c0",
+    "edit": null
+  }
+]

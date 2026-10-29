@@ -1,0 +1,83 @@
+[
+  {
+    "type": "session_started",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "start1",
+      "at": 1700000000000
+    },
+    "cwd": "/r",
+    "model": null,
+    "harness_version": null,
+    "log_path": null,
+    "origin": "new"
+  },
+  {
+    "type": "prompt_submitted",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "p1",
+      "at": 1700000001000
+    },
+    "text": "add retry with backoff"
+  },
+  {
+    "type": "assistant_message",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "a1",
+      "at": 1700000002000
+    },
+    "text": "I will edit a.txt.",
+    "model": null
+  },
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "c1",
+      "at": 1700000003000
+    },
+    "tool": "edit",
+    "native_tool": "edit",
+    "args": {
+      "path": "a.txt",
+      "old": "hello",
+      "new": "hello world"
+    },
+    "parent_call": null,
+    "edit": {
+      "path": "a.txt",
+      "change": "modify",
+      "old_path": null,
+      "old_text": "hello",
+      "new_text": "hello world"
+    }
+  },
+  {
+    "type": "tool_returned",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "r1",
+      "at": 1700000005000
+    },
+    "call_source_id": "c1",
+    "text": "edited a.txt",
+    "is_error": false
+  },
+  {
+    "type": "turn_ended",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "t1",
+      "at": 1700000007000
+    },
+    "parent_call": null
+  }
+]

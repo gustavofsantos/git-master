@@ -1,0 +1,5 @@
+{
+  "phase": "before",
+  "call_source_id": "c1",
+  "path": "a.txt"
+}

@@ -1,0 +1,5 @@
+{"event":"session_start","session":"s2","id":"start2","at":1700000100000,"cwd":"/r"}
+
+{"event":"mystery","session":"s2","id":"m2","at":1700000100500}
+{"event":"prompt","session":"s2","id":"p3","at":1700000101000,"text":"naïve retry"}
+{"event":"turn_end","session":"s2","id":"t2","at":1700000102000}

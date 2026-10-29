@@ -1,0 +1,16 @@
+[
+  {
+    "type": "session_started",
+    "header": {
+      "harness": "fake",
+      "session_id": "s1",
+      "source_id": "start1",
+      "at": 1700000000000
+    },
+    "cwd": "/r",
+    "model": null,
+    "harness_version": null,
+    "log_path": null,
+    "origin": "new"
+  }
+]
