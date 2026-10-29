@@ -186,6 +186,8 @@ pub enum Effect {
     ShowStashes,
     /// Opens the Reflog page and asks the engine for the first page of HEAD's reflog (B3).
     ShowReflog,
+    /// Opens the Threads page and asks the engine for the first page of threads (T5).
+    ShowThreads,
     /// Opens the Local review page and asks the engine for the review comments (B4d).
     ShowLocalReview,
     /// Opens the Working Copy on the unstaged side of `path`, with the cursor on
@@ -331,7 +333,7 @@ pub struct Context<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 79] = [
+const SPECS: [Spec; 80] = [
     spec(
         "file.stage",
         "Stage File",
@@ -810,6 +812,13 @@ const SPECS: [Spec; 79] = [
         Category::Repository,
     ),
     spec(
+        "threads.show",
+        "Show Threads",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
         "commit.checkout",
         "Check Out Commit (Detached)",
         None,
@@ -970,6 +979,7 @@ pub enum Action {
     StashPop,
     StashDrop,
     ShowReflog,
+    ShowThreads,
     CheckoutCommit,
     NewBranchFromCommit,
     CommentOnSelection,
@@ -1022,6 +1032,7 @@ fn navigation_effect(action: Action, args: &Args) -> Effect {
         (Action::ShowWorkflows, _) => Effect::ShowWorkflows,
         (Action::ShowStashes, _) => Effect::ShowStashes,
         (Action::ShowReflog, _) => Effect::ShowReflog,
+        (Action::ShowThreads, _) => Effect::ShowThreads,
         (Action::ShowLocalReview, _) => Effect::ShowLocalReview,
         _ => Effect::ShowHistory,
     }
@@ -1151,7 +1162,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 79] = [
+    pub const ALL: [Action; 80] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1221,6 +1232,7 @@ impl Action {
         Action::StashPop,
         Action::StashDrop,
         Action::ShowReflog,
+        Action::ShowThreads,
         Action::CheckoutCommit,
         Action::NewBranchFromCommit,
         Action::CommentOnSelection,
@@ -1287,6 +1299,7 @@ impl Action {
                 | Action::ShowWorkflows
                 | Action::ShowStashes
                 | Action::ShowReflog
+                | Action::ShowThreads
                 | Action::ShowLocalReview
         )
     }
@@ -1401,6 +1414,7 @@ impl Action {
             | Action::SearchText
             | Action::ShowWorkflows
             | Action::ShowReflog
+            | Action::ShowThreads
             | Action::ShowLocalReview => repository_open(ctx),
             Action::CheckoutBranch => {
                 idle(ctx)?;
@@ -3448,6 +3462,27 @@ mod tests {
             Action::NewBranchFromCommit.enabled(&target, &closed),
             Err("No repository is open.")
         );
+    }
+
+    #[test]
+    fn show_threads_needs_an_open_repository_and_has_no_key() {
+        let closed = Context {
+            repo_open: false,
+            selected_file: None,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowThreads.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::ShowThreads.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::ShowThreads)
+        );
+        assert_eq!(Action::ShowThreads.id(), "threads.show");
+        assert_eq!(Action::ShowThreads.spec().title, "Show Threads");
+        assert_eq!(Action::ShowThreads.spec().shortcut, None);
+        assert!(!Action::ShowThreads.opens_dialog());
     }
 
     #[test]

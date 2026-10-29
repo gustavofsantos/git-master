@@ -97,6 +97,23 @@ impl StatusView {
             }))
     }
 
+    /// The Threads line of the workspace, with its count once it is known (T5).
+    fn threads_item(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        item_row("Threads", self.screen == Screen::Threads)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.run_action(Action::ShowThreads, &Args::None, window, cx);
+                }),
+            )
+            .children(
+                self.model
+                    .threads
+                    .total()
+                    .map(|count| count_pill(count.to_string())),
+            )
+    }
+
     fn workspace_items(&self, cx: &mut Context<Self>) -> Div {
         let count = self.model.entry_count();
         let working = self.screen == Screen::WorkingCopy;
@@ -176,6 +193,7 @@ impl StatusView {
                     }),
                 ),
             )
+            .child(self.threads_item(cx))
             .child(
                 item_row("Local review", self.screen == Screen::LocalReview)
                     .on_mouse_down(

@@ -51,6 +51,7 @@ use crate::shell_code::CodeView;
 use crate::shell_history::CommitTexts;
 use crate::shell_search::{self, SearchView};
 use crate::shell_sidebar;
+use crate::shell_threads::{self, ThreadsView};
 use crate::sidebar::Grouping;
 use crate::stash_apply;
 use crate::stash_drop::DropStashDialog;
@@ -103,6 +104,8 @@ pub(crate) enum Screen {
     Stashes,
     /// The entries of HEAD's reflog, with the selected entry's files and diffs (B3).
     Reflog,
+    /// The threads of the agent sessions, with the selected thread's turns (T5).
+    Threads,
     /// The review comments of the repository, with one comment's Before and After (B4d).
     LocalReview,
     /// The conflict resolver of one conflicted file: the two sides, the result and Apply (C3b).
@@ -155,6 +158,8 @@ pub struct StatusView {
     pub(crate) code_view: CodeView,
     /// The text search page's boxes and scroll; its state is `model.text_search`.
     pub(crate) search_view: SearchView,
+    /// The Threads page's search box and list scroll; its state is `model.threads`.
+    pub(crate) threads_view: ThreadsView,
     /// The create-worktree dialog, while it is open.
     pub(crate) worktree_dialog: Option<WorktreeDialog>,
     /// The remove-worktree dialog, while it is open.
@@ -256,6 +261,7 @@ impl StatusView {
         let search_paths = cx.new(|cx| {
             TextArea::new("Files to search: src crates/ui !docs  (empty: all)", cx).with_lines(1, 1)
         });
+        let threads_query = cx.new(|cx| TextArea::new("Search the threads", cx).with_lines(1, 1));
         let sidebar_input = cx.new(|cx| TextArea::new("Find a branch", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
@@ -358,6 +364,7 @@ impl StatusView {
             &search_paths,
             cx,
         ));
+        subscriptions.extend(shell_threads::subscriptions(&threads_query, cx));
         subscriptions.extend(shell_sidebar::subscriptions(&sidebar_input, window, cx));
         let mut model = Model::default();
         model.request_open(open);
@@ -389,6 +396,7 @@ impl StatusView {
             quick_open_view: QuickOpenView::new(quick_open_input),
             code_view: CodeView::new(),
             search_view: SearchView::new(search_query, search_paths),
+            threads_view: ThreadsView::new(threads_query),
             worktree_dialog: None,
             removal_dialog: None,
             prune_dialog: None,
@@ -478,6 +486,7 @@ impl StatusView {
         let reload = matches!(event, Event::StatusLoaded { .. });
         let listed = matches!(event, Event::BranchesLoaded { .. });
         let stashes_listed = matches!(event, Event::StashesListed { .. });
+        let threads_flags = shell_threads::follow_flags(&event);
         let review_listed = matches!(event, Event::ReviewCommentsListed { .. });
         let stash_stale = stashes::is_stale_refusal(&event);
         let committed = matches!(event, Event::Committed { .. });
@@ -503,6 +512,7 @@ impl StatusView {
         if stash_stale {
             self.request_stash_list();
         }
+        self.follow_threads(threads_flags, reload);
         if detail_loaded {
             self.show_commit_texts(cx);
         }
@@ -676,6 +686,7 @@ impl StatusView {
             .children((self.screen == Screen::Search).then(|| self.search_page(cx)))
             .children((self.screen == Screen::Stashes).then(|| self.stashes_page(cx)))
             .children((self.screen == Screen::Reflog).then(|| self.reflog_page(cx)))
+            .children((self.screen == Screen::Threads).then(|| self.threads_page(cx)))
             .children((self.screen == Screen::LocalReview).then(|| self.local_review_page(cx)))
             .children((self.screen == Screen::Conflicts).then(|| self.conflicts_page(cx)))
     }
@@ -1102,6 +1113,7 @@ impl StatusView {
             Ok(Effect::ShowHistory) => self.show_history(cx),
             Ok(Effect::ShowStashes) => self.show_stashes(cx),
             Ok(Effect::ShowReflog) => self.show_reflog(cx),
+            Ok(Effect::ShowThreads) => self.show_threads(window, cx),
             Ok(Effect::ShowLocalReview) => self.show_local_review(cx),
             Ok(Effect::ShowReviewInDiff { path, line }) => {
                 self.show_review_in_diff(&path, line, cx);

@@ -29,6 +29,7 @@ use crate::stash_apply::Applying;
 use crate::stash_drop::Dropping;
 use crate::stashes::StashList;
 use crate::text_search::TextSearch;
+use crate::threads::ThreadsPage;
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
 use crate::worktree_create::Creating;
@@ -99,6 +100,8 @@ pub struct Model {
     pub reflog_stack: OpenStack,
     /// The detached checkout started from the Reflog page, and its outcome (B3).
     pub reflog_checkout: DetachedCheckout,
+    /// The Threads page: the list, the search, the selected thread and its entries (T5).
+    pub threads: ThreadsPage,
     /// Quick Open: its query, the search in flight and the last answer (N1).
     pub quick_open: QuickOpen,
     /// The Code page: the folder tree and the file viewer (N2).
@@ -718,6 +721,13 @@ impl Model {
                 self.reflog.ended(id, state, detail);
                 None
             }
+            // A failed read of the Threads page is shown on the page (T5).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.threads.owns(id) => {
+                self.threads.ended(id, state, detail);
+                None
+            }
             Event::PrunableListed { id, candidates } if self.pruning.owns(id) => {
                 self.pruning.listed(candidates);
                 None
@@ -840,13 +850,26 @@ impl Model {
                 }
                 None
             }
-            Event::ThreadsListed { .. }
-            | Event::ThreadSearchResults { .. }
-            | Event::ThreadRead { .. }
-            | Event::ThreadEditRead { .. }
-            | Event::ThreadExported { .. }
-            | Event::ThreadsScrubbed { .. }
-            | Event::ThreadsChanged => return None,
+            Event::ThreadsListed { id, threads, total } => {
+                self.threads.listed(id, threads, total);
+                None
+            }
+            Event::ThreadSearchResults { id, hits } => {
+                self.threads.searched(id, hits);
+                None
+            }
+            Event::ThreadRead { id, detail } => {
+                self.threads.read(id, detail);
+                None
+            }
+            Event::ThreadEditRead { id, edit, state } => {
+                self.threads.edit_read(id, edit.id, state);
+                None
+            }
+            // The view asks for the list again on a change; an export or a scrub is not shown here.
+            Event::ThreadExported { .. } | Event::ThreadsScrubbed { .. } | Event::ThreadsChanged => {
+                None
+            }
             Event::StashesListed { id, stashes } => {
                 self.list_stashes(id, stashes);
                 None
@@ -1166,6 +1189,7 @@ impl Model {
         self.reflog = ReflogList::default();
         self.reflog_commit = CommitPane::Empty;
         self.reflog_stack = OpenStack::default();
+        self.threads = ThreadsPage::default();
         self.quick_open = QuickOpen::default();
         self.code.reset();
         self.text_search = TextSearch::default();
