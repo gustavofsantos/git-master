@@ -840,6 +840,13 @@ impl Model {
                 }
                 None
             }
+            Event::ThreadsListed { .. }
+            | Event::ThreadSearchResults { .. }
+            | Event::ThreadRead { .. }
+            | Event::ThreadEditRead { .. }
+            | Event::ThreadExported { .. }
+            | Event::ThreadsScrubbed { .. }
+            | Event::ThreadsChanged => return None,
             Event::StashesListed { id, stashes } => {
                 self.list_stashes(id, stashes);
                 None
@@ -1403,10 +1410,17 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ReviewCommentsListed { id, .. }
         | Event::ReviewSnapshotText { id, .. }
         | Event::ReviewCurrentText { id, .. }
+        | Event::ThreadsListed { id, .. }
+        | Event::ThreadSearchResults { id, .. }
+        | Event::ThreadRead { id, .. }
+        | Event::ThreadEditRead { id, .. }
+        | Event::ThreadExported { id, .. }
+        | Event::ThreadsScrubbed { id, .. }
         | Event::ConflictRead { id, .. }
         | Event::ConflictResolved { id, .. }
         | Event::RecordedResolutionForgotten { id, .. } => Some(*id),
-        Event::WorkflowRunChanged { .. }
+        Event::ThreadsChanged
+        | Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }
         | Event::WorkflowNotice { .. }
         | Event::WorkflowApprovalRequested { .. }
