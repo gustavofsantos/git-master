@@ -137,7 +137,7 @@ A pattern that is not a valid regular expression **pauses capture** in every rep
 
 ### Apply a new pattern to old threads
 
-A pattern you add applies to what is captured from then on. To apply it to threads you already have, choose **Scrub Threads**. GitMaster runs the current patterns over every stored thread and tells you how many entries changed. Scrub can only remove more text, never restore any.
+A pattern you add applies to what is captured from then on. To apply it to threads you already have, run **Scrub Threads** from the command palette. GitMaster runs the current patterns over every stored thread and tells you how many entries changed. Scrub can only remove more text, never restore any.
 
 ### What is not removed
 

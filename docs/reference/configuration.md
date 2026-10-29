@@ -224,7 +224,6 @@ The settings dialog is not available yet, so these fields are edited today in **
 | **Your Patterns** | Adds, edits and removes your own patterns. An invalid pattern is flagged inline and pauses capture until it is fixed. |
 | **Sensitive Paths** | Edits the list of paths whose content is never stored. |
 | **Test** | Shows the result of redacting a sample text with the current patterns. |
-| **Scrub Threads** | Applies the current patterns to every stored thread. See [Threads](../guide/threads.md#apply-a-new-pattern-to-old-threads). |
 | **Result Size** | Sets the most bytes of one tool result that are stored. |
 
 ### Local Review
