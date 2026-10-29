@@ -27,6 +27,7 @@ GitMaster keeps its files in three places: your user config directory, your user
 | `~/.local/share/gitmaster/hook-approvals.json` (Linux), `~/Library/Application Support/gitmaster/hook-approvals.json` (macOS) | Your approvals of repository hooks. Each approval covers one repository and one hash of the hook command. |  |
 | `~/.local/share/gitmaster/gitmaster.db` (Linux), `~/Library/Application Support/gitmaster/gitmaster.db` (macOS) | Which versions of a workflow script you reviewed, and your automatic approvals. Each is tied to the hash of the script text. | |
 | `~/.local/share/gitmaster/workflow-trash/` (Linux), `~/Library/Application Support/gitmaster/workflow-trash/` (macOS) | Workflow files you delete. They are moved here instead of being removed. | |
+| `~/.local/share/gitmaster/agents/claude-code/` (Linux), `~/Library/Application Support/gitmaster/agents/claude-code/` (macOS) | The plugin that GitMaster generates for the agent integration. See [Agent integration](../agents/agent-integration.md). | Planned |
 
 A repository whose folder no longer exists is dropped from the recent list.
 
@@ -38,6 +39,8 @@ GitMaster keeps per-repository state in `.git/gitmaster/`, inside the Git common
 |---|---|---|
 | `.git/gitmaster/state.db` | Workflow run history: every run and every call it made. | |
 | `.git/gitmaster/` (local review data) | Comments and snapshots of the local review. | Planned |
+| `.git/gitmaster/threads.db` | The [threads](../guide/threads.md) captured from agent sessions in this repository: conversation, tool calls and edits, with a search index. Readable only by you. | Planned |
+| `.git/gitmaster/threads-spool/`, `threads-tmp/`, `threads.log` | Events waiting to be written when the database was busy, temporary copies of files the agent is about to edit, and the capture log. The log keeps at most 256 KiB. | Planned |
 | `.git/gitmaster/symbols.db` | The symbol index used by code navigation. | Planned |
 | Private refs inside `.git` | Snapshots taken before a restack, which an undo restores. | Planned |
 
@@ -51,11 +54,53 @@ GitMaster keeps its own preferences in `settings.json` in the user config direct
 |---|---|---|---|---|
 | `diff_layout` | string | `unified`, `split` | `unified` | The layout of the diff, set by the **Unified** or **Split** selector. The choice applies to the Working Copy diff and to the commit diff. |
 | `branch_scope` | string | `mine`, `all` | Not set | The scope of the sidebar's branch filter, **Mine** or **All**. While it is not set, the filter shows **Mine** when Git has a `user.email` and **All** when it does not. |
+| `threads` | object | See below | See below | Capture and redaction of [threads](../guide/threads.md). |
 
 ```json
 {
   "diff_layout": "split",
   "branch_scope": "all"
+}
+```
+
+### The threads key
+
+> **Planned.** Threads are not available in the app yet.
+
+The `threads` key is an object. Every field is optional, and a missing field has the default shown. The agent integration reads this key each time a hook runs, so a change applies to the next event.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `capture` | boolean | `true` | Turns capture off everywhere when `false`. |
+| `max_result_bytes` | integer | `65536` | The most bytes of one tool result that are stored. A longer result is cut, and the entry records its original size. |
+| `redact.builtin` | boolean | `true` | Turns the built-in patterns on or off as a group. Leave it on unless you replace them with your own. |
+| `redact.disabled_builtins` | array of strings | `[]` | Names of built-in patterns to turn off, for example `"jwt"`. A name that is not a built-in pattern is ignored with a warning. |
+| `redact.patterns` | array of objects | `[]` | Your own patterns. Each has `name`, `regex` and an optional `group`. |
+| `redact.paths` | array of strings | `[".env", ".env.*", "*.pem", "id_rsa*"]` | Globs on repository-relative paths. The content of a matching file is never stored; the path is. |
+
+A pattern object has these fields:
+
+| Field | Meaning |
+|---|---|
+| `name` | The label in `[REDACTED:name]`. Letters, digits, `-` and `_`. It must not repeat a built-in or another pattern. |
+| `regex` | A regular expression in the syntax of Rust's `regex` crate. It matches in linear time, so a pattern cannot make the hook hang. |
+| `group` | The number of the capture group that holds the secret. The default is `0`, the whole match. Use a group to keep a readable name, as in `(password=)(\S+)` with `group` set to `2`. |
+
+A pattern that is not valid pauses capture in every repository until it is fixed. See [Secrets](../guide/threads.md#secrets).
+
+```json
+{
+  "threads": {
+    "capture": true,
+    "redact": {
+      "disabled_builtins": ["jwt"],
+      "patterns": [
+        { "name": "acme-token", "regex": "acme_[A-Za-z0-9]{32}" },
+        { "name": "db-password", "regex": "(DB_PASS=)(\\S+)", "group": 2 }
+      ],
+      "paths": [".env", ".env.*", "*.pem", "id_rsa*", "secrets/**"]
+    }
+  }
 }
 ```
 
@@ -169,6 +214,21 @@ Changes apply as you make them, and there is no **Save** button. A value is save
 | **Socket Path** | Shows and sets the path of the local socket the MCP server listens on. |
 | **Tokens** | Manages the tokens that agents use to connect to the server. |
 | **Agent Policy** | Chooses which agent actions need your approval. See [MCP server](../agents/mcp-server.md). |
+
+### Threads
+
+> **Planned.** Threads are not available in the app yet.
+
+| Field | What it does |
+|---|---|
+| **Capture Threads** | Turns capture on or off everywhere. |
+| **Paused Repositories** | Lists the repositories where capture is paused, with a button to resume each one. |
+| **Built-in Patterns** | Lists the built-in redaction patterns, each with a switch. |
+| **Your Patterns** | Adds, edits and removes your own patterns. An invalid pattern is flagged inline and pauses capture until it is fixed. |
+| **Sensitive Paths** | Edits the list of paths whose content is never stored. |
+| **Test** | Shows the result of redacting a sample text with the current patterns. |
+| **Scrub Threads** | Applies the current patterns to every stored thread. See [Threads](../guide/threads.md#apply-a-new-pattern-to-old-threads). |
+| **Result Size** | Sets the most bytes of one tool result that are stored. |
 
 ### Local Review
 

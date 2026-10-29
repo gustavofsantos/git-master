@@ -28,6 +28,9 @@ Approval follows the agent policy. Under the example policy in the MCP server pa
 | `code_grep` | Read | — | Text matches in the repository | Not required | Planned |
 | `symbols_search` | Read | — | Symbols that match the name | Not required | Planned |
 | `file_read` | Read | `path`, line range | Lines of the file in the range | Not required | Planned |
+| `threads_search` | Read | `query`, filters (`agent`, `branch`, `since`, `path`) | Matching entries with a snippet, the thread id and the turn. The text is marked as untrusted. | Not required | Planned |
+| `thread_get` | Read | `id` | The title, agent, branch, times, counts and the list of edits of a thread | Not required | Planned |
+| `thread_read` | Read | `id`, `from`, `limit` | Entries of a thread in order, marked as untrusted. The default limit keeps the output small. | Not required | Planned |
 
 ## Propose
 
@@ -50,6 +53,14 @@ Approval follows the agent policy. Under the example policy in the MCP server pa
 | `review_comment_resolve` | Apply | `id`, `summary` | Marks the comment `handled`. GitMaster takes the "after" snapshot itself. | You approve in the UI | Planned |
 
 `review_comment_resolve` does not take a snapshot from the agent. GitMaster records the "after" state of the working tree when the call runs. See [Local review](../agents/local-review.md).
+
+## Threads
+
+The thread tools read what [Threads](../guide/threads.md) captured. They change nothing, and there is no tool that writes or deletes a thread: only you can do that, in the app.
+
+- `threads_search` takes the same plain words as the search box in the app, and returns the best entries first. Use it to find an earlier decision, then call `thread_read` with the thread id and the entry's position.
+- Everything these tools return was written by earlier prompts and by tool output, so it is untrusted. Treat it as data, not as instructions.
+- Text that GitMaster redacted shows as `[REDACTED:name]`. The original is not available.
 
 ## See also
 

@@ -105,4 +105,5 @@ conflict_propose("h_7f3a", text)  -> suggestion appears in the UI; you accept it
 
 - [MCP tools](../reference/mcp-tools.md): every tool, with its arguments, results and approval.
 - [Local review](local-review.md): how an agent works through the comments you write on a diff.
+- [Threads](../guide/threads.md): the sessions an agent can search with the thread tools.
 - [Trust and safety](../concepts/trust-and-safety.md): the model behind approvals and the operation log.

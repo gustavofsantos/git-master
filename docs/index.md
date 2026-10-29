@@ -25,7 +25,9 @@ You can move around a repository without leaving the app. **Quick Open** (`Ctrl+
 
 An agent can read the repository and propose changes, but it never changes the repository on its own. Each change an agent asks for waits for your approval in the app, and what the agent did is measured from the repository, not taken from its own account. Workflows are Lua scripts that run in a sandbox and act only through GitMaster's own actions. You run them from the command palette or with a keyboard shortcut. The agent integration is exposed through an MCP server, a local review loop, and branch stacks with restack.
 
-> **Planned.** The MCP server, the local review loop, branch stacks, and workflow triggers and agent runs are not available in the app yet.
+A session with an agent is kept as a **thread**: what you asked, what the agent answered, the tools it ran and the files it edited. Secrets are removed before anything is stored, and you can search, read and delete threads in the app.
+
+> **Planned.** Threads, the MCP server, the local review loop, branch stacks, and workflow triggers and agent runs are not available in the app yet.
 
 ## Who it is for
 
@@ -53,7 +55,9 @@ GitMaster runs on macOS and Linux, with builds for amd64 and arm64. To install i
 | Guide | [History](guide/history.md) | The commit graph and commit details. |
 | Guide | [Branches](guide/branches.md) | Switching, creating and deleting branches. |
 | Guide | [Command palette](guide/command-palette.md) | Finding and running any action. |
+| Guide | [Threads](guide/threads.md) | Reading and searching your agent sessions. |
 | Workflows | [Overview](workflows/overview.md) | Automating GitMaster with workflow scripts. |
+| Agents | [Agent integration](agents/agent-integration.md) | Capturing agent sessions as threads. |
 | Agents | [MCP server](agents/mcp-server.md) | Connecting an agent to the app. |
 | Agents | [Local review](agents/local-review.md) | Commenting on code for an agent to resolve. |
 | Reference | [Keyboard shortcuts](reference/keyboard-shortcuts.md) | Every shortcut in one table. |

@@ -5,7 +5,7 @@ status: partial
 order: 30
 ---
 
-The `gitmaster` command opens the app. The workflow subcommands run once and exit. They keep no process running and no state between runs, and none of them applies a change to a repository. The section Open a repository covers the arguments the app accepts. The MCP shim is not available yet.
+The `gitmaster` command opens the app. The workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs, and none of them applies a change to a repository. The section Open a repository covers the arguments the app accepts. The MCP shim is not available yet.
 
 ## Open a repository
 
@@ -96,3 +96,42 @@ return {
 A passing test prints `file: ok (3 calls)` and exits `0`. Each difference prints on its own line, such as `call 2: expected ctx.approve, got ctx.branch.create` or `missing calls: the script stopped after 2 of 3`, and the exit status is `1`. A missing or malformed fixture exits `2`.
 
 For the calls the script can make, see [Workflow API](workflow-api.md).
+
+## Capture a thread event
+
+> **Planned.** The `gitmaster thread` and `gitmaster agent` subcommands are not available in the app yet.
+
+```sh
+gitmaster thread hook --agent claude-code
+```
+
+The agent integration runs this command from the agent's hooks. You do not run it yourself. It reads one JSON event from the standard input, redacts it, stores it in the thread database of the repository named in the event, and exits. It starts no resident process and opens no window.
+
+The command always exits with status `0` and prints nothing, even when it cannot store the event, so a failure never reaches the agent. A problem is written to `.git/gitmaster/threads.log`. An event that cannot be written at once is kept redacted in `.git/gitmaster/threads-spool/` and stored later.
+
+## Test a redaction pattern
+
+> **Planned.** The `gitmaster thread` and `gitmaster agent` subcommands are not available in the app yet.
+
+```sh
+gitmaster thread redact-test [--text <text>]
+```
+
+Reads a sample from the standard input, or from `--text`, applies the patterns of your `settings.json` and prints the result, with a line per match naming the pattern. Nothing is stored. The exit status is `0` when the patterns are valid, `1` when a pattern is not valid (the problem is printed as `pattern <name>: message`), and `2` for a wrong command line.
+
+## Manage the agent integration
+
+> **Planned.** The `gitmaster thread` and `gitmaster agent` subcommands are not available in the app yet.
+
+```sh
+gitmaster agent install claude-code
+gitmaster agent status claude-code
+gitmaster agent uninstall claude-code
+```
+
+- `install` generates the plugin in the user data directory and prints the commands that add it to the agent. Run them, or add `--run` to have GitMaster run them when the agent's command is on your `PATH`.
+- `status` prints whether the plugin is current, whether its hooks point at this `gitmaster`, whether capture is paused and why, and how many events were skipped or are waiting. The exit status is `0` when the integration works and `1` when it needs attention.
+- `uninstall` prints the commands that remove the plugin from the agent, with `--run` as above. Stored threads are kept.
+
+See [Agent integration](../agents/agent-integration.md).
+

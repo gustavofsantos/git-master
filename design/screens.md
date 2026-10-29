@@ -100,3 +100,16 @@ Planned for slice 9 (premium finish), the settings screen is a modal that gather
 - **Sections**: General, Git & Identity, Worktrees (D31), Diff & Files, Hooks & Security (D17, D29, D30), Stacks & Restack, Conflict Resolver, MCP & Agents, and Local Review.
 
 For the field-level details of each section, see docs/reference/configuration.md.
+
+## Threads page (D119, D125; planned)
+
+Sidebar entry **Threads** under Workspace, with a count of threads. History's pattern: a virtualized list on the left, the detail on the right, a search box and filters in the header (agent, branch, date, starred, has edits, touched file).
+
+- **List row:** title, agent chip, branch, relative time, counts (`12 edits`), a `redacted` chip when anything was redacted, a dot while the session is open.
+- **Detail, by turn:** the human's prompt, the agent's text, then tool calls as one-line collapsed chips (tool, argument summary, status, duration). An edit is a card: path, `+n −m`, a state (`in working tree`, `in HEAD`, `changed since`), **Open Diff** and **View File**. A redaction shows as a muted `[REDACTED:name]` chip, never as a blank.
+- **Search:** one box, no syntax (D50, D128). Results show snippets and open the thread at the matching entry.
+- **Header actions and menu:** Rename, Add Note, Star, Tags, Link to Commit, Copy as Markdown, Export, Delete (red, asks for confirmation and says what goes). Entries have **Delete Entry**.
+- **Entry points elsewhere:** **Show Threads** on a Working Copy file and on a commit's detail; a `Threads` section in the commit panel lists the threads created during.
+- **Empty states:** no integration installed (shows the install step), no threads yet, capture paused (shows the reason, for example an invalid pattern).
+- Labels in English; icons from `assets/icons/`; colors from the theme tokens (design/visual-identity.md). Nothing is seen in a window until T5.
+

@@ -1,6 +1,6 @@
 # Architecture
 
-Last updated: 2026-10-23. The status of each decision is in `design/decisions.md`.
+Last updated: 2026-10-29. The status of each decision is in `design/decisions.md`.
 
 ## Overview (D08, decided)
 
@@ -50,6 +50,15 @@ The core defines the traits (`GitPort` and the others), and the adapters live in
 
 The Lua code is in `gm-core/src/script/` (the port, the Luau adapter in `luau/`, the catalog and the generated `ctx` surface, the loader, `M.meta`, the review store, the run host, the journal, the templates, the `.api/` generator and the subcommands), with `workflow_session.rs` and `script_session.rs` in `gm-core/src/`. The TOML engine (`model`, `parse`, `expr`, `validate`, `machine`, `edit`, `dry_run`, `driver`, `store`, `flow_graph*`, `flow_inspector`), the Flow tab and the `.toml` fixtures are removed. A `.toml` file in the workflows directory is ignored with a visible warning. Two formats are never supported at the same time: two interpreters would double the surface.
 
+## Threads (D119 to D128, planned)
+
+Agent sessions are captured into `.git/gitmaster/threads.db`. Full design in `design/threads.md`.
+
+- **Ingest is outside the engine.** A harness hook starts `gitmaster thread hook`, a one-shot process that redacts, normalizes and writes one SQLite transaction, then exits with status 0 (D124). It has no `OperationId` and is not a `Command`: it writes only GitMaster's own database and never touches the repository. The window learns of new data from a watcher on the database file.
+- **Reads and edits are commands.** `ListThreads`, `SearchThreads`, `ReadThread` and the curation commands go through the engine like any other, so the UI and MCP share them (D08). An agent actor gets reads only.
+- **Ports.** `ThreadStore` (SQLite adapter) and one `HarnessAdapter` per agent (payload parsing, transcript reading, plugin generation). The pure pieces (`redact`, `query`, normalization) hold the logic and are tested without SQLite or a window.
+- **Redaction is a pure function in front of every write** (D121). Nothing downstream, including the spool and the log, ever sees unredacted text.
+
 ## Persistence
 
 - Workflow files: outside the repository, in `~/.config/gitmaster/workflows/` (macOS: `Library/Application Support/gitmaster/workflows/`) and in the directories of `gitmaster.workflowPath`. Nothing is read or written in the working tree (D61, revised by D98). The file holds only the definition (D79): nothing about execution, such as `enabled`, last run or approvals.
@@ -60,6 +69,7 @@ The Lua code is in `gm-core/src/script/` (the port, the Luau adapter in `luau/`,
 - Stack parents: git config of the repository.
 - Operation log, review comments, approvals: SQLite in the Git common directory (`git rev-parse --git-common-dir`), in `gitmaster/state.db`. Works with worktrees.
 - Snapshots: private refs inside `.git`.
+- Threads: `threads.db` in the same directory (WAL, FTS5, `0600`), written by the hook process and by the engine, with a spool for events that cannot be written at once (D122, D124).
 - The operation log is the audit trail and the base of undo (through ref snapshots). **It is not event sourcing**: rebuilding state by replay is a trap, because Git changes outside the app.
 - The run journal of a workflow is the record the engine keeps of its own runs, not a reconstruction of the repository's state. Git remains the source of truth, and each effect revalidates fingerprints (D66).
 
