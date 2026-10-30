@@ -23,7 +23,7 @@ use super::config::{self, ThreadsConfig};
 use super::harness::{self, HarnessAdapter, InstallContext, Integration};
 use super::pipeline::{self, Context};
 use super::redact::Redactor;
-use super::store::ThreadStore;
+use super::store::{HookStore, ThreadStore};
 
 /// The largest hook payload read from standard input, in bytes. A larger one is dropped.
 const PAYLOAD_LIMIT: u64 = 8 * 1024 * 1024;
@@ -182,7 +182,7 @@ fn hook(rest: &[String], stdin: &mut dyn Read, env: &Env, adapters: &[&dyn Harne
     if !config.capture {
         return;
     }
-    let mut store = match ThreadStore::open(&repo.common_dir) {
+    let store = match ThreadStore::open_for_hook(&repo.common_dir) {
         Ok(store) => store,
         Err(error) => {
             pipeline::append_log(&repo.common_dir, &format!("store: {error}"));
@@ -193,7 +193,12 @@ fn hook(rest: &[String], stdin: &mut dyn Read, env: &Env, adapters: &[&dyn Harne
         config: &config,
         now_ms: env.now_ms,
     };
-    let _ = pipeline::ingest(adapter, &payload, &repo, &ctx, &mut store);
+    let _ = match store {
+        HookStore::Ready(mut store) => pipeline::ingest(adapter, &payload, &repo, &ctx, &mut store),
+        HookStore::Deferred(reader) => {
+            pipeline::ingest_deferred(adapter, &payload, &repo, &ctx, &reader)
+        }
+    };
 }
 
 /// The value after `--harness`. Other words are ignored, so a changed hook never fails on them.

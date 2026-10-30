@@ -67,6 +67,8 @@ Only the agent's file-editing tools produce edits. A change made by a shell comm
 
 Type in the search box above the list. There is no search syntax.
 
+Search covers what you and the agent said: your prompts and the agent's replies, and the names of the files the agent edited. It does not search the tool calls or their output, such as the arguments of a command, the output of a command or the text of a file the agent read. Those stay in the thread and you can read them there, but a word that appears only in them does not match.
+
 - Words are matched as the start of a word, and all of them must appear. `retry back` finds `retry backoff`.
 - Put words in double quotes to match them as a phrase.
 - Identifiers match whole, so `file_index` finds `file_index` and not every `file`.
@@ -82,7 +84,7 @@ Results show a snippet around the match. Select one to open the thread at that e
 
 > **Planned.** Filters for the agent, the branch and the dates are not available in the app yet.
 
-Search runs on your machine over what is stored in the repository, and its indexes are kept in the same local database. Nothing is sent anywhere.
+Search runs on your machine over the prompts, replies and edited file names stored for each thread, and its indexes are kept in the same local database. Nothing is sent anywhere.
 
 ## Link threads to your work
 
@@ -110,7 +112,7 @@ GitMaster never guesses that a thread produced a commit because the contents loo
 | Action | What it does |
 |---|---|
 | **Rename** | Changes the title. |
-| **Add Note** | Attaches a note of your own to the thread. A note is searchable. |
+| **Add Note** | Attaches a note of your own to the thread. The note is shown with the thread and is not searched. |
 | **Star** | Marks the thread so you can filter for it. |
 | **Tags** | Adds your own labels. |
 | **Export** | Writes the thread as a Markdown file at a path you choose. Redaction is applied again on the way out. |

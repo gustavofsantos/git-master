@@ -13,7 +13,7 @@ use gm_schema::threads::{
     ThreadEntry, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
 };
 use rusqlite::{
-    Connection, OptionalExtension, Row, ToSql, Transaction, TransactionBehavior, params,
+    Connection, OpenFlags, OptionalExtension, Row, ToSql, Transaction, TransactionBehavior, params,
 };
 use sha2::{Digest, Sha256};
 
@@ -23,7 +23,7 @@ use super::query::{
 };
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
 
 /// Hits below which a search runs the next stage (D131). A store can be built with another
 /// value for tests.
@@ -185,10 +185,63 @@ INSERT INTO entry_tri (entry_tri) VALUES ('rebuild');
 INSERT INTO edit_tri (edit_tri) VALUES ('rebuild');
 ";
 
+/// Schema 3 (D132): the word and trigram indexes cover only the conversation. Both are
+/// external-content tables over the view `entry_msg` (`user` and `assistant` entries, `text`
+/// only), so tool calls, tool results and notices are stored and shown but not indexed, and the
+/// tool name is not indexed either. The old indexes are dropped and rebuilt from the rows the
+/// view selects. `migrate` then runs `VACUUM` when the database is small (D132).
+const SCHEMA_V3: &str = "
+DROP TRIGGER entry_fts_ai;
+DROP TRIGGER entry_fts_ad;
+DROP TRIGGER entry_fts_au;
+DROP TABLE entry_fts;
+DROP TRIGGER entry_tri_ai;
+DROP TRIGGER entry_tri_ad;
+DROP TRIGGER entry_tri_au;
+DROP TABLE entry_tri;
+CREATE VIEW entry_msg AS SELECT id, text FROM entry WHERE kind IN ('user', 'assistant');
+CREATE VIRTUAL TABLE entry_fts USING fts5(
+    text, content='entry_msg', content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2 tokenchars ''_''');
+CREATE TRIGGER entry_fts_ai AFTER INSERT ON entry WHEN new.kind IN ('user', 'assistant') BEGIN
+    INSERT INTO entry_fts (rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER entry_fts_ad AFTER DELETE ON entry WHEN old.kind IN ('user', 'assistant') BEGIN
+    INSERT INTO entry_fts (entry_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER entry_fts_au AFTER UPDATE OF text ON entry
+WHEN old.kind IN ('user', 'assistant') AND new.kind IN ('user', 'assistant') BEGIN
+    INSERT INTO entry_fts (entry_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    INSERT INTO entry_fts (rowid, text) VALUES (new.id, new.text);
+END;
+CREATE VIRTUAL TABLE entry_tri USING fts5(
+    text, content='entry_msg', content_rowid='id', tokenize='trigram');
+CREATE TRIGGER entry_tri_ai AFTER INSERT ON entry WHEN new.kind IN ('user', 'assistant') BEGIN
+    INSERT INTO entry_tri (rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER entry_tri_ad AFTER DELETE ON entry WHEN old.kind IN ('user', 'assistant') BEGIN
+    INSERT INTO entry_tri (entry_tri, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER entry_tri_au AFTER UPDATE OF text ON entry
+WHEN old.kind IN ('user', 'assistant') AND new.kind IN ('user', 'assistant') BEGIN
+    INSERT INTO entry_tri (entry_tri, rowid, text) VALUES ('delete', old.id, old.text);
+    INSERT INTO entry_tri (rowid, text) VALUES (new.id, new.text);
+END;
+INSERT INTO entry_fts (entry_fts) VALUES ('rebuild');
+INSERT INTO entry_tri (entry_tri) VALUES ('rebuild');
+INSERT INTO entry_fts (entry_fts) VALUES ('optimize');
+INSERT INTO entry_tri (entry_tri) VALUES ('optimize');
+";
+
 const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
 /// Opening a file another process is initializing is retried this many times, this far apart.
 const OPEN_ATTEMPTS: u32 = 200;
 const OPEN_PAUSE: Duration = Duration::from_millis(5);
+/// Entries at or above which the hook does not migrate the database (D132): it spools instead.
+pub const HOOK_MIGRATION_LIMIT: i64 = 50_000;
+/// Entries below which a migration ends with `VACUUM`, which takes the dropped index pages out
+/// of the file at once (D132). Larger databases keep them until later checkpoints.
+const VACUUM_ENTRY_LIMIT: i64 = 50_000;
 /// Entries kept per thread before further ones are dropped (design/threads.md, Limits).
 const DEFAULT_ENTRY_LIMIT: u32 = 20_000;
 const LIMIT_GAP_REASON: &str = "entry limit reached";
@@ -355,6 +408,33 @@ pub struct MetaUpdate {
     pub tags: Option<Vec<String>>,
 }
 
+/// What the hook process gets from `ThreadStore::open_for_hook` (D132).
+pub enum HookStore {
+    /// The store, opened and migrated as `ThreadStore::open` does it.
+    Ready(ThreadStore),
+    /// The database needs a migration that the hook must not run. This handle is read-only: the
+    /// caller reads through it and spools its batch, and never writes.
+    Deferred(ThreadStore),
+}
+
+/// `open_for_hook` with the entry count from which the hook defers a migration.
+fn open_for_hook_below(git_common_dir: &Path, limit: i64) -> Result<HookStore, StoreError> {
+    let path = git_common_dir.join("gitmaster").join("threads.db");
+    if !path.is_file() {
+        return Ok(HookStore::Ready(ThreadStore::open(git_common_dir)?));
+    }
+    let reader = ThreadStore::open_read_only(git_common_dir)?;
+    let version: i64 = reader
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let latest = i64::try_from(MIGRATIONS.len()).unwrap_or(i64::MAX);
+    if version >= latest || count_entries(&reader.conn, limit)? < limit {
+        drop(reader);
+        return Ok(HookStore::Ready(ThreadStore::open(git_common_dir)?));
+    }
+    Ok(HookStore::Deferred(reader))
+}
+
 pub struct ThreadStore {
     conn: Connection,
     /// Entries kept per thread; tests lower it.
@@ -378,6 +458,26 @@ impl ThreadStore {
             create_private(&file)?;
         }
         let conn = open_connection(&path)?;
+        Ok(Self {
+            conn,
+            entry_limit: DEFAULT_ENTRY_LIMIT,
+            fallback_below: FALLBACK_BELOW,
+        })
+    }
+
+    /// The store for the hook process (D132). A database that needs a migration and holds
+    /// `HOOK_MIGRATION_LIMIT` entries or more is not migrated here: the hook gets a read-only
+    /// handle and spools its batch. Any other database is opened as `open` does.
+    pub fn open_for_hook(git_common_dir: &Path) -> Result<HookStore, StoreError> {
+        open_for_hook_below(git_common_dir, HOOK_MIGRATION_LIMIT)
+    }
+
+    /// A read-only handle on an existing database, which runs no migration and writes nothing.
+    /// It serves the hook's deferred path (D132) and tests. Fails when the file does not exist.
+    pub fn open_read_only(git_common_dir: &Path) -> Result<Self, StoreError> {
+        let path = git_common_dir.join("gitmaster").join("threads.db");
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         Ok(Self {
             conn,
             entry_limit: DEFAULT_ENTRY_LIMIT,
@@ -1081,7 +1181,25 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     }
     tx.pragma_update(None, "user_version", latest)?;
     tx.commit()?;
+    if count_entries(conn, VACUUM_ENTRY_LIMIT)? < VACUUM_ENTRY_LIMIT {
+        // The dropped tool index is out of the file once the pages are reused (D132). A busy
+        // database skips this: the next checkpoint and later writes reclaim the pages.
+        match conn.execute_batch("VACUUM") {
+            Ok(()) => {}
+            Err(error) if is_busy(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(())
+}
+
+/// The number of entries, counted up to `limit` so a large database is not scanned.
+fn count_entries(conn: &Connection, limit: i64) -> Result<i64, StoreError> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM entry LIMIT ?1)",
+        params![limit],
+        |row| row.get(0),
+    )?)
 }
 
 /// Creates the file with mode `0600` when missing, and makes it private when it is not.
@@ -1958,7 +2076,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         assert_eq!(store.total_threads().expect("count"), 1);
     }
 
@@ -2641,13 +2759,13 @@ mod tests {
             .expect("apply");
         // The trigram index holds the text too: it is found by a substring before the delete.
         let filter = ThreadFilter::default();
-        // Two entries hold the marker, so two hits (one per entry).
+        // The tool call holds the marker too, but only conversation is indexed: one hit.
         assert_eq!(
             store
                 .search("ecretmark", &filter, 10)
                 .expect("substring")
                 .len(),
-            2
+            1
         );
         assert!(trigram_rows(&store, "secretmark") >= 1);
         store.delete_thread(&uid("s")).expect("delete");
@@ -2746,15 +2864,20 @@ mod tests {
             .apply(&batch(
                 "s",
                 2,
-                vec![new_entry("u", EntryKind::User, "plain", 1), tool],
+                vec![
+                    new_entry("u", EntryKind::User, "plain", 1),
+                    tool,
+                    new_entry("x", EntryKind::Assistant, "the key is hunter2", 3),
+                ],
             ))
             .expect("apply");
         let scrub = |text: &str| {
             text.contains("hunter2")
                 .then(|| text.replace("hunter2", "[redacted]"))
         };
+        // The tool row and the assistant row; the edit patch holds no secret.
         let changed = store.rewrite_texts(&scrub).expect("rewrite");
-        assert_eq!(changed, 1);
+        assert_eq!(changed, 2);
         let filter = ThreadFilter::default();
         assert!(
             store
@@ -3135,7 +3258,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         let hits = store
             .search("ndex", &ThreadFilter::default(), 10)
             .expect("search");
@@ -3451,9 +3574,11 @@ mod tests {
                     new_entry("u", EntryKind::User, "plain words here", 1),
                     tool,
                     new_entry("x", EntryKind::Assistant, &format!("note {deleted}"), 3),
+                    new_entry("y", EntryKind::Assistant, &format!("kept {scrubbed}"), 4),
                 ],
             ))
             .expect("apply");
+        // Only the assistant reply that kept the token is indexed.
         assert_eq!(trigram_rows(&store, "scrubbedtok"), 1);
         let entry = row_id(&store, "SELECT id FROM entry WHERE source_id = ?1", "x");
         store.delete_entry(entry).expect("delete entry");
@@ -3461,7 +3586,8 @@ mod tests {
             text.contains(scrubbed)
                 .then(|| text.replace(scrubbed, "[redacted]"))
         };
-        assert_eq!(store.rewrite_texts(&scrub).expect("scrub"), 2);
+        // The tool row, the kept reply and the edit patch.
+        assert_eq!(store.rewrite_texts(&scrub).expect("scrub"), 3);
         store.checkpoint().expect("checkpoint");
         assert_eq!(trigram_rows(&store, "scrubbedtok"), 0);
         for (name, bytes) in file_bytes(dir.path()) {
@@ -3472,6 +3598,223 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Rows of an older database, written by the schema of its version: every entry kind, and
+    /// an edit on the tool call.
+    const EVERY_KIND_ROWS: &str = "
+        INSERT INTO thread (uid, harness, session_id, worktree, title, started_at, last_event_at)
+        VALUES ('old1', 'claude-code', 's1', '/repo', 'old', 1, 1);
+        INSERT INTO entry (thread_id, seq, turn, kind, source_id, tool, text, at) VALUES
+            (1, 0, 1, 'user', 'u1', NULL, 'please revisit backoff', 1),
+            (1, 1, 1, 'tool_call', 't1', 'Bash', 'run plumbago', 2),
+            (1, 2, 1, 'tool_result', 'r1', NULL, 'gizmoflux output lines', 3),
+            (1, 3, 1, 'notice', 'n1', NULL, 'frabjous notice', 4),
+            (1, 4, 1, 'assistant', 'a1', NULL, 'the reply says tangerine', 5);
+        INSERT INTO edit (thread_id, entry_id, path, change, patch, added, removed, at)
+        VALUES (1, 2, 'src/hexagonal_port.rs', 'modify', '', 0, 0, 2);";
+
+    /// A database file at schema `versions` (1, 2 or 3), with `rows` written after the schema.
+    fn legacy_database(dir: &Path, versions: usize, rows: &str) {
+        let gm = dir.join("gitmaster");
+        std::fs::create_dir_all(&gm).expect("dir");
+        let conn = Connection::open(gm.join("threads.db")).expect("raw");
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .expect("wal");
+        for sql in &MIGRATIONS[..versions] {
+            conn.execute_batch(sql).expect("schema");
+        }
+        conn.execute_batch(rows).expect("rows");
+        conn.pragma_update(
+            None,
+            "user_version",
+            i64::try_from(versions).expect("version"),
+        )
+        .expect("version");
+    }
+
+    fn version_of(dir: &Path) -> i64 {
+        let conn = Connection::open(dir.join("gitmaster").join("threads.db")).expect("raw");
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version")
+    }
+
+    /// Rows of the word and trigram indexes (their `docsize` tables: one row per indexed entry).
+    fn index_rows(store: &ThreadStore) -> (i64, i64) {
+        store
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM entry_fts_docsize),
+                        (SELECT COUNT(*) FROM entry_tri_docsize)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("index rows")
+    }
+
+    /// Hits of the exact, substring and fuzzy stage for a word, its inner part and a typo of it.
+    fn stage_hits(store: &ThreadStore, word: &str, inner: &str, typo: &str) -> [usize; 3] {
+        let filter = ThreadFilter::default();
+        [word, inner, typo].map(|query| store.search(query, &filter, 10).expect("search").len())
+    }
+
+    #[test]
+    fn only_the_conversation_and_the_edited_paths_are_searched() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        let mut call = with_edit(
+            new_entry("t1", EntryKind::ToolCall, "Bash plumbago", 2),
+            "src/hexagonal_port.rs",
+        );
+        call.tool = Some("Bash".to_owned());
+        call.args_json = Some("{\"command\":\"zebrafinch\"}".to_owned());
+        store
+            .apply(&batch(
+                "a",
+                1,
+                vec![
+                    new_entry("u1", EntryKind::User, "please revisit backoff", 1),
+                    call,
+                    new_entry("r1", EntryKind::ToolResult, "gizmoflux output lines", 3),
+                    new_entry("n1", EntryKind::Notice, "frabjous notice", 4),
+                    new_entry("a1", EntryKind::Assistant, "the reply says tangerine", 5),
+                ],
+            ))
+            .expect("apply");
+
+        // A user prompt and an assistant reply are found by every stage.
+        assert_eq!(stage_hits(&store, "backoff", "ckof", "bakcoff"), [1, 1, 1]);
+        assert_eq!(
+            stage_hits(&store, "tangerine", "angeri", "tangerien"),
+            [1, 1, 1]
+        );
+        // A tool result, a tool call (summary or arguments) and a notice are not.
+        assert_eq!(
+            stage_hits(&store, "gizmoflux", "moflu", "gizmofulx"),
+            [0, 0, 0]
+        );
+        assert_eq!(
+            stage_hits(&store, "plumbago", "umbag", "plumbgao"),
+            [0, 0, 0]
+        );
+        assert_eq!(
+            stage_hits(&store, "zebrafinch", "brafin", "zebrafnich"),
+            [0, 0, 0]
+        );
+        assert_eq!(
+            stage_hits(&store, "frabjous", "abjou", "frabjuos"),
+            [0, 0, 0]
+        );
+        // The path of an edited file is found, and the hit is the entry that edited it.
+        let hits = store
+            .search("hexagonal", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].seq, 1);
+    }
+
+    #[test]
+    fn tool_entries_do_not_grow_the_indexes() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "a",
+                1,
+                vec![
+                    new_entry("u", EntryKind::User, "please revisit backoff", 1),
+                    new_entry("a", EntryKind::Assistant, "the reply says tangerine", 2),
+                ],
+            ))
+            .expect("apply");
+        let before = index_rows(&store);
+        assert_eq!(before, (2, 2));
+        let tools: Vec<NewEntry> = (0..40)
+            .map(|n| {
+                let kind = if n % 2 == 0 {
+                    EntryKind::ToolCall
+                } else {
+                    EntryKind::ToolResult
+                };
+                new_entry(&format!("t{n}"), kind, &"output line ".repeat(200), 10 + n)
+            })
+            .collect();
+        store.apply(&batch("a", 2, tools)).expect("apply tools");
+        assert_eq!(index_rows(&store), before);
+    }
+
+    #[test]
+    fn a_legacy_database_keeps_only_the_conversation_in_its_indexes() {
+        // Versions 1 and 2 index tool rows too; the migration to 3 drops them from the index.
+        for versions in [1, 2] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            legacy_database(dir.path(), versions, EVERY_KIND_ROWS);
+            let store = ThreadStore::open(dir.path()).expect("migrate");
+            assert_eq!(version_of(dir.path()), 3, "from version {versions}");
+            assert_eq!(index_rows(&store), (2, 2), "from version {versions}");
+            assert_eq!(stage_hits(&store, "backoff", "ckof", "bakcoff"), [1, 1, 1]);
+            assert_eq!(
+                stage_hits(&store, "tangerine", "angeri", "tangerien"),
+                [1, 1, 1]
+            );
+            assert_eq!(
+                stage_hits(&store, "gizmoflux", "moflu", "gizmofulx"),
+                [0, 0, 0]
+            );
+            assert_eq!(
+                stage_hits(&store, "plumbago", "umbag", "plumbgao"),
+                [0, 0, 0]
+            );
+            assert_eq!(
+                stage_hits(&store, "frabjous", "abjou", "frabjuos"),
+                [0, 0, 0]
+            );
+            let by_path = store
+                .search("hexagonal", &ThreadFilter::default(), 10)
+                .expect("search");
+            assert_eq!(by_path.len(), 1);
+            assert_eq!(by_path[0].seq, 1);
+            // The tool text is still stored and shown; only the index left it out.
+            let detail = store.read_thread("old1", 0, 10).expect("read");
+            assert_eq!(detail.entries[1].text, "run plumbago");
+        }
+    }
+
+    #[test]
+    fn the_hook_defers_a_large_migration_and_runs_a_small_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        legacy_database(dir.path(), 2, EVERY_KIND_ROWS);
+        // Five entries, and a threshold of five: the hook may not migrate.
+        match open_for_hook_below(dir.path(), 5).expect("hook") {
+            HookStore::Deferred(reader) => {
+                assert_eq!(reader.total_threads().expect("count"), 1);
+                assert!(
+                    reader
+                        .search("backoff", &ThreadFilter::default(), 10)
+                        .is_ok()
+                );
+            }
+            HookStore::Ready(_) => panic!("a large database must not migrate in the hook"),
+        }
+        assert_eq!(version_of(dir.path()), 2, "the hook left the schema alone");
+
+        // A threshold above the count: the hook migrates as `open` does.
+        assert!(matches!(
+            open_for_hook_below(dir.path(), 6).expect("hook"),
+            HookStore::Ready(_)
+        ));
+        assert_eq!(version_of(dir.path()), 3);
+
+        // An up-to-date database is opened whatever its size.
+        assert!(matches!(
+            open_for_hook_below(dir.path(), 1).expect("hook"),
+            HookStore::Ready(_)
+        ));
+        // A new repository gets a new database.
+        let fresh = tempfile::tempdir().expect("tempdir");
+        assert!(matches!(
+            open_for_hook_below(fresh.path(), 1).expect("hook"),
+            HookStore::Ready(_)
+        ));
+        assert_eq!(version_of(fresh.path()), 3);
     }
 
     /// A deterministic generator for the benchmark: no randomness crate, same text every run.
@@ -3555,10 +3898,10 @@ mod tests {
         words
     }
 
-    /// One entry text: 15 to 60 words with code and prose separators.
-    fn synthetic_text(rng: &mut Lcg, vocabulary: &[String]) -> String {
+    /// One text of `min` to `max` words with code and prose separators.
+    fn synthetic_text(rng: &mut Lcg, vocabulary: &[String], min: usize, max: usize) -> String {
         const SEPARATORS: [&str; 7] = [" ", " ", " ", ", ", ". ", "(", "\n"];
-        let count = 15 + rng.below(46);
+        let count = min + rng.below(max - min + 1);
         let mut text = String::new();
         for _ in 0..count {
             text.push_str(&vocabulary[rng.below(vocabulary.len())]);
@@ -3582,40 +3925,57 @@ mod tests {
         (fastest, kinds)
     }
 
-    /// The measurement behind D131: 200,000 synthetic entries, the database size with and
-    /// without the trigram tables, and the time of each kind of search. It is not a
-    /// regression test; run it by hand (see `design/decisions.md`, D131):
-    /// `cargo test -p gm-core --lib threads::store::tests::bench -- --ignored --nocapture`.
-    #[test]
-    #[ignore = "measurement: builds 200,000 entries, run by hand"]
-    fn bench() {
-        const ENTRIES: usize = 200_000;
-        const PER_THREAD: usize = 100;
-        const LIMIT: u32 = 50;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut store = ThreadStore::open(dir.path()).expect("open");
-        let vocabulary = synthetic_vocabulary();
+    /// Fills a store with the realistic corpus of `bench`: `entries` entries in threads of
+    /// `per_thread`. Returns the bytes of conversation and of tool text.
+    fn populate(
+        store: &mut ThreadStore,
+        vocabulary: &[String],
+        entries: usize,
+        per_thread: usize,
+    ) -> (usize, usize) {
         let mut rng = Lcg(0x5eed_1234_abcd_0001);
-
-        let started = std::time::Instant::now();
-        for thread in 0..ENTRIES / PER_THREAD {
-            let entries: Vec<NewEntry> = (0..PER_THREAD)
+        let mut conversation_bytes = 0_usize;
+        let mut tool_bytes = 0_usize;
+        for thread in 0..entries / per_thread {
+            let entries: Vec<NewEntry> = (0..per_thread)
                 .map(|n| {
-                    let text = synthetic_text(&mut rng, &vocabulary);
-                    let at = i64::try_from(thread * PER_THREAD + n + 1).unwrap_or(i64::MAX);
-                    if n % 2 == 0 {
-                        new_entry(&format!("u{n}"), EntryKind::User, &text, at)
-                    } else {
-                        let mut entry = new_entry(&format!("t{n}"), EntryKind::ToolCall, &text, at);
-                        entry.tool = Some("Edit".to_owned());
-                        if n % 8 == 1 {
-                            entry.edit = Some(measured_edit(&format!(
-                                "src/{}/{}.rs",
-                                vocabulary[rng.below(vocabulary.len())],
-                                vocabulary[rng.below(vocabulary.len())]
-                            )));
+                    let at = i64::try_from(thread * per_thread + n + 1).unwrap_or(i64::MAX);
+                    match n % 5 {
+                        0 | 1 => {
+                            let text = synthetic_text(&mut rng, vocabulary, 15, 60);
+                            conversation_bytes += text.len();
+                            let kind = if n % 5 == 0 {
+                                EntryKind::User
+                            } else {
+                                EntryKind::Assistant
+                            };
+                            new_entry(&format!("c{n}"), kind, &text, at)
                         }
-                        entry
+                        2 => {
+                            let text = format!("Bash {}", vocabulary[rng.below(vocabulary.len())]);
+                            let args = format!("{{\"command\":\"{}\"}}", text.len());
+                            tool_bytes += text.len() + args.len();
+                            let mut entry =
+                                new_entry(&format!("t{n}"), EntryKind::ToolCall, &text, at);
+                            entry.tool = Some("Bash".to_owned());
+                            entry.args_json = Some(args);
+                            if rng.below(4) == 0 {
+                                entry.edit = Some(measured_edit(&format!(
+                                    "src/{}/{}.rs",
+                                    vocabulary[rng.below(vocabulary.len())],
+                                    vocabulary[rng.below(vocabulary.len())]
+                                )));
+                            }
+                            entry
+                        }
+                        _ => {
+                            let text = synthetic_text(&mut rng, vocabulary, 100, 300);
+                            tool_bytes += text.len();
+                            let mut entry =
+                                new_entry(&format!("r{n}"), EntryKind::ToolResult, &text, at);
+                            entry.tool = Some("Read".to_owned());
+                            entry
+                        }
                     }
                 })
                 .collect();
@@ -3624,7 +3984,32 @@ mod tests {
                 .apply(&batch(&format!("s{thread}"), at, entries))
                 .expect("apply");
         }
+        (conversation_bytes, tool_bytes)
+    }
+
+    /// The measurement behind D131 and D132: synthetic entries shaped like real threads, the
+    /// database size with and without the trigram tables, and the time of each kind of search.
+    /// Per 100 entries: 40 conversation entries (user prompts and assistant replies of 15 to 60
+    /// words) and 60 tool entries (20 calls, 40 results of 100 to 300 words), so about 85% of the
+    /// bytes are tool results. It is not a regression test; run it by hand (see
+    /// `design/decisions.md`, D132):
+    /// `cargo test -p gm-core --lib threads::store::tests::bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement: builds 100,000 entries, run by hand"]
+    fn bench() {
+        const ENTRIES: usize = 100_000;
+        const PER_THREAD: usize = 100;
+        const LIMIT: u32 = 50;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ThreadStore::open(dir.path()).expect("open");
+        let vocabulary = synthetic_vocabulary();
+
+        let started = std::time::Instant::now();
+        let (conversation_bytes, tool_bytes) =
+            populate(&mut store, &vocabulary, ENTRIES, PER_THREAD);
         eprintln!("populate {ENTRIES} entries: {:?}", started.elapsed());
+        let share = tool_bytes * 100 / (tool_bytes + conversation_bytes).max(1);
+        eprintln!("corpus: {share}% of the text bytes are tool calls and results");
 
         store
             .conn

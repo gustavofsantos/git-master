@@ -172,19 +172,76 @@ pub fn ingest(
     if !ctx.config.capture {
         return Outcome::Dropped(DropReason::CaptureOff);
     }
+    drain_spool(&repo.common_dir, store);
+    match prepare(adapter, payload, repo, ctx, store) {
+        Prepared::Done(outcome) => outcome,
+        Prepared::Record(record) => persist(store, &record, repo, ctx.now_ms),
+        Prepared::Refused { record, names } => {
+            if let Some(record) = record {
+                let _ = persist(store, &record, repo, ctx.now_ms);
+            }
+            Outcome::Dropped(DropReason::InvalidPattern(names))
+        }
+    }
+}
+
+/// Captures one hook payload without opening the database for writes. The hook uses this when
+/// the database needs a migration too large for the hook to run (`ThreadStore::open_for_hook`):
+/// the redacted batch is spooled for the app to store. `reader` is a read-only handle; it
+/// supplies what the batch needs from earlier invocations, and is never written to.
+pub fn ingest_deferred(
+    adapter: &dyn HarnessAdapter,
+    payload: &[u8],
+    repo: &RepoInfo,
+    ctx: &Context<'_>,
+    reader: &ThreadStore,
+) -> Outcome {
+    if !ctx.config.capture {
+        return Outcome::Dropped(DropReason::CaptureOff);
+    }
+    match prepare(adapter, payload, repo, ctx, reader) {
+        Prepared::Done(outcome) => outcome,
+        Prepared::Record(record) => spool_record(repo, &record, ctx.now_ms),
+        Prepared::Refused { record, names } => {
+            if let Some(record) = record {
+                let _ = spool_record(repo, &record, ctx.now_ms);
+            }
+            Outcome::Dropped(DropReason::InvalidPattern(names))
+        }
+    }
+}
+
+/// What `prepare` leaves to the caller: a batch to store, a refusal (a batch with only a gap
+/// row, when the session can be named), or an outcome already decided.
+enum Prepared {
+    Record(Record),
+    Refused {
+        record: Option<Record>,
+        names: Vec<String>,
+    },
+    Done(Outcome),
+}
+
+/// Reads, converts and redacts one payload into a record. Reads the store, never writes it.
+fn prepare(
+    adapter: &dyn HarnessAdapter,
+    payload: &[u8],
+    repo: &RepoInfo,
+    ctx: &Context<'_>,
+    store: &ThreadStore,
+) -> Prepared {
     let redactor = match Redactor::new(&ctx.config.redact) {
         Ok(redactor) => redactor,
-        Err(problems) => return refuse_invalid(adapter, payload, repo, ctx, store, &problems),
+        Err(problems) => return refuse_invalid(adapter, payload, repo, ctx, &problems),
     };
     if payload.len() > PAYLOAD_LIMIT {
         append_log(
             &repo.common_dir,
             &format!("{}: payload over the size limit not read", adapter.id()),
         );
-        return Outcome::Dropped(DropReason::Unparseable);
+        return Prepared::Done(Outcome::Dropped(DropReason::Unparseable));
     }
     clean_tmp(&repo.common_dir, ctx.now_ms);
-    drain_spool(&repo.common_dir, store);
 
     let mut hook = match adapter.parse_hook(payload) {
         Ok(hook) => hook,
@@ -193,7 +250,7 @@ pub fn ingest(
                 &repo.common_dir,
                 &format!("{}: payload not read: {error}", adapter.id()),
             );
-            return Outcome::Dropped(DropReason::Unparseable);
+            return Prepared::Done(Outcome::Dropped(DropReason::Unparseable));
         }
     };
     let (events, log) = take_events(adapter, &mut hook, store, &repo.common_dir, ctx.now_ms);
@@ -206,7 +263,7 @@ pub fn ingest(
     let scope = Scope {
         redactor: &redactor,
         worktree: &repo.worktree,
-        store: &*store,
+        store,
         harness: adapter.id(),
         session: &hook.session_id,
         max_result: ctx.config.max_result_bytes,
@@ -240,12 +297,11 @@ pub fn ingest(
         .chain(&log.unrecognized)
         .map(|name| (ctx.now_ms, unrecognized_reason(name)))
         .collect();
-    let record = Record {
+    Prepared::Record(Record {
         batch,
         edits,
         turn_ended: converted.meta.turn_ended,
-    };
-    persist(store, &record, repo, ctx.now_ms)
+    })
 }
 
 /// Stores a record, or spools it when the store cannot take it now.
@@ -257,13 +313,18 @@ fn persist(store: &mut ThreadStore, record: &Record, repo: &RepoInfo, now_ms: i6
         },
         Err(error) => {
             append_log(&repo.common_dir, &format!("store: {error}"));
-            match spool(&repo.common_dir, record, now_ms) {
-                Ok(()) => Outcome::Spooled,
-                Err(reason) => {
-                    append_log(&repo.common_dir, &format!("spool: {reason}"));
-                    Outcome::Dropped(DropReason::Storage)
-                }
-            }
+            spool_record(repo, record, now_ms)
+        }
+    }
+}
+
+/// Spools a record for the next run that can store it.
+fn spool_record(repo: &RepoInfo, record: &Record, now_ms: i64) -> Outcome {
+    match spool(&repo.common_dir, record, now_ms) {
+        Ok(()) => Outcome::Spooled,
+        Err(reason) => {
+            append_log(&repo.common_dir, &format!("spool: {reason}"));
+            Outcome::Dropped(DropReason::Storage)
         }
     }
 }
@@ -412,28 +473,24 @@ fn refuse_invalid(
     payload: &[u8],
     repo: &RepoInfo,
     ctx: &Context<'_>,
-    store: &mut ThreadStore,
     problems: &[PatternProblem],
-) -> Outcome {
+) -> Prepared {
     let names: Vec<String> = problems
         .iter()
         .map(|problem| problem.name.clone())
         .collect();
     let reason = format!("invalid redaction pattern: {}", names.join(", "));
     append_log(&repo.common_dir, &reason);
-    if let Ok(hook) = adapter.parse_hook(payload) {
+    let record = adapter.parse_hook(payload).ok().map(|hook| {
         let mut batch = base_batch(adapter.id(), &hook.session_id, repo, ctx.now_ms);
         batch.gaps = vec![(ctx.now_ms, reason)];
-        let record = Record {
+        Record {
             batch,
             edits: Vec::new(),
             turn_ended: false,
-        };
-        if store_record(store, &record, None).is_err() {
-            let _ = spool(&repo.common_dir, &record, ctx.now_ms);
         }
-    }
-    Outcome::Dropped(DropReason::InvalidPattern(names))
+    });
+    Prepared::Refused { record, names }
 }
 
 /// Stores a record: the batch, then its edits, then the links it earns. Links are facts: the
@@ -1840,6 +1897,34 @@ mod tests {
         let texts: Vec<&str> = detail.entries.iter().map(|e| e.text.as_str()).collect();
         assert_eq!(texts, vec!["spooled prompt", "second prompt"]);
         assert!(spool_files(&spool_dir(&rig.dir.path().join(".git"))).is_empty());
+    }
+
+    #[test]
+    fn a_deferred_hook_spools_its_batch_and_the_next_run_stores_it() {
+        let mut rig = Rig::new();
+        let common = rig.dir.path().join(".git");
+        let reader = ThreadStore::open_read_only(&common).expect("reader");
+        let repo = rig.repo();
+        let ctx = Context {
+            config: &rig.config,
+            now_ms: NOW,
+        };
+        let bytes = serde_json::to_vec(&prompt("s", "u1", 1, "deferred prompt")).expect("json");
+        let outcome = ingest_deferred(&FakeAdapter, &bytes, &repo, &ctx, &reader);
+        assert_eq!(outcome, Outcome::Spooled);
+        assert_eq!(rig.store.total_threads().expect("count"), 0);
+        assert_eq!(spool_files(&spool_dir(&common)).len(), 1);
+
+        let outcome = rig.ingest(&prompt("s", "u2", 2, "second prompt"));
+        assert!(matches!(outcome, Outcome::Stored { inserted: 1, .. }));
+        let texts: Vec<String> = rig
+            .thread("s")
+            .entries
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect();
+        assert_eq!(texts, vec!["deferred prompt", "second prompt"]);
+        assert!(spool_files(&spool_dir(&common)).is_empty());
     }
 
     #[test]
