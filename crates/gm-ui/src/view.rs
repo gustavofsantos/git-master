@@ -1091,6 +1091,7 @@ impl StatusView {
             ),
             Ok(Effect::OpenReviewEdit { id }) => self.open_review_edit(id, window, cx),
             Ok(Effect::CopyThreadMarkdown(uid)) => self.copy_thread_markdown(uid, cx),
+            Ok(Effect::ThreadFolds { open }) => self.fold_thread_groups(open, cx),
             Ok(Effect::Copy(text)) => {
                 let notice = format!("Copied {text}");
                 cx.write_to_clipboard(ClipboardItem::new_string(text));

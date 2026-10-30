@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use gm_schema::{
-    CommandKind, EditState, EntryKind, OperationId, OperationState, ThreadDetail, ThreadEdit,
-    ThreadEntry, ThreadFilter, ThreadHit, ThreadSummary,
+    CommandKind, EditState, EntryKind, LinkKind, LinkOrigin, OperationId, OperationState,
+    ThreadDetail, ThreadEdit, ThreadEntry, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
 };
 use serde_json::Value;
 
@@ -91,6 +91,20 @@ const RESULT_SUFFIX: &str = ":result";
 const REDACTED_OPEN: &str = "[REDACTED:";
 /// How many entries before a search hit are read with it, so its turn has its start.
 const FOCUS_CONTEXT: u32 = 20;
+/// The longest a plain title is, in characters, its ellipsis included.
+const TITLE_CHARS: usize = 120;
+/// The longest path a file line shows, in characters, before its start is cut.
+const PATH_CHARS: usize = 72;
+/// The title of a thread with no text to show.
+const UNTITLED: &str = "Untitled thread";
+
+/// What the details panel under the header shows. One is open at a time, per thread (T6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Panel {
+    Commits,
+    Files,
+    Note,
+}
 
 /// What the list shows: the threads, or the hits of a search.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,6 +203,8 @@ pub struct ThreadsPage {
     edit_reads: Vec<(OperationId, i64)>,
     /// The edit whose patch is open inline.
     open_edit: Option<i64>,
+    /// The panel open under the header of each thread, by its uid. Closed until it is opened.
+    panels: HashMap<String, Panel>,
     failure: Option<String>,
     /// The rows of the thread shown, and a hash of each: what the list draws.
     rows: Vec<Row>,
@@ -822,6 +838,7 @@ impl ThreadsPage {
     /// Drops the selection of thread `uid` when it is selected. Used when the
     /// thread is deleted, so no read of it is sent after the delete.
     pub fn forget(&mut self, uid: &str) {
+        self.panels.remove(uid);
         if self.selected.as_deref() == Some(uid) {
             self.selected = None;
             self.focus = None;
@@ -942,6 +959,26 @@ impl ThreadsPage {
         self.refresh_rows();
     }
 
+    /// The panel open under the header of the thread selected, if one is.
+    #[must_use]
+    pub fn open_panel(&self) -> Option<Panel> {
+        let uid = self.selected.as_deref()?;
+        self.panels.get(uid).copied()
+    }
+
+    /// Opens `panel` under the header of the thread selected, or closes it when it is
+    /// the panel open. Another thread's panel is not touched.
+    pub fn toggle_panel(&mut self, panel: Panel) {
+        let Some(uid) = self.selected.clone() else {
+            return;
+        };
+        if self.panels.get(&uid) == Some(&panel) {
+            self.panels.remove(&uid);
+        } else {
+            self.panels.insert(uid, panel);
+        }
+    }
+
     /// Opens the turn and the tool-call group that hold the focused entry, so a
     /// search hit is not hidden under a closed one.
     fn open_focus_group(&mut self) {
@@ -1017,14 +1054,250 @@ pub fn empty_text(empty: Empty) -> &'static str {
 /// The command that installs the integration, shown under the empty state.
 pub const INSTALL_HINT: &str = "gitmaster harness install claude-code";
 
-/// A thread's title, or a placeholder when the first prompt had none.
+/// A thread's title as plain text, or a placeholder when the first prompt had none.
 #[must_use]
-pub fn title(summary: &ThreadSummary) -> &str {
-    let title = summary.title.trim();
-    if title.is_empty() {
-        "Untitled thread"
+pub fn title(summary: &ThreadSummary) -> String {
+    plain_title(&summary.title)
+}
+
+/// A title as plain text, from the first non-empty line of `text`: the Markdown
+/// markers at its start (`#`, `>`, list bullets, task boxes) and the emphasis,
+/// code and link syntax in it are dropped, the whitespace is collapsed, and the
+/// result is cut to 120 characters. Text with nothing left is `Untitled thread`.
+#[must_use]
+pub fn plain_title(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let plain = strip_inline(strip_markers(line));
+    let collapsed = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        UNTITLED.to_owned()
     } else {
-        title
+        cut_end(&collapsed, TITLE_CHARS)
+    }
+}
+
+/// `text` without the block markers at its start, repeated until none is left: a
+/// heading's `#`s, a quote's `>`, a bullet, an ordered number, a task box.
+fn strip_markers(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    loop {
+        let before = rest;
+        let hashes = rest.len() - rest.trim_start_matches('#').len();
+        if hashes > 0 && (rest.len() == hashes || rest[hashes..].starts_with(' ')) {
+            rest = rest[hashes..].trim_start();
+        } else if let Some(after) = rest.strip_prefix('>') {
+            rest = after.trim_start();
+        } else if let Some(after) = strip_list_marker(rest) {
+            rest = after.trim_start();
+        }
+        if rest.len() == before.len() {
+            return rest;
+        }
+    }
+}
+
+/// The text after a bullet or an ordered number, and after a task box that follows it.
+fn strip_list_marker(text: &str) -> Option<&str> {
+    for bullet in ["- ", "* ", "+ "] {
+        if let Some(after) = text.strip_prefix(bullet) {
+            return Some(task_box(after));
+        }
+    }
+    let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return None;
+    }
+    let after = &text[digits..];
+    after
+        .strip_prefix(". ")
+        .or_else(|| after.strip_prefix(") "))
+        .map(task_box)
+}
+
+/// The text after a task box, `[ ]` or `[x]`, when one starts `text`.
+fn task_box(text: &str) -> &str {
+    for item in ["[ ]", "[x]", "[X]"] {
+        if let Some(after) = text.strip_prefix(item)
+            && (after.is_empty() || after.starts_with(' '))
+        {
+            return after;
+        }
+    }
+    text
+}
+
+/// `text` with each `[label](url)` replaced by its label, and its emphasis and code
+/// marks (`**`, `__`, backticks) removed.
+fn strip_inline(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find("](").map(|at| open + at) else {
+            break;
+        };
+        let Some(end) = rest[close + 2..].find(')').map(|at| close + 2 + at) else {
+            break;
+        };
+        let label = &rest[open + 1..close];
+        if label.contains('[') {
+            out.push_str(&rest[..=open]);
+            rest = &rest[open + 1..];
+            continue;
+        }
+        out.push_str(&rest[..open]);
+        out.push_str(label);
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out.replace("**", "").replace("__", "").replace('`', "")
+}
+
+/// `text`, cut to `max` characters with an ellipsis at its end when it is longer.
+fn cut_end(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// `text`, cut at its start to `max` characters with an ellipsis before it when it is
+/// longer, so the end of a path, its file name, stays on screen.
+fn cut_start(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_owned();
+    }
+    let kept: Vec<char> = text.chars().skip(count - max.saturating_sub(1)).collect();
+    format!("…{}", kept.iter().collect::<String>())
+}
+
+/// `path` as the panel shows it: relative to the worktree when it is under it, `~`
+/// for a folder under `home`, and cut at its start past 72 characters.
+#[must_use]
+pub fn display_path(path: &str, worktree: &str, home: &str) -> String {
+    let shown = if let Some(rest) = strip_dir(path, worktree) {
+        rest.to_owned()
+    } else if let Some(rest) = strip_dir(path, home) {
+        format!("~/{rest}")
+    } else {
+        path.to_owned()
+    };
+    cut_start(&shown, PATH_CHARS)
+}
+
+/// The part of `path` after the folder `dir`, when `path` is inside it.
+fn strip_dir<'a>(path: &'a str, dir: &str) -> Option<&'a str> {
+    let dir = dir.trim_end_matches('/');
+    if dir.is_empty() {
+        return None;
+    }
+    path.strip_prefix(dir)?.strip_prefix('/')
+}
+
+/// One file of a thread's details panel: its path, the lines its edits added and
+/// removed, and the manual link that names it, if the user made one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLine {
+    pub path: String,
+    /// Whether an edit of the thread changed the file, so its line counts are known.
+    pub edited: bool,
+    pub added: u32,
+    pub removed: u32,
+    pub manual: Option<ThreadLink>,
+}
+
+/// The files of a thread: each edited path once, with the lines of all its edits,
+/// in the order they were first edited, then the files linked by hand that no edit names.
+#[must_use]
+pub fn file_lines(detail: &ThreadDetail) -> Vec<FileLine> {
+    let mut lines: Vec<FileLine> = Vec::new();
+    for edit in &detail.edits {
+        match lines.iter_mut().find(|line| line.path == edit.path) {
+            Some(line) => {
+                line.added = line.added.saturating_add(edit.added);
+                line.removed = line.removed.saturating_add(edit.removed);
+            }
+            None => lines.push(FileLine {
+                path: edit.path.clone(),
+                edited: true,
+                added: edit.added,
+                removed: edit.removed,
+                manual: None,
+            }),
+        }
+    }
+    for link in &detail.links {
+        if link.kind != LinkKind::File || link.origin != LinkOrigin::Manual {
+            continue;
+        }
+        match lines.iter_mut().find(|line| line.path == link.reference) {
+            Some(line) => line.manual = Some(link.clone()),
+            None => lines.push(FileLine {
+                path: link.reference.clone(),
+                edited: false,
+                added: 0,
+                removed: 0,
+                manual: Some(link.clone()),
+            }),
+        }
+    }
+    lines
+}
+
+/// The line of a thread's header under its title: the harness, the branch, when it started,
+/// whether it is open, and the tags. Cut by the view when the header is narrow.
+#[must_use]
+pub fn header_meta(summary: &ThreadSummary, now_secs: i64) -> String {
+    let branch = summary.branch.as_deref().unwrap_or("detached HEAD");
+    let mut text = format!(
+        "{} · {branch} · started {}",
+        summary.harness,
+        relative(now_secs, summary.started_at)
+    );
+    if summary.ended_at.is_none() {
+        text.push_str(" · open");
+    }
+    if !summary.tags.is_empty() {
+        text.push_str(" · tags: ");
+        text.push_str(&summary.tags.join(", "));
+    }
+    text
+}
+
+/// A chip's count: `1 commit`, `3 commits`.
+#[must_use]
+pub fn chip_label(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
+/// The counts of a thread's header chips: its commit links, its files and its edits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeaderCounts {
+    pub commits: usize,
+    pub files: usize,
+    pub edits: usize,
+}
+
+/// The header's counts of a thread. An edit counts once, a file once per path.
+#[must_use]
+pub fn header_counts(detail: &ThreadDetail) -> HeaderCounts {
+    HeaderCounts {
+        commits: detail
+            .links
+            .iter()
+            .filter(|link| link.kind == LinkKind::Commit)
+            .count(),
+        files: file_lines(detail).len(),
+        edits: detail.edits.len(),
     }
 }
 
@@ -2500,6 +2773,184 @@ mod tests {
         ];
         let turns = turns(&detail("a", entries, Vec::new(), false));
         assert!(matches!(&turns[0].blocks[0], Block::Message(m) if m.kind == MessageKind::Result));
+    }
+
+    #[test]
+    fn a_plain_title_drops_the_markdown_markers_of_its_first_line() {
+        assert_eq!(plain_title("## Retry plan"), "Retry plan");
+        assert_eq!(plain_title("- [ ] do it"), "do it");
+        assert_eq!(plain_title("- [x] done it"), "done it");
+        assert_eq!(plain_title("> 1. **bold** `code` step"), "bold code step");
+        assert_eq!(plain_title("* + bullet"), "bullet");
+        assert_eq!(plain_title("#42 is a number"), "#42 is a number");
+    }
+
+    #[test]
+    fn a_plain_title_takes_the_first_non_empty_line_and_its_link_text() {
+        assert_eq!(
+            plain_title("\n\n  See [the docs](https://example.org/x)  \nsecond line"),
+            "See the docs"
+        );
+        assert_eq!(plain_title("a [b [c](d) e"), "a [b c e");
+        assert_eq!(plain_title("tabs\t\tand   spaces"), "tabs and spaces");
+    }
+
+    #[test]
+    fn a_plain_title_is_untitled_when_nothing_is_left_and_capped_with_an_ellipsis() {
+        assert_eq!(plain_title(""), "Untitled thread");
+        assert_eq!(plain_title(" \n ## \n"), "Untitled thread");
+        assert_eq!(plain_title("- [ ]"), "Untitled thread");
+        let long = "word ".repeat(60);
+        let cut = plain_title(&long);
+        assert_eq!(cut.chars().count(), TITLE_CHARS);
+        assert!(cut.ends_with('…'));
+        assert!(!cut.contains("  "));
+    }
+
+    #[test]
+    fn a_path_is_shown_relative_to_the_worktree_or_home_and_cut_at_its_start() {
+        assert_eq!(
+            display_path("/w/repo/src/a.rs", "/w/repo", "/home/u"),
+            "src/a.rs"
+        );
+        assert_eq!(
+            display_path("/home/u/notes/todo.md", "/w/repo", "/home/u"),
+            "~/notes/todo.md"
+        );
+        assert_eq!(
+            display_path("/opt/x.txt", "/w/repo", "/home/u"),
+            "/opt/x.txt"
+        );
+        // A sibling folder with the same start is not inside the worktree.
+        assert_eq!(
+            display_path("/w/repo2/a.rs", "/w/repo", "/home/u"),
+            "/w/repo2/a.rs"
+        );
+        let deep = format!("/w/repo/{}/file_name.rs", "dir/".repeat(40));
+        let shown = display_path(&deep, "/w/repo", "/home/u");
+        assert_eq!(shown.chars().count(), PATH_CHARS);
+        assert!(shown.starts_with('…'));
+        assert!(shown.ends_with("/file_name.rs"));
+    }
+
+    #[test]
+    fn the_files_of_a_thread_are_its_edited_paths_once_and_its_manual_file_links() {
+        let mut detail = detail("a", Vec::new(), Vec::new(), false);
+        let mut first = edit(1, 10, "src/a.rs");
+        first.added = 3;
+        first.removed = 1;
+        let mut again = edit(2, 11, "src/a.rs");
+        again.added = 2;
+        let mut other = edit(3, 12, "src/b.rs");
+        other.added = 1;
+        detail.edits = vec![first, again, other];
+        detail.links = vec![
+            ThreadLink {
+                kind: LinkKind::File,
+                reference: "docs/manual.md".to_owned(),
+                origin: LinkOrigin::Manual,
+            },
+            ThreadLink {
+                kind: LinkKind::File,
+                reference: "src/b.rs".to_owned(),
+                origin: LinkOrigin::Manual,
+            },
+            ThreadLink {
+                kind: LinkKind::File,
+                reference: "src/a.rs".to_owned(),
+                origin: LinkOrigin::Observed,
+            },
+        ];
+        let lines = file_lines(&detail);
+        let paths: Vec<&str> = lines.iter().map(|line| line.path.as_str()).collect();
+        assert_eq!(paths, ["src/a.rs", "src/b.rs", "docs/manual.md"]);
+        assert_eq!((lines[0].added, lines[0].removed), (5, 2));
+        assert!(
+            lines[0].manual.is_none(),
+            "an observed link is not unlinkable"
+        );
+        assert!(lines[1].manual.is_some());
+        assert_eq!((lines[2].added, lines[2].removed), (0, 0));
+        assert_eq!(
+            header_counts(&detail),
+            HeaderCounts {
+                commits: 0,
+                files: 3,
+                edits: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn the_header_line_names_the_harness_branch_age_state_and_tags() {
+        let mut thread = summary("a", 1_000);
+        thread.started_at = 0;
+        thread.ended_at = Some(5_000);
+        assert_eq!(
+            header_meta(&thread, 3 * 3_600),
+            "claude-code · main · started 3 h ago"
+        );
+        thread.ended_at = None;
+        thread.branch = None;
+        thread.tags = vec!["bug".to_owned(), "api".to_owned()];
+        let text = header_meta(&thread, 60);
+        assert!(text.starts_with("claude-code · detached HEAD · started 1 min ago · open"));
+        assert!(text.ends_with(" · tags: bug, api"));
+        assert_eq!(chip_label(1, "commit", "commits"), "1 commit");
+        assert_eq!(chip_label(0, "file", "files"), "0 files");
+    }
+
+    #[test]
+    fn the_commit_count_is_the_commit_links_whatever_their_origin() {
+        let mut detail = detail("a", Vec::new(), Vec::new(), false);
+        detail.links = vec![
+            ThreadLink {
+                kind: LinkKind::Commit,
+                reference: "abc".to_owned(),
+                origin: LinkOrigin::Observed,
+            },
+            ThreadLink {
+                kind: LinkKind::Commit,
+                reference: "def".to_owned(),
+                origin: LinkOrigin::Manual,
+            },
+            ThreadLink {
+                kind: LinkKind::Branch,
+                reference: "main".to_owned(),
+                origin: LinkOrigin::Observed,
+            },
+        ];
+        assert_eq!(header_counts(&detail).commits, 2);
+        assert_eq!(header_counts(&detail).files, 0);
+    }
+
+    #[test]
+    fn the_details_panel_is_per_thread_and_only_one_is_open_at_a_time() {
+        let mut page = ThreadsPage::default();
+        assert_eq!(page.open_panel(), None, "closed with no thread selected");
+        page.toggle_panel(Panel::Files);
+        assert_eq!(page.open_panel(), None, "a panel needs a thread");
+        page.selected = Some("a".to_owned());
+        assert_eq!(page.open_panel(), None, "closed by default");
+        page.toggle_panel(Panel::Commits);
+        assert_eq!(page.open_panel(), Some(Panel::Commits));
+        page.toggle_panel(Panel::Files);
+        assert_eq!(page.open_panel(), Some(Panel::Files));
+        page.toggle_panel(Panel::Files);
+        assert_eq!(page.open_panel(), None, "the same chip closes it");
+        page.toggle_panel(Panel::Note);
+        page.selected = Some("b".to_owned());
+        assert_eq!(page.open_panel(), None, "another thread keeps its own");
+        page.toggle_panel(Panel::Files);
+        page.selected = Some("a".to_owned());
+        assert_eq!(page.open_panel(), Some(Panel::Note));
+        page.forget("a");
+        page.selected = Some("a".to_owned());
+        assert_eq!(
+            page.open_panel(),
+            None,
+            "a deleted thread forgets its panel"
+        );
     }
 
     #[test]

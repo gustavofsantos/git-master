@@ -64,6 +64,8 @@ pub enum Row {
         text: String,
         depth: usize,
         focused: bool,
+        /// Whether the gutter names the speaker: the first reply after a prompt (see `label_speakers`).
+        label: bool,
     },
     /// The header of a group: its label, and the failures it holds, if any.
     Group {
@@ -259,7 +261,28 @@ pub fn flatten(page: &ThreadsPage) -> Vec<Row> {
         (_, false) => rows.push(Row::Marker(Marker::End)),
         _ => {}
     }
+    label_speakers(&mut rows);
     rows
+}
+
+/// Marks the replies that name their speaker: the first reply of each run of replies,
+/// a run that a prompt starts. The later replies of a run keep the gutter empty.
+fn label_speakers(rows: &mut [Row]) {
+    let mut in_reply = false;
+    for row in rows {
+        match row {
+            Row::Prompt { .. } => in_reply = false,
+            Row::Message {
+                kind: MessageKind::Assistant,
+                label,
+                ..
+            } => {
+                *label = !in_reply;
+                in_reply = true;
+            }
+            _ => {}
+        }
+    }
 }
 
 /// What a turn's rows are drawn from: the page, the thread, the turn and the focus.
@@ -297,6 +320,7 @@ fn push_turn(rows: &mut Vec<Row>, turn: &Turn, shown: &Shown<'_>) {
                     text: message.text.clone(),
                     depth: 0,
                     focused: is_focus(shown.focus, message.entry_id),
+                    label: false,
                 });
             }
         }
@@ -365,6 +389,7 @@ fn push_call(rows: &mut Vec<Row>, call: &Call, depth: usize, shown: &Shown<'_>) 
                 text: message.text.clone(),
                 depth: depth + 1,
                 focused: is_focus(shown.focus, message.entry_id),
+                label: false,
             }),
         }
     }
@@ -583,6 +608,29 @@ mod tests {
                 Row::Marker(_) => "marker",
             })
             .collect()
+    }
+
+    #[test]
+    fn only_the_first_reply_after_a_prompt_names_its_speaker() {
+        let entries = vec![
+            text(1, 0, 1, EntryKind::User, "fix it"),
+            text(2, 1, 1, EntryKind::Assistant, "reading"),
+            call(3, 2, 1, "c1", "Read"),
+            result(4, 3, 1, "c1", false),
+            text(5, 4, 1, EntryKind::Assistant, "done"),
+            text(6, 5, 2, EntryKind::User, "again"),
+            text(7, 6, 2, EntryKind::Assistant, "ok"),
+        ];
+        let page = shown(detail(entries, Vec::new(), false));
+        let labels: Vec<bool> = page
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                Row::Message { label, .. } => Some(*label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, [true, false, true], "reading, done, ok");
     }
 
     #[test]
@@ -862,6 +910,7 @@ mod tests {
                 text: "needle".to_owned(),
                 depth: 0,
                 focused: true,
+                label: false,
             }
         );
     }

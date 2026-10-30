@@ -982,7 +982,7 @@ impl StatusView {
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
-                                    .child(threads::title(thread).to_owned()),
+                                    .child(threads::title(thread)),
                             )
                             .child(chip(thread.harness.clone())),
                     )

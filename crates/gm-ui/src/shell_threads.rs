@@ -13,8 +13,8 @@ use gm_schema::{
     ThreadSummary,
 };
 use gpui::{
-    AnyElement, ClickEvent, ClipboardItem, Context, Div, Entity, FontWeight, IntoElement,
-    KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent,
+    AnyElement, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity, FontWeight,
+    IntoElement, KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent,
     ScrollStrategy, Stateful, Subscription, UniformListScrollHandle, Window, div, list, prelude::*,
     px, uniform_list,
 };
@@ -29,7 +29,9 @@ use crate::text_search::DEBOUNCE_MS;
 use crate::theme;
 use crate::thread_curate as curate;
 use crate::thread_rows::{self, GroupKey, Marker, Row};
-use crate::threads::{self, CallResult, CallStatus, Chip, Empty, MessageKind, Mode, Request, Span};
+use crate::threads::{
+    self, CallResult, CallStatus, Chip, Empty, MessageKind, Mode, Panel, Request, Span,
+};
 use crate::view::{Screen, StatusView};
 
 const THREAD_ROW_HEIGHT: f32 = 64.;
@@ -49,6 +51,14 @@ const PATCH_LINES: usize = 400;
 const INDENT: f32 = 16.;
 /// The rows the detail list draws beyond the visible ones, so scrolling does not show a gap.
 const DETAIL_OVERDRAW: f32 = 480.;
+/// The width of the gutter beside the content, where a row names its speaker or its turn.
+const GUTTER_WIDTH: f32 = 52.;
+/// The height of a tool-call line, a group's header and an edit's line.
+const LINE_HEIGHT: f32 = 22.;
+/// The height of a turn's divider.
+const TURN_HEIGHT: f32 = 18.;
+/// The most the details panel shows; a longer one scrolls inside this height.
+const PANEL_HEIGHT: f32 = 132.;
 const INSTALL_HINT_TEXT: &str = threads::INSTALL_HINT;
 
 /// The window's part of the page: the search box and the lists' scroll. Its state is `model.threads`.
@@ -512,7 +522,8 @@ impl StatusView {
             .child(body)
     }
 
-    /// The right column: the thread's header and its turns, or what it is waiting for.
+    /// The right column: the thread's header, the details panel when a chip opened one,
+    /// and its turns, or what the page is waiting for.
     fn threads_detail(&self, cx: &mut Context<Self>) -> Div {
         let page = &self.model.threads;
         let Some(detail) = page.detail() else {
@@ -524,43 +535,17 @@ impl StatusView {
             };
             return note(text);
         };
-        let summary = &detail.summary;
-        let branch = summary.branch.as_deref().unwrap_or("detached HEAD");
-        let state = if summary.ended_at.is_none() {
-            " · open"
-        } else {
-            ""
-        };
-        let meta = format!(
-            "{} · {branch} · started {}{state}",
-            summary.harness,
-            threads::relative(now_secs(), summary.started_at)
-        );
-        let header = div()
-            .flex_none()
-            .px_4()
-            .py_3()
-            .border_b_1()
-            .border_color(theme::hairline())
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(threads::title(summary).to_owned()),
-            )
-            .child(div().text_xs().text_color(theme::muted()).child(meta))
-            .children(note_view(&summary.note))
-            .child(self.thread_curation(detail, cx))
-            .child(Self::fold_buttons(cx));
+        let header = self.thread_header(detail, cx);
+        let panel = page
+            .open_panel()
+            .map(|panel| Self::details_panel(detail, panel, cx));
         let body = div()
             .flex_1()
             .min_h(px(0.))
             .flex()
             .flex_col()
             .px_4()
-            .py_3()
+            .py_2()
             .child(self.detail_list(cx));
         div()
             .flex_1()
@@ -569,71 +554,35 @@ impl StatusView {
             .flex()
             .flex_col()
             .child(header)
+            .children(panel)
             .child(body)
     }
 
-    /// The header's actions of the selected thread, then its tags and its links (T6).
-    fn thread_curation(&self, detail: &ThreadDetail, cx: &mut Context<Self>) -> Div {
+    /// The header of the selected thread, on two lines: its title, the star, Copy as
+    /// Markdown and More on the first; the meta and the chips on the second (T6).
+    fn thread_header(&self, detail: &ThreadDetail, cx: &mut Context<Self>) -> Div {
         let summary = &detail.summary;
         let target = thread_args(ThreadRef {
             uid: &summary.uid,
             starred: summary.starred,
         });
         let ctx = self.action_context("");
-        let star = if summary.starred { "Unstar" } else { "Star" };
-        let actions = div()
+        let title = div()
+            .flex_1()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .font_weight(FontWeight::MEDIUM)
+            .child(threads::title(summary));
+        let first = div()
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
-            .child(action_button(
-                Action::ThreadRename,
-                "thread-rename",
-                "Rename",
-                &target,
-                &ctx,
-                cx,
-            ))
-            .child(action_button(
-                Action::ThreadNote,
-                "thread-note",
-                "Add Note",
-                &target,
-                &ctx,
-                cx,
-            ))
-            .child(action_button(
-                Action::ThreadTags,
-                "thread-tags",
-                "Tags",
-                &target,
-                &ctx,
-                cx,
-            ))
-            .child(action_button(
-                Action::ThreadStar,
-                "thread-star",
-                star,
-                &target,
-                &ctx,
-                cx,
-            ))
-            .child(action_button(
-                Action::ThreadLinkCommit,
-                "thread-link",
-                "Link to Commit",
-                &target,
-                &ctx,
-                cx,
-            ))
-            .child(action_button(
-                Action::ThreadExport,
-                "thread-export",
-                "Export",
-                &target,
-                &ctx,
-                cx,
-            ))
+            .min_w(px(0.))
+            .child(title)
+            .child(thread_star(summary, "thread-header-star", cx))
             .child(action_button(
                 Action::ThreadCopyMarkdown,
                 "thread-copy-markdown",
@@ -642,21 +591,101 @@ impl StatusView {
                 &ctx,
                 cx,
             ))
-            .child(action_button(
-                Action::ThreadDelete,
-                "thread-delete",
-                "Delete",
-                &target,
-                &ctx,
-                cx,
-            ));
+            .child(more_button(summary, cx));
+        let meta = div()
+            .flex_1()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(theme::muted())
+            .child(threads::header_meta(summary, now_secs()));
+        let second = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .min_w(px(0.))
+            .text_xs()
+            .child(meta)
+            .child(self.header_chips(detail, cx));
         div()
+            .flex_none()
+            .px_4()
+            .py_1()
+            .border_b_1()
+            .border_color(theme::hairline())
             .flex()
             .flex_col()
-            .gap_2()
-            .child(actions)
-            .children(tag_row(&summary.tags))
-            .children(link_rows(&detail.links, &summary.uid, cx))
+            .gap_0p5()
+            .child(first)
+            .child(second)
+    }
+
+    /// The chips of the header's second line: the commits and the files, which open the
+    /// details panel, the edits, which only count, and the note when the thread has one.
+    fn header_chips(&self, detail: &ThreadDetail, cx: &mut Context<Self>) -> Div {
+        let counts = threads::header_counts(detail);
+        let open = self.model.threads.open_panel();
+        let edits = u32::try_from(counts.edits).unwrap_or(u32::MAX);
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .child(chip_toggle(
+                "thread-chip-commits",
+                threads::chip_label(counts.commits, "commit", "commits"),
+                open == Some(Panel::Commits),
+                Panel::Commits,
+                cx,
+            ))
+            .child(chip_toggle(
+                "thread-chip-files",
+                threads::chip_label(counts.files, "file", "files"),
+                open == Some(Panel::Files),
+                Panel::Files,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex_none()
+                    .px_1()
+                    .text_color(theme::muted())
+                    .child(threads::edits_label(edits)),
+            )
+            .children((!detail.summary.note.trim().is_empty()).then(|| {
+                chip_toggle(
+                    "thread-chip-note",
+                    "Note".to_owned(),
+                    open == Some(Panel::Note),
+                    Panel::Note,
+                    cx,
+                )
+            }))
+    }
+
+    /// The details panel under the header: the commits, the files or the note of the
+    /// thread, whichever chip opened it. It is at most six rows high and scrolls inside.
+    fn details_panel(detail: &ThreadDetail, panel: Panel, cx: &mut Context<Self>) -> Stateful<Div> {
+        let body = match panel {
+            Panel::Commits => commit_rows(&detail.links, &detail.summary.uid, cx),
+            Panel::Files => file_rows(detail, cx),
+            Panel::Note => text_block(detail.summary.note.trim(), MESSAGE_LINES),
+        };
+        div()
+            .id("thread-panel")
+            .flex_none()
+            .max_h(px(PANEL_HEIGHT))
+            .overflow_y_scroll()
+            .px_4()
+            .py_2()
+            .border_b_1()
+            .border_color(theme::hairline())
+            .bg(theme::panel())
+            .text_xs()
+            .child(body)
     }
 
     /// The file filter's chip in the toolbar: `File: <path>`, which a click removes.
@@ -725,32 +754,6 @@ impl StatusView {
         cx.notify();
     }
 
-    /// The buttons over the detail list that open or close every tool-call group.
-    fn fold_buttons(cx: &mut Context<Self>) -> Div {
-        div()
-            .flex()
-            .flex_row()
-            .gap_2()
-            .child(small_button(
-                "threads-expand-all",
-                "Expand all",
-                cx,
-                |this, cx| {
-                    this.model.threads.expand_all_groups();
-                    cx.notify();
-                },
-            ))
-            .child(small_button(
-                "threads-collapse-all",
-                "Collapse all",
-                cx,
-                |this, cx| {
-                    this.model.threads.collapse_all_groups();
-                    cx.notify();
-                },
-            ))
-    }
-
     /// The rows of the thread shown, in the variable-height list. The list asks for
     /// each row it draws, so only the visible ones are built.
     fn detail_list(&self, cx: &mut Context<Self>) -> Div {
@@ -789,8 +792,19 @@ impl StatusView {
         }
     }
 
-    /// Draws one row of the thread: a turn's header, a prompt, a text, a group's
-    /// header, a call and its body, an edit and its patch, or a marker.
+    /// Opens every tool-call group of the thread shown, or closes every one (the More
+    /// menu's Expand and Collapse all, and the palette's).
+    pub(crate) fn fold_thread_groups(&mut self, open: bool, cx: &mut Context<Self>) {
+        if open {
+            self.model.threads.expand_all_groups();
+        } else {
+            self.model.threads.collapse_all_groups();
+        }
+        cx.notify();
+    }
+
+    /// Draws one row of the thread, in the gutter and content columns: a turn's divider,
+    /// a prompt, a text, a group's header, a call and its body, an edit and its patch, or a marker.
     fn row_view(&self, ix: usize, row: &Row, cx: &mut Context<Self>) -> AnyElement {
         match row {
             Row::Turn {
@@ -799,7 +813,7 @@ impl StatusView {
                 focused,
             } => Self::turn_head(*number, *collapsed, *focused, cx).into_any_element(),
             Row::Prompt { text, focused, .. } => {
-                prompt_block(self.markdown_body(text), *focused).into_any_element()
+                prompt_row(self.markdown_body(text), *focused).into_any_element()
             }
             Row::Message {
                 entry,
@@ -807,6 +821,7 @@ impl StatusView {
                 text,
                 depth,
                 focused,
+                label,
             } => {
                 let content = match kind {
                     MessageKind::Assistant => self.markdown_body(text),
@@ -814,11 +829,18 @@ impl StatusView {
                     MessageKind::Result => text_block(text, RESULT_LINES),
                 };
                 let body = message_body(*kind, content, *focused);
-                indented(*depth, Self::framed(*entry, body, cx)).into_any_element()
+                let speaker =
+                    (*label && *kind == MessageKind::Assistant).then(|| role_label("Agent", false));
+                let row = gutter_row(speaker, indented(*depth, body)).py_1();
+                Self::framed(*entry, row, cx).into_any_element()
             }
             Row::Group {
                 key, label, failed, ..
-            } => Self::group_head(ix, key, label, failed.as_deref(), cx).into_any_element(),
+            } => gutter_row(
+                None,
+                Self::group_head(ix, key, label, failed.as_deref(), cx),
+            )
+            .into_any_element(),
             Row::Call {
                 entry,
                 depth,
@@ -838,16 +860,19 @@ impl StatusView {
                     focused: *focused,
                 };
                 let line = Self::call_line(&fields, cx);
-                indented(*depth, Self::framed(*entry, line, cx)).into_any_element()
+                gutter_row(None, indented(*depth, Self::framed(*entry, line, cx)))
+                    .into_any_element()
             }
             Row::CallBody {
                 depth,
                 args,
                 result,
                 ..
-            } => {
-                indented(*depth, call_details(args.as_deref(), result.as_ref())).into_any_element()
-            }
+            } => gutter_row(
+                None,
+                indented(*depth, call_details(args.as_deref(), result.as_ref())),
+            )
+            .into_any_element(),
             Row::Edit {
                 id,
                 depth,
@@ -857,12 +882,14 @@ impl StatusView {
                 open,
             } => {
                 let card = self.edit_row(*id, path, counts, state, *open, cx);
-                indented(*depth, card).into_any_element()
+                gutter_row(None, indented(*depth, card)).into_any_element()
             }
             Row::Patch { depth, patch, .. } => {
-                indented(*depth, patch_view(patch)).into_any_element()
+                gutter_row(None, indented(*depth, patch_view(patch))).into_any_element()
             }
-            Row::Marker(marker) => Self::marker_view(*marker, cx),
+            Row::Marker(marker) => {
+                gutter_row(None, Self::marker_view(*marker, cx)).into_any_element()
+            }
         }
     }
 
@@ -876,28 +903,39 @@ impl StatusView {
         shell_markdown::document(&parsed)
     }
 
-    /// A turn's header. A click folds the turn; the focused turn's label is accent-coloured.
+    /// A turn's divider: `Turn n` in the gutter and a hairline across, none above the
+    /// first turn. `collapsed` says the turn is folded. A click folds the turn; the
+    /// focused label is accent-coloured.
     fn turn_head(
         number: u32,
         collapsed: bool,
         focused: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let label = if collapsed {
-            format!("Turn {number} (collapsed)")
-        } else {
-            format!("Turn {number}")
-        };
         div()
             .id(("turn", u64::from(number)))
             .cursor_pointer()
+            .w_full()
+            .h(px(TURN_HEIGHT))
+            .flex()
+            .flex_row()
+            .items_center()
             .text_xs()
             .text_color(if focused {
                 theme::accent()
             } else {
                 theme::muted()
             })
-            .child(label)
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(GUTTER_WIDTH))
+                    .child(format!("Turn {number}")),
+            )
+            .children(
+                (number > 1).then(|| div().flex_1().min_w(px(0.)).h(px(1.)).bg(theme::hairline())),
+            )
+            .children(collapsed.then(|| div().flex_none().pl_2().child("collapsed")))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -920,8 +958,9 @@ impl StatusView {
         div()
             .id(("thread-group", u64::try_from(ix).unwrap_or(0)))
             .cursor_pointer()
+            .w_full()
             .px_2()
-            .py_1()
+            .h(px(LINE_HEIGHT))
             .rounded_sm()
             .border_1()
             .border_color(theme::hairline())
@@ -953,7 +992,8 @@ impl StatusView {
             }))
     }
 
-    /// Wraps a row's body with its entry's delete, which shows while the row is under the pointer (T6).
+    /// Wraps a row with its entry's delete, which shows at the row's top-right corner while
+    /// the row is under the pointer. The delete is laid over the row, so the row keeps its height.
     fn framed(entry: i64, body: impl IntoElement, cx: &mut Context<Self>) -> Div {
         let group = format!("thread-entry-{entry}");
         let key = usize::try_from(entry).unwrap_or(usize::MAX);
@@ -963,6 +1003,8 @@ impl StatusView {
             .group_hover(group.clone(), gpui::Styled::visible)
             .cursor_pointer()
             .px_1()
+            .rounded_sm()
+            .bg(theme::panel())
             .text_xs()
             .text_color(theme::removed_fg())
             .child("Delete entry")
@@ -974,10 +1016,12 @@ impl StatusView {
             );
         div()
             .group(group)
+            .relative()
             .flex()
             .flex_col()
+            .w_full()
             .child(body)
-            .child(div().flex().flex_row().justify_end().child(delete))
+            .child(div().absolute().top_0().right_0().child(delete))
     }
 
     /// A tool call's collapsed line, which a click opens into the arguments and the result.
@@ -991,8 +1035,9 @@ impl StatusView {
         div()
             .id(("call", u64::try_from(entry).unwrap_or(0)))
             .cursor_pointer()
+            .w_full()
             .px_2()
-            .py_1()
+            .h(px(LINE_HEIGHT))
             .rounded_md()
             .border_1()
             .border_color(theme::hairline())
@@ -1106,8 +1151,8 @@ impl StatusView {
         }
     }
 
-    /// An edit: its path, `+n −m`, the state of its file, and the buttons. Open Diff
-    /// shows the patch below the card; View File opens the file on the Code page.
+    /// An edit on one line: its path, `+n −m`, the state of its file, Open Diff, which
+    /// shows the patch below the line, and View File, which opens the file on the Code page.
     fn edit_row(
         &self,
         id: i64,
@@ -1138,12 +1183,17 @@ impl StatusView {
                     cx.notify();
                 }),
             );
-        let head = div()
+        div()
+            .w_full()
+            .h(px(LINE_HEIGHT))
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
+            .px_2()
             .min_w(px(0.))
+            .rounded_sm()
+            .bg(theme::panel())
             .child(
                 div()
                     .flex_1()
@@ -1161,12 +1211,7 @@ impl StatusView {
                     .text_xs()
                     .text_color(theme::muted())
                     .child(counts.to_owned()),
-            );
-        let actions = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
+            )
             .child(
                 div()
                     .flex_none()
@@ -1177,20 +1222,8 @@ impl StatusView {
                     .text_color(theme::text())
                     .child(state),
             )
-            .child(div().flex_1())
             .child(diff_button)
-            .child(view_button);
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(theme::hairline())
-            .bg(theme::panel())
-            .child(head)
-            .child(actions)
+            .child(view_button)
     }
 }
 
@@ -1208,9 +1241,12 @@ struct CallFields<'a> {
 fn indented(depth: usize, body: Div) -> Div {
     let steps = u16::try_from(depth).unwrap_or(u16::MAX);
     div()
+        .flex()
+        .flex_col()
+        .w_full()
         .pl(px(INDENT * f32::from(steps)))
         .min_w(px(0.))
-        .child(body)
+        .child(body.w_full())
 }
 
 /// The body of a message row, styled by its kind and by its focus. `content` is the
@@ -1234,47 +1270,57 @@ fn message_body(kind: MessageKind, content: Div, focused: bool) -> Div {
     }
 }
 
-/// The human's prompt of a turn, in its panel. `body` is the prompt's Markdown.
-fn prompt_block(body: Div, focused: bool) -> Div {
-    div()
-        .p_3()
-        .rounded_md()
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::hairline())
-        .when(focused, |block| block.bg(theme::selected_row()))
+/// A prompt of the human: its Markdown beside the gutter's `You`, with a thin accent bar.
+fn prompt_row(body: Div, focused: bool) -> Div {
+    let content = div()
         .flex()
         .flex_col()
-        .gap_1()
-        .child(div().text_xs().text_color(theme::muted()).child("Prompt"))
-        .child(body)
+        .min_w(px(0.))
+        .pl_2()
+        .border_l_2()
+        .border_color(theme::accent())
+        .when(focused, |block| block.bg(theme::selected_row()))
+        .child(body);
+    gutter_row(Some(role_label("You", true)), content).py_1()
 }
 
-/// A small outlined text button of the detail's header, which runs `on_click`.
-fn small_button(
-    id: &'static str,
-    label: &'static str,
-    cx: &mut Context<StatusView>,
-    on_click: fn(&mut StatusView, &mut Context<StatusView>),
-) -> Stateful<Div> {
+/// A row in the detail's two columns: the gutter, which holds a role label or stays
+/// empty, and the content beside it.
+fn gutter_row(label: Option<Div>, content: impl IntoElement) -> Div {
     div()
-        .id(id)
-        .cursor_pointer()
-        .flex_none()
-        .px_2()
-        .h(px(22.))
+        .w_full()
         .flex()
-        .items_center()
-        .rounded_sm()
-        .border_1()
-        .border_color(theme::button_border())
-        .text_xs()
-        .text_color(theme::muted())
-        .child(label)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, _, cx| on_click(this, cx)),
+        .flex_row()
+        .items_start()
+        .min_w(px(0.))
+        .child(
+            div()
+                .flex_none()
+                .w(px(GUTTER_WIDTH))
+                .pr_2()
+                .text_xs()
+                .children(label),
         )
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .min_w(px(0.))
+                .child(content),
+        )
+}
+
+/// The name a gutter shows: `You` in the accent colour, `Agent` in the muted one.
+fn role_label(name: &str, human: bool) -> Div {
+    div()
+        .text_xs()
+        .text_color(if human {
+            theme::accent()
+        } else {
+            theme::muted()
+        })
+        .child(name.to_owned())
 }
 
 /// A line of muted small text between the rows of the detail.
@@ -1451,13 +1497,13 @@ fn hit_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Status
 /// The star of a thread row: a click toggles the star, and the row keeps its selection.
 fn thread_star(
     thread: &ThreadSummary,
-    index: usize,
+    id: impl Into<ElementId>,
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
     let uid = thread.uid.clone();
     let starred = thread.starred;
     div()
-        .id(("thread-row-star", index))
+        .id(id)
         .cursor_pointer()
         .flex_none()
         .px_1()
@@ -1475,7 +1521,7 @@ fn thread_star(
         }))
 }
 
-/// One thread: its title, a dot while it is open, and its agent, branch, time,
+/// One thread: its plain title, a dot while it is open, and its agent, branch, time,
 /// edit count and a `redacted` chip. A click selects it.
 fn thread_row(
     thread: &ThreadSummary,
@@ -1503,11 +1549,11 @@ fn thread_row(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .child(threads::title(thread).to_owned()),
+                .child(threads::title(thread)),
         )
-        .child(thread_star(thread, index, cx));
+        .child(thread_star(thread, ("thread-row-star", index), cx));
     let menu_uid = thread.uid.clone();
-    let menu_title = threads::title(thread).to_owned();
+    let menu_title = threads::title(thread);
     let menu_starred = thread.starred;
     let meta = div()
         .flex()
@@ -1608,7 +1654,7 @@ fn hit_row(
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .child(hit.title.clone()),
+                        .child(threads::plain_title(&hit.title)),
                 )
                 .child(
                     div()
@@ -1696,6 +1742,7 @@ fn patch_view(patch: &str) -> Div {
                 threads::PatchKind::Context => (theme::text(), theme::panel()),
             };
             div()
+                .w_full()
                 .px_1()
                 .whitespace_nowrap()
                 .text_color(text)
@@ -1712,95 +1759,207 @@ fn patch_view(patch: &str) -> Div {
 /// The width the file filter's chip may take before its text is cut.
 const PATH_CHIP_WIDTH: f32 = 260.;
 
-/// The note of a thread, as the header shows it, or nothing when it has none.
-fn note_view(note: &str) -> Option<Div> {
-    let note = note.trim();
-    (!note.is_empty()).then(|| text_block(note, MESSAGE_LINES))
-}
-
-/// The tags of a thread as chips, or nothing when it has none.
-fn tag_row(tags: &[String]) -> Option<Div> {
-    (!tags.is_empty()).then(|| {
-        div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap_1()
-            .children(tags.iter().map(|tag| chip(tag.clone())))
-    })
-}
-
-/// The links of a thread: a manual one with its Unlink, an observed one as the
-/// commit that was made during the thread, with no button.
-fn link_rows(links: &[ThreadLink], uid: &str, cx: &mut Context<StatusView>) -> Option<Div> {
-    if links.is_empty() {
-        return None;
+/// The commit links of the details panel: the commit each one names, who made the link,
+/// and Unlink for a link the user made. Nothing else is said of a commit.
+fn commit_rows(links: &[ThreadLink], uid: &str, cx: &Context<StatusView>) -> Div {
+    let commits: Vec<&ThreadLink> = links
+        .iter()
+        .filter(|link| link.kind == LinkKind::Commit)
+        .collect();
+    if commits.is_empty() {
+        return small_note("No commit is linked to this thread.");
     }
-    let rows = links.iter().enumerate().map(|(index, link)| {
-        let kind = match link.kind {
-            LinkKind::Commit => "Commit",
-            LinkKind::Branch => "Branch",
-            LinkKind::File => "File",
-        };
-        let reference: String = match link.kind {
-            LinkKind::Commit => link.reference.chars().take(COMMIT_CHARS).collect(),
-            LinkKind::Branch | LinkKind::File => link.reference.clone(),
-        };
-        let row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .text_xs()
-            .child(chip(kind.to_owned()))
-            .child(
-                div()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .font_family(theme::code_font())
-                    .child(reference),
-            );
-        match link.origin {
-            LinkOrigin::Observed => {
-                let label = match link.kind {
-                    LinkKind::Commit => "created during this thread",
-                    LinkKind::Branch => "checked out when it started",
-                    LinkKind::File => "edited by the agent",
+    div().flex().flex_col().gap_1().children(
+        commits
+            .into_iter()
+            .enumerate()
+            .map(|(index, link)| {
+                let hash: String = link.reference.chars().take(COMMIT_CHARS).collect();
+                let who = match link.origin {
+                    LinkOrigin::Observed => "created during this thread",
+                    LinkOrigin::Manual => "linked by you",
                 };
-                row.text_color(theme::muted()).child(label)
-            }
-            LinkOrigin::Manual => {
-                let uid = uid.to_owned();
-                let link = link.clone();
-                row.child(
-                    div()
-                        .id(("thread-unlink", index))
-                        .cursor_pointer()
-                        .px_2()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(theme::button_border())
-                        .text_color(theme::text())
-                        .child("Unlink")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                this.unlink_thread(&uid, &link, cx);
-                            }),
-                        ),
-                )
-            }
-        }
-    });
-    Some(
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .children(rows.collect::<Vec<_>>()),
+                let row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .min_w(px(0.))
+                    .child(chip(hash))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_color(theme::muted())
+                            .child(who),
+                    );
+                match link.origin {
+                    LinkOrigin::Observed => row,
+                    LinkOrigin::Manual => row.child(unlink_button(
+                        ("thread-unlink-commit", index),
+                        uid,
+                        link,
+                        cx,
+                    )),
+                }
+            })
+            .collect::<Vec<_>>(),
     )
+}
+
+/// The files of the details panel: each path as its worktree or the home folder shows
+/// it, the lines its edits changed, and Unlink for a file the user linked by hand.
+fn file_rows(detail: &ThreadDetail, cx: &Context<StatusView>) -> Div {
+    let lines = threads::file_lines(detail);
+    if lines.is_empty() {
+        return small_note("No file was edited in this thread.");
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let worktree = detail.summary.worktree.as_str();
+    div().flex().flex_col().gap_1().children(
+        lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                let row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .min_w(px(0.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .font_family(theme::code_font())
+                            .child(threads::display_path(&line.path, worktree, &home)),
+                    )
+                    .children(line.edited.then(|| {
+                        div()
+                            .flex_none()
+                            .text_color(theme::muted())
+                            .child(threads::counts_label(line.added, line.removed))
+                    }));
+                match &line.manual {
+                    Some(link) => row
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(theme::muted())
+                                .child("linked by you"),
+                        )
+                        .child(unlink_button(
+                            ("thread-unlink-file", index),
+                            &detail.summary.uid,
+                            link,
+                            cx,
+                        )),
+                    None => row,
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Unlink, on a link the user made. It removes the link only: the commit or the file
+/// it names is untouched.
+fn unlink_button(
+    id: (&'static str, usize),
+    uid: &str,
+    link: &ThreadLink,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    let uid = uid.to_owned();
+    let link = link.clone();
+    div()
+        .id(id)
+        .cursor_pointer()
+        .flex_none()
+        .px_2()
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::button_border())
+        .text_color(theme::text())
+        .child("Unlink")
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.unlink_thread(&uid, &link, cx);
+            }),
+        )
+}
+
+/// The More button of the header. It opens the thread's menu under the pointer.
+fn more_button(summary: &ThreadSummary, cx: &Context<StatusView>) -> Stateful<Div> {
+    let uid = summary.uid.clone();
+    let title = threads::title(summary);
+    let starred = summary.starred;
+    div()
+        .id("thread-more")
+        .cursor_pointer()
+        .flex_none()
+        .px_2()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::button_border())
+        .text_xs()
+        .child("⋯")
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.open_thread_more_menu(&uid, &title, starred, event.position, cx);
+            }),
+        )
+}
+
+/// A header chip that opens or closes a details panel. The open one is accent-coloured.
+fn chip_toggle(
+    id: &'static str,
+    label: String,
+    active: bool,
+    panel: Panel,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .cursor_pointer()
+        .flex_none()
+        .px_2()
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .rounded_full()
+        .border_1()
+        .border_color(if active {
+            theme::accent()
+        } else {
+            theme::button_border()
+        })
+        .bg(if active {
+            theme::selection()
+        } else {
+            theme::panel()
+        })
+        .text_xs()
+        .text_color(if active {
+            theme::accent()
+        } else {
+            theme::text()
+        })
+        .child(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.model.threads.toggle_panel(panel);
+                cx.notify();
+            }),
+        )
 }
 
 /// The characters of a commit id a link row shows.

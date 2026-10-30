@@ -230,6 +230,10 @@ pub enum Effect {
     },
     /// Reads thread `uid` as Markdown and copies it to the clipboard once it is read (T6).
     CopyThreadMarkdown(String),
+    /// Opens every tool-call group of the thread shown (`open`), or closes every one.
+    ThreadFolds {
+        open: bool,
+    },
     /// Opens the confirmation that deletes thread `uid` (T6).
     OpenDeleteThreadDialog(String),
     /// Opens the confirmation of a scrub of every stored thread (T6).
@@ -367,7 +371,7 @@ pub struct ThreadRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 92] = [
+const SPECS: [Spec; 94] = [
     spec(
         "file.stage",
         "Stage File",
@@ -972,6 +976,20 @@ const SPECS: [Spec; 92] = [
         Category::Repository,
     ),
     spec(
+        "threads.expand_all",
+        "Expand All Tool Calls",
+        None,
+        ArgKind::Thread,
+        Category::Repository,
+    ),
+    spec(
+        "threads.collapse_all",
+        "Collapse All Tool Calls",
+        None,
+        ArgKind::Thread,
+        Category::Repository,
+    ),
+    spec(
         "threads.delete",
         "Delete Thread…",
         None,
@@ -1115,6 +1133,8 @@ pub enum Action {
     ThreadLinkCommit,
     ThreadExport,
     ThreadCopyMarkdown,
+    ThreadExpandAll,
+    ThreadCollapseAll,
     ThreadDelete,
     ThreadScrub,
     ShowThreadsForFile,
@@ -1215,6 +1235,8 @@ fn thread_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
         (Action::ThreadCopyMarkdown, Args::Thread { uid, .. }) => {
             Effect::CopyThreadMarkdown(uid.clone())
         }
+        (Action::ThreadExpandAll, Args::Thread { .. }) => Effect::ThreadFolds { open: true },
+        (Action::ThreadCollapseAll, Args::Thread { .. }) => Effect::ThreadFolds { open: false },
         (Action::ThreadDelete, Args::Thread { uid, .. }) => {
             Effect::OpenDeleteThreadDialog(uid.clone())
         }
@@ -1358,7 +1380,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 92] = [
+    pub const ALL: [Action; 94] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1446,6 +1468,8 @@ impl Action {
         Action::ThreadLinkCommit,
         Action::ThreadExport,
         Action::ThreadCopyMarkdown,
+        Action::ThreadExpandAll,
+        Action::ThreadCollapseAll,
         Action::ThreadDelete,
         Action::ThreadScrub,
         Action::ShowThreadsForFile,
@@ -1579,6 +1603,8 @@ impl Action {
                 | Action::ThreadLinkCommit
                 | Action::ThreadExport
                 | Action::ThreadCopyMarkdown
+                | Action::ThreadExpandAll
+                | Action::ThreadCollapseAll
                 | Action::ThreadDelete
                 | Action::ThreadScrub
                 | Action::ShowThreadsForFile
@@ -1709,6 +1735,8 @@ impl Action {
             | Action::ThreadLinkCommit
             | Action::ThreadExport
             | Action::ThreadCopyMarkdown
+            | Action::ThreadExpandAll
+            | Action::ThreadCollapseAll
             | Action::ThreadDelete => thread_rule(args, ctx),
             Action::ThreadScrub | Action::ShowThreadsForFile => repository_open(ctx),
             // The settings and the install dialog need no repository.
@@ -5164,6 +5192,16 @@ mod tests {
             (Action::ThreadDelete, "threads.delete", ArgKind::Thread),
             (Action::ThreadScrub, "threads.scrub", ArgKind::None),
             (
+                Action::ThreadExpandAll,
+                "threads.expand_all",
+                ArgKind::Thread,
+            ),
+            (
+                Action::ThreadCollapseAll,
+                "threads.collapse_all",
+                ArgKind::Thread,
+            ),
+            (
                 Action::ShowThreadsForFile,
                 "file.show_threads",
                 ArgKind::File,
@@ -5187,6 +5225,27 @@ mod tests {
     }
 
     #[test]
+    fn the_tool_call_folds_of_a_thread_plan_their_effect_and_need_a_thread() {
+        let context = ctx(&[], "");
+        let thread = thread_args(ThreadRef {
+            uid: "u1",
+            starred: false,
+        });
+        assert_eq!(
+            Action::ThreadExpandAll.plan(&thread, &context),
+            Ok(Effect::ThreadFolds { open: true })
+        );
+        assert_eq!(
+            Action::ThreadCollapseAll.plan(&thread, &context),
+            Ok(Effect::ThreadFolds { open: false })
+        );
+        assert_eq!(
+            Action::ThreadCollapseAll.plan(&Args::None, &context),
+            Err("Select a thread first.")
+        );
+    }
+
+    #[test]
     fn a_thread_action_with_no_thread_selected_says_so_whatever_the_repository() {
         let context = ctx(&[], "");
         for action in [
@@ -5197,6 +5256,8 @@ mod tests {
             Action::ThreadLinkCommit,
             Action::ThreadExport,
             Action::ThreadCopyMarkdown,
+            Action::ThreadExpandAll,
+            Action::ThreadCollapseAll,
             Action::ThreadDelete,
         ] {
             assert_eq!(

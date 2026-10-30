@@ -49,6 +49,12 @@ pub(crate) enum Target {
         title: String,
         starred: bool,
     },
+    /// The More menu of the thread header, with the thread's title and star (T6).
+    ThreadMore {
+        uid: String,
+        title: String,
+        starred: bool,
+    },
 }
 
 impl Target {
@@ -58,7 +64,7 @@ impl Target {
             Self::Branch(name) | Self::File(name) | Self::Worktree(name) => name.clone(),
             Self::Stash { index, .. } => stashes::label(*index),
             Self::ReflogEntry { index, .. } => reflog::label(*index),
-            Self::Thread { title, .. } => title.clone(),
+            Self::Thread { title, .. } | Self::ThreadMore { title, .. } => title.clone(),
         }
     }
 }
@@ -175,6 +181,27 @@ pub(crate) fn thread_items(uid: &str, starred: bool, ctx: &ActionContext<'_>) ->
         item(Action::ThreadLinkCommit, 1),
         item(Action::ThreadExport, 2),
         item(Action::ThreadCopyMarkdown, 2),
+        item(Action::ThreadDelete, 3),
+    ]
+}
+
+/// The More menu of the thread header: rename, note and tags, the link and the
+/// export, the two tool-call folds, and delete last in red. The star and the copy
+/// are the header's own buttons, so they are not listed here.
+pub(crate) fn thread_more_items(uid: &str, starred: bool, ctx: &ActionContext<'_>) -> Vec<Item> {
+    let target = Args::Thread {
+        uid: uid.to_owned(),
+        starred,
+    };
+    let item = |action, group| Item::new(action, target.clone(), group, ctx);
+    vec![
+        item(Action::ThreadRename, 0),
+        item(Action::ThreadNote, 0),
+        item(Action::ThreadTags, 0),
+        item(Action::ThreadLinkCommit, 1),
+        item(Action::ThreadExport, 1),
+        item(Action::ThreadExpandAll, 2),
+        item(Action::ThreadCollapseAll, 2),
         item(Action::ThreadDelete, 3),
     ]
 }
@@ -327,6 +354,26 @@ impl StatusView {
         );
     }
 
+    /// Opens the More menu of the thread header of `uid`, under the pointer (T6).
+    pub(crate) fn open_thread_more_menu(
+        &mut self,
+        uid: &str,
+        title: &str,
+        starred: bool,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_menu(
+            Target::ThreadMore {
+                uid: uid.to_owned(),
+                title: title.to_owned(),
+                starred,
+            },
+            position,
+            cx,
+        );
+    }
+
     /// Opens the menu of the thread row `uid`, under the pointer (T6).
     pub(crate) fn open_thread_menu(
         &mut self,
@@ -442,6 +489,7 @@ impl StatusView {
             Target::Stash { index, oid } => stash_items(*index, oid, &ctx),
             Target::ReflogEntry { oid, .. } => reflog_items(oid, &ctx),
             Target::Thread { uid, starred, .. } => thread_items(uid, *starred, &ctx),
+            Target::ThreadMore { uid, starred, .. } => thread_more_items(uid, *starred, &ctx),
         }
     }
 
@@ -675,6 +723,31 @@ mod tests {
             .iter()
             .find(|item| item.action == action)
             .expect("the menu lists the action")
+    }
+
+    #[test]
+    fn the_more_menu_of_a_thread_lists_its_actions_in_order_and_delete_last() {
+        let items = thread_more_items("u1", true, &ctx(&[]));
+        let actions: Vec<Action> = items.iter().map(|item| item.action).collect();
+        assert_eq!(
+            actions,
+            [
+                Action::ThreadRename,
+                Action::ThreadNote,
+                Action::ThreadTags,
+                Action::ThreadLinkCommit,
+                Action::ThreadExport,
+                Action::ThreadExpandAll,
+                Action::ThreadCollapseAll,
+                Action::ThreadDelete,
+            ]
+        );
+        assert!(items.iter().all(|item| item.args
+            == Args::Thread {
+                uid: "u1".into(),
+                starred: true,
+            }));
+        assert_eq!(items.last().map(Item::label), Some("Delete Thread…"));
     }
 
     #[test]

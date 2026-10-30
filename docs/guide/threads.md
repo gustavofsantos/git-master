@@ -29,19 +29,23 @@ Choose **Threads** in the sidebar, or run **Show Threads** from the command pale
 
 Each row of the list shows the title, the agent, the branch, how long ago the last event was, and how many edits the thread made. A dot marks a session that is still open. A **redacted** mark shows when GitMaster removed a secret from the thread.
 
-The title comes from your first prompt. You can rename it.
+The title comes from your first prompt, as plain text: the Markdown markers, emphasis and links are removed, and a long title is cut at 120 characters. You can rename it.
 
 ### Read a thread
 
-The thread is grouped by turn. A turn is one prompt of yours and everything the agent did until it stopped.
+The header of the thread takes two lines. The first has the title, then the star (★ or ☆), **Copy as Markdown** and **⋯**. The **⋯** button opens the less used actions: Rename, Add Note, Tags, Link to Commit, Export, Expand all tool calls, Collapse all tool calls and Delete. The second line has the agent, the branch, when the thread started and whether it is still open, then the chips: **N commits**, **N files**, **N edits** and, when the thread has one, **Note**.
 
-- Your prompt and the agent's text show in full, as Markdown: headings, bold, italic and strikethrough, lists and task lists, quotes, tables, code blocks and links. A code block in a language GitMaster knows is coloured, and a link shows its text without being followed. Tool arguments and results stay plain text. A prompt appears when the agent's next event arrives, such as its first tool call or the end of its turn, because GitMaster reads prompts from the agent's session file.
-- Each tool call is one collapsed line with the tool, a short summary of its arguments, whether it worked and how long it took. Select the line to expand the arguments and the result.
-- Each edit is a card with the path, `+n −m`, and its state. Choose **Open Diff** to expand the patch under the card, or **View File** to open the file in the [Code page](code-navigation.md).
+A commit chip, a file chip or the **Note** chip opens a details panel under the header. Only one panel is open at a time, and a click on its chip closes it. The commits panel lists each commit with whether it was created during this thread or linked by you; a link you made has **Unlink**. The files panel lists each edited file once, with the lines its edits added and removed. A path inside the worktree is shown relative to it, a path inside your home folder starts with `~`, and a long path is cut at its start so the file name stays visible. The **Note** panel shows the note in full. A panel is at most six rows high and scrolls past that.
+
+The thread is grouped by turn. A turn is one prompt of yours and everything the agent did until it stopped. Each turn starts with a thin divider that says `Turn n`; the first turn has no divider.
+
+- Your prompt is marked `You` in the left column and has a thin accent bar. The agent's text shows in full, as Markdown: headings, bold, italic and strikethrough, lists and task lists, quotes, tables, code blocks and links, and it is marked `Agent` in the left column. A run of replies with no prompt between them names the agent once, on the first. A code block in a language GitMaster knows is coloured, and a link shows its text without being followed. Tool arguments and results stay plain text. A prompt appears when the agent's next event arrives, such as its first tool call or the end of its turn, because GitMaster reads prompts from the agent's session file.
+- Each tool call is one line with the tool, a short summary of its arguments, whether it worked and how long it took. Select the line to expand the arguments and the result. A **Delete Entry** control appears at the line's right end while the pointer is over it.
+- Each edit is one line with the path, `+n −m`, its state, **Open Diff** and **View File**. **Open Diff** expands the patch under the line, and **View File** opens the file in the [Code page](code-navigation.md).
 
 The thread loads as you scroll. The first entries appear at once, and the next page is read when you come near the end of what is shown. A search result opens at its entry, and the entries before it are read when you scroll to the top. A line at the end says **Loading…** while a page is read and **End of thread** when there is nothing more.
 
-Tool calls that follow each other in a turn form a group. Its header says how many calls there are and which tools ran, for example `▸ 7 tool calls: Read ×3, Edit ×2, Bash ×2`. A group shows its edits and any failed call even while it is closed. Select the header to open the group, and select a call inside it to see its arguments and result. **Expand all** and **Collapse all** above the thread open or close every group at once. A group is closed when you open a thread, except the one that holds a search result.
+Tool calls that follow each other in a turn form a group. Its header says how many calls there are and which tools ran, for example `▸ 7 tool calls: Read ×3, Edit ×2, Bash ×2`. A group shows its edits and any failed call even while it is closed. Select the header to open the group, and select a call inside it to see its arguments and result. **Expand all** and **Collapse all** above the thread open or close every group at once. A group is closed when you open a thread, except the one that holds a search result. The **⋯** menu's **Expand all tool calls** and **Collapse all tool calls** open or close every group of the thread at once.
 
 An edit has one of these states, worked out each time you open the thread from the files themselves:
 
@@ -88,7 +92,9 @@ Select a commit in [History](history.md) and its panel lists the threads linked 
 GitMaster links a thread to a commit in two ways only:
 
 - **Created during this thread.** The commit appeared on the thread's branch between two events of the thread. This says when the commit was made, not who made it: a commit you made yourself in the same period also counts.
-- **Linked by you.** Choose **Link to Commit** on a thread and pick the commit.
+- **Linked by you.** Choose **Link to Commit** in the **⋯** menu of the thread's header and pick the commit. The thread's **Commits** panel shows the link as linked by you, with **Unlink** beside it. Unlinking removes the link only; the commit is untouched.
+
+The **Commits** chip of the header counts both kinds. The **Files** panel lists the files the thread edited, and a file you linked by hand, with its own **Unlink**.
 
 GitMaster never guesses that a thread produced a commit because the contents look alike.
 
@@ -106,6 +112,8 @@ GitMaster never guesses that a thread produced a commit because the contents loo
 | **Delete Entry** | Removes one message or tool call from a thread. |
 
 A delete is final. GitMaster overwrites the deleted text in the database file, and it does not keep a copy. It does not touch the agent's own session files; see [What is not removed](#what-is-not-removed).
+
+Rename, Add Note, Tags, Link to Commit, Export and Delete are in the **⋯** menu of the header; Star and Copy as Markdown are buttons beside the title. The thread's right-click menu in the list has the same actions.
 
 Only you can change or delete a thread. An agent connected through MCP can read threads and cannot write to them.
 
