@@ -9,18 +9,33 @@ use std::path::Path;
 use std::time::Duration;
 
 use gm_schema::threads::{
-    CaptureGap, EditChange, EntryKind, LinkKind, LinkOrigin, ThreadDetail, ThreadEdit, ThreadEntry,
-    ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
+    CaptureGap, EditChange, EntryKind, HitKind, LinkKind, LinkOrigin, ThreadDetail, ThreadEdit,
+    ThreadEntry, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
 };
 use rusqlite::{
     Connection, OptionalExtension, Row, ToSql, Transaction, TransactionBehavior, params,
 };
 use sha2::{Digest, Sha256};
 
-use super::query::build_fts_query;
+use super::query::{
+    MIN_FUZZY_CHARS, TrigramQuery, build_fts_query, build_trigram_queries, dice, is_word_char,
+    trigram_set,
+};
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
+
+/// Hits below which a search runs the next stage (D131). A store can be built with another
+/// value for tests.
+pub const FALLBACK_BELOW: usize = 8;
+/// Candidates the fuzzy stage fetches per hit still wanted, before they are checked in Rust.
+const FUZZY_CANDIDATE_FACTOR: usize = 5;
+/// Least trigram similarity between a typed word and a word of the text (D131).
+const FUZZY_MIN_SIMILARITY: f32 = 0.5;
+/// Words of context on each side of the match in a snippet built in Rust.
+const CONTEXT_WORDS: usize = 6;
+/// Words of a snippet taken from the start of a text when nothing matched in it.
+const PLAIN_SNIPPET_WORDS: usize = 12;
 
 const SCHEMA_V1: &str = "
 CREATE TABLE thread (
@@ -137,6 +152,37 @@ CREATE TRIGGER edit_fts_au AFTER UPDATE OF path ON edit BEGIN
     INSERT INTO edit_fts (edit_fts, rowid, path) VALUES ('delete', old.id, old.path);
     INSERT INTO edit_fts (rowid, path) VALUES (new.id, new.path);
 END;
+";
+
+/// Schema 2 (D131): trigram indexes next to the word indexes, for substring and fuzzy
+/// search. External-content tables, kept in step by triggers like the word indexes.
+const SCHEMA_V2: &str = "
+CREATE VIRTUAL TABLE entry_tri USING fts5(
+    text, tool, content='entry', content_rowid='id', tokenize='trigram');
+CREATE TRIGGER entry_tri_ai AFTER INSERT ON entry BEGIN
+    INSERT INTO entry_tri (rowid, text, tool) VALUES (new.id, new.text, new.tool);
+END;
+CREATE TRIGGER entry_tri_ad AFTER DELETE ON entry BEGIN
+    INSERT INTO entry_tri (entry_tri, rowid, text, tool) VALUES ('delete', old.id, old.text, old.tool);
+END;
+CREATE TRIGGER entry_tri_au AFTER UPDATE OF text, tool ON entry BEGIN
+    INSERT INTO entry_tri (entry_tri, rowid, text, tool) VALUES ('delete', old.id, old.text, old.tool);
+    INSERT INTO entry_tri (rowid, text, tool) VALUES (new.id, new.text, new.tool);
+END;
+CREATE VIRTUAL TABLE edit_tri USING fts5(
+    path, content='edit', content_rowid='id', tokenize='trigram');
+CREATE TRIGGER edit_tri_ai AFTER INSERT ON edit BEGIN
+    INSERT INTO edit_tri (rowid, path) VALUES (new.id, new.path);
+END;
+CREATE TRIGGER edit_tri_ad AFTER DELETE ON edit BEGIN
+    INSERT INTO edit_tri (edit_tri, rowid, path) VALUES ('delete', old.id, old.path);
+END;
+CREATE TRIGGER edit_tri_au AFTER UPDATE OF path ON edit BEGIN
+    INSERT INTO edit_tri (edit_tri, rowid, path) VALUES ('delete', old.id, old.path);
+    INSERT INTO edit_tri (rowid, path) VALUES (new.id, new.path);
+END;
+INSERT INTO entry_tri (entry_tri) VALUES ('rebuild');
+INSERT INTO edit_tri (edit_tri) VALUES ('rebuild');
 ";
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
@@ -313,6 +359,8 @@ pub struct ThreadStore {
     conn: Connection,
     /// Entries kept per thread; tests lower it.
     entry_limit: u32,
+    /// Hits below which search runs its next stage; tests lower it.
+    fallback_below: usize,
 }
 
 impl ThreadStore {
@@ -333,6 +381,7 @@ impl ThreadStore {
         Ok(Self {
             conn,
             entry_limit: DEFAULT_ENTRY_LIMIT,
+            fallback_below: FALLBACK_BELOW,
         })
     }
 
@@ -343,6 +392,7 @@ impl ThreadStore {
         Ok(Self {
             conn,
             entry_limit: DEFAULT_ENTRY_LIMIT,
+            fallback_below: FALLBACK_BELOW,
         })
     }
 
@@ -442,49 +492,160 @@ impl ThreadStore {
         Ok(summaries)
     }
 
-    /// Hits for `user_query` (see `query::build_fts_query`), best first. Matches in entry
-    /// text and tool names and in edit paths. One hit per entry. Text that makes no query
-    /// returns no hits.
+    /// Hits for the user's text, best first, one per entry (D128, D131). Stage 1 is the
+    /// strict word-start search (`query::build_fts_query`). When it returns fewer than
+    /// `fallback_below` hits, stage 2 adds substring matches over the trigram index, and
+    /// when still short, stage 3 adds close misspellings verified in Rust. Each stage
+    /// appends only what is new and never exceeds `limit`. Filters apply to every stage.
     pub fn search(
         &self,
         user_query: &str,
         filter: &ThreadFilter,
         limit: u32,
     ) -> Result<Vec<ThreadHit>, StoreError> {
-        let Some(fts) = build_fts_query(user_query) else {
-            return Ok(Vec::new());
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let wanted = self.fallback_below.min(limit);
+        let mut hits = Hits::new(limit);
+        if let Some(fts) = build_fts_query(user_query) {
+            self.exact_stage(&fts, filter, &mut hits)?;
+        }
+        let Some(trigram) = build_trigram_queries(user_query) else {
+            return Ok(hits.list);
         };
+        if hits.list.len() < wanted {
+            self.substring_stage(&trigram, filter, &mut hits)?;
+        }
+        if hits.list.len() < wanted && !trigram.fuzzy.is_empty() {
+            self.fuzzy_stage(&trigram, filter, &mut hits)?;
+        }
+        Ok(hits.list)
+    }
+
+    /// Stage 1: word-start matches, best first.
+    fn exact_stage(
+        &self,
+        fts: &str,
+        filter: &ThreadFilter,
+        hits: &mut Hits,
+    ) -> Result<(), StoreError> {
+        if hits.room() == 0 {
+            return Ok(());
+        }
+        let statements = stage_statements("entry_fts", "edit_fts", true, false);
+        for candidate in self.query_candidates(&statements, fts, filter, hits.room())? {
+            hits.add(candidate.hit);
+        }
+        Ok(())
+    }
+
+    /// Stage 2: the typed words inside words, over the trigram index, best first.
+    fn substring_stage(
+        &self,
+        trigram: &TrigramQuery,
+        filter: &ThreadFilter,
+        hits: &mut Hits,
+    ) -> Result<(), StoreError> {
+        if hits.room() == 0 {
+            return Ok(());
+        }
+        let statements = stage_statements("entry_tri", "edit_tri", true, true);
+        let candidates =
+            self.query_candidates(&statements, &trigram.substring, filter, hits.room())?;
+        for candidate in candidates {
+            if hits.seen.contains(&candidate.hit.entry_id) {
+                continue;
+            }
+            let mut hit = candidate.hit;
+            hit.kind = HitKind::Substring;
+            if !hit.snippet.contains(SNIPPET_MARK_START) {
+                hit.snippet = candidate
+                    .body
+                    .as_deref()
+                    .map_or_else(String::new, |body| substring_snippet(body, &trigram.tokens));
+            }
+            hits.add(hit);
+        }
+        Ok(())
+    }
+
+    /// Stage 3: close misspellings. The trigram OR query only gathers candidates; each one
+    /// is kept when every typed word has a word of its text at similarity 0.5 or more.
+    fn fuzzy_stage(
+        &self,
+        trigram: &TrigramQuery,
+        filter: &ThreadFilter,
+        hits: &mut Hits,
+    ) -> Result<(), StoreError> {
+        if hits.room() == 0 {
+            return Ok(());
+        }
+        let probes: Vec<&str> = trigram
+            .tokens
+            .iter()
+            .filter(|token| !token.contains(' ') && token.chars().count() >= MIN_FUZZY_CHARS)
+            .map(String::as_str)
+            .collect();
+        let cap = hits.room().saturating_mul(FUZZY_CANDIDATE_FACTOR);
+        let statements = stage_statements("entry_tri", "edit_tri", false, true);
+        let candidates = self.query_candidates(&statements, &trigram.fuzzy, filter, cap)?;
+        let mut scored: Vec<(f32, f64, ThreadHit)> = Vec::new();
+        for candidate in candidates {
+            if hits.seen.contains(&candidate.hit.entry_id) {
+                continue;
+            }
+            let Some(body) = candidate.body.as_deref() else {
+                continue;
+            };
+            if let Some((score, span)) = fuzzy_match(body, &probes) {
+                let snippet = marked_snippet(body, span);
+                let hit = ThreadHit {
+                    snippet,
+                    kind: HitKind::Fuzzy,
+                    ..candidate.hit
+                };
+                scored.push((score, candidate.rank, hit));
+            }
+        }
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.total_cmp(&b.1)));
+        for (_, _, hit) in scored {
+            hits.add(hit);
+        }
+        Ok(())
+    }
+
+    /// Runs one stage's statements (entry index, then edit index) with the query and the
+    /// filter, and returns the rows best first. `limit` is per statement.
+    fn query_candidates(
+        &self,
+        statements: &[String],
+        query: &str,
+        filter: &ThreadFilter,
+        limit: usize,
+    ) -> Result<Vec<Candidate>, StoreError> {
+        let fts = query.to_owned();
         let start = SNIPPET_MARK_START.to_owned();
         let end = SNIPPET_MARK_END.to_owned();
-        let limit_value = i64::from(limit);
+        let limit_value = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut bindings = thread_bindings(filter);
         bindings.push((":fts", &fts));
-        bindings.push((":mark_start", &start));
-        bindings.push((":mark_end", &end));
+        // rusqlite refuses a value for a name the statement does not use, so the markers
+        // are bound only for a stage that asks for snippets.
+        if statements.iter().any(|sql| sql.contains(":mark_start")) {
+            bindings.push((":mark_start", &start));
+            bindings.push((":mark_end", &end));
+        }
         bindings.push((":limit", &limit_value));
 
-        let mut scored: Vec<(f64, ThreadHit)> = Vec::new();
-        for sql in [entry_search_sql(), edit_search_sql()] {
-            let mut statement = self.conn.prepare(&sql)?;
-            let rows = statement.query_map(bindings.as_slice(), hit_row)?;
+        let mut found = Vec::new();
+        for sql in statements {
+            let mut statement = self.conn.prepare(sql)?;
+            let rows = statement.query_map(bindings.as_slice(), candidate_row)?;
             for row in rows {
-                scored.push(row?);
+                found.push(row?);
             }
         }
-        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-        let max_hits = usize::try_from(limit).unwrap_or(usize::MAX);
-        let mut seen = HashSet::new();
-        let mut hits = Vec::new();
-        for (_, hit) in scored {
-            if hits.len() >= max_hits {
-                break;
-            }
-            if seen.insert(hit.entry_id) {
-                hits.push(hit);
-            }
-        }
-        Ok(hits)
+        found.sort_by(|a, b| a.rank.total_cmp(&b.rank));
+        Ok(found)
     }
 
     /// A thread with its entries from `from_seq` on (at most `limit`), every edit of those
@@ -989,31 +1150,242 @@ fn thread_bindings(filter: &ThreadFilter) -> Vec<(&'static str, &dyn ToSql)> {
     bindings
 }
 
-fn entry_search_sql() -> String {
+/// The statements of one stage over the entry index and the edit index. `snippet` asks FTS
+/// for a snippet, `body` for the indexed text (entry text or edit path).
+fn stage_statements(entry_index: &str, edit_index: &str, snippet: bool, body: bool) -> Vec<String> {
+    vec![
+        stage_sql(entry_index, false, snippet, body),
+        stage_sql(edit_index, true, snippet, body),
+    ]
+}
+
+fn stage_sql(index: &str, edit: bool, snippet: bool, body: bool) -> String {
+    let snippet = if snippet {
+        format!("snippet({index}, 0, :mark_start, :mark_end, '...', 12)")
+    } else {
+        "NULL".to_owned()
+    };
+    let body = match (body, edit) {
+        (false, _) => "NULL",
+        (true, false) => "e.text",
+        (true, true) => "ed.path",
+    };
+    let from = if edit {
+        format!("JOIN edit ed ON ed.id = {index}.rowid JOIN entry e ON e.id = ed.entry_id")
+    } else {
+        format!("JOIN entry e ON e.id = {index}.rowid")
+    };
     format!(
-        "SELECT e.id, t.uid, t.title, e.seq, e.turn,
-            snippet(entry_fts, 0, :mark_start, :mark_end, '...', 12), e.at, bm25(entry_fts)
-         FROM entry_fts
-         JOIN entry e ON e.id = entry_fts.rowid
+        "SELECT e.id, t.uid, t.title, e.seq, e.turn, {snippet}, e.at, bm25({index}), {body}
+         FROM {index} {from}
          JOIN thread t ON t.id = e.thread_id
-         WHERE entry_fts MATCH :fts{FILTER_SQL}
-         ORDER BY bm25(entry_fts), e.id
+         WHERE {index} MATCH :fts{FILTER_SQL}
+         ORDER BY bm25({index}), e.id
          LIMIT :limit"
     )
 }
 
-fn edit_search_sql() -> String {
-    format!(
-        "SELECT en.id, t.uid, t.title, en.seq, en.turn,
-            snippet(edit_fts, 0, :mark_start, :mark_end, '...', 12), en.at, bm25(edit_fts)
-         FROM edit_fts
-         JOIN edit ed ON ed.id = edit_fts.rowid
-         JOIN entry en ON en.id = ed.entry_id
-         JOIN thread t ON t.id = ed.thread_id
-         WHERE edit_fts MATCH :fts{FILTER_SQL}
-         ORDER BY bm25(edit_fts), en.id
-         LIMIT :limit"
-    )
+/// A row of a stage before it is merged: the hit, its bm25 rank and the text it matched
+/// (`None` when the stage did not ask for it).
+struct Candidate {
+    rank: f64,
+    hit: ThreadHit,
+    body: Option<String>,
+}
+
+/// The hits of one search, filled stage by stage: one per entry, never more than `limit`.
+struct Hits {
+    list: Vec<ThreadHit>,
+    seen: HashSet<i64>,
+    limit: usize,
+}
+
+impl Hits {
+    fn new(limit: usize) -> Self {
+        Self {
+            list: Vec::new(),
+            seen: HashSet::new(),
+            limit,
+        }
+    }
+
+    fn room(&self) -> usize {
+        self.limit.saturating_sub(self.list.len())
+    }
+
+    fn add(&mut self, hit: ThreadHit) {
+        if self.room() > 0 && self.seen.insert(hit.entry_id) {
+            self.list.push(hit);
+        }
+    }
+}
+
+fn candidate_row(row: &Row<'_>) -> rusqlite::Result<Candidate> {
+    Ok(Candidate {
+        rank: row.get(7)?,
+        hit: ThreadHit {
+            entry_id: row.get(0)?,
+            thread_uid: row.get(1)?,
+            title: row.get(2)?,
+            seq: row.get(3)?,
+            turn: row.get(4)?,
+            snippet: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            at: row.get(6)?,
+            kind: HitKind::Exact,
+        },
+        body: row.get(8)?,
+    })
+}
+
+/// The fuzzy check of one text: every typed word needs a word of the text at trigram
+/// similarity `FUZZY_MIN_SIMILARITY` or more. Returns the sum of the best similarities and
+/// the span of the most similar word, for the snippet.
+fn fuzzy_match(text: &str, probes: &[&str]) -> Option<(f32, (usize, usize))> {
+    if probes.is_empty() {
+        return None;
+    }
+    let probe_sets: Vec<Vec<[char; 3]>> = probes.iter().map(|probe| trigram_set(probe)).collect();
+    let mut best = vec![0.0_f32; probes.len()];
+    let mut best_word: Option<((usize, usize), f32)> = None;
+    for span in word_spans(text) {
+        let word = trigram_set(&text[span.0..span.1]);
+        let mut word_best = 0.0_f32;
+        for (slot, probe) in best.iter_mut().zip(&probe_sets) {
+            let score = dice(probe, &word);
+            *slot = slot.max(score);
+            word_best = word_best.max(score);
+        }
+        if word_best > best_word.map_or(0.0, |(_, score)| score) {
+            best_word = Some((span, word_best));
+        }
+    }
+    if best.iter().all(|score| *score >= FUZZY_MIN_SIMILARITY) {
+        let (span, _) = best_word?;
+        Some((best.iter().sum(), span))
+    } else {
+        None
+    }
+}
+
+/// Byte spans of the words of a text: maximal runs of word characters.
+fn word_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (at, ch) in text.char_indices() {
+        if is_word_char(ch) {
+            start.get_or_insert(at);
+        } else if let Some(from) = start.take() {
+            spans.push((from, at));
+        }
+    }
+    if let Some(from) = start {
+        spans.push((from, text.len()));
+    }
+    spans
+}
+
+/// The first case-insensitive occurrence of `needle` in `text`, as byte offsets.
+fn find_ci(text: &str, needle: &str) -> Option<(usize, usize)> {
+    let needle: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    if needle.is_empty() {
+        return None;
+    }
+    // Each lowercased character with the byte range of the original character it came from.
+    let mut lowered: Vec<(char, usize, usize)> = Vec::with_capacity(text.len());
+    for (at, ch) in text.char_indices() {
+        for low in ch.to_lowercase() {
+            lowered.push((low, at, at + ch.len_utf8()));
+        }
+    }
+    lowered
+        .windows(needle.len())
+        .position(|window| {
+            window
+                .iter()
+                .zip(&needle)
+                .all(|(seen, want)| seen.0 == *want)
+        })
+        .map(|at| (lowered[at].1, lowered[at + needle.len() - 1].2))
+}
+
+/// The earliest occurrence of any token, marked, or the start of the text when none
+/// occurs (the match was on the tool name).
+fn substring_snippet(text: &str, tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .filter_map(|token| find_ci(text, token))
+        .min_by_key(|span| span.0)
+        .map_or_else(|| plain_snippet(text), |span| marked_snippet(text, span))
+}
+
+/// The text with `span` marked and about `CONTEXT_WORDS` words of context on each side.
+fn marked_snippet(text: &str, span: (usize, usize)) -> String {
+    let (start, end) = span;
+    let from = back_words(text, start, CONTEXT_WORDS);
+    let to = forward_words(text, end, CONTEXT_WORDS);
+    let mut out = String::new();
+    if from > 0 {
+        out.push_str("...");
+    }
+    out.push_str(&text[from..start]);
+    out.push_str(SNIPPET_MARK_START);
+    out.push_str(&text[start..end]);
+    out.push_str(SNIPPET_MARK_END);
+    out.push_str(&text[end..to]);
+    if to < text.len() {
+        out.push_str("...");
+    }
+    out
+}
+
+/// The start of a text, unmarked, about `PLAIN_SNIPPET_WORDS` words long.
+fn plain_snippet(text: &str) -> String {
+    let to = forward_words(text, 0, PLAIN_SNIPPET_WORDS);
+    let mut out = text[..to].to_owned();
+    if to < text.len() {
+        out.push_str("...");
+    }
+    out
+}
+
+/// Where the `words` words before byte `at` begin (`0` when there are fewer).
+fn back_words(text: &str, at: usize, words: usize) -> usize {
+    let mut count = 0;
+    let mut in_word = false;
+    for (index, ch) in text[..at].char_indices().rev() {
+        if ch.is_whitespace() {
+            if in_word {
+                count += 1;
+                in_word = false;
+                if count == words {
+                    return index + ch.len_utf8();
+                }
+            }
+        } else {
+            in_word = true;
+        }
+    }
+    0
+}
+
+/// Where the `words` words after byte `at` end (the text's end when there are fewer).
+fn forward_words(text: &str, at: usize, words: usize) -> usize {
+    let mut count = 0;
+    let mut in_word = false;
+    for (index, ch) in text[at..].char_indices() {
+        if ch.is_whitespace() {
+            if in_word {
+                count += 1;
+                in_word = false;
+                if count == words {
+                    return at + index;
+                }
+            }
+        } else {
+            in_word = true;
+        }
+    }
+    text.len()
 }
 
 fn summary_row(row: &Row<'_>) -> rusqlite::Result<(i64, ThreadSummary)> {
@@ -1037,19 +1409,6 @@ fn summary_row(row: &Row<'_>) -> rusqlite::Result<(i64, ThreadSummary)> {
         redaction_count: row.get(16)?,
     };
     Ok((row.get(0)?, summary))
-}
-
-fn hit_row(row: &Row<'_>) -> rusqlite::Result<(f64, ThreadHit)> {
-    let hit = ThreadHit {
-        entry_id: row.get(0)?,
-        thread_uid: row.get(1)?,
-        title: row.get(2)?,
-        seq: row.get(3)?,
-        turn: row.get(4)?,
-        snippet: row.get(5)?,
-        at: row.get(6)?,
-    };
-    Ok((row.get(7)?, hit))
 }
 
 fn entry_row(row: &Row<'_>) -> rusqlite::Result<ThreadEntry> {
@@ -1410,11 +1769,13 @@ fn add_redactions(
 }
 
 /// Secure delete leaves the text in the index's delete markers until the index merges, so
-/// the index is optimized after every removal of text.
+/// every index (word and trigram) is optimized after every removal of text (D131).
 fn purge_search_index(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(
         "INSERT INTO entry_fts (entry_fts) VALUES ('optimize');
-         INSERT INTO edit_fts (edit_fts) VALUES ('optimize');",
+         INSERT INTO edit_fts (edit_fts) VALUES ('optimize');
+         INSERT INTO entry_tri (entry_tri) VALUES ('optimize');
+         INSERT INTO edit_tri (edit_tri) VALUES ('optimize');",
     )?;
     Ok(())
 }
@@ -1597,7 +1958,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         assert_eq!(store.total_threads().expect("count"), 1);
     }
 
@@ -2278,14 +2639,26 @@ mod tests {
                 ],
             ))
             .expect("apply");
+        // The trigram index holds the text too: it is found by a substring before the delete.
+        let filter = ThreadFilter::default();
+        // Two entries hold the marker, so two hits (one per entry).
+        assert_eq!(
+            store
+                .search("ecretmark", &filter, 10)
+                .expect("substring")
+                .len(),
+            2
+        );
+        assert!(trigram_rows(&store, "secretmark") >= 1);
         store.delete_thread(&uid("s")).expect("delete");
         assert_eq!(store.total_threads().expect("count"), 0);
         assert!(
             store
-                .search(marker, &ThreadFilter::default(), 10)
+                .search(marker, &filter, 10)
                 .expect("search")
                 .is_empty()
         );
+        assert_eq!(trigram_rows(&store, "secretmark"), 0);
         store.checkpoint().expect("checkpoint");
 
         let db = dir.path().join("gitmaster");
@@ -2669,5 +3042,635 @@ mod tests {
             .map(|thread| thread.entry_count)
             .sum();
         assert_eq!(total, 400);
+    }
+
+    /// Rows of the trigram indexes that match `text` as a substring.
+    fn trigram_rows(store: &ThreadStore, text: &str) -> i64 {
+        let query = format!("\"{text}\"");
+        store
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM entry_tri WHERE entry_tri MATCH ?1)
+                      + (SELECT COUNT(*) FROM edit_tri WHERE edit_tri MATCH ?1)",
+                params![query],
+                |row| row.get(0),
+            )
+            .expect("trigram rows")
+    }
+
+    /// Every byte of the database files, the WAL included, after a checkpoint.
+    fn file_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let db = dir.join("gitmaster");
+        ["threads.db", "threads.db-wal"]
+            .iter()
+            .filter_map(|name| {
+                std::fs::read(db.join(name))
+                    .ok()
+                    .map(|bytes| ((*name).to_owned(), bytes))
+            })
+            .collect()
+    }
+
+    fn indexed(store: &mut ThreadStore, session: &str, at: i64, text: &str) {
+        store
+            .apply(&batch(
+                session,
+                at,
+                vec![new_entry("u", EntryKind::User, text, at)],
+            ))
+            .expect("apply");
+    }
+
+    fn uids_of(hits: &[ThreadHit]) -> Vec<String> {
+        hits.iter().map(|hit| hit.thread_uid.clone()).collect()
+    }
+
+    #[test]
+    fn the_bundled_sqlite_has_the_trigram_tokenizer() {
+        assert!(
+            rusqlite::version_number() >= 3_034_000,
+            "trigram needs SQLite 3.34"
+        );
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE t USING fts5(x, tokenize='trigram');
+             INSERT INTO t(x) VALUES ('file_index rebuilt');",
+        )
+        .expect("trigram table");
+        let found: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM t WHERE t MATCH '\"ndex\"'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("match");
+        assert_eq!(found, 1);
+    }
+
+    #[test]
+    fn a_version_one_database_gains_the_trigram_indexes_with_its_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gm = dir.path().join("gitmaster");
+        std::fs::create_dir_all(&gm).expect("dir");
+        {
+            let conn = Connection::open(gm.join("threads.db")).expect("raw");
+            conn.pragma_update(None, "journal_mode", "WAL")
+                .expect("wal");
+            conn.execute_batch(SCHEMA_V1).expect("schema 1");
+            conn.execute_batch(
+                "INSERT INTO thread (uid, harness, session_id, worktree, title, started_at,
+                    last_event_at)
+                 VALUES ('old1', 'claude-code', 's1', '/repo', 'old', 1, 1);
+                 INSERT INTO entry (thread_id, seq, turn, kind, source_id, text, at)
+                 VALUES (1, 0, 1, 'user', 'u1', 'the function file_index is rebuilt', 1);
+                 INSERT INTO edit (thread_id, entry_id, path, change, patch, added, removed, at)
+                 VALUES (1, 1, 'src/search/index.rs', 'modify', '', 0, 0, 1);",
+            )
+            .expect("rows");
+            conn.pragma_update(None, "user_version", 1)
+                .expect("version");
+        }
+        let store = ThreadStore::open(dir.path()).expect("migrate");
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, 2);
+        let hits = store
+            .search("ndex", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, HitKind::Substring);
+        assert_eq!(hits[0].seq, 0);
+        let by_path = store
+            .search("search", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert_eq!(by_path.len(), 1);
+    }
+
+    #[test]
+    fn index_finds_file_index_as_a_substring_when_the_words_do_not_match() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        indexed(&mut store, "a", 1, "the function file_index is rebuilt");
+        let hits = store
+            .search("index", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, HitKind::Substring);
+        assert!(
+            hits[0].snippet.contains("\u{e000}") && hits[0].snippet.contains("index\u{e001}"),
+            "{}",
+            hits[0].snippet
+        );
+    }
+
+    #[test]
+    fn stream_finds_history_stream_ignoring_case() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        indexed(&mut store, "a", 1, "the HistoryStream type holds the rows");
+        let hits = store
+            .search("stream", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, HitKind::Substring);
+    }
+
+    #[test]
+    fn a_transposed_misspelling_is_found_as_fuzzy() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        indexed(&mut store, "a", 1, "retry with backoff after failures");
+        let hits = store
+            .search("bakcoff", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert_eq!(hits.len(), 1, "similarity of bakcoff and backoff is 0.5");
+        assert_eq!(hits[0].kind, HitKind::Fuzzy);
+        assert!(
+            hits[0].snippet.contains("\u{e000}backoff\u{e001}"),
+            "{}",
+            hits[0].snippet
+        );
+    }
+
+    #[test]
+    fn a_four_letter_typo_with_no_similar_word_finds_nothing() {
+        // `fidx` has four characters, so the fuzzy stage runs for it. No trigram of it occurs
+        // in the text, and no word is similar enough (below 0.5), so no result is the
+        // documented outcome (D131).
+        let mut store = ThreadStore::open_memory().expect("open");
+        indexed(&mut store, "a", 1, "the function file_index is rebuilt");
+        let hits = store
+            .search("fidx", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn strict_hits_come_first_and_are_exact() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        indexed(&mut store, "a", 1, "the file_index is rebuilt");
+        indexed(&mut store, "b", 2, "index of the files");
+        let hits = store
+            .search("index", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert_eq!(uids_of(&hits), vec![uid("b"), uid("a")]);
+        assert_eq!(hits[0].kind, HitKind::Exact);
+        assert_eq!(hits[1].kind, HitKind::Substring);
+    }
+
+    #[test]
+    fn a_fallback_stage_runs_only_below_the_threshold() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        indexed(&mut store, "a", 1, "index of the files");
+        indexed(&mut store, "b", 2, "the file_index is rebuilt");
+        store.fallback_below = 1;
+        let hits = store
+            .search("index", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert_eq!(uids_of(&hits), vec![uid("a")], "one exact hit is enough");
+        store.fallback_below = 8;
+        let hits = store
+            .search("index", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn filters_apply_to_substring_and_fuzzy_hits() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "a",
+                1,
+                vec![
+                    new_entry("u", EntryKind::User, "the file_index is rebuilt", 1),
+                    with_edit(new_entry("t", EntryKind::ToolCall, "Edit", 2), "src/lib.rs"),
+                ],
+            ))
+            .expect("a");
+        let mut other = batch(
+            "b",
+            2,
+            vec![new_entry(
+                "u",
+                EntryKind::User,
+                "the file_index is rebuilt",
+                3,
+            )],
+        );
+        other.branch = Some("dev".to_owned());
+        store.apply(&other).expect("b");
+        store
+            .update_meta(
+                &uid("b"),
+                &MetaUpdate {
+                    starred: Some(true),
+                    ..MetaUpdate::default()
+                },
+            )
+            .expect("star");
+        let by = |filter: ThreadFilter| {
+            store
+                .search("index", &filter, 10)
+                .expect("search")
+                .into_iter()
+                .map(|hit| (hit.thread_uid, hit.kind))
+                .collect::<Vec<_>>()
+        };
+        let branch = ThreadFilter {
+            branch: Some("dev".to_owned()),
+            ..ThreadFilter::default()
+        };
+        assert_eq!(by(branch), vec![(uid("b"), HitKind::Substring)]);
+        let starred = ThreadFilter {
+            starred: Some(true),
+            ..ThreadFilter::default()
+        };
+        assert_eq!(by(starred), vec![(uid("b"), HitKind::Substring)]);
+        let path = ThreadFilter {
+            path: Some("src/lib.rs".to_owned()),
+            ..ThreadFilter::default()
+        };
+        assert_eq!(by(path), vec![(uid("a"), HitKind::Substring)]);
+
+        // The fuzzy stage obeys the same filter: this thread has the word `backoff`.
+        let mut backoff = batch(
+            "c",
+            4,
+            vec![new_entry("u", EntryKind::User, "retry with backoff", 5)],
+        );
+        backoff.branch = Some("dev".to_owned());
+        store.apply(&backoff).expect("c");
+        let fuzzy =
+            |filter: ThreadFilter| store.search("bakcoff", &filter, 10).expect("search").len();
+        let dev = ThreadFilter {
+            branch: Some("dev".to_owned()),
+            ..ThreadFilter::default()
+        };
+        assert_eq!(fuzzy(dev), 1, "only the dev thread has the word");
+        assert_eq!(fuzzy(ThreadFilter::default()), 1);
+        let main = ThreadFilter {
+            branch: Some("main".to_owned()),
+            ..ThreadFilter::default()
+        };
+        assert_eq!(fuzzy(main), 0);
+    }
+
+    #[test]
+    fn limit_is_respected_across_stages_and_no_entry_repeats() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        indexed(&mut store, "w", 0, "index rebuilt by hand");
+        for n in 1..=12 {
+            indexed(
+                &mut store,
+                &format!("s{n}"),
+                n,
+                &format!("file_index number {n}"),
+            );
+        }
+        let five = store
+            .search("index", &ThreadFilter::default(), 5)
+            .expect("search");
+        assert_eq!(five.len(), 5);
+        assert_eq!(five[0].kind, HitKind::Exact);
+        let all = store
+            .search("index", &ThreadFilter::default(), 50)
+            .expect("search");
+        assert_eq!(all.len(), 13);
+        let mut ids: Vec<i64> = all.iter().map(|hit| hit.entry_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 13);
+    }
+
+    #[test]
+    fn a_text_matched_by_word_and_by_path_is_one_hit() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "a",
+                1,
+                vec![with_edit(
+                    new_entry("t", EntryKind::ToolCall, "retry retry", 1),
+                    "src/retry.rs",
+                )],
+            ))
+            .expect("a");
+        assert_eq!(
+            store
+                .search("retry", &ThreadFilter::default(), 10)
+                .expect("s")
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search("etr", &ThreadFilter::default(), 10)
+                .expect("s")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_phrase_is_a_substring_and_never_fuzzy() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        indexed(&mut store, "a", 1, "the file_index in backoff");
+        let hits = store
+            .search("\"ndex in\"", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, HitKind::Substring);
+        let typo = store
+            .search("\"bakcoff in\"", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert!(typo.is_empty());
+    }
+
+    #[test]
+    fn hostile_input_does_not_error_in_any_stage() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        indexed(&mut store, "a", 1, "foo bar index backoff");
+        let filter = ThreadFilter::default();
+        for query in [
+            "\"",
+            "*",
+            "AND (",
+            "NEAR(",
+            "foo\"bar",
+            "^",
+            "-",
+            "\"unterminated",
+            "",
+            "*:()^-+",
+            "\"index\" OR (",
+            "x) AND (y",
+            "'\"); DROP TABLE entry;--",
+            "bakc\"off",
+            "\"\"\"\"",
+        ] {
+            store
+                .search(query, &filter, 10)
+                .unwrap_or_else(|e| panic!("{query:?}: {e}"));
+        }
+    }
+
+    #[test]
+    fn deleted_and_scrubbed_text_is_gone_from_every_stage() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        indexed(&mut store, "a", 1, "file_index backoff");
+        indexed(&mut store, "b", 2, "scrub hunter2 soon");
+        let filter = ThreadFilter::default();
+        assert_eq!(store.search("bakcoff", &filter, 10).expect("s").len(), 1);
+        store.delete_thread(&uid("a")).expect("delete");
+        assert!(store.search("index", &filter, 10).expect("s").is_empty());
+        assert!(store.search("bakcoff", &filter, 10).expect("s").is_empty());
+        let scrub = |text: &str| {
+            text.contains("hunter2")
+                .then(|| text.replace("hunter2", "[redacted]"))
+        };
+        store.rewrite_texts(&scrub).expect("scrub");
+        assert!(store.search("nter2", &filter, 10).expect("s").is_empty());
+    }
+
+    #[test]
+    fn delete_entry_and_scrub_leave_no_trigram_text_in_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scrubbed = "zqx9scrubbedtoken";
+        let deleted = "zqx9deletedentry";
+        let mut store = ThreadStore::open(dir.path()).expect("open");
+        let mut patched = measured_edit("src/a.rs");
+        patched.patch = format!("+{scrubbed}\n");
+        let mut tool = new_entry("t", EntryKind::ToolCall, &format!("Bash {scrubbed}"), 2);
+        tool.args_json = Some(format!("{{\"cmd\":\"{scrubbed}\"}}"));
+        tool.edit = Some(patched);
+        store
+            .apply(&batch(
+                "s",
+                2,
+                vec![
+                    new_entry("u", EntryKind::User, "plain words here", 1),
+                    tool,
+                    new_entry("x", EntryKind::Assistant, &format!("note {deleted}"), 3),
+                ],
+            ))
+            .expect("apply");
+        assert_eq!(trigram_rows(&store, "scrubbedtok"), 1);
+        let entry = row_id(&store, "SELECT id FROM entry WHERE source_id = ?1", "x");
+        store.delete_entry(entry).expect("delete entry");
+        let scrub = |text: &str| {
+            text.contains(scrubbed)
+                .then(|| text.replace(scrubbed, "[redacted]"))
+        };
+        assert_eq!(store.rewrite_texts(&scrub).expect("scrub"), 2);
+        store.checkpoint().expect("checkpoint");
+        assert_eq!(trigram_rows(&store, "scrubbedtok"), 0);
+        for (name, bytes) in file_bytes(dir.path()) {
+            for marker in [scrubbed, deleted] {
+                assert!(
+                    !contains(&bytes, marker.as_bytes()),
+                    "{name} still holds {marker}"
+                );
+            }
+        }
+    }
+
+    /// A deterministic generator for the benchmark: no randomness crate, same text every run.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 33
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next()).unwrap_or(0) % n
+        }
+    }
+
+    /// Words of prompts and code: real identifiers plus generated ones.
+    fn synthetic_vocabulary() -> Vec<String> {
+        let mut words: Vec<String> = [
+            "the",
+            "a",
+            "to",
+            "of",
+            "and",
+            "fix",
+            "add",
+            "retry",
+            "backoff",
+            "parser",
+            "cache",
+            "HistoryStream",
+            "file_index",
+            "timeout",
+            "offset",
+            "function",
+            "return",
+            "error",
+            "test",
+            "config",
+            "branch",
+            "commit",
+            "rebase",
+            "stash",
+            "merge",
+            "refactor",
+            "let",
+            "mut",
+            "fn",
+            "impl",
+            "struct",
+            "match",
+            "Option",
+            "Result",
+            "self",
+            "async",
+            "await",
+        ]
+        .iter()
+        .map(|word| (*word).to_owned())
+        .collect();
+        let syllables = [
+            "ba", "ke", "ti", "mo", "ra", "sul", "nex", "or", "dim", "fal", "gro", "ven", "pi",
+            "qu", "ser", "tan", "ul", "wex", "yo", "zib", "chi", "lum",
+        ];
+        let mut rng = Lcg(0x00c0_ffee);
+        while words.len() < 4_000 {
+            let parts = 2 + rng.below(3);
+            let mut word = String::new();
+            for _ in 0..parts {
+                word.push_str(syllables[rng.below(syllables.len())]);
+            }
+            if rng.below(4) == 0 {
+                word.push('_');
+                word.push_str(syllables[rng.below(syllables.len())]);
+            }
+            words.push(word);
+        }
+        words
+    }
+
+    /// One entry text: 15 to 60 words with code and prose separators.
+    fn synthetic_text(rng: &mut Lcg, vocabulary: &[String]) -> String {
+        const SEPARATORS: [&str; 7] = [" ", " ", " ", ", ", ". ", "(", "\n"];
+        let count = 15 + rng.below(46);
+        let mut text = String::new();
+        for _ in 0..count {
+            text.push_str(&vocabulary[rng.below(vocabulary.len())]);
+            text.push_str(SEPARATORS[rng.below(SEPARATORS.len())]);
+        }
+        text
+    }
+
+    /// Times one search: the fastest of three runs, and the stages that answered.
+    fn timed(store: &ThreadStore, query: &str, limit: u32) -> (std::time::Duration, Vec<HitKind>) {
+        let mut fastest = std::time::Duration::MAX;
+        let mut kinds = Vec::new();
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let hits = store
+                .search(query, &ThreadFilter::default(), limit)
+                .expect("search");
+            fastest = fastest.min(started.elapsed());
+            kinds = hits.iter().map(|hit| hit.kind).collect();
+        }
+        (fastest, kinds)
+    }
+
+    /// The measurement behind D131: 200,000 synthetic entries, the database size with and
+    /// without the trigram tables, and the time of each kind of search. It is not a
+    /// regression test; run it by hand (see `design/decisions.md`, D131):
+    /// `cargo test -p gm-core --lib threads::store::tests::bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement: builds 200,000 entries, run by hand"]
+    fn bench() {
+        const ENTRIES: usize = 200_000;
+        const PER_THREAD: usize = 100;
+        const LIMIT: u32 = 50;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ThreadStore::open(dir.path()).expect("open");
+        let vocabulary = synthetic_vocabulary();
+        let mut rng = Lcg(0x5eed_1234_abcd_0001);
+
+        let started = std::time::Instant::now();
+        for thread in 0..ENTRIES / PER_THREAD {
+            let entries: Vec<NewEntry> = (0..PER_THREAD)
+                .map(|n| {
+                    let text = synthetic_text(&mut rng, &vocabulary);
+                    let at = i64::try_from(thread * PER_THREAD + n + 1).unwrap_or(i64::MAX);
+                    if n % 2 == 0 {
+                        new_entry(&format!("u{n}"), EntryKind::User, &text, at)
+                    } else {
+                        let mut entry = new_entry(&format!("t{n}"), EntryKind::ToolCall, &text, at);
+                        entry.tool = Some("Edit".to_owned());
+                        if n % 8 == 1 {
+                            entry.edit = Some(measured_edit(&format!(
+                                "src/{}/{}.rs",
+                                vocabulary[rng.below(vocabulary.len())],
+                                vocabulary[rng.below(vocabulary.len())]
+                            )));
+                        }
+                        entry
+                    }
+                })
+                .collect();
+            let at = i64::try_from(thread).unwrap_or(i64::MAX);
+            store
+                .apply(&batch(&format!("s{thread}"), at, entries))
+                .expect("apply");
+        }
+        eprintln!("populate {ENTRIES} entries: {:?}", started.elapsed());
+
+        store
+            .conn
+            .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("vacuum");
+        let db = dir.path().join("gitmaster").join("threads.db");
+        let with = std::fs::metadata(&db).expect("size").len();
+        let copy = dir.path().join("without.db");
+        store
+            .conn
+            .execute_batch(&format!("VACUUM INTO '{}';", copy.display()))
+            .expect("copy");
+        {
+            let raw = Connection::open(&copy).expect("copy open");
+            raw.execute_batch(
+                "DROP TRIGGER entry_tri_ai; DROP TRIGGER entry_tri_ad; DROP TRIGGER entry_tri_au;
+                 DROP TRIGGER edit_tri_ai; DROP TRIGGER edit_tri_ad; DROP TRIGGER edit_tri_au;
+                 DROP TABLE entry_tri; DROP TABLE edit_tri; VACUUM;",
+            )
+            .expect("drop trigram tables");
+        }
+        let without = std::fs::metadata(&copy).expect("size").len();
+        // Ratio in thousandths, in integers.
+        let permille = with * 1000 / without.max(1);
+        eprintln!(
+            "db size: {with} bytes with trigram tables, {without} without; ratio {}.{:03}",
+            permille / 1000,
+            permille % 1000
+        );
+
+        for (label, query, bound) in [
+            ("strict", "backoff", 2_u64),
+            ("substring", "ckof", 10),
+            ("fuzzy", "bakcoff", 10),
+        ] {
+            let (fastest, kinds) = timed(&store, query, LIMIT);
+            let exact = kinds.iter().filter(|k| **k == HitKind::Exact).count();
+            let substring = kinds.iter().filter(|k| **k == HitKind::Substring).count();
+            let fuzzy = kinds.iter().filter(|k| **k == HitKind::Fuzzy).count();
+            eprintln!(
+                "{label} search {query:?}: {fastest:?} (exact {exact}, substring {substring}, fuzzy {fuzzy})"
+            );
+            assert!(
+                fastest < std::time::Duration::from_secs(bound),
+                "{label} took {fastest:?}, bound {bound} s"
+            );
+        }
     }
 }

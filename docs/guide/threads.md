@@ -71,11 +71,18 @@ Type in the search box above the list. There is no search syntax.
 - Put words in double quotes to match them as a phrase.
 - Identifiers match whole, so `file_index` finds `file_index` and not every `file`.
 
+When these matches are few (fewer than eight), GitMaster also looks further, after the exact matches:
+
+- **Text inside a word.** The letters you type are found anywhere in a word, whatever the case: `index` finds `file_index`, and `stream` finds `HistoryStream`. These hits are marked `approx.`.
+- **Close misspellings.** A word with a letter swapped, missing or wrong is found when most of its letters appear in the same order in a word of the thread: `bakcoff` finds `backoff`. These hits are marked `approx.` too.
+
+Words shorter than three characters are matched at the start of a word only, so `in` does not find `join`. In quotes, the text is matched exactly, inside words too, and a phrase is never matched by misspelling.
+
 Results show a snippet around the match. Select one to open the thread at that entry. Narrow the list with the **Starred** and **Has edits** filters, and with a file: choose **Show Threads for File** on a file to list the threads that edited it. A removable chip shows the file.
 
 > **Planned.** Filters for the agent, the branch and the dates are not available in the app yet.
 
-Search runs on your machine over what is stored in the repository. Nothing is sent anywhere.
+Search runs on your machine over what is stored in the repository, and its indexes are kept in the same local database. Nothing is sent anywhere.
 
 ## Link threads to your work
 

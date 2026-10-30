@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use gm_schema::{
-    CommandKind, EditState, EntryKind, LinkKind, LinkOrigin, OperationId, OperationState,
+    CommandKind, EditState, EntryKind, HitKind, LinkKind, LinkOrigin, OperationId, OperationState,
     ThreadDetail, ThreadEdit, ThreadEntry, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
 };
 use serde_json::Value;
@@ -1060,6 +1060,16 @@ pub fn title(summary: &ThreadSummary) -> String {
     plain_title(&summary.title)
 }
 
+/// The label of a search hit that a fallback stage found (D131): `approx.` for a substring
+/// or a fuzzy match, nothing for a word-start match.
+#[must_use]
+pub fn approximate_label(kind: HitKind) -> Option<&'static str> {
+    match kind {
+        HitKind::Exact => None,
+        HitKind::Substring | HitKind::Fuzzy => Some("approx."),
+    }
+}
+
 /// A title as plain text, from the first non-empty line of `text`: the Markdown
 /// markers at its start (`#`, `>`, list bullets, task boxes) and the emphasis,
 /// code and link syntax in it are dropped, the whitespace is collapsed, and the
@@ -1868,7 +1878,27 @@ mod tests {
             turn: 1,
             snippet: "retry".to_owned(),
             at: 1,
+            kind: HitKind::Exact,
         }
+    }
+
+    #[test]
+    fn a_fallback_hit_is_marked_approximate_and_the_page_keeps_each_kind() {
+        assert_eq!(approximate_label(HitKind::Exact), None);
+        assert_eq!(approximate_label(HitKind::Substring), Some("approx."));
+        assert_eq!(approximate_label(HitKind::Fuzzy), Some("approx."));
+        let mut page = ThreadsPage::default();
+        listed_page(&mut page, 1, &["a"], 1);
+        page.set_query("bakcoff");
+        let search = page.plan_search().expect("a search");
+        page.sent(&search.read, id(2));
+        let fuzzy = ThreadHit {
+            kind: HitKind::Fuzzy,
+            ..hit("a", 3)
+        };
+        assert!(page.searched(id(2), vec![hit("a", 1), fuzzy]));
+        let kinds: Vec<HitKind> = page.hits().iter().map(|hit| hit.kind).collect();
+        assert_eq!(kinds, vec![HitKind::Exact, HitKind::Fuzzy]);
     }
 
     fn id(n: u64) -> OperationId {

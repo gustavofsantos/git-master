@@ -1662,7 +1662,10 @@ fn hit_row(
                         .text_xs()
                         .text_color(theme::muted())
                         .child(format!("Turn {}", hit.turn)),
-                ),
+                )
+                .when_some(threads::approximate_label(hit.kind), |line, label| {
+                    line.child(approximate_chip(label))
+                }),
         )
         .child(
             div()
@@ -1673,6 +1676,19 @@ fn hit_row(
                 .text_color(theme::muted())
                 .child(hit.snippet.replace('\n', " ")),
         )
+}
+
+/// The muted `approx.` chip of a hit found by a fallback stage (D131).
+fn approximate_chip(label: &'static str) -> Div {
+    div()
+        .flex_none()
+        .px_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::hairline())
+        .text_xs()
+        .text_color(theme::muted())
+        .child(label)
 }
 
 /// A small chip: a code-font label on the selection colour.

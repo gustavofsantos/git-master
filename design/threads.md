@@ -359,6 +359,8 @@ Limits (starting values, tuned in T2): per field 64 KiB for results and 256 KiB 
 
 FTS5 over entry text, tool names and edit paths. The user's text is turned into a query by the engine, never passed raw: words become prefix terms joined by AND, a double-quoted phrase stays a phrase, and FTS operators typed by accident are escaped. Results are ranked by `bm25` and returned with a snippet around the match, the thread, the turn and the entry. Filters (agent, branch, date range, starred, tag, touched path, has edits) are columns, not syntax, as in D50. The tokenizer keeps identifiers whole (`file_index`, `HistoryStream`) and is chosen in T2 against a corpus of real prompts and code; target: 100 ms for the 95th percentile on 1 million entries.
 
+**Fallback (D131).** When the strict search gives fewer than eight hits, the same filter runs two more stages over FTS5 `trigram` indexes (`entry_tri` over text and tool, `edit_tri` over paths; schema 2): substring matches, then close misspellings. The misspelling stage's trigram OR query only gathers candidates; a candidate is kept when every typed word of four or more characters has a word of its text at trigram Dice similarity 0.5 or more (`query::trigram_similarity`, padded trigrams, checked in Rust). Each stage appends only entries not yet listed and never exceeds the limit. Hits carry `kind` (`exact`, `substring`, `fuzzy`); the window marks the last two `approx.`. The trigram tables are purged with the word indexes on delete and scrub.
+
 ## Links to Git (D126)
 
 Links are facts, never guesses:

@@ -279,6 +279,18 @@ pub struct ThreadFilter {
     pub tag: Option<String>,
 }
 
+/// How a search hit matched (D131). `Exact` is the strict word-start search; the two
+/// fallback stages are `Substring` (the typed text is inside a word) and `Fuzzy`
+/// (a close misspelling). A hit without a kind, from older data, is `Exact`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HitKind {
+    #[default]
+    Exact,
+    Substring,
+    Fuzzy,
+}
+
 /// One search result: the best-matching entry of a thread.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -291,6 +303,9 @@ pub struct ThreadHit {
     /// Text around the match.
     pub snippet: String,
     pub at: i64,
+    /// Which stage of the search found it (D131).
+    #[serde(default)]
+    pub kind: HitKind,
 }
 
 /// What a link points at (D126).
@@ -450,6 +465,43 @@ mod tests {
         assert_eq!(back.harness, None);
         assert_eq!(back.starred, None);
         assert_eq!(back.tag, None);
+    }
+
+    #[test]
+    fn hit_kind_round_trips_and_defaults_to_exact() {
+        for (kind, text) in [
+            (HitKind::Exact, "\"exact\""),
+            (HitKind::Substring, "\"substring\""),
+            (HitKind::Fuzzy, "\"fuzzy\""),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).expect("serialize"), text);
+            let back: HitKind = serde_json::from_str(text).expect("deserialize");
+            assert_eq!(back, kind);
+        }
+        assert_eq!(HitKind::default(), HitKind::Exact);
+    }
+
+    #[test]
+    fn thread_hit_carries_its_kind_and_reads_older_hits_as_exact() {
+        let hit = ThreadHit {
+            thread_uid: "a1".to_owned(),
+            title: "t".to_owned(),
+            entry_id: 7,
+            seq: 1,
+            turn: 1,
+            snippet: "x".to_owned(),
+            at: 1,
+            kind: HitKind::Fuzzy,
+        };
+        let json = serde_json::to_value(&hit).expect("serialize");
+        assert_eq!(json["kind"], "fuzzy");
+        let back: ThreadHit = serde_json::from_value(json.clone()).expect("deserialize");
+        assert_eq!(back, hit);
+
+        let mut older = json;
+        older.as_object_mut().expect("object").remove("kind");
+        let parsed: ThreadHit = serde_json::from_value(older).expect("older hit");
+        assert_eq!(parsed.kind, HitKind::Exact);
     }
 
     #[test]
