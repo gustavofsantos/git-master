@@ -4,6 +4,7 @@
 //! sends the reads it plans. A search runs 250 ms after the last keystroke, Up and
 //! Down move the selection, and Esc clears the search.
 
+use std::cell::RefCell;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -22,6 +23,7 @@ use crate::action_registry::{Action, Args, ThreadRef, thread_args};
 use crate::commit_threads;
 use crate::icon::{self, Icon};
 use crate::shell_history::{action_button, now_secs};
+use crate::shell_markdown::{self, MarkdownCache};
 use crate::text_area::TextArea;
 use crate::text_search::DEBOUNCE_MS;
 use crate::theme;
@@ -59,6 +61,8 @@ pub(crate) struct ThreadsView {
     pub(crate) shown: Vec<u64>,
     /// The search hit whose row the list was last scrolled to.
     pub(crate) focus_scrolled: Option<i64>,
+    /// The Markdown of the prompts and replies drawn, parsed once per text.
+    pub(crate) markdown: RefCell<MarkdownCache>,
 }
 
 impl ThreadsView {
@@ -69,6 +73,7 @@ impl ThreadsView {
             rows: ListState::new(0, ListAlignment::Top, px(DETAIL_OVERDRAW)),
             shown: Vec::new(),
             focus_scrolled: None,
+            markdown: RefCell::new(MarkdownCache::default()),
         }
     }
 }
@@ -761,6 +766,12 @@ impl StatusView {
     /// One row of the detail list. Drawing a row near the end of the rows asks for the
     /// next page of entries; drawing one near the start asks for the entries before.
     pub(crate) fn detail_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(detail) = self.model.threads.detail() {
+            self.threads_view
+                .markdown
+                .borrow_mut()
+                .for_thread(&detail.summary.uid);
+        }
         let count = self.model.threads.rows().len();
         if thread_rows::near_end(ix, count)
             && let Some(request) = self.model.threads.plan_more()
@@ -787,7 +798,9 @@ impl StatusView {
                 collapsed,
                 focused,
             } => Self::turn_head(*number, *collapsed, *focused, cx).into_any_element(),
-            Row::Prompt { text, focused, .. } => prompt_block(text, *focused).into_any_element(),
+            Row::Prompt { text, focused, .. } => {
+                prompt_block(self.markdown_body(text), *focused).into_any_element()
+            }
             Row::Message {
                 entry,
                 kind,
@@ -795,7 +808,12 @@ impl StatusView {
                 depth,
                 focused,
             } => {
-                let body = message_body(*kind, text, *focused);
+                let content = match kind {
+                    MessageKind::Assistant => self.markdown_body(text),
+                    MessageKind::Notice => text_block(text, MESSAGE_LINES),
+                    MessageKind::Result => text_block(text, RESULT_LINES),
+                };
+                let body = message_body(*kind, content, *focused);
                 indented(*depth, Self::framed(*entry, body, cx)).into_any_element()
             }
             Row::Group {
@@ -846,6 +864,16 @@ impl StatusView {
             }
             Row::Marker(marker) => Self::marker_view(*marker, cx),
         }
+    }
+
+    /// The Markdown of a prompt or a reply, drawn from the cache of its parse.
+    fn markdown_body(&self, text: &str) -> Div {
+        let parsed = self
+            .threads_view
+            .markdown
+            .borrow_mut()
+            .get(text, MESSAGE_LINES);
+        shell_markdown::document(&parsed)
     }
 
     /// A turn's header. A click folds the turn; the focused turn's label is accent-coloured.
@@ -1185,8 +1213,9 @@ fn indented(depth: usize, body: Div) -> Div {
         .child(body)
 }
 
-/// The text of a message row, styled by its kind and by its focus.
-fn message_body(kind: MessageKind, text: &str, focused: bool) -> Div {
+/// The body of a message row, styled by its kind and by its focus. `content` is the
+/// text: Markdown for a reply, plain lines for a notice or a result.
+fn message_body(kind: MessageKind, content: Div, focused: bool) -> Div {
     let block = div()
         .flex()
         .flex_col()
@@ -1195,21 +1224,18 @@ fn message_body(kind: MessageKind, text: &str, focused: bool) -> Div {
         .rounded_sm()
         .when(focused, |block| block.bg(theme::selected_row()));
     match kind {
-        MessageKind::Assistant => block.child(text_block(text, MESSAGE_LINES)),
-        MessageKind::Notice => block
-            .text_xs()
-            .text_color(theme::muted())
-            .child(text_block(text, MESSAGE_LINES)),
+        MessageKind::Assistant => block.child(content),
+        MessageKind::Notice => block.text_xs().text_color(theme::muted()).child(content),
         MessageKind::Result => block
             .font_family(theme::code_font())
             .text_xs()
             .text_color(theme::muted())
-            .child(text_block(text, RESULT_LINES)),
+            .child(content),
     }
 }
 
-/// The human's prompt of a turn, in its panel.
-fn prompt_block(text: &str, focused: bool) -> Div {
+/// The human's prompt of a turn, in its panel. `body` is the prompt's Markdown.
+fn prompt_block(body: Div, focused: bool) -> Div {
     div()
         .p_3()
         .rounded_md()
@@ -1221,7 +1247,7 @@ fn prompt_block(text: &str, focused: bool) -> Div {
         .flex_col()
         .gap_1()
         .child(div().text_xs().text_color(theme::muted()).child("Prompt"))
-        .child(text_block(text, MESSAGE_LINES))
+        .child(body)
 }
 
 /// A small outlined text button of the detail's header, which runs `on_click`.

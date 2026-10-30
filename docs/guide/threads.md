@@ -35,7 +35,7 @@ The title comes from your first prompt. You can rename it.
 
 The thread is grouped by turn. A turn is one prompt of yours and everything the agent did until it stopped.
 
-- Your prompt and the agent's text show in full. A prompt appears when the agent's next event arrives, such as its first tool call or the end of its turn, because GitMaster reads prompts from the agent's session file.
+- Your prompt and the agent's text show in full, as Markdown: headings, bold, italic and strikethrough, lists and task lists, quotes, tables, code blocks and links. A code block in a language GitMaster knows is coloured, and a link shows its text without being followed. Tool arguments and results stay plain text. A prompt appears when the agent's next event arrives, such as its first tool call or the end of its turn, because GitMaster reads prompts from the agent's session file.
 - Each tool call is one collapsed line with the tool, a short summary of its arguments, whether it worked and how long it took. Select the line to expand the arguments and the result.
 - Each edit is a card with the path, `+n −m`, and its state. Choose **Open Diff** to expand the patch under the card, or **View File** to open the file in the [Code page](code-navigation.md).
 
