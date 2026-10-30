@@ -53,13 +53,11 @@ GitMaster keeps its own preferences in `settings.json` in the user config direct
 | Key | Type | Values | Default | Meaning |
 |---|---|---|---|---|
 | `diff_layout` | string | `unified`, `split` | `unified` | The layout of the diff, set by the **Unified** or **Split** selector. The choice applies to the Working Copy diff and to the commit diff. |
-| `branch_scope` | string | `mine`, `all` | Not set | The scope of the sidebar's branch filter, **Mine** or **All**. While it is not set, the filter shows **Mine** when Git has a `user.email` and **All** when it does not. |
 | `threads` | object | See below | See below | Capture and redaction of [threads](../guide/threads.md). |
 
 ```json
 {
-  "diff_layout": "split",
-  "branch_scope": "all"
+  "diff_layout": "split"
 }
 ```
 
@@ -115,7 +113,6 @@ GitMaster reads Git's own configuration through `git`, so Git's scope rules appl
 
 | Key | Scope | Default | Used for | Status |
 |---|---|---|---|---|
-| `user.email` | Any | Not set | Decides the default of the branch filter. With an email set, the sidebar starts on **Mine**, which shows your current branch and the branches whose latest commit is yours. The match ignores case. | |
 | `core.editor` | Any | Not set | The program that **Open in editor** starts. | Planned |
 | `merge.conflictStyle` | Any | `zdiff3` | The style of the conflict markers the conflict resolver shows. | Planned |
 | `gitmaster.workflowPath` | Any, can be set more than once | Not set | Extra folders to read workflow files from, after your workflows directory. A folder inside the repository's working tree is ignored, with a warning. | |

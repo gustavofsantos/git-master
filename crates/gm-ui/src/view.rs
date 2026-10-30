@@ -23,7 +23,7 @@ use crate::action_registry::{
 use crate::app_settings::{self, AppSettings};
 use crate::avatar::Avatars;
 use crate::branch_delete::DeleteDialog;
-use crate::branch_filter::{self, BranchFilter};
+use crate::branch_filter::BranchFilter;
 use crate::branch_menu::BranchMenu;
 use crate::composer::{Composer, ComposerEvent};
 use crate::context_menu::ContextMenu;
@@ -52,7 +52,7 @@ use crate::shell_history::CommitTexts;
 use crate::shell_search::{self, SearchView};
 use crate::shell_sidebar;
 use crate::shell_threads::{self, ThreadsView};
-use crate::sidebar::Grouping;
+use crate::sidebar::{Folded, Grouping};
 use crate::stash_apply;
 use crate::stash_drop::DropStashDialog;
 use crate::stashes;
@@ -138,7 +138,9 @@ pub struct StatusView {
     pub(crate) commit_height: f32,
     /// How the sidebar's branch tree is grouped.
     pub(crate) sidebar_grouping: Grouping,
-    /// The sidebar's branch filter: the scope and the typed query (D53).
+    /// Which sidebar sections are folded.
+    pub(crate) sidebar_folded: Folded,
+    /// The sidebar's branch filter: the typed query (D53).
     pub(crate) sidebar_filter: BranchFilter,
     /// The input the sidebar's query is typed into.
     pub(crate) sidebar_input: Entity<TextArea>,
@@ -395,7 +397,8 @@ impl StatusView {
             left_width: resize::LEFT_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
             sidebar_grouping: Grouping::default(),
-            sidebar_filter: BranchFilter::with_chosen(settings.branch_scope),
+            sidebar_folded: Folded::default(),
+            sidebar_filter: BranchFilter::default(),
             sidebar_input,
             settings,
             screen: Screen::default(),
@@ -1158,7 +1161,6 @@ impl StatusView {
             Ok(Effect::RevertWorkflow) => self.revert_workflow(cx),
             Ok(Effect::OpenDeleteWorkflow) => self.ask_delete_workflow(cx),
             Ok(Effect::DryRunWorkflow) => self.dry_run_workflow(cx),
-            Ok(Effect::SetBranchScope(scope)) => self.choose_branch_scope(scope, cx),
             Ok(Effect::SetAuthorPictures(on)) => self.set_author_pictures(on, cx),
             Ok(Effect::PickMoveTarget {
                 action: target,
@@ -1273,7 +1275,6 @@ impl StatusView {
                 .and_then(|status| status.branch.head.as_deref()),
             root: self.model.status().map(|status| status.root.as_str()),
             worktrees: &self.model.worktrees,
-            branch_scope: self.sidebar_filter.scope(self.model.branches.user_email()),
             author_pictures: crate::action_registry::AuthorPictures::from_on(
                 self.settings.author_pictures,
             ),
@@ -1286,8 +1287,6 @@ impl StatusView {
                 comments: self.model.review.comments(),
                 spot,
             },
-            user_email_known: branch_filter::known_email(self.model.branches.user_email())
-                .is_some(),
             hooks: HookCtx {
                 running: self.model.hooks.in_flight(),
                 applicable: self.model.hooks.applicable(),

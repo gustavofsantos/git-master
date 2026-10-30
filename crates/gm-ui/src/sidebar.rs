@@ -7,6 +7,43 @@
 
 use gm_schema::BranchEntry;
 
+/// A section of the sidebar that folds away under its header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Section {
+    Workspace,
+    Branches,
+    Worktrees,
+}
+
+/// Which sections are folded. All are open at the start; the choice is kept for
+/// the window only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Folded {
+    workspace: bool,
+    branches: bool,
+    worktrees: bool,
+}
+
+impl Folded {
+    #[must_use]
+    pub fn is_folded(self, section: Section) -> bool {
+        match section {
+            Section::Workspace => self.workspace,
+            Section::Branches => self.branches,
+            Section::Worktrees => self.worktrees,
+        }
+    }
+
+    pub fn toggle(&mut self, section: Section) {
+        let flag = match section {
+            Section::Workspace => &mut self.workspace,
+            Section::Branches => &mut self.branches,
+            Section::Worktrees => &mut self.worktrees,
+        };
+        *flag = !*flag;
+    }
+}
+
 /// How the branch tree is organised.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Grouping {
@@ -117,6 +154,18 @@ fn grouped<'a>(rows: &mut Vec<Row<'a>>, branches: impl Iterator<Item = &'a Branc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sections_start_open_and_fold_one_at_a_time() {
+        let mut folded = Folded::default();
+        assert!(!folded.is_folded(Section::Branches));
+        folded.toggle(Section::Branches);
+        assert!(folded.is_folded(Section::Branches));
+        assert!(!folded.is_folded(Section::Workspace));
+        assert!(!folded.is_folded(Section::Worktrees));
+        folded.toggle(Section::Branches);
+        assert!(!folded.is_folded(Section::Branches));
+    }
 
     fn branch(name: &str, remote: bool) -> BranchEntry {
         BranchEntry {

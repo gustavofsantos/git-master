@@ -1,11 +1,11 @@
 ---
 title: Branches
-description: The branch sidebar, the Mine and All filter, switching, creating and deleting branches, and the Fetch, Pull and Push with lease commands.
+description: The branch sidebar, the branch search, switching, creating and deleting branches, and the Fetch, Pull and Push with lease commands.
 status: partial
 order: 40
 ---
 
-The sidebar lists the local and remote branches of the repository. Use it to check out a branch, filter the list, and see which branch HEAD points at. Create and delete branches from the branch menu, the command palette or the sidebar. The top bar holds the remote commands: **Fetch**, **Pull** and **Push with lease**.
+The sidebar lists the local and remote branches of the repository. Use it to check out a branch, search the list, and see which branch HEAD points at. Create and delete branches from the branch menu, the command palette or the sidebar. The top bar holds the remote commands: **Fetch**, **Pull** and **Push with lease**.
 
 ## The branch sidebar
 
@@ -23,37 +23,21 @@ The worktrees of the repository are listed in their own section below the branch
 
 The width is not kept between runs.
 
-## Filter the branches
+## Fold the sections
 
-The filter sits above the branch list. It has three parts:
+The sidebar has three sections: **Workspace**, **Branches** and **Worktrees**. Click a section's header to fold it, and click it again to open it. The arrow before the title shows the state: `▾` when the section is open and `▸` when it is folded. A folded section shows its header only, so the sections you do not need leave room for the others. The **+** at the end of the Branches and Worktrees headers still works while the section is folded.
 
-- The **Mine** and **All** switch chooses the scope.
-- The search box narrows the list by name.
-- The count on the right shows `N of M`: the branches shown, and the total.
+All sections are open when the window starts. Which ones are folded is not kept between runs.
 
-### Mine and All
+## Search the branches
 
-**Mine** shows the branches that belong to you:
+The list shows every local and remote branch of the repository. The search box above the list narrows it by name, and the count on the right shows `N of M`: the branches shown, and the total.
 
-- The current branch, always.
-- Each branch whose tip commit has your `user.email` as its author email. The comparison ignores letter case.
-- Each local branch whose author cannot be read.
+The search matches the letters of the full branch name in order, so `flg` finds `feature/login`. The search text is not saved between runs.
 
-Remote branches without a readable author are hidden under **Mine**.
+When nothing matches, the sidebar says **No branches match** and offers a link that clears the search.
 
-**All** shows every branch.
-
-Until you choose a scope, the scope is **Mine** when Git has `user.email`, and **All** when it does not. Your choice is saved in `settings.json`, so it stays after a restart. Without `user.email`, the scope is **All** and the command palette action **Show Only My Branches** is disabled, with the reason.
-
-### Search
-
-The search matches the letters of the full branch name in order, so `flg` finds `feature/login`. The search works together with the scope. The search text is not saved between runs.
-
-When nothing matches, the sidebar says **No branches match** and offers a link that shows all branches.
-
-The palette actions **Show Only My Branches** and **Show All Branches** change the scope. The action that would change nothing is disabled, and its reason says so.
-
-The branch picker in the top bar and the command palette always list every branch, whatever the filter.
+The branch picker in the top bar and the command palette always list every branch, whatever the search.
 
 ## Switch to another branch
 

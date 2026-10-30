@@ -11,6 +11,8 @@ A worktree is a second folder of the same repository, with its own checked-out b
 
 The **Worktrees** section sits under the branch tree in the sidebar. The main checkout, the folder you opened the repository from, is always the first row. The other worktrees follow it. Each row shows the worktree's branch, or a detached HEAD.
 
+Click the header to fold the section. The **+** in the header stays available while it is folded. See [Branches](branches.md#fold-the-sections).
+
 Each worktree gets a color from its name, so the same worktree keeps the same color in every session.
 
 Badges mark the state of a row:

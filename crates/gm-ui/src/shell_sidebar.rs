@@ -1,6 +1,6 @@
 //! The sidebar at the window's left: the workspace destinations, the switch
 //! between the two ways of grouping branches, the branch tree and the
-//! worktrees. Every destination is a row of its own; the stack tree is a
+//! worktrees. Each of the three sections folds under its header. Every destination is a row of its own; the stack tree is a
 //! placeholder until its slice lands (design/roadmap.md). The worktrees show their state;
 //! a double-click opens one in its own window (design/roadmap.md, W4).
 
@@ -13,14 +13,14 @@ use gpui::{
 };
 
 use crate::action_registry::{Action, Args};
-use crate::branch_filter::{self, Scope};
+use crate::branch_filter;
 use crate::icon::{self, Icon};
 use crate::local_review;
 use crate::move_file::{self, DropTarget, DropZone};
 use crate::name_fit::{self, name_label};
 use crate::resize::{self, SIDEBAR};
 use crate::resize_handle::{self, Edge};
-use crate::sidebar::{self, Grouping, Row};
+use crate::sidebar::{self, Grouping, Row, Section};
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
 use crate::view::{Screen, StatusView};
@@ -56,11 +56,18 @@ impl StatusView {
             .bg(theme::ground())
             .border_r_1()
             .border_color(theme::hairline())
-            .child(section_title("Workspace"))
-            .child(self.workspace_items(cx))
-            .child(self.grouping_switch(cx))
-            .children(self.has_branches().then(|| self.branch_filter_bar(cx)))
-            .child(self.branch_tree(cx))
+            .child(self.section_header(Section::Workspace, "Workspace", None, cx))
+            .children(
+                (!self.sidebar_folded.is_folded(Section::Workspace))
+                    .then(|| self.workspace_items(cx)),
+            )
+            .child(self.section_header(
+                Section::Branches,
+                "Branches",
+                Some(new_branch_button(cx)),
+                cx,
+            ))
+            .children(self.branches_body(cx))
             .child(self.worktrees_section(cx))
             .children((self.sidebar_grouping == Grouping::ByStack).then(footer_hint))
             .child(width_strip)
@@ -79,22 +86,88 @@ impl StatusView {
             Some(status.root.as_str()),
             theme::LANE_COUNT,
         );
+        let header = self.section_header(
+            Section::Worktrees,
+            "Worktrees",
+            Some(new_worktree_button(cx)),
+            cx,
+        );
+        let header =
+            move_file::accept_drops(header, Some(self.drop_zone(DropTarget::NewWorktree)), cx);
+        let open = !self.sidebar_folded.is_folded(Section::Worktrees);
         div()
             .flex_none()
             .max_h(px(ROW_HEIGHT * WORKTREE_ROWS_SHOWN + 40.))
             .overflow_hidden()
-            .px_2()
             .pb_2()
-            .child(worktrees_header(
-                self.drop_zone(DropTarget::NewWorktree),
-                cx,
-            ))
-            .children(rows.iter().map(|row| {
-                let zone = self.drop_zone(DropTarget::Worktree {
-                    path: row.entry.path.clone(),
-                });
-                worktree_row(row, zone, cx)
+            .child(header)
+            .children(open.then(|| {
+                div().px_2().children(rows.iter().map(|row| {
+                    let zone = self.drop_zone(DropTarget::Worktree {
+                        path: row.entry.path.clone(),
+                    });
+                    worktree_row(row, zone, cx)
+                }))
             }))
+    }
+
+    /// The header of a foldable section: a chevron, the title and an optional
+    /// control at the end. A click on the header folds or opens the section;
+    /// a click on the control does not reach it.
+    fn section_header(
+        &self,
+        section: Section,
+        title: &'static str,
+        control: Option<Stateful<Div>>,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let folded = self.sidebar_folded.is_folded(section);
+        div()
+            .id(title)
+            .px_4()
+            .pt_4()
+            .pb_1()
+            .gap_1()
+            .flex()
+            .flex_row()
+            .items_center()
+            .text_xs()
+            .text_color(theme::muted())
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme::text()))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(10.))
+                    .child(if folded { "▸" } else { "▾" }),
+            )
+            .child(div().flex_1().child(title.to_uppercase()))
+            .children(control)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.sidebar_folded.toggle(section);
+                    cx.notify();
+                }),
+            )
+    }
+
+    /// What the Branches section holds while it is open: the grouping switch,
+    /// the search and the tree. Nothing while it is folded.
+    fn branches_body(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.sidebar_folded.is_folded(Section::Branches) {
+            return None;
+        }
+        Some(
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .child(self.grouping_switch(cx))
+                .children(self.has_branches().then(|| self.branch_filter_bar(cx)))
+                .child(self.branch_tree(cx)),
+        )
     }
 
     /// The Threads line of the workspace, with its count once it is known (T5).
@@ -238,7 +311,6 @@ impl StatusView {
                     .child(segment_for(Grouping::ByStack))
                     .child(segment_for(Grouping::ByName)),
             )
-            .child(new_branch_button(cx))
     }
 
     /// Whether a listing has arrived with branches in it. The filter is only
@@ -247,19 +319,14 @@ impl StatusView {
         !self.model.branches.known().is_empty()
     }
 
-    /// The branches the sidebar shows: the filter's scope and query applied to
-    /// the last listing. The branch picker and the palette still see them all.
+    /// The branches the sidebar shows: the filter's query applied to the last
+    /// listing. The branch picker and the palette still see them all.
     pub(crate) fn visible_branches(&self) -> Vec<&BranchEntry> {
-        branch_filter::visible(
-            self.model.branches.known(),
-            &self.sidebar_filter,
-            self.model.branches.user_email(),
-        )
+        branch_filter::visible(self.model.branches.known(), &self.sidebar_filter)
     }
 
     /// The filter's input, the scope toggle and the count of shown branches.
     fn branch_filter_bar(&self, cx: &mut Context<Self>) -> Div {
-        let scope = self.sidebar_filter.scope(self.model.branches.user_email());
         let shown = self.visible_branches().len();
         let total = self.model.branches.known().len();
         let clear = (!self.sidebar_filter.query().is_empty()).then(|| {
@@ -294,24 +361,6 @@ impl StatusView {
                     .child(self.sidebar_input.clone()),
             )
             .children(clear);
-        let scope_segment = |option: Scope| {
-            let id = SharedString::from(format!("sidebar-scope-{}", option.id()));
-            segment_with_id(id, option.label(), option == scope).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                    this.choose_branch_scope(option, cx);
-                }),
-            )
-        };
-        let toggle = div()
-            .p(px(2.))
-            .w(px(120.))
-            .flex()
-            .flex_row()
-            .rounded_md()
-            .bg(theme::selected_row())
-            .child(scope_segment(Scope::Mine))
-            .child(scope_segment(Scope::All));
         let count = div()
             .text_xs()
             .text_color(theme::muted())
@@ -323,41 +372,14 @@ impl StatusView {
             .flex_col()
             .gap_2()
             .child(input)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(toggle)
-                    .child(count),
-            )
+            .child(count)
     }
 
-    /// Sets the sidebar's scope to one the user picked, and keeps it for the next start.
-    pub(crate) fn choose_branch_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
-        self.sidebar_filter.choose(scope);
-        self.remember_branch_scope(cx);
-        cx.notify();
-    }
-
-    /// Shows every branch and clears the query: the empty state's link and the
-    /// "Show All Branches" action both come here.
+    /// Clears the query so every branch shows again: the empty state's link
+    /// comes here.
     fn show_all_branches(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_filter.show_all();
         self.sidebar_input.update(cx, TextArea::clear);
-        self.remember_branch_scope(cx);
         cx.notify();
-    }
-
-    /// Saves the chosen scope in the settings, unless the file already has it.
-    fn remember_branch_scope(&mut self, cx: &mut Context<Self>) {
-        let chosen = self.sidebar_filter.chosen();
-        if self.settings.branch_scope == chosen {
-            return;
-        }
-        self.settings.branch_scope = chosen;
-        self.save_settings(cx);
     }
 
     /// The filter's input changed. Only its first line counts; the list follows it.
@@ -441,8 +463,8 @@ fn count_pill(count: String) -> Div {
         .child(count)
 }
 
-/// The empty state of the branch tree: nothing matches the filter, and a link
-/// shows every branch again.
+/// The empty state of the branch tree: nothing matches the search, and a link
+/// clears it.
 fn no_match_state(cx: &mut Context<StatusView>) -> Div {
     div()
         .px_4()
@@ -456,7 +478,7 @@ fn no_match_state(cx: &mut Context<StatusView>) -> Div {
                 .id("sidebar-show-all-branches")
                 .cursor_pointer()
                 .text_color(theme::accent())
-                .child("Show all branches")
+                .child("Clear the search")
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -487,7 +509,7 @@ pub(crate) fn subscriptions(
     ]
 }
 
-/// The "+" beside the grouping switch: starts a new branch.
+/// The "+" of the Branches header: starts a new branch.
 fn new_branch_button(cx: &Context<StatusView>) -> Stateful<Div> {
     div()
         .id("sidebar-new-branch")
@@ -506,29 +528,13 @@ fn new_branch_button(cx: &Context<StatusView>) -> Stateful<Div> {
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
                 this.run_action(Action::NewBranch, &Args::None, window, cx);
             }),
         )
 }
 
-/// The WORKTREES heading, with the "+" that opens the New Worktree dialog.
-fn worktrees_header(zone: DropZone, cx: &Context<StatusView>) -> Div {
-    let header = div()
-        .px_4()
-        .pt_4()
-        .pb_1()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .text_xs()
-        .text_color(theme::muted())
-        .child("WORKTREES")
-        .child(new_worktree_button(cx));
-    move_file::accept_drops(header, Some(zone), cx)
-}
-
-/// The "+" of the WORKTREES heading: a plain glyph that brightens on hover.
+/// The "+" of the Worktrees header: a plain glyph that brightens on hover.
 fn new_worktree_button(cx: &Context<StatusView>) -> Stateful<Div> {
     div()
         .id("worktrees-new")
@@ -547,6 +553,7 @@ fn new_worktree_button(cx: &Context<StatusView>) -> Stateful<Div> {
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
                 this.run_action(Action::NewWorktree, &Args::None, window, cx);
             }),
         )

@@ -14,7 +14,6 @@ use serde_json::{Map, Value, json};
 
 use gm_core::threads::config::{RedactConfig, ThreadsConfig, UserPattern};
 
-use crate::branch_filter::Scope;
 use crate::diff_rows::Layout;
 
 /// The preferences the app keeps. Each field has its default when unset.
@@ -22,9 +21,6 @@ use crate::diff_rows::Layout;
 pub struct AppSettings {
     /// The layout of the read-only commit diff (D39). Unified by default.
     pub diff_layout: Layout,
-    /// The scope the user chose for the sidebar's branches (D53). `None` until
-    /// they choose one, which leaves the default in force.
-    pub branch_scope: Option<Scope>,
     /// Whether author pictures are looked up on Gravatar (D110). Off until chosen,
     /// because a lookup sends a hash of the author's email to a third party.
     pub author_pictures: bool,
@@ -44,10 +40,6 @@ impl AppSettings {
             Some("split") => Layout::Split,
             _ => Layout::Unified,
         };
-        let branch_scope = fields
-            .get("branch_scope")
-            .and_then(Value::as_str)
-            .and_then(Scope::from_id);
         let author_pictures = fields
             .get("author_pictures")
             .and_then(Value::as_bool)
@@ -55,7 +47,6 @@ impl AppSettings {
         let threads = ThreadsConfig::from_settings(&Value::Object(fields));
         Self {
             diff_layout,
-            branch_scope,
             author_pictures,
             threads,
         }
@@ -76,10 +67,8 @@ impl AppSettings {
             Layout::Split => "split",
         };
         fields.insert("diff_layout".to_owned(), json!(diff_layout));
-        match self.branch_scope {
-            Some(scope) => fields.insert("branch_scope".to_owned(), json!(scope.id())),
-            None => fields.remove("branch_scope"),
-        };
+        // The branch scope was a preference once; an old file loses the key.
+        fields.remove("branch_scope");
         fields.insert("author_pictures".to_owned(), json!(self.author_pictures));
         let threads = threads_value(fields.get("threads"), &self.threads);
         fields.insert("threads".to_owned(), threads);
@@ -288,7 +277,6 @@ mod tests {
     fn split() -> AppSettings {
         AppSettings {
             diff_layout: Layout::Split,
-            branch_scope: None,
             author_pictures: false,
             threads: ThreadsConfig::default(),
         }
@@ -339,25 +327,10 @@ mod tests {
     }
 
     #[test]
-    fn the_branch_scope_round_trips_and_an_unknown_one_reads_as_unset() {
-        let all = AppSettings {
-            branch_scope: Some(Scope::All),
-            ..split()
-        };
-        let text = all.merge_into("");
-        assert_eq!(AppSettings::parse(&text), all);
-        let unset = AppSettings {
-            branch_scope: None,
-            ..all
-        };
-        assert_eq!(
-            AppSettings::parse(&unset.merge_into(&text)).branch_scope,
-            None
-        );
-        assert_eq!(
-            AppSettings::parse(r#"{"branch_scope":"everyone"}"#).branch_scope,
-            None
-        );
+    fn the_retired_branch_scope_key_is_dropped_on_save() {
+        let text = split().merge_into(r#"{"branch_scope":"all","keep":1}"#);
+        assert!(!text.contains("branch_scope"));
+        assert!(text.contains("keep"));
     }
 
     #[test]

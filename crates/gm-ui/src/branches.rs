@@ -53,9 +53,6 @@ pub struct Branches {
     highlight: usize,
     /// The `Checkout` the window waits for.
     checkout: Option<OperationId>,
-    /// Git's `user.email` as the last listing reported it: the sidebar's
-    /// "Mine" scope matches authors against it.
-    user_email: Option<String>,
 }
 
 /// One row of the picker. Headers and "None" rows are not selectable.
@@ -79,17 +76,11 @@ impl Branches {
 
     /// Takes the reply to the request `id`. A reply to any other request is
     /// stale and is dropped. The highlight starts on the current branch.
-    pub fn listed(
-        &mut self,
-        id: OperationId,
-        branches: Vec<BranchEntry>,
-        user_email: Option<String>,
-    ) -> bool {
+    pub fn listed(&mut self, id: OperationId, branches: Vec<BranchEntry>) -> bool {
         if self.listing != Listing::Waiting(id) {
             return false;
         }
         self.known.clone_from(&branches);
-        self.user_email = user_email;
         self.listing = Listing::Listed(branches);
         self.highlight = self
             .matches()
@@ -105,16 +96,9 @@ impl Branches {
         &self.known
     }
 
-    /// The user's email as the last listing reported it, if Git has one.
-    #[must_use]
-    pub fn user_email(&self) -> Option<&str> {
-        self.user_email.as_deref()
-    }
-
     /// Forgets the listing: it belonged to a repository that was left.
     pub fn clear(&mut self) {
         self.known.clear();
-        self.user_email = None;
         self.listing = Listing::Idle;
     }
 
@@ -260,7 +244,7 @@ mod tests {
     fn listed(branches: Vec<BranchEntry>) -> Branches {
         let mut state = Branches::default();
         state.request(OperationId(1));
-        assert!(state.listed(OperationId(1), branches, None));
+        assert!(state.listed(OperationId(1), branches));
         state
     }
 
@@ -389,33 +373,16 @@ mod tests {
         let mut state = Branches::default();
         state.request(OperationId(1));
         state.request(OperationId(2));
-        assert!(!state.listed(OperationId(1), vec![local("old", true)], None));
+        assert!(!state.listed(OperationId(1), vec![local("old", true)]));
         assert!(state.lines().is_empty());
-        assert!(state.listed(OperationId(2), vec![local("new", true)], None));
+        assert!(state.listed(OperationId(2), vec![local("new", true)]));
         assert_eq!(names(&state), ["new"]);
-    }
-
-    #[test]
-    fn the_user_email_comes_with_the_listing_and_is_forgotten_with_it() {
-        let mut state = Branches::default();
-        state.request(OperationId(1));
-        assert!(state.listed(
-            OperationId(1),
-            vec![local("main", true)],
-            Some("me@example.com".into())
-        ));
-        assert_eq!(state.user_email(), Some("me@example.com"));
-        state.request(OperationId(2));
-        assert!(!state.listed(OperationId(1), vec![], None));
-        assert_eq!(state.user_email(), Some("me@example.com"));
-        state.clear();
-        assert_eq!(state.user_email(), None);
     }
 
     #[test]
     fn a_reply_after_the_picker_was_reset_is_dropped() {
         let mut state = Branches::default();
-        assert!(!state.listed(OperationId(9), vec![local("main", true)], None));
+        assert!(!state.listed(OperationId(9), vec![local("main", true)]));
         assert!(state.lines().is_empty());
     }
 

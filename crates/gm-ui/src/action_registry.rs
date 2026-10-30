@@ -15,7 +15,6 @@ use gm_schema::{
     StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
 };
 
-use crate::branch_filter::Scope;
 use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, SAME_WORKTREE};
 use crate::stashes;
 use crate::thread_curate::{self, ThreadField};
@@ -252,8 +251,6 @@ pub enum Effect {
     OpenDeleteWorkflow,
     /// Asks the engine for a dry run of the open workflow's buffer.
     DryRunWorkflow,
-    /// Sets the sidebar's branches to the scope the window names (D53).
-    SetBranchScope(Scope),
     /// Turns the Gravatar lookup of author pictures on or off (D110).
     SetAuthorPictures(bool),
     /// Opens the palette on the target step of a move action, with the file
@@ -347,12 +344,8 @@ pub struct Context<'a> {
     pub worktrees: &'a [WorktreeEntry],
     /// The stashes the Stashes page listed, newest first; `None` until the first listing.
     pub stashes: Option<&'a [StashEntry]>,
-    /// The scope in effect for the sidebar's branches now (D53).
-    pub branch_scope: Scope,
     /// Whether author pictures are looked up on Gravatar (D110).
     pub author_pictures: AuthorPictures,
-    /// Whether Git has a `user.email` to match branches against.
-    pub user_email_known: bool,
     /// A fetch, pull or push with lease is in flight; the three refuse another one meanwhile.
     pub remote_running: bool,
     /// The review comments and the Working Copy diff's selection (B4c).
@@ -371,7 +364,7 @@ pub struct ThreadRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 94] = [
+const SPECS: [Spec; 92] = [
     spec(
         "file.stage",
         "Stage File",
@@ -708,20 +701,6 @@ const SPECS: [Spec; 94] = [
         None,
         ArgKind::None,
         Category::Repository,
-    ),
-    spec(
-        "branch.show_mine",
-        "Show Only My Branches",
-        None,
-        ArgKind::None,
-        Category::Branches,
-    ),
-    spec(
-        "branch.show_all",
-        "Show All Branches",
-        None,
-        ArgKind::None,
-        Category::Branches,
     ),
     spec(
         "commit.show_pictures",
@@ -1095,8 +1074,6 @@ pub enum Action {
     UnlockWorktree,
     PruneWorktrees,
     ShowHistory,
-    ShowOnlyMyBranches,
-    ShowAllBranches,
     ShowAuthorPictures,
     HideAuthorPictures,
     CopyCommitHash,
@@ -1287,24 +1264,19 @@ fn resolve_conflict_effect(args: &Args) -> Result<Effect, Reason> {
     }]))
 }
 
-/// Whether the action sets a preference of the window (the sidebar scope, the pictures).
+/// Whether the action sets a preference of the window (the pictures).
 fn is_choice(action: Action) -> bool {
     matches!(
         action,
-        Action::ShowOnlyMyBranches
-            | Action::ShowAllBranches
-            | Action::ShowAuthorPictures
-            | Action::HideAuthorPictures
+        Action::ShowAuthorPictures | Action::HideAuthorPictures
     )
 }
 
 /// The effect of an action that sets a preference of the window.
 fn choice_effect(action: Action) -> Effect {
     match action {
-        Action::ShowOnlyMyBranches => Effect::SetBranchScope(Scope::Mine),
         Action::ShowAuthorPictures => Effect::SetAuthorPictures(true),
-        Action::HideAuthorPictures => Effect::SetAuthorPictures(false),
-        _ => Effect::SetBranchScope(Scope::All),
+        _ => Effect::SetAuthorPictures(false),
     }
 }
 
@@ -1319,26 +1291,6 @@ impl AuthorPictures {
     #[must_use]
     pub fn from_on(on: bool) -> Self {
         if on { Self::Shown } else { Self::Hidden }
-    }
-}
-
-/// The rule of the two sidebar scope actions: each is refused when it would
-/// change nothing, and Mine is refused when Git has no email to match.
-fn scope_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
-    if !ctx.repo_open {
-        return Err("No repository is open.");
-    }
-    match action {
-        Action::ShowOnlyMyBranches if !ctx.user_email_known => {
-            Err("Git has no user.email to match branches against.")
-        }
-        Action::ShowOnlyMyBranches if ctx.branch_scope == Scope::Mine => {
-            Err("Already showing only your branches.")
-        }
-        Action::ShowAllBranches if ctx.branch_scope == Scope::All => {
-            Err("Already showing all branches.")
-        }
-        _ => Ok(()),
     }
 }
 
@@ -1380,7 +1332,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 94] = [
+    pub const ALL: [Action; 92] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1430,8 +1382,6 @@ impl Action {
         Action::UnlockWorktree,
         Action::PruneWorktrees,
         Action::ShowHistory,
-        Action::ShowOnlyMyBranches,
-        Action::ShowAllBranches,
         Action::ShowAuthorPictures,
         Action::HideAuthorPictures,
         Action::CopyCommitHash,
@@ -1700,7 +1650,6 @@ impl Action {
             Action::RevealFile | Action::ViewFile => reveal_rule(args, ctx),
             Action::MoveFileToBranch | Action::MoveFileToWorktree => move_rule(self, args, ctx),
             Action::DiscardFile | Action::DiscardAllChanges => discard_rule(self, args, ctx),
-            Action::ShowOnlyMyBranches | Action::ShowAllBranches => scope_rule(self, ctx),
             Action::ShowAuthorPictures if ctx.author_pictures == AuthorPictures::Shown => {
                 Err("Author pictures are already shown.")
             }
@@ -2614,9 +2563,7 @@ mod tests {
             hooks: crate::action_registry::HookCtx::default(),
             workflows: WorkflowCtx::default(),
             worktrees: &[],
-            branch_scope: Scope::All,
             author_pictures: AuthorPictures::Hidden,
-            user_email_known: false,
             remote_running: false,
             stashes: None,
             review: ReviewCtx::default(),
@@ -4042,60 +3989,6 @@ mod tests {
             Action::HideAuthorPictures
                 .enabled(&Args::None, &hidden)
                 .is_err()
-        );
-    }
-
-    #[test]
-    fn the_branch_scope_actions_switch_to_the_other_scope() {
-        let mine = Context {
-            branch_scope: Scope::Mine,
-            author_pictures: AuthorPictures::Hidden,
-            user_email_known: true,
-            ..ctx(&[], "")
-        };
-        assert_eq!(
-            Action::ShowAllBranches.plan(&Args::None, &mine),
-            Ok(Effect::SetBranchScope(Scope::All))
-        );
-        assert_eq!(
-            Action::ShowOnlyMyBranches.enabled(&Args::None, &mine),
-            Err("Already showing only your branches.")
-        );
-        let all = Context {
-            branch_scope: Scope::All,
-            author_pictures: AuthorPictures::Hidden,
-            user_email_known: true,
-            ..ctx(&[], "")
-        };
-        assert_eq!(
-            Action::ShowOnlyMyBranches.plan(&Args::None, &all),
-            Ok(Effect::SetBranchScope(Scope::Mine))
-        );
-        assert_eq!(
-            Action::ShowAllBranches.enabled(&Args::None, &all),
-            Err("Already showing all branches.")
-        );
-        assert_eq!(Action::ShowOnlyMyBranches.id(), "branch.show_mine");
-        assert_eq!(Action::ShowAllBranches.id(), "branch.show_all");
-    }
-
-    #[test]
-    fn show_only_my_branches_needs_a_known_email_and_a_repository() {
-        // Without an email, Mine would show every branch: the run is refused and says why.
-        let no_email = ctx(&[], "");
-        assert_eq!(
-            Action::ShowOnlyMyBranches.enabled(&Args::None, &no_email),
-            Err("Git has no user.email to match branches against.")
-        );
-        let closed = Context {
-            repo_open: false,
-            selected_file: None,
-            selected_thread: None,
-            ..ctx(&[], "")
-        };
-        assert_eq!(
-            Action::ShowAllBranches.enabled(&Args::None, &closed),
-            Err("No repository is open.")
         );
     }
 

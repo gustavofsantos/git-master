@@ -57,7 +57,7 @@ The sidebar lists the places in the repository and its branches and worktrees.
 | **Reflog** | The reference log. | |
 | **Local review** | Review comments on local changes. | Planned |
 
-Below the entries, the **Branches** section shows local and remote branches in a tree grouped by prefix, such as `feature/`. The current branch carries a **HEAD** badge. A filter above the tree shows **Mine** or **All** branches, with a search box and a count such as "3 of 12". **Mine** is the default when Git has a `user.email` set. Your choice is saved in `settings.json`. See [Branches](../guide/branches.md).
+Below the entries, the **Branches** section shows local and remote branches in a tree grouped by prefix, such as `feature/`. The current branch carries a **HEAD** badge. A search box above the tree narrows the list, with a count such as "3 of 12". Click the header of the **Workspace**, **Branches** or **Worktrees** section to fold it. See [Branches](../guide/branches.md).
 
 > **Planned.** The **By stack** view of the branch tree is not available yet. Only the **By name** view works.
 
