@@ -14,8 +14,10 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use gm_schema::threads::{CanonicalEvent, EditPhase};
+use gm_schema::threads::{CanonicalEvent, EditPhase, EntryKind};
 use sha2::{Digest, Sha256};
+
+use crate::threads::store::Cleaned;
 
 /// The most bytes one `read_session_log` call reads from a transcript.
 pub const MAX_LOG_READ: usize = 8 * 1024 * 1024;
@@ -129,6 +131,12 @@ pub trait HarnessAdapter: Send + Sync {
 
     /// Existing sessions for a repository's worktree, for import. May be empty.
     fn discover(&self, worktree: &Path) -> Vec<SessionLog>;
+
+    /// The cleaned text of a stored entry, for the schema 4 repair (D133): the harness markers
+    /// removed from a `user` or `tool_result` entry. `None` when there is no rule for the kind.
+    fn clean_stored_text(&self, _kind: EntryKind, _text: &str) -> Option<Cleaned> {
+        None
+    }
 }
 
 /// The known adapters. Empty until a harness is added: a harness is one line here.
@@ -146,6 +154,13 @@ pub fn known_ids() -> Vec<&'static str> {
 #[must_use]
 pub fn lookup(id: &str) -> Option<&'static dyn HarnessAdapter> {
     REGISTRY.iter().copied().find(|adapter| adapter.id() == id)
+}
+
+/// The cleaner the store runs over stored entries (D133): dispatches on the harness id to its
+/// adapter. An unknown harness has no rule, so its entries are left as they are.
+#[must_use]
+pub fn clean_stored(harness: &str, kind: EntryKind, text: &str) -> Option<Cleaned> {
+    lookup(harness)?.clean_stored_text(kind, text)
 }
 
 /// The `source_id` of an item the harness gives no id for: the first 24 hex digits of

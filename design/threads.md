@@ -127,6 +127,11 @@ The first adapter. The left column is the harness's contract and **unverified un
 | transcript `tool_use`, `tool_result` | `ToolCalled`, `ToolReturned` (reconciliation) |
 | transcript thinking block | dropped (Q31) |
 | transcript compaction or summary record | `Notice` |
+| transcript `user` text with `<command-name>` and `<command-args>` | `PromptSubmitted`, the command as typed, such as `/model opus` (D133) |
+| transcript `user` text with `<bash-input>` | `PromptSubmitted`, `! <command>` |
+| transcript `user` text with `<local-command-stdout>`, `<local-command-stderr>`, `<bash-stdout>`, `<bash-stderr>`, `<task-notification>` or an interruption | `Notice` |
+| transcript `user` text with `<local-command-caveat>`, `<system-reminder>` or `<user-prompt-submit-hook>` | dropped; the text around it is kept |
+| hook `PostToolUse` response, transcript `tool_result` | `ToolReturned` without its `<system-reminder>` blocks |
 | tool `Read` | `ToolKind::Read` |
 | tool `Edit`, `MultiEdit`, `NotebookEdit` | `ToolKind::Edit` |
 | tool `Write` | `ToolKind::Write` |
@@ -362,6 +367,8 @@ FTS5 over the conversation and edit paths. What is indexed (D132, schema 3): the
 **Fallback (D131).** When the strict search gives fewer than eight hits, the same filter runs two more stages over FTS5 `trigram` indexes (`entry_tri` over the conversation, `edit_tri` over paths; schema 3, see D132): substring matches, then close misspellings. The misspelling stage's trigram OR query only gathers candidates; a candidate is kept when every typed word of four or more characters has a word of its text at trigram Dice similarity 0.5 or more (`query::trigram_similarity`, padded trigrams, checked in Rust). Each stage appends only entries not yet listed and never exceeds the limit. Hits carry `kind` (`exact`, `substring`, `fuzzy`); the window marks the last two `approx.`. The trigram tables are purged with the word indexes on delete and scrub.
 
 **Migration (D132).** Schema 3 drops the word and trigram indexes over `entry` and rebuilds them over `entry_msg` from the rows that qualify. A database of fewer than 50,000 entries is vacuumed after the migration, which takes the dropped index pages out of the file. A larger one is not vacuumed; its pages are reclaimed by later checkpoints. The hook process (`ThreadStore::open_for_hook`) never runs this migration on a database of 50,000 entries or more: it reads through a read-only handle and spools its redacted batch, The next hook run, which finds the database migrated, stores the spool, as it does for a busy database.
+
+**Repair (D133).** Schema 4 runs the adapter's cleaner over every stored entry, inside the same migration transaction, through the `TextCleaner` the store is given (`harness::clean_stored`, dispatched by harness id). Entries that are harness markers only are deleted with their edits and the counters are recounted; a cleaned entry takes its new text; a notice also takes its new kind, which moves it out of the search index (the update triggers follow the kind). Only the first piece of a message is kept. A title derived from a prompt that changed is derived again from the first remaining prompt, unless the person edited it.
 
 ## Links to Git (D126)
 

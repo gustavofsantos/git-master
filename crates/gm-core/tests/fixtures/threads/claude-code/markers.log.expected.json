@@ -1,0 +1,100 @@
+[
+  {
+    "type": "prompt_submitted",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "5a7c0e1e-2f3b-4c8d-9e0f-aabbccddeeff",
+      "source_id": "m-01",
+      "at": 1735787100000
+    },
+    "text": "/model"
+  },
+  {
+    "type": "prompt_submitted",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "5a7c0e1e-2f3b-4c8d-9e0f-aabbccddeeff",
+      "source_id": "m-02",
+      "at": 1735787101000
+    },
+    "text": "/review main"
+  },
+  {
+    "type": "notice",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "5a7c0e1e-2f3b-4c8d-9e0f-aabbccddeeff",
+      "source_id": "m-03",
+      "at": 1735787102000
+    },
+    "text": "Model set to opus"
+  },
+  {
+    "type": "prompt_submitted",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "5a7c0e1e-2f3b-4c8d-9e0f-aabbccddeeff",
+      "source_id": "m-05",
+      "at": 1735787104000
+    },
+    "text": "! git status"
+  },
+  {
+    "type": "notice",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "5a7c0e1e-2f3b-4c8d-9e0f-aabbccddeeff",
+      "source_id": "m-06",
+      "at": 1735787105000
+    },
+    "text": "On branch main\nnothing to commit"
+  },
+  {
+    "type": "prompt_submitted",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "5a7c0e1e-2f3b-4c8d-9e0f-aabbccddeeff",
+      "source_id": "m-07",
+      "at": 1735787106000
+    },
+    "text": "Add a test for the retry path"
+  },
+  {
+    "type": "notice",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "5a7c0e1e-2f3b-4c8d-9e0f-aabbccddeeff",
+      "source_id": "m-08",
+      "at": 1735787107000
+    },
+    "text": "Request interrupted by user for tool use"
+  },
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "5a7c0e1e-2f3b-4c8d-9e0f-aabbccddeeff",
+      "source_id": "toolu_07Q",
+      "at": 1735787108000
+    },
+    "tool": "shell",
+    "native_tool": "Bash",
+    "args": {
+      "command": "cargo test"
+    },
+    "parent_call": null,
+    "edit": null
+  },
+  {
+    "type": "tool_returned",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "5a7c0e1e-2f3b-4c8d-9e0f-aabbccddeeff",
+      "source_id": "toolu_07Q:result",
+      "at": 1735787109000
+    },
+    "call_source_id": "toolu_07Q",
+    "text": "test result: ok",
+    "is_error": false
+  }
+]

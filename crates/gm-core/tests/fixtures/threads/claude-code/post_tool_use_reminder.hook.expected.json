@@ -1,0 +1,30 @@
+[
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "3f1d9c2a-7b4e-4a6d-8e5f-1c2b3a4d5e6f",
+      "source_id": "toolu_05R",
+      "at": 0
+    },
+    "tool": "read",
+    "native_tool": "Read",
+    "args": {
+      "file_path": "/home/dev/repo/src/fetch.rs"
+    },
+    "parent_call": null,
+    "edit": null
+  },
+  {
+    "type": "tool_returned",
+    "header": {
+      "harness": "claude-code",
+      "session_id": "3f1d9c2a-7b4e-4a6d-8e5f-1c2b3a4d5e6f",
+      "source_id": "toolu_05R:result",
+      "at": 0
+    },
+    "call_source_id": "toolu_05R",
+    "text": "fn fetch() {}",
+    "is_error": false
+  }
+]

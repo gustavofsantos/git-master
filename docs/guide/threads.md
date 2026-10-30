@@ -21,6 +21,8 @@ Threads are captured by the agent integration. Install it first: see [Agent inte
 
 A thread does not hold the model's reasoning, images or other attachments. An image shows as a placeholder with its type and size.
 
+Claude Code wraps some of what it writes in its own tags: slash commands, the output of commands and of bash runs, and context it gives the agent. GitMaster shows a slash command as you typed it (`/model opus`), shows command output and interruptions as notices, and leaves out the reminders the agent was given.
+
 A thread belongs to the repository where the agent ran. A session started in a linked worktree is stored with the repository, and every worktree sees it. A session that ran outside a Git repository is not captured.
 
 ## Open the Threads page

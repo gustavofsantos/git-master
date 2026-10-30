@@ -14,10 +14,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gm_schema::threads::{
-    CanonicalEvent, EditChange, EditIntent, EditPhase, EventHeader, SessionOrigin, ToolKind,
+    CanonicalEvent, EditChange, EditIntent, EditPhase, EntryKind, EventHeader, SessionOrigin,
+    ToolKind,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+
+use crate::threads::store::Cleaned;
 
 use super::{
     Capabilities, EditPhaseInfo, HarnessAdapter, HookInput, InstallContext, Integration, LogChunk,
@@ -76,6 +79,10 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         };
         discover_in(Path::new(&home), worktree)
     }
+
+    fn clean_stored_text(&self, kind: EntryKind, text: &str) -> Option<Cleaned> {
+        clean_stored(kind, text)
+    }
 }
 
 /// One hook invocation. Hook payloads carry no time, so every event gets `at` 0; the pipeline
@@ -118,7 +125,7 @@ fn parse_hook(payload: &[u8]) -> Result<HookInput, ParseError> {
             input.events.push(CanonicalEvent::ToolReturned {
                 header: header(&session, format!("{}:result", call.source_id), 0),
                 call_source_id: call.source_id.clone(),
-                text: response_text(response),
+                text: strip_reminders(&response_text(response)),
                 is_error: response_is_error(response),
             });
         }
@@ -482,9 +489,7 @@ fn transcript_line(line: &str, offset: u64, fallback_session: &str, out: &mut Lo
 
 fn user_message(record: &Record, content: Option<&Value>, out: &mut LogChunk) {
     match content {
-        Some(Value::String(text)) if !text.is_empty() => {
-            out.events.push(prompt(record, text.clone()));
-        }
+        Some(Value::String(text)) => user_pieces(record, text, out),
         Some(Value::Array(blocks)) => {
             let mut texts = Vec::new();
             for block in blocks {
@@ -496,17 +501,34 @@ fn user_message(record: &Record, content: Option<&Value>, out: &mut LogChunk) {
                 }
             }
             if !texts.is_empty() {
-                out.events.push(prompt(record, texts.join("\n")));
+                user_pieces(record, &texts.join("\n"), out);
             }
         }
         _ => {}
     }
 }
 
-fn prompt(record: &Record, text: String) -> CanonicalEvent {
-    CanonicalEvent::PromptSubmitted {
-        header: record.header(record.base.clone()),
-        text,
+/// The events of one user message: one per piece (D133). The first piece keeps the line's
+/// `source_id`, so an entry already stored from the line is not stored twice; the others get
+/// `<id>:<n>`.
+fn user_pieces(record: &Record, text: &str, out: &mut LogChunk) {
+    for (index, piece) in normalize_user_text(text).into_iter().enumerate() {
+        let source = if index == 0 {
+            record.base.clone()
+        } else {
+            format!("{}:{index}", record.base)
+        };
+        let header = record.header(source);
+        out.events.push(match piece.kind {
+            PieceKind::Prompt => CanonicalEvent::PromptSubmitted {
+                header,
+                text: piece.text,
+            },
+            PieceKind::Notice => CanonicalEvent::Notice {
+                header,
+                text: piece.text,
+            },
+        });
     }
 }
 
@@ -518,7 +540,7 @@ fn tool_result(record: &Record, block: &Value, out: &mut LogChunk) {
     };
     out.events.push(CanonicalEvent::ToolReturned {
         header: record.header(format!("{call}:result")),
-        text: block_text(block.get("content")),
+        text: strip_reminders(&block_text(block.get("content"))),
         is_error: flag(block, "is_error"),
         call_source_id: call,
     });
@@ -586,6 +608,342 @@ fn block_text(content: Option<&Value>) -> String {
 
 fn block_type(block: &Value) -> Option<&str> {
     block.get("type").and_then(Value::as_str)
+}
+
+/// What a piece of a user message is once Claude Code's markers are read (D133).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PieceKind {
+    /// Something the person typed or ran: a prompt.
+    Prompt,
+    /// Output or an event the harness reports: a notice.
+    Notice,
+}
+
+/// One piece of a user message, from `normalize_user_text`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Piece {
+    pub kind: PieceKind,
+    pub text: String,
+}
+
+/// Blocks the harness injects as context or hides. They are removed with their content,
+/// wherever they stand.
+const INJECTED: &[&str] = &[
+    "system-reminder",
+    "user-prompt-submit-hook",
+    "local-command-caveat",
+];
+
+/// Blocks read into pieces. `command-message` and `command-args` count only after a
+/// `command-name`; on their own they are dropped.
+const MARKERS: &[&str] = &[
+    "command-name",
+    "command-message",
+    "command-args",
+    "local-command-stdout",
+    "local-command-stderr",
+    "bash-input",
+    "bash-stdout",
+    "bash-stderr",
+    "task-notification",
+];
+
+const INTERRUPTED: &str = "[Request interrupted by user]";
+const INTERRUPTED_FOR_TOOL: &str = "[Request interrupted by user for tool use]";
+
+/// The pieces a user message stands for, in order (D133). Pure.
+///
+/// Claude Code wraps slash commands, their output, bash runs and injected context in its own
+/// tags. A command is one prompt (`/model opus`); command output, bash output and task
+/// notifications are notices; a bash command is a prompt (`! ls`); injected context is
+/// dropped, and the text around it is kept as a prompt. Text outside the markers is trimmed.
+/// An opening tag without its closing tag, or a tag of another name, is plain text. A message
+/// with no piece gives an empty list.
+#[must_use]
+pub fn normalize_user_text(text: &str) -> Vec<Piece> {
+    let cleaned = remove_blocks(text, INJECTED);
+    let trimmed = cleaned.trim();
+    let interrupted = match trimmed {
+        INTERRUPTED => Some("Request interrupted by user"),
+        INTERRUPTED_FOR_TOOL => Some("Request interrupted by user for tool use"),
+        _ if trimmed.is_empty() => return Vec::new(),
+        _ => None,
+    };
+    if let Some(notice) = interrupted {
+        return vec![Piece {
+            kind: PieceKind::Notice,
+            text: notice.to_owned(),
+        }];
+    }
+    read_markers(&cleaned)
+}
+
+/// `text` without its `system-reminder` blocks, for a tool result (D133). When a block was
+/// removed, the trailing whitespace of what is left is cut as well.
+#[must_use]
+pub fn strip_reminders(text: &str) -> String {
+    let stripped = remove_blocks(text, &["system-reminder"]);
+    if stripped == text {
+        text.to_owned()
+    } else {
+        stripped.trim_end().to_owned()
+    }
+}
+
+/// The cleaned form of a stored entry, for the schema 4 repair (D133). `None` for a kind this
+/// adapter has no rule for.
+fn clean_stored(kind: EntryKind, text: &str) -> Option<Cleaned> {
+    match kind {
+        EntryKind::User => Some(match normalize_user_text(text).into_iter().next() {
+            None => Cleaned::Drop,
+            Some(Piece {
+                kind: PieceKind::Prompt,
+                text,
+            }) => Cleaned::Text(text),
+            Some(Piece {
+                kind: PieceKind::Notice,
+                text,
+            }) => Cleaned::Notice(text),
+        }),
+        EntryKind::ToolResult => Some(Cleaned::Text(strip_reminders(text))),
+        _ => None,
+    }
+}
+
+/// Reads the marker blocks of text that has no injected block left.
+fn read_markers(text: &str) -> Vec<Piece> {
+    let mut pieces = Vec::new();
+    let mut prompt = String::new();
+    let mut bash_done = false;
+    let mut rest = text;
+    while let Some(at) = rest.find('<') {
+        prompt.push_str(&rest[..at]);
+        let here = &rest[at..];
+        let Some((name, body, len)) = closed_block(here, MARKERS) else {
+            prompt.push('<');
+            rest = &here[1..];
+            continue;
+        };
+        rest = &here[len..];
+        match name {
+            "command-name" => {
+                let (args, after) = command_tail(rest);
+                rest = after;
+                flush(&mut prompt, &mut pieces);
+                let command = body.trim();
+                if !command.is_empty() {
+                    let text = match args {
+                        Some(args) if !args.is_empty() => format!("{command} {args}"),
+                        _ => command.to_owned(),
+                    };
+                    pieces.push(Piece {
+                        kind: PieceKind::Prompt,
+                        text,
+                    });
+                }
+            }
+            "local-command-stdout" | "local-command-stderr" => {
+                flush(&mut prompt, &mut pieces);
+                push_notice(&mut pieces, strip_ansi(body).trim());
+            }
+            "bash-input" => {
+                flush(&mut prompt, &mut pieces);
+                let command = body.trim();
+                if !command.is_empty() {
+                    pieces.push(Piece {
+                        kind: PieceKind::Prompt,
+                        text: format!("! {command}"),
+                    });
+                }
+            }
+            "bash-stdout" | "bash-stderr" => {
+                // The output of every bash block of the message is one notice, at the first.
+                if !bash_done {
+                    bash_done = true;
+                    flush(&mut prompt, &mut pieces);
+                    push_notice(&mut pieces, &bash_output(text));
+                }
+            }
+            "task-notification" => {
+                flush(&mut prompt, &mut pieces);
+                push_notice(&mut pieces, &task_summary(body));
+            }
+            // A `command-message` or `command-args` outside a command: its text is not shown.
+            _ => {}
+        }
+    }
+    prompt.push_str(rest);
+    flush(&mut prompt, &mut pieces);
+    pieces
+}
+
+/// The optional `command-message` and `command-args` blocks after a `command-name`: the
+/// arguments, when there are some, and the text after the blocks.
+fn command_tail(text: &str) -> (Option<&str>, &str) {
+    let mut rest = text;
+    if let Some((_, _, len)) =
+        closed_block(rest.trim_start(), MARKERS).filter(|(name, _, _)| *name == "command-message")
+    {
+        rest = &rest.trim_start()[len..];
+    }
+    match closed_block(rest.trim_start(), MARKERS).filter(|(name, _, _)| *name == "command-args") {
+        Some((_, body, len)) => (Some(body.trim()), &rest.trim_start()[len..]),
+        None => (None, rest),
+    }
+}
+
+/// The cleaned output of every `bash-stdout` and `bash-stderr` block of `text`, joined by a
+/// newline. Blocks with no output are left out.
+fn bash_output(text: &str) -> String {
+    let mut parts = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find('<') {
+        let here = &rest[at..];
+        if let Some((name, body, len)) = closed_block(here, MARKERS) {
+            if matches!(name, "bash-stdout" | "bash-stderr") {
+                parts.push(strip_ansi(body));
+            }
+            rest = &here[len..];
+        } else {
+            rest = &here[1..];
+        }
+    }
+    parts
+        .iter()
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The summary of a task notification, when it has one, else its text without tags.
+fn task_summary(body: &str) -> String {
+    element(body, "summary")
+        .map_or_else(|| strip_tags(body), str::to_owned)
+        .trim()
+        .to_owned()
+}
+
+/// Ends the pending prompt text as a piece, when it has any after trimming.
+fn flush(prompt: &mut String, pieces: &mut Vec<Piece>) {
+    let text = prompt.trim();
+    if !text.is_empty() {
+        pieces.push(Piece {
+            kind: PieceKind::Prompt,
+            text: text.to_owned(),
+        });
+    }
+    prompt.clear();
+}
+
+fn push_notice(pieces: &mut Vec<Piece>, text: &str) {
+    if !text.is_empty() {
+        pieces.push(Piece {
+            kind: PieceKind::Notice,
+            text: text.to_owned(),
+        });
+    }
+}
+
+/// The first block of one of `names` at the start of `text`, when it is closed: its name, its
+/// body and its length in bytes. An opening tag without its closing tag is not a block.
+fn closed_block<'a>(
+    text: &'a str,
+    names: &[&'static str],
+) -> Option<(&'static str, &'a str, usize)> {
+    let inner = text.strip_prefix('<')?;
+    let name = names.iter().copied().find(|name| {
+        inner
+            .strip_prefix(*name)
+            .is_some_and(|rest| rest.starts_with('>'))
+    })?;
+    let start = name.len() + 2;
+    let close = format!("</{name}>");
+    let end = text[start..].find(close.as_str())?;
+    Some((name, &text[start..start + end], start + end + close.len()))
+}
+
+/// `text` with every closed block of `names` removed. Removal repeats until nothing is left,
+/// so a block that only shows once an inner one is gone is removed too.
+fn remove_blocks(text: &str, names: &[&'static str]) -> String {
+    let mut current = text.to_owned();
+    loop {
+        let mut out = String::with_capacity(current.len());
+        let mut removed = false;
+        let mut rest = current.as_str();
+        while let Some(at) = rest.find('<') {
+            out.push_str(&rest[..at]);
+            let here = &rest[at..];
+            if let Some((_, _, len)) = closed_block(here, names) {
+                rest = &here[len..];
+                removed = true;
+            } else {
+                out.push('<');
+                rest = &here[1..];
+            }
+        }
+        out.push_str(rest);
+        if !removed {
+            return out;
+        }
+        current = out;
+    }
+}
+
+/// The body of the first `<name>` element in `text`.
+fn element<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let open = format!("<{name}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(format!("</{name}>").as_str())?;
+    Some(&text[start..start + end])
+}
+
+/// `text` without its tags: `<name>`, `</name>` with a name of letters, digits, `-` or `_`.
+/// Any other `<` is kept.
+fn strip_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('<') {
+        out.push_str(&rest[..at]);
+        let here = &rest[at + 1..];
+        let name_part = here.strip_prefix('/').unwrap_or(here);
+        let name_len = name_part
+            .bytes()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            .count();
+        let is_tag = name_len > 0
+            && name_part.as_bytes()[0].is_ascii_alphabetic()
+            && name_part[name_len..].starts_with('>');
+        if is_tag {
+            rest = &name_part[name_len + 1..];
+        } else {
+            out.push('<');
+            rest = here;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `text` without ANSI escape sequences: a CSI sequence, or a two-character escape.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.next() == Some('[') {
+            // A CSI sequence ends at its final byte, `@` through `~`.
+            for end in chars.by_ref() {
+                if ('@'..='~').contains(&end) {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 fn header(session: &str, source_id: String, at: i64) -> EventHeader {
@@ -745,6 +1103,8 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    use proptest::prelude::*;
 
     use super::*;
     use crate::threads::harness::conformance;
@@ -940,5 +1300,327 @@ mod tests {
         assert_eq!(logs[0].path, project.join("a.jsonl"));
 
         assert!(discover_in(home.path(), Path::new("/elsewhere")).is_empty());
+    }
+
+    fn prompt_piece(text: &str) -> Piece {
+        Piece {
+            kind: PieceKind::Prompt,
+            text: text.to_owned(),
+        }
+    }
+
+    fn notice_piece(text: &str) -> Piece {
+        Piece {
+            kind: PieceKind::Notice,
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_slash_command_is_one_prompt_with_its_arguments() {
+        assert_eq!(
+            normalize_user_text(
+                "<command-name>/model</command-name>\n   <command-message>model</command-message>\n   <command-args></command-args>"
+            ),
+            vec![prompt_piece("/model")]
+        );
+        assert_eq!(
+            normalize_user_text(
+                "<command-name>/review</command-name>\n<command-message>review</command-message>\n<command-args>  main branch \n</command-args>"
+            ),
+            vec![prompt_piece("/review main branch")]
+        );
+        assert_eq!(
+            normalize_user_text("<command-name>\n  /clear\n</command-name>"),
+            vec![prompt_piece("/clear")]
+        );
+        assert_eq!(
+            normalize_user_text(
+                "<command-name>/init</command-name><command-args>\n</command-args>"
+            ),
+            vec![prompt_piece("/init")]
+        );
+    }
+
+    #[test]
+    fn command_output_is_a_notice_without_ansi_or_padding() {
+        assert_eq!(
+            normalize_user_text(
+                "<local-command-stdout>\u{1b}[32mModel set to opus\u{1b}[0m\n</local-command-stdout>"
+            ),
+            vec![notice_piece("Model set to opus")]
+        );
+        assert_eq!(
+            normalize_user_text("<local-command-stderr>  boom  </local-command-stderr>"),
+            vec![notice_piece("boom")]
+        );
+        assert!(normalize_user_text("<local-command-stdout>\n</local-command-stdout>").is_empty());
+    }
+
+    #[test]
+    fn the_caveat_is_dropped_and_leaves_no_piece() {
+        assert!(
+            normalize_user_text(
+                "<local-command-caveat>Caveat: generated by a local command</local-command-caveat>"
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_bash_command_is_a_prompt_and_its_output_one_notice() {
+        assert_eq!(
+            normalize_user_text("<bash-input>ls -la</bash-input>"),
+            vec![prompt_piece("! ls -la")]
+        );
+        assert_eq!(
+            normalize_user_text(
+                "<bash-stdout>a.txt\n</bash-stdout>\n<bash-stderr>\u{1b}[31mwarn\u{1b}[0m</bash-stderr>"
+            ),
+            vec![notice_piece("a.txt\nwarn")]
+        );
+        assert_eq!(
+            normalize_user_text(
+                "<bash-input>ls</bash-input>\n<bash-stdout>a</bash-stdout>\n<bash-stderr></bash-stderr>"
+            ),
+            vec![prompt_piece("! ls"), notice_piece("a")]
+        );
+        assert!(normalize_user_text("<bash-stdout> </bash-stdout>").is_empty());
+    }
+
+    #[test]
+    fn injected_context_is_removed_and_the_text_around_it_joins() {
+        assert_eq!(
+            normalize_user_text("fix the parser\n<system-reminder>Be careful.</system-reminder>"),
+            vec![prompt_piece("fix the parser")]
+        );
+        assert_eq!(
+            normalize_user_text(
+                "<system-reminder>a</system-reminder>hello <system-reminder>b</system-reminder>world"
+            ),
+            vec![prompt_piece("hello world")]
+        );
+        assert!(normalize_user_text("<system-reminder>only this</system-reminder>").is_empty());
+        assert_eq!(
+            normalize_user_text("<user-prompt-submit-hook>x</user-prompt-submit-hook>ok"),
+            vec![prompt_piece("ok")]
+        );
+    }
+
+    #[test]
+    fn a_task_notification_is_its_summary_or_its_text() {
+        assert_eq!(
+            normalize_user_text(
+                "<task-notification><task-id>t1</task-id><summary>Build finished</summary></task-notification>"
+            ),
+            vec![notice_piece("Build finished")]
+        );
+        assert_eq!(
+            normalize_user_text("<task-notification>  done <b>now</b> </task-notification>"),
+            vec![notice_piece("done now")]
+        );
+        assert!(
+            normalize_user_text("<task-notification><summary> </summary></task-notification>")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_interruption_is_a_notice() {
+        assert_eq!(
+            normalize_user_text("[Request interrupted by user]"),
+            vec![notice_piece("Request interrupted by user")]
+        );
+        assert_eq!(
+            normalize_user_text(" [Request interrupted by user for tool use]\n"),
+            vec![notice_piece("Request interrupted by user for tool use")]
+        );
+    }
+
+    #[test]
+    fn unclosed_and_unknown_tags_are_plain_text() {
+        assert_eq!(
+            normalize_user_text("<command-name>/x"),
+            vec![prompt_piece("<command-name>/x")]
+        );
+        assert_eq!(
+            normalize_user_text("use <b>bold</b> here"),
+            vec![prompt_piece("use <b>bold</b> here")]
+        );
+        assert_eq!(
+            normalize_user_text("a <bash-input>ls"),
+            vec![prompt_piece("a <bash-input>ls")]
+        );
+        assert_eq!(
+            normalize_user_text("use Vec<u8> here"),
+            vec![prompt_piece("use Vec<u8> here")]
+        );
+    }
+
+    #[test]
+    fn a_stray_command_message_is_dropped() {
+        assert!(normalize_user_text("<command-message>model</command-message>").is_empty());
+    }
+
+    #[test]
+    fn pieces_keep_their_order() {
+        assert_eq!(
+            normalize_user_text("first\n<command-name>/a</command-name>\nsecond"),
+            vec![
+                prompt_piece("first"),
+                prompt_piece("/a"),
+                prompt_piece("second")
+            ]
+        );
+        assert_eq!(
+            normalize_user_text("<local-command-stdout>out</local-command-stdout>tail"),
+            vec![notice_piece("out"), prompt_piece("tail")]
+        );
+    }
+
+    #[test]
+    fn plain_text_is_one_trimmed_prompt_and_blank_text_is_nothing() {
+        assert_eq!(
+            normalize_user_text("  add retry \n  with backoff\n"),
+            vec![prompt_piece("add retry \n  with backoff")]
+        );
+        assert!(normalize_user_text(" \n\t ").is_empty());
+        assert!(normalize_user_text("").is_empty());
+    }
+
+    #[test]
+    fn reminders_are_stripped_from_tool_results_and_nothing_else_changes() {
+        assert_eq!(
+            strip_reminders("out\n<system-reminder>x</system-reminder>"),
+            "out"
+        );
+        assert_eq!(strip_reminders("  keep  \n"), "  keep  \n");
+        assert_eq!(
+            strip_reminders(
+                "<system-reminder>a</system-reminder>one <system-reminder>b</system-reminder>two"
+            ),
+            "one two"
+        );
+        assert_eq!(
+            strip_reminders("open <system-reminder> never closed"),
+            "open <system-reminder> never closed"
+        );
+    }
+
+    #[test]
+    fn a_stored_entry_is_cleaned_to_its_first_piece() {
+        let user = |text: &str| clean_stored(EntryKind::User, text);
+        assert_eq!(
+            user("<local-command-caveat>c</local-command-caveat>"),
+            Some(Cleaned::Drop)
+        );
+        assert_eq!(
+            user("<command-name>/model</command-name><command-args>opus</command-args>"),
+            Some(Cleaned::Text("/model opus".to_owned()))
+        );
+        assert_eq!(
+            user("<local-command-stdout>ok</local-command-stdout>"),
+            Some(Cleaned::Notice("ok".to_owned()))
+        );
+        assert_eq!(
+            user("[Request interrupted by user]"),
+            Some(Cleaned::Notice("Request interrupted by user".to_owned()))
+        );
+        assert_eq!(
+            user("fix it <system-reminder>x</system-reminder>"),
+            Some(Cleaned::Text("fix it".to_owned()))
+        );
+        assert_eq!(
+            user("<bash-input>ls</bash-input>\n<bash-stdout>a</bash-stdout>"),
+            Some(Cleaned::Text("! ls".to_owned()))
+        );
+        assert_eq!(
+            clean_stored(
+                EntryKind::ToolResult,
+                "out\n<system-reminder>x</system-reminder>"
+            ),
+            Some(Cleaned::Text("out".to_owned()))
+        );
+        assert_eq!(
+            clean_stored(EntryKind::Assistant, "<system-reminder>x</system-reminder>"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_user_line_with_two_pieces_keeps_its_id_on_the_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("s9.jsonl");
+        let line = r#"{"type":"user","uuid":"u9","sessionId":"s9","timestamp":"2025-01-02T03:04:05Z","message":{"role":"user","content":"<local-command-stdout>ok</local-command-stdout>\n<bash-input>ls</bash-input>"}}"#;
+        fs::write(&path, format!("{line}\n")).expect("write");
+        let chunk = read_transcript(&path, 0).expect("read");
+        let ids: Vec<&str> = chunk
+            .events
+            .iter()
+            .map(|event| event.header().source_id.as_str())
+            .collect();
+        assert_eq!(ids, ["u9", "u9:1"]);
+        assert!(matches!(chunk.events[0], CanonicalEvent::Notice { .. }));
+        assert!(matches!(
+            chunk.events[1],
+            CanonicalEvent::PromptSubmitted { .. }
+        ));
+    }
+
+    /// Plain text, with no `<`.
+    const PLAIN: &str = "[a-zA-Z0-9 .,!?\n-]{0,20}";
+
+    /// A message of up to six fragments, each plain text or a closed block of any known name.
+    /// No block nests in another, so every marker is well formed.
+    fn message() -> impl Strategy<Value = String> {
+        let names: Vec<&'static str> = MARKERS.iter().chain(INJECTED).copied().collect();
+        let fragment = prop_oneof![
+            PLAIN.prop_map(|text: String| text),
+            (proptest::sample::select(names), PLAIN)
+                .prop_map(|(name, body)| format!("<{name}>{body}</{name}>")),
+        ];
+        proptest::collection::vec(fragment, 0..6).prop_map(|parts| parts.concat())
+    }
+
+    proptest! {
+        #[test]
+        fn normalizing_any_text_does_not_panic(text in any::<String>()) {
+            let _ = normalize_user_text(&text);
+            let _ = strip_reminders(&text);
+        }
+
+        #[test]
+        fn no_piece_keeps_a_marker_from_a_well_formed_message(text in message()) {
+            for piece in normalize_user_text(&text) {
+                prop_assert!(!piece.text.contains('<'), "{piece:?}");
+            }
+            prop_assert!(!strip_reminders(&text).contains("<system-reminder>"));
+        }
+
+        #[test]
+        fn a_prompt_piece_normalizes_to_itself(text in message()) {
+            for piece in normalize_user_text(&text) {
+                if piece.kind == PieceKind::Prompt {
+                    prop_assert_eq!(normalize_user_text(&piece.text), vec![piece.clone()]);
+                }
+            }
+        }
+
+        #[test]
+        fn text_without_a_marker_is_one_trimmed_prompt(text in "[^<]{0,80}") {
+            let trimmed = text.trim();
+            let expected = if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                vec![prompt_piece(trimmed)]
+            };
+            prop_assert_eq!(normalize_user_text(&text), expected);
+        }
+
+        #[test]
+        fn stripping_reminders_is_idempotent(text in message()) {
+            let once = strip_reminders(&text);
+            prop_assert_eq!(strip_reminders(&once), once);
+        }
     }
 }

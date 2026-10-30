@@ -17,13 +17,31 @@ use rusqlite::{
 };
 use sha2::{Digest, Sha256};
 
+use super::harness;
 use super::query::{
     MIN_FUZZY_CHARS, TrigramQuery, build_fts_query, build_trigram_queries, dice, is_word_char,
     trigram_set,
 };
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
+/// The index in `MIGRATIONS` of the schema that repairs stored entries with the cleaner (D133).
+const REPAIR_MIGRATION: usize = 3;
+
+/// What the cleaner makes of a stored entry (D133).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Cleaned {
+    /// The entry is harness markers only: it is deleted with its edits.
+    Drop,
+    /// The entry keeps this text.
+    Text(String),
+    /// The entry becomes a notice with this text.
+    Notice(String),
+}
+
+/// Cleans the text of a stored entry of a harness, or says it has no rule for it. The store
+/// takes it as a function, so the store never knows a harness's markers (D133).
+pub type TextCleaner = fn(harness: &str, kind: EntryKind, text: &str) -> Option<Cleaned>;
 
 /// Hits below which a search runs the next stage (D131). A store can be built with another
 /// value for tests.
@@ -231,6 +249,27 @@ INSERT INTO entry_fts (entry_fts) VALUES ('rebuild');
 INSERT INTO entry_tri (entry_tri) VALUES ('rebuild');
 INSERT INTO entry_fts (entry_fts) VALUES ('optimize');
 INSERT INTO entry_tri (entry_tri) VALUES ('optimize');
+";
+
+/// Schema 4 (D133): the update trigger of each index follows the kind as well as the text. A
+/// row that becomes a notice leaves the index, and a notice that becomes a prompt or a reply
+/// enters it. Each trigger removes the old row when the old kind was indexed and adds the
+/// new one when the new kind is indexed.
+const SCHEMA_V4: &str = "
+DROP TRIGGER entry_fts_au;
+CREATE TRIGGER entry_fts_au AFTER UPDATE OF text, kind ON entry BEGIN
+    INSERT INTO entry_fts (entry_fts, rowid, text)
+        SELECT 'delete', old.id, old.text WHERE old.kind IN ('user', 'assistant');
+    INSERT INTO entry_fts (rowid, text)
+        SELECT new.id, new.text WHERE new.kind IN ('user', 'assistant');
+END;
+DROP TRIGGER entry_tri_au;
+CREATE TRIGGER entry_tri_au AFTER UPDATE OF text, kind ON entry BEGIN
+    INSERT INTO entry_tri (entry_tri, rowid, text)
+        SELECT 'delete', old.id, old.text WHERE old.kind IN ('user', 'assistant');
+    INSERT INTO entry_tri (rowid, text)
+        SELECT new.id, new.text WHERE new.kind IN ('user', 'assistant');
+END;
 ";
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
@@ -447,6 +486,11 @@ impl ThreadStore {
     /// Opens (creating `gitmaster/threads.db` under `git_common_dir` when missing) and migrates
     /// the store. The file and its WAL and shared-memory files are private (mode `0600`).
     pub fn open(git_common_dir: &Path) -> Result<Self, StoreError> {
+        Self::open_with(git_common_dir, harness::clean_stored)
+    }
+
+    /// `open` with the cleaner the schema 4 repair runs (D133).
+    fn open_with(git_common_dir: &Path, clean: TextCleaner) -> Result<Self, StoreError> {
         let dir = git_common_dir.join("gitmaster");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("threads.db");
@@ -457,7 +501,7 @@ impl ThreadStore {
         ] {
             create_private(&file)?;
         }
-        let conn = open_connection(&path)?;
+        let conn = open_connection(&path, clean)?;
         Ok(Self {
             conn,
             entry_limit: DEFAULT_ENTRY_LIMIT,
@@ -488,7 +532,7 @@ impl ThreadStore {
     /// A store that lives only in memory (tests).
     pub fn open_memory() -> Result<Self, StoreError> {
         let mut conn = Connection::open_in_memory()?;
-        prepare(&mut conn)?;
+        prepare(&mut conn, harness::clean_stored)?;
         Ok(Self {
             conn,
             entry_limit: DEFAULT_ENTRY_LIMIT,
@@ -1129,11 +1173,11 @@ impl ThreadStore {
 /// Opens the file and prepares it. SQLite can report busy at once, without waiting, while
 /// another process is creating the WAL or the schema, so the attempt is repeated for a
 /// short, bounded time.
-fn open_connection(path: &Path) -> Result<Connection, StoreError> {
+fn open_connection(path: &Path, clean: TextCleaner) -> Result<Connection, StoreError> {
     let mut attempts = 0_u32;
     loop {
         let mut conn = Connection::open(path)?;
-        match prepare(&mut conn) {
+        match prepare(&mut conn, clean) {
             Ok(()) => return Ok(conn),
             Err(StoreError::Sqlite(error)) if is_busy(&error) && attempts < OPEN_ATTEMPTS => {
                 attempts += 1;
@@ -1154,18 +1198,19 @@ fn is_busy(error: &rusqlite::Error) -> bool {
 }
 
 /// Opens the connection, sets the pragmas and migrates.
-fn prepare(conn: &mut Connection) -> Result<(), StoreError> {
+fn prepare(conn: &mut Connection, clean: TextCleaner) -> Result<(), StoreError> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "secure_delete", true)?;
-    migrate(conn)
+    migrate(conn, clean)
 }
 
 /// Runs the migrations the database has not seen, in one immediate transaction so two
-/// processes opening a new file do not both create the schema.
-fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
+/// processes opening a new file do not both create the schema. The repair of stored entries
+/// runs inside the transaction, right after its schema (D133).
+fn migrate(conn: &mut Connection, clean: TextCleaner) -> Result<(), StoreError> {
     let tx = begin(conn)?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let latest = i64::try_from(MIGRATIONS.len()).unwrap_or(i64::MAX);
@@ -1176,8 +1221,11 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     if from == MIGRATIONS.len() {
         return Ok(());
     }
-    for sql in &MIGRATIONS[from..] {
+    for (index, sql) in MIGRATIONS.iter().enumerate().skip(from) {
         tx.execute_batch(sql)?;
+        if index == REPAIR_MIGRATION {
+            repair_entries(&tx, clean)?;
+        }
     }
     tx.pragma_update(None, "user_version", latest)?;
     tx.commit()?;
@@ -1972,6 +2020,145 @@ fn rewrite_patches(
     }
 }
 
+/// A thread whose title follows its prompts, as the repair found it, before the cleaner ran.
+struct TitleCheck {
+    thread: i64,
+    harness: String,
+    title: String,
+    /// The text of the thread's first prompt before the repair.
+    first: Option<String>,
+}
+
+fn title_checks(tx: &Transaction<'_>) -> Result<Vec<TitleCheck>, StoreError> {
+    let mut statement = tx.prepare(
+        "SELECT t.id, t.harness, t.title,
+            (SELECT e.text FROM entry e WHERE e.thread_id = t.id AND e.kind = 'user'
+             ORDER BY e.seq LIMIT 1)
+         FROM thread t WHERE t.title_edited = 0",
+    )?;
+    let checks = statement
+        .query_map([], |row| {
+            Ok(TitleCheck {
+                thread: row.get(0)?,
+                harness: row.get(1)?,
+                title: row.get(2)?,
+                first: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(checks)
+}
+
+/// The text of a thread's first prompt now, if it has one.
+fn first_prompt(tx: &Transaction<'_>, thread: i64) -> Result<Option<String>, StoreError> {
+    Ok(tx
+        .query_row(
+            "SELECT text FROM entry WHERE thread_id = ?1 AND kind = 'user'
+             ORDER BY seq LIMIT 1",
+            params![thread],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Whether the cleaner changes `text` as a prompt, so it holds a harness marker.
+fn marked(clean: TextCleaner, harness: &str, text: &str) -> bool {
+    match clean(harness, EntryKind::User, text) {
+        None => false,
+        Some(Cleaned::Text(cleaned)) => cleaned != text,
+        Some(Cleaned::Drop | Cleaned::Notice(_)) => true,
+    }
+}
+
+/// The schema 4 repair (D133). Every stored entry goes through the cleaner. An entry that is
+/// harness markers only is deleted with its edits; a cleaned entry takes its new text, and a
+/// notice also its new kind, which moves it out of the search index. A thread whose title came
+/// from a prompt that changed takes the title of its first remaining prompt, or the untitled
+/// name. Titles the person edited are left alone.
+fn repair_entries(tx: &Transaction<'_>, clean: TextCleaner) -> Result<(), StoreError> {
+    let titles = title_checks(tx)?;
+    let mut changed = 0_u32;
+    let mut dropped = 0_u32;
+    let mut after = 0_i64;
+    loop {
+        let rows: Vec<(i64, String, String, String)> = {
+            let mut statement = tx.prepare_cached(
+                "SELECT e.id, t.harness, e.kind, e.text
+                 FROM entry e JOIN thread t ON t.id = e.thread_id
+                 WHERE e.id > ?1 ORDER BY e.id LIMIT ?2",
+            )?;
+            statement
+                .query_map(params![after, REWRITE_PAGE], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let Some(last) = rows.last().map(|row| row.0) else {
+            break;
+        };
+        after = last;
+        for (id, harness, kind, text) in rows {
+            let Some(kind) = parse_kind(&kind) else {
+                continue;
+            };
+            match clean(&harness, kind, &text) {
+                None => {}
+                Some(Cleaned::Text(new)) => {
+                    if new != text {
+                        tx.execute("UPDATE entry SET text = ?2 WHERE id = ?1", params![id, new])?;
+                        changed += 1;
+                    }
+                }
+                Some(Cleaned::Drop) => {
+                    tx.execute("DELETE FROM entry WHERE id = ?1", params![id])?;
+                    dropped += 1;
+                }
+                Some(Cleaned::Notice(notice)) => {
+                    tx.execute(
+                        "UPDATE entry SET text = ?2, kind = ?3 WHERE id = ?1",
+                        params![id, notice, kind_text(EntryKind::Notice)],
+                    )?;
+                    changed += 1;
+                }
+            }
+        }
+    }
+    if dropped > 0 {
+        // Counters are recounted, as `delete_entry` does for one entry.
+        tx.execute_batch(
+            "UPDATE thread SET
+                entry_count = (SELECT COUNT(*) FROM entry WHERE entry.thread_id = thread.id),
+                edit_count = (SELECT COUNT(*) FROM edit WHERE edit.thread_id = thread.id)",
+        )?;
+    }
+    for check in titles {
+        let derived = check.first.as_deref().and_then(derive_title);
+        let affected = derived.as_deref() == Some(check.title.as_str())
+            || marked(clean, &check.harness, &check.title)
+            || check
+                .first
+                .as_deref()
+                .is_some_and(|text| marked(clean, &check.harness, text));
+        if !affected {
+            continue;
+        }
+        let title = first_prompt(tx, check.thread)?
+            .as_deref()
+            .and_then(derive_title)
+            .unwrap_or_else(|| UNTITLED.to_owned());
+        if title != check.title {
+            tx.execute(
+                "UPDATE thread SET title = ?2 WHERE id = ?1",
+                params![check.thread, title],
+            )?;
+        }
+    }
+    if changed + dropped > 0 {
+        purge_search_index(tx)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2076,7 +2263,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         assert_eq!(store.total_threads().expect("count"), 1);
     }
 
@@ -3258,7 +3445,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         let hits = store
             .search("ndex", &ThreadFilter::default(), 10)
             .expect("search");
@@ -3744,11 +3931,11 @@ mod tests {
     #[test]
     fn a_legacy_database_keeps_only_the_conversation_in_its_indexes() {
         // Versions 1 and 2 index tool rows too; the migration to 3 drops them from the index.
-        for versions in [1, 2] {
+        for versions in [1, 2, 3] {
             let dir = tempfile::tempdir().expect("tempdir");
             legacy_database(dir.path(), versions, EVERY_KIND_ROWS);
             let store = ThreadStore::open(dir.path()).expect("migrate");
-            assert_eq!(version_of(dir.path()), 3, "from version {versions}");
+            assert_eq!(version_of(dir.path()), 4, "from version {versions}");
             assert_eq!(index_rows(&store), (2, 2), "from version {versions}");
             assert_eq!(stage_hits(&store, "backoff", "ckof", "bakcoff"), [1, 1, 1]);
             assert_eq!(
@@ -3778,6 +3965,155 @@ mod tests {
         }
     }
 
+    /// Rows of a version 3 database holding Claude Code markers of every kind: a slash command
+    /// with its output, a bash run, injected reminders, an interruption, a marker-only first
+    /// prompt with an edit, and a title the person edited.
+    const MARKER_ROWS: &str = "
+        INSERT INTO thread (uid, harness, session_id, worktree, title, started_at, last_event_at)
+        VALUES ('m1', 'claude-code', 'm1', '/repo', '<command-name>/model</command-name>', 1, 9),
+               ('m2', 'claude-code', 'm2', '/repo', '<local-command-caveat>c</local-command-caveat>', 1, 9),
+               ('m3', 'claude-code', 'm3', '/repo', 'Renamed by hand', 1, 9);
+        UPDATE thread SET title_edited = 1 WHERE uid = 'm3';
+        UPDATE thread SET entry_count = 8, edit_count = 1 WHERE uid = 'm1';
+        UPDATE thread SET entry_count = 2 WHERE uid = 'm2';
+        INSERT INTO entry (thread_id, seq, turn, kind, source_id, tool, text, at) VALUES
+            (1, 0, 1, 'user', 'u1', NULL, '<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>', 1),
+            (1, 1, 1, 'assistant', 'a1', NULL, 'Switched to opus.', 2),
+            (1, 2, 2, 'user', 'u2', NULL, '<local-command-stdout>\u{1b}[32mSet model\u{1b}[0m</local-command-stdout>', 3),
+            (1, 3, 2, 'user', 'u3', NULL, '<bash-input>ls -la</bash-input>', 4),
+            (1, 4, 2, 'tool_result', 'r1', NULL, 'gizmo output\n<system-reminder>secretreminder</system-reminder>', 5),
+            (1, 5, 2, 'user', 'u4', NULL, 'Please check <system-reminder>secretreminder</system-reminder>the parser', 6),
+            (1, 6, 3, 'user', 'u5', NULL, '[Request interrupted by user]', 7),
+            (1, 7, 4, 'user', 'u6', NULL, '<local-command-caveat>Caveat: generated</local-command-caveat>', 8),
+            (2, 0, 1, 'user', 'c1', NULL, '<local-command-caveat>c</local-command-caveat>', 1),
+            (2, 1, 2, 'user', 'c2', NULL, 'fix the second thing', 2),
+            (3, 0, 1, 'user', 'e1', NULL, '<command-name>/x</command-name>', 1);
+        INSERT INTO edit (thread_id, entry_id, path, change, patch, added, removed, at)
+        VALUES (1, (SELECT id FROM entry WHERE source_id = 'u6'), 'src/x.rs', 'modify', '', 0, 0, 8);";
+
+    /// The kinds and texts of a thread, in order.
+    fn entries_of(store: &ThreadStore, uid: &str) -> Vec<(&'static str, String)> {
+        store
+            .read_thread(uid, 0, 50)
+            .expect("read")
+            .entries
+            .into_iter()
+            .map(|entry| (kind_text(entry.kind), entry.text))
+            .collect()
+    }
+
+    /// Both index tables pass their own integrity check, which fails on a stale row.
+    fn integrity_checks_pass(store: &ThreadStore) {
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO entry_fts (entry_fts) VALUES ('integrity-check');
+                 INSERT INTO entry_tri (entry_tri) VALUES ('integrity-check');
+                 INSERT INTO edit_fts (edit_fts) VALUES ('integrity-check');
+                 INSERT INTO edit_tri (edit_tri) VALUES ('integrity-check');",
+            )
+            .expect("the index passes its integrity check");
+    }
+
+    #[test]
+    fn a_version_three_database_is_repaired_by_the_cleaner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        legacy_database(dir.path(), 3, MARKER_ROWS);
+        let store = ThreadStore::open(dir.path()).expect("migrate");
+        assert_eq!(version_of(dir.path()), 4);
+
+        // Slash command as typed, output and bash as notices and a bash prompt, reminders
+        // gone, the interruption as a notice; the marker-only prompt is deleted.
+        assert_eq!(
+            entries_of(&store, "m1"),
+            vec![
+                ("user", "/model".to_owned()),
+                ("assistant", "Switched to opus.".to_owned()),
+                ("notice", "Set model".to_owned()),
+                ("user", "! ls -la".to_owned()),
+                ("tool_result", "gizmo output".to_owned()),
+                ("user", "Please check the parser".to_owned()),
+                ("notice", "Request interrupted by user".to_owned()),
+            ]
+        );
+        assert_eq!(
+            entries_of(&store, "m2"),
+            vec![("user", "fix the second thing".to_owned())]
+        );
+        assert_eq!(entries_of(&store, "m3"), vec![("user", "/x".to_owned())]);
+
+        // Counters are recounted where an entry and its edit were deleted.
+        let m1 = store.read_thread("m1", 0, 50).expect("read").summary;
+        assert_eq!((m1.entry_count, m1.edit_count), (7, 0));
+        assert_eq!(m1.title, "/model");
+        let m2 = store.read_thread("m2", 0, 50).expect("read").summary;
+        assert_eq!((m2.entry_count, m2.edit_count), (1, 0));
+        assert_eq!(m2.title, "fix the second thing");
+        // A title the person edited is not touched.
+        let m3 = store.read_thread("m3", 0, 50).expect("read").summary;
+        assert_eq!(m3.title, "Renamed by hand");
+
+        // The reminder text was in the index before the repair and is not after it. Only
+        // the prompts and replies are indexed: the notices and tool results are not.
+        let found = |query: &str| {
+            store
+                .search(query, &ThreadFilter::default(), 10)
+                .expect("search")
+        };
+        assert_eq!(
+            stage_hits(&store, "secretreminder", "ecretremind", "secretremider"),
+            [0, 0, 0]
+        );
+        assert_eq!(uids_of(&found("/model")), ["m1"]);
+        assert_eq!(uids_of(&found("parser")), ["m1"]);
+        assert!(found("interrupted").is_empty());
+        assert_eq!(index_rows(&store), (6, 6));
+        let edits: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM edit", [], |row| row.get(0))
+            .expect("edits");
+        assert_eq!(edits, 0);
+        integrity_checks_pass(&store);
+    }
+
+    #[test]
+    fn a_row_that_changes_kind_leaves_and_enters_the_index() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "k",
+                1,
+                vec![new_entry("u", EntryKind::User, "the quokka sleeps", 1)],
+            ))
+            .expect("apply");
+        let count = |store: &ThreadStore, word: &str| {
+            store
+                .search(word, &ThreadFilter::default(), 10)
+                .expect("search")
+                .len()
+        };
+        assert_eq!(count(&store, "quokka"), 1);
+
+        store
+            .conn
+            .execute_batch("UPDATE entry SET kind = 'notice' WHERE source_id = 'u'")
+            .expect("to a notice");
+        assert_eq!(count(&store, "quokka"), 0);
+        assert_eq!(index_rows(&store), (0, 0));
+        integrity_checks_pass(&store);
+
+        store
+            .conn
+            .execute_batch(
+                "UPDATE entry SET kind = 'user', text = 'the quokka wakes' WHERE source_id = 'u'",
+            )
+            .expect("back to a prompt");
+        assert_eq!(count(&store, "quokka"), 1);
+        assert_eq!(count(&store, "wakes"), 1);
+        assert_eq!(index_rows(&store), (1, 1));
+        integrity_checks_pass(&store);
+    }
+
     #[test]
     fn the_hook_defers_a_large_migration_and_runs_a_small_one() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3801,7 +4137,7 @@ mod tests {
             open_for_hook_below(dir.path(), 6).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(dir.path()), 3);
+        assert_eq!(version_of(dir.path()), 4);
 
         // An up-to-date database is opened whatever its size.
         assert!(matches!(
@@ -3814,7 +4150,7 @@ mod tests {
             open_for_hook_below(fresh.path(), 1).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(fresh.path()), 3);
+        assert_eq!(version_of(fresh.path()), 4);
     }
 
     /// A deterministic generator for the benchmark: no randomness crate, same text every run.
