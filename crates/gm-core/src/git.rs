@@ -49,8 +49,9 @@ pub struct SubprocessGit {
     pub login_path: Arc<OnceLock<String>>,
     /// Receives every command that changes the repository. Reads are not logged.
     pub log: Option<CommandLog>,
-    /// Reads the user-scope hook config from this file instead of the real
-    /// global config (`GIT_CONFIG_GLOBAL`, for the tests).
+    /// Makes every command read this file instead of the real global config
+    /// (`GIT_CONFIG_GLOBAL`, for the tests), so the user's own settings, such as
+    /// `rerere.autoupdate`, cannot change what a test sees.
     pub global_config: Option<PathBuf>,
 }
 
@@ -59,6 +60,9 @@ impl SubprocessGit {
         let mut command = Command::new("git");
         if let Some(path) = self.login_path.get() {
             command.env("PATH", path);
+        }
+        if let Some(path) = &self.global_config {
+            command.env("GIT_CONFIG_GLOBAL", path);
         }
         // --no-optional-locks: never take index.lock against an agent running git.
         command
@@ -1957,9 +1961,6 @@ impl GitPort for SubprocessGit {
             "--get-regexp",
             HOOK_KEYS,
         ]);
-        if let (HookScope::User, Some(path)) = (scope, &self.global_config) {
-            command.env("GIT_CONFIG_GLOBAL", path);
-        }
         // Exit 1 means no key matches.
         let bytes = Self::run_allowing(command, &[0, 1])?;
         Ok(parse_null_config(&bytes))

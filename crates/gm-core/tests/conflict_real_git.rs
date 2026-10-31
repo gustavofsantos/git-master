@@ -37,6 +37,8 @@ fn git_output(dir: &Path, args: &[&str]) -> std::process::Output {
         ])
         .args(args)
         .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap()
 }
@@ -76,6 +78,8 @@ fn commit(dir: &Path, file: &str, content: &[u8], message: &str) {
 fn engine_on(root: &Path) -> Engine {
     let git = SubprocessGit {
         log: Some(CommandLog::default()),
+        // The engine must not see the developer's own `rerere.autoupdate` and the like.
+        global_config: Some("/dev/null".into()),
         ..SubprocessGit::default()
     };
     let mut engine = Engine::new(Box::new(git));
