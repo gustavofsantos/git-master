@@ -13,6 +13,7 @@ use crate::file_index::FileIndex;
 use crate::grep::GrepRequest;
 use crate::history::HistoryStream;
 use crate::hook::ConfigValue;
+use crate::restack::Replayed;
 use crate::stack::{EdgeFacts, StackLink};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -611,6 +612,19 @@ pub trait GitPort: Send {
         _two: &str,
     ) -> Result<Option<String>, GitError> {
         Err(GitError("stacks are not supported by this adapter".into()))
+    }
+
+    /// Replays `commit` onto `onto` the way a restack will (D142): a three-way
+    /// merge of the commit's change onto `onto`, and a new commit with the same
+    /// message, author and author date when it is clean. The new commit is not
+    /// referenced by any ref. Never recorded in the command log.
+    fn restack_replay(
+        &self,
+        _root: &Path,
+        _onto: &str,
+        _commit: &str,
+    ) -> Result<Replayed, GitError> {
+        Err(GitError("restack is not supported by this adapter".into()))
     }
 
     /// Writes the stack link of `branch` as `(parent, base)` with `git config`,

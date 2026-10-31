@@ -11,6 +11,7 @@ use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::hook::{HookFailure, HookInfo};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
+use crate::restack::RestackPlan;
 use crate::review::{ReviewChange, ReviewComment};
 use crate::stack::StackSnapshot;
 use crate::stash::StashEntry;
@@ -188,6 +189,13 @@ pub enum CommandKind {
     /// the state each branch derives from its base. Answers `StacksLoaded`.
     /// Never recorded in the command log (D28).
     LoadStacks,
+    /// Plans a restack of `branch` and the branches under it (D14, D142): each
+    /// branch that is stale, or under one that moves, is replayed commit by commit
+    /// onto its parent's planned tip, without moving any ref. Answers
+    /// `RestackPlanned`. Never recorded in the command log (D28).
+    PlanRestack {
+        branch: String,
+    },
     /// Creates the local branch `name` at the tip of the local branch `parent`
     /// and records `parent` as its stack parent, with that tip as its base
     /// (D138). Checks it out when `checkout` is set. Human only.
@@ -703,6 +711,11 @@ pub enum Event {
     StacksLoaded {
         id: OperationId,
         stacks: StackSnapshot,
+    },
+    /// Answers `PlanRestack`.
+    RestackPlanned {
+        id: OperationId,
+        plan: RestackPlan,
     },
     /// Answers `LoadHistory`.
     HistoryLoaded {

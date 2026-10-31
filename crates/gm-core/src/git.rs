@@ -32,6 +32,7 @@ use crate::port::{DetailRead, FileListRead, GrepRead, HistoryRevs, RemoteRun, St
 use crate::port::{DiscardOutcome, FileMerge, ReviewSide, TreeMerge};
 use crate::reflog;
 use crate::remote;
+use crate::restack::{ReplayKind, Replayed};
 use crate::stack::{self, EdgeFacts, StackLink};
 use crate::stage_math;
 use crate::stash;
@@ -1737,6 +1738,68 @@ impl GitPort for SubprocessGit {
             return Ok(None);
         };
         Ok(optional_merge_base(&repo, one, two)?.map(|oid| oid.to_string()))
+    }
+
+    fn restack_replay(&self, root: &Path, onto: &str, commit: &str) -> Result<Replayed, GitError> {
+        require_commit_id(onto)?;
+        require_commit_id(commit)?;
+        // One read: parents, author, author date (raw keeps the offset) and message.
+        let mut command = self.git(root);
+        command.args([
+            "log",
+            "-1",
+            "--no-show-signature",
+            "--date=raw",
+            "--format=%P%x00%an%x00%ae%x00%ad%x00%B",
+            commit,
+        ]);
+        let out = Self::run(command)?;
+        let text = String::from_utf8_lossy(&out);
+        let mut fields = text.splitn(5, '\0');
+        let (parents, name, email, date, message) = (
+            fields.next().unwrap_or_default(),
+            fields.next().unwrap_or_default(),
+            fields.next().unwrap_or_default(),
+            fields.next().unwrap_or_default(),
+            fields.next().unwrap_or_default(),
+        );
+        let subject = message.lines().next().unwrap_or_default().to_owned();
+        let parents: Vec<&str> = parents.split_whitespace().collect();
+        let [parent] = parents.as_slice() else {
+            return Ok(Replayed {
+                subject,
+                kind: ReplayKind::NotLinear,
+            });
+        };
+        let kind = match self.merge_trees(root, parent, onto, commit)? {
+            TreeMerge::Conflict { paths } => ReplayKind::Conflict { paths },
+            TreeMerge::Clean { tree } => {
+                let mut command = self.git(root);
+                command.args(["rev-parse", &format!("{onto}^{{tree}}")]);
+                let onto_tree = String::from_utf8_lossy(&Self::run(command)?)
+                    .trim()
+                    .to_owned();
+                if tree == onto_tree {
+                    ReplayKind::Dropped
+                } else {
+                    // The user's own identity commits, as a rebase does; the author
+                    // is kept. Only an object is written: no ref moves.
+                    let mut command = self.git(root);
+                    command
+                        .args(["commit-tree", &tree, "-p", onto])
+                        .env("GIT_AUTHOR_NAME", name)
+                        .env("GIT_AUTHOR_EMAIL", email)
+                        .env("GIT_AUTHOR_DATE", date);
+                    let output = Self::execute(&mut command, Some(message.as_bytes()))
+                        .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+                    let new = Self::checked(output, &[0])?;
+                    ReplayKind::Clean {
+                        new: String::from_utf8_lossy(&new).trim().to_owned(),
+                    }
+                }
+            }
+        };
+        Ok(Replayed { subject, kind })
     }
 
     fn write_stack_link(

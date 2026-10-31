@@ -540,16 +540,29 @@ Sub-slices (agreed with the author on 2026-10-31: engine and sidebar first; D13 
 - **4c2, Commits | Stacks switch** in the history graph: one node per branch, with its commits folded or unfolded.
 - **4d, the derived events** `stack.parent_moved` and `stack.parent_merged` for workflow triggers (with WF3), and `stack_tree` over MCP (slice 7).
 
-## Slice 5: restack
+## Slice 5: restack (in progress: 5a done, with gaps)
 
 - Exact plan per commit, in-memory execution, snapshot and atomic undo, persisted state.
 - Fallback without a resolver: on conflict, pause and deliver the conflict in the working tree to resolve outside.
 - Workflows `before.restack` and `after.restack` (the old `pre-restack` and `post-restack` hooks, D75).
-- Decide Q2 (dirty working copy).
+- Q2 decided: block with a banner (2026-10-31). Execution in D142.
 - Primitives exposed as Commands: `restack.plan`, `restack.apply`, `restack.undo`, `reparent.*` and `push.lease` (D68).
 - The automatic update policies are workflow templates (WF4), with no specific code (D68).
 
 Done when: a complete restack runs, can be undone, and survives closing the app.
+
+Sub-slices (agreed with the author on 2026-10-31; D14 decided, execution in D142; each engine first, with `crates/gm-core/tests/restack_real_git.rs`):
+
+- **5a, plan (done on 2026-10-31, with known gaps).**
+  - Engine: `PlanRestack { branch }` answers `RestackPlanned` (a read, not logged). Pure rules in `gm-core/src/restack.rs` walk the subtree parents first and decide each branch; the port's `restack_replay` runs `merge-tree --write-tree` per commit and `commit-tree` with the original message, author and author date, writing unreferenced objects only. A child is replayed onto its parent's planned tip. Result types in `gm-schema/src/restack.rs`, with a `plan_id` over tips, bases and new tips.
+  - Refusals: diverged base, parent gone or merged, a merge commit among the own commits, 1,000 or more own commits, a branch checked out in a linked worktree; a dirty working copy with a plan branch checked out stops the whole plan (Q2). A conflict blocks the branch and its descendants only; a commit already in the base is dropped.
+  - Checked: 9 unit tests of the rules and 9 real-Git tests (`crates/gm-core/tests/restack_real_git.rs`). No window: the UI ignores the event until 5e.
+  - Known gaps: the plan runs on the engine thread and cannot be cancelled, as the stack snapshot in 4a; commits are not signed even with `commit.gpgSign`; `merge-tree` does not use rerere (slice 6); the committer is the current user, as for a rebase, so the committer date differs from a `git rebase` result only by time. Not measured on a large stack.
+- **5b, apply and undo** (one ref transaction, the base writes, HEAD's branch and linked worktrees).
+- **5c, persisted state and resume** after a kill.
+- **5d, conflict pause** (skip branch and children, abort all).
+- **5e, UI flow** (plan, running, conflict, done; top-bar Restack, Restack This Stack, ⇧⌘R).
+- Out of this slice for now: `before.restack` and `after.restack`, push with lease, MCP.
 
 ## Slice 6: conflict resolution
 

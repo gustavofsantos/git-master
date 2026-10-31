@@ -23,6 +23,7 @@ pub mod path_match;
 mod port;
 mod reflog;
 pub mod remote;
+pub mod restack;
 pub mod review;
 mod review_session;
 pub mod review_store;
