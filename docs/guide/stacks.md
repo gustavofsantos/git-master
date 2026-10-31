@@ -86,6 +86,8 @@ The sidebar shows these indicators:
 
 Hover a tag or an indicator to read what it means.
 
+The list is virtualized, so a repository with hundreds of branches stays responsive.
+
 ## Set a parent
 
 Every action below is in the branch menu of the sidebar and in the command palette. Each one changes only the two values above. No commit moves until you restack.
@@ -97,11 +99,7 @@ Every action below is in the branch menu of the sidebar and in the command palet
 
 ### Drag to set a parent
 
-> **Planned.** Dragging a branch onto another branch is not available yet.
-
-To set a parent, drag a branch onto another branch. The target becomes the parent of the dragged branch.
-
-The list is virtualized, so a repository with hundreds of remote branches stays responsive.
+In the **By stack** view, drag a branch onto another branch. The branch you drop it on becomes the parent of the dragged branch, as with **Set Parent…**. While you drag, the row under the pointer is highlighted when it can be the parent, and the status bar says what the drop does. A row that cannot be the parent is dimmed, and the status bar says why: the branch itself, a branch under it, or its parent already.
 
 ## Stacks in the history graph
 

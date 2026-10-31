@@ -147,9 +147,7 @@ The **By stack** view shows the local branches as a tree of parents, under a **S
 
 ## Set a parent by dragging
 
-> **Planned.** Dragging a branch onto another branch to set its parent is not available yet.
-
-In the **By stack** view, drag a branch onto another branch. The branch you drop it on becomes the parent of the dragged branch. For how a parent is set and what it changes, see [Stacks](stacks.md).
+In the **By stack** view, drag a branch onto another branch. The branch you drop it on becomes the parent of the dragged branch. A row that cannot be the parent is dimmed while you drag, and the status bar says why. For how a parent is set and what it changes, see [Stacks](stacks.md).
 
 ## Move a file to a branch
 
