@@ -14,7 +14,7 @@ use gm_schema::{CommandKind, Event, OperationId};
 use crate::GitPort;
 use crate::threads::config::ThreadsConfig;
 use crate::threads::redact::Redactor;
-use crate::threads::store::{MetaUpdate, StoreError, ThreadStore};
+use crate::threads::store::{MetaUpdate, SearchRequest, StoreError, ThreadStore};
 
 /// The most rows one read returns; a larger `limit` is cut to this.
 pub(crate) const MAX_PAGE: u32 = 500;
@@ -118,11 +118,31 @@ pub(crate) fn run(
             query,
             filter,
             limit,
+            cursor,
+            group,
+            order,
+            context,
+            facets,
         } => {
-            let hits = store
-                .search(query, filter, page(*limit)?)
-                .map_err(|e| e.to_string())?;
-            Ok(vec![Event::ThreadSearchResults { id, hits }])
+            let request = SearchRequest {
+                query,
+                filter,
+                limit: page(*limit)?,
+                cursor: cursor.as_deref(),
+                group: *group,
+                order: *order,
+                context: *context,
+                facets: *facets,
+            };
+            let found = store.search_page(&request).map_err(|e| e.to_string())?;
+            Ok(vec![Event::ThreadSearchResults {
+                id,
+                hits: found.hits,
+                has_more: found.has_more,
+                next_cursor: found.next_cursor,
+                facets: found.facets,
+                diagnosis: found.diagnosis,
+            }])
         }
         CommandKind::ReadThread {
             uid,
@@ -614,7 +634,9 @@ mod tests {
     use crate::fake::FakeGit;
     use crate::git::SubprocessGit;
     use crate::threads::store::{Batch, NewEdit, NewEntry};
-    use gm_schema::threads::{LinkKind, LinkOrigin, ThreadLink, ThreadSummary};
+    use gm_schema::threads::{
+        LinkKind, LinkOrigin, SearchGroup, SearchOrder, ThreadLink, ThreadSummary,
+    };
     use gm_schema::{Actor, Command, OperationState, RepoStatus};
 
     fn human() -> Actor {
@@ -950,6 +972,11 @@ mod tests {
                 query: "backoff".into(),
                 filter: ThreadFilter::default(),
                 limit: 10,
+                cursor: None,
+                group: SearchGroup::Entry,
+                order: SearchOrder::Relevance,
+                context: 0,
+                facets: false,
             },
         );
         let Event::ThreadSearchResults { hits, .. } = answer(&found) else {
@@ -1206,6 +1233,11 @@ mod tests {
                 query: "backoff".into(),
                 filter: ThreadFilter::default(),
                 limit: 5,
+                cursor: None,
+                group: SearchGroup::Entry,
+                order: SearchOrder::Relevance,
+                context: 0,
+                facets: false,
             },
         );
         assert!(

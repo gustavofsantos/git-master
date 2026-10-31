@@ -4,7 +4,11 @@
 use std::path::Path;
 use std::process::Command as Process;
 
-use gm_schema::{Actor, Command, CommandKind, OperationId};
+use gm_core::threads::store::{Batch, MetaUpdate, NewEdit, NewEntry, ThreadStore};
+use gm_schema::{
+    Actor, Command, CommandKind, EditChange, EntryKind, LinkKind, LinkOrigin, OperationId,
+    ThreadLink,
+};
 use serde_json::{Value, json};
 
 fn git(dir: &Path, args: &[&str]) {
@@ -279,12 +283,8 @@ fn a_directory_that_is_not_a_repository_exits_with_one() {
     assert_eq!(code, 2);
 }
 
-/// A thread stored the way the capture hook stores it, in the repository's `threads.db`.
-fn store_thread(dir: &Path) -> String {
-    use gm_core::threads::store::{Batch, NewEdit, NewEntry, ThreadStore};
-    use gm_schema::{EditChange, EntryKind};
-
-    let entry = |source: &str, kind, text: &str, at| NewEntry {
+fn new_entry(source: &str, kind: EntryKind, text: &str, at: i64) -> NewEntry {
+    NewEntry {
         source_id: source.to_owned(),
         kind,
         parent_id: None,
@@ -298,7 +298,12 @@ fn store_thread(dir: &Path) -> String {
         hits: Vec::new(),
         at,
         edit: None,
-    };
+    }
+}
+
+/// A thread stored the way the capture hook stores it, in the repository's `threads.db`.
+fn store_thread(dir: &Path) -> String {
+    let entry = new_entry;
     let mut edited = entry("e2", EntryKind::ToolCall, "Edit f.txt", 3);
     edited.edit = Some(NewEdit {
         path: "f.txt".to_owned(),
@@ -384,6 +389,467 @@ fn an_agent_searches_a_thread_then_reads_it_in_pages() {
     assert_eq!(entries[0]["kind"], "assistant");
     assert_eq!(entries[0]["untrusted"], true);
     assert_eq!(page["has_more"], true);
+}
+
+const COMMIT: &str = "abcdef1234567890abcdef1234567890abcdef12";
+
+fn new_batch(
+    dir: &Path,
+    session: &str,
+    model: &str,
+    branch: &str,
+    entries: Vec<NewEntry>,
+) -> Batch {
+    let started_at = entries.first().map_or(0, |entry| entry.at);
+    let at = entries.last().map_or(0, |entry| entry.at);
+    Batch {
+        harness: "claude-code".to_owned(),
+        session_id: session.to_owned(),
+        worktree: dir.to_string_lossy().into_owned(),
+        branch: Some(branch.to_owned()),
+        head: None,
+        model: Some(model.to_owned()),
+        harness_version: None,
+        transcript: None,
+        cursor: None,
+        started_at,
+        at,
+        ended: None,
+        entries,
+        gaps: Vec::new(),
+    }
+}
+
+/// Two threads for the search tests, returned as their ids. `a` ran on `main` with
+/// `claude-opus-4`, edited `f.txt`, is starred, labelled `auth` and linked to a commit. `b` ran
+/// later on `feature` with `claude-haiku` and edited nothing.
+fn store_search_threads(dir: &Path) -> (String, String) {
+    let mut edited = new_entry("a2", EntryKind::ToolCall, "Edit f.txt", 1002);
+    edited.edit = Some(NewEdit {
+        path: "f.txt".to_owned(),
+        old_path: None,
+        change: EditChange::Modify,
+        patch: "@@ -1 +1 @@\n-a\n+b\n".to_owned(),
+        added: 1,
+        removed: 1,
+        pre_oid: None,
+        post_oid: None,
+        from_input: false,
+        hits: Vec::new(),
+    });
+    let a = new_batch(
+        dir,
+        "a",
+        "claude-opus-4",
+        "main",
+        vec![
+            new_entry(
+                "a0",
+                EntryKind::User,
+                "why did we pick jittered backoff",
+                1000,
+            ),
+            new_entry(
+                "a1",
+                EntryKind::Assistant,
+                "jittered backoff avoids thundering herds",
+                1001,
+            ),
+            edited,
+            new_entry("a3", EntryKind::Assistant, "done", 1003),
+        ],
+    );
+    let b = new_batch(
+        dir,
+        "b",
+        "claude-haiku",
+        "feature",
+        vec![
+            new_entry("b0", EntryKind::User, "keep the backoff short", 2000),
+            new_entry("b1", EntryKind::Assistant, "a fixed delay is enough", 2001),
+        ],
+    );
+    let mut store = ThreadStore::open(&dir.join(".git")).unwrap();
+    store.apply(&a).unwrap();
+    store.apply(&b).unwrap();
+    let uid_a = ThreadStore::thread_uid("claude-code", "a");
+    let uid_b = ThreadStore::thread_uid("claude-code", "b");
+    store
+        .update_meta(
+            &uid_a,
+            &MetaUpdate {
+                starred: Some(true),
+                tags: Some(vec!["auth".to_owned()]),
+                ..MetaUpdate::default()
+            },
+        )
+        .unwrap();
+    store
+        .link(
+            &uid_a,
+            &ThreadLink {
+                kind: LinkKind::Commit,
+                reference: COMMIT.to_owned(),
+                origin: LinkOrigin::Manual,
+            },
+        )
+        .unwrap();
+    (uid_a, uid_b)
+}
+
+/// Runs each search in one session, after the handshake, and returns the reply to each.
+fn searches(dir: &Path, arguments: &[Value]) -> Vec<Value> {
+    let mut requests = vec![initialize()];
+    requests.extend(
+        (2_u64..)
+            .zip(arguments)
+            .map(|(id, args)| call(id, "threads_search", args)),
+    );
+    session(dir, &requests).split_off(1)
+}
+
+/// The thread ids of a reply, sorted, for a search whose equal hits have no fixed order.
+fn thread_set(reply: &Value) -> Vec<String> {
+    let mut ids = thread_ids(reply);
+    ids.sort();
+    ids
+}
+
+fn hits_of(reply: &Value) -> Vec<Value> {
+    result(reply)["hits"].as_array().unwrap().clone()
+}
+
+fn thread_ids(reply: &Value) -> Vec<String> {
+    hits_of(reply)
+        .iter()
+        .map(|hit| hit["thread"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The count the diagnosis gives for removing `filter`, when it is named.
+fn removed_by(reply: &Value, filter: &str) -> Option<i64> {
+    result(reply)["diagnosis"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["filter"] == filter)?["count"]
+        .as_i64()
+}
+
+#[test]
+fn the_search_filters_by_role_turn_thread_and_context() {
+    let dir = repo();
+    let (a, b) = store_search_threads(dir.path());
+    let replies = searches(
+        dir.path(),
+        &[
+            json!({ "query": "backoff", "group": "entry", "role": "user" }),
+            json!({ "query": "backoff", "group": "entry", "role": "assistant" }),
+            json!({ "query": "backoff", "group": "entry", "role": "any" }),
+            json!({ "query": "backoff", "group": "entry", "thread": b }),
+            json!({ "query": "backoff", "group": "entry", "turn_from": 50 }),
+            json!({ "query": "backoff", "group": "entry", "role": "assistant", "context": 2 }),
+        ],
+    );
+
+    assert_eq!(result(&replies[0])["filters"]["role"], "user");
+    let user = hits_of(&replies[0]);
+    assert_eq!(user.len(), 2, "one prompt of each thread");
+    assert!(user.iter().all(|hit| hit["seq"] == 0), "{user:?}");
+
+    let assistant = hits_of(&replies[1]);
+    assert_eq!(assistant.len(), 1, "{assistant:?}");
+    assert_eq!(assistant[0]["thread"], a.as_str());
+    assert_eq!(assistant[0]["seq"], 1);
+
+    assert_eq!(hits_of(&replies[2]).len(), 3);
+
+    assert_eq!(thread_ids(&replies[3]), vec![b.clone()]);
+
+    assert!(hits_of(&replies[4]).is_empty());
+    assert_eq!(removed_by(&replies[4], "turn_range"), Some(3));
+
+    let context = hits_of(&replies[5]);
+    let seqs: Vec<i64> = context[0]["context"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["seq"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        seqs,
+        [0, 3],
+        "the prompt before the hit and the reply after it"
+    );
+    assert_eq!(context[0]["context"][0]["kind"], "user");
+}
+
+#[test]
+fn the_search_filters_by_thread_metadata_paths_commits_and_times() {
+    let dir = repo();
+    let (a, b) = store_search_threads(dir.path());
+    let replies = searches(
+        dir.path(),
+        &[
+            json!({ "query": "backoff", "harness": "claude-code" }),
+            json!({ "query": "backoff", "harness": "codex" }),
+            json!({ "query": "backoff", "model": "claude-haiku" }),
+            json!({ "query": "backoff", "branch": "main" }),
+            json!({ "query": "backoff", "label": "auth" }),
+            json!({ "query": "backoff", "label": "missing" }),
+            json!({ "query": "backoff", "starred": true }),
+            json!({ "query": "backoff", "starred": false }),
+            json!({ "query": "backoff", "edited_only": true }),
+            json!({ "query": "backoff", "path": "f.txt" }),
+            json!({ "query": "backoff", "path": "*.txt" }),
+            json!({ "query": "backoff", "path": "*.rs" }),
+            json!({ "query": "backoff", "commit": "abcdef1" }),
+            json!({ "query": "backoff", "commit": "1111111" }),
+            json!({ "query": "backoff", "since": "7d" }),
+            json!({ "query": "backoff", "until": "7d" }),
+            json!({ "query": "backoff", "since": 1500 }),
+            json!({ "query": "backoff", "until": "1970-01-01T00:00:02Z" }),
+        ],
+    );
+    let mut both = vec![a.clone(), b.clone()];
+    both.sort();
+    assert_eq!(thread_set(&replies[0]), both);
+    assert!(hits_of(&replies[1]).is_empty());
+    assert_eq!(removed_by(&replies[1], "harness"), Some(2));
+    assert_eq!(thread_ids(&replies[2]), vec![b.clone()]);
+    assert_eq!(thread_ids(&replies[3]), vec![a.clone()]);
+    assert_eq!(thread_ids(&replies[4]), vec![a.clone()]);
+    assert!(hits_of(&replies[5]).is_empty());
+    assert_eq!(removed_by(&replies[5], "label"), Some(2));
+    assert_eq!(thread_ids(&replies[6]), vec![a.clone()]);
+    assert_eq!(thread_ids(&replies[7]), vec![b.clone()]);
+    assert_eq!(thread_ids(&replies[8]), vec![a.clone()]);
+    assert_eq!(thread_ids(&replies[9]), vec![a.clone()]);
+    assert_eq!(thread_ids(&replies[10]), vec![a.clone()]);
+    assert!(hits_of(&replies[11]).is_empty());
+    assert_eq!(removed_by(&replies[11], "path"), Some(2));
+    assert_eq!(thread_ids(&replies[12]), vec![a.clone()]);
+    assert!(hits_of(&replies[13]).is_empty());
+    assert_eq!(removed_by(&replies[13], "commit"), Some(2));
+    assert!(
+        hits_of(&replies[14]).is_empty(),
+        "nothing is newer than 7 days"
+    );
+    assert_eq!(removed_by(&replies[14], "since"), Some(2));
+    assert_eq!(thread_set(&replies[15]), both);
+    assert_eq!(thread_ids(&replies[16]), vec![b.clone()]);
+    assert_eq!(thread_ids(&replies[17]), vec![a.clone()]);
+}
+
+#[test]
+fn the_search_orders_counts_and_lists_threads() {
+    let dir = repo();
+    let (a, b) = store_search_threads(dir.path());
+    let replies = searches(
+        dir.path(),
+        &[
+            json!({ "query": "backoff", "order": "recent" }),
+            json!({ "query": "backoff", "facets": true }),
+            json!({ "query": "backoff" }),
+            json!({ "branch": "main" }),
+            json!({ "query": "" }),
+            json!({ "query": "backoff", "label": "auth", "since": "1970-01-01T00:00:01Z", "edited_only": true }),
+        ],
+    );
+
+    assert_eq!(
+        thread_ids(&replies[0]),
+        vec![b.clone(), a.clone()],
+        "newest first"
+    );
+
+    let facets = &result(&replies[1])["facets"];
+    assert!(
+        facets["branch"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({ "value": "main", "count": 1 }))
+    );
+    assert!(
+        facets["branch"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({ "value": "feature", "count": 1 }))
+    );
+    assert_eq!(
+        facets["agent"],
+        json!([{ "value": "claude-code", "count": 2 }])
+    );
+    assert_eq!(facets["path"], json!([{ "value": "f.txt", "count": 1 }]));
+    assert!(
+        result(&replies[2])["facets"].is_null(),
+        "facets only when asked"
+    );
+
+    let listed = hits_of(&replies[3]);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["thread"], a.as_str());
+    assert_eq!(listed[0]["seq"], 0, "a listing hit has no entry");
+    assert_eq!(listed[0]["agent"], "claude-code");
+    assert_eq!(listed[0]["branch"], "main");
+    assert_eq!(listed[0]["edit_count"], 1);
+    assert_eq!(listed[0]["labels"], json!(["auth"]));
+    assert_eq!(listed[0]["untrusted"], true);
+    assert_eq!(
+        thread_ids(&replies[4]).len(),
+        2,
+        "an empty query lists by filter alone"
+    );
+
+    let answer = result(&replies[5]);
+    assert_eq!(answer["filters"]["label"], "auth");
+    assert_eq!(answer["filters"]["edited_only"], true);
+    assert_eq!(answer["filters"]["since"], 1000);
+    assert!(
+        answer["filters"].get("harness").is_none(),
+        "unset filters are not echoed"
+    );
+    assert_eq!(thread_ids(&replies[5]), vec![a.clone()]);
+    assert_eq!(answer["has_more"], false);
+    assert!(answer["next_cursor"].is_null());
+}
+
+#[test]
+fn the_search_pages_with_a_cursor_until_no_more_hits() {
+    let dir = repo();
+    store_search_threads(dir.path());
+    let mut cursor: Option<String> = None;
+    let mut seen: Vec<(String, u64)> = Vec::new();
+    let mut pages = 0;
+    loop {
+        pages += 1;
+        assert!(pages <= 5, "the paging does not end");
+        let mut args = json!({ "query": "backoff", "group": "entry", "limit": 1 });
+        if let Some(text) = &cursor {
+            args["cursor"] = json!(text);
+        }
+        let reply = searches(dir.path(), &[args]).remove(0);
+        for hit in hits_of(&reply) {
+            seen.push((
+                hit["thread"].as_str().unwrap().to_owned(),
+                hit["seq"].as_u64().unwrap(),
+            ));
+        }
+        let answer = result(&reply);
+        if answer["has_more"] == true {
+            cursor = Some(answer["next_cursor"].as_str().unwrap().to_owned());
+        } else {
+            assert!(answer["next_cursor"].is_null());
+            break;
+        }
+    }
+    assert_eq!(pages, 3, "one hit a page");
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), seen.len(), "no hit repeats: {seen:?}");
+}
+
+#[test]
+fn invalid_search_values_are_refused_with_the_valid_ones() {
+    let dir = repo();
+    store_search_threads(dir.path());
+    let cases = [
+        (
+            json!({ "query": "x", "role": "bogus" }),
+            "one of user, assistant, any",
+        ),
+        (
+            json!({ "query": "x", "group": "pages" }),
+            "one of thread, entry",
+        ),
+        (
+            json!({ "query": "x", "order": "random" }),
+            "one of relevance, recent",
+        ),
+        (
+            json!({ "query": "x", "context": 4 }),
+            "between 0 and 3, not 4",
+        ),
+        (
+            json!({ "query": "x", "limit": 0 }),
+            "between 1 and 50, not 0",
+        ),
+        (
+            json!({ "query": "x", "turn_from": 0 }),
+            "must be between 1 and",
+        ),
+        (
+            json!({ "query": "x", "turn_from": 3, "turn_to": 1 }),
+            "after turn_to",
+        ),
+        (
+            json!({ "query": "x", "since": "yesterday" }),
+            "is not a time",
+        ),
+        (json!({ "query": "x", "until": true }), "must be a time"),
+        (json!({ "query": "x", "harness": "" }), "must not be empty"),
+        (json!({ "query": "x", "starred": "yes" }), "true or false"),
+        (json!({ "query": "x", "facets": 1 }), "true or false"),
+    ];
+    let arguments: Vec<Value> = cases.iter().map(|(args, _)| args.clone()).collect();
+    let replies = searches(dir.path(), &arguments);
+    assert_eq!(replies.len(), cases.len());
+    for ((_, expected), reply) in cases.iter().zip(&replies) {
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let message = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            message.contains(expected),
+            "{expected:?} not in {message:?}"
+        );
+    }
+}
+
+#[test]
+fn the_search_schema_declares_every_filter_and_option() {
+    let dir = repo();
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        ],
+    );
+    let tools = replies[1]["result"]["tools"].as_array().unwrap();
+    let search = tools
+        .iter()
+        .find(|tool| tool["name"] == "threads_search")
+        .unwrap();
+    let schema = &search["inputSchema"];
+    assert!(schema.get("required").is_none(), "query is optional");
+    for name in [
+        "query",
+        "role",
+        "thread",
+        "turn_from",
+        "turn_to",
+        "since",
+        "until",
+        "branch",
+        "commit",
+        "path",
+        "harness",
+        "model",
+        "label",
+        "starred",
+        "edited_only",
+        "group",
+        "order",
+        "limit",
+        "cursor",
+        "context",
+        "facets",
+    ] {
+        assert!(
+            schema["properties"].get(name).is_some(),
+            "{name} is not declared"
+        );
+    }
+    assert_eq!(schema["properties"]["group"]["default"], "thread");
 }
 
 /// Several servers on one repository at the same time, in its main worktree and in a linked

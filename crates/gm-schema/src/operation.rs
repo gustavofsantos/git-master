@@ -21,8 +21,8 @@ use crate::status::{
 };
 use crate::syntax::HighlightSpan;
 use crate::threads::{
-    EditState, LinkKind, ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink,
-    ThreadSummary,
+    EditState, LinkKind, SearchFacets, SearchGroup, SearchOrder, ThreadDetail, ThreadEdit,
+    ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
 };
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
@@ -569,12 +569,25 @@ pub enum CommandKind {
         before_uid: Option<String>,
         limit: u32,
     },
-    /// Searches entry text, tool names and edit paths. Answers `ThreadSearchResults`.
-    /// A read (D08).
+    /// Searches entry text and edit paths; with an empty `query` it lists the threads
+    /// the filter matches, newest first (D147). `limit` is the page size; `cursor` is the
+    /// `next_cursor` of the previous page. `group` and `order` shape the hits, `context`
+    /// (0 to 3) adds the entries around each hit, `facets` asks for the common values of
+    /// the matching threads. Answers `ThreadSearchResults`. A read (D08).
     SearchThreads {
         query: String,
         filter: ThreadFilter,
         limit: u32,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default)]
+        group: SearchGroup,
+        #[serde(default)]
+        order: SearchOrder,
+        #[serde(default)]
+        context: u8,
+        #[serde(default)]
+        facets: bool,
     },
     /// Reads the entries of thread `uid` from `from_seq`, with their edits and links.
     /// Answers `ThreadRead`. A read (D08).
@@ -1026,10 +1039,21 @@ pub enum Event {
         threads: Vec<ThreadSummary>,
         total: u32,
     },
-    /// Answers `SearchThreads`, best match first.
+    /// Answers `SearchThreads`, best match first. `has_more` and `next_cursor` page the
+    /// hits (D147). `facets` is set when asked; `diagnosis` is set when a search with
+    /// filters finds nothing: each filter that, removed alone, would bring hits back, with
+    /// its count, most first.
     ThreadSearchResults {
         id: OperationId,
         hits: Vec<ThreadHit>,
+        #[serde(default)]
+        has_more: bool,
+        #[serde(default)]
+        next_cursor: Option<String>,
+        #[serde(default)]
+        facets: Option<SearchFacets>,
+        #[serde(default)]
+        diagnosis: Option<Vec<(String, u32)>>,
     },
     /// Answers `ReadThread`.
     ThreadRead {

@@ -10,7 +10,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use gm_schema::{
     CommandKind, EditState, EntryKind, HitKind, LinkKind, LinkOrigin, OperationId, OperationState,
-    ThreadDetail, ThreadEdit, ThreadEntry, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
+    SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadEntry, ThreadFilter, ThreadHit,
+    ThreadLink, ThreadSummary,
 };
 use serde_json::Value;
 
@@ -425,6 +426,11 @@ impl ThreadsPage {
                 query: query.to_owned(),
                 filter: self.filter.clone(),
                 limit: PAGE,
+                cursor: None,
+                group: SearchGroup::Entry,
+                order: SearchOrder::Relevance,
+                context: 0,
+                facets: false,
             },
             read: Read::Search,
         })
@@ -1879,6 +1885,7 @@ mod tests {
             snippet: "retry".to_owned(),
             at: 1,
             kind: HitKind::Exact,
+            ..ThreadHit::default()
         }
     }
 

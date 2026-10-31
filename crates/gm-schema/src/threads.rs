@@ -281,9 +281,10 @@ pub struct ThreadFilter {
     pub until: Option<i64>,
     pub starred: Option<bool>,
     pub has_edits: Option<bool>,
-    /// A thread that edited this path. Without `*`, `?` or `[` the path must match
-    /// exactly; with one, it is a glob over the path of each edit (SQLite `GLOB`, so `*`
-    /// also matches across `/`, and matching is case-sensitive).
+    /// A thread that edited this path. The path matches the path of an edit exactly, or,
+    /// when the value contains `*`, `?` or `[`, as a glob too (SQLite `GLOB`). In a glob
+    /// `*` also matches `/`, and matching is case-sensitive, for exact and glob alike. So
+    /// a literal path with brackets, such as `app/[id]/page.tsx`, matches itself (D147).
     pub path: Option<String>,
     /// A thread linked to this commit. The value is a full id or a short one of at
     /// least seven hex digits; hex digits match in either case.
@@ -319,8 +320,50 @@ pub enum HitKind {
     Fuzzy,
 }
 
-/// One search result: the best-matching entry of a thread.
+/// How a search groups its hits (D147).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchGroup {
+    /// One best hit per thread.
+    #[default]
+    Thread,
+    /// Every matching entry.
+    Entry,
+}
+
+/// The order of search hits (D147). `Relevance` is the match rank; `Recent` sorts the
+/// best hits by the time of their entry, newest first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchOrder {
+    #[default]
+    Relevance,
+    Recent,
+}
+
+/// One entry next to a search hit (`context`, D147): its place in the thread, its kind and
+/// its text, capped.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ThreadEntryBrief {
+    pub seq: u32,
+    pub kind: EntryKind,
+    pub text: String,
+}
+
+/// The most common values among the threads a search matches, each with its count (D147).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct SearchFacets {
+    pub branch: Vec<(String, u32)>,
+    pub harness: Vec<(String, u32)>,
+    /// Counted over the edits of the matching threads.
+    pub path: Vec<(String, u32)>,
+}
+
+/// One search result: the best-matching entry of a thread, with the thread's metadata
+/// (D147). A hit of a listing (no query) has `seq` 0 and the title as its snippet.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ThreadHit {
     pub thread_uid: String,
@@ -334,6 +377,23 @@ pub struct ThreadHit {
     /// Which stage of the search found it (D131).
     #[serde(default)]
     pub kind: HitKind,
+    /// The thread's harness.
+    #[serde(default)]
+    pub harness: String,
+    /// The thread's branch at its first event; `None` when detached.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// The thread's start time, in milliseconds.
+    #[serde(default)]
+    pub started_at: i64,
+    #[serde(default)]
+    pub edit_count: u32,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// The user and assistant entries before and after the hit in its thread, when the
+    /// search asks for context (D147).
+    #[serde(default)]
+    pub context: Vec<ThreadEntryBrief>,
 }
 
 /// What a link points at (D126).
@@ -520,6 +580,7 @@ mod tests {
             snippet: "x".to_owned(),
             at: 1,
             kind: HitKind::Fuzzy,
+            ..ThreadHit::default()
         };
         let json = serde_json::to_value(&hit).expect("serialize");
         assert_eq!(json["kind"], "fuzzy");

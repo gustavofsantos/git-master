@@ -58,8 +58,9 @@ pub use status::{
 pub use syntax::{HighlightSpan, SyntaxRole};
 pub use threads::{
     CanonicalEvent, CaptureGap, EditChange, EditIntent, EditPhase, EditState, EntryKind, EntryRole,
-    EventHeader, HitKind, LinkKind, LinkOrigin, SessionOrigin, ThreadDetail, ThreadEdit,
-    ThreadEntry, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary, ToolKind,
+    EventHeader, HitKind, LinkKind, LinkOrigin, SearchFacets, SearchGroup, SearchOrder,
+    SessionOrigin, ThreadDetail, ThreadEdit, ThreadEntry, ThreadEntryBrief, ThreadFilter,
+    ThreadHit, ThreadLink, ThreadSummary, ToolKind,
 };
 pub use workflow::{
     WorkflowCallRecord, WorkflowDiagnostic, WorkflowDryCall, WorkflowDryRun, WorkflowEnd,

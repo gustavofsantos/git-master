@@ -935,7 +935,7 @@ impl Model {
                 }
                 None
             }
-            Event::ThreadSearchResults { id, hits } => {
+            Event::ThreadSearchResults { id, hits, .. } => {
                 self.threads.searched(id, hits);
                 None
             }

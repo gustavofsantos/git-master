@@ -3,14 +3,15 @@
 //! per batch and idempotent on replay. Reads return the rows the engine shows.
 //! Nothing here knows a harness: callers hand over canonical entries.
 
-use std::collections::HashSet;
-use std::fmt;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::{self, Write as _};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gm_schema::threads::{
-    CaptureGap, EditChange, EntryKind, EntryRole, HitKind, LinkKind, LinkOrigin, ThreadDetail,
-    ThreadEdit, ThreadEntry, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
+    CaptureGap, EditChange, EntryKind, EntryRole, HitKind, LinkKind, LinkOrigin, SearchFacets,
+    SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadEntry, ThreadEntryBrief,
+    ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, ToSql, Transaction, TransactionBehavior, params,
@@ -46,8 +47,25 @@ pub type TextCleaner = fn(harness: &str, kind: EntryKind, text: &str) -> Option<
 /// Hits below which a search runs the next stage (D131). A store can be built with another
 /// value for tests.
 pub const FALLBACK_BELOW: usize = 8;
-/// Candidates the fuzzy stage fetches per hit still wanted, before they are checked in Rust.
-const FUZZY_CANDIDATE_FACTOR: usize = 5;
+/// Candidates the fuzzy stage fetches, before they are checked in Rust. The pool is fixed, not
+/// a function of the page asked for, so every page of a search sees the same ordered hits (D147).
+const FUZZY_POOL: usize = 200;
+/// Hits a search with `order: recent` takes from relevance before it sorts them by time (D147).
+const RECENT_POOL: usize = 1000;
+/// Hits a facet count reads at most, and the hits a zero-hit diagnosis counts per filter (D147).
+const FACET_POOL: usize = 2000;
+const DIAGNOSIS_POOL: usize = 200;
+/// A zero-hit diagnosis runs only when the strict stage takes less time than this (D147).
+const DIAGNOSIS_BUDGET: Duration = Duration::from_millis(200);
+/// The most entries a hit carries as `context` on each side (D147).
+const CONTEXT_MAX: u8 = 3;
+/// Characters of a context entry's text (D147).
+const CONTEXT_CHARS: usize = 600;
+/// Values a facet lists, and filters a diagnosis names (D147).
+const FACET_TOP: usize = 10;
+const DIAGNOSIS_TOP: usize = 3;
+const CURSOR_MALFORMED: &str = "the cursor is not valid";
+const CURSOR_MISMATCH: &str = "the cursor belongs to another search; start again without a cursor";
 /// Least trigram similarity between a typed word and a word of the text (D131).
 const FUZZY_MIN_SIMILARITY: f32 = 0.5;
 /// Words of context on each side of the match in a snippet built in Rust.
@@ -306,7 +324,8 @@ const FILTER_SQL: &str = " AND (:harness IS NULL OR t.harness = :harness)
     AND (:until IS NULL OR t.last_event_at < :until)
     AND (:starred IS NULL OR t.starred = :starred)
     AND (:has_edits IS NULL OR (t.edit_count > 0) = :has_edits)
-    AND (:path IS NULL OR EXISTS (SELECT 1 FROM edit f WHERE f.thread_id = t.id AND f.path GLOB :path))
+    AND (:path IS NULL OR EXISTS (SELECT 1 FROM edit f WHERE f.thread_id = t.id
+        AND (f.path = :path OR f.path GLOB :path)))
     AND (:thread IS NULL OR t.uid = :thread)
     AND (:model IS NULL OR t.model = :model)
     AND (:commit IS NULL OR EXISTS (SELECT 1 FROM thread_link k WHERE k.thread_id = t.id AND k.kind = 'commit' AND (
@@ -657,21 +676,307 @@ impl ThreadStore {
         limit: u32,
     ) -> Result<Vec<ThreadHit>, StoreError> {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-        let wanted = self.fallback_below.min(limit);
-        let mut hits = Hits::new(limit);
+        self.stream(user_query, filter, limit)
+    }
+
+    /// One page of a search, or of a listing when the query is empty (D147). The hits of a
+    /// search are a fixed order: a page is the window of that order that its cursor names, so
+    /// pages neither repeat nor skip a hit. A cursor made for another request is refused.
+    pub fn search_page(&self, request: &SearchRequest<'_>) -> Result<SearchPage, StoreError> {
+        let query = request.query.trim();
+        let digest = request_digest(query, request.filter, request.group, request.order);
+        let position = request
+            .cursor
+            .map(|text| decode_cursor(text, &digest))
+            .transpose()?;
+        let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
+        let context = usize::from(request.context.min(CONTEXT_MAX));
+        let first_page = request.cursor.is_none();
+        let mut page = if query.is_empty() {
+            self.list_page(request.filter, position, limit, &digest)?
+        } else {
+            self.match_page(request, query, position.as_ref(), limit, context, &digest)?
+        };
+        if request.facets {
+            page.facets = Some(self.facets(query, request.filter)?);
+        }
+        if page.hits.is_empty() && first_page {
+            page.diagnosis = self.diagnosis(query, request.filter, request.group)?;
+        }
+        Ok(page)
+    }
+
+    /// The page of a search: hits from `ranked`, windowed by the offset in the cursor.
+    fn match_page(
+        &self,
+        request: &SearchRequest<'_>,
+        query: &str,
+        position: Option<&Position>,
+        limit: usize,
+        context: usize,
+        digest: &str,
+    ) -> Result<SearchPage, StoreError> {
+        let offset = match position {
+            None => 0,
+            Some(&Position::Offset(offset)) => offset,
+            Some(Position::Keyset(..)) => return Err(invalid(CURSOR_MALFORMED)),
+        };
+        let relevance = request.order == SearchOrder::Relevance;
+        // Relevance pages need the window only; recency sorts a fixed pool, so every page sees
+        // the same hits to sort.
+        let wanted = if relevance {
+            offset.saturating_add(limit).saturating_add(1)
+        } else {
+            RECENT_POOL
+        };
+        let mut ranked = self.ranked(query, request.filter, request.group, wanted)?;
+        if !relevance {
+            ranked.sort_by(|a, b| b.at.cmp(&a.at).then(a.entry_id.cmp(&b.entry_id)));
+        }
+        let has_more = ranked.len() > offset.saturating_add(limit);
+        let next_cursor =
+            has_more.then(|| encode_cursor(digest, &Position::Offset(offset + limit)));
+        let mut hits: Vec<ThreadHit> = ranked.into_iter().skip(offset).take(limit).collect();
+        self.fill_metadata(&mut hits)?;
+        self.attach_context(&mut hits, context)?;
+        Ok(SearchPage {
+            hits,
+            has_more,
+            next_cursor,
+            ..SearchPage::default()
+        })
+    }
+
+    /// The page of a listing (empty query): threads by `last_event_at`, newest first, from the
+    /// `(last_event_at, uid)` of the cursor (D147).
+    fn list_page(
+        &self,
+        filter: &ThreadFilter,
+        position: Option<Position>,
+        limit: usize,
+        digest: &str,
+    ) -> Result<SearchPage, StoreError> {
+        let before = match position {
+            None => None,
+            Some(Position::Keyset(at, uid)) => Some((at, uid)),
+            Some(Position::Offset(_)) => return Err(invalid(CURSOR_MALFORMED)),
+        };
+        let fetch = u32::try_from(limit.saturating_add(1)).unwrap_or(u32::MAX);
+        let mut threads = self.list_threads(filter, before, fetch)?;
+        let has_more = threads.len() > limit;
+        threads.truncate(limit);
+        let next_cursor = if has_more {
+            threads.last().map(|thread| {
+                encode_cursor(
+                    digest,
+                    &Position::Keyset(thread.last_event_at, thread.uid.clone()),
+                )
+            })
+        } else {
+            None
+        };
+        let hits = threads.into_iter().map(listing_hit).collect();
+        Ok(SearchPage {
+            hits,
+            has_more,
+            next_cursor,
+            ..SearchPage::default()
+        })
+    }
+
+    /// The first `wanted` hits of a query in the order of its page, grouped as asked. The
+    /// entry stream is read again with twice the room while grouping leaves too few, and it
+    /// stops growing when the data runs out.
+    fn ranked(
+        &self,
+        query: &str,
+        filter: &ThreadFilter,
+        group: SearchGroup,
+        wanted: usize,
+    ) -> Result<Vec<ThreadHit>, StoreError> {
+        let mut cap = wanted.max(1);
+        let mut previous = None;
+        loop {
+            let entries = self.stream(query, filter, cap)?;
+            let exhausted = previous.is_some_and(|before| entries.len() <= before);
+            let mut grouped = group_hits(&entries, group);
+            if grouped.len() >= wanted || exhausted {
+                grouped.truncate(wanted);
+                return Ok(grouped);
+            }
+            previous = Some(entries.len());
+            cap = cap.saturating_mul(2);
+        }
+    }
+
+    /// The entry hits of a query, at most `cap`, best first: the strict stage, then the
+    /// stages that are short of `fallback_below` hits (D131).
+    fn stream(
+        &self,
+        user_query: &str,
+        filter: &ThreadFilter,
+        cap: usize,
+    ) -> Result<Vec<ThreadHit>, StoreError> {
+        let mut hits = Hits::new(cap);
         if let Some(fts) = build_fts_query(user_query) {
             self.exact_stage(&fts, filter, &mut hits)?;
         }
         let Some(trigram) = build_trigram_queries(user_query) else {
             return Ok(hits.list);
         };
-        if hits.list.len() < wanted {
+        if hits.list.len() < self.fallback_below {
             self.substring_stage(&trigram, filter, &mut hits)?;
         }
-        if hits.list.len() < wanted && !trigram.fuzzy.is_empty() {
+        if hits.list.len() < self.fallback_below && !trigram.fuzzy.is_empty() {
             self.fuzzy_stage(&trigram, filter, &mut hits)?;
         }
         Ok(hits.list)
+    }
+
+    /// Fills the thread's metadata of each hit: harness, branch, start, edits and tags (D147).
+    fn fill_metadata(&self, hits: &mut [ThreadHit]) -> Result<(), StoreError> {
+        let mut cache: HashMap<String, ThreadSummary> = HashMap::new();
+        for hit in hits {
+            if !cache.contains_key(&hit.thread_uid) {
+                let summary = summary_by_uid(&self.conn, &hit.thread_uid)?;
+                cache.insert(hit.thread_uid.clone(), summary);
+            }
+            let summary = &cache[&hit.thread_uid];
+            hit.harness.clone_from(&summary.harness);
+            hit.branch.clone_from(&summary.branch);
+            hit.started_at = summary.started_at;
+            hit.edit_count = summary.edit_count;
+            hit.tags.clone_from(&summary.tags);
+        }
+        Ok(())
+    }
+
+    /// Adds to each hit up to `context` user and assistant entries before it and after it in
+    /// the same thread, in thread order, with their text capped (D147).
+    fn attach_context(&self, hits: &mut [ThreadHit], context: usize) -> Result<(), StoreError> {
+        if context == 0 {
+            return Ok(());
+        }
+        let limit = i64::try_from(context).unwrap_or(i64::MAX);
+        let mut earlier = self.conn.prepare(
+            "SELECT e.seq, e.kind, e.text FROM entry e JOIN thread t ON t.id = e.thread_id
+             WHERE t.uid = ?1 AND e.seq < ?2 AND e.kind IN ('user', 'assistant')
+             ORDER BY e.seq DESC LIMIT ?3",
+        )?;
+        let mut later = self.conn.prepare(
+            "SELECT e.seq, e.kind, e.text FROM entry e JOIN thread t ON t.id = e.thread_id
+             WHERE t.uid = ?1 AND e.seq > ?2 AND e.kind IN ('user', 'assistant')
+             ORDER BY e.seq ASC LIMIT ?3",
+        )?;
+        for hit in hits {
+            let mut before = brief_rows(&mut earlier, &hit.thread_uid, hit.seq, limit)?;
+            before.reverse();
+            let after = brief_rows(&mut later, &hit.thread_uid, hit.seq, limit)?;
+            hit.context = before.into_iter().chain(after).collect();
+        }
+        Ok(())
+    }
+
+    /// The most common branches, harnesses and edited paths among the threads a search matches
+    /// (D147). The query's threads come from the strict and fallback stages, at most
+    /// `FACET_POOL` hits, so `limit` and the cursor do not apply.
+    fn facets(&self, query: &str, filter: &ThreadFilter) -> Result<SearchFacets, StoreError> {
+        let uids = if query.is_empty() {
+            self.matching_uids(filter)?
+        } else {
+            self.stream(query, filter, FACET_POOL)?
+                .into_iter()
+                .map(|hit| hit.thread_uid)
+                .collect()
+        };
+        let mut harness: BTreeMap<String, u32> = BTreeMap::new();
+        let mut branch: BTreeMap<String, u32> = BTreeMap::new();
+        let mut statement = self
+            .conn
+            .prepare("SELECT uid, harness, branch FROM thread")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (uid, thread_harness, thread_branch) = row?;
+            if uids.contains(&uid) {
+                *harness.entry(thread_harness).or_default() += 1;
+                if let Some(name) = thread_branch {
+                    *branch.entry(name).or_default() += 1;
+                }
+            }
+        }
+        let mut path: BTreeMap<String, u32> = BTreeMap::new();
+        let mut statement = self
+            .conn
+            .prepare("SELECT t.uid, f.path FROM edit f JOIN thread t ON t.id = f.thread_id")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (uid, edited) = row?;
+            if uids.contains(&uid) {
+                *path.entry(edited).or_default() += 1;
+            }
+        }
+        Ok(SearchFacets {
+            branch: top_counts(branch),
+            harness: top_counts(harness),
+            path: top_counts(path),
+        })
+    }
+
+    /// The uids of the threads the filter matches, with no query.
+    fn matching_uids(&self, filter: &ThreadFilter) -> Result<HashSet<String>, StoreError> {
+        let sql = format!("SELECT t.uid FROM thread t WHERE 1 = 1{FILTER_SQL}");
+        let bindings = thread_bindings(filter);
+        let mut statement = self.conn.prepare(&sql)?;
+        let uids = statement
+            .query_map(bindings.as_slice(), |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<String>>>()?;
+        Ok(uids)
+    }
+
+    /// Why a search with filters found nothing (D147): for each set filter, how many hits the
+    /// search would have with that filter removed alone, most first, only those above zero.
+    /// Skipped (`None`) when no filter is set, or when the strict stage alone takes longer than
+    /// `DIAGNOSIS_BUDGET`. Each filter is counted once, over at most `DIAGNOSIS_POOL` hits.
+    fn diagnosis(
+        &self,
+        query: &str,
+        filter: &ThreadFilter,
+        group: SearchGroup,
+    ) -> Result<Option<Vec<(String, u32)>>, StoreError> {
+        let relaxed = set_filters(filter);
+        if relaxed.is_empty() {
+            return Ok(None);
+        }
+        if let Some(fts) = build_fts_query(query) {
+            let started = Instant::now();
+            self.exact_stage(&fts, filter, &mut Hits::new(DIAGNOSIS_POOL))?;
+            if started.elapsed() > DIAGNOSIS_BUDGET {
+                return Ok(None);
+            }
+        }
+        let limit = u32::try_from(DIAGNOSIS_POOL).unwrap_or(u32::MAX);
+        let mut counts = Vec::new();
+        for (name, without) in relaxed {
+            let hits = if query.is_empty() {
+                self.list_threads(&without, None, limit)?.len()
+            } else {
+                group_hits(&self.stream(query, &without, DIAGNOSIS_POOL)?, group).len()
+            };
+            if hits > 0 {
+                counts.push((name.to_owned(), u32::try_from(hits).unwrap_or(u32::MAX)));
+            }
+        }
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        counts.truncate(DIAGNOSIS_TOP);
+        Ok(Some(counts))
     }
 
     /// Stage 1: word-start matches, best first.
@@ -702,8 +1007,9 @@ impl ThreadStore {
             return Ok(());
         }
         let statements = stage_statements("entry_tri", "edit_tri", true, true);
-        let candidates =
-            self.query_candidates(&statements, &trigram.substring, filter, hits.room())?;
+        // The seen hits may take some of the candidates, so the room is added to the cap.
+        let cap = hits.room() + hits.seen.len();
+        let candidates = self.query_candidates(&statements, &trigram.substring, filter, cap)?;
         for candidate in candidates {
             if hits.seen.contains(&candidate.hit.entry_id) {
                 continue;
@@ -738,9 +1044,8 @@ impl ThreadStore {
             .filter(|token| !token.contains(' ') && token.chars().count() >= MIN_FUZZY_CHARS)
             .map(String::as_str)
             .collect();
-        let cap = hits.room().saturating_mul(FUZZY_CANDIDATE_FACTOR);
         let statements = stage_statements("entry_tri", "edit_tri", false, true);
-        let candidates = self.query_candidates(&statements, &trigram.fuzzy, filter, cap)?;
+        let candidates = self.query_candidates(&statements, &trigram.fuzzy, filter, FUZZY_POOL)?;
         let mut scored: Vec<(f32, f64, ThreadHit)> = Vec::new();
         for candidate in candidates {
             if hits.seen.contains(&candidate.hit.entry_id) {
@@ -1336,6 +1641,230 @@ fn thread_bindings(filter: &ThreadFilter) -> Vec<(&'static str, &dyn ToSql)> {
     bindings
 }
 
+/// One search or listing as the engine asks for it (D147).
+#[derive(Clone, Copy, Debug)]
+pub struct SearchRequest<'a> {
+    pub query: &'a str,
+    pub filter: &'a ThreadFilter,
+    /// The page size.
+    pub limit: u32,
+    /// The `next_cursor` of the previous page, or `None` for the first.
+    pub cursor: Option<&'a str>,
+    pub group: SearchGroup,
+    pub order: SearchOrder,
+    /// Entries before and after each hit; clamped to 3.
+    pub context: u8,
+    /// Whether to count the common values of the matching threads.
+    pub facets: bool,
+}
+
+/// One page of a search or a listing (D147).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchPage {
+    pub hits: Vec<ThreadHit>,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+    pub facets: Option<SearchFacets>,
+    pub diagnosis: Option<Vec<(String, u32)>>,
+}
+
+/// Where a page starts. A search is windowed by an offset in its fixed order; a listing is
+/// keyed by the last thread of the previous page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Position {
+    Offset(usize),
+    Keyset(i64, String),
+}
+
+/// What a hit of a listing looks like: the thread, its title as the snippet, and seq 0.
+fn listing_hit(thread: ThreadSummary) -> ThreadHit {
+    ThreadHit {
+        thread_uid: thread.uid,
+        title: thread.title.clone(),
+        entry_id: 0,
+        seq: 0,
+        turn: 0,
+        snippet: thread.title,
+        at: thread.last_event_at,
+        kind: HitKind::Exact,
+        harness: thread.harness,
+        branch: thread.branch,
+        started_at: thread.started_at,
+        edit_count: thread.edit_count,
+        tags: thread.tags,
+        context: Vec::new(),
+    }
+}
+
+/// The hits of one thread at most, the best of each (its first, as the stream is ranked).
+fn group_hits(entries: &[ThreadHit], group: SearchGroup) -> Vec<ThreadHit> {
+    match group {
+        SearchGroup::Entry => entries.to_vec(),
+        SearchGroup::Thread => {
+            let mut seen = HashSet::new();
+            entries
+                .iter()
+                .filter(|hit| seen.insert(hit.thread_uid.as_str()))
+                .cloned()
+                .collect()
+        }
+    }
+}
+
+/// The filters a diagnosis may remove, with the name it reports: each set one, with a copy of
+/// the filter that has it cleared (D147).
+fn set_filters(filter: &ThreadFilter) -> Vec<(&'static str, ThreadFilter)> {
+    type Check = (&'static str, bool, fn(&mut ThreadFilter));
+    let checks: [Check; 13] = [
+        ("branch", filter.branch.is_some(), |f| f.branch = None),
+        ("harness", filter.harness.is_some(), |f| f.harness = None),
+        ("model", filter.model.is_some(), |f| f.model = None),
+        ("since", filter.since.is_some(), |f| f.since = None),
+        ("until", filter.until.is_some(), |f| f.until = None),
+        ("starred", filter.starred.is_some(), |f| f.starred = None),
+        ("has_edits", filter.has_edits.is_some(), |f| {
+            f.has_edits = None;
+        }),
+        ("path", filter.path.is_some(), |f| f.path = None),
+        ("commit", filter.commit.is_some(), |f| f.commit = None),
+        ("tag", filter.tag.is_some(), |f| f.tag = None),
+        ("role", filter.role.is_some(), |f| f.role = None),
+        ("thread", filter.thread.is_some(), |f| f.thread = None),
+        (
+            "turn_range",
+            filter.turn_from.is_some() || filter.turn_to.is_some(),
+            |f| {
+                f.turn_from = None;
+                f.turn_to = None;
+            },
+        ),
+    ];
+    checks
+        .into_iter()
+        .filter(|(_, set, _)| *set)
+        .map(|(name, _, clear)| {
+            let mut relaxed = filter.clone();
+            clear(&mut relaxed);
+            (name, relaxed)
+        })
+        .collect()
+}
+
+/// The `count` most common values, most first, ties by name (facets, D147).
+fn top_counts(counts: BTreeMap<String, u32>) -> Vec<(String, u32)> {
+    let mut values: Vec<(String, u32)> = counts.into_iter().collect();
+    values.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    values.truncate(FACET_TOP);
+    values
+}
+
+/// Digest of what a cursor belongs to: the query and every option that shapes the hits. A
+/// cursor from another request fails this check (D147).
+fn request_digest(
+    query: &str,
+    filter: &ThreadFilter,
+    group: SearchGroup,
+    order: SearchOrder,
+) -> String {
+    use sha2::Digest as _;
+    let mut hasher = Sha256::new();
+    hasher.update(query.as_bytes());
+    hasher.update([0x1f_u8]);
+    hasher.update(format!("{filter:?}|{group:?}|{order:?}").as_bytes());
+    hex_encode(&hasher.finalize()[..8])
+}
+
+/// An opaque cursor: the digest and the position, as hex.
+fn encode_cursor(digest: &str, position: &Position) -> String {
+    let payload = match position {
+        Position::Offset(offset) => format!("{digest}:o{offset}"),
+        Position::Keyset(at, uid) => format!("{digest}:k{at}:{uid}"),
+    };
+    hex_encode(payload.as_bytes())
+}
+
+fn decode_cursor(text: &str, digest: &str) -> Result<Position, StoreError> {
+    let bytes = hex_decode(text).ok_or_else(|| invalid(CURSOR_MALFORMED))?;
+    let payload = String::from_utf8(bytes).map_err(|_| invalid(CURSOR_MALFORMED))?;
+    let rest = payload
+        .strip_prefix(digest)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .ok_or_else(|| invalid(CURSOR_MISMATCH))?;
+    if let Some(offset) = rest.strip_prefix('o') {
+        offset
+            .parse()
+            .map(Position::Offset)
+            .map_err(|_| invalid(CURSOR_MALFORMED))
+    } else if let Some(key) = rest.strip_prefix('k') {
+        let (at, uid) = key
+            .split_once(':')
+            .ok_or_else(|| invalid(CURSOR_MALFORMED))?;
+        let at = at.parse().map_err(|_| invalid(CURSOR_MALFORMED))?;
+        Ok(Position::Keyset(at, uid.to_owned()))
+    } else {
+        Err(invalid(CURSOR_MALFORMED))
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+}
+
+fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 == 1 {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(text.get(index..index + 2)?, 16).ok())
+        .collect()
+}
+
+/// The metadata of one thread by its uid, with its tags.
+fn summary_by_uid(conn: &Connection, uid: &str) -> Result<ThreadSummary, StoreError> {
+    let sql = format!("{SUMMARY_SQL} WHERE t.uid = ?1");
+    let (id, mut summary) = conn
+        .query_row(&sql, params![uid], summary_row)
+        .optional()?
+        .ok_or(StoreError::NotFound)?;
+    summary.tags = tags_of(conn, id)?;
+    Ok(summary)
+}
+
+/// The entries of a context query (`seq`, `kind`, `text`), in the query's order, with the text
+/// capped (D147). Rows of an unknown kind are skipped.
+fn brief_rows(
+    statement: &mut rusqlite::Statement<'_>,
+    uid: &str,
+    seq: u32,
+    limit: i64,
+) -> Result<Vec<ThreadEntryBrief>, StoreError> {
+    let rows = statement
+        .query_map(params![uid, seq, limit], |row| {
+            Ok((
+                row.get::<_, u32>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(seq, kind, text)| {
+            Some(ThreadEntryBrief {
+                seq,
+                kind: parse_kind(&kind)?,
+                text: text.chars().take(CONTEXT_CHARS).collect(),
+            })
+        })
+        .collect())
+}
+
 /// The `entry.kind` text of a role (`kind_text` for the two kinds a search covers).
 fn entry_role_text(role: EntryRole) -> &'static str {
     match role {
@@ -1426,6 +1955,7 @@ fn candidate_row(row: &Row<'_>) -> rusqlite::Result<Candidate> {
             snippet: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
             at: row.get(6)?,
             kind: HitKind::Exact,
+            ..ThreadHit::default()
         },
         body: row.get(8)?,
     })
@@ -4750,5 +5280,528 @@ mod tests {
                 "{label} took {fastest:?}, bound {bound} s"
             );
         }
+    }
+
+    /// A search request with the options of a first page: entries, relevance, no context.
+    fn request<'a>(query: &'a str, filter: &'a ThreadFilter, limit: u32) -> SearchRequest<'a> {
+        SearchRequest {
+            query,
+            filter,
+            limit,
+            cursor: None,
+            group: SearchGroup::Entry,
+            order: SearchOrder::Relevance,
+            context: 0,
+            facets: false,
+        }
+    }
+
+    /// The `(thread, seq)` pairs of hits, in order.
+    fn keys(hits: &[ThreadHit]) -> Vec<(String, u32)> {
+        hits.iter()
+            .map(|hit| (hit.thread_uid.clone(), hit.seq))
+            .collect()
+    }
+
+    /// Every page of a request, each as its `(thread, seq)` pairs, following `next_cursor`
+    /// until `has_more` is false. A last page carries no cursor.
+    fn pages_of(store: &ThreadStore, base: SearchRequest<'_>) -> Vec<Vec<(String, u32)>> {
+        let mut pages = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..50 {
+            let page = store
+                .search_page(&SearchRequest {
+                    cursor: cursor.as_deref(),
+                    ..base
+                })
+                .expect("page");
+            pages.push(keys(&page.hits));
+            if !page.has_more {
+                assert!(page.next_cursor.is_none(), "a last page has no cursor");
+                return pages;
+            }
+            cursor = Some(page.next_cursor.expect("a cursor while more pages follow"));
+        }
+        panic!("the pages never end");
+    }
+
+    #[test]
+    fn cursor_paging_neither_repeats_nor_skips_a_hit() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        for session in ["a", "b", "c", "d", "e"] {
+            store
+                .apply(&batch(
+                    session,
+                    100,
+                    vec![
+                        new_entry("u", EntryKind::User, "backoff first", 1),
+                        new_entry("x", EntryKind::Assistant, "backoff second", 2),
+                    ],
+                ))
+                .expect("apply");
+        }
+        let filter = ThreadFilter::default();
+        for order in [SearchOrder::Relevance, SearchOrder::Recent] {
+            let whole = store
+                .search_page(&SearchRequest {
+                    order,
+                    ..request("backoff", &filter, 100)
+                })
+                .expect("whole");
+            let whole = keys(&whole.hits);
+            assert_eq!(whole.len(), 10, "{order:?}");
+
+            let base = SearchRequest {
+                order,
+                ..request("backoff", &filter, 3)
+            };
+            let first = store.search_page(&base).expect("first");
+            assert!(first.has_more, "{order:?}");
+            assert!(first.next_cursor.is_some(), "{order:?}");
+
+            let pages = pages_of(&store, base);
+            let sizes: Vec<usize> = pages.iter().map(Vec::len).collect();
+            assert_eq!(sizes, vec![3, 3, 3, 1], "{order:?}");
+            let walked: Vec<(String, u32)> = pages.into_iter().flatten().collect();
+            assert_eq!(walked, whole, "{order:?}");
+        }
+    }
+
+    #[test]
+    fn a_thread_group_page_walks_each_thread_once() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        for session in ["a", "b", "c", "d", "e"] {
+            store
+                .apply(&batch(
+                    session,
+                    100,
+                    vec![
+                        new_entry("u", EntryKind::User, "backoff first", 1),
+                        new_entry("x", EntryKind::Assistant, "backoff second", 2),
+                    ],
+                ))
+                .expect("apply");
+        }
+        let filter = ThreadFilter::default();
+        let base = SearchRequest {
+            group: SearchGroup::Thread,
+            ..request("backoff", &filter, 2)
+        };
+        let pages = pages_of(&store, base);
+        let sizes: Vec<usize> = pages.iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![2, 2, 1]);
+        let uids: HashSet<String> = pages.iter().flatten().map(|(uid, _)| uid.clone()).collect();
+        assert_eq!(uids.len(), 5);
+    }
+
+    #[test]
+    fn a_cursor_from_another_search_is_refused() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&prompted("a", 100, "backoff jitter"))
+            .expect("a");
+        store
+            .apply(&prompted("b", 200, "backoff retry"))
+            .expect("b");
+        let filter = ThreadFilter::default();
+        let first = store
+            .search_page(&request("backoff", &filter, 1))
+            .expect("first");
+        let cursor = first.next_cursor.expect("a cursor");
+        let resume = |query: &str, filter: &ThreadFilter, group, order| {
+            store.search_page(&SearchRequest {
+                cursor: Some(cursor.as_str()),
+                group,
+                order,
+                ..request(query, filter, 1)
+            })
+        };
+        let same = resume(
+            "backoff",
+            &filter,
+            SearchGroup::Entry,
+            SearchOrder::Relevance,
+        );
+        assert_eq!(same.expect("the same search resumes").hits.len(), 1);
+
+        let other_filter = ThreadFilter {
+            harness: Some("codex".to_owned()),
+            ..ThreadFilter::default()
+        };
+        let refused = [
+            resume(
+                "jitter",
+                &filter,
+                SearchGroup::Entry,
+                SearchOrder::Relevance,
+            ),
+            resume(
+                "backoff",
+                &other_filter,
+                SearchGroup::Entry,
+                SearchOrder::Relevance,
+            ),
+            resume(
+                "backoff",
+                &filter,
+                SearchGroup::Thread,
+                SearchOrder::Relevance,
+            ),
+            resume("backoff", &filter, SearchGroup::Entry, SearchOrder::Recent),
+        ];
+        for result in refused {
+            let error = result.expect_err("a cursor of another search");
+            assert!(error.to_string().contains("another search"), "{error}");
+        }
+
+        for text in ["zz", "abc", "ff"] {
+            let garbage = store.search_page(&SearchRequest {
+                cursor: Some(text),
+                ..request("backoff", &filter, 1)
+            });
+            assert!(garbage.is_err(), "{text} is not a cursor");
+        }
+    }
+
+    #[test]
+    fn thread_group_keeps_one_hit_per_thread_and_entry_group_keeps_all() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "a",
+                100,
+                vec![
+                    new_entry("u", EntryKind::User, "backoff one", 1),
+                    new_entry("x", EntryKind::Assistant, "backoff two", 2),
+                ],
+            ))
+            .expect("a");
+        store
+            .apply(&prompted("b", 200, "backoff three"))
+            .expect("b");
+        let filter = ThreadFilter::default();
+        let by_thread = store
+            .search_page(&SearchRequest {
+                group: SearchGroup::Thread,
+                ..request("backoff", &filter, 10)
+            })
+            .expect("thread");
+        let by_entry = store
+            .search_page(&request("backoff", &filter, 10))
+            .expect("entry");
+        assert_eq!(by_thread.hits.len(), 2);
+        let uids: HashSet<&str> = by_thread
+            .hits
+            .iter()
+            .map(|hit| hit.thread_uid.as_str())
+            .collect();
+        assert_eq!(uids.len(), 2);
+        assert!(!by_thread.has_more);
+        assert_eq!(by_entry.hits.len(), 3);
+    }
+
+    #[test]
+    fn relevance_ranks_by_match_and_recent_by_entry_time() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        // Equal length, so the four matches of "strong" outrank the one of "recent".
+        store
+            .apply(&batch(
+                "strong",
+                10,
+                vec![new_entry(
+                    "u",
+                    EntryKind::User,
+                    "flaky flaky flaky flaky",
+                    10,
+                )],
+            ))
+            .expect("strong");
+        store
+            .apply(&batch(
+                "recent",
+                500,
+                vec![new_entry("u", EntryKind::User, "flaky test here now", 500)],
+            ))
+            .expect("recent");
+        let filter = ThreadFilter::default();
+        let relevance = store
+            .search_page(&request("flaky", &filter, 10))
+            .expect("relevance");
+        let uids: Vec<&str> = relevance
+            .hits
+            .iter()
+            .map(|hit| hit.thread_uid.as_str())
+            .collect();
+        assert_eq!(uids, vec![uid("strong"), uid("recent")]);
+
+        let recent = store
+            .search_page(&SearchRequest {
+                order: SearchOrder::Recent,
+                ..request("flaky", &filter, 10)
+            })
+            .expect("recent");
+        let uids: Vec<&str> = recent
+            .hits
+            .iter()
+            .map(|hit| hit.thread_uid.as_str())
+            .collect();
+        assert_eq!(uids, vec![uid("recent"), uid("strong")]);
+        assert_eq!(recent.hits[0].at, 500);
+    }
+
+    #[test]
+    fn context_is_up_to_three_conversation_entries_each_side_and_capped() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "a",
+                100,
+                vec![
+                    new_entry("s", EntryKind::User, "start of the session", 1),
+                    new_entry("a1", EntryKind::Assistant, "first answer", 2),
+                    new_entry("t", EntryKind::ToolCall, "Bash", 3),
+                    new_entry("h", EntryKind::User, "backoff hit here", 4),
+                    new_entry("a2", EntryKind::Assistant, "second answer", 5),
+                    new_entry("q", EntryKind::User, "later question", 6),
+                    new_entry("a3", EntryKind::Assistant, "last answer", 7),
+                ],
+            ))
+            .expect("a");
+        store
+            .apply(&batch(
+                "b",
+                200,
+                vec![
+                    new_entry("h", EntryKind::User, "backoff alone", 1),
+                    new_entry("x", EntryKind::Assistant, &"z".repeat(1000), 2),
+                ],
+            ))
+            .expect("b");
+        let filter = ThreadFilter::default();
+        let page = |context: u8| {
+            store
+                .search_page(&SearchRequest {
+                    context,
+                    ..request("backoff", &filter, 10)
+                })
+                .expect("search")
+        };
+        let context_of = |context: u8| -> Vec<u32> {
+            let page = page(context);
+            let hit = page
+                .hits
+                .iter()
+                .find(|hit| hit.thread_uid == uid("a"))
+                .expect("the hit of a");
+            hit.context.iter().map(|entry| entry.seq).collect()
+        };
+        assert!(context_of(0).is_empty());
+        assert_eq!(context_of(1), vec![1, 4]);
+        assert_eq!(context_of(2), vec![0, 1, 4, 5]);
+        assert_eq!(context_of(3), vec![0, 1, 4, 5, 6]);
+        assert_eq!(context_of(9), vec![0, 1, 4, 5, 6]);
+
+        let capped = page(1);
+        let hit = capped
+            .hits
+            .iter()
+            .find(|hit| hit.thread_uid == uid("b"))
+            .expect("the hit of b");
+        assert_eq!(hit.context.len(), 1);
+        assert_eq!(hit.context[0].text.chars().count(), CONTEXT_CHARS);
+    }
+
+    #[test]
+    fn facets_count_the_matching_threads_only() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "a",
+                100,
+                vec![
+                    new_entry("u", EntryKind::User, "backoff a", 1),
+                    with_edit(new_entry("t", EntryKind::ToolCall, "Edit", 2), "src/a.rs"),
+                ],
+            ))
+            .expect("a");
+        store
+            .apply(&batch(
+                "b",
+                200,
+                vec![
+                    new_entry("u", EntryKind::User, "backoff b", 1),
+                    with_edit(new_entry("t", EntryKind::ToolCall, "Edit", 2), "src/a.rs"),
+                    with_edit(new_entry("s", EntryKind::ToolCall, "Edit", 3), "src/b.rs"),
+                ],
+            ))
+            .expect("b");
+        store
+            .apply(&Batch {
+                harness: "codex".to_owned(),
+                branch: Some("feature".to_owned()),
+                ..batch(
+                    "c",
+                    300,
+                    vec![
+                        new_entry("u", EntryKind::User, "unrelated words", 1),
+                        with_edit(new_entry("t", EntryKind::ToolCall, "Edit", 2), "src/c.rs"),
+                    ],
+                )
+            })
+            .expect("c");
+        store
+            .apply(&Batch {
+                branch: None,
+                ..batch(
+                    "d",
+                    400,
+                    vec![new_entry("u", EntryKind::User, "backoff d", 1)],
+                )
+            })
+            .expect("d");
+        let filter = ThreadFilter::default();
+
+        let page = store
+            .search_page(&SearchRequest {
+                facets: true,
+                ..request("backoff", &filter, 10)
+            })
+            .expect("search");
+        let facets = page.facets.expect("facets");
+        assert_eq!(facets.branch, vec![("main".to_owned(), 2)]);
+        assert_eq!(facets.harness, vec![("claude-code".to_owned(), 3)]);
+        assert_eq!(
+            facets.path,
+            vec![("src/a.rs".to_owned(), 2), ("src/b.rs".to_owned(), 1)]
+        );
+        let plain = store
+            .search_page(&request("backoff", &filter, 10))
+            .expect("plain");
+        assert!(plain.facets.is_none());
+
+        let feature = ThreadFilter {
+            branch: Some("feature".to_owned()),
+            ..ThreadFilter::default()
+        };
+        let listed = store
+            .search_page(&SearchRequest {
+                facets: true,
+                ..request("", &feature, 10)
+            })
+            .expect("listing");
+        assert_eq!(listed.hits.len(), 1);
+        let facets = listed.facets.expect("facets");
+        assert_eq!(facets.branch, vec![("feature".to_owned(), 1)]);
+        assert_eq!(facets.harness, vec![("codex".to_owned(), 1)]);
+        assert_eq!(facets.path, vec![("src/c.rs".to_owned(), 1)]);
+    }
+
+    #[test]
+    fn an_empty_result_says_which_filter_removed_the_most() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "a",
+                100,
+                vec![
+                    new_entry("u", EntryKind::User, "backoff a", 1),
+                    with_edit(new_entry("t", EntryKind::ToolCall, "Edit", 2), "src/a.rs"),
+                ],
+            ))
+            .expect("a");
+        store
+            .apply(&Batch {
+                branch: Some("feature".to_owned()),
+                ..batch(
+                    "b",
+                    200,
+                    vec![new_entry("u", EntryKind::User, "backoff b", 1)],
+                )
+            })
+            .expect("b");
+        // Each filter alone keeps one thread, but no thread has both.
+        let both = ThreadFilter {
+            branch: Some("feature".to_owned()),
+            has_edits: Some(true),
+            ..ThreadFilter::default()
+        };
+        let page = store
+            .search_page(&request("backoff", &both, 10))
+            .expect("search");
+        assert!(page.hits.is_empty());
+        assert_eq!(
+            page.diagnosis,
+            Some(vec![("branch".to_owned(), 1), ("has_edits".to_owned(), 1)])
+        );
+        let listed = store.search_page(&request("", &both, 10)).expect("listing");
+        assert_eq!(listed.diagnosis, page.diagnosis);
+
+        let found = store
+            .search_page(&request(
+                "backoff",
+                &ThreadFilter {
+                    branch: Some("main".to_owned()),
+                    ..ThreadFilter::default()
+                },
+                10,
+            ))
+            .expect("found");
+        assert_eq!(found.hits.len(), 1);
+        assert!(found.diagnosis.is_none());
+
+        let nothing = store
+            .search_page(&request("nowhere", &ThreadFilter::default(), 10))
+            .expect("nothing");
+        assert!(nothing.diagnosis.is_none());
+    }
+
+    #[test]
+    fn empty_query_lists_threads_newest_first_in_pages_without_gaps() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        for (session, at) in [("a", 100), ("b", 300), ("c", 200), ("d", 300), ("e", 50)] {
+            store
+                .apply(&prompted(session, at, "task x"))
+                .expect("apply");
+        }
+        let filter = ThreadFilter::default();
+        let all = store.list_threads(&filter, None, 100).expect("list");
+        assert_eq!(all.len(), 5);
+        assert!(
+            all.windows(2)
+                .all(|pair| pair[0].last_event_at >= pair[1].last_event_at)
+        );
+        let expected: Vec<(String, u32)> =
+            all.iter().map(|thread| (thread.uid.clone(), 0)).collect();
+
+        let base = request("", &filter, 2);
+        let pages = pages_of(&store, base);
+        let sizes: Vec<usize> = pages.iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![2, 2, 1]);
+        let walked: Vec<(String, u32)> = pages.into_iter().flatten().collect();
+        assert_eq!(walked, expected);
+
+        let first = store.search_page(&base).expect("first");
+        assert_eq!(first.hits[0].snippet, first.hits[0].title);
+
+        let search = store
+            .search_page(&request("task", &filter, 2))
+            .expect("search");
+        let cursor = search.next_cursor.expect("a cursor");
+        let misplaced = store.search_page(&SearchRequest {
+            cursor: Some(cursor.as_str()),
+            ..request("", &filter, 2)
+        });
+        assert!(misplaced.is_err(), "a search cursor does not list");
+
+        let nothing = ThreadFilter {
+            branch: Some("nope".to_owned()),
+            ..ThreadFilter::default()
+        };
+        let empty = store
+            .search_page(&request("", &nothing, 2))
+            .expect("empty listing");
+        assert!(empty.hits.is_empty());
+        assert!(!empty.has_more);
+        assert_eq!(empty.diagnosis, Some(vec![("branch".to_owned(), 5)]));
     }
 }
