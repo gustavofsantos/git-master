@@ -422,7 +422,7 @@ pub enum CommandKind {
     },
     /// Marks review comment `id` handled by an agent, with its `summary` of what it
     /// did (D135). Refused for a resolved comment and for a blank summary. Writes
-    /// only GitMaster's own store. Answers `ReviewCommentsListed`.
+    /// only the app's own store. Answers `ReviewCommentsListed`.
     HandleReviewComment {
         id: i64,
         summary: String,
