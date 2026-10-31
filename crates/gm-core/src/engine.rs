@@ -2227,6 +2227,10 @@ impl Engine {
                 only_a_human(actor, "resolve a review comment")?;
                 self.set_review_status(id, *comment, ReviewStatus::Resolved)
             }
+            CommandKind::HandleReviewComment {
+                id: comment,
+                summary,
+            } => self.handle_review_comment(id, *comment, summary),
             CommandKind::ReopenReviewComment { id: comment } => {
                 only_a_human(actor, "reopen a review comment")?;
                 self.set_review_status(id, *comment, ReviewStatus::Open)
@@ -2291,12 +2295,36 @@ impl Engine {
         if find_review(store, comment)?.status == status {
             return Err(match status {
                 ReviewStatus::Resolved => "the comment is already resolved".to_owned(),
-                ReviewStatus::Open => "the comment is not resolved".to_owned(),
+                ReviewStatus::Open | ReviewStatus::Handled => {
+                    "the comment is already open".to_owned()
+                }
             });
         }
         store
             .set_status(comment, status, now_ms())
             .map_err(|e| e.0)?;
+        self.review_listed(id, &root)
+    }
+
+    /// An agent's note that it worked on comment `comment` (D135): the status becomes
+    /// `Handled` and the summary is kept. A resolved comment is a human's decision
+    /// and is not touched.
+    fn handle_review_comment(
+        &mut self,
+        id: OperationId,
+        comment: i64,
+        summary: &str,
+    ) -> Result<Vec<Event>, String> {
+        let summary = summary.trim();
+        if summary.is_empty() {
+            return Err("the summary is empty".to_owned());
+        }
+        let root = self.open_root()?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        if find_review(store, comment)?.status == ReviewStatus::Resolved {
+            return Err("the comment is already resolved".to_owned());
+        }
+        store.set_handled(comment, summary).map_err(|e| e.0)?;
         self.review_listed(id, &root)
     }
 
@@ -3016,6 +3044,7 @@ fn is_review_command(kind: &CommandKind) -> bool {
             | CommandKind::ListReviewComments
             | CommandKind::EditReviewComment { .. }
             | CommandKind::ResolveReviewComment { .. }
+            | CommandKind::HandleReviewComment { .. }
             | CommandKind::ReopenReviewComment { .. }
             | CommandKind::DeleteReviewComment { .. }
             | CommandKind::LoadReviewSnapshotText { .. }

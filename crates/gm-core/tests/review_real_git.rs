@@ -208,6 +208,65 @@ fn private_refs(dir: &Path) -> Vec<String> {
 }
 
 #[test]
+fn an_agent_marks_a_comment_handled_and_only_a_human_resolves_it() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 2, 2, "rename")));
+    let id = only(&mut engine).id;
+
+    let events = engine.handle(
+        OperationId(11),
+        &agent(CommandKind::HandleReviewComment {
+            id,
+            summary: "  renamed b to bee  ".to_owned(),
+        }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    let handled = listed(&events).remove(0);
+    assert_eq!(handled.status, ReviewStatus::Handled);
+    assert_eq!(handled.summary.as_deref(), Some("renamed b to bee"));
+
+    let events = engine.handle(
+        OperationId(12),
+        &agent(CommandKind::ResolveReviewComment { id }),
+    );
+    assert_eq!(failure(&events), "only a human can resolve a review comment");
+    let events = engine.handle(
+        OperationId(13),
+        &agent(CommandKind::HandleReviewComment {
+            id,
+            summary: " ".to_owned(),
+        }),
+    );
+    assert_eq!(failure(&events), "the summary is empty");
+
+    let events = engine.handle(
+        OperationId(14),
+        &human(CommandKind::ResolveReviewComment { id }),
+    );
+    let resolved = listed(&events).remove(0);
+    assert_eq!(resolved.status, ReviewStatus::Resolved);
+    assert_eq!(resolved.summary.as_deref(), Some("renamed b to bee"));
+    let events = engine.handle(
+        OperationId(15),
+        &agent(CommandKind::HandleReviewComment {
+            id,
+            summary: "again".to_owned(),
+        }),
+    );
+    assert_eq!(failure(&events), "the comment is already resolved");
+
+    let events = engine.handle(
+        OperationId(16),
+        &human(CommandKind::ReopenReviewComment { id }),
+    );
+    let reopened = listed(&events).remove(0);
+    assert_eq!(reopened.status, ReviewStatus::Open);
+    assert_eq!(reopened.summary, None);
+}
+
+#[test]
 fn a_comment_is_added_listed_resolved_reopened_edited_and_deleted() {
     let dir = repo();
     let log = CommandLog::default();
@@ -259,7 +318,7 @@ fn a_comment_is_added_listed_resolved_reopened_edited_and_deleted() {
         OperationId(14),
         &human(CommandKind::ReopenReviewComment { id }),
     );
-    assert_eq!(failure(&events), "the comment is not resolved");
+    assert_eq!(failure(&events), "the comment is already open");
 
     let events = engine.handle(
         OperationId(15),

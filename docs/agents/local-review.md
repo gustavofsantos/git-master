@@ -19,7 +19,7 @@ Local review is a loop between you and an agent on your machine. You comment on 
 1. You comment on the lines.
 2. The agent reads the open comments with `review_comments_list`.
 3. The agent changes the code, then calls `review_comment_resolve` on each comment it handled, with a summary of what it did.
-4. The comment becomes `handled`. The agent proposes closing it, and you confirm, which makes the comment `resolved`.
+4. The comment becomes `handled`, with the summary beside it. You read the change and resolve the comment, or reopen it.
 
 ## Comment states
 

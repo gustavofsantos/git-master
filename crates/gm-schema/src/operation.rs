@@ -420,8 +420,15 @@ pub enum CommandKind {
     ResolveReviewComment {
         id: i64,
     },
-    /// Marks review comment `id` open again, which is refused when it is not
-    /// resolved. Human only.
+    /// Marks review comment `id` handled by an agent, with its `summary` of what it
+    /// did (D135). Refused for a resolved comment and for a blank summary. Writes
+    /// only GitMaster's own store. Answers `ReviewCommentsListed`.
+    HandleReviewComment {
+        id: i64,
+        summary: String,
+    },
+    /// Marks review comment `id` open again, which is refused when it is already
+    /// open. Human only.
     ReopenReviewComment {
         id: i64,
     },

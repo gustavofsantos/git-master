@@ -1,109 +1,85 @@
 ---
 title: MCP server
-description: How AI agents connect to GitMaster through MCP, and how approvals keep you in charge of every change an agent makes.
-status: planned
+description: How AI agents use GitMaster through MCP, which tools it offers, and how it keeps you in charge of what the agent records.
+status: partial
 order: 10
 ---
 
-> **Planned.** The MCP server is not available in the app yet.
+> **Planned.** Only the review and thread tools are available. The tools that propose or apply a change to the repository, and the agent policy, are not.
 
-GitMaster runs its MCP server inside the running app. An agent connected to it sees the same repository state you see, and every change it applies waits for your approval in the UI.
+`gitmaster mcp` is an MCP server that your agent starts as a separate process and talks to over its standard input and output. It offers the tools that only GitMaster can offer: the review comments you wrote on a diff, and the threads GitMaster captured from earlier agent sessions. It does not repeat what the agent already has. Reading files, searching text and running `git` stay with the agent's own tools.
 
-## How the server is reached
+## How the server runs
 
-The server runs inside the app, so you and the agent share one view of the repository and one set of approvals. There is no headless mode, no separate server process and no account.
+Your MCP client starts `gitmaster mcp` as a stdio server and stops it when the session ends. There is no socket, no port, no token and no resident process: the server lives exactly as long as the client that started it. The app does not need to be open.
 
-`gitmaster mcp` is a stdio shim. Your MCP client starts it, the shim forwards each request to the app over a Unix socket protected by a token, and the shim opens the app if the app is closed. A token-protected socket is used instead of HTTP on localhost because any local process can reach a TCP port, and web pages can reach one through DNS rebinding.
-
-Configure your MCP client to start this command as a stdio server:
+Configure your MCP client to start this command:
 
 ```sh
 gitmaster mcp
 ```
 
+The server works on the repository that contains its working directory, which is the directory the client starts it in. To name another repository, pass its path:
+
+```sh
+gitmaster mcp --repo ~/src/project
+```
+
 See [CLI](../reference/cli.md) for the command.
 
-## Set up the server
+The server and the app share what they store in the repository's `.git/gitmaster/` directory. A comment the agent marks as handled appears in the app, and a comment you write in the app is there the next time the agent lists comments. Neither one waits for the other.
 
-1. Press `Ctrl+,` (`⌘,` on macOS) to open **Settings**, then choose **MCP & Agents**.
-2. Under **MCP Server**, turn the server on. Set the path of the Unix socket if you need a different one.
-3. Under **Authentication**, generate a token for the `gitmaster mcp` shim.
-4. Give the token to the shim, and start your MCP client with it.
+## What the server may do
 
-To remove access, go back to **Authentication** and revoke the token.
+The server offers two kinds of tool:
 
-## Effect levels
-
-Every tool has one of three effect levels. The level decides whether a call needs your approval.
-
-| Level | What it does | Approval |
+| Kind | What it does | Approval |
 |---|---|---|
-| Read | Reads repository state. Changes nothing. | Not required |
-| Propose | Computes a plan or a suggestion. Changes nothing. | Not required. A suggestion takes effect only when you accept it. |
-| Apply | Changes the repository. | You approve in the UI before it runs. |
+| Read | Reads review comments and threads. Changes nothing. | Not required |
+| Record | Writes to GitMaster's own store only: it marks a review comment as handled, with a summary. It never changes your files, your branches or your index. | Not required. You confirm the result in the app. |
 
-The sequence for a change is:
+A record tool takes effect on GitMaster's record, and a person still decides what it means. When an agent marks a comment as `handled`, the comment waits for you. Only you make it `resolved`.
 
-```text
-Read  →  Propose  →  your approval in the UI  →  Apply
-```
+There is no tool that commits, pushes, restacks, edits a file or deletes anything. An agent that changes your code does it with its own tools, as it does without GitMaster, and the [thread](../guide/threads.md) records what it did.
 
-An apply tool accepts only a `plan_id`, never free arguments. What you approve is the plan, so exactly what runs is what you approved.
-
-The agent goes through the same hooks and gates that you do. Every change an agent applies is recorded in the operation log with `actor: agent:<client>`, where `<client>` names the MCP client.
-
-## Policy
-
-The policy decides which tools run without asking you. Set it under **Agent Policies** in the **MCP & Agents** section of Settings. You can also write it in your Git configuration, in the same style as the hook sections:
-
-```ini
-[gitmaster "mcp"]
-    auto = read, propose
-    approve = apply
-```
-
-With this policy, Read and Propose run without asking, and Apply waits for your approval in the UI. When no UI is open, an apply stays `pending_approval` until you open the app and approve it.
+> **Planned.** Tools that propose a change, such as a restack plan, and that apply it after your approval in the app.
 
 ## Output designed for agents
 
-- **Small output by default.** An agent reads `diff_stat` first, then asks for one hunk with `diff_get`.
-- **Hunk ids come from the content.** A hunk id is a hash of the hunk's content. When a hunk changes, its id changes and the call fails, so an agent cannot apply a change to the wrong place.
-- **Tasks, not Git commands.** The server offers fewer than about a dozen tools, each built for a task. It does not repeat what the `git` command line already does well, such as `log` and `show`.
+- **Small output by default.** Lists return a page, and the thread tools take a limit. An agent reads a thread's summary first, then asks for the entries it needs.
+- **Tasks, not Git commands.** The server offers a handful of tools, each built for a task.
 
 ## Untrusted content
 
-Commit messages, branch names and file contents come from the repository, and an agent must treat them as untrusted. The server returns them in fields marked as untrusted. No value from the repository becomes an argument to an apply tool unless it passed through a plan that you approve.
+Review comments, thread entries and file text come from people and from earlier sessions, so an agent must treat them as untrusted. The server returns them in fields marked as untrusted. Text that GitMaster redacted shows as `[REDACTED:name]`, and the original is not available to the agent.
 
-## Agents and workflows
+A change an agent records is written to the operation log with `actor: agent:<client>`, where `<client>` is the name the MCP client gave when it connected. Reads are not logged.
 
-An agent runs a workflow with `workflow_run`. Every applying step of that run waits for your approval, with no override.
+## Worked example: an agent works through your comments
 
-Agents write workflow scripts as ordinary files. The MCP server has no tool that writes them. See [AI agents](../workflows/ai-agents.md) for how to write a workflow that an agent can run.
-
-## Worked example: an agent restacks a stack
-
-An agent restacks the stack `ledger-base`, which has three branches out of date. The restack stops at a conflict in `ledger-ui`.
+You commented on two lines of `src/ledger.rs` in the app: "Return an error here instead of unwrapping". The agent handles it:
 
 ```text
-stack_tree()                      -> ledger-base -> [api, ui -> [e2e]], 3 branches out of date
-restack_plan(root="ledger-base")  -> { plan_id: "01J9Z...", steps: 3, refs: {...} }
-restack_apply(plan_id)            -> { status: "pending_approval", operation_id }
-                                     ... you approve in the UI ...
-                                  -> { status: "conflict", branch: "ledger-ui", hunks: ["h_7f3a", "h_c21b"] }
-conflict_get("h_7f3a")            -> base, left side, right side
-conflict_propose("h_7f3a", text)  -> suggestion appears in the UI; you accept it
+review_comments_list(status="open")  -> [{ id: 7, path: "src/ledger.rs", lines: 41-42, body: "Return an error ...", untrusted: true }]
+                                        ... the agent edits src/ledger.rs with its own tools ...
+review_comment_resolve(id=7, summary="parse_amount now returns Result; callers propagate with ?")
+                                     -> { id: 7, status: "handled" }
 ```
 
-1. `stack_tree` shows the stack and the branches that are out of date. Reading changes nothing.
-2. `restack_plan` builds a plan and returns its `plan_id`. Planning changes nothing.
-3. `restack_apply` asks to run the plan. Under the example policy the apply waits, so the call returns `pending_approval` and an operation id. You approve in the UI.
-4. The restack reaches `ledger-ui` and stops at a conflict. The call returns the branch and the ids of its conflicting hunks.
-5. `conflict_get` returns the base and both sides of the first hunk.
-6. `conflict_propose` sends a suggested resolution to the UI. Nothing changes until you accept it.
+1. `review_comments_list` returns the open comments with the lines they are anchored to now. A comment whose text no longer appears exactly once is `outdated` and has no lines.
+2. The agent changes the code with its own tools.
+3. `review_comment_resolve` marks the comment `handled` and stores the agent's summary. The comment appears as handled in the app, and you decide whether to resolve it.
+
+An agent that needs an earlier decision searches the threads instead:
+
+```text
+threads_search(query="retry backoff") -> [{ thread: "01J9Z...", turn: 4, snippet: "...we chose jittered backoff because...", untrusted: true }]
+thread_read(id="01J9Z...", from=4, limit=10)
+```
 
 ## See also
 
-- [MCP tools](../reference/mcp-tools.md): every tool, with its arguments, results and approval.
+- [MCP tools](../reference/mcp-tools.md): every tool, with its arguments and results.
 - [Local review](local-review.md): how an agent works through the comments you write on a diff.
 - [Threads](../guide/threads.md): the sessions an agent can search with the thread tools.
 - [Trust and safety](../concepts/trust-and-safety.md): the model behind approvals and the operation log.

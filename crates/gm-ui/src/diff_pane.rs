@@ -852,6 +852,7 @@ impl DiffPane {
     ) -> AnyElement {
         let (label, colour) = match badge {
             Badge::Open => ("Open", theme::accent()),
+            Badge::Handled => ("Handled", theme::accent()),
             Badge::Resolved => ("Resolved", theme::muted()),
             Badge::Outdated => ("Outdated", theme::warn_fg()),
         };

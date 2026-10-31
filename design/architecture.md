@@ -7,7 +7,7 @@ Last updated: 2026-10-29. The status of each decision is in `design/decisions.md
 One engine, two front ends (GPUI and MCP). Dependencies point inward (hexagonal architecture, ports and adapters).
 
 ```
-gm-ui (GPUI)          gm-mcp (rmcp + socket shim)
+gm-ui (GPUI)          gm-mcp (stdio JSON-RPC, own process)
       \                    /
             gm-core
    (engine, ports and their adapters:
@@ -21,12 +21,12 @@ The core defines the traits (`GitPort` and the others), and the adapters live in
 ## Rules
 
 1. **Commands in, events out.** `dispatch(Command { actor, ... })` returns an `OperationId`; the front ends subscribe to a stream of `Event`.
-2. **One state machine per operation:** `Requested → Gating → AwaitingApproval → Executing → Done | Failed | Vetoed | Cancelled`. The UI and MCP are adapters of this contract. A human actor skips approval; an agent does not.
+2. **One state machine per operation:** `Requested → Gating → AwaitingApproval → Executing → Done | Failed | Vetoed | Cancelled`. The UI and MCP are adapters of this contract. A human actor skips approval; an agent does not. `gitmaster mcp` is a second process with its own engine on the same repository (D135); it shares only the files in `.git/gitmaster/`, so an agent write that needs approval has no approver there until a later decision.
 3. **One writer per repository (actors).** A mailbox serializes the mutations; reads come from immutable snapshots. libgit2's `Repository` is not `Sync`. The order of the operation log is the real execution order.
 4. **Separate runtimes.** GPUI has its own executors. The engine runs on a dedicated tokio runtime, on threads of its own, and talks to the UI over channels. The UI never waits for the engine.
 5. **Hybrid Git backend (D26):** libgit2 for objects, index, and in-memory merge/rebase; `git` subprocess for status in massive repositories (libgit2 does not use fsmonitor or the untracked cache) and for commit-graph at scale. Check the state of gitoxide before closing (Q6).
 6. **Git is the source of truth.** The engine's state is derived and disposable. Only metadata lives outside Git: stack parents (git config), comments and snapshots (store). Every read revalidates fingerprints; a watcher (`notify`, with debounce) emits `RepoChanged`.
-7. **One `gitmaster` binary** with subcommands: it opens the app by default; `gitmaster mcp` is the shim.
+7. **One `gitmaster` binary** with subcommands: it opens the app by default; `gitmaster mcp` is the MCP server: a second process over stdio, no socket (D135).
 8. **Extension by process**, not by dynamic library (the Rust ABI is not stable; security).
 
 ## Workflows (D60; direction D98 to D102)

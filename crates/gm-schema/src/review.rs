@@ -1,12 +1,13 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Where a review comment stands (B4, D96, D97). Stored as `open` or
-/// `resolved`; the agent's `addressed` state comes with Slice 7.
+/// Where a review comment stands (B4, D96, D97, D135). `Handled` is set by an agent
+/// through MCP, with a summary; only a human makes a comment `Resolved`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewStatus {
     Open,
+    Handled,
     Resolved,
 }
 
@@ -46,6 +47,10 @@ pub struct ReviewComment {
     pub created_at: i64,
     /// Set while the comment is resolved; cleared when it is reopened.
     pub resolved_at: Option<i64>,
+    /// What the agent says it did, set with `Handled` and kept when the comment is
+    /// resolved; cleared when it is reopened. Narrative only (D96): untrusted.
+    #[serde(default)]
+    pub summary: Option<String>,
     /// Object id of the snapshot taken when the comment was made; `None` when
     /// the snapshot failed.
     pub snapshot: Option<String>,

@@ -205,10 +205,9 @@ Changes apply as you make them, and there is no **Save** button. A value is save
 
 | Field | What it does |
 |---|---|
-| **Server** | Turns the MCP server on or off. |
-| **Socket Path** | Shows and sets the path of the local socket the MCP server listens on. |
-| **Tokens** | Manages the tokens that agents use to connect to the server. |
 | **Agent Policy** | Chooses which agent actions need your approval. See [MCP server](../agents/mcp-server.md). |
+
+The MCP server is started by your agent with `gitmaster mcp`, so it has no switch, socket or token to set.
 
 ### Threads
 

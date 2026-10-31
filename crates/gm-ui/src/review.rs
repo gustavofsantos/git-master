@@ -174,10 +174,11 @@ pub fn range_label(start: u32, end: u32) -> String {
     }
 }
 
-/// The badge of a card: resolved wins, then outdated, else open.
+/// The badge of a card: resolved wins, then outdated, then handled, else open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Badge {
     Open,
+    Handled,
     Resolved,
     Outdated,
 }
@@ -188,6 +189,8 @@ pub fn badge(comment: &ReviewComment) -> Badge {
         Badge::Resolved
     } else if comment.location.is_none() {
         Badge::Outdated
+    } else if comment.status == ReviewStatus::Handled {
+        Badge::Handled
     } else {
         Badge::Open
     }
@@ -558,6 +561,7 @@ mod tests {
             },
             created_at: 1_000_000,
             resolved_at: None,
+            summary: None,
             snapshot: None,
             location: location.map(|(start_line, end_line)| ReviewLocation {
                 start_line,

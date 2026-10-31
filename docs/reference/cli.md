@@ -5,7 +5,7 @@ status: partial
 order: 30
 ---
 
-The `gitmaster` command opens the app. The workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs, and none of them applies a change to a repository. The section Open a repository covers the arguments the app accepts. The MCP shim is not available yet.
+The `gitmaster` command opens the app. The workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs, and none of them applies a change to a repository. The section Open a repository covers the arguments the app accepts. `gitmaster mcp` is the MCP server your agent starts.
 
 ## Open a repository
 
@@ -25,11 +25,15 @@ gitmaster --version       # print the version and exit
 
 The theme is chosen with the `GITMASTER_THEME` environment variable, as described in [Configuration](configuration.md). Installation puts the command on your `PATH`, as described in [Installation](../getting-started/installation.md).
 
-## MCP shim
+## MCP server
 
-> **Planned.** The `gitmaster mcp` subcommand is not available in the app yet.
+```sh
+gitmaster mcp [--repo <path>]
+```
 
-`gitmaster mcp` is a stdio server that an MCP client starts. It forwards each request to the running app over a Unix socket, using a token. If the app is closed, the shim opens it. See [MCP server](../agents/mcp-server.md).
+Runs an MCP server on the standard input and output, for an MCP client to start. It works on the repository that contains the current directory, or on the one at `--repo`, and it exits when the client closes the input. It does not need the app to be open, opens no socket and keeps no state outside the repository's `.git/gitmaster/` directory. See [MCP server](../agents/mcp-server.md).
+
+The exit status is `0` after a normal end, `1` when the repository cannot be opened, and `2` for a wrong command line.
 
 ## Check a workflow
 

@@ -644,6 +644,7 @@ fn region_lines(lines: &[String], first: u32, marks: &[bool], highlight: Hsla) -
 fn badge_text(badge: Badge) -> (&'static str, Hsla) {
     match badge {
         Badge::Open => ("Open", theme::accent()),
+        Badge::Handled => ("Handled", theme::accent()),
         Badge::Resolved => ("Resolved", theme::muted()),
         Badge::Outdated => ("Outdated", theme::warn_fg()),
     }

@@ -10,7 +10,7 @@ use gm_schema::{ReviewAnchor, ReviewComment, ReviewStatus};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 /// How long a writer waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -23,12 +23,16 @@ CREATE TABLE comments (
     anchor_json TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     resolved_at INTEGER,
-    snapshot TEXT
+    snapshot TEXT,
+    summary TEXT
 );
 ";
 
+/// Version 1 to 2 (D135): the agent's summary of a handled comment.
+const V2: &str = "ALTER TABLE comments ADD COLUMN summary TEXT;";
+
 /// Columns read back for a `ReviewComment`, in the order `raw_comment` expects.
-const COLUMNS: &str = "id, path, body, status, anchor_json, created_at, resolved_at, snapshot";
+const COLUMNS: &str = "id, path, body, status, anchor_json, created_at, resolved_at, snapshot, summary";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreError(pub String);
@@ -48,7 +52,7 @@ impl From<rusqlite::Error> for StoreError {
 }
 
 /// One row as SQLite gives it: id, path, body, status, anchor JSON, created,
-/// resolved and snapshot.
+/// resolved, snapshot and summary.
 type RawComment = (
     i64,
     String,
@@ -57,6 +61,7 @@ type RawComment = (
     String,
     i64,
     Option<i64>,
+    Option<String>,
     Option<String>,
 );
 
@@ -154,13 +159,25 @@ impl ReviewStore {
     }
 
     /// Sets the status. `resolved_at` is `now` when the comment becomes resolved
-    /// and cleared when it is reopened.
+    /// and cleared otherwise; the agent's summary is cleared when it is reopened.
     pub fn set_status(&self, id: i64, status: ReviewStatus, now: i64) -> Result<(), StoreError> {
         let resolved_at = (status == ReviewStatus::Resolved).then_some(now);
         Self::changed(
             self.conn.execute(
-                "UPDATE comments SET status = ?2, resolved_at = ?3 WHERE id = ?1",
+                "UPDATE comments SET status = ?2, resolved_at = ?3,
+                 summary = CASE WHEN ?2 = 'open' THEN NULL ELSE summary END WHERE id = ?1",
                 params![id, status_text(status), resolved_at],
+            )?,
+            id,
+        )
+    }
+
+    /// Marks the comment handled by an agent, with its `summary` (D135).
+    pub fn set_handled(&self, id: i64, summary: &str) -> Result<(), StoreError> {
+        Self::changed(
+            self.conn.execute(
+                "UPDATE comments SET status = ?2, resolved_at = NULL, summary = ?3 WHERE id = ?1",
+                params![id, status_text(ReviewStatus::Handled), summary],
             )?,
             id,
         )
@@ -206,6 +223,12 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit().map_err(StoreError::from)
         }
+        1 => {
+            let tx = conn.transaction()?;
+            tx.execute_batch(V2)?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.commit().map_err(StoreError::from)
+        }
         v if v == SCHEMA_VERSION => Ok(()),
         v if v > SCHEMA_VERSION => Err(StoreError(
             "review.db was written by a newer GitMaster".to_owned(),
@@ -219,6 +242,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
 fn status_text(status: ReviewStatus) -> &'static str {
     match status {
         ReviewStatus::Open => "open",
+        ReviewStatus::Handled => "handled",
         ReviewStatus::Resolved => "resolved",
     }
 }
@@ -226,6 +250,7 @@ fn status_text(status: ReviewStatus) -> &'static str {
 fn parse_status(text: &str) -> Result<ReviewStatus, StoreError> {
     match text {
         "open" => Ok(ReviewStatus::Open),
+        "handled" => Ok(ReviewStatus::Handled),
         "resolved" => Ok(ReviewStatus::Resolved),
         other => Err(StoreError(format!("unknown review status {other:?}"))),
     }
@@ -241,11 +266,12 @@ fn raw_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawComment> {
         row.get(5)?,
         row.get(6)?,
         row.get(7)?,
+        row.get(8)?,
     ))
 }
 
 fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
-    let (id, path, body, status, anchor_json, created_at, resolved_at, snapshot) = raw;
+    let (id, path, body, status, anchor_json, created_at, resolved_at, snapshot, summary) = raw;
     Ok(ReviewComment {
         id,
         path,
@@ -255,6 +281,7 @@ fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
             .map_err(|e| StoreError(format!("cannot decode the anchor of comment {id}: {e}")))?,
         created_at,
         resolved_at,
+        summary,
         snapshot,
         location: None,
         outdated: false,
@@ -283,6 +310,29 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("user_version")
+    }
+
+    #[test]
+    fn a_version_one_database_gains_the_summary_column() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("review.db");
+        {
+            let conn = Connection::open(&path).expect("open");
+            conn.execute_batch(
+                "CREATE TABLE comments (id INTEGER PRIMARY KEY, path TEXT NOT NULL,
+                 body TEXT NOT NULL, status TEXT NOT NULL, anchor_json TEXT NOT NULL,
+                 created_at INTEGER NOT NULL, resolved_at INTEGER, snapshot TEXT);
+                 PRAGMA user_version = 1;",
+            )
+            .expect("v1");
+        }
+        let store = ReviewStore::open(&path).expect("migrate");
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
+        let id = store.add("a", "b", &anchor("x", 1), 1).expect("add");
+        store.set_handled(id, "done").expect("handled");
+        let comment = store.get(id).expect("get").expect("found");
+        assert_eq!(comment.status, ReviewStatus::Handled);
+        assert_eq!(comment.summary.as_deref(), Some("done"));
     }
 
     #[test]

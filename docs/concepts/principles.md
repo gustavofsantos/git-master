@@ -37,7 +37,7 @@ What an agent did is measured from the repository, by comparing its state before
 
 ## Local-first
 
-GitMaster is for one engineer on one machine. It has no account, and it has no headless, server or CI mode.
+GitMaster is for one engineer on one machine. It has no account, and it has no headless, server or CI mode. The one process without a window is `gitmaster mcp`, which your agent starts and stops: it opens no port and no socket, and it ends with the agent's session.
 
 ## Self-contained
 
@@ -49,6 +49,6 @@ The app stays smooth and fast as repositories grow. Long lists draw only the row
 
 ## What GitMaster is not
 
-- **A server or a CI tool.** There is no headless, server or CI mode. GitMaster runs in a window on your machine.
+- **A server or a CI tool.** There is no headless, server or CI mode. GitMaster runs in a window on your machine. The MCP server is started by your agent, for the length of its session, and listens on nothing.
 - **A web or JavaScript front end.** The interface is native and is not built with web or JavaScript technology.
 - **A host for plugins loaded as dynamic libraries.** Extensions run as separate processes, or as workflow scripts.

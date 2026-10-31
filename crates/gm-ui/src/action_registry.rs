@@ -2382,7 +2382,7 @@ fn review_entry_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(
             Err("This comment is already resolved.")
         }
         Action::ReopenReviewComment if comment.status == ReviewStatus::Open => {
-            Err("This comment is not resolved.")
+            Err("This comment is already open.")
         }
         _ => Ok(()),
     }
@@ -4540,6 +4540,7 @@ mod tests {
             },
             created_at: 0,
             resolved_at: None,
+            summary: None,
             snapshot: None,
             location: Some(gm_schema::ReviewLocation {
                 start_line: 1,
@@ -4633,7 +4634,7 @@ mod tests {
         );
         assert_eq!(
             Action::ReopenReviewComment.plan(&Args::ReviewComment(4), &listed),
-            Err("This comment is not resolved.")
+            Err("This comment is already open.")
         );
         assert_eq!(
             Action::DeleteReviewComment.plan(&Args::ReviewComment(4), &listed),

@@ -43,13 +43,14 @@ impl Filter {
         }
     }
 
-    /// Whether the filter shows `comment`. An outdated open comment is shown by
+    /// Whether the filter shows `comment`. Open is what still waits for the person,
+    /// so it keeps a handled comment too. An outdated open comment is shown by
     /// Open, by Outdated and by All.
     #[must_use]
     pub fn keeps(self, comment: &ReviewComment) -> bool {
         match self {
             Filter::All => true,
-            Filter::Open => comment.status == ReviewStatus::Open,
+            Filter::Open => comment.status != ReviewStatus::Resolved,
             Filter::Resolved => comment.status == ReviewStatus::Resolved,
             Filter::Outdated => is_outdated(comment),
         }
@@ -449,6 +450,7 @@ mod tests {
             },
             created_at: 1_000 * id,
             resolved_at: None,
+            summary: None,
             snapshot: Some("abc".into()),
             location: line.map(|start_line| ReviewLocation {
                 start_line,

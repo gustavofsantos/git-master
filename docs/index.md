@@ -23,11 +23,11 @@ You can move around a repository without leaving the app. **Quick Open** (`Ctrl+
 
 ### Agents under human accountability
 
-An agent can read the repository and propose changes, but it never changes the repository on its own. Each change an agent asks for waits for your approval in the app, and what the agent did is measured from the repository, not taken from its own account. Workflows are Lua scripts that run in a sandbox and act only through GitMaster's own actions. You run them from the command palette or with a keyboard shortcut. The agent integration is exposed through an MCP server, a local review loop, and branch stacks with restack.
+An agent can read your review comments and earlier threads through GitMaster, and record that it handled a comment. GitMaster gives it no way to change the repository, and what you see as handled stays open to you until you resolve it. What the agent did is measured from the repository, not taken from its own account. Workflows are Lua scripts that run in a sandbox and act only through GitMaster's own actions. You run them from the command palette or with a keyboard shortcut. The agent integration is exposed through an MCP server, a local review loop, and branch stacks with restack.
 
 A session with an agent is kept as a **thread**: what you asked, what the agent answered, the tools it ran and the files it edited. Secrets are removed before anything is stored, and you can search, read and delete threads in the app.
 
-> **Planned.** Threads, the MCP server, the local review loop, branch stacks, and workflow triggers and agent runs are not available in the app yet.
+> **Planned.** Tools that propose and apply a change through the MCP server, branch stacks, and workflow triggers and agent runs are not available in the app yet.
 
 ## Who it is for
 

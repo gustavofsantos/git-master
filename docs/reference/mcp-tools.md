@@ -1,58 +1,50 @@
 ---
 title: MCP tools
 description: Reference for the MCP tools agents use with GitMaster, grouped by effect level, with arguments, results and approval.
-status: planned
+status: partial
 order: 50
 ---
 
-> **Planned.** The MCP server is not available in the app yet.
+> **Planned.** The tools marked Planned are not available yet.
 
-The tools are grouped by effect level, as described in [MCP server](../agents/mcp-server.md). Every tool carries the MCP annotations `readOnlyHint` and `destructiveHint`. A dash in a cell means the field is not specified.
+The tools are served by `gitmaster mcp`, described in [MCP server](../agents/mcp-server.md). They offer what only GitMaster has: review comments and threads. Reading files, searching text and running Git stay with the agent's own tools. Every tool carries the MCP annotations `readOnlyHint` and `destructiveHint`.
 
-Approval follows the agent policy. Under the example policy in the MCP server page, Read and Propose run without asking, and every Apply tool waits for your approval in the UI.
+Text that comes from the repository, from a comment or from a thread is untrusted, and the results mark it with `"untrusted": true`. A dash in a cell means the field is not specified.
 
 ## Read
 
-| Tool | Level | Arguments | Returns | Approval | Status |
-|---|---|---|---|---|---|
-| `repo_status` | Read | — | Status of the repository | Not required | Planned |
-| `stack_tree` | Read | — | Stack tree, with children and the number of branches out of date | Not required | Planned |
-| `diff_stat` | Read | — | Summary of the changed files. Call it before `diff_get`. | Not required | Planned |
-| `diff_get` | Read | `path`, `hunk` | One hunk of a file's diff | Not required | Planned |
-| `conflict_list` | Read | — | Conflicts in progress | Not required | Planned |
-| `conflict_get` | Read | `hunk` | Base, left side and right side of the hunk | Not required | Planned |
-| `operation_log` | Read | — | Recorded operations, with their actor | Not required | Planned |
-| `workflow_list` | Read | — | Workflows available to run | Not required | Planned |
-| `review_comments_list` | Read | `status` | Review comments with that status | Not required | Planned |
-| `files_search` | Read | — | Files that match the search | Not required | Planned |
-| `code_grep` | Read | — | Text matches in the repository | Not required | Planned |
-| `symbols_search` | Read | — | Symbols that match the name | Not required | Planned |
-| `file_read` | Read | `path`, line range | Lines of the file in the range | Not required | Planned |
-| `threads_search` | Read | `query`, filters (`agent`, `branch`, `since`, `path`) | Matching entries with a snippet, the thread id and the turn. The text is marked as untrusted. | Not required | Planned |
-| `thread_get` | Read | `id` | The title, agent, branch, times, counts and the list of edits of a thread | Not required | Planned |
-| `thread_read` | Read | `id`, `from`, `limit` | Entries of a thread in order, marked as untrusted. The default limit keeps the output small. | Not required | Planned |
+| Tool | Arguments | Returns | Status |
+|---|---|---|---|
+| `review_comments_list` | `status` (optional: `open`, `handled`, `resolved`) | Review comments, each with its id, path, body, status, the lines it is anchored to now, and `outdated` | Implemented |
+| `threads_search` | `query`, filters (`harness`, `branch`, `since`, `path`), `limit` | Matching entries with a snippet, the thread id and the turn | Implemented |
+| `thread_get` | `id` | The title, agent, branch, times, counts and the list of edits of a thread | Implemented |
+| `thread_read` | `id`, `from`, `limit` | Entries of a thread in order. The default limit keeps the output small. | Implemented |
+| `stack_tree` | — | Stack tree, with children and the number of branches out of date | Planned |
+| `conflict_list` | — | Conflicts in progress | Planned |
+| `conflict_get` | `hunk` | Base, left side and right side of the hunk | Planned |
+| `operation_log` | — | Recorded operations, with their actor | Planned |
+| `workflow_list` | — | Workflows available to run | Planned |
 
-## Propose
+## Record
 
-| Tool | Level | Arguments | Returns | Approval | Status |
-|---|---|---|---|---|---|
-| `restack_plan` | Propose | `root` | Plan id, number of steps and the refs the plan depends on | Not required | Planned |
-| `reparent_plan` | Propose | — | — | Not required | Planned |
-| `conflict_propose` | Propose | `hunk`, `text` | A suggestion shown in the UI | You accept the suggestion in the UI | Planned |
+A record tool writes to GitMaster's own store and nowhere else. It does not change your files, branches or index, and it needs no approval.
 
-## Apply
+| Tool | Arguments | Returns | Status |
+|---|---|---|---|
+| `review_comment_resolve` | `id`, `summary` | Marks the comment `handled` and stores the summary. You make it `resolved` in the app. | Implemented |
 
-| Tool | Level | Arguments | Returns | Approval | Status |
-|---|---|---|---|---|---|
-| `restack_apply` | Apply | `plan_id` | Operation status: `pending_approval`, or `conflict` with the branch and its hunk ids; the operation id | You approve in the UI | Planned |
-| `conflict_resolve` | Apply | — | — | You approve in the UI | Planned |
-| `commit_create` | Apply | — | — | You approve in the UI | Planned |
-| `push` | Apply | — | — | You approve in the UI | Planned |
-| `operation_undo` | Apply | — | — | You approve in the UI | Planned |
-| `workflow_run` | Apply | `name`, `inputs` | — | Each applying step waits for you | Planned |
-| `review_comment_resolve` | Apply | `id`, `summary` | Marks the comment `handled`. GitMaster takes the "after" snapshot itself. | You approve in the UI | Planned |
+`review_comment_resolve` is refused for a comment that is already `resolved`. Marking a `handled` comment again replaces its summary.
 
-`review_comment_resolve` does not take a snapshot from the agent. GitMaster records the "after" state of the working tree when the call runs. See [Local review](../agents/local-review.md).
+## Propose and apply
+
+> **Planned.** These tools change the repository, so they wait for your approval in the app.
+
+| Tool | Level | Arguments | Returns | Status |
+|---|---|---|---|---|
+| `restack_plan` | Propose | `root` | Plan id, number of steps and the refs the plan depends on | Planned |
+| `conflict_propose` | Propose | `hunk`, `text` | A suggestion shown in the app | Planned |
+| `restack_apply` | Apply | `plan_id` | Operation status and id | Planned |
+| `workflow_run` | Apply | `name`, `inputs` | Each applying step waits for you | Planned |
 
 ## Threads
 
@@ -64,5 +56,6 @@ The thread tools read what [Threads](../guide/threads.md) captured. They change 
 
 ## See also
 
-- [MCP server](../agents/mcp-server.md): how the server is reached, and how levels, policy and approvals work.
+- [MCP server](../agents/mcp-server.md): how the server runs and what it may do.
+- [Local review](../agents/local-review.md): the comments the review tools work on.
 - [Trust and safety](../concepts/trust-and-safety.md): the model behind approvals and the operation log.

@@ -2703,6 +2703,7 @@ mod stash_tests {
             },
             created_at: 0,
             resolved_at: None,
+            summary: None,
             snapshot: Some("abc".into()),
             location: Some(gm_schema::ReviewLocation {
                 start_line: 2,
