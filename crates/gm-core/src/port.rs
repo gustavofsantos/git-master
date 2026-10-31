@@ -8,6 +8,7 @@ use gm_schema::{
     StageTarget, StashEntry, WorktreeEntry, WorktreeMode,
 };
 
+use crate::blame::BlameLine;
 use crate::command_log::CommandLog;
 use crate::file_index::FileIndex;
 use crate::grep::GrepRequest;
@@ -52,6 +53,10 @@ pub type FileListRead = Box<dyn FnOnce(&AtomicBool) -> Result<FileIndex, GitErro
 /// own, stops early at the result limit, and stops like a `DetailRead` once
 /// `stop` is set.
 pub type GrepRead = Box<dyn FnOnce(&AtomicBool) -> Result<GrepResult, GitError> + Send>;
+
+/// The lines of a blame, started by `GitPort::blame_lines` (D144). It runs on a
+/// thread of its own and stops like a `DetailRead` once `stop` is set.
+pub type BlameRead = Box<dyn FnOnce(&AtomicBool) -> Result<Vec<BlameLine>, GitError> + Send>;
 
 /// What a history walk starts from (H6, D139): the engine resolves a scope to it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -531,6 +536,32 @@ pub trait GitPort: Send {
     ) -> Result<Option<Vec<u8>>, GitError> {
         Err(GitError(
             "snapshots are not supported by this adapter".into(),
+        ))
+    }
+
+    /// Starts the blame of lines `from` to `to` (1-based, inclusive) of `path`:
+    /// `git blame --line-porcelain -M -C`, so a line moved from another file keeps its
+    /// origin. Starts nothing but the returned read. Never records anything (D28).
+    fn blame_lines(
+        &self,
+        _root: &Path,
+        _path: &str,
+        _from: u32,
+        _to: u32,
+    ) -> Result<BlameRead, GitError> {
+        Err(GitError("blame is not supported by this adapter".into()))
+    }
+
+    /// The blob id of `path` in commit `oid`, or `None` when the commit has no such
+    /// file. Lists the tree and reads nothing else. Never records anything (D28).
+    fn blob_at_commit(
+        &self,
+        _root: &Path,
+        _oid: &str,
+        _path: &str,
+    ) -> Result<Option<String>, GitError> {
+        Err(GitError(
+            "blob lookup is not supported by this adapter".into(),
         ))
     }
 

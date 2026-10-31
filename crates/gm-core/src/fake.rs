@@ -9,10 +9,11 @@ use gm_schema::{
     History, ReflogEntry, RepoStatus, StashEntry, WorktreeEntry, WorktreeMode,
 };
 
+use crate::blame::BlameLine;
 use crate::file_index::FileIndex;
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryPage, HistoryStream};
-use crate::port::{DetailRead, FileListRead, GrepRead, HistoryRevs, StackRead};
+use crate::port::{BlameRead, DetailRead, FileListRead, GrepRead, HistoryRevs, StackRead};
 use crate::stack::{EdgeFacts, StackLink};
 use crate::{GitError, GitPort};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +52,10 @@ pub struct FakeGit {
     edges: Arc<Mutex<HashMap<String, EdgeFacts>>>,
     /// The tip of each branch `branch_tip` and `branch_merge_base` know.
     tips: Arc<Mutex<HashMap<String, String>>>,
+    /// The lines `blame_lines` answers with.
+    blame: Arc<Mutex<Result<Vec<BlameLine>, GitError>>>,
+    /// The blob `blob_at_commit` answers with.
+    blob: Arc<Mutex<Result<Option<String>, GitError>>>,
 }
 
 impl FakeGit {
@@ -78,6 +83,8 @@ impl FakeGit {
             links: Arc::new(Mutex::new(Vec::new())),
             edges: Arc::new(Mutex::new(HashMap::new())),
             tips: Arc::new(Mutex::new(HashMap::new())),
+            blame: Arc::new(Mutex::new(Ok(Vec::new()))),
+            blob: Arc::new(Mutex::new(Ok(None))),
         }
     }
 
@@ -161,6 +168,24 @@ impl FakeGit {
     /// If another thread panicked while holding the grep lock.
     pub fn set_grep(&self, result: Result<GrepResult, GitError>) {
         *self.grep.lock().unwrap() = result;
+    }
+
+    /// Sets the lines `blame_lines` answers with.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the blame lock.
+    pub fn set_blame(&self, lines: Result<Vec<BlameLine>, GitError>) {
+        *self.blame.lock().unwrap() = lines;
+    }
+
+    /// Sets the blob `blob_at_commit` answers with.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the blob lock.
+    pub fn set_blob(&self, blob: Result<Option<String>, GitError>) {
+        *self.blob.lock().unwrap() = blob;
     }
 
     /// The text searches git was asked for, in order.
@@ -449,6 +474,31 @@ impl GitPort for FakeGit {
     fn checkout_commit(&self, _root: &Path, _oid: &str) -> Result<(), GitError> {
         self.writes.lock().unwrap().push("checkout_commit");
         Ok(())
+    }
+
+    fn blame_lines(
+        &self,
+        _root: &Path,
+        _path: &str,
+        _from: u32,
+        _to: u32,
+    ) -> Result<BlameRead, GitError> {
+        let lines = self.blame.lock().unwrap().clone();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            if stop.load(Ordering::SeqCst) {
+                return Err(GitError("the blame was superseded".into()));
+            }
+            lines
+        }))
+    }
+
+    fn blob_at_commit(
+        &self,
+        _root: &Path,
+        _oid: &str,
+        _path: &str,
+    ) -> Result<Option<String>, GitError> {
+        self.blob.lock().unwrap().clone()
     }
 
     fn grep_text(&self, _root: &Path, request: &GrepRequest) -> Result<GrepRead, GitError> {

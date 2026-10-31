@@ -606,6 +606,26 @@ Record commands are written to the command log with their actor (D28). Level **r
 
 Pure ranking and bounds, and the blame and patch-id adapters in `gm-core`. Real-git tests in `crates/gm-core/tests/provenance_real_git.rs`: a blob match, a line match, an ambiguous line match, a formatter run after the edit, a rebase, a squash and a reorder, a redacted and a truncated edit. Measure N on real threads and record it (closes Q34). Done when each fixture returns its evidence and the release build answers a range within the budget set in P1.
 
+**Built (engine only, 2026-10-31; Q34 still open).** `ReadProvenance` and `ThreadProvenance` in `gm-schema`; the rules in `gm-core/src/threads/provenance.rs` (pure); `git blame --line-porcelain` parsed in `gm-core/src/blame.rs`; the adapters `blame_lines` and `blob_at_commit` on `GitPort`; the queries `path_edits`, `commit_links`, `thread_summary` and `entries_around` in the store. Reads are excluded from the operation log, as the other thread reads are.
+
+Decisions taken in P1 (the docs do not cover them; they are the engine's rules until the author decides otherwise):
+
+- **Constants.** `LINE_MATCH_MIN` = 3 (N, a placeholder until Q34 is measured), 10 commits per query, 5 threads per commit, 200 edits compared per commit (`candidates` cut beyond), a range of at most 1000 lines (longer is refused, not cut), 2 entries of context each side of an edit.
+- **Trivial lines** are blank, or made only of `{}()[];,` and whitespace. They never count toward a run. Comparison is exact: no whitespace normalization.
+- **A run** is the consecutive lines blame gives one commit under one path, with its non-trivial lines. It matches an edit when those lines appear in order and contiguously among the non-trivial added lines of one **segment** of the edit's patch. A segment is a maximal run of `+` lines; a context line or a hunk header ends it, a removed line does not (it is not in the new file).
+- **The date rule** is `edit.at <= commit author date` (milliseconds). It applies to line and hunk evidence. `blob_match` does not use it, because D144 states the blob rule without a date.
+- **Paths.** An edit matches a blame path when its path equals it, or equals `thread.worktree` joined to it (an absolute path the edit recorded under the thread's worktree). Until `edit.rel_path` exists (P3), this is the join in SQL. The scan uses the existing `edit_path` index only partly, because of the `OR`; P3's `rel_path` index replaces it.
+- **`hunk_overlap` (defined here).** The edit added a non-trivial line that blame gives the same commit in the queried range. Blame already proves the commit owns that line, so the `-U0` hunk is not read. It is weak: it never makes a result ambiguous and never creates a link. It is reported only for an edit that is verifiable and dated before the commit.
+- **Ambiguous.** When more than one edit of one commit has `blob_match` or `line_match`, each thread holding such an edit is marked ambiguous. Nothing is picked.
+- **Unverifiable.** An edit from the tool input (`from_input`), a patch that contains `[REDACTED:` (D121) or `[... truncated ` (the size cap) is unverifiable, when it is dated before the commit and has no blob match. A blob match is verified by the raw content, so the reason is then not shown.
+- **Links.** A thread linked to the commit by `thread_link` shows `observed_commit` (origin `observed`) or `manual` (origin `manual`). A commit link needs the full id, which is what `rev-list` stores.
+- **Order of threads.** Strongest evidence first, then the most recent `last_event_at`, then `uid`. Threads without evidence (unverifiable edits only) come last.
+- **Edges.** P1 walks line to commit to thread to entries, which is two steps from the line. The bound on two edges out applies once labels and `thread_rel` exist (P3); nothing beyond the thread is walked yet.
+- **`post_oid` (Q34, not changed here).** It is libgit2's hash of the raw bytes (`git2::Oid::hash_object`), which is what `git hash-object` gives without `--path`: no CRLF or LFS normalization. Under `core.autocrlf` or a filter, the blob at the commit and the post image can differ, so a blob match fails rather than matching falsely. Whether to use `--path` remains open.
+- **Blob at commit** is read with `git ls-tree` (it names a missing path cleanly), not `rev-parse <commit>:<path>`.
+- **Blame** is `git blame --line-porcelain -M -C -L from,to -- path` run in the repository root. Uncommitted lines (all-zero ids) belong to no commit and are left out.
+- **Not yet built.** The read runs on the engine thread, as `ReadThread` does, and is not cancellable; a superseded provenance read is not implemented. The release budget is not measured, and N is not measured on real threads, so Q34 stays open.
+
 ### P2: MCP provenance tool
 
 `provenance` in `gm-mcp` over `ReadProvenance`, untrusted-marked, bounded, with the cut stated. Depends on slice 7 for the server. Done when an agent asks about a range and gets the thread, its entries and the evidence, and a cut result says so.

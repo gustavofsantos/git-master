@@ -19,6 +19,7 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 
 use super::harness;
+use super::provenance::EditRow;
 use super::query::{
     MIN_FUZZY_CHARS, TrigramQuery, build_fts_query, build_trigram_queries, dice, is_word_char,
     trigram_set,
@@ -1181,6 +1182,92 @@ impl ThreadStore {
             redactions,
             has_more,
         })
+    }
+
+    /// The edits of `path` that could explain a line (D144), newest first, with their patches. An
+    /// edit counts when it was made by `before` (the commit's author date) or when its blob is
+    /// `blob`, the file's blob in the commit, which needs no date. A path is compared as the
+    /// repository path, or as the worktree joined to it for an absolute path the edit recorded.
+    /// The caller passes `limit` plus one to learn whether the list was cut.
+    pub fn path_edits(
+        &self,
+        path: &str,
+        before: i64,
+        blob: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<EditRow>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT ed.id, t.uid, e.seq, ed.path, ed.at, ed.post_oid, ed.from_input, ed.patch
+             FROM edit ed
+             JOIN thread t ON t.id = ed.thread_id
+             JOIN entry e ON e.id = ed.entry_id
+             WHERE (ed.path = ?1 OR ed.path = t.worktree || '/' || ?1)
+               AND (ed.at <= ?2 OR COALESCE(ed.post_oid = ?3, 0))
+             ORDER BY COALESCE(ed.post_oid = ?3, 0) DESC, ed.at DESC, ed.id DESC
+             LIMIT ?4",
+        )?;
+        let rows = statement
+            .query_map(params![path, before, blob, i64::from(limit)], |row| {
+                Ok(EditRow {
+                    edit_id: row.get(0)?,
+                    thread_uid: row.get(1)?,
+                    seq: row.get(2)?,
+                    path: row.get(3)?,
+                    at: row.get(4)?,
+                    post_oid: row.get(5)?,
+                    from_input: row.get(6)?,
+                    patch: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The threads linked to commit `commit` (full id), with how each link was made (D126).
+    pub fn commit_links(&self, commit: &str) -> Result<Vec<(String, LinkOrigin)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT t.uid, l.origin FROM thread_link l JOIN thread t ON t.id = l.thread_id
+             WHERE l.kind = 'commit' AND l.ref = ?1 ORDER BY t.uid",
+        )?;
+        let rows = statement
+            .query_map(params![commit], |row| {
+                Ok((row.get(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(uid, origin)| Some((uid, parse_origin(&origin)?)))
+            .collect())
+    }
+
+    /// The metadata of thread `uid`, as listings show it.
+    pub fn thread_summary(&self, uid: &str) -> Result<ThreadSummary, StoreError> {
+        summary_by_uid(&self.conn, uid)
+    }
+
+    /// The user and assistant entries around entry `seq` of thread `uid`, up to `limit` on each
+    /// side, earlier ones first (D147's context, used for provenance).
+    pub fn entries_around(
+        &self,
+        uid: &str,
+        seq: u32,
+        limit: u32,
+    ) -> Result<Vec<ThreadEntryBrief>, StoreError> {
+        let limit = i64::from(limit);
+        let mut earlier = self.conn.prepare(
+            "SELECT e.seq, e.kind, e.text FROM entry e JOIN thread t ON t.id = e.thread_id
+             WHERE t.uid = ?1 AND e.seq < ?2 AND e.kind IN ('user', 'assistant')
+             ORDER BY e.seq DESC LIMIT ?3",
+        )?;
+        let mut later = self.conn.prepare(
+            "SELECT e.seq, e.kind, e.text FROM entry e JOIN thread t ON t.id = e.thread_id
+             WHERE t.uid = ?1 AND e.seq > ?2 AND e.kind IN ('user', 'assistant')
+             ORDER BY e.seq ASC LIMIT ?3",
+        )?;
+        let mut before = brief_rows(&mut earlier, uid, seq, limit)?;
+        before.reverse();
+        let after = brief_rows(&mut later, uid, seq, limit)?;
+        Ok(before.into_iter().chain(after).collect())
     }
 
     /// One edit, with its patch.

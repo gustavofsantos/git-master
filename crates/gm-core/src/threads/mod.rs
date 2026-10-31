@@ -5,6 +5,7 @@ pub mod cli;
 pub mod config;
 pub mod harness;
 pub mod pipeline;
+pub mod provenance;
 pub mod query;
 pub mod redact;
 pub mod store;

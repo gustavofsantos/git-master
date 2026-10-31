@@ -956,6 +956,7 @@ impl Model {
                 self.threads.read(id, detail);
                 None
             }
+            // The provenance view is not built yet (P4), so nothing takes the answer.
             Event::ThreadEditRead { id, edit, state } => {
                 self.threads.edit_read(id, edit.id, state);
                 None
@@ -1185,6 +1186,7 @@ impl Model {
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
+            | Event::ThreadProvenance { .. }
             | Event::ThreadsChanged => None,
             // The read opens the resolver; the staged note is the resolver's own.
             Event::ConflictRead { id, read } => {
@@ -1563,6 +1565,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ThreadsListed { id, .. }
         | Event::ThreadSearchResults { id, .. }
         | Event::ThreadRead { id, .. }
+        | Event::ThreadProvenance { id, .. }
         | Event::ThreadEditRead { id, .. }
         | Event::ThreadMarkdown { id, .. }
         | Event::ThreadExported { id, .. }

@@ -5,14 +5,20 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use gm_schema::threads::{
-    EditChange, EditState, EntryKind, ThreadDetail, ThreadEdit, ThreadFilter,
+    CutBound, EditChange, EditState, EntryKind, Evidence, LinkOrigin, ProvenanceCommit,
+    ProvenanceCut, ProvenanceEdit, ProvenanceResult, ProvenanceThread, ThreadDetail, ThreadEdit,
+    ThreadFilter,
 };
 use gm_schema::{CommandKind, Event, OperationId};
 
 use crate::GitPort;
 use crate::threads::config::ThreadsConfig;
+use crate::threads::provenance::{
+    self, COMMIT_LIMIT, CONTEXT, EDIT_LIMIT, EditFact, Owner, THREAD_LIMIT, Verdict,
+};
 use crate::threads::redact::Redactor;
 use crate::threads::store::{MetaUpdate, SearchRequest, StoreError, ThreadStore};
 
@@ -80,6 +86,7 @@ pub(crate) fn is_threads_command(kind: &CommandKind) -> bool {
         CommandKind::ListThreads { .. }
             | CommandKind::SearchThreads { .. }
             | CommandKind::ReadThread { .. }
+            | CommandKind::ReadProvenance { .. }
             | CommandKind::ReadThreadEdit { .. }
             | CommandKind::ReadThreadMarkdown { .. }
             | CommandKind::ExportThread { .. }
@@ -154,6 +161,11 @@ pub(crate) fn run(
                 .map_err(|e| named(e, THREAD_MISSING))?;
             Ok(vec![Event::ThreadRead { id, detail }])
         }
+        CommandKind::ReadProvenance {
+            path,
+            from_line,
+            to_line,
+        } => provenance_of(id, store, ctx, path, *from_line, *to_line),
         CommandKind::ReadThreadEdit { id: edit_id } => {
             let edit = store
                 .read_edit(*edit_id)
@@ -178,6 +190,169 @@ pub(crate) fn run(
         | CommandKind::ScrubThreads => write(id, store, ctx, kind),
         _ => Err("not a thread command".to_owned()),
     }
+}
+
+/// Explains lines `from` to `to` of `path` (D144): blame gives the commits, each commit the
+/// threads linked to it and the edits that match its lines, each edit the entries around it.
+/// The bounds are the rules' (`provenance`), and a cut result says what it cut.
+fn provenance_of(
+    id: OperationId,
+    store: &ThreadStore,
+    ctx: &Context<'_>,
+    path: &str,
+    from: u32,
+    to: u32,
+) -> Result<Vec<Event>, String> {
+    provenance::check_path(path)?;
+    provenance::check_range(from, to)?;
+    let read = ctx
+        .git
+        .blame_lines(ctx.root, path, from, to)
+        .map_err(|e| e.0)?;
+    let lines = read(&AtomicBool::new(false)).map_err(|e| e.0)?;
+    let owners = provenance::owners(&lines);
+    let mut result = ProvenanceResult {
+        path: path.to_owned(),
+        from_line: from,
+        to_line: to,
+        commits: Vec::new(),
+        cuts: Vec::new(),
+    };
+    if owners.len() > COMMIT_LIMIT {
+        result.cuts.push(ProvenanceCut {
+            bound: CutBound::Commits,
+            limit: bound(COMMIT_LIMIT),
+            commit: None,
+        });
+    }
+    for owner in owners.into_iter().take(COMMIT_LIMIT) {
+        let commit = commit_provenance(store, ctx, &owner, &mut result.cuts)?;
+        result.commits.push(commit);
+    }
+    Ok(vec![Event::ThreadProvenance {
+        id,
+        provenance: result,
+    }])
+}
+
+/// The threads that explain one commit's lines, at most `THREAD_LIMIT` of them.
+fn commit_provenance(
+    store: &ThreadStore,
+    ctx: &Context<'_>,
+    owner: &Owner,
+    cuts: &mut Vec<ProvenanceCut>,
+) -> Result<ProvenanceCommit, String> {
+    let blob = ctx
+        .git
+        .blob_at_commit(ctx.root, &owner.commit, &owner.path)
+        .map_err(|e| e.0)?;
+    let limit = u32::try_from(EDIT_LIMIT + 1).unwrap_or(u32::MAX);
+    let rows = store
+        .path_edits(&owner.path, owner.author_at, blob.as_deref(), limit)
+        .map_err(|e| e.to_string())?;
+    if rows.len() > EDIT_LIMIT {
+        cuts.push(ProvenanceCut {
+            bound: CutBound::Candidates,
+            limit: bound(EDIT_LIMIT),
+            commit: Some(owner.commit.clone()),
+        });
+    }
+    let judged: Vec<(EditFact, Verdict)> = rows
+        .into_iter()
+        .take(EDIT_LIMIT)
+        .map(|row| {
+            let fact = EditFact::new(row);
+            let verdict = provenance::judge(owner, blob.as_deref(), &fact);
+            (fact, verdict)
+        })
+        .filter(|(_, verdict)| !verdict.evidence.is_empty() || verdict.unverifiable.is_some())
+        .collect();
+    let ambiguous = judged
+        .iter()
+        .filter(|(_, verdict)| verdict.decisive())
+        .count()
+        > 1;
+
+    let mut drafts: BTreeMap<String, Draft> = BTreeMap::new();
+    for (uid, origin) in store
+        .commit_links(&owner.commit)
+        .map_err(|e| e.to_string())?
+    {
+        let evidence = match origin {
+            LinkOrigin::Observed => Evidence::ObservedCommit,
+            LinkOrigin::Manual => Evidence::Manual,
+        };
+        drafts.entry(uid).or_default().evidence.push(evidence);
+    }
+    for (fact, verdict) in judged {
+        let entries = store
+            .entries_around(&fact.thread_uid, fact.seq, CONTEXT)
+            .map_err(|e| e.to_string())?;
+        let draft = drafts.entry(fact.thread_uid.clone()).or_default();
+        draft.evidence.extend(verdict.evidence.iter().copied());
+        draft.ambiguous |= ambiguous && verdict.decisive();
+        draft.edits.push(ProvenanceEdit {
+            edit_id: fact.edit_id,
+            seq: fact.seq,
+            path: fact.path,
+            at: fact.at,
+            evidence: verdict.evidence,
+            unverifiable: verdict.unverifiable,
+            entries,
+        });
+    }
+
+    let mut threads = Vec::new();
+    for (uid, mut draft) in drafts {
+        let summary = store.thread_summary(&uid).map_err(|e| e.to_string())?;
+        provenance::strongest_first(&mut draft.evidence);
+        let thread = ProvenanceThread {
+            uid,
+            title: summary.title,
+            harness: summary.harness,
+            branch: summary.branch,
+            evidence: draft.evidence,
+            ambiguous: draft.ambiguous,
+            edits: draft.edits,
+        };
+        threads.push((thread, summary.last_event_at));
+    }
+    threads.sort_by(|(a, a_at), (b, b_at)| {
+        provenance::thread_rank(&a.evidence, *a_at)
+            .cmp(&provenance::thread_rank(&b.evidence, *b_at))
+            .then_with(|| a.uid.cmp(&b.uid))
+    });
+    if threads.len() > THREAD_LIMIT {
+        cuts.push(ProvenanceCut {
+            bound: CutBound::Threads,
+            limit: bound(THREAD_LIMIT),
+            commit: Some(owner.commit.clone()),
+        });
+        threads.truncate(THREAD_LIMIT);
+    }
+
+    Ok(ProvenanceCommit {
+        id: owner.commit.clone(),
+        subject: owner.subject.clone(),
+        author: owner.author.clone(),
+        author_at: owner.author_at,
+        path: owner.path.clone(),
+        lines: owner.runs.clone(),
+        threads: threads.into_iter().map(|(thread, _)| thread).collect(),
+    })
+}
+
+/// What one thread contributes to a commit's answer, before it is cut to `THREAD_LIMIT`.
+#[derive(Default)]
+struct Draft {
+    evidence: Vec<Evidence>,
+    ambiguous: bool,
+    edits: Vec<ProvenanceEdit>,
+}
+
+/// A count of the provenance bounds as the wire type holds it.
+fn bound(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// Writes thread `uid` as Markdown to `path`, as stored.
@@ -1228,6 +1403,15 @@ mod tests {
         send(&mut engine, &human(), CommandKind::ReadThreadEdit { id: 1 });
         send(
             &mut engine,
+            &agent,
+            CommandKind::ReadProvenance {
+                path: "a.txt".into(),
+                from_line: 1,
+                to_line: 1,
+            },
+        );
+        send(
+            &mut engine,
             &human(),
             CommandKind::SearchThreads {
                 query: "backoff".into(),
@@ -1272,6 +1456,7 @@ mod tests {
             CommandKind::ListThreads { .. }
                 | CommandKind::SearchThreads { .. }
                 | CommandKind::ReadThread { .. }
+                | CommandKind::ReadProvenance { .. }
                 | CommandKind::ReadThreadEdit { .. }
                 | CommandKind::ReadThreadMarkdown { .. }
                 | CommandKind::ExportThread { .. }

@@ -437,6 +437,131 @@ pub struct ThreadDetail {
     pub has_more: bool,
 }
 
+/// The evidence that ties a line to an edit or a commit (D144), strongest first. The order of the
+/// variants is the order of strength, so sorting puts the strongest first.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Evidence {
+    /// The edit's `post_oid` equals the file's blob in the blamed commit.
+    BlobMatch,
+    /// A contiguous run of the lines appears contiguously in the added lines of one edit.
+    LineMatch,
+    /// The edit added a line that the blamed commit also added to the file.
+    HunkOverlap,
+    /// The commit appeared on the thread's branch during the thread (D126).
+    ObservedCommit,
+    /// The user linked the thread to the commit.
+    Manual,
+}
+
+/// Why an edit cannot be compared with the lines (D144). Such an edit is reported as
+/// unverifiable, never as no match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Unverifiable {
+    /// The edit's text was redacted (D121).
+    Redacted,
+    /// The edit's patch was cut at the size limit.
+    Truncated,
+    /// The edit is known only from the tool input; the file was not measured (D123).
+    FromInput,
+}
+
+/// A run of consecutive lines of the queried file, both ends inclusive, 1-based.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LineRun {
+    pub from: u32,
+    pub to: u32,
+}
+
+/// One edit of a provenance thread that was compared with the lines.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ProvenanceEdit {
+    pub edit_id: i64,
+    /// The sequence number of the entry that carried the edit.
+    pub seq: u32,
+    /// The path as the edit recorded it.
+    pub path: String,
+    /// When the edit was made, in milliseconds.
+    pub at: i64,
+    /// The evidence for this edit, strongest first. Empty when the edit is only unverifiable.
+    pub evidence: Vec<Evidence>,
+    /// Set when the edit could not be compared, so no match is claimed either way.
+    pub unverifiable: Option<Unverifiable>,
+    /// The user and assistant entries around the edit's entry (two each side).
+    pub entries: Vec<ThreadEntryBrief>,
+}
+
+/// A thread that explains some lines of a commit (D144).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ProvenanceThread {
+    pub uid: String,
+    pub title: String,
+    pub harness: String,
+    /// The branch at the thread's first event; `None` when detached.
+    pub branch: Option<String>,
+    /// Every evidence the thread has for these lines, strongest first.
+    pub evidence: Vec<Evidence>,
+    /// Other edits also match these lines, so no edit is picked (D144).
+    pub ambiguous: bool,
+    pub edits: Vec<ProvenanceEdit>,
+}
+
+/// One commit that last changed some lines of the queried file, under the path Git reports for them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ProvenanceCommit {
+    /// Full commit id.
+    pub id: String,
+    pub subject: String,
+    pub author: String,
+    /// The author date, in milliseconds.
+    pub author_at: i64,
+    /// The path blame reports for these lines, which may differ from the queried path after a copy or rename.
+    pub path: String,
+    /// The lines of the query this commit owns, in order.
+    pub lines: Vec<LineRun>,
+    pub threads: Vec<ProvenanceThread>,
+}
+
+/// Which bound cut a provenance result (D144).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CutBound {
+    /// More commits own the lines than the result shows.
+    Commits,
+    /// More threads match a commit than the result shows.
+    Threads,
+    /// More edits touch the path than the commit compares; the rest are not compared.
+    Candidates,
+}
+
+/// Something a provenance result left out, and the bound that did it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ProvenanceCut {
+    pub bound: CutBound,
+    /// The bound's value, such as 10 commits.
+    pub limit: u32,
+    /// The commit the cut is in, for a thread or candidate cut.
+    pub commit: Option<String>,
+}
+
+/// The answer of `ReadProvenance` (D144): why the lines are as they are.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ProvenanceResult {
+    pub path: String,
+    pub from_line: u32,
+    pub to_line: u32,
+    pub commits: Vec<ProvenanceCommit>,
+    pub cuts: Vec<ProvenanceCut>,
+}
+
 /// Events dropped for a reason the user can see (the `capture_gap` table).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

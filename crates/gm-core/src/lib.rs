@@ -1,6 +1,7 @@
 //! The engine: commands in, events out, no UI and no real repository needed.
 //! Git is reached through `GitPort`; `git::SubprocessGit` is the first adapter.
 
+pub mod blame;
 pub mod branch;
 pub mod command_log;
 pub mod commit_detail;
@@ -49,8 +50,8 @@ pub use files::{
 };
 pub use history::{HistoryJob, HistoryOutcome, HistoryPage, HistoryReport, HistoryStream};
 pub use port::{
-    DetailRead, DiscardOutcome, FileListRead, FileMerge, GitError, GitPort, GrepRead, HistoryRevs,
-    RefMove, RemoteRun, ReviewSide, TreeMerge,
+    BlameRead, DetailRead, DiscardOutcome, FileListRead, FileMerge, GitError, GitPort, GrepRead,
+    HistoryRevs, RefMove, RemoteRun, ReviewSide, TreeMerge,
 };
 pub use runner::{EngineHandle, spawn, spawn_with};
 pub use script_session::{EffectRequest, ScriptLink};

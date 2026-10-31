@@ -57,10 +57,11 @@ pub use status::{
 };
 pub use syntax::{HighlightSpan, SyntaxRole};
 pub use threads::{
-    CanonicalEvent, CaptureGap, EditChange, EditIntent, EditPhase, EditState, EntryKind, EntryRole,
-    EventHeader, HitKind, LinkKind, LinkOrigin, SearchFacets, SearchGroup, SearchOrder,
-    SessionOrigin, ThreadDetail, ThreadEdit, ThreadEntry, ThreadEntryBrief, ThreadFilter,
-    ThreadHit, ThreadLink, ThreadSummary, ToolKind,
+    CanonicalEvent, CaptureGap, CutBound, EditChange, EditIntent, EditPhase, EditState, EntryKind,
+    EntryRole, EventHeader, Evidence, HitKind, LineRun, LinkKind, LinkOrigin, ProvenanceCommit,
+    ProvenanceCut, ProvenanceEdit, ProvenanceResult, ProvenanceThread, SearchFacets, SearchGroup,
+    SearchOrder, SessionOrigin, ThreadDetail, ThreadEdit, ThreadEntry, ThreadEntryBrief,
+    ThreadFilter, ThreadHit, ThreadLink, ThreadSummary, ToolKind, Unverifiable,
 };
 pub use workflow::{
     WorkflowCallRecord, WorkflowDiagnostic, WorkflowDryCall, WorkflowDryRun, WorkflowEnd,

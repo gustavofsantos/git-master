@@ -3156,6 +3156,7 @@ impl Engine {
                 | CommandKind::ListThreads { .. }
                 | CommandKind::SearchThreads { .. }
                 | CommandKind::ReadThread { .. }
+                | CommandKind::ReadProvenance { .. }
                 | CommandKind::ReadThreadEdit { .. }
                 | CommandKind::ReadThreadMarkdown { .. }
                 | CommandKind::ExportThread { .. }

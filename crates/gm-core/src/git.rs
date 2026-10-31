@@ -18,6 +18,7 @@ use gm_schema::{
     WorktreeEntry, WorktreeMode,
 };
 
+use crate::blame;
 use crate::branch;
 use crate::command_log::{CommandLog, CommandRecord, Source, bounded_text};
 use crate::commit_detail;
@@ -29,7 +30,9 @@ use crate::file_index::FileIndex;
 use crate::grep::{Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
-use crate::port::{DetailRead, FileListRead, GrepRead, HistoryRevs, RemoteRun, StackRead};
+use crate::port::{
+    BlameRead, DetailRead, FileListRead, GrepRead, HistoryRevs, RemoteRun, StackRead,
+};
 use crate::port::{DiscardOutcome, FileMerge, RefMove, ReviewSide, TreeMerge};
 use crate::reflog;
 use crate::remote;
@@ -1092,6 +1095,24 @@ impl GitPort for SubprocessGit {
         oid: &str,
         path: &str,
     ) -> Result<Option<Vec<u8>>, GitError> {
+        let Some(object) = self.blob_at_commit(root, oid, path)? else {
+            return Ok(None);
+        };
+        let mut cat = self.git(root);
+        cat.args(["cat-file", "blob", object.as_str()]);
+        Self::run(cat).map(Some)
+    }
+
+    fn blob_at_commit(
+        &self,
+        root: &Path,
+        oid: &str,
+        path: &str,
+    ) -> Result<Option<String>, GitError> {
+        // `HEAD` and the like are fine; an option is not.
+        if oid.starts_with('-') {
+            return Err(GitError(format!("not a revision: {oid:?}")));
+        }
         let mut list = self.git(root);
         list.args([
             "--literal-pathspecs",
@@ -1113,9 +1134,39 @@ impl GitPort for SubprocessGit {
         let (Some("blob"), Some(object)) = (fields.next(), fields.next()) else {
             return Ok(None);
         };
-        let mut cat = self.git(root);
-        cat.args(["cat-file", "blob", object]);
-        Self::run(cat).map(Some)
+        Ok(Some(object.to_owned()))
+    }
+
+    fn blame_lines(
+        &self,
+        root: &Path,
+        path: &str,
+        from: u32,
+        to: u32,
+    ) -> Result<BlameRead, GitError> {
+        if from == 0 || to < from {
+            return Err(GitError(format!("not a line range: {from} to {to}")));
+        }
+        let git = self.clone();
+        let root = root.to_path_buf();
+        let path = path.to_owned();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            let range = format!("{from},{to}");
+            // `-M -C` finds lines moved or copied from other files (D144). The path comes
+            // last, after `--`, so no name is read as an option.
+            let args = [
+                "blame",
+                "--line-porcelain",
+                "-M",
+                "-C",
+                "-L",
+                range.as_str(),
+                "--",
+                path.as_str(),
+            ];
+            let raw = git.run_stoppable(&root, &args, stop)?;
+            blame::parse_line_porcelain(&raw).map_err(GitError)
+        }))
     }
 
     fn common_dir(&self, root: &Path) -> Result<PathBuf, GitError> {

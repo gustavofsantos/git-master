@@ -21,8 +21,8 @@ use crate::status::{
 };
 use crate::syntax::HighlightSpan;
 use crate::threads::{
-    EditState, LinkKind, SearchFacets, SearchGroup, SearchOrder, ThreadDetail, ThreadEdit,
-    ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
+    EditState, LinkKind, ProvenanceResult, SearchFacets, SearchGroup, SearchOrder, ThreadDetail,
+    ThreadEdit, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
 };
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
@@ -596,6 +596,15 @@ pub enum CommandKind {
         from_seq: u32,
         limit: u32,
     },
+    /// Explains the lines `from_line` to `to_line` (1-based, inclusive) of `path`: the commits
+    /// that last changed them (`git blame`), their threads and the entries around each
+    /// matching edit (D144). Bounded: 10 commits, 5 threads per commit, and a range of at most
+    /// 1000 lines. Answers `ThreadProvenance`. A read (D08), never in the command log (D28).
+    ReadProvenance {
+        path: String,
+        from_line: u32,
+        to_line: u32,
+    },
     /// Reads edit `id` with its state in the working tree and at `HEAD`. Answers
     /// `ThreadEditRead`. A read (D08).
     ReadThreadEdit {
@@ -1059,6 +1068,11 @@ pub enum Event {
     ThreadRead {
         id: OperationId,
         detail: ThreadDetail,
+    },
+    /// Answers `ReadProvenance`: the commits, threads and evidence behind the lines.
+    ThreadProvenance {
+        id: OperationId,
+        provenance: ProvenanceResult,
     },
     /// Answers `ReadThreadEdit`: the edit and where its file is now.
     ThreadEditRead {
