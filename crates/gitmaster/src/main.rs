@@ -29,6 +29,9 @@ fn main() {
         let code = gm_mcp::command(
             &words,
             &cwd,
+            std::env::var_os("CLAUDE_PROJECT_DIR")
+                .map(std::path::PathBuf::from)
+                .as_deref(),
             std::io::stdin().lock(),
             std::io::stdout().lock(),
             &mut std::io::stderr().lock(),

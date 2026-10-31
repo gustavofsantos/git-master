@@ -46,7 +46,7 @@ fn session(dir: &Path, requests: &[Value]) -> Vec<Value> {
         .join("\n");
     let mut output = Vec::new();
     let mut errors = Vec::new();
-    let code = gm_mcp::command(&[], dir, input.as_bytes(), &mut output, &mut errors);
+    let code = gm_mcp::command(&[], dir, None, input.as_bytes(), &mut output, &mut errors);
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&errors));
     String::from_utf8(output)
         .unwrap()
@@ -216,12 +216,13 @@ fn threads_of_an_empty_store_search_to_nothing() {
 fn a_directory_that_is_not_a_repository_exits_with_one() {
     let dir = tempfile::tempdir().unwrap();
     let mut errors = Vec::new();
-    let code = gm_mcp::command(&[], dir.path(), &b""[..], Vec::new(), &mut errors);
+    let code = gm_mcp::command(&[], dir.path(), None, &b""[..], Vec::new(), &mut errors);
     assert_eq!(code, 1);
     assert!(!errors.is_empty());
     let code = gm_mcp::command(
         &["--bogus".to_owned()],
         dir.path(),
+        None,
         &b""[..],
         Vec::new(),
         &mut Vec::new(),
@@ -419,4 +420,26 @@ fn parallel_servers_share_one_repository_and_its_worktrees() {
         ],
     );
     assert_eq!(result(&replies[1])["comments"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn a_server_started_outside_a_repository_falls_back_to_the_project_directory() {
+    let outside = tempfile::tempdir().unwrap();
+    let project = repo();
+    let input = format!("{}\n", call(1, "review_comments_list", &json!({})));
+    let mut output = Vec::new();
+    let code = gm_mcp::command(
+        &[],
+        outside.path(),
+        Some(project.path()),
+        input.as_bytes(),
+        &mut output,
+        &mut Vec::new(),
+    );
+    assert_eq!(code, 0);
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("\"comments\":[]")
+    );
 }

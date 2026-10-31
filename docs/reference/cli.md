@@ -31,7 +31,7 @@ The theme is chosen with the `GITMASTER_THEME` environment variable, as describe
 gitmaster mcp [--repo <path>]
 ```
 
-Runs an MCP server on the standard input and output, for an MCP client to start. It works on the repository that contains the current directory, or on the one at `--repo`, and it exits when the client closes the input. It does not need the app to be open, opens no socket and keeps no state outside the repository's `.git/gitmaster/` directory. See [MCP server](../agents/mcp-server.md).
+Runs an MCP server on the standard input and output, for an MCP client to start. It works on the repository that contains the current directory, or on the one at `--repo`. When the current directory is not in a repository and `CLAUDE_PROJECT_DIR` is set, as Claude Code sets it, it uses that directory instead. It exits when the client closes the input. It does not need the app to be open, opens no socket and keeps no state outside the repository's `.git/gitmaster/` directory. See [MCP server](../agents/mcp-server.md).
 
 The exit status is `0` after a normal end, `1` when the repository cannot be opened, and `2` for a wrong command line.
 

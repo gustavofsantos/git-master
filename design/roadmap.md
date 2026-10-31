@@ -595,8 +595,9 @@ Redirected by the author on 2026-10-31 (D135): `gitmaster mcp` is a second proce
 
 - **7a, stdio server with review and thread tools** (done 2026-10-31, D135). `gitmaster mcp [--repo PATH]`; tools `review_comments_list`, `review_comment_resolve` (sets the new `handled` status with a summary, review schema 2), `threads_search`, `thread_get`, `thread_read`; the actor is `agent:<client>` from `initialize`; results mark person- and session-written text `untrusted`. Tests: JSON-RPC over a real repository and real stores (`crates/gm-mcp/tests/stdio_real_git.rs`).
   - Known gaps: the app does not watch `review.db`, so a comment an agent marks handled shows when the Local review page is next listed, not live; no "after" snapshot is taken when a comment is handled (`docs/agents/local-review.md` still describes it); the `handled` summary is not shown in the app yet; the plugin's skill is short and was not tried in a session (Q26); `since` takes milliseconds; nothing was seen in a window.
+  - Claude Code does not document the directory a plugin's stdio server starts in, so `gitmaster mcp` falls back to `CLAUDE_PROJECT_DIR` when the current directory is not in a repository; neither was seen in a session.
   - Also in 7a: the Claude Code plugin carries `.mcp.json` (`gitmaster mcp`, one process per session) and a `gitmaster` skill; parallel servers on one repository, in several worktrees, are tested, including a race on the first creation of the stores, and `set_handled` is one statement so a resolved comment is never overwritten.
-- **7b, propose and apply tools** (not started). Blocked on Q32 (approval without a window): `stack_tree`, `restack_plan`, `restack_apply`, `conflict_*`, `workflow_list`, `workflow_run`, `operation_log`, the agent policy, and the settings section.
+- **7b, propose and apply tools** (not started). Approval is the harness's (D137); open: Q33 (clients that cannot enforce it). `stack_tree`, `restack_plan`, `restack_apply`, `conflict_*`, `workflow_list`, `workflow_run`, `operation_log`, the agent policy, and the settings section.
 
 Done when: an agent can read the stack, propose a restack and apply it with approval (7b).
 

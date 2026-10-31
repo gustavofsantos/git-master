@@ -203,11 +203,7 @@ Changes apply as you make them, and there is no **Save** button. A value is save
 
 ### MCP & Agents
 
-| Field | What it does |
-|---|---|
-| **Agent Policy** | Chooses which agent actions need your approval. See [MCP server](../agents/mcp-server.md). |
-
-The MCP server is started by your agent with `gitmaster mcp`, so it has no switch, socket or token to set.
+The MCP server is started by your agent with `gitmaster mcp`, so it has no switch, socket or token to set. Which tool calls ask for your approval is set in your agent's permissions. See [MCP server](../agents/mcp-server.md#claude-code-permissions).
 
 ### Threads
 

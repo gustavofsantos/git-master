@@ -27,7 +27,7 @@ You act through the window, the menus, the command palette and the keyboard. Eac
 
 An agent that connects through the [MCP server](../agents/mcp-server.md) can read review comments and threads, and record that it handled a review comment. It cannot change the repository through GitMaster: the server has no tool that edits, commits, pushes or deletes. What an agent records is yours to confirm in the app, so a comment it marks `handled` stays open to you until you resolve it.
 
-> **Planned.** Tools that propose and apply a change to the repository. Apply will accept only a plan that you approved in the app, never free-form arguments, so what you approve is exactly what runs.
+> **Planned.** Tools that propose and apply a change to the repository. Your agent asks you before each apply call, and apply accepts only a plan, never free-form arguments, so what you approve is exactly what runs. The agent enforces this approval, not GitMaster, so it holds only as long as the agent's own permission settings do. See [Approval](../agents/mcp-server.md#approval).
 
 ## Untrusted data
 

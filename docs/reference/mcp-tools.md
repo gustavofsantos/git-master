@@ -37,7 +37,7 @@ A record tool writes to GitMaster's own store and nowhere else. It does not chan
 
 ## Propose and apply
 
-> **Planned.** These tools change the repository, so they wait for your approval in the app.
+> **Planned.** These tools change the repository. Your agent asks you before each apply call: see [Approval](../agents/mcp-server.md#approval).
 
 | Tool | Level | Arguments | Returns | Status |
 |---|---|---|---|---|

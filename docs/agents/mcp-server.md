@@ -48,12 +48,44 @@ A record tool takes effect on GitMaster's record, and a person still decides wha
 
 There is no tool that commits, pushes, restacks, edits a file or deletes anything. An agent that changes your code does it with its own tools, as it does without GitMaster, and the [thread](../guide/threads.md) records what it did.
 
-> **Planned.** Tools that propose a change, such as a restack plan, and that apply it after your approval in the app.
+> **Planned.** Tools that propose a change, such as a restack plan, and that apply it. See [Approval](#approval).
+
+## Approval
+
+Your agent asks you before it uses a tool that changes the repository. GitMaster does not show its own approval prompt: the server runs without a window, so the approval is the one your agent already gives you.
+
+> **Planned.** The tools that apply a change are not available yet. The rest of this section is how they will work.
+
+- **Plan first.** A propose tool returns the whole plan and a `plan_id`. An apply tool accepts only that `plan_id`, never free arguments, so what you approve is the plan.
+- **The agent asks every time.** Each apply tool tells the client that it needs a person's approval on every call. In Claude Code the prompt appears even when you allow edits automatically, in auto mode and in bypass mode. It offers no "don't ask again", and an allow rule does not skip it. In Claude Code's `dontAsk` mode the call is denied instead.
+- **The server still checks.** Before it applies, it rebuilds the plan and refuses one that is stale, because the branches moved, or one that was already applied.
+- **Only as strong as the client.** The approval is enforced by the agent, not by GitMaster. A client with no such control could let an apply call through, so the apply tools are offered only to clients known to enforce it.
+- **Read and record tools do not ask for approval from GitMaster.** Your agent may still ask the first time you use them. See [Claude Code permissions](#claude-code-permissions).
 
 ## Output designed for agents
 
 - **Small output by default.** Lists return a page, and the thread tools take a limit. An agent reads a thread's summary first, then asks for the entries it needs.
 - **Tasks, not Git commands.** The server offers a handful of tools, each built for a task.
+
+## Claude Code permissions
+
+Claude Code asks before it uses an MCP tool you have not allowed. The read tools and `review_comment_resolve` are safe to allow, so you can add rules to your Claude Code settings to stop the questions. The rule name for a tool of the GitMaster plugin is `mcp__plugin_gitmaster_gitmaster__<tool>`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_gitmaster_gitmaster__review_comments_list",
+      "mcp__plugin_gitmaster_gitmaster__review_comment_resolve",
+      "mcp__plugin_gitmaster_gitmaster__threads_search",
+      "mcp__plugin_gitmaster_gitmaster__thread_get",
+      "mcp__plugin_gitmaster_gitmaster__thread_read"
+    ]
+  }
+}
+```
+
+Do not allow the whole server with `mcp__plugin_gitmaster_gitmaster__*` once the apply tools exist. The apply tools ask anyway, but a narrow list keeps the intent clear. The plugin cannot add these rules for you.
 
 ## Untrusted content
 
