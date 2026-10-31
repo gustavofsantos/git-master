@@ -26,6 +26,7 @@ use crate::quick_open::QuickOpen;
 use crate::reflog::{DetachedCheckout, ReflogList};
 use crate::remote_op::{Outcome, RemoteOp};
 use crate::review::{ReviewList, ReviewWrite};
+use crate::stacks::Stacks;
 use crate::stash_apply::Applying;
 use crate::stash_drop::Dropping;
 use crate::stashes::StashList;
@@ -72,6 +73,8 @@ pub struct Model {
     switched: Option<Switched>,
     /// The branch picker's listing, filter and checkout in flight.
     pub branches: Branches,
+    /// The branch stacks the sidebar's By stack view draws, and the read in flight.
+    pub stacks: Stacks,
     /// The prepare-commit hooks: what is listed, the run and its suggestion.
     pub hooks: Hooks,
     /// The manual workflows: what is listed and the runs the engine reported.
@@ -577,6 +580,7 @@ impl Model {
             && state.is_terminal()
         {
             self.end_refresh(*id);
+            self.stacks.settled(*id);
         }
         match event {
             Event::StatusLoaded { id, status } => {
@@ -854,6 +858,10 @@ impl Model {
                 let _ = self.branches.listed(id, branches);
                 None
             }
+            Event::StacksLoaded { id, stacks } => {
+                self.stacks.loaded(id, stacks);
+                None
+            }
             Event::WorktreesLoaded { worktrees, .. } => {
                 self.worktrees = worktrees;
                 None
@@ -1112,7 +1120,6 @@ impl Model {
             | Event::WorktreeInspected { .. }
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
-            | Event::StacksLoaded { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
@@ -1230,6 +1237,7 @@ impl Model {
         self.move_file = MoveFile::default();
         self.history = HistoryList::default();
         self.commit = CommitPane::Empty;
+        self.stacks.clear();
         self.stashes = StashList::default();
         self.stash_commit = CommitPane::Empty;
         self.stash_stack = OpenStack::default();

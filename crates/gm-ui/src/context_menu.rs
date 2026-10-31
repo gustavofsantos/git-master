@@ -123,11 +123,14 @@ pub(crate) fn branch_items(name: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         item(Action::NewBranch, 1),
         item(Action::NewChildBranch, 1),
         item(Action::CreateWorktree, 1),
-        item(Action::Restack, 1),
-        item(Action::PushWithLease, 2),
-        item(Action::CopyBranchName, 3),
-        item(Action::RenameBranch, 4),
-        item(Action::DeleteBranch, 4),
+        item(Action::SetStackParent, 2),
+        item(Action::RemoveFromStack, 2),
+        item(Action::ReparentToGrandparent, 2),
+        item(Action::Restack, 2),
+        item(Action::PushWithLease, 3),
+        item(Action::CopyBranchName, 4),
+        item(Action::RenameBranch, 5),
+        item(Action::DeleteBranch, 5),
     ]
 }
 
@@ -257,8 +260,11 @@ fn worktree_branch_items(path: &str, name: &str, ctx: &ActionContext<'_>) -> Vec
         Item::new(Action::CopyWorktreePath, worktree.clone(), 1, ctx),
         Item::new(Action::NewBranch, branch.clone(), 2, ctx),
         Item::new(Action::NewChildBranch, branch.clone(), 2, ctx),
-        Item::new(Action::Restack, branch, 2, ctx),
-        Item::new(Action::RemoveWorktree, worktree, 3, ctx),
+        Item::new(Action::SetStackParent, branch.clone(), 3, ctx),
+        Item::new(Action::RemoveFromStack, branch.clone(), 3, ctx),
+        Item::new(Action::ReparentToGrandparent, branch.clone(), 3, ctx),
+        Item::new(Action::Restack, branch, 3, ctx),
+        Item::new(Action::RemoveWorktree, worktree, 4, ctx),
     ]
 }
 
@@ -466,7 +472,10 @@ impl StatusView {
                 self.close_context_menu(cx);
                 self.notify_user(reason, cx);
             }
-            Ok(()) if item.destructive() && !item.action.opens_dialog() => {
+            Ok(())
+                if (item.destructive() || item.action.asks_first())
+                    && !item.action.opens_dialog() =>
+            {
                 if let Some(open) = self.context_menu.open.as_mut() {
                     open.armed = Some(item);
                 }
@@ -614,16 +623,21 @@ impl StatusView {
     fn confirm_panel(item: &Item, target: &Target, cx: &Context<Self>) -> Div {
         let subject = target.subject();
         let confirm = item.clone();
+        let confirm_destructive = item.destructive();
         div()
             .px_3()
             .py_2()
             .flex()
             .flex_col()
             .gap_2()
-            .child(format!(
-                "{} to {subject}? This cannot be undone.",
-                item.label()
-            ))
+            .child(if item.destructive() {
+                format!("{} to {subject}? This cannot be undone.", item.label())
+            } else {
+                format!(
+                    "{} for {subject}? Its commits do not move until you restack.",
+                    item.label()
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -654,7 +668,9 @@ impl StatusView {
                             .rounded_sm()
                             .border_1()
                             .border_color(theme::button_border())
-                            .text_color(theme::removed_fg())
+                            .when(confirm_destructive, |this| {
+                                this.text_color(theme::removed_fg())
+                            })
                             .cursor_pointer()
                             .child(item.label())
                             .on_mouse_down(
@@ -700,6 +716,7 @@ mod tests {
             repo_open: true,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
             staged_count: 0,
@@ -759,6 +776,9 @@ mod tests {
                 "New Branch…",
                 "New Child Branch",
                 "Create Worktree",
+                "Set Parent…",
+                "Remove From Stack",
+                "Reparent to Grandparent",
                 "Restack This Stack",
                 "Push With Lease",
                 "Copy Branch Name",
@@ -777,7 +797,7 @@ mod tests {
     fn branch_menu_is_split_into_groups_by_the_separators() {
         let items = branch_items("feature", &ctx(&[]));
         let sizes: Vec<usize> = sections(&items).iter().map(|s| s.len()).collect();
-        assert_eq!(sizes, [1, 4, 1, 1, 2]);
+        assert_eq!(sizes, [1, 3, 4, 1, 1, 2]);
     }
 
     #[test]
@@ -810,6 +830,9 @@ mod tests {
                 "Copy Worktree Path",
                 "New Branch…",
                 "New Child Branch",
+                "Set Parent…",
+                "Remove From Stack",
+                "Reparent to Grandparent",
                 "Restack This Stack",
                 "Remove Worktree",
             ]
@@ -894,11 +917,7 @@ mod tests {
     #[test]
     fn branch_items_the_engine_lacks_are_listed_disabled_with_a_reason() {
         let items = branch_items("feature", &ctx(&[]));
-        for action in [
-            Action::NewChildBranch,
-            Action::Restack,
-            Action::RenameBranch,
-        ] {
+        for action in [Action::Restack, Action::RenameBranch] {
             assert_eq!(
                 find(&items, action).state,
                 Err("Not available yet"),
@@ -1067,6 +1086,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&[])
         };

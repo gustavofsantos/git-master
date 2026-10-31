@@ -307,6 +307,7 @@ pub(crate) fn build(
 fn top_level(query: &str, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Vec<Candidate> {
     let mut candidates: Vec<Candidate> = Action::ALL
         .into_iter()
+        .filter(|action| action.listed_in_palette())
         .map(|action| action_row(action, ctx, branches))
         .collect();
     if !query.is_empty() {
@@ -654,6 +655,7 @@ mod tests {
             repo_open: true,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
             staged_count: entries.iter().filter(|e| e.staged.is_some()).count(),
@@ -719,7 +721,14 @@ mod tests {
             .iter()
             .filter(|action| action.spec().category == Category::Worktrees)
             .count();
-        assert_eq!(actions, Action::ALL.len() - worktree_actions);
+        // Choose Parent is only the second step of Set Parent….
+        let unlisted = Action::ALL
+            .iter()
+            .filter(|action| !action.listed_in_palette())
+            .count();
+        assert_eq!(unlisted, 1);
+        assert_eq!(actions, Action::ALL.len() - worktree_actions - unlisted);
+        assert!(candidates.iter().all(|c| c.label != "Choose Parent"));
         let worktree = find(&candidates, "Create Worktree");
         assert_eq!(worktree.section, Section::Worktrees);
         assert_eq!(worktree.state, Err(NO_BRANCH));

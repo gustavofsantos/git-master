@@ -1,5 +1,7 @@
 //! The new-branch dialog. It names a local branch, the commit it starts from,
-//! and whether the new branch is checked out. The rules are pure and tested
+//! and whether the new branch is checked out. Opened by New Child Branch, it
+//! names the stack parent instead of a start point: the branch starts at the
+//! parent's tip and records it (D138). The rules are pure and tested
 //! here: what the form needs, the command it sends, the command line it shows
 //! and what an outcome means. The window side is the `impl StatusView` at the
 //! bottom. The form refuses the names `gm_core::branch` refuses, so the reason
@@ -34,6 +36,8 @@ pub(crate) struct Form {
     pub(crate) start: String,
     /// Whether the new branch is checked out as well.
     pub(crate) checkout: bool,
+    /// The stack parent of a new child branch; the start field is not used then.
+    pub(crate) parent: Option<String>,
 }
 
 /// The reason the typed name cannot be a branch name, shown while typing. An
@@ -57,6 +61,13 @@ pub(crate) fn build(form: &Form) -> Result<CommandKind, &'static str> {
     }
     if let Some(problem) = branch::name_problem(name) {
         return Err(problem);
+    }
+    if let Some(parent) = &form.parent {
+        return Ok(CommandKind::CreateChildBranch {
+            name: name.to_owned(),
+            parent: parent.clone(),
+            checkout: form.checkout,
+        });
     }
     let start = form.start.trim();
     let start_point = if start.is_empty() {
@@ -87,6 +98,16 @@ pub(crate) fn command_line(form: &Form) -> String {
         "" => "<name>",
         name => name,
     };
+    if let Some(parent) = &form.parent {
+        let create = if form.checkout {
+            format!("git checkout -b {name} <tip of {parent}>")
+        } else {
+            format!("git branch {name} <tip of {parent}>")
+        };
+        return format!(
+            "{create}\ngit config --local branch.{name}.stackParent {parent}\ngit config --local branch.{name}.stackParentBase <tip of {parent}>"
+        );
+    }
     let start = match form.start.trim() {
         "" => String::new(),
         start => format!(" {start}"),
@@ -149,6 +170,8 @@ pub(crate) struct NewBranchDialog {
     pub(crate) name: Entity<TextArea>,
     pub(crate) start: Entity<TextArea>,
     pub(crate) checkout: bool,
+    /// The stack parent of a new child branch (New Child Branch).
+    pub(crate) parent: Option<String>,
     /// Git's refusal, or the reason the form cannot run.
     pub(crate) error: Option<String>,
     /// The two texts the dialog last saw. The fields notify on every caret
@@ -163,16 +186,19 @@ impl NewBranchDialog {
             name: self.name.read(cx).text().to_owned(),
             start: self.start.read(cx).text().to_owned(),
             checkout: self.checkout,
+            parent: self.parent.clone(),
         }
     }
 }
 
 impl StatusView {
     /// Opens the dialog. `start` is the commit the new branch starts from; the
-    /// checked-out branch (or HEAD) is the default.
+    /// checked-out branch (or HEAD) is the default. With `parent`, the dialog
+    /// makes a child of that local branch instead.
     pub(crate) fn open_new_branch_dialog(
         &mut self,
         start: Option<&str>,
+        parent: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -210,6 +236,7 @@ impl StatusView {
             name: name.clone(),
             start: start_field,
             checkout: true,
+            parent: parent.map(str::to_owned),
             error: None,
             seen,
             _subscriptions: subscriptions,
@@ -301,6 +328,10 @@ impl StatusView {
         let Some(dialog) = self.new_branch_dialog.as_ref() else {
             return;
         };
+        if dialog.parent.is_some() {
+            // A child has one field: its name.
+            return;
+        }
         let fields = [dialog.name.clone(), dialog.start.clone()];
         let current = fields
             .iter()
@@ -363,11 +394,18 @@ impl StatusView {
                 div()
                     .text_color(theme::text())
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("New branch"),
+                    .child(if dialog.parent.is_some() {
+                        "New child branch"
+                    } else {
+                        "New branch"
+                    }),
             )
             .child(field_row("NAME", dialog.name.clone()))
             .children(live.map(|message| div().text_sm().text_color(theme::error()).child(message)))
-            .child(field_row("STARTS FROM", dialog.start.clone()))
+            .child(match &dialog.parent {
+                Some(parent) => parent_row(parent),
+                None => field_row("STARTS FROM", dialog.start.clone()),
+            })
             .child(checkbox(
                 "new-branch-checkout",
                 "Check out the new branch",
@@ -386,6 +424,21 @@ impl StatusView {
             }))
             .child(buttons(pending, allowed, cx))
     }
+}
+
+/// The fixed parent of a new child branch, where the start field would be.
+fn parent_row(parent: &str) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_xs().text_color(theme::muted()).child("PARENT"))
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme::text())
+                .child(format!("{parent}, starting at its tip")),
+        )
 }
 
 /// A checkbox row: the mark, then its label. A click runs `on_click` on the window.
@@ -471,8 +524,35 @@ fn buttons(pending: bool, allowed: bool, cx: &Context<StatusView>) -> Div {
 mod tests {
     use super::*;
 
+    fn child_form(name: &str, parent: &str, checkout: bool) -> Form {
+        Form {
+            parent: Some(parent.to_owned()),
+            ..form(name, "ignored", checkout)
+        }
+    }
+
+    #[test]
+    fn a_child_form_creates_a_child_of_its_parent() {
+        assert_eq!(
+            build(&child_form(" api ", "base", false)),
+            Ok(CommandKind::CreateChildBranch {
+                name: "api".into(),
+                parent: "base".into(),
+                checkout: false,
+            })
+        );
+        assert_eq!(build(&child_form("", "base", true)), Err(NO_NAME));
+        let line = command_line(&child_form("api", "base", true));
+        assert!(
+            line.starts_with("git checkout -b api <tip of base>"),
+            "{line}"
+        );
+        assert!(line.contains("git config --local branch.api.stackParent base"));
+    }
+
     fn form(name: &str, start: &str, checkout: bool) -> Form {
         Form {
+            parent: None,
             name: name.into(),
             start: start.into(),
             checkout,

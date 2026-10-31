@@ -61,6 +61,7 @@ mod shell_stashes;
 mod shell_threads;
 mod shell_workflows;
 mod sidebar;
+mod stacks;
 mod stash_apply;
 mod stash_drop;
 mod stashes;

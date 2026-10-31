@@ -173,6 +173,8 @@ pub struct StatusView {
     pub(crate) prune_dialog: Option<PruneDialog>,
     /// The new-branch dialog, while it is open.
     pub(crate) new_branch_dialog: Option<NewBranchDialog>,
+    /// The branch Set Parent… was run on, while the palette picks its parent.
+    pub(crate) stack_subject: Option<String>,
     /// The stash dialog, while it is open (B2).
     pub(crate) new_stash_dialog: Option<NewStashDialog>,
     /// The review comment composer, while it is open (B4c).
@@ -415,6 +417,7 @@ impl StatusView {
             removal_dialog: None,
             prune_dialog: None,
             new_branch_dialog: None,
+            stack_subject: None,
             new_stash_dialog: None,
             review_dialog: None,
             workflow_inputs_dialog: None,
@@ -592,12 +595,7 @@ impl StatusView {
             self.refresh_palette(cx);
         }
         if reload {
-            // A checkout moves HEAD; the tree marks the new branch.
-            if self.head_name() != head_before {
-                self.request_branch_list();
-                self.request_hook_list();
-            }
-            self.load_selected(cx);
+            self.after_status(head_before.as_deref(), cx);
         }
         // The watcher refreshes the status when HEAD or a ref moves; the open
         // history re-reads its top then, so an outside commit shows up.
@@ -728,6 +726,28 @@ impl StatusView {
             .engine
             .dispatch(Actor::Human, CommandKind::ListBranches);
         self.model.branches.request(id);
+    }
+
+    /// What every status refresh asks for again: the stacks, the branch list and
+    /// the hooks when HEAD moved (the tree marks the new branch), and the diff.
+    fn after_status(&mut self, head_before: Option<&str>, cx: &mut Context<Self>) {
+        self.request_stacks();
+        if self.head_name().as_deref() != head_before {
+            self.request_branch_list();
+            self.request_hook_list();
+        }
+        self.load_selected(cx);
+    }
+
+    /// Asks for the branch stacks the By stack view draws (D138), after every status
+    /// refresh, since any moved ref can change a stack's states. Not while a read is
+    /// in flight: its answer is as fresh, since the engine runs in order.
+    pub(crate) fn request_stacks(&mut self) {
+        if self.model.status().is_none() || self.model.stacks.is_waiting() {
+            return;
+        }
+        let id = self.engine.dispatch(Actor::Human, CommandKind::LoadStacks);
+        self.model.stacks.request(id);
     }
 
     /// Asks the engine for the prepare-commit hooks of the open repository. Nothing
@@ -1119,9 +1139,11 @@ impl StatusView {
             Ok(Effect::OpenWorktree(path)) => self.open_worktree(&path, cx),
             Ok(Effect::OpenRemoveDialog(path)) => self.open_remove_dialog(&path, window, cx),
             Ok(Effect::OpenPruneDialog) => self.open_prune_dialog(cx),
-            Ok(Effect::OpenNewBranchDialog { start }) => {
-                self.open_new_branch_dialog(start.as_deref(), window, cx);
-            }
+            Ok(
+                effect @ (Effect::OpenNewBranchDialog { .. }
+                | Effect::OpenNewChildDialog { .. }
+                | Effect::PickStackParent { .. }),
+            ) => self.open_branch_effect(effect, window, cx),
             Ok(Effect::OpenDeleteBranchDialog(branch)) => {
                 self.open_delete_branch_dialog(&branch, window, cx);
             }
@@ -1229,6 +1251,24 @@ impl StatusView {
         cx.reveal_path(path);
     }
 
+    /// The effects that start a branch: the new-branch dialog, as itself or for a
+    /// child, and the parent step of Set Parent….
+    fn open_branch_effect(&mut self, effect: Effect, window: &mut Window, cx: &mut Context<Self>) {
+        match effect {
+            Effect::OpenNewBranchDialog { start } => {
+                self.open_new_branch_dialog(start.as_deref(), None, window, cx);
+            }
+            Effect::OpenNewChildDialog { parent } => {
+                self.open_new_branch_dialog(None, Some(&parent), window, cx);
+            }
+            Effect::PickStackParent { branch } => {
+                self.stack_subject = Some(branch);
+                self.open_palette_at_pick(Action::ChooseStackParent, window, cx);
+            }
+            _ => {}
+        }
+    }
+
     /// Copy Branch Name on the checked-out branch: the `⌥⌘C` shortcut.
     pub(crate) fn copy_current_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let head = self
@@ -1256,6 +1296,11 @@ impl StatusView {
         ActionContext {
             repo_open: self.model.status().is_some(),
             selected_file: self.model.selected_path(),
+            stack: crate::action_registry::StackCtx {
+                stacks: Some(&self.model.stacks),
+                subject: self.stack_subject.as_deref(),
+                branches: self.model.branches.known(),
+            },
             selected_thread: self
                 .model
                 .threads

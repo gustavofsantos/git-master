@@ -6,7 +6,7 @@
 
 use std::ops::Range;
 
-use gm_schema::BranchEntry;
+use gm_schema::{BranchEntry, StackBranch, StackState};
 use gpui::{
     AnyElement, Context, Div, ElementId, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
     SharedString, Stateful, Subscription, Window, div, prelude::*, px, uniform_list,
@@ -21,6 +21,7 @@ use crate::name_fit::{self, name_label};
 use crate::resize::{self, SIDEBAR};
 use crate::resize_handle::{self, Edge};
 use crate::sidebar::{self, Grouping, Row, Section};
+use crate::stacks;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
 use crate::view::{Screen, StatusView};
@@ -416,7 +417,7 @@ impl StatusView {
                 .flex_col()
                 .child(no_match_state(cx));
         }
-        let count = sidebar::rows(&visible, self.sidebar_grouping).len();
+        let count = sidebar::rows(&visible, self.sidebar_grouping, &self.model.stacks).len();
         div().flex_1().min_h(px(0.)).flex().flex_col().child(
             uniform_list(
                 "sidebar-branches",
@@ -427,7 +428,8 @@ impl StatusView {
                      _window: &mut Window,
                      cx: &mut Context<StatusView>| {
                         let visible = this.visible_branches();
-                        let rows = sidebar::rows(&visible, this.sidebar_grouping);
+                        let rows =
+                            sidebar::rows(&visible, this.sidebar_grouping, &this.model.stacks);
                         let head = this
                             .model
                             .status()
@@ -728,15 +730,18 @@ fn tree_row(
         Row::Branch {
             branch,
             label,
-            indented,
+            indent,
+            stack,
+            looped,
         } => {
             let current = !branch.is_remote && head == Some(branch.name.as_str());
             let name = branch.name.clone();
             let full = branch.name.clone();
+            let indent = f32::from(u16::try_from(*indent).unwrap_or(u16::MAX).min(12));
             let inner = div()
                 .id(("sidebar-branch", index))
                 .size_full()
-                .pl(px(if *indented { 24. } else { 8. }))
+                .pl(px(8. + 16. * indent))
                 .pr_2()
                 .gap_2()
                 .flex()
@@ -759,6 +764,7 @@ fn tree_row(
                     this.tooltip(window_chrome::hint(full))
                 })
                 .child(name_label(label, &[]))
+                .children(stack_marks(*stack, *looped, index))
                 .children(current.then(|| {
                     div()
                         .flex_none()
@@ -787,6 +793,100 @@ fn tree_row(
                 .into_any_element()
         }
     }
+}
+
+/// The stack indicators after a branch name (D138): the amber dot of a stale
+/// branch, its state tag, `↑N` against the parent and `restack N` on a parent
+/// that moved. Each says what it means on hover; the shape and the text carry
+/// the state, never the colour alone.
+fn stack_marks(stack: Option<&StackBranch>, looped: bool, index: usize) -> Vec<AnyElement> {
+    let mut marks = Vec::new();
+    if looped {
+        marks.push(
+            hinted_tag(
+                ("stack-loop", index),
+                "parent loop",
+                "The recorded parents of this branch lead back to it. Set Parent… or Remove From Stack to end the loop.",
+                theme::warn_fg(),
+                theme::warn_bg(),
+            )
+            .into_any_element(),
+        );
+    }
+    let Some(entry) = stack else {
+        return marks;
+    };
+    if entry.state == StackState::Stale {
+        marks.push(
+            div()
+                .id(("stack-stale", index))
+                .flex_none()
+                .w(px(8.))
+                .h(px(8.))
+                .rounded_full()
+                .bg(theme::warn_fg())
+                .tooltip(window_chrome::hint(stacks::stale_hint(entry)))
+                .into_any_element(),
+        );
+    }
+    if let Some((text, hint)) = stacks::state_tag(entry) {
+        marks.push(
+            hinted_tag(
+                ("stack-state", index),
+                text,
+                hint,
+                theme::warn_fg(),
+                theme::warn_bg(),
+            )
+            .into_any_element(),
+        );
+    }
+    if let Some((text, hint)) = stacks::ahead_label(entry) {
+        marks.push(
+            div()
+                .id(("stack-ahead", index))
+                .flex_none()
+                .text_xs()
+                .text_color(theme::muted())
+                .tooltip(window_chrome::hint(hint))
+                .child(text)
+                .into_any_element(),
+        );
+    }
+    if let Some((text, hint)) = stacks::restack_label(entry) {
+        marks.push(
+            hinted_tag(
+                ("stack-restack", index),
+                text,
+                hint,
+                theme::accent(),
+                theme::selection(),
+            )
+            .into_any_element(),
+        );
+    }
+    marks
+}
+
+/// A small tag that explains itself on hover.
+fn hinted_tag(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    hint: impl Into<SharedString>,
+    text_color: Hsla,
+    background: Hsla,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .px_1()
+        .rounded_sm()
+        .bg(background)
+        .text_color(text_color)
+        .text_xs()
+        .whitespace_nowrap()
+        .tooltip(window_chrome::hint(hint.into()))
+        .child(text.into())
 }
 
 /// One worktree: its colour mark, its name, and the tags that say it is the
@@ -888,7 +988,7 @@ fn tag(text: &'static str, text_color: Hsla, background: Hsla) -> Div {
         .child(text)
 }
 
-/// The hint under the stack tree, for the gesture slice 4 adds.
+/// The hint under the stack tree: where the stack actions are.
 fn footer_hint() -> Div {
     div()
         .px_4()
@@ -896,5 +996,5 @@ fn footer_hint() -> Div {
         .border_t_1()
         .border_color(theme::hairline())
         .text_color(theme::muted())
-        .child("Drag a branch onto another to set its parent.")
+        .child("Right-click a branch to set its parent.")
 }

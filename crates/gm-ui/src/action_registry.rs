@@ -11,11 +11,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use gm_schema::{
-    CommandKind, DiffSide, HunkId, OperationId, ReviewComment, ReviewStatus, StageTarget,
-    StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
+    BranchEntry, CommandKind, DiffSide, HunkId, OperationId, ReviewComment, ReviewStatus,
+    StageTarget, StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
 };
 
 use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, SAME_WORKTREE};
+use crate::stacks::Stacks;
 use crate::stashes;
 use crate::thread_curate::{self, ThreadField};
 use crate::workflows_page::PageState;
@@ -253,6 +254,14 @@ pub enum Effect {
     DryRunWorkflow,
     /// Turns the Gravatar lookup of author pictures on or off (D110).
     SetAuthorPictures(bool),
+    /// Opens the new-branch dialog for a child of local branch `parent` (D138).
+    OpenNewChildDialog {
+        parent: String,
+    },
+    /// Opens the palette on the parent step of Set Parent… for `branch`.
+    PickStackParent {
+        branch: String,
+    },
     /// Opens the palette on the target step of a move action, with the file
     /// at `path` selected, so the branch or worktree is picked there.
     PickMoveTarget {
@@ -354,6 +363,18 @@ pub struct Context<'a> {
     pub selected_file: Option<&'a str>,
     /// The thread selected on the Threads page, which the thread actions take (T6).
     pub selected_thread: Option<ThreadRef<'a>>,
+    /// The branch stacks and the branch whose parent is being chosen (D138).
+    pub stack: StackCtx<'a>,
+}
+
+/// What the stack actions read: the last stack snapshot, and the branch Set
+/// Parent… was run on, while its parent is picked.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StackCtx<'a> {
+    pub stacks: Option<&'a Stacks>,
+    pub subject: Option<&'a str>,
+    /// The last branch listing, to tell a local branch from a remote one.
+    pub branches: &'a [BranchEntry],
 }
 
 /// The thread the Threads page has selected: its uid and its star.
@@ -364,7 +385,7 @@ pub struct ThreadRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 92] = [
+const SPECS: [Spec; 96] = [
     spec(
         "file.stage",
         "Stage File",
@@ -453,6 +474,34 @@ const SPECS: [Spec; 92] = [
         "branch.new_child",
         "New Child Branch",
         Some("⌘B"),
+        ArgKind::Branch,
+        Category::Branches,
+    ),
+    spec(
+        "stack.set_parent",
+        "Set Parent…",
+        None,
+        ArgKind::Branch,
+        Category::Branches,
+    ),
+    spec(
+        "stack.choose_parent",
+        "Choose Parent",
+        None,
+        ArgKind::Branch,
+        Category::Branches,
+    ),
+    spec(
+        "stack.remove",
+        "Remove From Stack",
+        None,
+        ArgKind::Branch,
+        Category::Branches,
+    ),
+    spec(
+        "stack.reparent_grandparent",
+        "Reparent to Grandparent",
+        None,
         ArgKind::Branch,
         Category::Branches,
     ),
@@ -1038,6 +1087,10 @@ pub enum Action {
     FocusCommitMessage,
     NewBranch,
     NewChildBranch,
+    SetStackParent,
+    ChooseStackParent,
+    RemoveFromStack,
+    ReparentToGrandparent,
     Restack,
     PushWithLease,
     RenameBranch,
@@ -1332,7 +1385,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 92] = [
+    pub const ALL: [Action; 96] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1346,6 +1399,10 @@ impl Action {
         Action::FocusCommitMessage,
         Action::NewBranch,
         Action::NewChildBranch,
+        Action::SetStackParent,
+        Action::ChooseStackParent,
+        Action::RemoveFromStack,
+        Action::ReparentToGrandparent,
         Action::Restack,
         Action::PushWithLease,
         Action::RenameBranch,
@@ -1447,10 +1504,33 @@ impl Action {
     /// listed disabled with `NOT_AVAILABLE` wherever it appears.
     #[must_use]
     pub fn available(self) -> bool {
-        !matches!(
+        !matches!(self, Action::Restack | Action::RenameBranch)
+    }
+
+    /// The actions that make or change a stack's metadata (D138).
+    fn is_stack_action(self) -> bool {
+        matches!(
             self,
-            Action::NewChildBranch | Action::Restack | Action::RenameBranch
+            Action::NewChildBranch
+                | Action::SetStackParent
+                | Action::ChooseStackParent
+                | Action::RemoveFromStack
+                | Action::ReparentToGrandparent
         )
+    }
+
+    /// Whether the palette lists the action at its top level. Choose Parent is
+    /// only the second step of Set Parent…, so it is reached from there.
+    #[must_use]
+    pub fn listed_in_palette(self) -> bool {
+        self != Action::ChooseStackParent
+    }
+
+    /// Whether a menu asks before it runs the action, though it destroys
+    /// nothing: Reparent to Grandparent changes the stack (docs/guide/stacks.md).
+    #[must_use]
+    pub fn asks_first(self) -> bool {
+        self == Action::ReparentToGrandparent
     }
 
     /// Whether the action throws away work. Menus show it in red and ask first.
@@ -1574,6 +1654,7 @@ impl Action {
                 | Action::RemoveWorktree
                 | Action::PruneWorktrees
                 | Action::NewBranch
+                | Action::NewChildBranch
                 | Action::DeleteBranch
                 | Action::DeleteMergedBranches
                 | Action::DiscardFile
@@ -1643,6 +1724,7 @@ impl Action {
                 }
             }
             Action::NewBranch | Action::DeleteBranch => branch_rule(self, args, ctx),
+            _ if self.is_stack_action() => stack_rule(self, args, ctx),
             // A checkout of a commit moves HEAD, so it waits for an idle repository, like a branch.
             Action::DeleteMergedBranches | Action::CheckoutCommit | Action::NewBranchFromCommit => {
                 idle(ctx)
@@ -1766,10 +1848,9 @@ impl Action {
             (action, _) if action.opens_a_page() => navigation_effect(action, args),
             (action, _) if is_choice(action) => choice_effect(action),
             (Action::CopyCommitMessage, Args::Commit(text)) => Effect::CopyMessage(text.clone()),
-            (Action::NewBranch, Args::Branch(name)) => Effect::OpenNewBranchDialog {
-                start: Some(name.clone()),
-            },
-            (Action::NewBranch, _) => Effect::OpenNewBranchDialog { start: None },
+            (action, _) if action == Action::NewBranch || action.is_stack_action() => {
+                branch_effect(action, args, ctx)?
+            }
             (Action::CheckoutCommit, Args::Commit(oid)) => {
                 Effect::Send(vec![CommandKind::CheckoutCommit { oid: oid.clone() }])
             }
@@ -1830,6 +1911,82 @@ impl Action {
                 | (ArgKind::Thread, Args::Thread { .. })
         )
     }
+}
+
+/// The rules of the stack actions (D138). Each takes a local branch and waits
+/// for an idle repository. Choose Parent takes the parent of the branch Set
+/// Parent… was run on; the engine checks loops and shared history.
+fn stack_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    idle(ctx)?;
+    let Args::Branch(name) = args else {
+        return Err("No target for this action");
+    };
+    let stacks = ctx.stack.stacks;
+    let local = !ctx
+        .stack
+        .branches
+        .iter()
+        .any(|branch| branch.is_remote && branch.name == *name);
+    match action {
+        Action::NewChildBranch | Action::SetStackParent if !local => {
+            Err("Stacks are made of local branches.")
+        }
+        Action::ChooseStackParent => match ctx.stack.subject {
+            None => Err("Run Set Parent… on a branch first."),
+            Some(subject) if subject == name => Err("A branch cannot be its own parent."),
+            Some(_) if !local => Err("The parent must be a local branch."),
+            Some(subject)
+                if stacks
+                    .and_then(|stacks| stacks.branch(subject))
+                    .and_then(|entry| entry.parent.as_deref())
+                    == Some(name.as_str()) =>
+            {
+                Err("This is already its parent.")
+            }
+            Some(_) => Ok(()),
+        },
+        Action::RemoveFromStack if !stacks.is_some_and(|stacks| stacks.has_parent(name)) => {
+            Err("This branch has no parent.")
+        }
+        Action::ReparentToGrandparent => match stacks.and_then(|stacks| stacks.branch(name)) {
+            Some(entry) if entry.state.parent_left() => Ok(()),
+            Some(entry) if entry.parent.is_some() => Err("The parent is neither gone nor merged."),
+            _ => Err("This branch has no parent."),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// What New Branch… and the stack actions open or send.
+fn branch_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
+    let Args::Branch(name) = args else {
+        return match action {
+            Action::NewBranch => Ok(Effect::OpenNewBranchDialog { start: None }),
+            _ => Err("No target for this action"),
+        };
+    };
+    Ok(match action {
+        Action::NewBranch => Effect::OpenNewBranchDialog {
+            start: Some(name.clone()),
+        },
+        Action::NewChildBranch => Effect::OpenNewChildDialog {
+            parent: name.to_owned(),
+        },
+        Action::SetStackParent => Effect::PickStackParent {
+            branch: name.to_owned(),
+        },
+        Action::ChooseStackParent => Effect::Send(vec![CommandKind::SetStackParent {
+            branch: ctx.stack.subject.ok_or(NOT_AVAILABLE)?.to_owned(),
+            parent: name.to_owned(),
+        }]),
+        Action::RemoveFromStack => Effect::Send(vec![CommandKind::ClearStackParent {
+            branch: name.to_owned(),
+        }]),
+        Action::ReparentToGrandparent => Effect::Send(vec![CommandKind::ReparentToGrandparent {
+            branch: name.to_owned(),
+        }]),
+        _ => return Err(NOT_AVAILABLE),
+    })
 }
 
 /// The rule of the actions that create or delete a local branch. A delete
@@ -2554,6 +2711,7 @@ mod tests {
             repo_open: true,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
             staged_count: entries.iter().filter(|e| e.staged.is_some()).count(),
@@ -2637,11 +2795,7 @@ mod tests {
     fn placeholders_are_disabled_with_the_same_reason_whatever_the_target() {
         let entries = [entry("a.txt", None, Some(Change::Modified))];
         let context = ctx(&entries, "msg");
-        let placeholders = [
-            Action::NewChildBranch,
-            Action::Restack,
-            Action::RenameBranch,
-        ];
+        let placeholders = [Action::Restack, Action::RenameBranch];
         for action in placeholders {
             let args = match action.spec().args {
                 ArgKind::Branch => Args::Branch("main".into()),
@@ -2720,6 +2874,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&entries, "")
         };
         assert_eq!(
@@ -2794,6 +2949,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -2850,6 +3006,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3023,6 +3180,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3093,6 +3251,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&entries, "")
         };
@@ -3125,6 +3284,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&entries, "")
         };
@@ -3149,6 +3309,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&[], "")
         };
@@ -3213,6 +3374,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3401,6 +3563,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3533,6 +3696,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
         };
         for action in [Action::DiscardFile, Action::DiscardAllChanges] {
@@ -3596,6 +3760,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3615,6 +3780,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3638,6 +3804,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3673,6 +3840,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3702,6 +3870,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3716,6 +3885,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3780,6 +3950,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
         };
         assert_eq!(
@@ -3900,6 +4071,7 @@ mod tests {
                 repo_open: false,
                 selected_file: None,
                 selected_thread: None,
+                stack: crate::action_registry::StackCtx::default(),
                 root: None,
                 ..with_stashes(&stashes)
             };
@@ -4002,6 +4174,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -4288,6 +4461,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
         };
         assert_eq!(
@@ -4439,6 +4613,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
         };
         assert_eq!(
@@ -4583,6 +4758,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(lines("a.txt", Some((1, 1))), None)
         };
         assert_eq!(
@@ -4680,6 +4856,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(CommentSpot::Nothing, Some(&listed))
         };
         assert_eq!(
@@ -4730,6 +4907,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -4796,6 +4974,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
             ..open_ctx(&entries, Some(&current))
         };
         assert_eq!(
@@ -5327,5 +5506,147 @@ mod tests {
             Action::ThreadsInstall.plan(&Args::None, &closed),
             Ok(Effect::OpenThreadsInstall)
         );
+    }
+
+    fn stack_snapshot(state: gm_schema::StackState) -> Stacks {
+        let entry = |name: &str, parent: Option<&str>, state| gm_schema::StackBranch {
+            name: name.into(),
+            parent: parent.map(str::to_owned),
+            depth: u32::from(parent.is_some()),
+            state,
+            ahead: 0,
+            behind: 0,
+            restack: 0,
+        };
+        let mut stacks = Stacks::default();
+        stacks.loaded(
+            OperationId(1),
+            gm_schema::StackSnapshot {
+                stacks: vec![gm_schema::Stack {
+                    branches: vec![
+                        entry("main", None, gm_schema::StackState::Root),
+                        entry("topic", Some("main"), state),
+                    ],
+                }],
+                looped: Vec::new(),
+            },
+        );
+        stacks
+    }
+
+    fn remote_entry(name: &str) -> BranchEntry {
+        BranchEntry {
+            name: name.into(),
+            is_remote: true,
+            is_current: false,
+            upstream: None,
+            author_email: None,
+        }
+    }
+
+    #[test]
+    fn new_child_branch_opens_the_child_dialog_for_a_local_branch_only() {
+        let remotes = [remote_entry("origin/main")];
+        let context = Context {
+            stack: StackCtx {
+                branches: &remotes,
+                ..StackCtx::default()
+            },
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::NewChildBranch.plan(&Args::Branch("main".into()), &context),
+            Ok(Effect::OpenNewChildDialog {
+                parent: "main".into()
+            })
+        );
+        assert_eq!(
+            Action::NewChildBranch.enabled(&Args::Branch("origin/main".into()), &context),
+            Err("Stacks are made of local branches.")
+        );
+        assert!(Action::NewChildBranch.available());
+        assert!(Action::NewChildBranch.opens_dialog());
+    }
+
+    #[test]
+    fn set_parent_picks_the_parent_next_and_choose_parent_sends_the_write() {
+        let stacks = stack_snapshot(gm_schema::StackState::Current);
+        let context = ctx(&[], "");
+        assert_eq!(
+            Action::SetStackParent.plan(&Args::Branch("lone".into()), &context),
+            Ok(Effect::PickStackParent {
+                branch: "lone".into()
+            })
+        );
+        assert_eq!(
+            Action::ChooseStackParent.enabled(&Args::Branch("main".into()), &context),
+            Err("Run Set Parent… on a branch first.")
+        );
+        let picking = |subject| Context {
+            stack: StackCtx {
+                stacks: Some(&stacks),
+                subject: Some(subject),
+                branches: &[],
+            },
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ChooseStackParent.plan(&Args::Branch("main".into()), &picking("lone")),
+            Ok(Effect::Send(vec![CommandKind::SetStackParent {
+                branch: "lone".into(),
+                parent: "main".into(),
+            }]))
+        );
+        assert_eq!(
+            Action::ChooseStackParent.enabled(&Args::Branch("lone".into()), &picking("lone")),
+            Err("A branch cannot be its own parent.")
+        );
+        assert_eq!(
+            Action::ChooseStackParent.enabled(&Args::Branch("main".into()), &picking("topic")),
+            Err("This is already its parent.")
+        );
+        assert!(!Action::ChooseStackParent.listed_in_palette());
+        assert!(Action::SetStackParent.listed_in_palette());
+    }
+
+    #[test]
+    fn remove_and_reparent_follow_the_stack_state() {
+        let current = stack_snapshot(gm_schema::StackState::Current);
+        let merged = stack_snapshot(gm_schema::StackState::ParentMerged);
+        let with = |stacks| Context {
+            stack: StackCtx {
+                stacks: Some(stacks),
+                ..StackCtx::default()
+            },
+            ..ctx(&[], "")
+        };
+        let topic = Args::Branch("topic".into());
+        let main = Args::Branch("main".into());
+        assert_eq!(
+            Action::RemoveFromStack.plan(&topic, &with(&current)),
+            Ok(Effect::Send(vec![CommandKind::ClearStackParent {
+                branch: "topic".into()
+            }]))
+        );
+        assert_eq!(
+            Action::RemoveFromStack.enabled(&main, &with(&current)),
+            Err("This branch has no parent.")
+        );
+        assert_eq!(
+            Action::ReparentToGrandparent.enabled(&topic, &with(&current)),
+            Err("The parent is neither gone nor merged.")
+        );
+        assert_eq!(
+            Action::ReparentToGrandparent.plan(&topic, &with(&merged)),
+            Ok(Effect::Send(vec![CommandKind::ReparentToGrandparent {
+                branch: "topic".into()
+            }]))
+        );
+        assert_eq!(
+            Action::ReparentToGrandparent.enabled(&main, &with(&merged)),
+            Err("This branch has no parent.")
+        );
+        assert!(Action::ReparentToGrandparent.asks_first());
+        assert!(!Action::ReparentToGrandparent.destructive());
     }
 }

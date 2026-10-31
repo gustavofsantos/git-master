@@ -1,11 +1,13 @@
 //! The rows of the sidebar's branch tree. Pure: the view draws what this lists.
 //!
-//! No branch has a stack parent yet (slice 4), so "By stack" shows an empty
-//! "Stacks" section above every local branch under "No stack". "By name" is
-//! the classic view: local, then remote, grouped by the prefix before the
-//! first slash.
+//! "By stack" shows the local branches as trees of recorded parents under
+//! "Stacks", each parent before its children and indented by depth, then the
+//! local branches in no tree under "No stack" (D138). "By name" is the classic
+//! view: local, then remote, grouped by the prefix before the first slash.
 
-use gm_schema::BranchEntry;
+use gm_schema::{BranchEntry, StackBranch};
+
+use crate::stacks::Stacks;
 
 /// A section of the sidebar that folds away under its header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,15 +76,25 @@ pub enum Row<'a> {
         branch: &'a BranchEntry,
         /// The name as drawn: without the group's prefix when under a group.
         label: &'a str,
-        indented: bool,
+        /// Levels of indent: under a prefix group, or the depth in a stack.
+        indent: u32,
+        /// The branch's place in its stack, in the By stack view.
+        stack: Option<&'a StackBranch>,
+        /// The branch's recorded parents form a loop.
+        looped: bool,
     },
 }
 
 /// The tree's rows for `branches` under `grouping`: the branches the filter
-/// kept, in the order listed. Empty until a listing has arrived. A header whose
-/// section has no branch left is not drawn.
+/// kept, in the order listed, and in "By stack" in the order of `stacks`. Empty
+/// until a listing has arrived. A header whose section has no branch left is
+/// not drawn.
 #[must_use]
-pub fn rows<'a>(branches: &[&'a BranchEntry], grouping: Grouping) -> Vec<Row<'a>> {
+pub fn rows<'a>(
+    branches: &[&'a BranchEntry],
+    grouping: Grouping,
+    stacks: &'a Stacks,
+) -> Vec<Row<'a>> {
     let mut rows = Vec::new();
     if branches.is_empty() {
         return rows;
@@ -98,18 +110,7 @@ pub fn rows<'a>(branches: &[&'a BranchEntry], grouping: Grouping) -> Vec<Row<'a>
         .filter(|branch| branch.is_remote)
         .collect();
     match grouping {
-        Grouping::ByStack => {
-            rows.push(Row::Header("Stacks"));
-            rows.push(Row::Note("No stacks yet"));
-            if !local.is_empty() {
-                rows.push(Row::Header("No stack"));
-                rows.extend(local.into_iter().map(|branch| Row::Branch {
-                    branch,
-                    label: &branch.name,
-                    indented: false,
-                }));
-            }
-        }
+        Grouping::ByStack => by_stack(&mut rows, &local, stacks),
         Grouping::ByName => {
             if !local.is_empty() {
                 rows.push(Row::Header("Local"));
@@ -122,6 +123,52 @@ pub fn rows<'a>(branches: &[&'a BranchEntry], grouping: Grouping) -> Vec<Row<'a>
         }
     }
     rows
+}
+
+/// The "Stacks" section, then "No stack" with the local branches in no tree.
+/// Until the first snapshot arrives, every branch waits under "No stack".
+fn by_stack<'a>(rows: &mut Vec<Row<'a>>, local: &[&'a BranchEntry], stacks: &'a Stacks) {
+    rows.push(Row::Header("Stacks"));
+    let mut stacked = Vec::new();
+    if stacks.calculating() {
+        rows.push(Row::Note("Calculating…"));
+    } else {
+        let entries = stacks
+            .snapshot()
+            .into_iter()
+            .flat_map(|snapshot| &snapshot.stacks)
+            .flat_map(|stack| &stack.branches);
+        for entry in entries {
+            if let Some(branch) = local.iter().find(|branch| branch.name == entry.name) {
+                stacked.push(entry.name.as_str());
+                rows.push(Row::Branch {
+                    branch,
+                    label: &branch.name,
+                    indent: entry.depth,
+                    stack: Some(entry),
+                    looped: false,
+                });
+            }
+        }
+        if stacked.is_empty() {
+            rows.push(Row::Note("No stacks yet"));
+        }
+    }
+    let alone: Vec<&'a BranchEntry> = local
+        .iter()
+        .copied()
+        .filter(|branch| !stacked.contains(&branch.name.as_str()))
+        .collect();
+    if !alone.is_empty() {
+        rows.push(Row::Header("No stack"));
+        rows.extend(alone.into_iter().map(|branch| Row::Branch {
+            branch,
+            label: &branch.name,
+            indent: 0,
+            stack: None,
+            looped: stacks.looped(&branch.name),
+        }));
+    }
 }
 
 /// Appends `branches` with a `Group` row before each run of branches that share
@@ -138,14 +185,18 @@ fn grouped<'a>(rows: &mut Vec<Row<'a>>, branches: impl Iterator<Item = &'a Branc
             rows.push(Row::Branch {
                 branch,
                 label: rest,
-                indented: true,
+                indent: 1,
+                stack: None,
+                looped: false,
             });
         } else {
             open = None;
             rows.push(Row::Branch {
                 branch,
                 label: &branch.name,
-                indented: false,
+                indent: 0,
+                stack: None,
+                looped: false,
             });
         }
     }
@@ -190,17 +241,17 @@ mod tests {
                 Row::Header(title) => format!("# {title}"),
                 Row::Note(text) => format!("~ {text}"),
                 Row::Group(prefix) => format!("{prefix}/"),
-                Row::Branch {
-                    label, indented, ..
-                } => format!("{}{label}", if *indented { "  " } else { "" }),
+                Row::Branch { label, indent, .. } => {
+                    format!("{}{label}", "  ".repeat(*indent as usize))
+                }
             })
             .collect()
     }
 
     #[test]
     fn nothing_is_listed_before_a_listing_arrives() {
-        assert!(rows(&[], Grouping::ByStack).is_empty());
-        assert!(rows(&[], Grouping::ByName).is_empty());
+        assert!(rows(&[], Grouping::ByStack, &Stacks::default()).is_empty());
+        assert!(rows(&[], Grouping::ByName, &Stacks::default()).is_empty());
     }
 
     #[test]
@@ -210,7 +261,8 @@ mod tests {
             branch("origin/main", true),
             branch("topic", false),
         ];
-        let shown = rows(&refs(&all), Grouping::ByStack);
+        let none = Stacks::default();
+        let shown = rows(&refs(&all), Grouping::ByStack, &none);
         assert_eq!(shown[0], Row::Header("Stacks"));
         assert_eq!(shown[1], Row::Note("No stacks yet"));
         assert_eq!(shown[2], Row::Header("No stack"));
@@ -232,7 +284,8 @@ mod tests {
             branch("main", false),
             branch("origin/main", true),
         ];
-        let shown = rows(&refs(&all), Grouping::ByName);
+        let none = Stacks::default();
+        let shown = rows(&refs(&all), Grouping::ByName, &none);
         assert_eq!(
             texts(&shown),
             [
@@ -244,7 +297,8 @@ mod tests {
     #[test]
     fn by_name_leaves_out_an_empty_remote_section() {
         let all = [branch("main", false)];
-        let shown = rows(&refs(&all), Grouping::ByName);
+        let none = Stacks::default();
+        let shown = rows(&refs(&all), Grouping::ByName, &none);
         assert!(!shown.contains(&Row::Header("Remote")));
     }
 
@@ -258,12 +312,12 @@ mod tests {
         // The filter kept `main` and the remote branch only.
         let kept = [&all[1], &all[2]];
         assert_eq!(
-            texts(&rows(&kept, Grouping::ByName)),
+            texts(&rows(&kept, Grouping::ByName, &Stacks::default())),
             ["# Local", "main", "# Remote", "origin/", "  feature/a"]
         );
         let local_gone = [&all[2]];
         assert_eq!(
-            texts(&rows(&local_gone, Grouping::ByName)),
+            texts(&rows(&local_gone, Grouping::ByName, &Stacks::default())),
             ["# Remote", "origin/", "  feature/a"]
         );
     }
@@ -271,13 +325,114 @@ mod tests {
     #[test]
     fn by_stack_drops_the_no_stack_header_when_no_local_branch_is_left() {
         let all = [branch("origin/main", true)];
-        let shown = rows(&refs(&all), Grouping::ByStack);
+        let none = Stacks::default();
+        let shown = rows(&refs(&all), Grouping::ByStack, &none);
         assert_eq!(texts(&shown), ["# Stacks", "~ No stacks yet"]);
     }
 
     #[test]
     fn nothing_kept_gives_no_rows() {
-        assert!(rows(&[], Grouping::ByName).is_empty());
-        assert!(rows(&[], Grouping::ByStack).is_empty());
+        assert!(rows(&[], Grouping::ByName, &Stacks::default()).is_empty());
+        assert!(rows(&[], Grouping::ByStack, &Stacks::default()).is_empty());
+    }
+
+    fn stack_entry(name: &str, parent: Option<&str>, depth: u32) -> gm_schema::StackBranch {
+        gm_schema::StackBranch {
+            name: name.into(),
+            parent: parent.map(str::to_owned),
+            depth,
+            state: if parent.is_some() {
+                gm_schema::StackState::Current
+            } else {
+                gm_schema::StackState::Root
+            },
+            ahead: 0,
+            behind: 0,
+            restack: 0,
+        }
+    }
+
+    fn ledger() -> Stacks {
+        let mut stacks = Stacks::default();
+        stacks.loaded(
+            gm_schema::OperationId(1),
+            gm_schema::StackSnapshot {
+                stacks: vec![gm_schema::Stack {
+                    branches: vec![
+                        stack_entry("main", None, 0),
+                        stack_entry("ledger-base", Some("main"), 1),
+                        stack_entry("ledger-ui", Some("ledger-base"), 2),
+                    ],
+                }],
+                looped: vec!["a".into()],
+            },
+        );
+        stacks
+    }
+
+    #[test]
+    fn by_stack_draws_each_tree_then_the_branches_in_none() {
+        let all = [
+            branch("a", false),
+            branch("ledger-base", false),
+            branch("ledger-ui", false),
+            branch("lone", false),
+            branch("main", false),
+            branch("origin/main", true),
+        ];
+        let stacks = ledger();
+        let shown = rows(&refs(&all), Grouping::ByStack, &stacks);
+        assert_eq!(
+            texts(&shown),
+            [
+                "# Stacks",
+                "main",
+                "  ledger-base",
+                "    ledger-ui",
+                "# No stack",
+                "a",
+                "lone"
+            ]
+        );
+        let looped: Vec<&str> = shown
+            .iter()
+            .filter_map(|row| match row {
+                Row::Branch {
+                    label,
+                    looped: true,
+                    ..
+                } => Some(*label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(looped, ["a"]);
+        assert!(matches!(
+            shown[2],
+            Row::Branch {
+                stack: Some(entry),
+                ..
+            } if entry.parent.as_deref() == Some("main")
+        ));
+    }
+
+    #[test]
+    fn a_filter_keeps_the_depth_of_the_stack_branches_it_shows() {
+        let all = [branch("ledger-ui", false), branch("main", false)];
+        let stacks = ledger();
+        assert_eq!(
+            texts(&rows(&refs(&all), Grouping::ByStack, &stacks)),
+            ["# Stacks", "main", "    ledger-ui"]
+        );
+    }
+
+    #[test]
+    fn by_stack_says_calculating_until_the_first_snapshot() {
+        let all = [branch("main", false)];
+        let mut stacks = Stacks::default();
+        stacks.request(gm_schema::OperationId(3));
+        assert_eq!(
+            texts(&rows(&refs(&all), Grouping::ByStack, &stacks)),
+            ["# Stacks", "~ Calculating…", "# No stack", "main"]
+        );
     }
 }

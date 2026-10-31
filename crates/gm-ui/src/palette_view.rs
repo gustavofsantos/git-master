@@ -314,8 +314,13 @@ impl StatusView {
                     ArgKind::Stash => "a stash",
                     _ => "a branch",
                 };
+                // Choose Parent is Set Parent…'s second step: it names the branch.
+                let title = match (action, self.stack_subject.as_deref()) {
+                    (Action::ChooseStackParent, Some(branch)) => format!("Parent of {branch}"),
+                    _ => action.spec().title.to_owned(),
+                };
                 (
-                    Some(format!("{}: choose {what}", action.spec().title)),
+                    Some(format!("{title}: choose {what}")),
                     &["↑↓ Navigate", "Enter Run", "Esc Back"],
                 )
             }
