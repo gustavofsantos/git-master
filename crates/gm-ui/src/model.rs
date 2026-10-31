@@ -27,6 +27,7 @@ use crate::new_stash::StashCreate;
 use crate::quick_open::QuickOpen;
 use crate::reflog::{DetachedCheckout, ReflogList};
 use crate::remote_op::{Outcome, RemoteOp};
+use crate::restack_dialog::Restacking;
 use crate::review::{ReviewList, ReviewWrite};
 use crate::stacks::Stacks;
 use crate::stash_apply::Applying;
@@ -149,6 +150,8 @@ pub struct Model {
     pub stash_drop: Dropping,
     /// The delete-merged-branches dialog's listing, delete in flight and outcome.
     pub merging: Merging,
+    /// The restack dialog's plan, operation in flight, and the record Undo uses.
+    pub restacking: Restacking,
     /// The review comments the engine listed, and the read in flight (B4c).
     pub review: ReviewList,
     /// The composer's comment write in flight, and its outcome (B4c).
@@ -798,6 +801,21 @@ impl Model {
                 self.merging.reported(deleted.len(), failures);
                 None
             }
+            Event::RestackPlanned { id, plan } if self.restacking.owns(id) => {
+                self.restacking.planned(plan);
+                None
+            }
+            // An apply, an undo and the resume at open all report the record Undo uses.
+            Event::RestackFinished { record, .. } => {
+                self.restacking.recorded(record);
+                None
+            }
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.restacking.owns(id) => {
+                self.restacking.settle(state, detail);
+                None
+            }
             Event::OperationChanged {
                 id, state, detail, ..
             } if self.merging.owns(id) => {
@@ -1143,9 +1161,8 @@ impl Model {
             // The failure reason arrives on the operation's own event; a cancel has no text.
             // An inspection nobody asked for is dropped; pruning's preview is shown by its
             // dialog (W6), not here yet.
-            // The restack screen (5e) shows the plan; nothing keeps it yet.
+            // A plan nobody asked for in this window.
             Event::RestackPlanned { .. }
-            | Event::RestackFinished { .. }
             | Event::HookFailed { .. }
             | Event::HookCancelled { .. }
             | Event::WorktreeInspected { .. }
@@ -1269,6 +1286,7 @@ impl Model {
         self.history = HistoryList::default();
         self.commit = CommitPane::Empty;
         self.stacks.clear();
+        self.restacking = Restacking::default();
         self.history_scope.reset();
         self.stashes = StashList::default();
         self.stash_commit = CommitPane::Empty;

@@ -48,6 +48,7 @@ use crate::quick_open_view::{self, QuickOpenView};
 use crate::recent::{self, Recents};
 use crate::reflog;
 use crate::resize;
+use crate::restack_dialog::RestackDialog;
 use crate::review_composer::ReviewDialog;
 use crate::shell_code::CodeView;
 use crate::shell_history::CommitTexts;
@@ -215,6 +216,8 @@ pub struct StatusView {
     pub(crate) message_dialog: Option<MessageDialog>,
     /// The delete-merged-branches dialog, while it is open.
     pub(crate) merged_dialog: Option<MergedDialog>,
+    /// The restack dialog, while it is open.
+    pub(crate) restack_dialog: Option<RestackDialog>,
     /// The recent repositories, newest first, as last saved or loaded.
     pub(crate) recents: Recents,
     /// Where the list is kept; `None` when there is no home directory.
@@ -446,6 +449,7 @@ impl StatusView {
             threads_install: None,
             message_dialog: None,
             merged_dialog: None,
+            restack_dialog: None,
             recents,
             recent_store,
             recent_generation: 0,
@@ -537,6 +541,10 @@ impl StatusView {
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let shown = self.model.apply(event);
+        if stacks_loaded && self.model.restacking.take_resume() {
+            self.engine
+                .dispatch(Actor::Human, CommandKind::ResumeRestack);
+        }
         // A read that opened the resolver shows its page.
         if self.model.take_conflict_opened().is_some() {
             self.show_conflicts(cx);
@@ -661,6 +669,9 @@ impl StatusView {
         self.sync_move_popover(window);
         if let Some(outcome) = self.model.discarding.take() {
             self.on_file_discard_settled(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.restacking.take_outcome() {
+            self.on_restack_settled(outcome, window, cx);
         }
         if let Some(outcome) = self.model.merging.take_outcome() {
             self.on_merged_settled(outcome, window, cx);
@@ -1188,6 +1199,9 @@ impl StatusView {
                 self.open_delete_branch_dialog(&branch, window, cx);
             }
             Ok(Effect::OpenMergedBranchesDialog) => self.open_merged_dialog(window, cx),
+            Ok(Effect::OpenRestackDialog { branch }) => {
+                self.open_restack_dialog(&branch, window, cx);
+            }
             Ok(Effect::OpenDiscardFileDialog {
                 path,
                 include_staged,
@@ -1735,6 +1749,9 @@ impl StatusView {
         layers.extend(self.move_popover_layer(cx));
         if self.merged_dialog.is_some() {
             layers.push(self.merged_layer(window, cx));
+        }
+        if self.restack_dialog.is_some() {
+            layers.push(self.restack_layer(window, cx));
         }
         layers
     }

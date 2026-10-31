@@ -47,6 +47,7 @@ mod reflog;
 mod remote_op;
 mod resize;
 mod resize_handle;
+mod restack_dialog;
 mod review;
 mod review_composer;
 mod shell_code;

@@ -540,7 +540,7 @@ Sub-slices (agreed with the author on 2026-10-31: engine and sidebar first; D13 
 - **4c2, Commits | Stacks switch** in the history graph: one node per branch, with its commits folded or unfolded.
 - **4d, the derived events** `stack.parent_moved` and `stack.parent_merged` for workflow triggers (with WF3), and `stack_tree` over MCP (slice 7).
 
-## Slice 5: restack (in progress: 5a to 5d (skip) done, with gaps)
+## Slice 5: restack (in progress: 5a to 5e done, with gaps)
 
 - Exact plan per commit, in-memory execution, snapshot and atomic undo, persisted state.
 - Fallback without a resolver: on conflict, pause and deliver the conflict in the working tree to resolve outside.
@@ -570,7 +570,10 @@ Sub-slices (agreed with the author on 2026-10-31; D14 decided, execution in D142
 - **5d, conflict handling (skip done on 2026-10-31; delivery of a conflict to the working tree not built).**
   - A conflict already blocks only its branch and the ones under it, and apply moves the rest. `PlanRestack` and `ApplyRestack` take `skip`, the branches to leave out (Skip branch and children): they and their descendants are not replayed, and the plan id changes with the list. Abort all is not sending `ApplyRestack`, since a plan moves nothing. Checked: one real-Git test (skip keeps a branch and its child, moves a sibling, and the skipped ones are offered again) and a unit test.
   - Not built: delivering a blocked branch's conflict in the working tree to resolve outside, and continuing after. It needs the author's choice between a temporary worktree and the open checkout, and overlaps slice 6.
-- **5e, UI flow** (plan, running, conflict, done; top-bar Restack, Restack This Stack, ⇧⌘R).
+- **5e, UI flow (done on 2026-10-31, with known gaps).**
+  - `crates/gm-ui/src/restack_dialog.rs`: Restack This Stack (branch menu, palette) and the top-bar Restack open a dialog for the stack of the branch, planned from its root. It lists each branch with what its replay gives (commits replayed, dropped, the conflicting commit and files, why a branch waits or is refused), a banner for a stopped plan, **Skip branch and children** / **Include** per branch (the plan is made again), **Restack N branches**, then **Undo restack**. `ResumeRestack` is sent once when the stacks first load, so the Undo of a restack from an earlier session is offered.
+  - Checked: 9 unit tests of the dialog's state and wording and a registry test; `make check` for the code and docs; seen in a window (release build, virtual display, light and dark): the plan, Skip and Include, apply (the sidebar's `restack 2` and amber dot went away, the branches sat on `main`, the bases were written), and Undo (the original commits and bases came back, the record was removed).
+  - Known gaps: the shortcut ⇧⌘R is not bound; there is no progress view while it runs (the apply is one transaction); the done view still words the rows as "Replays"; a failed plan or apply shows only its reason; the dialog is not reachable by keyboard apart from Enter and Esc; no smoke scenario in `scripts/ui-smoke.sh`; Push with lease and delivering a conflict are not built.
 - Out of this slice for now: `before.restack` and `after.restack`, push with lease, MCP.
 
 ## Slice 6: conflict resolution

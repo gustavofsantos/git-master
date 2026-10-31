@@ -889,13 +889,10 @@ mod tests {
     #[test]
     fn branch_items_the_engine_lacks_are_listed_disabled_with_a_reason() {
         let items = branch_items("feature", &ctx(&[]));
-        for action in [Action::Restack, Action::RenameBranch] {
-            assert_eq!(
-                find(&items, action).state,
-                Err("Not available yet"),
-                "{action:?}"
-            );
-        }
+        assert_eq!(
+            find(&items, Action::RenameBranch).state,
+            Err("Not available yet")
+        );
     }
 
     #[test]

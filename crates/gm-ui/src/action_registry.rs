@@ -158,6 +158,11 @@ pub enum Effect {
     OpenNewBranchDialog {
         start: Option<String>,
     },
+    /// Opens the restack dialog for the stack `branch` is in: it plans the
+    /// restack and asks before anything moves (D14, D142).
+    OpenRestackDialog {
+        branch: String,
+    },
     /// Opens the delete-branch dialog, which asks before the branch goes.
     OpenDeleteBranchDialog(String),
     /// Opens the inputs dialog of a workflow that declares inputs; Run there sends it.
@@ -1514,7 +1519,7 @@ impl Action {
     /// listed disabled with `NOT_AVAILABLE` wherever it appears.
     #[must_use]
     pub fn available(self) -> bool {
-        !matches!(self, Action::Restack | Action::RenameBranch)
+        !matches!(self, Action::RenameBranch)
     }
 
     /// The actions that make or change a stack's metadata (D138).
@@ -1526,6 +1531,7 @@ impl Action {
                 | Action::ChooseStackParent
                 | Action::RemoveFromStack
                 | Action::ReparentToGrandparent
+                | Action::Restack
         )
     }
 
@@ -1664,6 +1670,7 @@ impl Action {
                 | Action::RemoveWorktree
                 | Action::PruneWorktrees
                 | Action::NewBranch
+                | Action::Restack
                 | Action::NewChildBranch
                 | Action::DeleteBranch
                 | Action::DeleteMergedBranches
@@ -1955,6 +1962,11 @@ fn stack_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reas
             }
             Some(_) => Ok(()),
         },
+        Action::Restack => match stacks {
+            None => Err("The stacks are still being read."),
+            Some(stacks) if stacks.branch(name).is_none() => Err("This branch is in no stack."),
+            Some(_) => Ok(()),
+        },
         Action::RemoveFromStack if !stacks.is_some_and(|stacks| stacks.has_parent(name)) => {
             Err("This branch has no parent.")
         }
@@ -1992,6 +2004,9 @@ fn branch_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Effec
         Action::RemoveFromStack => Effect::Send(vec![CommandKind::ClearStackParent {
             branch: name.to_owned(),
         }]),
+        Action::Restack => Effect::OpenRestackDialog {
+            branch: name.to_owned(),
+        },
         Action::ReparentToGrandparent => Effect::Send(vec![CommandKind::ReparentToGrandparent {
             branch: name.to_owned(),
         }]),
@@ -2805,7 +2820,7 @@ mod tests {
     fn placeholders_are_disabled_with_the_same_reason_whatever_the_target() {
         let entries = [entry("a.txt", None, Some(Change::Modified))];
         let context = ctx(&entries, "msg");
-        let placeholders = [Action::Restack, Action::RenameBranch];
+        let placeholders = [Action::RenameBranch];
         for action in placeholders {
             let args = match action.spec().args {
                 ArgKind::Branch => Args::Branch("main".into()),
@@ -5583,6 +5598,35 @@ mod tests {
         );
         assert!(Action::NewChildBranch.available());
         assert!(Action::NewChildBranch.opens_dialog());
+    }
+
+    #[test]
+    fn restack_opens_its_dialog_for_a_branch_in_a_stack_and_refuses_others() {
+        let stacks = stack_snapshot(gm_schema::StackState::Stale);
+        let known = Context {
+            stack: StackCtx {
+                stacks: Some(&stacks),
+                subject: None,
+                branches: &[],
+            },
+            ..ctx(&[], "")
+        };
+        let main = Args::Branch("main".into());
+        assert_eq!(
+            Action::Restack.plan(&main, &known),
+            Ok(Effect::OpenRestackDialog {
+                branch: "main".into()
+            })
+        );
+        assert_eq!(
+            Action::Restack.enabled(&Args::Branch("lone".into()), &known),
+            Err("This branch is in no stack.")
+        );
+        assert_eq!(
+            Action::Restack.enabled(&main, &ctx(&[], "")),
+            Err("The stacks are still being read.")
+        );
+        assert!(Action::Restack.opens_dialog());
     }
 
     #[test]

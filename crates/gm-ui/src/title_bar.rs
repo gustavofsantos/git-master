@@ -176,7 +176,7 @@ impl StatusView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action_registry::{Context as RuleContext, HookCtx, NOT_AVAILABLE, WorkflowCtx};
+    use crate::action_registry::{Context as RuleContext, HookCtx, WorkflowCtx};
 
     #[test]
     fn the_home_directory_shows_as_a_tilde() {
@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn the_remote_buttons_are_enabled_on_a_branch_and_restack_is_not_available() {
+    fn the_remote_buttons_are_enabled_on_a_branch_and_restack_needs_the_stacks() {
         let context = RuleContext {
             repo_open: true,
             selected_file: None,
@@ -245,11 +245,12 @@ mod tests {
             assert_eq!(action.enabled(&args, &context), Ok(()), "{action:?}");
         }
         let restack = toolbar_args(Action::Restack, Some("main"));
+        // Restack works on a branch of a stack, so it waits for the stacks.
         assert_eq!(
             Action::Restack.enabled(&restack, &context),
-            Err(NOT_AVAILABLE)
+            Err("The stacks are still being read.")
         );
-        assert!(!Action::Restack.available());
+        assert!(Action::Restack.available());
     }
 
     #[test]

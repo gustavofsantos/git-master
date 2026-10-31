@@ -747,7 +747,7 @@ mod tests {
         );
         assert_eq!(
             find(&restack, "Restack This Stack").state,
-            Err("Not available yet")
+            Err("The stacks are still being read.")
         );
     }
 

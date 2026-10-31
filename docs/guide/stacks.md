@@ -118,31 +118,34 @@ The graph has two modes. **Commits** shows the graph of commits. **Stacks** show
 
 ## Restack
 
-> **Planned.** Restack is not available in the app yet.
-
 Restack brings a stack up to date. It walks the tree from the top down, so parents come before their children. For each branch, it replays the branch's own commits onto the new tip of its parent. When the branch is done, its base moves to that tip, and the walk continues with the next branch.
 
 ### How restack works
 
 - **The plan is exact.** Before anything runs, GitMaster builds a plan. The plan replays each commit in order, with the same algorithm that runs the restack, so it shows exactly which commits conflict. It never reports a probable conflict.
 - **A plan is tied to the commits it reads.** A plan refers to the commit IDs of the branches it touches. If any of those branches moves, the plan is invalid, and you build a new one.
-- **The restack runs in memory.** It does not touch your working copy, so your files and staged changes stay as they are while it runs.
+- **The restack does not use your working copy.** The commits are built without checking anything out, so your files and staged changes stay as they are. When the branch you have checked out is part of the restack, its files move to the new commit once the branches have moved.
 - **Undo is atomic.** Before a restack starts, GitMaster records the commit of every branch it touches. **Undo restack** restores all of them in one step. Each restack is recorded in the operation log.
 - **The state survives.** GitMaster saves the state of a restack as it runs. Closing the app or a crash does not lose it.
-- **A conflict pauses only its subtree.** The branch with the conflict and its children wait. Independent sibling branches keep going.
+- **A conflict holds back only its subtree.** The branch with the conflict and its children stay where they are. Independent sibling branches are restacked.
+> **Planned.** Recorded resolutions are not reused yet.
+
 - **Recorded resolutions are reused.** GitMaster enables Git's rerere. The same conflict reappears on each restack, and its recorded resolution is reapplied in the same way. See [Resolving conflicts](conflicts.md).
 - **A dirty working copy can block the restack.** If your working copy has uncommitted changes and the current branch is part of the plan, the restack does not start. A banner explains the block. Commit your changes, then start the restack again.
+> **Planned.** Push with lease is not offered from the restack yet.
+
 - **Push is a separate step.** GitMaster never pushes restacked branches on its own. **Push with lease** pushes with `--force-with-lease`, so it fails when the remote branch has changed since your last fetch.
 
 ### The four steps
 
-1. **Plan.** Review the ordered list of branches, how many commits each one replays, and what depends on what. Start the restack from here.
-2. **Running.** Each branch shows its progress. The work happens in memory.
-3. **Conflict.** The branch pauses. Choose one of the actions:
-   - **Resolve conflict** opens the resolver for the branch. See [Resolving conflicts](conflicts.md).
-   - **Skip branch and children** leaves that branch and its children out of the restack.
-   - **Abort all** stops the whole restack.
-4. **Done.** Choose **Push with lease** to push the restacked branches, or **Undo restack** to restore every branch the restack moved.
+1. **Plan.** Review the ordered list of branches, how many commits each one replays, and what depends on what. A conflict shows the commit and the files. **Skip branch and children** leaves that branch and the ones under it out, and **Include** puts them back. Start the restack from here.
+2. **Running.** The branches move together in one step.
+3. **Conflict.** A branch that conflicts is listed in the plan and stays where it is, with its children. Close the dialog (**Abort all**) or restack the rest.
+
+   > **Planned.** **Resolve conflict**, which opens the resolver for the branch and continues the restack afterwards. See [Resolving conflicts](conflicts.md).
+4. **Done.** Choose **Undo restack** to restore every branch the restack moved. The undo is also offered after you reopen the app.
+
+   > **Planned.** **Push with lease** from this step.
 
 ## Automate stack updates
 
