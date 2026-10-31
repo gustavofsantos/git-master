@@ -512,13 +512,24 @@ Details, engines and risks are in `design/code-navigation.md`. Decisions D43 to 
 
 Done when: opening a file by name, finding text and jumping to a definition takes seconds in a 100 thousand file repository, without freezing the UI.
 
-## Slice 4: stacks (model and visualization)
+## Slice 4: stacks (model and visualization) (in progress: 4a done, with gaps; 4b to 4d to do)
 
 - Metadata `stackParent` and `stackParentBase`; create and reparent a branch (drag).
 - Sidebar per stack; lag indicators; dashed edge in the graph.
 - Derived events `stack.parent_moved` and `stack.parent_merged` (D68), which feed workflow triggers.
 
 Done when: a real everyday stack is represented and the lag is visible.
+
+Sub-slices (agreed with the author on 2026-10-31: engine and sidebar first; D13 and D68 decided, rules in D138):
+
+- **4a, model and By stack sidebar (done on 2026-10-31, with known gaps).**
+  - Engine: `LoadStacks` (`StacksLoaded`, a read, not logged) and the human-only writes `CreateChildBranch`, `SetStackParent`, `ClearStackParent` and `ReparentToGrandparent`, which change metadata only and answer with a fresh snapshot. Pure rules in `gm-core/src/stack.rs` (forest, loops, states, `restack N`, refusals, grandparent), port reads with libgit2 (merge base, ahead and behind, ancestry, patch ids) and writes with `git config --local`, logged. Derived states: current, stale, diverged base, parent gone, parent merged (fast-forward, merge, rebase and squash merges).
+  - UI: the By stack view draws each tree with its depth, the amber dot, `↑N`, `restack N` and the state tags (each with a tooltip), **Calculating…** before the first snapshot, and loops under No stack with a `parent loop` tag. The stacks are read again after every status refresh, with one read in flight at most. New Child Branch opens the New Branch dialog in a child mode; Set Parent… picks the branch, then its parent, in the palette; Remove From Stack; Reparent to Grandparent asks first in the menu. They are in the branch menu, the worktree-branch menu and the palette.
+  - Checked: 10 unit tests of the rules, 17 real-Git tests (`crates/gm-core/tests/stacks_real_git.rs`: create, stale, diverged, amended parent, squash, rebase and merge detection, gone parent, set and clear, refusals, agent refused, odd names, loops, a linked worktree), and UI model tests (sidebar rows, the stacks model, the registry rules and effects, the child form). Seen in a window (release build, virtual display, light theme): the ledger stack of the docs with stale branches and counts, a squash-merged parent tagged, the branch menu, Reparent to Grandparent with its confirmation, Set Parent… through both palette steps, and New Child Branch through the dialog, each checked against `git config`.
+  - Known gaps: the snapshot is read on the engine thread, one libgit2 pass per link, so a large stack delays other commands while it reads and the read cannot be cancelled; it is not measured on a large repository. Patch ids look at most 2,000 commits of the root, and a squash merge whose context lines changed on the root is missed. `↑N` after Reparent to Grandparent counts the old parent's commits too until a restack. The palette runs Reparent to Grandparent without the menu's confirmation. The two config writes are not atomic: a failure between them leaves a parent with no base, shown as diverged. The registry's `Ctrl+B` for New Child Branch is not bound. The sidebar keeps the depth of a stack branch when the search hides its parent. No UI smoke scenario was added to `scripts/ui-smoke.sh`.
+- **4b, drag a branch onto another to set its parent** (needs the drag measurement owed by M4 of slice 1f).
+- **4c, stacks in the history graph:** dashed edge with **N commits behind parent**, commit owner from the recorded base (D25), the Commits and Stacks modes, and the **Scope: current stack** chip (D34).
+- **4d, the derived events** `stack.parent_moved` and `stack.parent_merged` for workflow triggers (with WF3), and `stack_tree` over MCP (slice 7).
 
 ## Slice 5: restack
 
