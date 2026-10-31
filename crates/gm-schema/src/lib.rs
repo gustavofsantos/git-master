@@ -57,7 +57,7 @@ pub use status::{
 };
 pub use syntax::{HighlightSpan, SyntaxRole};
 pub use threads::{
-    CanonicalEvent, CaptureGap, EditChange, EditIntent, EditPhase, EditState, EntryKind,
+    CanonicalEvent, CaptureGap, EditChange, EditIntent, EditPhase, EditState, EntryKind, EntryRole,
     EventHeader, HitKind, LinkKind, LinkOrigin, SessionOrigin, ThreadDetail, ThreadEdit,
     ThreadEntry, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary, ToolKind,
 };

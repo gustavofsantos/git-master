@@ -258,8 +258,18 @@ pub enum EditState {
     Unknown,
 }
 
+/// Who wrote a conversation entry, for the search `role` filter (D147). Only the two kinds
+/// the search index covers (D132).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryRole {
+    User,
+    Assistant,
+}
+
 /// Filters for listing and searching threads. Each field is a column, not query
-/// syntax (D128). `None` means no restriction.
+/// syntax (D128). `None` means no restriction. The entry fields (`role`, `turn_from`,
+/// `turn_to`) restrict which entries a search can match and do not apply to listing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ThreadFilter {
@@ -271,12 +281,30 @@ pub struct ThreadFilter {
     pub until: Option<i64>,
     pub starred: Option<bool>,
     pub has_edits: Option<bool>,
-    /// A thread that touched this path.
+    /// A thread that edited this path. Without `*`, `?` or `[` the path must match
+    /// exactly; with one, it is a glob over the path of each edit (SQLite `GLOB`, so `*`
+    /// also matches across `/`, and matching is case-sensitive).
     pub path: Option<String>,
     /// A thread linked to this commit. The value is a full id or a short one of at
     /// least seven hex digits; hex digits match in either case.
     pub commit: Option<String>,
     pub tag: Option<String>,
+    /// Only entries of this role can match (search only). A match inside an edit counts
+    /// the entry that carried the edit, which is a tool call, so `role` excludes it.
+    #[serde(default)]
+    pub role: Option<EntryRole>,
+    /// Only this thread, by its uid (D147).
+    #[serde(default)]
+    pub thread: Option<String>,
+    /// Inclusive lower bound on the entry's `turn`, 1-based (search only).
+    #[serde(default)]
+    pub turn_from: Option<u32>,
+    /// Inclusive upper bound on the entry's `turn`, 1-based (search only).
+    #[serde(default)]
+    pub turn_to: Option<u32>,
+    /// Exact match on the thread's model.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// How a search hit matched (D131). `Exact` is the strict word-start search; the two

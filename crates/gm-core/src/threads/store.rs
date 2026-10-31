@@ -9,8 +9,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use gm_schema::threads::{
-    CaptureGap, EditChange, EntryKind, HitKind, LinkKind, LinkOrigin, ThreadDetail, ThreadEdit,
-    ThreadEntry, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
+    CaptureGap, EditChange, EntryKind, EntryRole, HitKind, LinkKind, LinkOrigin, ThreadDetail,
+    ThreadEdit, ThreadEntry, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, ToSql, Transaction, TransactionBehavior, params,
@@ -306,13 +306,21 @@ const FILTER_SQL: &str = " AND (:harness IS NULL OR t.harness = :harness)
     AND (:until IS NULL OR t.last_event_at < :until)
     AND (:starred IS NULL OR t.starred = :starred)
     AND (:has_edits IS NULL OR (t.edit_count > 0) = :has_edits)
-    AND (:path IS NULL OR EXISTS (SELECT 1 FROM edit f WHERE f.thread_id = t.id AND f.path = :path))
+    AND (:path IS NULL OR EXISTS (SELECT 1 FROM edit f WHERE f.thread_id = t.id AND f.path GLOB :path))
+    AND (:thread IS NULL OR t.uid = :thread)
+    AND (:model IS NULL OR t.model = :model)
     AND (:commit IS NULL OR EXISTS (SELECT 1 FROM thread_link k WHERE k.thread_id = t.id AND k.kind = 'commit' AND (
         lower(k.ref) = lower(:commit)
         OR (length(k.ref) >= 7 AND k.ref NOT GLOB '*[^0-9a-fA-F]*'
             AND substr(lower(:commit), 1, length(k.ref)) = lower(k.ref))
         OR (length(:commit) >= 7 AND substr(lower(k.ref), 1, length(:commit)) = lower(:commit)))))
     AND (:tag IS NULL OR EXISTS (SELECT 1 FROM thread_tag g WHERE g.thread_id = t.id AND g.tag = :tag))";
+
+/// The entry filters as SQL (D147), for the statements of a search only: `e` is the entry the
+/// hit comes from. They are bound with the thread filter by `query_candidates`.
+const ENTRY_FILTER_SQL: &str = " AND (:role IS NULL OR e.kind = :role)
+    AND (:turn_from IS NULL OR e.turn >= :turn_from)
+    AND (:turn_to IS NULL OR e.turn <= :turn_to)";
 
 const EDIT_COLUMNS: &str = "id, entry_id, path, old_path, change, patch, added, removed, pre_oid, post_oid, from_input, at";
 
@@ -640,7 +648,8 @@ impl ThreadStore {
     /// strict word-start search (`query::build_fts_query`). When it returns fewer than
     /// `fallback_below` hits, stage 2 adds substring matches over the trigram index, and
     /// when still short, stage 3 adds close misspellings verified in Rust. Each stage
-    /// appends only what is new and never exceeds `limit`. Filters apply to every stage.
+    /// appends only what is new and never exceeds `limit`. Filters apply to every stage,
+    /// the entry filters (`role`, `turn_from`, `turn_to`) included (D147).
     pub fn search(
         &self,
         user_query: &str,
@@ -770,7 +779,13 @@ impl ThreadStore {
         let start = SNIPPET_MARK_START.to_owned();
         let end = SNIPPET_MARK_END.to_owned();
         let limit_value = i64::try_from(limit).unwrap_or(i64::MAX);
+        let role = filter.role.map(entry_role_text);
+        let turn_from = filter.turn_from.map(i64::from);
+        let turn_to = filter.turn_to.map(i64::from);
         let mut bindings = thread_bindings(filter);
+        bindings.push((":role", &role));
+        bindings.push((":turn_from", &turn_from));
+        bindings.push((":turn_to", &turn_to));
         bindings.push((":fts", &fts));
         // rusqlite refuses a value for a name the statement does not use, so the markers
         // are bound only for a stage that asks for snippets.
@@ -1306,7 +1321,7 @@ fn tags_of(conn: &Connection, thread: i64) -> Result<Vec<String>, StoreError> {
 
 /// The filter's parameters, in the names `FILTER_SQL` uses.
 fn thread_bindings(filter: &ThreadFilter) -> Vec<(&'static str, &dyn ToSql)> {
-    let mut bindings: Vec<(&'static str, &dyn ToSql)> = Vec::with_capacity(10);
+    let mut bindings: Vec<(&'static str, &dyn ToSql)> = Vec::with_capacity(12);
     bindings.push((":harness", &filter.harness));
     bindings.push((":branch", &filter.branch));
     bindings.push((":since", &filter.since));
@@ -1314,9 +1329,19 @@ fn thread_bindings(filter: &ThreadFilter) -> Vec<(&'static str, &dyn ToSql)> {
     bindings.push((":starred", &filter.starred));
     bindings.push((":has_edits", &filter.has_edits));
     bindings.push((":path", &filter.path));
+    bindings.push((":thread", &filter.thread));
+    bindings.push((":model", &filter.model));
     bindings.push((":commit", &filter.commit));
     bindings.push((":tag", &filter.tag));
     bindings
+}
+
+/// The `entry.kind` text of a role (`kind_text` for the two kinds a search covers).
+fn entry_role_text(role: EntryRole) -> &'static str {
+    match role {
+        EntryRole::User => "user",
+        EntryRole::Assistant => "assistant",
+    }
 }
 
 /// The statements of one stage over the entry index and the edit index. `snippet` asks FTS
@@ -1348,7 +1373,7 @@ fn stage_sql(index: &str, edit: bool, snippet: bool, body: bool) -> String {
         "SELECT e.id, t.uid, t.title, e.seq, e.turn, {snippet}, e.at, bm25({index}), {body}
          FROM {index} {from}
          JOIN thread t ON t.id = e.thread_id
-         WHERE {index} MATCH :fts{FILTER_SQL}
+         WHERE {index} MATCH :fts{FILTER_SQL}{ENTRY_FILTER_SQL}
          ORDER BY bm25({index}), e.id
          LIMIT :limit"
     )
@@ -2800,6 +2825,215 @@ mod tests {
         assert!(none.is_empty());
     }
 
+    fn in_thread(filter: ThreadFilter, session: &str) -> ThreadFilter {
+        ThreadFilter {
+            thread: Some(uid(session)),
+            ..filter
+        }
+    }
+
+    fn seqs_of(hits: &[ThreadHit]) -> Vec<u32> {
+        hits.iter().map(|hit| hit.seq).collect()
+    }
+
+    #[test]
+    fn role_picks_the_user_or_the_assistant_entry() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "a",
+                1,
+                vec![
+                    new_entry("u", EntryKind::User, "retry with backoff", 1),
+                    new_entry("x", EntryKind::Assistant, "the backoff uses jitter", 2),
+                ],
+            ))
+            .expect("a");
+        let search = |role: Option<EntryRole>| {
+            store
+                .search(
+                    "backoff",
+                    &ThreadFilter {
+                        role,
+                        ..ThreadFilter::default()
+                    },
+                    10,
+                )
+                .expect("search")
+        };
+        assert_eq!(seqs_of(&search(None)), vec![0, 1]);
+        assert_eq!(seqs_of(&search(Some(EntryRole::User))), vec![0]);
+        assert_eq!(seqs_of(&search(Some(EntryRole::Assistant))), vec![1]);
+        let assistant = search(Some(EntryRole::Assistant));
+        assert_eq!(assistant[0].thread_uid, uid("a"));
+        assert_eq!(assistant[0].kind, HitKind::Exact);
+    }
+
+    #[test]
+    fn turn_range_is_inclusive_and_counts_entries_by_turn() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "a",
+                1,
+                vec![
+                    new_entry("u1", EntryKind::User, "first backoff", 1),
+                    new_entry("x1", EntryKind::Assistant, "reply backoff", 2),
+                    new_entry("u2", EntryKind::User, "second backoff", 3),
+                    new_entry("u3", EntryKind::User, "third backoff", 4),
+                ],
+            ))
+            .expect("a");
+        let turns = |turn_from: Option<u32>, turn_to: Option<u32>| {
+            let filter = ThreadFilter {
+                turn_from,
+                turn_to,
+                ..ThreadFilter::default()
+            };
+            store
+                .search("backoff", &filter, 10)
+                .expect("search")
+                .iter()
+                .map(|hit| (hit.seq, hit.turn))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(turns(None, None), vec![(0, 1), (1, 1), (2, 2), (3, 3)]);
+        assert_eq!(turns(Some(2), None), vec![(2, 2), (3, 3)]);
+        assert_eq!(turns(None, Some(1)), vec![(0, 1), (1, 1)]);
+        assert_eq!(turns(Some(2), Some(2)), vec![(2, 2)]);
+        assert!(turns(Some(4), None).is_empty());
+        assert!(turns(Some(3), Some(2)).is_empty());
+
+        // Listing has no entries to restrict, so the turn range does not narrow it.
+        let listed = store
+            .list_threads(
+                &ThreadFilter {
+                    turn_from: Some(9),
+                    ..ThreadFilter::default()
+                },
+                None,
+                10,
+            )
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+    }
+
+    #[test]
+    fn thread_and_model_restrict_to_one_thread() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        let mut a = prompted("a", 100, "retry with backoff");
+        a.model = Some("opus-4".to_owned());
+        store.apply(&a).expect("a");
+        let mut b = prompted("b", 200, "retry with backoff");
+        b.model = Some("sonnet-4".to_owned());
+        store.apply(&b).expect("b");
+        store
+            .apply(&prompted("c", 300, "retry with backoff"))
+            .expect("c");
+
+        let by = |filter: ThreadFilter| {
+            store
+                .search("backoff", &filter, 10)
+                .expect("search")
+                .into_iter()
+                .map(|hit| hit.thread_uid)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(by(in_thread(ThreadFilter::default(), "b")), vec![uid("b")]);
+        assert!(by(in_thread(ThreadFilter::default(), "missing")).is_empty());
+        let model = |name: &str| ThreadFilter {
+            model: Some(name.to_owned()),
+            ..ThreadFilter::default()
+        };
+        assert_eq!(by(model("opus-4")), vec![uid("a")]);
+        assert_eq!(by(model("sonnet-4")), vec![uid("b")]);
+        assert!(
+            by(model("sonnet")).is_empty(),
+            "the model is an exact match"
+        );
+        assert!(
+            by(model("Opus-4")).is_empty(),
+            "the model is case-sensitive"
+        );
+        let listed = store
+            .list_threads(&model("opus-4"), None, 10)
+            .expect("list");
+        assert_eq!(
+            listed.iter().map(|t| t.uid.clone()).collect::<Vec<_>>(),
+            vec![uid("a")]
+        );
+        let both = ThreadFilter {
+            model: Some("opus-4".to_owned()),
+            ..in_thread(ThreadFilter::default(), "b")
+        };
+        assert!(by(both).is_empty());
+    }
+
+    #[test]
+    fn a_path_is_exact_or_a_glob_when_it_has_wildcards() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "a",
+                1,
+                vec![with_edit(
+                    new_entry("t", EntryKind::ToolCall, "Edit", 1),
+                    "src/search/index.rs",
+                )],
+            ))
+            .expect("a");
+        store
+            .apply(&batch(
+                "b",
+                2,
+                vec![with_edit(
+                    new_entry("t", EntryKind::ToolCall, "Edit", 2),
+                    "docs/index.md",
+                )],
+            ))
+            .expect("b");
+        store
+            .apply(&batch(
+                "c",
+                3,
+                vec![with_edit(
+                    new_entry("t", EntryKind::ToolCall, "Edit", 3),
+                    "src/lib.rs",
+                )],
+            ))
+            .expect("c");
+        let listed = |path: &str| {
+            let filter = ThreadFilter {
+                path: Some(path.to_owned()),
+                ..ThreadFilter::default()
+            };
+            let mut uids = store
+                .list_threads(&filter, None, 10)
+                .expect("list")
+                .into_iter()
+                .map(|thread| thread.uid)
+                .collect::<Vec<_>>();
+            uids.sort();
+            uids
+        };
+        let mut both = vec![uid("a"), uid("c")];
+        both.sort();
+        assert_eq!(listed("src/*.rs"), both);
+        assert_eq!(listed("*.md"), vec![uid("b")]);
+        assert_eq!(listed("docs/*"), vec![uid("b")]);
+        assert_eq!(listed("src/?ib.rs"), vec![uid("c")]);
+        assert_eq!(listed("src/[l]ib.rs"), vec![uid("c")]);
+        assert!(listed("src/[xy]ib.rs").is_empty());
+        assert!(listed("*.RS").is_empty(), "globs are case-sensitive");
+
+        let edits_in_docs = ThreadFilter {
+            path: Some("docs/*".to_owned()),
+            ..ThreadFilter::default()
+        };
+        let hits = store.search("index", &edits_in_docs, 10).expect("search");
+        assert_eq!(uids_of(&hits), vec![uid("b")]);
+    }
+
     #[test]
     fn search_ranks_by_bm25_and_returns_marked_snippets() {
         let mut store = ThreadStore::open_memory().expect("open");
@@ -3626,6 +3860,126 @@ mod tests {
             ..ThreadFilter::default()
         };
         assert_eq!(fuzzy(main), 0);
+    }
+
+    /// Two threads for the fallback stages: `a` has three prompts and one reply, `b` one prompt.
+    fn fallback_store() -> ThreadStore {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "a",
+                1,
+                vec![
+                    new_entry("u1", EntryKind::User, "retry with backoff", 1),
+                    new_entry("x1", EntryKind::Assistant, "backoff uses jitter", 2),
+                    new_entry("u2", EntryKind::User, "again, backoff", 3),
+                ],
+            ))
+            .expect("a");
+        store
+            .apply(&prompted("b", 200, "retry with backoff"))
+            .expect("b");
+        store
+    }
+
+    /// The hits of a search as `(thread, seq, kind)`, sorted by thread and seq.
+    fn found_rows(
+        store: &ThreadStore,
+        query: &str,
+        filter: &ThreadFilter,
+    ) -> Vec<(String, u32, HitKind)> {
+        let mut rows: Vec<(String, u32, HitKind)> = store
+            .search(query, filter, 10)
+            .expect("search")
+            .into_iter()
+            .map(|hit| (hit.thread_uid, hit.seq, hit.kind))
+            .collect();
+        rows.sort_by(|x, y| (&x.0, x.1).cmp(&(&y.0, y.1)));
+        rows
+    }
+
+    fn found_seqs(store: &ThreadStore, query: &str, filter: &ThreadFilter) -> Vec<(String, u32)> {
+        found_rows(store, query, filter)
+            .into_iter()
+            .map(|(uid, seq, _)| (uid, seq))
+            .collect()
+    }
+
+    fn role_filter(role: EntryRole) -> ThreadFilter {
+        ThreadFilter {
+            role: Some(role),
+            ..ThreadFilter::default()
+        }
+    }
+
+    #[test]
+    fn role_turn_and_thread_filters_apply_to_the_substring_stage() {
+        let store = fallback_store();
+        // `ackoff` sits inside a word, so only the substring stage finds it.
+        let (a, b) = (uid("a"), uid("b"));
+        let seqs = |filter: &ThreadFilter| found_seqs(&store, "ackoff", filter);
+        assert_eq!(
+            seqs(&ThreadFilter::default()),
+            vec![
+                (a.clone(), 0),
+                (a.clone(), 1),
+                (a.clone(), 2),
+                (b.clone(), 0)
+            ]
+        );
+        assert_eq!(
+            seqs(&role_filter(EntryRole::User)),
+            vec![(a.clone(), 0), (a.clone(), 2), (b.clone(), 0)]
+        );
+        assert_eq!(
+            seqs(&role_filter(EntryRole::Assistant)),
+            vec![(a.clone(), 1)]
+        );
+        let second_turn_on = ThreadFilter {
+            turn_from: Some(2),
+            ..ThreadFilter::default()
+        };
+        assert_eq!(seqs(&second_turn_on), vec![(a.clone(), 2)]);
+        let only_b = ThreadFilter {
+            thread: Some(b),
+            ..ThreadFilter::default()
+        };
+        assert_eq!(seqs(&only_b), vec![(uid("b"), 0)]);
+        let rows = found_rows(&store, "ackoff", &ThreadFilter::default());
+        assert!(rows.iter().all(|(_, _, kind)| *kind == HitKind::Substring));
+    }
+
+    #[test]
+    fn role_turn_and_thread_filters_apply_to_the_fuzzy_stage() {
+        let store = fallback_store();
+        // `bakcoff` is a misspelling of `backoff`, so only the fuzzy stage finds it.
+        let (a, b) = (uid("a"), uid("b"));
+        let fuzzy = found_rows(&store, "bakcoff", &ThreadFilter::default());
+        assert_eq!(fuzzy.len(), 4, "{fuzzy:?}");
+        assert!(fuzzy.iter().all(|(_, _, kind)| *kind == HitKind::Fuzzy));
+        assert_eq!(
+            found_seqs(&store, "bakcoff", &role_filter(EntryRole::User)),
+            vec![(a.clone(), 0), (a.clone(), 2), (b.clone(), 0)]
+        );
+        assert_eq!(
+            found_seqs(&store, "bakcoff", &role_filter(EntryRole::Assistant)),
+            vec![(a.clone(), 1)]
+        );
+        let first_turn_users = ThreadFilter {
+            turn_to: Some(1),
+            role: Some(EntryRole::User),
+            ..ThreadFilter::default()
+        };
+        assert_eq!(
+            found_seqs(&store, "bakcoff", &first_turn_users),
+            vec![(a.clone(), 0), (b.clone(), 0)]
+        );
+        let b_replies = ThreadFilter {
+            thread: Some(b),
+            role: Some(EntryRole::Assistant),
+            ..ThreadFilter::default()
+        };
+        assert!(found_seqs(&store, "bakcoff", &b_replies).is_empty());
     }
 
     #[test]
