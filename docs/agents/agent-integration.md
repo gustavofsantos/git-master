@@ -80,6 +80,6 @@ This shows the commands that remove the plugin from the agent, in the same way a
 ## See also
 
 - [Threads](../guide/threads.md): read, search and delete what was captured.
-- [MCP server](mcp-server.md): how an agent connects to the app.
+- [MCP server](mcp-server.md): how an agent starts the server and which tools it offers.
 - [Command line](../reference/cli.md): `gitmaster harness` and `gitmaster thread`.
 - [Trust and safety](../concepts/trust-and-safety.md): what the app records and where.

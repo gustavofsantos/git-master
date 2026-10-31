@@ -1,11 +1,11 @@
 ---
 title: Local review
 description: How to comment on a diff, have an agent work through the comments over MCP, and see for each comment what the agent changed.
-status: planned
+status: partial
 order: 20
 ---
 
-> **Planned.** The local review loop is not available in the app yet.
+> **Planned.** The "after" snapshot GitMaster takes when the agent handles a comment, and the agent's summary in the diff. Today a handled comment shows its status and the summary is returned to the agent only.
 
 Local review is a loop between you and an agent on your machine. You comment on lines of a diff. The agent reads the comments through MCP, works on the code and resolves each comment with a summary. GitMaster then shows what changed for each comment, from snapshots of the working tree, not from the agent's own account.
 

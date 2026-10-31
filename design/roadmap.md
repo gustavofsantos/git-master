@@ -591,13 +591,13 @@ Requested by the author on 2026-10-29. Decisions D119 to D129 and open questions
 
 ## Slice 7: MCP
 
-- Server in the app, plus a socket shim.
-- Read and Propose tools first; Apply with UI approval later.
-- Config policy; operation log with `actor`.
-- Tools `workflow_list` (Read) and `workflow_run` (WF5, D71).
-- Tools `threads_search`, `thread_get` and `thread_read` (T9, D128), over the store of slice 6t.
+Redirected by the author on 2026-10-31 (D135): `gitmaster mcp` is a second process over stdio, with no socket, token or app-side server. It runs its own engine on the repository and shares only the `.git/gitmaster/` files with the app. Its first tools are the ones an agent does not already have: review comments and threads. No grep, file read or symbol tool (D48 is superseded).
 
-Done when: an agent can read the stack, propose a restack and apply it with approval.
+- **7a, stdio server with review and thread tools** (done 2026-10-31, D135). `gitmaster mcp [--repo PATH]`; tools `review_comments_list`, `review_comment_resolve` (sets the new `handled` status with a summary, review schema 2), `threads_search`, `thread_get`, `thread_read`; the actor is `agent:<client>` from `initialize`; results mark person- and session-written text `untrusted`. Tests: JSON-RPC over a real repository and real stores (`crates/gm-mcp/tests/stdio_real_git.rs`).
+  - Known gaps: the app does not watch `review.db`, so a comment an agent marks handled shows when the Local review page is next listed, not live; no "after" snapshot is taken when a comment is handled (`docs/agents/local-review.md` still describes it); the `handled` summary is not shown in the app yet; the plugin does not write the MCP settings or the skill (T9); `since` takes milliseconds; nothing was seen in a window.
+- **7b, propose and apply tools** (not started). Blocked on Q32 (approval without a window): `stack_tree`, `restack_plan`, `restack_apply`, `conflict_*`, `workflow_list`, `workflow_run`, `operation_log`, the agent policy, and the settings section.
+
+Done when: an agent can read the stack, propose a restack and apply it with approval (7b).
 
 ## Slice 8: local review
 

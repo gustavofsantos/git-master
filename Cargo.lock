@@ -2085,6 +2085,7 @@ name = "gitmaster"
 version = "0.0.0"
 dependencies = [
  "gm-core",
+ "gm-mcp",
  "gm-schema",
  "gm-ui",
 ]
@@ -2174,8 +2175,8 @@ version = "0.0.0"
 dependencies = [
  "gm-core",
  "gm-schema",
- "schemars",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -32,7 +32,8 @@ CREATE TABLE comments (
 const V2: &str = "ALTER TABLE comments ADD COLUMN summary TEXT;";
 
 /// Columns read back for a `ReviewComment`, in the order `raw_comment` expects.
-const COLUMNS: &str = "id, path, body, status, anchor_json, created_at, resolved_at, snapshot, summary";
+const COLUMNS: &str =
+    "id, path, body, status, anchor_json, created_at, resolved_at, snapshot, summary";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreError(pub String);

@@ -231,7 +231,10 @@ fn an_agent_marks_a_comment_handled_and_only_a_human_resolves_it() {
         OperationId(12),
         &agent(CommandKind::ResolveReviewComment { id }),
     );
-    assert_eq!(failure(&events), "only a human can resolve a review comment");
+    assert_eq!(
+        failure(&events),
+        "only a human can resolve a review comment"
+    );
     let events = engine.handle(
         OperationId(13),
         &agent(CommandKind::HandleReviewComment {
