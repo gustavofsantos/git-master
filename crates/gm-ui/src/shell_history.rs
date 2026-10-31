@@ -20,6 +20,7 @@ use crate::action_registry::{Action, Args, Context as ActionContext};
 use crate::avatar::{self, Avatars};
 use crate::history_graph::{self, Drawing, GraphRow, StackMarks, Tint};
 use crate::history_scope;
+use crate::icon::{self, Icon};
 use crate::model::{CommitPage, CommitPane, HistoryList};
 use crate::shell_list::change_letter;
 use crate::shell_threads::chip;
@@ -155,7 +156,7 @@ impl StatusView {
             .cursor_pointer()
             .hover(|style| style.bg(theme::selected_row()))
             .child(history_scope::label(&scope))
-            .child(div().text_color(theme::muted()).child("▾"))
+            .child(icon::view(Icon::CaretDown, icon::SMALL, theme::muted()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -213,7 +214,10 @@ fn scope_line(line: history_scope::ScopeOption, cx: &Context<StatusView>) -> Sta
                 .w(px(12.))
                 .flex_none()
                 .text_color(theme::accent())
-                .child(if line.current { "✓" } else { "" }),
+                .children(
+                    line.current
+                        .then(|| icon::view(Icon::Check, icon::SMALL, theme::accent())),
+                ),
         )
         .child(div().flex_1().child(line.title))
         .children(reason.map(|reason| div().text_xs().text_color(theme::muted()).child(reason)))

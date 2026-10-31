@@ -14,6 +14,7 @@ use gpui::{
 };
 
 use crate::code_page::{Content, Piece, Shown, TreeRow, Viewer, styled};
+use crate::icon::{self, Icon};
 use crate::theme;
 use crate::view::{Screen, StatusView};
 
@@ -453,13 +454,17 @@ fn tree_row(
                 .w(px(12.))
                 .text_xs()
                 .text_color(theme::muted())
-                .child(if !is_dir {
-                    ""
-                } else if row.expanded {
-                    "▾"
-                } else {
-                    "▸"
-                }),
+                .children(is_dir.then(|| {
+                    icon::view(
+                        if row.expanded {
+                            Icon::CaretDown
+                        } else {
+                            Icon::CaretRight
+                        },
+                        icon::SMALL,
+                        theme::muted(),
+                    )
+                })),
         )
         .child(
             div()

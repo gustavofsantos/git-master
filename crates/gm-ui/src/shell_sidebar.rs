@@ -137,12 +137,15 @@ impl StatusView {
             .text_color(theme::muted())
             .cursor_pointer()
             .hover(|style| style.text_color(theme::text()))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(10.))
-                    .child(if folded { "▸" } else { "▾" }),
-            )
+            .child(div().flex_none().w(px(10.)).child(icon::view(
+                if folded {
+                    Icon::CaretRight
+                } else {
+                    Icon::CaretDown
+                },
+                icon::SMALL,
+                theme::muted(),
+            )))
             .child(div().flex_1().child(title.to_uppercase()))
             .children(control)
             .on_mouse_down(

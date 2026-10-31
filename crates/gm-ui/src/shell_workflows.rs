@@ -19,6 +19,7 @@ use gpui::{
 
 use crate::SaveWorkflow;
 use crate::action_registry::{Action, Args};
+use crate::icon::{self, Icon};
 use crate::shell_history::{now_secs, relative_time};
 use crate::theme;
 use crate::view::{Screen, StatusView};
@@ -876,13 +877,7 @@ fn workflow_row(
                         .rounded_full()
                         .bg(theme::error())
                 }))
-                .children(dirty.then(|| {
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(theme::warn_fg())
-                        .child("●")
-                })),
+                .children(dirty.then(|| icon::filled(Icon::Circle, px(8.), theme::warn_fg()))),
         )
         .child(
             div()

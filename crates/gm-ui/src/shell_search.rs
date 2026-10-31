@@ -368,7 +368,15 @@ fn file_row(
                 .w(px(12.))
                 .text_xs()
                 .text_color(theme::muted())
-                .child(if is_folded { "▸" } else { "▾" }),
+                .child(icon::view(
+                    if is_folded {
+                        Icon::CaretRight
+                    } else {
+                        Icon::CaretDown
+                    },
+                    icon::SMALL,
+                    theme::muted(),
+                )),
         )
         .child(
             div()

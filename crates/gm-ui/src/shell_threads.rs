@@ -1512,7 +1512,11 @@ fn thread_star(
         } else {
             theme::muted()
         })
-        .child(if starred { "★" } else { "☆" })
+        .child(if starred {
+            icon::filled(Icon::Star, icon::SIZE, theme::accent())
+        } else {
+            icon::view(Icon::Star, icon::SIZE, theme::muted())
+        })
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             // The star is not a click on the row: the thread stays as it was.
             cx.stop_propagation();

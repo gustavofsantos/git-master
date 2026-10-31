@@ -18,6 +18,7 @@ use gpui::{
     UnderlineStyle, div, prelude::*, px, rems,
 };
 
+use crate::icon::{self, Icon};
 use crate::markdown::{self, Block, Inline, Item};
 use crate::theme;
 use crate::threads;
@@ -154,13 +155,17 @@ fn list_view(ordered: bool, start: u64, items: &[Item]) -> Div {
         .min_w(px(0.))
         .children(items.iter().enumerate().map(|(index, item)| {
             let marker = match item.checked {
-                Some(true) => "☑".to_owned(),
-                Some(false) => "☐".to_owned(),
+                Some(true) => {
+                    icon::filled(Icon::CheckSquare, icon::SMALL, theme::muted()).into_any_element()
+                }
+                Some(false) => {
+                    icon::view(Icon::Square, icon::SMALL, theme::muted()).into_any_element()
+                }
                 None if ordered => {
                     let number = start.saturating_add(u64::try_from(index).unwrap_or(0));
-                    format!("{number}.")
+                    format!("{number}.").into_any_element()
                 }
-                None => "•".to_owned(),
+                None => "•".into_any_element(),
             };
             div()
                 .flex()
