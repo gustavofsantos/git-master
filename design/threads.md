@@ -395,7 +395,7 @@ Commands and events in `gm-schema`; the UI and the MCP front end use the same on
 | `UpdateThread { uid, title?, note?, starred? }` | apply | human | Edits metadata only; never entry text. Tags are labels from schema v5. |
 | `LinkThread` / `UnlinkThread` | apply | human | Manual commit links. |
 | `DeleteThread { uid }` / `DeleteThreadEntry { id }` | apply | human | A real delete (`secure_delete`); confirmation lists what goes. |
-| `ExportThread { uid, path }` | read | human | Markdown; redacted again on the way out. |
+| `ExportThread { uid, path }` | read | human | Markdown of the stored text; redaction happens at ingest and scrub, never on export. |
 | `ScrubThreads` | apply | human | Re-applies the patterns, off-thread, with progress. |
 | `ImportThreads { agent }` | apply | human | Reads existing session files for this repository. |
 | `InstallThreadIntegration` / `UninstallThreadIntegration` | read / apply | human | Never reaches an agent. |
@@ -500,7 +500,7 @@ Done when: the pure models are tested; the page is virtualized; superseded searc
 
 Rename, note, star, tags, delete (thread and entry), export to Markdown, manual commit links, observed links, the derived edit state, **Show Threads** on a Working Copy file and on a commit, and the context menu and palette entries (registry actions with reasons when disabled).
 
-Done when: every action is in the registry and reachable by menu and palette; deletes are confirmed and verified at the file level; export is redacted again; the file and commit entry points show only their own threads.
+Done when: every action is in the registry and reachable by menu and palette; deletes are confirmed and verified at the file level; export writes the stored text; the file and commit entry points show only their own threads.
 
 ### T7: redaction settings
 

@@ -162,7 +162,7 @@ pub(crate) fn run(
             Ok(vec![Event::ThreadEditRead { id, edit, state }])
         }
         CommandKind::ReadThreadMarkdown { uid } => {
-            let markdown = thread_markdown(store, ctx, uid)?;
+            let markdown = thread_markdown(store, uid)?;
             Ok(vec![Event::ThreadMarkdown {
                 id,
                 uid: uid.clone(),
@@ -180,7 +180,7 @@ pub(crate) fn run(
     }
 }
 
-/// Writes thread `uid` as Markdown to `path`, redacted again.
+/// Writes thread `uid` as Markdown to `path`, as stored.
 fn export(
     id: OperationId,
     store: &mut ThreadStore,
@@ -189,7 +189,7 @@ fn export(
     path: &str,
 ) -> Result<Vec<Event>, String> {
     let target = export_target(ctx.root, path)?;
-    let text = thread_markdown(store, ctx, uid)?;
+    let text = thread_markdown(store, uid)?;
     std::fs::write(&target, text).map_err(|e| format!("cannot write {}: {e}", target.display()))?;
     Ok(vec![Event::ThreadExported {
         id,
@@ -197,14 +197,14 @@ fn export(
     }])
 }
 
-/// The whole of thread `uid` as Markdown, redacted with the current patterns. The
-/// export and `ReadThreadMarkdown` both produce their text here, so they agree.
-fn thread_markdown(store: &ThreadStore, ctx: &Context<'_>, uid: &str) -> Result<String, String> {
-    let redactor = redactor(ctx)?;
+/// The whole of thread `uid` as Markdown, the text as stored. Redaction happens at
+/// ingest, so nothing is redacted here. The export and `ReadThreadMarkdown` both
+/// produce their text here, so they agree.
+fn thread_markdown(store: &ThreadStore, uid: &str) -> Result<String, String> {
     let detail = store
         .read_thread(uid, 0, u32::MAX)
         .map_err(|e| named(e, THREAD_MISSING))?;
-    Ok(redactor.redact(&markdown(&detail)).text)
+    Ok(markdown(&detail))
 }
 
 /// The commands that change the store. Each answers `ThreadsChanged`.
@@ -1300,7 +1300,10 @@ mod tests {
         assert_eq!(*id, OperationId(4));
         assert_eq!(uid, &a);
         assert!(markdown.starts_with("# retry with backoff for the client\n"));
-        assert!(!markdown.contains("TICKET-42"), "redacted: {markdown}");
+        assert!(
+            markdown.contains("TICKET-42"),
+            "the stored text, not redacted again: {markdown}"
+        );
 
         let target = out.path().join("same.md");
         run(
@@ -1318,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn read_thread_markdown_refuses_unknown_threads_and_invalid_patterns() {
+    fn read_thread_markdown_refuses_unknown_threads() {
         let (_dir, root, [a, _, _]) = repository();
         let out = tempfile::tempdir().expect("out dir");
         let settings = ticket_settings(out.path());
@@ -1335,6 +1338,8 @@ mod tests {
         );
         assert_eq!(missing.unwrap_err(), "Thread not found.");
 
+        // Invalid patterns do not block the read or the export: redaction is an
+        // ingest and scrub concern, so the stored text is what both return.
         let broken = out.path().join("broken.json");
         std::fs::write(
             &broken,
@@ -1342,24 +1347,32 @@ mod tests {
         )
         .expect("write settings");
         let broken_ctx = context(&fake, &root, &broken);
-        let refused = run(
+        let read = run(
             OperationId(7),
             &mut store,
             &broken_ctx,
             &CommandKind::ReadThreadMarkdown { uid: a.clone() },
-        );
-        let export_refusal = run(
+        )
+        .expect("read markdown with invalid patterns");
+        let Event::ThreadMarkdown { markdown, .. } = &read[0] else {
+            panic!("expected the markdown, got {read:?}");
+        };
+        assert!(markdown.contains("TICKET-42"), "{markdown}");
+        let target = out.path().join("t.md");
+        run(
             OperationId(8),
             &mut store,
             &broken_ctx,
             &CommandKind::ExportThread {
                 uid: a,
-                path: out.path().join("t.md").to_string_lossy().into_owned(),
+                path: target.to_string_lossy().into_owned(),
             },
+        )
+        .expect("export with invalid patterns");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read export"),
+            *markdown
         );
-        let message = refused.unwrap_err();
-        assert!(message.starts_with("the redaction patterns are invalid"));
-        assert_eq!(export_refusal.unwrap_err(), message);
     }
 
     #[test]
@@ -1402,7 +1415,7 @@ mod tests {
     }
 
     #[test]
-    fn export_writes_markdown_with_the_redaction_applied() {
+    fn export_writes_the_stored_text_as_it_is() {
         let (_dir, root, [a, _, _]) = repository();
         let out = tempfile::tempdir().expect("out dir");
         let settings = ticket_settings(out.path());
@@ -1427,13 +1440,39 @@ mod tests {
         assert!(text.contains("- Edit: "));
         assert!(text.contains("**Edit** `src/client.rs` modified: +1 -1\n\n```diff\n@@ -1 +1 @@"));
         assert!(
-            !text.contains("TICKET-42"),
-            "the redaction is applied: {text}"
+            text.contains("TICKET-42"),
+            "the export does not redact again: {text}"
         );
     }
 
     #[test]
-    fn export_refuses_paths_and_invalid_patterns() {
+    fn export_writes_text_scrubbed_earlier_with_the_pattern_applied() {
+        let (_dir, root, [a, _, _]) = repository();
+        let out = tempfile::tempdir().expect("out dir");
+        let settings = ticket_settings(out.path());
+        let fake = FakeGit::new(&root, RepoStatus::default());
+        let mut store = ThreadStore::open(&root.join(".git")).expect("open");
+        let ctx = context(&fake, &root, &settings);
+        run(OperationId(1), &mut store, &ctx, &CommandKind::ScrubThreads).expect("scrub");
+
+        let target = out.path().join("scrubbed.md");
+        run(
+            OperationId(2),
+            &mut store,
+            &ctx,
+            &CommandKind::ExportThread {
+                uid: a,
+                path: target.to_string_lossy().into_owned(),
+            },
+        )
+        .expect("export");
+        let text = std::fs::read_to_string(&target).expect("read export");
+        assert!(!text.contains("TICKET-42"), "scrubbed earlier: {text}");
+        assert!(text.contains("[REDACTED:ticket]"), "{text}");
+    }
+
+    #[test]
+    fn export_refuses_bad_paths() {
         let (_dir, root, [a, _, _]) = repository();
         let out = tempfile::tempdir().expect("out dir");
         let settings = ticket_settings(out.path());
@@ -1463,20 +1502,6 @@ mod tests {
         let missing = export(&mut store, &settings, out.path().join("no/such/t.md"));
         assert!(missing.unwrap_err().contains("does not exist"));
         assert!(!out.path().join("thread.md").exists());
-
-        let broken = out.path().join("broken.json");
-        std::fs::write(
-            &broken,
-            r#"{"threads":{"redact":{"patterns":[{"name":"bad","regex":"(","group":0}]}}}"#,
-        )
-        .expect("write settings");
-        let refused = export(&mut store, &broken, out.path().join("t.md"));
-        let message = refused.unwrap_err();
-        assert!(
-            message.starts_with("the redaction patterns are invalid"),
-            "{message}"
-        );
-        assert!(message.contains("bad"));
     }
 
     #[test]

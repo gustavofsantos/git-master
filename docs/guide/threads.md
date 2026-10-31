@@ -188,8 +188,8 @@ You create labels, attach them and remove attachments. Only you can rename or de
 | **Add Note** | Attaches a note of your own to the thread. The note is shown with the thread and is not searched. |
 | **Star** | Marks the thread so you can filter for it. |
 | **Labels** | Attaches labels to the thread. See [Labels](#labels). |
-| **Export** | Writes the thread as a Markdown file at a path you choose. Redaction is applied again on the way out. |
-| **Copy as Markdown** | Puts the thread on the clipboard as the Markdown that Export writes, with the same redaction. |
+| **Export** | Writes the thread as a Markdown file at a path you choose. The file holds the stored text, which was redacted when it was captured. |
+| **Copy as Markdown** | Puts the thread on the clipboard as the Markdown that Export writes: the stored text, already redacted. |
 | **Delete** | Removes the thread from the database. The confirmation says what is removed. |
 | **Delete Entry** | Removes one message or tool call from a thread. |
 
@@ -235,6 +235,8 @@ A pattern that is not a valid regular expression **pauses capture** in every rep
 ### Apply a new pattern to old threads
 
 A pattern you add applies to what is captured from then on. To apply it to threads you already have, run **Scrub Threads** from the command palette. GitMaster runs the current patterns over every stored thread and tells you how many entries changed. Scrub can only remove more text, never restore any.
+
+Export and Copy as Markdown do not apply the patterns again. They write the stored text as it is, so a thread you export has the same redactions as the thread in GitMaster. To make an export follow a new pattern, run Scrub Threads first.
 
 ### What is not removed
 
