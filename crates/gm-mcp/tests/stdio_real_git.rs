@@ -196,7 +196,7 @@ fn resolving_returns_the_edit_gitmaster_observed_in_the_region() {
     assert_eq!(resolved["untrusted"], true);
     assert_eq!(
         resolved["change"],
-        json!({ "before": ["b"], "after": ["bee"], "changed": true })
+        json!({ "before": ["b"], "after": ["bee"], "changed": true, "before_start_line": 2, "after_start_line": 2 })
     );
     // The list stays as it was: the change is only on the resolve result.
     assert!(result(&replies[2])["comments"][0].get("change").is_none());
@@ -219,7 +219,7 @@ fn resolving_without_an_edit_says_nothing_changed() {
     );
     assert_eq!(
         result(&replies[1])["change"],
-        json!({ "before": ["b"], "after": ["b"], "changed": false })
+        json!({ "before": ["b"], "after": ["b"], "changed": false, "before_start_line": 2, "after_start_line": 2 })
     );
 }
 

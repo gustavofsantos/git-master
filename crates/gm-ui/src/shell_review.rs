@@ -276,7 +276,7 @@ impl StatusView {
                 };
                 region_lines(
                     lines,
-                    local_review::first_line(comment, version),
+                    page.first_line(comment, version),
                     &page.marks(version),
                     highlight,
                 )

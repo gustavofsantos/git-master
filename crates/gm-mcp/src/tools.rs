@@ -146,6 +146,8 @@ fn review_comment_resolve(session: &mut Session, args: &Value) -> Result<Value, 
             "before": change.before,
             "after": change.after,
             "changed": change.changed,
+            "before_start_line": change.before_start_line,
+            "after_start_line": change.after_start_line,
         });
     }
     Ok(result)

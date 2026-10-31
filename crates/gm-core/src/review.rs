@@ -179,6 +179,8 @@ pub fn review_change(
             before,
             after: Vec::new(),
             changed: true,
+            before_start_line: line_number(region.start).unwrap_or(1),
+            after_start_line: 1,
         });
     };
     let (range, changed) = after_range(&region, hunks);
@@ -189,6 +191,8 @@ pub fn review_change(
         before,
         after: owned(&after_lines[start..end]),
         changed,
+        before_start_line: line_number(region.start).unwrap_or(1),
+        after_start_line: line_number(start).unwrap_or(1),
     })
 }
 
@@ -491,6 +495,20 @@ mod tests {
         assert_eq!(change.before, strings(&["c", "d"]));
         assert_eq!(change.after, strings(&["c", "d"]));
         assert!(!change.changed);
+        assert_eq!((change.before_start_line, change.after_start_line), (3, 3));
+    }
+
+    #[test]
+    fn the_after_side_starts_where_lines_inserted_above_pushed_it() {
+        let hunks = [LineHunk {
+            old_start: 1,
+            old_lines: 0,
+            new_start: 2,
+            new_lines: 2,
+        }];
+        let change = change_of(&["a", "x", "y", "b", "c", "d", "e", "f", "g"], &hunks);
+        assert_eq!(change.after, strings(&["c", "d"]));
+        assert_eq!((change.before_start_line, change.after_start_line), (3, 5));
     }
 
     #[test]

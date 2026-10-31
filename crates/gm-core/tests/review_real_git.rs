@@ -971,6 +971,8 @@ fn an_edit_inside_the_region_shows_as_a_change() {
             before: strings(&["b", "c"]),
             after: strings(&["B", "c"]),
             changed: true,
+            before_start_line: 2,
+            after_start_line: 2,
         })
     );
 }
@@ -991,6 +993,8 @@ fn a_comment_handled_without_an_edit_is_unchanged() {
             before: strings(&["b", "c"]),
             after: strings(&["b", "c"]),
             changed: false,
+            before_start_line: 2,
+            after_start_line: 2,
         })
     );
 }
@@ -1010,6 +1014,8 @@ fn an_edit_above_the_region_moves_it_and_keeps_its_text() {
             before: strings(&["d", "e"]),
             after: strings(&["d", "E2"]),
             changed: true,
+            before_start_line: 4,
+            after_start_line: 7,
         })
     );
 
@@ -1029,6 +1035,8 @@ fn an_edit_above_the_region_moves_it_and_keeps_its_text() {
             before: strings(&["d"]),
             after: strings(&["d"]),
             changed: false,
+            before_start_line: 7,
+            after_start_line: 8,
         })
     );
 }
@@ -1048,6 +1056,8 @@ fn a_file_gone_from_the_after_snapshot_has_an_empty_after_side() {
             before: strings(&["b"]),
             after: Vec::new(),
             changed: true,
+            before_start_line: 2,
+            after_start_line: 1,
         })
     );
 }

@@ -2822,6 +2822,8 @@ mod stash_tests {
                 before: vec![before.into()],
                 after: vec![after.into()],
                 changed: before != after,
+                before_start_line: 1,
+                after_start_line: 1,
             })
         };
         let _ = model.apply(Event::ReviewChange {

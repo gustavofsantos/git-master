@@ -259,6 +259,9 @@ pub fn empty_hint(shortcut: &str) -> String {
 struct Read {
     pending: Option<OperationId>,
     lines: Option<Vec<String>>,
+    /// The number of the first line, when the answer said where the lines are in
+    /// their snapshot (D140); otherwise `first_line` of the comment applies.
+    first: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -359,10 +362,17 @@ impl LocalReview {
         change: Option<ReviewChange>,
     ) -> bool {
         let wanted = self.selected_id();
+        let starts = change
+            .as_ref()
+            .map(|change| (change.before_start_line, change.after_start_line));
         let (before, after) =
             change.map_or_else(Default::default, |change| (change.before, change.after));
         let took_before = settle(&mut self.before, wanted, id, comment, before);
         let took_after = settle(&mut self.after, wanted, id, comment, after);
+        if took_before && took_after {
+            self.before.first = starts.map(|(before, _)| before);
+            self.after.first = starts.map(|(_, after)| after);
+        }
         took_before && took_after
     }
 
@@ -384,6 +394,15 @@ impl LocalReview {
     #[must_use]
     pub fn lines(&self, version: Version) -> Option<&[String]> {
         self.read(version).lines.as_deref()
+    }
+
+    /// The number of the first line of the `version` text of `comment`: where its
+    /// snapshot put it when the answer said so, else `first_line`.
+    #[must_use]
+    pub fn first_line(&self, comment: &ReviewComment, version: Version) -> u32 {
+        self.read(version)
+            .first
+            .unwrap_or_else(|| first_line(comment, version))
     }
 
     fn read(&self, version: Version) -> &Read {
@@ -437,6 +456,7 @@ fn settle(
     }
     read.pending = None;
     read.lines = Some(lines);
+    read.first = None;
     true
 }
 
@@ -765,7 +785,42 @@ mod tests {
             before: words(before),
             after: words(after),
             changed: before != after,
+            before_start_line: 1,
+            after_start_line: 1,
         }
+    }
+
+    #[test]
+    fn a_change_numbers_its_lines_where_its_snapshots_put_them() {
+        let mut page = LocalReview::default();
+        let comment = handled(1);
+        page.select(&comment);
+        let read = OperationId(30);
+        page.expect_change(read);
+        let mut moved = change(&["b"], &["c"]);
+        moved.before_start_line = 4;
+        moved.after_start_line = 9;
+        assert!(page.received_change(read, 1, Some(moved)));
+        assert_eq!(page.first_line(&comment, Version::Before), 4);
+        assert_eq!(page.first_line(&comment, Version::After), 9);
+    }
+
+    #[test]
+    fn texts_read_from_the_file_number_their_lines_from_the_comment() {
+        let mut page = LocalReview::default();
+        let open = comment(1, "a", ReviewStatus::Open, Some(7));
+        page.select(&open);
+        page.expect(id(10), id(11));
+        page.received_before(id(10), 1, words(&["b"]));
+        page.received_after(id(11), 1, words(&["b"]));
+        assert_eq!(
+            page.first_line(&open, Version::Before),
+            first_line(&open, Version::Before)
+        );
+        assert_eq!(
+            page.first_line(&open, Version::After),
+            first_line(&open, Version::After)
+        );
     }
 
     #[test]

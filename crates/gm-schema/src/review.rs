@@ -78,6 +78,13 @@ pub struct ReviewChange {
     pub after: Vec<String>,
     /// True when an edit between the snapshots overlaps or touches the region.
     pub changed: bool,
+    /// The 1-based number of the first line of `before` in the "before" snapshot.
+    #[serde(default)]
+    pub before_start_line: u32,
+    /// The 1-based number of the first line of `after` in the "after" snapshot; where
+    /// the region would start when `after` is empty.
+    #[serde(default)]
+    pub after_start_line: u32,
 }
 
 #[cfg(test)]
