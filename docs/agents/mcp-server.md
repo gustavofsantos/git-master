@@ -115,8 +115,8 @@ review_comment_resolve(id=7, summary="parse_amount now returns Result; callers p
 An agent that needs an earlier decision searches the threads instead:
 
 ```text
-threads_search(query="retry backoff") -> [{ thread: "01J9Z...", turn: 4, snippet: "...we chose jittered backoff because...", untrusted: true }]
-thread_read(id="01J9Z...", from=4, limit=10)
+threads_search(query="retry backoff") -> [{ thread: "01J9Z...", seq: 12, turn: 4, snippet: "...we chose jittered backoff because...", untrusted: true }]
+thread_read(id="01J9Z...", from=12, limit=10)
 ```
 
 ## See also

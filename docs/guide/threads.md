@@ -255,7 +255,9 @@ Threads are stored in `.git/gitmaster/threads.db`, in the Git common directory o
 
 ## Search from an agent
 
-Once the MCP server is on, an agent can search earlier threads, for example to find why a past change was made. The text of a thread is returned marked as untrusted, because it came from earlier prompts and tool output. See [MCP tools](../reference/mcp-tools.md).
+Once the MCP server is on, an agent searches the same threads with the same words as the search box. It can also list threads without a query, for example every thread that edited a path in the last week. The agent filters by role, turn range, thread, agent, model, branch, commit, path, label, star and edits, and by time. Each thread appears once with its best entry unless the agent asks for every match, and the results come in pages. An agent that finds no hit is told which filter removed the most hits.
+
+The agent reads the text of a thread marked as untrusted, because it came from earlier prompts and tool output. See [MCP tools](../reference/mcp-tools.md) for every argument.
 
 ## See also
 
