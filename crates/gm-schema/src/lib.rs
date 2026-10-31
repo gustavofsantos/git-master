@@ -44,7 +44,9 @@ pub use operation::{
     OperationState, STASH_LIST_CHANGED, WorktreeMode,
 };
 pub use reflog::{REFLOG_PAGE, ReflogEntry};
-pub use restack::{PlannedBranch, PlannedCommit, ReplayStep, RestackBlock, RestackPlan};
+pub use restack::{
+    PlannedBranch, PlannedCommit, ReplayStep, RestackBlock, RestackMove, RestackPlan, RestackRecord,
+};
 pub use review::{ReviewAnchor, ReviewChange, ReviewComment, ReviewLocation, ReviewStatus};
 pub use stack::{OWN_COMMITS_LIMIT, Stack, StackBranch, StackSnapshot, StackState};
 pub use stash::StashEntry;

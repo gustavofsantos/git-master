@@ -2,6 +2,7 @@
 //! stable, machine-readable, and it honors fsmonitor and the untracked cache.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
@@ -29,7 +30,7 @@ use crate::grep::{Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
 use crate::port::{DetailRead, FileListRead, GrepRead, HistoryRevs, RemoteRun, StackRead};
-use crate::port::{DiscardOutcome, FileMerge, ReviewSide, TreeMerge};
+use crate::port::{DiscardOutcome, FileMerge, RefMove, ReviewSide, TreeMerge};
 use crate::reflog;
 use crate::remote;
 use crate::restack::{ReplayKind, Replayed};
@@ -1738,6 +1739,30 @@ impl GitPort for SubprocessGit {
             return Ok(None);
         };
         Ok(optional_merge_base(&repo, one, two)?.map(|oid| oid.to_string()))
+    }
+
+    fn update_refs(&self, root: &Path, moves: &[RefMove]) -> Result<(), GitError> {
+        let mut input = String::from("start\n");
+        for item in moves {
+            if !item.name.starts_with("refs/") || item.name.contains(['\n', '\0', ' ']) {
+                return Err(GitError(format!("{} is not a ref under refs/", item.name)));
+            }
+            require_commit_id(&item.new)?;
+            require_commit_id(&item.old)?;
+            let _ = writeln!(input, "update {} {} {}", item.name, item.new, item.old);
+        }
+        input.push_str("prepare\ncommit\n");
+        let mut command = self.git(root);
+        command.args(["update-ref", "--stdin"]);
+        self.logged(command, Some(input.as_bytes())).map(drop)
+    }
+
+    fn refresh_checkout(&self, root: &Path, old: &str, new: &str) -> Result<(), GitError> {
+        require_commit_id(old)?;
+        require_commit_id(new)?;
+        let mut command = self.git(root);
+        command.args(["read-tree", "-m", "-u", old, new]);
+        self.logged(command, None).map(drop)
     }
 
     fn restack_replay(&self, root: &Path, onto: &str, commit: &str) -> Result<Replayed, GitError> {

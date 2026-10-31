@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +29,7 @@ use crate::move_preview;
 use crate::port::{HistoryRevs, ReviewSide};
 use crate::reflog;
 use crate::remote::{RemoteJob, RemoteReport};
-use crate::restack;
+use crate::restack_session;
 use crate::review;
 use crate::review_session::{self, ReviewSession};
 use crate::review_store::ReviewStore;
@@ -1508,6 +1508,9 @@ impl Engine {
             }
             CommandKind::ListMergedBranches => self.list_merged(id),
             CommandKind::PlanRestack { branch } => self.plan_restack(id, branch),
+            CommandKind::ApplyRestack { .. } | CommandKind::UndoRestack => {
+                self.restack_command(id, actor, kind)
+            }
             CommandKind::LoadStacks
             | CommandKind::CreateChildBranch { .. }
             | CommandKind::SetStackParent { .. }
@@ -1604,38 +1607,44 @@ impl Engine {
     /// stacks and replays each commit without moving a ref. A read.
     fn plan_restack(&self, id: OperationId, branch: &str) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
-        let git = self.git.as_ref();
-        let snapshot = stack_session::snapshot(git, &root)?;
-        let links = git.stack_links(&root).map_err(|e| e.0)?;
-        let mut tips = HashMap::new();
-        for entry in snapshot.stacks.iter().flat_map(|stack| &stack.branches) {
-            if let Some(tip) = git.branch_tip(&root, &entry.name).map_err(|e| e.0)? {
-                tips.insert(entry.name.clone(), tip);
-            }
-        }
-        let status = git.status(&root).map_err(|e| e.0)?;
-        let mut checked_out = HashMap::new();
-        for entry in git.worktrees(&root).map_err(|e| e.0)? {
-            let Some(name) = entry.branch else { continue };
-            let placed = if same_folder(&root, &entry.path) {
-                restack::CheckedOut::Here {
-                    dirty: !status.entries.is_empty(),
-                }
-            } else {
-                restack::CheckedOut::Elsewhere { path: entry.path }
-            };
-            checked_out.insert(name, placed);
-        }
-        let inputs = restack::Inputs {
-            snapshot: &snapshot,
-            links: &links,
-            tips: &tips,
-            checked_out: &checked_out,
-        };
-        let plan = restack::plan(branch, &inputs, &mut |onto, commit| {
-            git.restack_replay(&root, onto, commit).map_err(|e| e.0)
+        let plan = restack_session::plan(self.git.as_ref(), &root, branch, &|path| {
+            same_folder(&root, path)
         })?;
         Ok(vec![Event::RestackPlanned { id, plan }])
+    }
+
+    /// Applies a plan, or undoes the last restack (D142). Human only. The status,
+    /// the branches and the stacks follow.
+    fn restack_command(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "restack")?;
+        let root = self.open_root()?;
+        let git = self.git.as_ref();
+        let record = match kind {
+            CommandKind::ApplyRestack { branch, plan_id } => Some(restack_session::apply(
+                git,
+                &root,
+                branch,
+                plan_id,
+                &|path| same_folder(&root, path),
+            )?),
+            CommandKind::UndoRestack => {
+                restack_session::undo(git, &root)?;
+                None
+            }
+            _ => return Err("not a restack command".to_owned()),
+        };
+        let mut events = self.branches_changed(id, &root)?;
+        events.push(Event::RestackFinished { id, record });
+        events.push(Event::StacksLoaded {
+            id,
+            stacks: stack_session::snapshot(git, &root)?,
+        });
+        Ok(events)
     }
 
     /// Deletes a local branch, safely (`-d`) unless `force` (`-D`). A branch that a

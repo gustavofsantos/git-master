@@ -275,20 +275,39 @@ fn link_base(links: &[StackLink], branch: &str) -> Option<String> {
         .and_then(|link| link.base.clone())
 }
 
-/// A digest of everything apply would rely on: each branch, its tip and base now,
-/// where it lands and the commits it gets. Equal inputs give an equal id (D66).
+/// A digest of everything apply relies on: each branch, its tip and base now,
+/// its commits and what their replay gave, and the tip it lands on when its
+/// parent is not restacked. The new commits are left out: they carry the time of
+/// the replay, so planning again gives other ids for the same plan (D66).
 fn plan_id(plan: &RestackPlan) -> String {
+    let planned: HashSet<&str> = plan
+        .branches
+        .iter()
+        .map(|branch| branch.name.as_str())
+        .collect();
     let mut text = format!("restack:{}\n", plan.from);
     for branch in &plan.branches {
+        let onto = if planned.contains(branch.parent.as_str()) {
+            "-"
+        } else {
+            branch.onto.as_str()
+        };
         let _ = writeln!(
             text,
-            "{} {} {} {} {}",
+            "{} {} {} {onto} {}",
             branch.name,
             branch.old_tip,
             branch.old_base.as_deref().unwrap_or("-"),
-            branch.onto,
-            branch.new_tip.as_deref().unwrap_or("-"),
+            branch.new_tip.is_some(),
         );
+        for commit in &branch.commits {
+            let step = match &commit.step {
+                ReplayStep::Clean { .. } => "clean",
+                ReplayStep::Dropped => "dropped",
+                ReplayStep::Conflict { .. } => "conflict",
+            };
+            let _ = writeln!(text, "  {} {step}", commit.oid);
+        }
     }
     let digest = Sha256::digest(text.as_bytes());
     digest.iter().take(8).fold(String::new(), |mut hex, byte| {

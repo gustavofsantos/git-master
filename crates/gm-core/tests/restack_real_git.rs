@@ -363,3 +363,155 @@ fn planning_is_a_read_and_not_in_the_command_log() {
     repo.plan("main");
     assert_eq!(repo.log.entries().len(), logged);
 }
+
+impl Repo {
+    fn apply(&mut self, branch: &str, plan_id: &str) -> Vec<Event> {
+        self.run_as(
+            Actor::Human,
+            CommandKind::ApplyRestack {
+                branch: branch.into(),
+                plan_id: plan_id.into(),
+            },
+        )
+    }
+
+    fn undo(&mut self) -> Vec<Event> {
+        self.run_as(Actor::Human, CommandKind::UndoRestack)
+    }
+
+    fn config(&self, branch: &str) -> Option<String> {
+        let output = Process::new("git")
+            .args([
+                "config",
+                "--local",
+                "--get",
+                &format!("branch.{branch}.stackParentBase"),
+            ])
+            .current_dir(&self.root)
+            .output()
+            .unwrap();
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+}
+
+#[test]
+fn applying_a_plan_moves_the_branches_and_their_bases_and_leaves_the_stack_current() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    let plan = repo.plan("main");
+    let events = repo.apply("main", &plan.plan_id);
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    for name in ["a", "b"] {
+        let planned = branch(&plan, name);
+        assert_eq!(
+            repo.git(&["rev-parse", name]),
+            planned.new_tip.clone().unwrap()
+        );
+        assert_eq!(repo.config(name), Some(planned.onto.clone()));
+    }
+    assert!(
+        repo.plan("main").branches.is_empty(),
+        "nothing is stale now"
+    );
+    let snapshot = events
+        .iter()
+        .find_map(|event| match event {
+            Event::StacksLoaded { stacks, .. } => Some(stacks.clone()),
+            _ => None,
+        })
+        .expect("stacks follow");
+    assert_eq!(snapshot.branch("b").unwrap().restack, 0);
+    assert_eq!(repo.git(&["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_plan_that_went_stale_is_not_applied() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    let plan = repo.plan("main");
+    repo.commit_on("main", "m.2", "m2");
+    let before = repo.refs();
+    let events = repo.apply("main", &plan.plan_id);
+    assert!(refusal(&events).is_some_and(|text| text.contains("Plan again")));
+    assert_eq!(repo.refs(), before);
+}
+
+#[test]
+fn the_checked_out_branch_gets_its_files_and_stays_clean() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    repo.git(&["checkout", "-q", "b"]);
+    let plan = repo.plan("main");
+    let events = repo.apply("main", &plan.plan_id);
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    assert_eq!(repo.git(&["status", "--porcelain"]), "");
+    assert!(repo.root.join("m.1").exists() && repo.root.join("b.1").exists());
+}
+
+#[test]
+fn undo_puts_back_every_branch_and_base_once() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    repo.git(&["checkout", "-q", "b"]);
+    let refs = repo.refs();
+    let bases = (repo.config("a"), repo.config("b"));
+    let plan = repo.plan("main");
+    repo.apply("main", &plan.plan_id);
+    assert_ne!(repo.refs(), refs);
+    let events = repo.undo();
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    assert_eq!(repo.refs(), refs);
+    assert_eq!((repo.config("a"), repo.config("b")), bases);
+    assert_eq!(repo.git(&["status", "--porcelain"]), "");
+    assert!(!repo.root.join("m.1").exists());
+    assert!(refusal(&repo.undo()).is_some_and(|text| text.contains("no restack")));
+}
+
+#[test]
+fn undo_is_refused_when_a_branch_moved_since() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    let plan = repo.plan("main");
+    repo.apply("main", &plan.plan_id);
+    repo.commit_on("a", "later", "later");
+    let refs = repo.refs();
+    assert!(refusal(&repo.undo()).is_some_and(|text| text.contains("moved since")));
+    assert_eq!(repo.refs(), refs);
+}
+
+#[test]
+fn a_blocked_branch_stays_while_its_sibling_moves() {
+    let mut repo = Repo::new();
+    repo.child("a", "main");
+    repo.child("c", "main");
+    repo.commit_on("a", "a.txt", "from a\n");
+    repo.commit_on("c", "c.1", "c1");
+    repo.commit_on("main", "a.txt", "from main\n");
+    let a_tip = repo.git(&["rev-parse", "a"]);
+    let plan = repo.plan("main");
+    let events = repo.apply("main", &plan.plan_id);
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    assert_eq!(repo.git(&["rev-parse", "a"]), a_tip);
+    assert_eq!(
+        repo.git(&["rev-parse", "c"]),
+        branch(&plan, "c").new_tip.clone().unwrap()
+    );
+}
+
+#[test]
+fn an_agent_cannot_apply_or_undo() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    let plan = repo.plan("main");
+    let events = repo.run_as(
+        Actor::Agent { name: "x".into() },
+        CommandKind::ApplyRestack {
+            branch: "main".into(),
+            plan_id: plan.plan_id,
+        },
+    );
+    assert!(refusal(&events).is_some_and(|text| text.contains("only a human")));
+}
