@@ -3,7 +3,7 @@
 //! agent may do apply here too. Text that came from a person, an earlier session or the
 //! repository is marked `"untrusted": true` in the result.
 
-use gm_schema::{CommandKind, Event, ReviewComment, ReviewStatus, ThreadFilter};
+use gm_schema::{CommandKind, Event, ReviewChange, ReviewComment, ReviewStatus, ThreadFilter};
 use serde_json::{Map, Value, json};
 
 use crate::session::Session;
@@ -40,7 +40,7 @@ pub fn tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "review_comment_resolve",
-            description: "Record that you worked on review comment `id`, with a `summary` of what you changed. The comment becomes handled; the person decides whether to resolve it. This writes only GitMaster's own record, never the code. Call it after you edited the code.",
+            description: "Record that you worked on review comment `id`, with a `summary` of what you changed. The comment becomes handled; the person decides whether to resolve it. This writes only GitMaster's own record, never the code. Call it after you edited the code. The result carries `change`: the comment's lines `before` and `after`, as GitMaster observed them from its own snapshots, not from your summary. `changed: false` means GitMaster saw no edit in the comment's region. `change` is absent when a snapshot is missing.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -140,7 +140,15 @@ fn review_comment_resolve(session: &mut Session, args: &Value) -> Result<Value, 
         .iter()
         .find(|comment| comment.id == id)
         .ok_or_else(|| format!("no review comment {id}"))?;
-    Ok(comment_json(comment))
+    let mut result = comment_json(comment);
+    if let Some(change) = review_change(session.run(CommandKind::LoadReviewChange { id })?)? {
+        result["change"] = json!({
+            "before": change.before,
+            "after": change.after,
+            "changed": change.changed,
+        });
+    }
+    Ok(result)
 }
 
 fn threads_search(session: &mut Session, args: &Value) -> Result<Value, String> {
@@ -275,6 +283,18 @@ fn listed_comments(events: Vec<Event>) -> Result<Vec<ReviewComment>, String> {
             _ => None,
         })
         .ok_or_else(|| "the engine returned no comments".to_owned())
+}
+
+/// The change the engine observed between a comment's snapshots (D140); `None` when a
+/// snapshot is missing.
+fn review_change(events: Vec<Event>) -> Result<Option<ReviewChange>, String> {
+    events
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ReviewChange { change, .. } => Some(change),
+            _ => None,
+        })
+        .ok_or_else(|| "the engine returned no change".to_owned())
 }
 
 fn comment_json(comment: &ReviewComment) -> Value {

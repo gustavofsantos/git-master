@@ -175,6 +175,55 @@ fn an_agent_lists_a_comment_handles_it_and_the_person_still_has_to_resolve_it() 
 }
 
 #[test]
+fn resolving_returns_the_edit_gitmaster_observed_in_the_region() {
+    let dir = repo();
+    comment(dir.path(), 2, "rename b");
+    std::fs::write(dir.path().join("f.txt"), "a\nbee\nc\n").unwrap();
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "review_comment_resolve",
+                &json!({ "id": 1, "summary": "renamed b to bee" }),
+            ),
+            call(3, "review_comments_list", &json!({ "status": "handled" })),
+        ],
+    );
+    let resolved = result(&replies[1]);
+    assert_eq!(resolved["status"], "handled");
+    assert_eq!(resolved["untrusted"], true);
+    assert_eq!(
+        resolved["change"],
+        json!({ "before": ["b"], "after": ["bee"], "changed": true })
+    );
+    // The list stays as it was: the change is only on the resolve result.
+    assert!(result(&replies[2])["comments"][0].get("change").is_none());
+}
+
+#[test]
+fn resolving_without_an_edit_says_nothing_changed() {
+    let dir = repo();
+    comment(dir.path(), 2, "rename b");
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "review_comment_resolve",
+                &json!({ "id": 1, "summary": "renamed b to bee" }),
+            ),
+        ],
+    );
+    assert_eq!(
+        result(&replies[1])["change"],
+        json!({ "before": ["b"], "after": ["b"], "changed": false })
+    );
+}
+
+#[test]
 fn errors_are_answered_not_fatal() {
     let dir = repo();
     let replies = session(
