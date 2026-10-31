@@ -1508,9 +1508,9 @@ impl Engine {
             }
             CommandKind::ListMergedBranches => self.list_merged(id),
             CommandKind::PlanRestack { branch } => self.plan_restack(id, branch),
-            CommandKind::ApplyRestack { .. } | CommandKind::UndoRestack => {
-                self.restack_command(id, actor, kind)
-            }
+            CommandKind::ApplyRestack { .. }
+            | CommandKind::UndoRestack
+            | CommandKind::ResumeRestack => self.restack_command(id, actor, kind),
             CommandKind::LoadStacks
             | CommandKind::CreateChildBranch { .. }
             | CommandKind::SetStackParent { .. }
@@ -1636,6 +1636,7 @@ impl Engine {
                 restack_session::undo(git, &root)?;
                 None
             }
+            CommandKind::ResumeRestack => restack_session::resume(git, &root)?,
             _ => return Err("not a restack command".to_owned()),
         };
         let mut events = self.branches_changed(id, &root)?;

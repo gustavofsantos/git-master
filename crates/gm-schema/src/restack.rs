@@ -108,6 +108,17 @@ pub struct RestackMove {
     pub new_base: String,
 }
 
+/// How far a restack got.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RestackPhase {
+    /// Saved before the refs move; the files and bases may still be owed.
+    Applying,
+    /// Refs, files and bases are all written.
+    #[default]
+    Applied,
+}
+
 /// A restack that ran, kept in `.git/gitmaster/restack.json` until it is undone
 /// or the next one replaces it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -115,4 +126,6 @@ pub struct RestackRecord {
     pub plan_id: String,
     pub from: String,
     pub moves: Vec<RestackMove>,
+    #[serde(default)]
+    pub phase: RestackPhase,
 }

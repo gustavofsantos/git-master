@@ -515,3 +515,138 @@ fn an_agent_cannot_apply_or_undo() {
     );
     assert!(refusal(&events).is_some_and(|text| text.contains("only a human")));
 }
+
+impl Repo {
+    fn record_path(&self) -> PathBuf {
+        self.root.join(".git/gitmaster/restack.json")
+    }
+
+    /// Rewrites the saved record's phase, as a kill before the last save leaves it.
+    fn set_phase(&self, phase: &str) {
+        let text = std::fs::read_to_string(self.record_path()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        value["phase"] = phase.into();
+        std::fs::write(self.record_path(), value.to_string()).unwrap();
+    }
+
+    fn resume(&mut self) -> Vec<Event> {
+        self.run_as(Actor::Human, CommandKind::ResumeRestack)
+    }
+
+    fn put_base(&self, branch: &str, base: &str) {
+        self.git(&[
+            "config",
+            "--local",
+            &format!("branch.{branch}.stackParentBase"),
+            base,
+        ]);
+    }
+}
+
+fn record_of(events: &[Event]) -> Option<gm_schema::RestackRecord> {
+    events.iter().find_map(|event| match event {
+        Event::RestackFinished { record, .. } => record.clone(),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_kill_before_the_bases_are_written_is_finished_on_resume() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    let plan = repo.plan("main");
+    repo.apply("main", &plan.plan_id);
+    let new_bases = (repo.config("a"), repo.config("b"));
+    repo.put_base("a", &branch(&plan, "a").old_base.clone().unwrap());
+    repo.put_base("b", &branch(&plan, "b").old_base.clone().unwrap());
+    repo.set_phase("applying");
+    let record = record_of(&repo.resume()).expect("the record is kept for undo");
+    assert_eq!(record.phase, gm_schema::RestackPhase::Applied);
+    assert_eq!((repo.config("a"), repo.config("b")), new_bases);
+    assert!(repo.plan("main").branches.is_empty());
+}
+
+#[test]
+fn a_kill_before_the_files_follow_is_finished_on_resume() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    repo.git(&["checkout", "-q", "b"]);
+    let old_b = repo.git(&["rev-parse", "b"]);
+    let plan = repo.plan("main");
+    repo.apply("main", &plan.plan_id);
+    // The ref moved but the index and files stayed at the old commit.
+    let new_b = repo.git(&["rev-parse", "b"]);
+    repo.git(&["read-tree", "-m", "-u", &new_b, &old_b]);
+    assert_ne!(repo.git(&["status", "--porcelain"]), "");
+    repo.set_phase("applying");
+    assert!(record_of(&repo.resume()).is_some());
+    assert_eq!(repo.git(&["status", "--porcelain"]), "");
+    assert!(repo.root.join("m.1").exists());
+}
+
+#[test]
+fn a_kill_before_any_ref_moved_drops_the_record() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    let refs = repo.refs();
+    let plan = repo.plan("main");
+    repo.apply("main", &plan.plan_id);
+    // Put everything back by hand, then pretend the kill came first.
+    for name in ["a", "b"] {
+        let planned = branch(&plan, name);
+        repo.git(&[
+            "update-ref",
+            &format!("refs/heads/{name}"),
+            &planned.old_tip,
+        ]);
+        repo.put_base(name, &planned.old_base.clone().unwrap());
+    }
+    assert_eq!(repo.refs(), refs);
+    repo.set_phase("applying");
+    assert_eq!(record_of(&repo.resume()), None);
+    assert!(!repo.record_path().exists());
+}
+
+#[test]
+fn a_mix_of_old_and_new_tips_is_reported_and_left_alone() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    let plan = repo.plan("main");
+    repo.apply("main", &plan.plan_id);
+    repo.git(&["update-ref", "refs/heads/b", &branch(&plan, "b").old_tip]);
+    repo.set_phase("applying");
+    let refs = repo.refs();
+    let events = repo.resume();
+    assert!(
+        refusal(&events).is_some_and(|text| text.contains("mix")),
+        "{events:?}"
+    );
+    assert_eq!(repo.refs(), refs);
+    assert!(repo.record_path().exists());
+}
+
+#[test]
+fn an_applied_record_survives_a_new_engine_and_can_be_undone() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    let refs = repo.refs();
+    let plan = repo.plan("main");
+    repo.apply("main", &plan.plan_id);
+    // A new engine on the same repository, as after closing and opening the app.
+    let mut engine = Engine::new(Box::new(SubprocessGit::default()));
+    let human = |kind| Command {
+        actor: Actor::Human,
+        kind,
+    };
+    engine.handle(
+        OperationId(1),
+        &human(CommandKind::OpenRepo {
+            path: repo.root.to_string_lossy().into_owned(),
+        }),
+    );
+    let events = engine.handle(OperationId(2), &human(CommandKind::ResumeRestack));
+    assert!(record_of(&events).is_some());
+    let events = engine.handle(OperationId(3), &human(CommandKind::UndoRestack));
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    assert_eq!(repo.refs(), refs);
+}

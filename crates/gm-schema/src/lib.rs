@@ -45,7 +45,8 @@ pub use operation::{
 };
 pub use reflog::{REFLOG_PAGE, ReflogEntry};
 pub use restack::{
-    PlannedBranch, PlannedCommit, ReplayStep, RestackBlock, RestackMove, RestackPlan, RestackRecord,
+    PlannedBranch, PlannedCommit, ReplayStep, RestackBlock, RestackMove, RestackPhase, RestackPlan,
+    RestackRecord,
 };
 pub use review::{ReviewAnchor, ReviewChange, ReviewComment, ReviewLocation, ReviewStatus};
 pub use stack::{OWN_COMMITS_LIMIT, Stack, StackBranch, StackSnapshot, StackState};

@@ -540,7 +540,7 @@ Sub-slices (agreed with the author on 2026-10-31: engine and sidebar first; D13 
 - **4c2, Commits | Stacks switch** in the history graph: one node per branch, with its commits folded or unfolded.
 - **4d, the derived events** `stack.parent_moved` and `stack.parent_merged` for workflow triggers (with WF3), and `stack_tree` over MCP (slice 7).
 
-## Slice 5: restack (in progress: 5a and 5b done, with gaps)
+## Slice 5: restack (in progress: 5a to 5c done, with gaps)
 
 - Exact plan per commit, in-memory execution, snapshot and atomic undo, persisted state.
 - Fallback without a resolver: on conflict, pause and deliver the conflict in the working tree to resolve outside.
@@ -560,10 +560,13 @@ Sub-slices (agreed with the author on 2026-10-31; D14 decided, execution in D142
   - Known gaps: the plan runs on the engine thread and cannot be cancelled, as the stack snapshot in 4a; commits are not signed even with `commit.gpgSign`; `merge-tree` does not use rerere (slice 6); the committer is the current user, as for a rebase, so the committer date differs from a `git rebase` result only by time. Not measured on a large stack.
 - **5b, apply and undo (done on 2026-10-31, with known gaps).**
   - Engine: `ApplyRestack { branch, plan_id }` plans again, refuses a changed plan id or a stopped plan, saves the record in `.git/gitmaster/restack.json`, moves every unblocked branch in one `git update-ref --stdin` transaction (each ref checked against its old value), brings the checked-out branch's index and files along with `read-tree -m -u` (the refs are put back if that fails), then writes the bases. `UndoRestack` refuses when a branch moved since, and reverses refs, files and bases. Both are human only and answer with `RestackFinished`, the branches, the status and the stacks.
-  - The plan id leaves out the new commits, which carry the replay's time, so planning twice gives one id.
+  - The replay keeps the original committer date, so planning twice gives the same commits and the applied tips are the planned ones.
   - Checked: 7 more real-Git tests in `restack_real_git.rs` (refs, bases and stack state after apply, a stale plan id, the checked-out branch clean, undo once, undo after a later commit, a blocked branch beside a moving sibling, an agent refused). No window.
-  - Known gaps: a crash after the ref transaction and before the bases leaves the bases old (5c repairs it from the record); the record keeps only the last restack; the committed objects of the plan are replayed again at apply, so their commit times differ from the ones planned.
-- **5c, persisted state and resume** after a kill.
+  - Known gaps: a crash after the ref transaction and before the bases leaves the bases old (5c repairs it from the record); the record keeps only the last restack.
+- **5c, persisted state and resume (done on 2026-10-31, with known gaps).**
+  - The record has a phase: `applying` is saved before the refs move and `applied` after the bases. `ResumeRestack` (human, sent when a repository opens) drops a record whose refs never moved, finishes one whose refs all moved (files of the checked-out branch when the working copy shows changes, then the bases), and reports a mix of old and new tips without touching it. Undo resumes first.
+  - Checked: 5 real-Git tests (kill before the bases, before the files, before any ref, a mix, a new engine undoing an applied restack). The kills are simulated by putting the state back by hand, not by killing a process.
+  - Known gaps: the UI does not send `ResumeRestack` yet (5e); a kill during the ref transaction itself relies on Git's own atomicity; one record only, so a second restack replaces the undo of the first.
 - **5d, conflict pause** (skip branch and children, abort all).
 - **5e, UI flow** (plan, running, conflict, done; top-bar Restack, Restack This Stack, ⇧⌘R).
 - Out of this slice for now: `before.restack` and `after.restack`, push with lease, MCP.

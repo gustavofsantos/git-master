@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gm_schema::{RestackMove, RestackPlan, RestackRecord};
+use gm_schema::{RestackMove, RestackPhase, RestackPlan, RestackRecord};
 
 use crate::GitPort;
 use crate::port::RefMove;
@@ -124,21 +124,84 @@ pub(crate) fn apply(
         plan_id: plan.plan_id,
         from: branch.to_owned(),
         moves,
+        phase: RestackPhase::Applying,
     };
-    save(&store_path(git, root)?, &record)?;
+    let path = store_path(git, root)?;
+    save(&path, &record)?;
     transact(git, root, &record, false)?;
+    finish(git, root, record, &path)
+}
+
+/// Writes the bases and marks the record applied.
+fn finish(
+    git: &dyn GitPort,
+    root: &Path,
+    mut record: RestackRecord,
+    path: &Path,
+) -> Result<RestackRecord, String> {
     for item in &record.moves {
         git.write_stack_link(root, &item.name, Some((&item.parent, &item.new_base)))
             .map_err(|e| e.0)?;
     }
+    record.phase = RestackPhase::Applied;
+    save(path, &record)?;
     Ok(record)
+}
+
+/// Finishes a restack that was interrupted (D142). Refs move in one transaction,
+/// so they are all at the old tips (nothing happened: the record is dropped) or
+/// all at the new ones (the files of the checked-out branch and the bases may be
+/// owed, and are written). Any mix is reported and left alone. Returns the record
+/// undo would use.
+pub(crate) fn resume(git: &dyn GitPort, root: &Path) -> Result<Option<RestackRecord>, String> {
+    let Some(record) = last(git, root)? else {
+        return Ok(None);
+    };
+    if record.phase == RestackPhase::Applied {
+        return Ok(Some(record));
+    }
+    let path = store_path(git, root)?;
+    let mut moved = 0;
+    let mut kept = 0;
+    for item in &record.moves {
+        let tip = git.branch_tip(root, &item.name).map_err(|e| e.0)?;
+        if tip.as_deref() == Some(&item.new_tip) {
+            moved += 1;
+        } else if tip.as_deref() == Some(&item.old_tip) {
+            kept += 1;
+        }
+    }
+    if moved == 0 && kept == record.moves.len() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("cannot remove the restack record: {e}"))?;
+        return Ok(None);
+    }
+    if moved != record.moves.len() {
+        return Err(
+            "An interrupted restack left its branches in a mix of old and new tips. Nothing was changed; check them with the reflog."
+                .to_owned(),
+        );
+    }
+    // The checked-out branch had a clean working copy; changes now mean the files
+    // never followed the ref.
+    let status = git.status(root).map_err(|e| e.0)?;
+    if let Some(item) = record
+        .moves
+        .iter()
+        .find(|item| status.branch.head.as_deref() == Some(item.name.as_str()))
+        && !status.entries.is_empty()
+    {
+        git.refresh_checkout(root, &item.old_tip, &item.new_tip)
+            .map_err(|e| e.0)?;
+    }
+    finish(git, root, record, &path).map(Some)
 }
 
 /// Puts back the branches and bases of the last restack (D142). Refused when a
 /// branch moved since, or when the working copy has changes and its branch is
 /// one of them.
 pub(crate) fn undo(git: &dyn GitPort, root: &Path) -> Result<(), String> {
-    let record = last(git, root)?.ok_or_else(|| "There is no restack to undo.".to_owned())?;
+    let record = resume(git, root)?.ok_or_else(|| "There is no restack to undo.".to_owned())?;
     for item in &record.moves {
         if git
             .branch_tip(root, &item.name)

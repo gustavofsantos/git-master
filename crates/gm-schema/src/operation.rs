@@ -209,6 +209,11 @@ pub enum CommandKind {
     /// transaction. Refused when a branch moved since. Answers `RestackFinished`
     /// with no record. Human only.
     UndoRestack,
+    /// Finishes a restack that a crash or a kill interrupted, or drops its record
+    /// when no ref had moved, and answers `RestackFinished` with the record undo
+    /// would use (`None` when there is none). Sent when a repository opens. Human
+    /// only.
+    ResumeRestack,
     /// Creates the local branch `name` at the tip of the local branch `parent`
     /// and records `parent` as its stack parent, with that tip as its base
     /// (D138). Checks it out when `checkout` is set. Human only.

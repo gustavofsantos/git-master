@@ -1775,13 +1775,14 @@ impl GitPort for SubprocessGit {
             "-1",
             "--no-show-signature",
             "--date=raw",
-            "--format=%P%x00%an%x00%ae%x00%ad%x00%B",
+            "--format=%P%x00%an%x00%ae%x00%ad%x00%cd%x00%B",
             commit,
         ]);
         let out = Self::run(command)?;
         let text = String::from_utf8_lossy(&out);
-        let mut fields = text.splitn(5, '\0');
-        let (parents, name, email, date, message) = (
+        let mut fields = text.splitn(6, '\0');
+        let (parents, name, email, date, committed, message) = (
+            fields.next().unwrap_or_default(),
             fields.next().unwrap_or_default(),
             fields.next().unwrap_or_default(),
             fields.next().unwrap_or_default(),
@@ -1807,14 +1808,16 @@ impl GitPort for SubprocessGit {
                 if tree == onto_tree {
                     ReplayKind::Dropped
                 } else {
-                    // The user's own identity commits, as a rebase does; the author
-                    // is kept. Only an object is written: no ref moves.
+                    // The user's own identity commits, as a rebase does; the author is
+                    // kept, and the committer date too, so the same plan gives the
+                    // same commits (D09). Only an object is written: no ref moves.
                     let mut command = self.git(root);
                     command
                         .args(["commit-tree", &tree, "-p", onto])
                         .env("GIT_AUTHOR_NAME", name)
                         .env("GIT_AUTHOR_EMAIL", email)
-                        .env("GIT_AUTHOR_DATE", date);
+                        .env("GIT_AUTHOR_DATE", date)
+                        .env("GIT_COMMITTER_DATE", committed);
                     let output = Self::execute(&mut command, Some(message.as_bytes()))
                         .map_err(|e| GitError(format!("cannot run git: {e}")))?;
                     let new = Self::checked(output, &[0])?;
