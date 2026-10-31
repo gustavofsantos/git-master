@@ -30,8 +30,8 @@ pub use grep::{
     GrepResult, GrepScope,
 };
 pub use history::{
-    CommitDetail, CommitFile, CommitSummary, DETAIL_FILE_LIMIT, HISTORY_PAGE, History, RefKind,
-    RefLabel,
+    CommitDetail, CommitFile, CommitSummary, DETAIL_FILE_LIMIT, HISTORY_PAGE, History,
+    HistoryScope, RefKind, RefLabel,
 };
 pub use hook::{
     CONTRACT_VERSION, HookFailure, HookInfo, HookInput, HookOutput, HookPayload, HookRepo,
@@ -44,7 +44,7 @@ pub use operation::{
 };
 pub use reflog::{REFLOG_PAGE, ReflogEntry};
 pub use review::{ReviewAnchor, ReviewComment, ReviewLocation, ReviewStatus};
-pub use stack::{Stack, StackBranch, StackSnapshot, StackState};
+pub use stack::{OWN_COMMITS_LIMIT, Stack, StackBranch, StackSnapshot, StackState};
 pub use stash::StashEntry;
 pub use status::{
     Blocker, BranchEntry, BranchFailure, BranchInfo, Change, MergedBranch, PruneCandidate,

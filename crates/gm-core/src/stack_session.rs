@@ -5,10 +5,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use gm_schema::StackSnapshot;
+use gm_schema::{HistoryScope, StackSnapshot};
 
 use crate::GitPort;
 use crate::branch;
+use crate::port::HistoryRevs;
 use crate::stack::{self, Forest, StackLink};
 
 /// The local branch names, as the branch list gives them.
@@ -123,6 +124,69 @@ pub(crate) fn child_start(git: &dyn GitPort, root: &Path, parent: &str) -> Resul
 
 fn link_of<'a>(links: &'a [StackLink], branch: &str) -> Option<&'a StackLink> {
     links.iter().find(|link| link.branch == branch)
+}
+
+/// What a history walk of `scope` starts from (D139). Current stack is every
+/// branch of the stack of HEAD's branch, the default branch and HEAD; HEAD
+/// alone when its branch is in no stack. A local branch is named by its full
+/// ref, so a tag or a path of the same name cannot be read in its place.
+pub(crate) fn history_revs(
+    git: &dyn GitPort,
+    root: &Path,
+    scope: &HistoryScope,
+    head_branch: Option<&str>,
+) -> Result<HistoryRevs, String> {
+    let local = |name: &str| format!("refs/heads/{name}");
+    Ok(match scope {
+        HistoryScope::CurrentBranch => HistoryRevs::Head,
+        HistoryScope::AllRefs => HistoryRevs::All,
+        HistoryScope::Ref { name } => {
+            if let Some(problem) = branch::start_point_problem(name) {
+                return Err(problem.to_owned());
+            }
+            let locals = locals(git, root)?;
+            let name = if locals.iter().any(|known| known == name) {
+                local(name)
+            } else {
+                name.clone()
+            };
+            HistoryRevs::Refs {
+                refs: vec![name],
+                with_head: false,
+            }
+        }
+        HistoryScope::CurrentStack => {
+            let Some(head) = head_branch else {
+                return Ok(HistoryRevs::Head);
+            };
+            let snapshot = snapshot(git, root)?;
+            let Some(stack) = snapshot
+                .stacks
+                .iter()
+                .find(|stack| stack.branches.iter().any(|entry| entry.name == head))
+            else {
+                return Ok(HistoryRevs::Head);
+            };
+            let mut names: Vec<&str> = stack
+                .branches
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            let locals = locals(git, root)?;
+            let default = default_branch(git, root, &locals)?;
+            if let Some(default) = default.as_deref()
+                && !names.contains(&default)
+            {
+                names.push(default);
+            }
+            // A root whose parent is gone names no branch of its own in the stack.
+            names.retain(|name| locals.iter().any(|known| known == name));
+            HistoryRevs::Refs {
+                refs: names.into_iter().map(local).collect(),
+                with_head: true,
+            }
+        }
+    })
 }
 
 /// The default branch, by the rule of `ListMergedBranches` without the current

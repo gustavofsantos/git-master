@@ -12,7 +12,7 @@ use gm_schema::{
 use crate::file_index::FileIndex;
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryPage, HistoryStream};
-use crate::port::{DetailRead, FileListRead, GrepRead, StackRead};
+use crate::port::{DetailRead, FileListRead, GrepRead, HistoryRevs, StackRead};
 use crate::stack::{EdgeFacts, StackLink};
 use crate::{GitError, GitPort};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -483,7 +483,11 @@ impl GitPort for FakeGit {
         }))
     }
 
-    fn history_stream(&self, _root: &Path) -> Result<Option<Box<dyn HistoryStream>>, GitError> {
+    fn history_stream(
+        &self,
+        _root: &Path,
+        _revs: &HistoryRevs,
+    ) -> Result<Option<Box<dyn HistoryStream>>, GitError> {
         let history = self.history.lock().unwrap().clone()?;
         if history.unborn {
             return Ok(None);

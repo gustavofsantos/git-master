@@ -163,6 +163,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             restack: 0,
+            commits: Vec::new(),
         }
     }
 

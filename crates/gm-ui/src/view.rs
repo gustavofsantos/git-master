@@ -896,7 +896,12 @@ impl StatusView {
 
     /// Asks for the first page. A list already shown stays until the answer comes.
     pub(crate) fn refresh_history(&mut self) {
-        let id = self.engine.dispatch(Actor::Human, CommandKind::LoadHistory);
+        let id = self.engine.dispatch(
+            Actor::Human,
+            CommandKind::LoadHistory {
+                scope: gm_schema::HistoryScope::default(),
+            },
+        );
         self.model.history.request_top(id);
     }
 

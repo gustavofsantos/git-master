@@ -37,6 +37,9 @@ pub struct EdgeFacts {
     pub base_in_branch: bool,
     /// The merge base of the branch and its parent strictly descends from the base.
     pub merge_base_past_base: bool,
+    /// The branch's own commits, `base..tip`, newest first, at most
+    /// `OWN_COMMITS_LIMIT`; empty when the base is not a commit (D139).
+    pub own: Vec<String>,
 }
 
 /// A check the engine runs for a parent that is not a root: whether its changes
@@ -183,15 +186,15 @@ impl Forest {
                 .iter()
                 .map(|(name, depth)| {
                     let link = self.links.get(*name);
-                    let (state, ahead, behind) = match link {
-                        None => (StackState::Root, 0, 0),
+                    let (state, ahead, behind, commits) = match link {
+                        None => (StackState::Root, 0, 0, Vec::new()),
                         Some(link) if !self.locals.contains(&link.parent) => {
-                            (StackState::ParentGone, 0, 0)
+                            (StackState::ParentGone, 0, 0, Vec::new())
                         }
                         Some(link) => {
                             let edge = facts.get(*name).cloned().unwrap_or_default();
                             let state = edge_state(link, &edge, merged.contains(&link.parent));
-                            (state, edge.ahead, edge.behind)
+                            (state, edge.ahead, edge.behind, edge.own)
                         }
                     };
                     StackBranch {
@@ -202,6 +205,7 @@ impl Forest {
                         ahead,
                         behind,
                         restack: 0,
+                        commits,
                     }
                 })
                 .collect();
@@ -411,6 +415,7 @@ mod tests {
             behind: 0,
             base_in_branch: true,
             merge_base_past_base: false,
+            own: vec![format!("{tip}-own")],
         }
     }
 

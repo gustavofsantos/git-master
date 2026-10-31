@@ -5,7 +5,7 @@ use std::process::Command;
 
 use gm_core::GitPort;
 use gm_core::git::SubprocessGit;
-use gm_schema::{HISTORY_PAGE, History, RefKind};
+use gm_schema::{HISTORY_PAGE, History, HistoryScope, RefKind};
 
 /// Runs `git` in `dir` with a fixed identity; `when` sets both dates, so the
 /// commits order by time without ties.
@@ -46,7 +46,10 @@ fn history_of(dir: &Path) -> History {
 
 fn walk(dir: &Path, page: usize) -> History {
     let root = SubprocessGit::default().resolve_root(dir).unwrap();
-    let Some(mut stream) = SubprocessGit::default().history_stream(&root).unwrap() else {
+    let Some(mut stream) = SubprocessGit::default()
+        .history_stream(&root, &gm_core::HistoryRevs::Head)
+        .unwrap()
+    else {
         return History {
             commits: Vec::new(),
             unborn: true,
@@ -338,7 +341,10 @@ fn reading_the_history_records_nothing_and_writes_no_commit_graph() {
     };
     let root = git_port.resolve_root(dir.path()).unwrap();
 
-    let mut stream = git_port.history_stream(&root).unwrap().unwrap();
+    let mut stream = git_port
+        .history_stream(&root, &gm_core::HistoryRevs::Head)
+        .unwrap()
+        .unwrap();
     stream.next_page(HISTORY_PAGE).unwrap();
 
     assert!(log.entries().is_empty());
@@ -372,7 +378,7 @@ fn a_page_after_a_cursor_resumes_the_walk_past_it() {
     let expected = rev_list(dir.path());
     let root = SubprocessGit::default().resolve_root(dir.path()).unwrap();
     let mut stream = SubprocessGit::default()
-        .history_stream(&root)
+        .history_stream(&root, &gm_core::HistoryRevs::Head)
         .unwrap()
         .unwrap();
 
@@ -391,7 +397,7 @@ fn stopping_a_walk_makes_its_next_read_fail() {
     fast_import(dir.path(), 5000);
     let root = SubprocessGit::default().resolve_root(dir.path()).unwrap();
     let mut stream = SubprocessGit::default()
-        .history_stream(&root)
+        .history_stream(&root, &gm_core::HistoryRevs::Head)
         .unwrap()
         .unwrap();
     let stop = stream.canceller();
@@ -448,11 +454,21 @@ fn a_second_top_load_after_an_outside_commit_shows_it_through_the_engine() {
             .flat_map(|job| engine.history_report(job.run()))
             .collect()
     };
-    engine.handle(OperationId(2), &command(CommandKind::LoadHistory));
+    engine.handle(
+        OperationId(2),
+        &command(CommandKind::LoadHistory {
+            scope: HistoryScope::default(),
+        }),
+    );
     run(&mut engine);
 
     commit(dir.path(), "2024-01-02T10:00:00+00:00", "b", "second");
-    let started = engine.handle(OperationId(3), &command(CommandKind::LoadHistory));
+    let started = engine.handle(
+        OperationId(3),
+        &command(CommandKind::LoadHistory {
+            scope: HistoryScope::default(),
+        }),
+    );
     let events = run(&mut engine);
 
     assert!(

@@ -52,7 +52,14 @@ pub struct StackBranch {
     /// The branches a restack from this branch would replay: its stale children
     /// and every branch under them (`restack N`).
     pub restack: u32,
+    /// The branch's own commits, `stackParentBase..tip`, newest first, at most
+    /// `OWN_COMMITS_LIMIT` (D139). Empty for a root and when the parent is gone.
+    #[serde(default)]
+    pub commits: Vec<String>,
 }
+
+/// The most commits `StackBranch::commits` lists for one branch.
+pub const OWN_COMMITS_LIMIT: usize = 1_000;
 
 /// One tree of branches: its root first, then the rest parents first.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

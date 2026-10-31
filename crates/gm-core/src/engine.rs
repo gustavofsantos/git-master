@@ -26,6 +26,7 @@ use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, Histo
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::move_exec;
 use crate::move_preview;
+use crate::port::HistoryRevs;
 use crate::reflog;
 use crate::remote::{RemoteJob, RemoteReport};
 use crate::review;
@@ -808,7 +809,7 @@ impl Engine {
     ) -> Option<Result<Vec<Event>, String>> {
         let (actor, kind) = (&command.actor, &command.kind);
         Some(match kind {
-            CommandKind::LoadHistory => self.start_history(id, actor, kind, None),
+            CommandKind::LoadHistory { .. } => self.start_history(id, actor, kind, None),
             CommandKind::LoadHistoryPage { after } => {
                 self.start_history(id, actor, kind, Some(after.clone()))
             }
@@ -948,7 +949,7 @@ impl Engine {
             CommandKind::SearchFiles { .. }
             | CommandKind::ReadFile { .. }
             | CommandKind::SearchText { .. } => Err("file reads are started by handle".to_owned()),
-            CommandKind::LoadHistory | CommandKind::LoadHistoryPage { .. } => {
+            CommandKind::LoadHistory { .. } | CommandKind::LoadHistoryPage { .. } => {
                 Err("history is started by handle".to_owned())
             }
             CommandKind::LoadCommitDetail { .. } | CommandKind::LoadCommitStack { .. } => {
@@ -1122,8 +1123,17 @@ impl Engine {
             });
             return Ok(Vec::new());
         }
+        // A page that does not continue the walk starts a new one of HEAD; a
+        // `LoadHistory` starts the walk of its scope (D139).
+        let revs = match kind {
+            CommandKind::LoadHistory { scope } => {
+                let (branch, _) = self.current(&root)?;
+                stack_session::history_revs(self.git.as_ref(), &root, scope, branch.as_deref())?
+            }
+            _ => HistoryRevs::Head,
+        };
         // The new walk starts before the old one is stopped, so a failure keeps the old one.
-        let stream = self.git.history_stream(&root).map_err(|e| e.0)?;
+        let stream = self.git.history_stream(&root, &revs).map_err(|e| e.0)?;
         let stop: Canceller = match &stream {
             Some(stream) => stream.canceller(),
             None => std::sync::Arc::new(|| {}),
@@ -3121,7 +3131,7 @@ mod tests {
     use super::*;
     use crate::GitError;
     use crate::fake::FakeGit;
-    use gm_schema::{ConflictFileRead, HunkOrigin, RepoStatus, WorktreeMode};
+    use gm_schema::{ConflictFileRead, HistoryScope, HunkOrigin, RepoStatus, WorktreeMode};
     use proptest::prelude::*;
 
     fn engine() -> Engine {
@@ -3251,7 +3261,12 @@ mod tests {
     fn a_history_load_answers_once_its_page_is_read() {
         let mut engine = history_engine(&["c", "b", "a"]);
         engine.handle(OperationId(1), &open());
-        let started = engine.handle(OperationId(2), &command(CommandKind::LoadHistory));
+        let started = engine.handle(
+            OperationId(2),
+            &command(CommandKind::LoadHistory {
+                scope: HistoryScope::default(),
+            }),
+        );
         assert_eq!(
             states(&started),
             [
@@ -3289,8 +3304,18 @@ mod tests {
     fn a_superseded_history_load_is_dropped_and_cancelled() {
         let mut engine = history_engine(&["c", "b", "a"]);
         engine.handle(OperationId(1), &open());
-        engine.handle(OperationId(2), &command(CommandKind::LoadHistory));
-        let superseding = engine.handle(OperationId(3), &command(CommandKind::LoadHistory));
+        engine.handle(
+            OperationId(2),
+            &command(CommandKind::LoadHistory {
+                scope: HistoryScope::default(),
+            }),
+        );
+        let superseding = engine.handle(
+            OperationId(3),
+            &command(CommandKind::LoadHistory {
+                scope: HistoryScope::default(),
+            }),
+        );
         assert!(superseding.contains(&Event::OperationChanged {
             id: OperationId(2),
             actor: Actor::Human,
@@ -3329,7 +3354,12 @@ mod tests {
         let oids = ["c", "b", "a"];
         let mut engine = history_engine(&oids);
         engine.handle(OperationId(1), &open());
-        engine.handle(OperationId(2), &command(CommandKind::LoadHistory));
+        engine.handle(
+            OperationId(2),
+            &command(CommandKind::LoadHistory {
+                scope: HistoryScope::default(),
+            }),
+        );
         run_jobs(&mut engine);
 
         // The first page held every commit, so the next one is the walk's end.
@@ -3666,7 +3696,12 @@ mod tests {
     fn leaving_the_repository_cancels_the_history_load() {
         let mut engine = history_engine(&["c"]);
         engine.handle(OperationId(1), &open());
-        engine.handle(OperationId(2), &command(CommandKind::LoadHistory));
+        engine.handle(
+            OperationId(2),
+            &command(CommandKind::LoadHistory {
+                scope: HistoryScope::default(),
+            }),
+        );
         let reopened = engine.handle(OperationId(3), &open());
         assert!(reopened.contains(&Event::OperationChanged {
             id: OperationId(2),

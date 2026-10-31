@@ -44,6 +44,18 @@ pub type FileListRead = Box<dyn FnOnce(&AtomicBool) -> Result<FileIndex, GitErro
 /// `stop` is set.
 pub type GrepRead = Box<dyn FnOnce(&AtomicBool) -> Result<GrepResult, GitError> + Send>;
 
+/// What a history walk starts from (H6, D139): the engine resolves a scope to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HistoryRevs {
+    /// HEAD.
+    Head,
+    /// Every local branch, remote branch and tag, and HEAD.
+    All,
+    /// These refs, as Git reads them (full ref names where the engine knows them),
+    /// and HEAD when `with_head` is set.
+    Refs { refs: Vec<String>, with_head: bool },
+}
+
 /// A remote operation the adapter has checked: the Git run that is left. It
 /// runs on a thread of its own, and its error is Git's own text.
 pub type RemoteRun = Box<dyn FnOnce() -> Result<(), GitError> + Send>;
@@ -210,10 +222,14 @@ pub trait GitPort: Send {
         ))
     }
 
-    /// The walk of the commits of HEAD, newest first in topological order, or
-    /// `None` when HEAD is unborn. Starts a process and reads nothing yet.
-    /// Never records anything (D28).
-    fn history_stream(&self, _root: &Path) -> Result<Option<Box<dyn HistoryStream>>, GitError> {
+    /// The walk of the commits reachable from `revs`, newest first in topological
+    /// order, or `None` when HEAD is unborn and `revs` is HEAD. Starts a process
+    /// and reads nothing yet. Never records anything (D28).
+    fn history_stream(
+        &self,
+        _root: &Path,
+        _revs: &HistoryRevs,
+    ) -> Result<Option<Box<dyn HistoryStream>>, GitError> {
         Err(GitError("history is not supported by this adapter".into()))
     }
 

@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use git2::{BranchType, ConfigLevel, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, CommitFile, ConflictFileRead, ConflictOperation, DiffSide,
-    FileDiff, HookScope, Hunk, HunkId, MergedBranch, PruneCandidate, RecordedResolution,
-    ReflogEntry, RepoStatus, StageTarget, StashEntry, StatusEntry, WorktreeEntry, WorktreeMode,
+    FileDiff, HookScope, Hunk, HunkId, MergedBranch, OWN_COMMITS_LIMIT, PruneCandidate,
+    RecordedResolution, ReflogEntry, RepoStatus, StageTarget, StashEntry, StatusEntry,
+    WorktreeEntry, WorktreeMode,
 };
 
 use crate::branch;
@@ -27,7 +28,7 @@ use crate::file_index::FileIndex;
 use crate::grep::{Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
-use crate::port::{DetailRead, FileListRead, GrepRead, RemoteRun, StackRead};
+use crate::port::{DetailRead, FileListRead, GrepRead, HistoryRevs, RemoteRun, StackRead};
 use crate::port::{DiscardOutcome, FileMerge, TreeMerge};
 use crate::reflog;
 use crate::remote;
@@ -1148,14 +1149,20 @@ impl GitPort for SubprocessGit {
         Ok(local)
     }
 
-    /// Starts `git log --topo-order` for HEAD and returns its walk, read a page
-    /// at a time (D32). `None` when HEAD is unborn. Git reads a commit-graph
-    /// when one exists and never writes one. Runs without logging (D28).
-    fn history_stream(&self, root: &Path) -> Result<Option<Box<dyn HistoryStream>>, GitError> {
+    /// Starts `git log --topo-order` for `revs` and returns its walk, read a page
+    /// at a time (D32, D139). `None` when HEAD is unborn and the walk is of HEAD.
+    /// Git reads a commit-graph when one exists and never writes one. Runs
+    /// without logging (D28).
+    fn history_stream(
+        &self,
+        root: &Path,
+        revs: &HistoryRevs,
+    ) -> Result<Option<Box<dyn HistoryStream>>, GitError> {
         // An unborn HEAD makes `git log` fail; asking first keeps Git's wording out.
         let mut head = self.git(root);
         head.args(["rev-parse", "--verify", "-q", "HEAD"]);
-        if Self::run_allowing(head, &[0, 1])?.is_empty() {
+        let born = !Self::run_allowing(head, &[0, 1])?.is_empty();
+        if !born && *revs == HistoryRevs::Head {
             return Ok(None);
         }
         let mut log = self.git(root);
@@ -1166,12 +1173,31 @@ impl GitPort for SubprocessGit {
             "--decorate=short",
             "--topo-order",
             log_parse::FORMAT,
-            "HEAD",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        // Nothing reads stderr while the walk is paused, so a full pipe would stall git.
-        .stderr(Stdio::null());
+        ]);
+        match revs {
+            HistoryRevs::Head => {
+                log.arg("HEAD");
+            }
+            HistoryRevs::All => {
+                log.args(["--branches", "--remotes", "--tags"]);
+                if born {
+                    log.arg("HEAD");
+                }
+            }
+            HistoryRevs::Refs { refs, with_head } => {
+                // After this, nothing Git reads is an option, whatever a name starts with.
+                log.arg("--end-of-options").args(refs);
+                if *with_head && born {
+                    log.arg("HEAD");
+                }
+            }
+        }
+        // The paths that would follow: none, so no ref is mistaken for a path.
+        log.arg("--")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            // Nothing reads stderr while the walk is paused, so a full pipe would stall git.
+            .stderr(Stdio::null());
         let mut child = log
             .spawn()
             .map_err(|e| GitError(format!("cannot run git: {e}")))?;
@@ -1577,6 +1603,13 @@ impl GitPort for SubprocessGit {
         let base = base
             .and_then(|text| Oid::from_str(text).ok())
             .filter(|oid| repo.find_commit(*oid).is_ok());
+        let own = match base {
+            Some(base) => commits_between(&repo, tip, base, OWN_COMMITS_LIMIT)?
+                .into_iter()
+                .map(|oid| oid.to_string())
+                .collect(),
+            None => Vec::new(),
+        };
         let (base_in_branch, merge_base_past_base) = match base {
             None => (false, false),
             Some(base) => {
@@ -1594,6 +1627,7 @@ impl GitPort for SubprocessGit {
             behind: u32::try_from(behind).unwrap_or(u32::MAX),
             base_in_branch,
             merge_base_past_base,
+            own,
         })
     }
 

@@ -792,7 +792,7 @@ mod tests {
         let git = SubprocessGit::default();
         let root = git.resolve_root(dir).unwrap();
         let mut stream = git
-            .history_stream(&root)
+            .history_stream(&root, &gm_core::HistoryRevs::Head)
             .unwrap()
             .expect("HEAD has commits");
         stream.next_page(usize::MAX).unwrap().commits

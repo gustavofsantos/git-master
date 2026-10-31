@@ -7,7 +7,7 @@ use crate::conflict::{ConflictFileRead, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
 use crate::grep::{GrepOptions, GrepResult};
-use crate::history::{CommitDetail, CommitFile, History};
+use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::hook::{HookFailure, HookInfo};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
@@ -104,10 +104,14 @@ pub enum CommandKind {
         message: String,
     },
     ListBranches,
-    /// Reads the first `HISTORY_PAGE` commits of HEAD, newest first. Never
-    /// recorded in the command log (D28).
-    LoadHistory,
-    /// Reads the next `HISTORY_PAGE` commits of HEAD after `after`, the last
+    /// Reads the first `HISTORY_PAGE` commits of `scope`, newest first, and
+    /// starts the walk the next pages continue. Never recorded in the command
+    /// log (D28).
+    LoadHistory {
+        #[serde(default)]
+        scope: HistoryScope,
+    },
+    /// Reads the next `HISTORY_PAGE` commits of the walk after `after`, the last
     /// commit the list holds. Never recorded in the command log (D28).
     LoadHistoryPage {
         after: String,

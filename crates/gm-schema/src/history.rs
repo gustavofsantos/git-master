@@ -6,6 +6,22 @@ use crate::status::Change;
 /// How many commits one page of the history holds (H1, H2).
 pub const HISTORY_PAGE: usize = 200;
 
+/// Which commits the history list reads (H6, D34, D139).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HistoryScope {
+    /// The commits of HEAD.
+    #[default]
+    CurrentBranch,
+    /// The commits of every branch in the stack of HEAD's branch, the default
+    /// branch and HEAD. HEAD alone when its branch is in no stack.
+    CurrentStack,
+    /// The commits of every local branch, remote branch and tag, and HEAD.
+    AllRefs,
+    /// The commits of one ref: a local branch, else the name as Git reads it.
+    Ref { name: String },
+}
+
 /// What a commit row shows of one ref that points at it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RefLabel {
