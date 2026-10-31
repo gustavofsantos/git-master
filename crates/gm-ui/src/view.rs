@@ -31,6 +31,7 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::context_menu::ContextMenu;
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::diff_rows::Layout;
+use crate::editor_theme;
 use crate::file_discard::DiscardDialog;
 use crate::hook_run::Fill;
 use crate::icon::{self, Icon};
@@ -266,7 +267,9 @@ impl StatusView {
         Self::follow_watch(notices, cx);
         let may_fall_back = !start.from_argument;
         let open = engine.dispatch(Actor::Human, CommandKind::OpenRepo { path: start.path });
-        theme::follow(window.appearance());
+        if theme::follow(window.appearance()) {
+            editor_theme::apply(cx);
+        }
         let list_focus = cx.focus_handle();
         list_focus.focus(window);
         let recent_store = recent::default_file().map(|file| Arc::new(recent::Store::new(file)));
@@ -375,7 +378,9 @@ impl StatusView {
             // Also fires when the compositor answers the decoration request, so
             // the title bar appears or goes as soon as the grant is known.
             cx.observe_window_appearance(window, |_, window, cx| {
-                theme::follow(window.appearance());
+                if theme::follow(window.appearance()) {
+                    editor_theme::apply(cx);
+                }
                 cx.notify();
             }),
         ];

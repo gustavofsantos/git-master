@@ -98,6 +98,12 @@ The Workflows page lists your workflows on the left and shows the selected one o
 
 Press **Run** to start the open workflow.
 
+### Colors in the Script tab
+
+> **Planned.** The script editor does not color the text yet. It shows the file in plain text.
+
+The script editor colors keywords, strings, comments and the rest of the code with the same twelve colors as the file viewer, in the light and the dark theme. See [Syntax highlighting](../guide/code-navigation.md#syntax-highlighting).
+
 Cancel and approve work from the command palette:
 
 - **Cancel Workflow Run** stops a run at any time, even while the script waits for you or waits for a program to finish.

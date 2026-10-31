@@ -21,6 +21,7 @@ mod context_menu;
 mod diff_pane;
 mod diff_rows;
 mod editor;
+mod editor_theme;
 mod file_discard;
 mod fuzzy;
 mod history_graph;
@@ -161,6 +162,9 @@ pub fn run(
                 .and_then(ThemeMode::from_name)
                 .unwrap_or(ThemeMode::System);
             theme::set_mode(mode);
+            // The component's theme follows the palette in use. The OS appearance is not
+            // known yet, so `StatusView` applies it again once the window reports it.
+            editor_theme::apply(cx);
             bind_keys(cx);
             quit_with_the_window(cx);
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
