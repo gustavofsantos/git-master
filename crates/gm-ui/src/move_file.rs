@@ -1173,7 +1173,8 @@ pub(crate) fn accept_drops<E: InteractiveElement>(
     let moved_over = zone.target;
     element
         .drag_over::<DraggedFile>(move |style, _, _, _| dragged_over(style, drag))
-        .can_drop(move |_, _, _| takes)
+        // One predicate serves every payload: a dragged branch is judged by its own handler.
+        .can_drop(move |dragged, _, _| takes || !dragged.is::<DraggedFile>())
         .on_drop(cx.listener(move |this, _: &DraggedFile, window, cx| {
             this.drop_on(dropped.clone(), window, cx);
             this.end_drag(cx);

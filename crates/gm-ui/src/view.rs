@@ -1483,7 +1483,9 @@ impl StatusView {
             "{} staged · {} unstaged · {} untracked",
             summary.staged, summary.unstaged, summary.untracked
         );
-        let drag_status = self.drag_status_text();
+        let drag_status = self
+            .drag_status_text()
+            .or_else(|| self.branch_drag_status());
         let (message, colour, tint) = match (&self.model.error, &drag_status, &self.model.notice) {
             (Some(error), _, _) => (error.clone(), theme::removed_fg(), theme::removed_bg()),
             (None, Some(hint), _) => (hint.clone(), theme::text(), theme::panel()),

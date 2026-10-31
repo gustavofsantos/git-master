@@ -8,6 +8,7 @@ use gm_schema::{
 };
 
 use crate::branch_delete::Deleting;
+use crate::branch_drag::BranchDrag;
 use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
 use crate::code_page::CodePage;
@@ -75,6 +76,8 @@ pub struct Model {
     pub branches: Branches,
     /// The branch stacks the sidebar's By stack view draws, and the read in flight.
     pub stacks: Stacks,
+    /// The branch dragged onto another to set its parent, while the drag runs.
+    pub(crate) branch_drag: BranchDrag,
     /// The prepare-commit hooks: what is listed, the run and its suggestion.
     pub hooks: Hooks,
     /// The manual workflows: what is listed and the runs the engine reported.

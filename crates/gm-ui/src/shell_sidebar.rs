@@ -13,6 +13,7 @@ use gpui::{
 };
 
 use crate::action_registry::{Action, Args};
+use crate::branch_drag::{self, BranchZone};
 use crate::branch_filter;
 use crate::icon::{self, Icon};
 use crate::local_review;
@@ -434,6 +435,7 @@ impl StatusView {
                             .model
                             .status()
                             .and_then(|status| status.branch.head.clone());
+                        let by_stack = this.sidebar_grouping == Grouping::ByStack;
                         rows.get(range.clone())
                             .unwrap_or_default()
                             .iter()
@@ -441,7 +443,14 @@ impl StatusView {
                             .map(|(row, index)| {
                                 let zone = drop_target_of(&rows, index)
                                     .map(|target| this.drop_zone(target));
-                                tree_row(row, index, head.as_deref(), zone, cx)
+                                // In By stack, a local branch row is dragged and takes a branch.
+                                let branch_zone = match row {
+                                    Row::Branch { branch, .. } if by_stack && !branch.is_remote => {
+                                        Some(this.branch_zone(&branch.name))
+                                    }
+                                    _ => None,
+                                };
+                                tree_row(row, index, head.as_deref(), zone, branch_zone, cx)
                             })
                             .collect()
                     },
@@ -654,7 +663,6 @@ fn item_row(label: &'static str, selected: bool) -> Stateful<Div> {
         )
 }
 
-/// A row of the branch tree. `head` is the branch HEAD is on.
 /// The drop target a sidebar row stands for, when it takes files: a local branch,
 /// a prefix group of local branches, or the Local header. Remote branches, their
 /// groups and the other headers take nothing.
@@ -682,11 +690,15 @@ fn drop_target_of(rows: &[Row<'_>], index: usize) -> Option<DropTarget> {
     }
 }
 
+/// A row of the branch tree. `head` is the branch HEAD is on. `zone` is the row's
+/// target for a dragged file; `branch_zone` is set on a local branch row of the
+/// By stack view, which is dragged and takes a dragged branch.
 fn tree_row(
     row: &Row<'_>,
     index: usize,
     head: Option<&str>,
     zone: Option<DropZone>,
+    branch_zone: Option<BranchZone>,
     cx: &mut Context<StatusView>,
 ) -> AnyElement {
     match row {
@@ -784,6 +796,7 @@ fn tree_row(
                     }),
                 );
             let inner = move_file::accept_drops(inner, zone, cx);
+            let inner = branch_drag::branch_zone(inner, branch_zone, cx);
             // A `uniform_list` item takes no margin, so the inset is padding here.
             div()
                 .w_full()
@@ -988,7 +1001,7 @@ fn tag(text: &'static str, text_color: Hsla, background: Hsla) -> Div {
         .child(text)
 }
 
-/// The hint under the stack tree: where the stack actions are.
+/// The hint under the stack tree, for the drag that sets a parent.
 fn footer_hint() -> Div {
     div()
         .px_4()
@@ -996,5 +1009,5 @@ fn footer_hint() -> Div {
         .border_t_1()
         .border_color(theme::hairline())
         .text_color(theme::muted())
-        .child("Right-click a branch to set its parent.")
+        .child("Drag a branch onto another to set its parent.")
 }

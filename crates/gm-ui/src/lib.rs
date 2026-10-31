@@ -7,6 +7,7 @@ mod app_settings;
 mod assets;
 mod avatar;
 mod branch_delete;
+mod branch_drag;
 mod branch_filter;
 mod branch_menu;
 mod branches;
