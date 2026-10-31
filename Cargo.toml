@@ -24,7 +24,7 @@ notify = "8.2"
 regex = "1"
 pulldown-cmark = { version = "0.13", default-features = false }
 rusqlite = { version = "0.40", features = ["bundled"] }
-tree-sitter = "0.27"
+tree-sitter = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
 tree-sitter-go = "0.25"
@@ -42,6 +42,7 @@ tree-sitter-bash = "0.25"
 tree-sitter-html = "0.23"
 tree-sitter-css = "0.25"
 tree-sitter-clojure-orchard = "0.2"
+gpui-component = "=0.5.1"
 mlua = { version = "0.11", features = ["luau", "send", "serialize"] }
 gm-schema = { path = "crates/gm-schema" }
 gm-core = { path = "crates/gm-core" }

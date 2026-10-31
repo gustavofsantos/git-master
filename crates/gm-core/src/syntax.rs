@@ -2,7 +2,6 @@
 //! the binary, with the product's own highlight queries (`queries/<language>/`). The module is
 //! pure: text in, spans out. It reads no file and touches no repository.
 
-use std::ops::ControlFlow;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -290,26 +289,15 @@ pub fn highlight_within(
     let mut parser = Parser::new();
     parser.set_language(&language.grammar()?).ok()?;
     let bytes = text.as_bytes();
-    let mut on_parse = |_: &tree_sitter::ParseState| {
-        if should_stop() {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    };
+    // tree-sitter 0.25 takes a progress callback that answers `true` to cancel.
+    let mut on_parse = |_: &tree_sitter::ParseState| should_stop();
     let tree = parser.parse_with_options(
         &mut |offset, _| &bytes[offset.min(bytes.len())..],
         None,
         Some(ParseOptions::new().progress_callback(&mut on_parse)),
     )?;
 
-    let mut on_query = |_: &tree_sitter::QueryCursorState| {
-        if should_stop() {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    };
+    let mut on_query = |_: &tree_sitter::QueryCursorState| should_stop();
     let mut cursor = QueryCursor::new();
     let mut captures = cursor.captures_with_options(
         &compiled.query,
@@ -320,7 +308,7 @@ pub fn highlight_within(
     // (start, end, pattern, code)
     let mut found: Vec<(usize, usize, usize, u8)> = Vec::new();
     while let Some((matched, index)) = captures.next() {
-        let capture = matched.captures()[*index];
+        let capture = matched.captures[*index];
         let node = capture.node;
         let (start, end) = (node.start_byte(), node.end_byte().min(bytes.len()));
         // A capture with no role (a bare `@variable`) is plain text: it paints nothing, so a
