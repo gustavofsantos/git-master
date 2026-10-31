@@ -5,7 +5,7 @@ status: partial
 order: 20
 ---
 
-> **Planned.** The "after" snapshot GitMaster takes when the agent handles a comment, and the agent's summary in the diff. Today a handled comment shows its status and the summary is returned to the agent only.
+> **Planned.** The agent's summary in the diff, and the changes that overlap no comment. Today a handled comment shows its status and its Before/After, and the summary is returned to the agent only.
 
 Local review is a loop between you and an agent on your machine. You comment on lines of a diff. The agent reads the comments through MCP, works on the code and resolves each comment with a summary. GitMaster then shows what changed for each comment, from snapshots of the working tree, not from the agent's own account.
 
@@ -44,17 +44,19 @@ GitMaster never moves a comment to a position it estimated. A comment is either 
 GitMaster does not rely on the agent's report of what it changed. It takes two snapshots of the working tree:
 
 - one when you write the comment;
-- one when the agent resolves it.
+- one when the agent marks it handled.
 
 The snapshots are stored as private refs inside `.git`, so the working tree and your branches are not touched.
 
-What the agent did for a comment is the diff between the two snapshots, limited to the region the comment is anchored to. The agent's summary is the narrative; the diff is the record.
+What the agent did for a comment is the diff between the two snapshots, limited to the region the comment is anchored to. GitMaster finds the anchored lines in the "before" snapshot and follows them through the changes to the file: lines the agent added, removed or rewrote inside the region, or right against its edges, belong to the comment. The agent's summary is the narrative; the diff is the record.
 
-When several comments are handled in one pass, they share the "after" snapshot. GitMaster assigns each change to the comment whose anchor it overlaps. Changes that overlap no comment appear as "other changes".
+When the agent marks the same comment handled again, the new "after" snapshot replaces the old one. When you reopen a comment, its "after" snapshot is discarded and the agent's summary with it. If a snapshot cannot be taken, the comment is still handled, without an "after".
+
+> **Planned.** Changes that overlap no comment appear as "other changes".
 
 ## Read the comments in a diff
 
-Each comment appears inline in the diff. Use the **Before** / **After** selector to see the anchored text as it was when you wrote the comment, or as it is after the agent resolved it.
+Each comment appears inline in the diff. Use the **Before** / **After** selector to see the anchored text as it was when you wrote the comment, or as it was when the agent marked it handled. Until an agent handles the comment, **After** shows the text as it is in the file now.
 
 ## Where comments are stored
 

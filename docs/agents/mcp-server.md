@@ -101,12 +101,12 @@ You commented on two lines of `src/ledger.rs` in the app: "Return an error here 
 review_comments_list(status="open")  -> [{ id: 7, path: "src/ledger.rs", lines: 41-42, body: "Return an error ...", untrusted: true }]
                                         ... the agent edits src/ledger.rs with its own tools ...
 review_comment_resolve(id=7, summary="parse_amount now returns Result; callers propagate with ?")
-                                     -> { id: 7, status: "handled" }
+                                     -> { id: 7, status: "handled", change: { before: [...], after: [...], changed: true } }
 ```
 
 1. `review_comments_list` returns the open comments with the lines they are anchored to now. A comment whose text no longer appears exactly once is `outdated` and has no lines.
 2. The agent changes the code with its own tools.
-3. `review_comment_resolve` marks the comment `handled` and stores the agent's summary. The comment appears as handled in the app, and you decide whether to resolve it.
+3. `review_comment_resolve` marks the comment `handled`, stores the agent's summary and takes the "after" snapshot. The result carries the change GitMaster observed in the comment's region, so the agent can check that its edit landed where the comment is. The comment appears as handled in the app, and you decide whether to resolve it.
 
 An agent that needs an earlier decision searches the threads instead:
 

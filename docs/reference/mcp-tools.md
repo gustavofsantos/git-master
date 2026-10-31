@@ -31,9 +31,9 @@ A record tool writes to GitMaster's own store and nowhere else. It does not chan
 
 | Tool | Arguments | Returns | Status |
 |---|---|---|---|
-| `review_comment_resolve` | `id`, `summary` | Marks the comment `handled` and stores the summary. You make it `resolved` in the app. | Implemented |
+| `review_comment_resolve` | `id`, `summary` | Marks the comment `handled`, stores the summary and takes the "after" snapshot. Returns the comment with `change`: the anchored lines `before` and `after`, as GitMaster observed them, and `changed`. You make it `resolved` in the app. | Implemented |
 
-`review_comment_resolve` is refused for a comment that is already `resolved`. Marking a `handled` comment again replaces its summary.
+`review_comment_resolve` is refused for a comment that is already `resolved`. Marking a `handled` comment again replaces its summary and its "after" snapshot. `change` is read from the two snapshots, not from the summary: when it shows `changed: false`, GitMaster saw no edit in the comment's region. `change` is absent when a snapshot is missing.
 
 ## Propose and apply
 
