@@ -1,4 +1,4 @@
-//! The colors of gpui-component, the editor component of D147. The component reads a global
+//! The colors of gpui-component, the editor component of D149. The component reads a global
 //! `Theme`; this module fills it from the `GitMaster` palette for the mode in use, so the editor
 //! follows the light and dark themes like every other view. Only the component's own widgets
 //! read it: the views of `GitMaster` keep their palette accessors.
@@ -193,7 +193,7 @@ mod tests {
 
     /// The highlight names of gpui-component 0.5.1, copied from `HIGHLIGHT_NAMES` in its
     /// `src/highlighter/registry.rs`. That array is `pub(super)`, so it cannot be read from here.
-    /// The crate is pinned to `=0.5.1` (D147); a bump must update this list.
+    /// The crate is pinned to `=0.5.1` (D149); a bump must update this list.
     const CRATE_NAMES: [&str; 40] = [
         "attribute",
         "boolean",
