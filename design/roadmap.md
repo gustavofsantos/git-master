@@ -391,7 +391,7 @@ Known gaps:
 - Local and remote names (`feature` and `origin/feature`) get different colors, because `%D` does not say which is which.
 - No dashed edge and no commit owner (D25 stays Proposed). The graph shows only HEAD; choosing other scopes is H6.
 
-### H6, scope
+### H6, scope (done in slice 4c, see there; D139)
 
 Pill with the current branch, all refs, or one ref. Left-clicking a branch in the sidebar, on the history page, sets the scope. Checkout stays on double-click or the context menu. "Current stack" shows disabled with "Not available yet" (D34).
 
@@ -512,7 +512,7 @@ Details, engines and risks are in `design/code-navigation.md`. Decisions D43 to 
 
 Done when: opening a file by name, finding text and jumping to a definition takes seconds in a 100 thousand file repository, without freezing the UI.
 
-## Slice 4: stacks (model and visualization) (in progress: 4a and 4b done, with gaps; 4c and 4d to do)
+## Slice 4: stacks (model and visualization) (in progress: 4a, 4b and 4c done, with gaps; 4c2 and 4d to do)
 
 - Metadata `stackParent` and `stackParentBase`; create and reparent a branch (drag).
 - Sidebar per stack; lag indicators; dashed edge in the graph.
@@ -532,7 +532,12 @@ Sub-slices (agreed with the author on 2026-10-31: engine and sidebar first; D13 
   - gpui keeps one `can_drop` predicate per element and draws `drag_over` styles only when it passes. The file drag's predicate on a branch row now lets every other payload through, so the branch drag reaches its own handler there, and a refusing row is dimmed; the branch drop checks again and says why it refuses.
   - Checked: unit tests of the answer and of the drag's state; seen in a window (release build, virtual display, light theme, driven with xdotool): a branch dragged over its parent is dimmed with "… is already the parent of …", over another row is highlighted with "Make … the parent of …", and the drop changes `branch.<name>.stackParent`; a file dragged onto a By stack branch row still opens the commit popover, and a refusing row still refuses it.
   - Known gaps: the release-build drag measurement owed by M4 of slice 1f was not made (the virtual display renders on the CPU, so its frame times say nothing about a real machine). The sidebar does not scroll during a drag, so a target out of view needs Set Parent…. There is no drop on the No stack header to remove a parent. Esc ends the gesture only when the mouse is released (as for files). The dark theme was not looked at during a drag. The file drag's own `can_drop` still refuses before gpui draws its dimmed style, so a refusing row for a file is not dimmed (a gap of M5, not changed here).
-- **4c, stacks in the history graph:** dashed edge with **N commits behind parent**, commit owner from the recorded base (D25), the Commits and Stacks modes, and the **Scope: current stack** chip (D34).
+- **4c, history scope and stacks in the graph (done on 2026-10-31, with known gaps; D25 decided, D139).** It also builds H6 of slice 3 (the scope pill), as the author chose.
+  - Engine: `LoadHistory { scope }` with Current branch, Current stack (the branches of HEAD's stack, the default branch and HEAD), All refs (`--branches --remotes --tags` and HEAD) and One ref (a local branch by its full ref name, after `--end-of-options`); `GitPort::history_stream` takes the revisions. Each `StackBranch` lists its own commits (`stackParentBase..tip`, newest first, up to 1,000).
+  - UI: `history_scope.rs` (the choice, the default that follows HEAD, the menu's lines and reasons); the scope pill and its menu in the history header (deferred, so it paints over the rows); a left click on a sidebar branch on the History page shows One ref and never checks it out. The layout takes `StackMarks` from the snapshot: a node owned by a stack branch takes its colour, and the first-parent edge of the oldest own commit of a branch behind its parent is dashed and amber until it reaches its base or a solid line joins its lane. Each branch chip behind its parent is followed by **N commits behind parent**. A new snapshot lays the graph out again; the first one reads the list again when it changes the default scope.
+  - Checked: 7 real-Git tests (`crates/gm-core/tests/history_scope_real_git.rs`: each scope, a tag named like a branch, a name read as an option refused, own commits), layout tests (marks from the snapshot, the dashed run and where it ends, a cut list, a new snapshot redoing the rows), and the scope model's tests. Seen in a window (release build, virtual display, light and dark): the fixture's ledger stack under Current stack, Current branch and All refs with the expected dashed edges and badges, the menu over the rows, and One ref from a sidebar click with HEAD unchanged. The window check found the menu painted under the rows and a badge read as the wrong branch's; both were fixed and seen again.
+  - Known gaps: Commits and Stacks modes are 4c2. The pill is not reachable by keyboard and has no palette action. One ref of a name that resolves to nothing shows an empty list with no message (Git's error is not read while the walk streams). Current stack reads the snapshot again in the engine on each load. A commit owned by no stack branch keeps its lane colour even inside a stack. The behind badge sits on the row of the branch's tip only, so a tip outside the scope shows none. The ownership list stops at 1,000 commits per branch, and then no edge is dashed. No smoke scenario was added.
+- **4c2, Commits | Stacks switch** in the history graph: one node per branch, with its commits folded or unfolded.
 - **4d, the derived events** `stack.parent_moved` and `stack.parent_merged` for workflow triggers (with WF3), and `stack_tree` over MCP (slice 7).
 
 ## Slice 5: restack
