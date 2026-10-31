@@ -22,6 +22,8 @@ use gpui::{
 use crate::action_registry::{Action, Args, ThreadRef, thread_args};
 use crate::commit_threads;
 use crate::icon::{self, Icon};
+use crate::resize::{self};
+use crate::resize_handle::{self, Edge};
 use crate::shell_history::{action_button, now_secs};
 use crate::shell_markdown::{self, MarkdownCache};
 use crate::text_area::TextArea;
@@ -36,7 +38,6 @@ use crate::view::{Screen, StatusView};
 
 const THREAD_ROW_HEIGHT: f32 = 64.;
 const HIT_ROW_HEIGHT: f32 = 56.;
-const LIST_WIDTH: f32 = 360.;
 const BRANCH_WIDTH: f32 = 120.;
 /// The next page of threads is asked for when the rows drawn reach this close to the end.
 const PREFETCH: usize = 20;
@@ -510,8 +511,19 @@ impl StatusView {
                     .into_any_element(),
             },
         };
+        let width = self.thread_list_width;
+        let width_strip = resize_handle::handle(
+            "thread-list-resize",
+            Edge::Right,
+            width,
+            resize::PANE,
+            |this: &mut StatusView, width, _| this.thread_list_width = width,
+            |this: &mut StatusView, _| this.thread_list_width = resize::THREAD_LIST_DEFAULT,
+            cx,
+        );
         div()
-            .w(px(LIST_WIDTH))
+            .relative()
+            .w(px(width))
             .flex_none()
             .min_h(px(0.))
             .flex()
@@ -520,6 +532,7 @@ impl StatusView {
             .border_color(theme::hairline())
             .children(failure)
             .child(body)
+            .child(width_strip)
     }
 
     /// The right column: the thread's header, the details panel when a chip opened one,
@@ -970,6 +983,7 @@ impl StatusView {
             .items_center()
             .gap_2()
             .min_w(px(0.))
+            .font_family(theme::code_font())
             .text_xs()
             .text_color(theme::muted())
             .child(
@@ -1047,6 +1061,7 @@ impl StatusView {
             .items_center()
             .gap_2()
             .min_w(px(0.))
+            .font_family(theme::code_font())
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.model.threads.toggle_call(entry);
                 cx.notify();
@@ -1334,7 +1349,14 @@ fn small_note(text: &str) -> Div {
 
 /// The arguments and the result of an open tool call.
 fn call_details(args: Option<&str>, result: Option<&CallResult>) -> Div {
-    let mut details = div().flex().flex_col().gap_1().px_2().pb_1().text_xs();
+    let mut details = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .px_2()
+        .pb_1()
+        .font_family(theme::code_font())
+        .text_xs();
     if let Some(args) = args {
         details = details
             .child(div().text_color(theme::muted()).child("Arguments"))

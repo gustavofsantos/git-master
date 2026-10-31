@@ -20,6 +20,8 @@ use gpui::{
 use crate::SaveWorkflow;
 use crate::action_registry::{Action, Args};
 use crate::icon::{self, Icon};
+use crate::resize::{self};
+use crate::resize_handle::{self, Edge};
 use crate::shell_history::{now_secs, relative_time};
 use crate::theme;
 use crate::view::{Screen, StatusView};
@@ -31,7 +33,6 @@ use crate::workflows_page::{
 };
 
 /// The width of the workflow list on the left.
-const LIST_WIDTH: f32 = 260.;
 /// The height of the runs list above a run's view.
 const RUNS_LIST_HEIGHT: f32 = 220.;
 /// The most of the dry run panel shown; it scrolls past this.
@@ -270,7 +271,7 @@ impl StatusView {
     }
 
     /// The whole page: the list on the left, the open file on the right.
-    pub(crate) fn workflows_page(&self, cx: &Context<Self>) -> Div {
+    pub(crate) fn workflows_page(&self, cx: &mut Context<Self>) -> Div {
         div()
             .flex_1()
             .min_w(px(0.))
@@ -282,7 +283,22 @@ impl StatusView {
             .child(self.workflow_detail(cx))
     }
 
-    fn workflow_list(&self, cx: &Context<Self>) -> Div {
+    /// The strip on the list's right edge that resizes it.
+    fn list_width_strip(cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+        resize_handle::handle(
+            "workflow-list-resize",
+            Edge::Right,
+            cx.entity().read(cx).workflow_list_width,
+            resize::PANE,
+            |this: &mut StatusView, width, _| this.workflow_list_width = width,
+            |this: &mut StatusView, _| this.workflow_list_width = resize::WORKFLOW_LIST_DEFAULT,
+            cx,
+        )
+    }
+
+    fn workflow_list(&self, cx: &mut Context<Self>) -> Div {
+        let width = self.workflow_list_width;
+        let width_strip = Self::list_width_strip(cx);
         let listed = self.model.workflows.listed.as_deref();
         let selected = self.model.workflows_page.path();
         let dirty = self.model.workflows_page.dirty();
@@ -331,8 +347,9 @@ impl StatusView {
                     )
             });
         div()
+            .relative()
             .flex_none()
-            .w(px(LIST_WIDTH))
+            .w(px(width))
             .h_full()
             .min_h(px(0.))
             .flex()
@@ -340,15 +357,7 @@ impl StatusView {
             .border_r_1()
             .border_color(theme::hairline())
             .bg(theme::panel())
-            .child(
-                div()
-                    .px_3()
-                    .h(px(44.))
-                    .flex()
-                    .items_center()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("Workflows"),
-            )
+            .child(list_title())
             .child(
                 div()
                     .id("workflow-list")
@@ -381,6 +390,7 @@ impl StatusView {
                     )
                     .children(templates),
             )
+            .child(width_strip)
     }
 
     fn workflow_detail(&self, cx: &Context<Self>) -> Div {
@@ -1339,4 +1349,15 @@ fn file_name(path: &str) -> String {
         .and_then(|file| file.to_str())
         .unwrap_or(path)
         .to_owned()
+}
+
+/// The heading of the workflows list.
+fn list_title() -> Div {
+    div()
+        .px_3()
+        .h(px(44.))
+        .flex()
+        .items_center()
+        .font_weight(FontWeight::MEDIUM)
+        .child("Workflows")
 }

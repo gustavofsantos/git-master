@@ -11,7 +11,9 @@ use gpui::{
 };
 
 use crate::FocusNext;
-use crate::action_registry::{CommentSpot, shortcut_text};
+use crate::action_registry::{CommentSpot, Effect, shortcut_text};
+use crate::diff_pane::PaneSpot;
+use crate::diff_rows::Side;
 use crate::review::{self, range_label};
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
@@ -34,6 +36,9 @@ pub(crate) enum ReviewTarget {
         start_line: u32,
         end_line: u32,
     },
+    /// A new comment on text picked in a surface that is not the working tree
+    /// (D141): the engine looks for the text in the file now.
+    NewByText { path: String, text: String },
     Edit {
         id: i64,
         path: String,
@@ -45,12 +50,19 @@ pub(crate) enum ReviewTarget {
 impl ReviewTarget {
     fn path(&self) -> &str {
         match self {
-            ReviewTarget::New { path, .. } | ReviewTarget::Edit { path, .. } => path,
+            ReviewTarget::New { path, .. }
+            | ReviewTarget::NewByText { path, .. }
+            | ReviewTarget::Edit { path, .. } => path,
         }
     }
 
+    /// The lines the dialog names: the target's own, or for picked text one to its length.
     fn lines(&self) -> (u32, u32) {
         match self {
+            ReviewTarget::NewByText { text, .. } => (
+                1,
+                u32::try_from(text.lines().count().max(1)).unwrap_or(u32::MAX),
+            ),
             ReviewTarget::New {
                 start_line,
                 end_line,
@@ -94,6 +106,11 @@ pub(crate) fn command(target: &ReviewTarget, text: &str) -> Option<CommandKind> 
             end_line: *end_line,
             body,
         },
+        ReviewTarget::NewByText { path, text } => CommandKind::AddReviewCommentByText {
+            path: path.clone(),
+            text: text.clone(),
+            body,
+        },
         ReviewTarget::Edit { id, .. } => CommandKind::EditReviewComment { id: *id, body },
     })
 }
@@ -102,9 +119,13 @@ pub(crate) fn command(target: &ReviewTarget, text: &str) -> Option<CommandKind> 
 #[must_use]
 pub(crate) fn title(target: &ReviewTarget) -> String {
     let (start, end) = target.lines();
-    let range = range_label(start, end);
+    let range = match target {
+        ReviewTarget::NewByText { .. } if end > 1 => format!("{end} selected lines"),
+        ReviewTarget::NewByText { .. } => "the selected line".to_owned(),
+        _ => range_label(start, end),
+    };
     match target {
-        ReviewTarget::New { .. } => format!("Comment on {range}"),
+        ReviewTarget::New { .. } | ReviewTarget::NewByText { .. } => format!("Comment on {range}"),
         ReviewTarget::Edit { .. } => format!("Edit comment on {range}"),
     }
 }
@@ -113,7 +134,7 @@ pub(crate) fn title(target: &ReviewTarget) -> String {
 #[must_use]
 pub(crate) fn save_label(target: &ReviewTarget) -> &'static str {
     match target {
-        ReviewTarget::New { .. } => "Comment",
+        ReviewTarget::New { .. } | ReviewTarget::NewByText { .. } => "Comment",
         ReviewTarget::Edit { .. } => "Save",
     }
 }
@@ -183,7 +204,7 @@ impl StatusView {
                 .comment(*id)
                 .map(|comment| comment.body.clone())
                 .unwrap_or_default(),
-            ReviewTarget::New { .. } => String::new(),
+            ReviewTarget::New { .. } | ReviewTarget::NewByText { .. } => String::new(),
         };
         let body = cx.new(|cx| TextArea::new("Comment", cx).with_lines(4, 12));
         body.update(cx, |area, cx| area.set_text(&initial, cx));
@@ -424,24 +445,80 @@ fn buttons(target: &ReviewTarget, pending: bool, can_save: bool, cx: &Context<St
 }
 
 impl StatusView {
-    /// What the registry reads of the Working Copy diff's selection (B4c): the file
-    /// and side shown and the working-tree lines under the cursor or selection.
-    /// Nothing off the Working Copy screen, or with no line under the cursor.
-    pub(crate) fn comment_spot<'a>(&'a self, cx: &App) -> CommentSpot<'a> {
-        if self.screen != Screen::WorkingCopy {
-            return CommentSpot::Nothing;
+    /// What the registry reads of the lines picked to comment on (B4c, D141): in the
+    /// Working Copy diff, the Code viewer, or a commit's, stash's or reflog entry's diff.
+    /// Nothing elsewhere, or with no line picked.
+    pub(crate) fn comment_spot<'a>(&'a self, cx: &'a App) -> CommentSpot<'a> {
+        match self.screen {
+            Screen::Code => return self.code_comment_spot(),
+            Screen::History | Screen::Stashes | Screen::Reflog => {
+                return match self.commit_diff_pane.read(cx).comment_spot() {
+                    Some(spot) => stacked_spot(&spot),
+                    None => CommentSpot::Nothing,
+                };
+            }
+            Screen::WorkingCopy => {}
+            _ => return CommentSpot::Nothing,
         }
         let Some(path) = self.model.selected_path() else {
             return CommentSpot::Nothing;
         };
-        match self.diff_pane.read(cx).comment_spot() {
-            Some((side, covered)) if covered.has_line => CommentSpot::Lines {
-                path,
-                side: side.diff_side(),
-                working: covered.working,
-            },
-            _ => CommentSpot::Nothing,
+        let Some(spot) = self.diff_pane.read(cx).comment_spot() else {
+            return CommentSpot::Nothing;
+        };
+        if !spot.covered.has_line {
+            return CommentSpot::Nothing;
         }
+        match (spot.side, spot.covered.working) {
+            // The unstaged new side is the working tree: its numbers are the file's.
+            (Side::Unstaged, working) => CommentSpot::Lines { path, working },
+            (Side::Staged, None) => CommentSpot::Lines {
+                path,
+                working: None,
+            },
+            (Side::Staged, Some(_)) if spot.picked.contiguous => CommentSpot::Text { path },
+            (Side::Staged, Some(_)) => CommentSpot::Split,
+        }
+    }
+
+    /// The text picked in the diff, for a comment found by its text (D141).
+    pub(crate) fn comment_text(&self, cx: &App) -> Option<String> {
+        match self.screen {
+            Screen::History | Screen::Stashes | Screen::Reflog => {
+                self.commit_diff_pane.read(cx).comment_text()
+            }
+            _ => self.diff_pane.read(cx).comment_text(),
+        }
+    }
+
+    /// Opens the composer for what Comment on Selection planned: the working-tree
+    /// lines, or the text picked in the diff.
+    pub(crate) fn open_comment_composer(
+        &mut self,
+        effect: Effect,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match effect {
+            Effect::OpenReviewComposer {
+                path,
+                start_line,
+                end_line,
+            } => ReviewTarget::New {
+                path,
+                start_line,
+                end_line,
+            },
+            Effect::OpenReviewComposerByText { path } => {
+                let Some(text) = self.comment_text(cx) else {
+                    self.notify_user("Select lines to comment on first.", cx);
+                    return;
+                };
+                ReviewTarget::NewByText { path, text }
+            }
+            _ => return,
+        };
+        self.open_review_composer(target, window, cx);
     }
 
     /// Edit Comment: the composer on the comment's body, with its lines.
@@ -485,6 +562,27 @@ impl StatusView {
     }
 }
 
+/// The spot of lines picked in a commit's diff: found by their text in the file now.
+fn stacked_spot<'a>(spot: &PaneSpot<'a>) -> CommentSpot<'a> {
+    let Some(path) = spot.file else {
+        return CommentSpot::Nothing;
+    };
+    if !spot.covered.has_line {
+        return CommentSpot::Nothing;
+    }
+    if spot.picked.lines.is_empty() {
+        // Only removed lines: the file has none of them.
+        CommentSpot::Lines {
+            path,
+            working: None,
+        }
+    } else if spot.picked.contiguous {
+        CommentSpot::Text { path }
+    } else {
+        CommentSpot::Split
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,11 +597,62 @@ mod tests {
         }
     }
 
+    fn pane_spot<'a>(lines: &[&str], contiguous: bool, file: Option<&'a str>) -> PaneSpot<'a> {
+        PaneSpot {
+            side: Side::Unstaged,
+            covered: crate::review::Covered {
+                has_line: true,
+                working: None,
+            },
+            picked: crate::review::Picked {
+                lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+                contiguous,
+            },
+            file,
+        }
+    }
+
+    #[test]
+    fn lines_picked_in_a_commit_are_found_by_text_when_they_are_one_run_in_one_file() {
+        let spot = |lines, contiguous, file| stacked_spot(&pane_spot(lines, contiguous, file));
+        assert_eq!(
+            spot(&["a"], true, Some("f.rs")),
+            CommentSpot::Text { path: "f.rs" }
+        );
+        assert_eq!(spot(&["a", "b"], false, Some("f.rs")), CommentSpot::Split);
+        assert_eq!(
+            spot(&[], true, Some("f.rs")),
+            CommentSpot::Lines {
+                path: "f.rs",
+                working: None
+            }
+        );
+        assert_eq!(spot(&["a"], true, None), CommentSpot::Nothing);
+    }
+
     #[test]
     fn a_blank_body_is_no_body_and_the_rest_is_trimmed() {
         assert_eq!(body_of(""), None);
         assert_eq!(body_of(" \n\t "), None);
         assert_eq!(body_of("  rename this\n  "), Some("rename this".to_owned()));
+    }
+
+    #[test]
+    fn a_comment_on_picked_text_sends_the_text_and_names_the_lines_it_has() {
+        let target = ReviewTarget::NewByText {
+            path: "src/a.rs".into(),
+            text: "one\ntwo".into(),
+        };
+        assert_eq!(
+            command(&target, " check "),
+            Some(CommandKind::AddReviewCommentByText {
+                path: "src/a.rs".into(),
+                text: "one\ntwo".into(),
+                body: "check".into(),
+            })
+        );
+        assert_eq!(title(&target), "Comment on 2 selected lines");
+        assert_eq!(save_label(&target), "Comment");
     }
 
     #[test]

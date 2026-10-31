@@ -48,7 +48,7 @@ use crate::quick_open_view::{self, QuickOpenView};
 use crate::recent::{self, Recents};
 use crate::reflog;
 use crate::resize;
-use crate::review_composer::{ReviewDialog, ReviewTarget};
+use crate::review_composer::ReviewDialog;
 use crate::shell_code::CodeView;
 use crate::shell_history::CommitTexts;
 use crate::shell_search::{self, SearchView};
@@ -136,6 +136,10 @@ pub struct StatusView {
     pub(crate) commit_texts: CommitTexts,
     /// The left column's width, in logical pixels, as the user dragged it.
     pub(crate) left_width: f32,
+    /// The width of the Code file tree, the Workflows list and the Threads list.
+    pub(crate) code_tree_width: f32,
+    pub(crate) workflow_list_width: f32,
+    pub(crate) thread_list_width: f32,
     /// The commit message box's height, in logical pixels, as dragged.
     pub(crate) commit_height: f32,
     /// How the sidebar's branch tree is grouped.
@@ -401,6 +405,9 @@ impl StatusView {
             sidebar_width: resize::SIDEBAR_DEFAULT,
             commit_texts,
             left_width: resize::LEFT_DEFAULT,
+            code_tree_width: resize::CODE_TREE_DEFAULT,
+            workflow_list_width: resize::WORKFLOW_LIST_DEFAULT,
+            thread_list_width: resize::THREAD_LIST_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
             sidebar_grouping: Grouping::default(),
             sidebar_folded: Folded::default(),
@@ -1139,19 +1146,12 @@ impl StatusView {
         match planned {
             Err(reason) => self.notify_user(reason, cx),
             Ok(Effect::Send(kinds)) => self.send_commands(action, kinds, cx),
-            Ok(Effect::OpenReviewComposer {
-                path,
-                start_line,
-                end_line,
-            }) => self.open_review_composer(
-                ReviewTarget::New {
-                    path,
-                    start_line,
-                    end_line,
-                },
-                window,
-                cx,
-            ),
+            Ok(
+                effect @ (Effect::OpenReviewComposer { .. }
+                | Effect::OpenReviewComposerByText { .. }),
+            ) => {
+                self.open_comment_composer(effect, window, cx);
+            }
             Ok(Effect::OpenReviewEdit { id }) => self.open_review_edit(id, window, cx),
             Ok(Effect::CopyThreadMarkdown(uid)) => self.copy_thread_markdown(uid, cx),
             Ok(Effect::ThreadFolds { open }) => self.fold_thread_groups(open, cx),
@@ -1648,6 +1648,14 @@ impl Render for StatusView {
                     this.run_action(Action::QuickOpen, &Args::None, window, cx);
                 }
             }))
+            // The Code viewer has no key context of its own: its pick is commented on here.
+            .on_action(cx.listener(
+                |this, _: &crate::diff_pane::CommentOnSelection, window, cx| {
+                    if this.screen == Screen::Code && this.review_dialog.is_none() {
+                        this.run_action(Action::CommentOnSelection, &Args::None, window, cx);
+                    }
+                },
+            ))
             .on_action(cx.listener(Self::save_workflow_action))
             .on_action(cx.listener(|this, action: &RunWorkflowKey, window, cx| {
                 this.run_action(
@@ -1685,7 +1693,7 @@ impl Render for StatusView {
                 self.context_menu
                     .open
                     .is_some()
-                    .then(|| self.context_menu_layer(window, cx)),
+                    .then(|| self.context_menu_layer(cx)),
             )
             .children(self.palette.open.then(|| self.palette_layer(window, cx)))
             .children(

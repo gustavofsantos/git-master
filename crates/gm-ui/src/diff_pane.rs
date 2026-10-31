@@ -11,8 +11,9 @@ use std::time::Instant;
 use gm_schema::{CommitFile, FileDiff, LineKind, ReviewComment, StageTarget};
 use gpui::{
     AnyElement, ClickEvent, Context, Div, EventEmitter, FocusHandle, FontWeight, Hsla, IntoElement,
-    KeyBinding, Render, ScrollStrategy, ScrollWheelEvent, Stateful, UniformListScrollHandle,
-    Window, actions, div, prelude::*, px, uniform_list,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollStrategy,
+    ScrollWheelEvent, Stateful, UniformListScrollHandle, Window, actions, div, prelude::*, px,
+    uniform_list,
 };
 
 use crate::action_registry::{Action, Args};
@@ -26,7 +27,7 @@ use crate::diff_rows::{
 };
 use crate::icon::{self, Icon};
 use crate::review::{
-    self, Badge, Covered, Delete, DeleteArm, Entry, Heading, Listing, Notes, Opened, Part,
+    self, Badge, Covered, Delete, DeleteArm, Entry, Heading, Listing, Notes, Opened, Part, Picked,
 };
 use crate::shell_history::{change_color, file_counts, now_secs, path_label};
 use crate::shell_list::change_letter;
@@ -117,7 +118,12 @@ const WORKING_KEYS: [KeyRow; 11] = [
 
 /// The keys of the commit's stacked diff (H4c, H4c-keys), bound in the read-only
 /// context only. Up and Down scroll a row; the file keys wrap around.
-const COMMIT_KEYS: [KeyRow; 7] = [
+const COMMIT_KEYS: [KeyRow; 8] = [
+    KeyRow {
+        keys: "secondary-shift-m",
+        action: "CommentOnSelection",
+        what: "Comment on the selected lines",
+    },
     KeyRow {
         keys: "secondary-shift-n",
         action: "NextFile",
@@ -260,6 +266,11 @@ pub struct DiffPane {
     /// Index into `rows`.
     cursor: usize,
     visual: Option<Visual>,
+    /// The rows picked with the mouse to comment on, as (where the press began,
+    /// where it is now), kept apart from the staging selection (D141).
+    picked: Option<(usize, usize)>,
+    /// A press on a line number is held: moving over rows extends `picked`.
+    picking: bool,
     /// The apply key pressed once while its selection splits a pair.
     pending: Option<Apply>,
     /// The hunk whose discard waits for its confirmation.
@@ -281,6 +292,15 @@ pub struct DiffPane {
     delete_arm: DeleteArm,
     /// The line to show once the diff of its file is here (B4d).
     reveal: Option<Reveal>,
+}
+
+/// What a pane's picked rows hold, for the window to turn into a comment target (D141).
+pub struct PaneSpot<'a> {
+    pub side: Side,
+    pub covered: Covered,
+    pub picked: Picked,
+    /// The file of a commit's stack the rows are in.
+    pub file: Option<&'a str>,
 }
 
 /// A working-tree line of a file to put the cursor on (B4d).
@@ -325,6 +345,8 @@ impl DiffPane {
             selection: Selection::default(),
             cursor: 0,
             visual: None,
+            picked: None,
+            picking: false,
             pending: None,
             discard_armed: None,
             stack_files: Vec::new(),
@@ -387,6 +409,7 @@ impl DiffPane {
         self.rebuild_rows();
         self.selection = kept;
         self.visual = None;
+        self.clear_pick();
         self.pending = None;
         self.discard_armed = None;
         self.delete_arm.clear();
@@ -477,6 +500,7 @@ impl DiffPane {
         self.scroll_columns = 0;
         self.selection.clear();
         self.visual = None;
+        self.clear_pick();
         self.pending = None;
         self.discard_armed = None;
         self.cursor = 0;
@@ -584,6 +608,7 @@ impl DiffPane {
         self.scroll_columns = 0;
         self.selection.clear();
         self.visual = None;
+        self.clear_pick();
         self.pending = None;
         self.discard_armed = None;
         self.cursor = next_changed_line(&self.rows, self.diffs(), 0).unwrap_or(0);
@@ -615,26 +640,103 @@ impl DiffPane {
         );
     }
 
-    /// The lines the cursor or the visual selection covers, for a review comment
-    /// (B4c): the side shown and what the rows cover. `None` outside the Working
-    /// Copy diff or with no rows.
-    pub fn comment_spot(&self) -> Option<(Side, Covered)> {
-        if self.mode != Mode::Working || self.rows.is_empty() {
+    /// The rows a review comment is about: the ones picked with the mouse, else the
+    /// visual selection or the cursor row.
+    fn comment_rows(&self) -> (usize, usize) {
+        self.picked.unwrap_or_else(|| {
+            let from = self
+                .visual
+                .as_ref()
+                .map_or(self.cursor, |visual| visual.anchor);
+            (from, self.cursor)
+        })
+    }
+
+    /// What the picked rows cover and show, for a review comment (B4c, D141): the
+    /// side shown, the working-tree lines they number, the text they hold and, in
+    /// a commit's stack, the file they are in. `None` with no rows.
+    pub fn comment_spot(&self) -> Option<PaneSpot<'_>> {
+        if self.rows.is_empty() {
             return None;
         }
-        let from = self
-            .visual
-            .as_ref()
-            .map_or(self.cursor, |visual| visual.anchor);
-        Some((
-            self.side,
-            review::covered(&self.rows, self.diffs(), from, self.cursor),
-        ))
+        let (from, to) = self.comment_rows();
+        let mut picked = review::picked(&self.rows, self.diffs(), from, to);
+        let file = (self.mode == Mode::ReadOnly).then(|| {
+            let starts = self.starts_for(Layout::Unified);
+            let first = file_at_row(starts, from.min(to));
+            // Rows of two files are not one run of lines.
+            if first != file_at_row(starts, from.max(to)) {
+                picked.contiguous = false;
+            }
+            self.stack_files.get(first).map(|file| file.path.as_str())
+        });
+        Some(PaneSpot {
+            side: self.side,
+            covered: review::covered(&self.rows, self.diffs(), from, to),
+            picked,
+            file: file.flatten(),
+        })
+    }
+
+    /// Forgets the mouse pick.
+    fn clear_pick(&mut self) {
+        self.picked = None;
+        self.picking = false;
+    }
+
+    /// A press on a line number of row `row`: starts a pick there, or with Shift
+    /// extends the last one to it. The pane takes the keyboard, so the comment key works.
+    fn pick_start(&mut self, row: usize, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        self.pending = None;
+        self.visual = None;
+        self.cursor = row;
+        self.picked = match self.picked {
+            Some((from, _)) if shift => Some((from, row)),
+            _ => Some((row, row)),
+        };
+        self.picking = true;
+        cx.notify();
+    }
+
+    /// The pointer moved over row `row` with the press held.
+    fn pick_to(&mut self, row: usize, cx: &mut Context<Self>) {
+        if !self.picking {
+            return;
+        }
+        if let Some((from, to)) = self.picked
+            && to != row
+        {
+            self.picked = Some((from, row));
+            self.cursor = row;
+            cx.notify();
+        }
+    }
+
+    /// Whether row `row` is in the pick.
+    fn in_pick(&self, row: usize) -> bool {
+        self.picked
+            .is_some_and(|(from, to)| (from.min(to)..=from.max(to)).contains(&row))
+    }
+
+    /// The row of the line `key` (the split view names cells by key).
+    fn row_of_key(&self, key: LineKey) -> Option<usize> {
+        self.rows.iter().position(|row| {
+            matches!(*row, Row::Line { side, hunk_index, line_index } if (side, hunk_index, line_index) == key)
+        })
+    }
+
+    /// The text picked, as the engine looks for it in the file; `None` with no line.
+    pub fn comment_text(&self) -> Option<String> {
+        let (from, to) = self.comment_rows();
+        let picked = review::picked(&self.rows, self.diffs(), from, to);
+        (!picked.lines.is_empty()).then(|| picked.text())
     }
 
     /// Comment on Selection, from the key or the header button.
     fn comment_at_selection(&mut self, cx: &mut Context<Self>) {
-        if controls(self.mode).line_selection {
+        // A commit's diff has no staging, but its lines can be commented on (D141).
+        if controls(self.mode).line_selection || self.mode == Mode::ReadOnly {
             cx.emit(DiffPaneEvent::Review {
                 action: Action::CommentOnSelection,
                 args: Args::None,
@@ -1047,7 +1149,14 @@ impl DiffPane {
         };
         let changed = line.kind != LineKind::Context;
         let selected = self.selection.contains(cell.key);
-        let background = if on_cursor { theme::cursor_row() } else { tint };
+        let row = self.row_of_key(cell.key);
+        let background = if row.is_some_and(|row| self.in_pick(row)) {
+            theme::selection()
+        } else if on_cursor {
+            theme::cursor_row()
+        } else {
+            tint
+        };
         let number = if which == 0 { line.old_no } else { line.new_no };
         let marker = self.marker(line.new_no);
         let checkbox = if changed && controls(self.mode).line_selection {
@@ -1069,16 +1178,22 @@ impl DiffPane {
         } else {
             div().w(icon::SMALL).mx_1().flex_none().into_any_element()
         };
+        let number_cell = div()
+            .w(px(44.))
+            .flex_none()
+            .text_right()
+            .text_color(theme::gutter())
+            .child(number.map_or_else(String::new, |n| n.to_string()));
+        let (base, number_cell) = match row {
+            Some(row) => (
+                Self::pick_follow(base, row, cx),
+                Self::pick_number(number_cell, row, cx),
+            ),
+            None => (base, number_cell),
+        };
         base.bg(background)
             .child(marker)
-            .child(
-                div()
-                    .w(px(44.))
-                    .flex_none()
-                    .text_right()
-                    .text_color(theme::gutter())
-                    .child(number.map_or_else(String::new, |n| n.to_string())),
-            )
+            .child(number_cell)
             .child(checkbox)
             .child(
                 div()
@@ -1266,7 +1381,9 @@ impl DiffPane {
     /// Escape ends a pending discard or visual mode first, then clears the selection.
     fn escape(&mut self, cx: &mut Context<Self>) {
         self.pending = None;
-        if self.discard_armed.take().is_none() && self.visual.take().is_none() {
+        if self.picked.is_some() {
+            self.clear_pick();
+        } else if self.discard_armed.take().is_none() && self.visual.take().is_none() {
             self.selection.clear();
         }
         cx.notify();
@@ -1570,9 +1687,29 @@ impl DiffPane {
             .into_any_element()
     }
 
+    /// A line number that starts or extends a pick of rows to comment on (D141).
+    fn pick_number(number: Div, row: usize, cx: &Context<Self>) -> Div {
+        number.cursor_pointer().on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.pick_start(row, event.modifiers.shift, window, cx);
+            }),
+        )
+    }
+
+    /// A row that follows a held press, so a drag across it extends the pick.
+    fn pick_follow<E: InteractiveElement>(element: E, row: usize, cx: &Context<Self>) -> E {
+        element.on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+            if event.pressed_button == Some(MouseButton::Left) {
+                this.pick_to(row, cx);
+            }
+        }))
+    }
+
     fn line_row(
         &self,
         ix: usize,
+        row: usize,
         side: Side,
         hunk_index: usize,
         line_index: usize,
@@ -1592,18 +1729,24 @@ impl DiffPane {
         };
         let changed = line.kind != LineKind::Context;
         let selected = self.selection.contains((side, hunk_index, line_index));
-        let background = if ix == self.cursor_ix() {
+        let background = if self.in_pick(row) {
+            theme::selection()
+        } else if ix == self.cursor_ix() {
             theme::cursor_row()
         } else {
             tint
         };
         let number = |n: Option<u32>| {
-            div()
-                .w(px(44.))
-                .flex_none()
-                .text_right()
-                .text_color(theme::gutter())
-                .child(n.map_or_else(String::new, |n| n.to_string()))
+            Self::pick_number(
+                div()
+                    .w(px(44.))
+                    .flex_none()
+                    .text_right()
+                    .text_color(theme::gutter())
+                    .child(n.map_or_else(String::new, |n| n.to_string())),
+                row,
+                cx,
+            )
         };
         let checkbox = if changed && controls(self.mode).line_selection {
             let mark = if selected {
@@ -1624,7 +1767,7 @@ impl DiffPane {
         } else {
             div().w(icon::SMALL).mx_1().flex_none().into_any_element()
         };
-        div()
+        Self::pick_follow(div(), row, cx)
             .h(px(ROW_HEIGHT))
             .w_full()
             .flex()
@@ -1666,7 +1809,7 @@ impl DiffPane {
                 side,
                 hunk_index,
                 line_index,
-            }) => self.line_row(ix, side, hunk_index, line_index, cx),
+            }) => self.line_row(ix, row, side, hunk_index, line_index, cx),
             Some(row @ (Row::FileHeader { .. } | Row::Notice { .. } | Row::MoreFiles { .. })) => {
                 self.banner_row(row)
             }
@@ -2028,6 +2171,14 @@ impl Render for DiffPane {
             .on_action(cx.listener(|this, _: &CommentOnSelection, _, cx| {
                 this.comment_at_selection(cx);
             }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.picking = false),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.picking = false),
+            )
             .size_full()
             .flex()
             .flex_col()
@@ -2145,6 +2296,7 @@ mod tests {
         assert_eq!(
             COMMIT_KEYS.iter().map(|row| row.keys).collect::<Vec<_>>(),
             [
+                "secondary-shift-m",
                 "secondary-shift-n",
                 "secondary-shift-p",
                 "up",

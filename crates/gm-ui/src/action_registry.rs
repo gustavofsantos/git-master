@@ -213,6 +213,11 @@ pub enum Effect {
         start_line: u32,
         end_line: u32,
     },
+    /// Opens the composer that comments on the text selected in `path`, a surface
+    /// that is not the working tree (D141). The window reads the text from the pane.
+    OpenReviewComposerByText {
+        path: String,
+    },
     /// Opens the composer that edits the body of review comment `id` (B4c).
     OpenReviewEdit {
         id: i64,
@@ -306,20 +311,25 @@ pub struct WorkflowCtx<'a> {
     pub page: PageState<'a>,
 }
 
-/// Where the Working Copy diff's cursor or visual selection is, for a review
-/// comment (B4c). Built by the window from the diff pane.
+/// Where the lines picked to comment on are, for a review comment (B4c, D141).
+/// Built by the window from the diff pane or the Code viewer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CommentSpot<'a> {
-    /// No file is shown, or the cursor is on a hunk header.
+    /// Nothing is picked: no file is shown, or the cursor is on a hunk header.
     #[default]
     Nothing,
-    /// Lines of `path` on `side`. `working` is the working-tree lines they cover,
-    /// from the lowest to the highest; `None` when they are all removed lines.
+    /// Lines of `path` that the working tree has at these numbers: the unstaged
+    /// diff's new side and the Code viewer. `working` is the lowest and highest
+    /// line, `None` when all are removed lines.
     Lines {
         path: &'a str,
-        side: DiffSide,
         working: Option<(u32, u32)>,
     },
+    /// Lines of `path` on a surface that is not the working tree (the staged side,
+    /// a commit, a stash): the engine finds the text in the file now.
+    Text { path: &'a str },
+    /// The pick runs over more than one hunk, so its text is not one run of lines.
+    Split,
 }
 
 /// What the window knows of the review comments, for the rules (B4c).
@@ -327,7 +337,7 @@ pub enum CommentSpot<'a> {
 pub struct ReviewCtx<'a> {
     /// The comments the engine listed; `None` until the first listing.
     pub comments: Option<&'a [ReviewComment]>,
-    /// Where the Working Copy diff's cursor or selection is.
+    /// Where the lines picked to comment on are.
     pub spot: CommentSpot<'a>,
 }
 
@@ -2497,33 +2507,33 @@ pub(crate) fn stash_args(entry: &StashEntry) -> Args {
     }
 }
 
-/// The rule of Comment on Selection: an idle repository, and a line of the
-/// unstaged side with a working-tree line under the cursor or the selection.
+/// The rule of Comment on Selection: an idle repository and picked lines the
+/// working tree has, or whose text the engine can look for in the file.
 fn comment_rule(ctx: &Context<'_>) -> Result<(), Reason> {
     idle(ctx)?;
     match ctx.review.spot {
-        CommentSpot::Nothing => Err("Select lines of the unstaged diff first."),
-        CommentSpot::Lines {
-            side: DiffSide::Staged,
-            ..
-        } => Err("Comment from the unstaged side of the diff."),
+        CommentSpot::Nothing => Err("Select lines to comment on first."),
         CommentSpot::Lines { working: None, .. } => Err("Those lines are not in the working tree."),
-        CommentSpot::Lines { .. } => Ok(()),
+        CommentSpot::Split => Err("Select lines of one hunk to comment on."),
+        CommentSpot::Lines { .. } | CommentSpot::Text { .. } => Ok(()),
     }
 }
 
-/// What Comment on Selection opens: the composer for the working-tree lines.
+/// What Comment on Selection opens: the composer for the working-tree lines, or
+/// for the picked text.
 fn comment_effect(ctx: &Context<'_>) -> Result<Effect, Reason> {
     comment_rule(ctx)?;
     match ctx.review.spot {
         CommentSpot::Lines {
             path,
             working: Some((start_line, end_line)),
-            ..
         } => Ok(Effect::OpenReviewComposer {
             path: path.to_owned(),
             start_line,
             end_line,
+        }),
+        CommentSpot::Text { path } => Ok(Effect::OpenReviewComposerByText {
+            path: path.to_owned(),
         }),
         _ => Err(NOT_AVAILABLE),
     }
@@ -4687,11 +4697,7 @@ mod tests {
     }
 
     fn lines(path: &str, working: Option<(u32, u32)>) -> CommentSpot<'_> {
-        CommentSpot::Lines {
-            path,
-            side: DiffSide::Unstaged,
-            working,
-        }
+        CommentSpot::Lines { path, working }
     }
 
     fn review_ctx<'a>(spot: CommentSpot<'a>, comments: Option<&'a [ReviewComment]>) -> Context<'a> {
@@ -4727,7 +4733,7 @@ mod tests {
     }
 
     #[test]
-    fn comment_on_selection_needs_lines_of_the_unstaged_side_with_a_working_tree_line() {
+    fn comment_on_selection_needs_picked_lines_the_working_tree_has_or_text_to_look_for() {
         let shown = review_ctx(lines("a.txt", Some((12, 15))), None);
         assert_eq!(
             Action::CommentOnSelection.enabled(&Args::None, &shown),
@@ -4736,24 +4742,22 @@ mod tests {
         let none = review_ctx(CommentSpot::Nothing, None);
         assert_eq!(
             Action::CommentOnSelection.enabled(&Args::None, &none),
-            Err("Select lines of the unstaged diff first.")
+            Err("Select lines to comment on first.")
         );
         let removed = review_ctx(lines("a.txt", None), None);
         assert_eq!(
             Action::CommentOnSelection.enabled(&Args::None, &removed),
             Err("Those lines are not in the working tree.")
         );
-        let staged = review_ctx(
-            CommentSpot::Lines {
-                path: "a.txt",
-                side: DiffSide::Staged,
-                working: Some((1, 1)),
-            },
-            None,
-        );
+        let staged = review_ctx(CommentSpot::Text { path: "a.txt" }, None);
         assert_eq!(
             Action::CommentOnSelection.enabled(&Args::None, &staged),
-            Err("Comment from the unstaged side of the diff.")
+            Ok(())
+        );
+        let split = review_ctx(CommentSpot::Split, None);
+        assert_eq!(
+            Action::CommentOnSelection.enabled(&Args::None, &split),
+            Err("Select lines of one hunk to comment on.")
         );
         let closed = Context {
             repo_open: false,
@@ -4781,7 +4785,18 @@ mod tests {
         );
         assert_eq!(
             Action::CommentOnSelection.plan(&Args::None, &review_ctx(CommentSpot::Nothing, None)),
-            Err("Select lines of the unstaged diff first.")
+            Err("Select lines to comment on first.")
+        );
+    }
+
+    #[test]
+    fn comment_on_selection_by_text_plans_the_composer_for_the_picked_text() {
+        let staged = review_ctx(CommentSpot::Text { path: "src/a.rs" }, None);
+        assert_eq!(
+            Action::CommentOnSelection.plan(&Args::None, &staged),
+            Ok(Effect::OpenReviewComposerByText {
+                path: "src/a.rs".into(),
+            })
         );
     }
 

@@ -8,17 +8,19 @@ use std::ops::Range;
 
 use gm_schema::{Actor, CommandKind};
 use gpui::{
-    AnyElement, Context, Div, HighlightStyle, MouseButton, MouseDownEvent, ScrollStrategy,
-    ScrollWheelEvent, Stateful, StyledText, UniformListScrollHandle, Window, div, prelude::*, px,
-    uniform_list,
+    AnyElement, Context, Div, HighlightStyle, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ScrollStrategy, ScrollWheelEvent, Stateful, StyledText, UniformListScrollHandle,
+    Window, div, prelude::*, px, uniform_list,
 };
 
+use crate::action_registry::{Action, Args, CommentSpot};
 use crate::code_page::{Content, Piece, Shown, TreeRow, Viewer, styled};
 use crate::icon::{self, Icon};
+use crate::resize::{self};
+use crate::resize_handle::{self, Edge};
 use crate::theme;
 use crate::view::{Screen, StatusView};
 
-const TREE_WIDTH: f32 = 300.;
 const TREE_ROW: f32 = 24.;
 const INDENT: f32 = 14.;
 const LINE_HEIGHT: f32 = 20.;
@@ -38,6 +40,11 @@ pub(crate) struct CodeView {
     /// The tree is to scroll to the chosen file once its row exists: the
     /// folders above it may still be listing.
     pub(crate) reveal_scroll: bool,
+    /// The lines picked to comment on, 0-based, as (where the press began, where
+    /// it is now) (D141).
+    pub(crate) picked: Option<(usize, usize)>,
+    /// A press on a line number is held: moving over lines extends `picked`.
+    pub(crate) picking: bool,
 }
 
 impl CodeView {
@@ -48,6 +55,8 @@ impl CodeView {
             columns: 0,
             marked: None,
             reveal_scroll: false,
+            picked: None,
+            picking: false,
         }
     }
 }
@@ -77,6 +86,7 @@ impl StatusView {
         self.model.code.file_requested(id, path, line);
         self.code_view.columns = 0;
         self.code_view.marked = None;
+        self.code_view.picked = None;
         self.code_view
             .lines_scroll
             .scroll_to_item(0, ScrollStrategy::Top);
@@ -118,6 +128,7 @@ impl StatusView {
         self.model.code.file_requested(id, path, None);
         self.code_view.columns = 0;
         self.code_view.marked = None;
+        self.code_view.picked = None;
         self.code_view
             .lines_scroll
             .scroll_to_item(0, ScrollStrategy::Top);
@@ -215,9 +226,20 @@ impl StatusView {
             String::new()
         };
         let rows = code.rows();
+        let width = self.code_tree_width;
+        let width_strip = resize_handle::handle(
+            "code-tree-resize",
+            Edge::Right,
+            width,
+            resize::PANE,
+            |this: &mut StatusView, width, _| this.code_tree_width = width,
+            |this: &mut StatusView, _| this.code_tree_width = resize::CODE_TREE_DEFAULT,
+            cx,
+        );
         div()
+            .relative()
             .flex_none()
-            .w(px(TREE_WIDTH))
+            .w(px(width))
             .h_full()
             .flex()
             .flex_col()
@@ -275,6 +297,7 @@ impl StatusView {
                 .min_h(px(0.))
                 .into_any_element()
             })
+            .child(width_strip)
     }
 
     fn code_viewer(&self, cx: &mut Context<Self>) -> Div {
@@ -322,6 +345,7 @@ impl StatusView {
                             .font_family(theme::code_font())
                             .child(header_path.unwrap_or_default()),
                     )
+                    .children(self.code_view.picked.map(|range| comment_button(range, cx)))
                     .children(shown.map(|shown| {
                         div()
                             .flex_none()
@@ -331,6 +355,14 @@ impl StatusView {
                     })),
             )
             .child(body)
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.code_view.picking = false),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.code_view.picking = false),
+            )
     }
 
     /// The body of a file on screen: its lines, or one line saying why there are none.
@@ -347,7 +379,7 @@ impl StatusView {
                         move |this: &mut StatusView,
                               range: Range<usize>,
                               _window: &mut Window,
-                              _cx: &mut Context<StatusView>| {
+                              cx: &mut Context<StatusView>| {
                             let Some(shown) = this.model.code.on_screen() else {
                                 return Vec::new();
                             };
@@ -356,6 +388,7 @@ impl StatusView {
                             };
                             let columns = this.code_view.columns;
                             let marked = this.code_view.marked;
+                            let picked = this.code_view.picked;
                             range
                                 .map(|index| {
                                     let pieces = styled(
@@ -364,7 +397,16 @@ impl StatusView {
                                         columns,
                                         &shown.spans,
                                     );
-                                    code_line(index, &pieces, gutter, marked == Some(index))
+                                    let in_pick = picked.is_some_and(|(from, to)| {
+                                        (from.min(to)..=from.max(to)).contains(&index)
+                                    });
+                                    code_line(
+                                        index,
+                                        &pieces,
+                                        gutter,
+                                        marked == Some(index) || in_pick,
+                                        cx,
+                                    )
                                 })
                                 .collect()
                         },
@@ -383,6 +425,78 @@ impl StatusView {
             Content::Missing => notice("This file is not in the worktree now."),
             Content::Symlink(target) => notice(&format!("Symbolic link to {target}")),
             Content::Directory => notice("This is a folder."),
+        }
+    }
+}
+
+/// The 1-based lines of the file a pick covers, lowest first.
+fn picked_lines((from, to): (usize, usize)) -> (u32, u32) {
+    let line = |index: usize| u32::try_from(index + 1).unwrap_or(u32::MAX);
+    (line(from.min(to)), line(from.max(to)))
+}
+
+/// The header button that comments on the lines picked in the viewer.
+fn comment_button(range: (usize, usize), cx: &Context<StatusView>) -> Stateful<Div> {
+    let (start, end) = picked_lines(range);
+    div()
+        .id("code-comment")
+        .flex_none()
+        .px_2()
+        .h(px(22.))
+        .flex()
+        .items_center()
+        .rounded_md()
+        .border_1()
+        .border_color(theme::button_border())
+        .text_xs()
+        .cursor_pointer()
+        .child(format!(
+            "Comment on {}",
+            crate::review::range_label(start, end)
+        ))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.run_action(Action::CommentOnSelection, &Args::None, window, cx);
+            }),
+        )
+}
+
+impl StatusView {
+    /// A press on line number `index`: starts a pick there, or with Shift extends the last.
+    fn pick_code_start(&mut self, index: usize, shift: bool, cx: &mut Context<Self>) {
+        self.code_view.picked = match self.code_view.picked {
+            Some((from, _)) if shift => Some((from, index)),
+            _ => Some((index, index)),
+        };
+        self.code_view.picking = true;
+        cx.notify();
+    }
+
+    /// The pointer moved over line `index` with the press held.
+    fn pick_code_to(&mut self, index: usize, cx: &mut Context<Self>) {
+        if !self.code_view.picking {
+            return;
+        }
+        if let Some((from, to)) = self.code_view.picked
+            && to != index
+        {
+            self.code_view.picked = Some((from, index));
+            cx.notify();
+        }
+    }
+
+    /// The file and lines the Code viewer has picked, for a review comment (D141): the
+    /// viewer shows the file on disk, so its line numbers are the working tree's.
+    pub(crate) fn code_comment_spot(&self) -> CommentSpot<'_> {
+        let (Some(range), Some(shown)) = (self.code_view.picked, self.model.code.on_screen())
+        else {
+            return CommentSpot::Nothing;
+        };
+        let (start, end) = picked_lines(range);
+        CommentSpot::Lines {
+            path: &shown.path,
+            working: Some((start, end)),
         }
     }
 }
@@ -509,9 +623,21 @@ fn colored(pieces: &[Piece]) -> StyledText {
 }
 
 /// One line of the file: its number, then its text from the scrolled column, colored by role.
-fn code_line(index: usize, pieces: &[Piece], gutter: f32, marked: bool) -> AnyElement {
+fn code_line(
+    index: usize,
+    pieces: &[Piece],
+    gutter: f32,
+    marked: bool,
+    cx: &Context<StatusView>,
+) -> AnyElement {
     div()
+        .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+            if event.pressed_button == Some(MouseButton::Left) {
+                this.pick_code_to(index, cx);
+            }
+        }))
         .h(px(LINE_HEIGHT))
+        .w_full()
         .flex()
         .flex_row()
         .items_center()
@@ -524,7 +650,14 @@ fn code_line(index: usize, pieces: &[Piece], gutter: f32, marked: bool) -> AnyEl
                 .text_right()
                 .text_xs()
                 .text_color(theme::gutter())
-                .child((index + 1).to_string()),
+                .cursor_pointer()
+                .child((index + 1).to_string())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.pick_code_start(index, event.modifiers.shift, cx);
+                    }),
+                ),
         )
         .child(
             div()
@@ -540,6 +673,13 @@ fn code_line(index: usize, pieces: &[Piece], gutter: f32, marked: bool) -> AnyEl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pick_is_numbered_from_one_whichever_way_it_was_dragged() {
+        assert_eq!(picked_lines((6, 10)), (7, 11));
+        assert_eq!(picked_lines((10, 6)), (7, 11));
+        assert_eq!(picked_lines((0, 0)), (1, 1));
+    }
 
     #[test]
     fn sizes_read_in_bytes_kilobytes_and_megabytes() {

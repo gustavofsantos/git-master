@@ -13,6 +13,13 @@ pub const LEFT_DEFAULT: f32 = 420.;
 /// 1px bottom border.
 pub const COMMIT_DEFAULT: f32 = 77.;
 
+/// The Code file tree's width before the user drags it.
+pub const CODE_TREE_DEFAULT: f32 = 300.;
+/// The Workflows list's width before the user drags it.
+pub const WORKFLOW_LIST_DEFAULT: f32 = 260.;
+/// The Threads list's width before the user drags it.
+pub const THREAD_LIST_DEFAULT: f32 = 360.;
+
 /// The narrowest the main area is kept while the columns beside it are
 /// dragged wider. Below this the left column gives way first.
 pub const MAIN_MIN: f32 = 320.;
@@ -27,6 +34,12 @@ pub const SIDEBAR: Limits = Limits {
 pub const LEFT: Limits = Limits {
     min: 280.,
     max_fraction: 0.6,
+};
+/// The list or tree beside a page's content: at least 180px, at most half the
+/// window's width.
+pub const PANE: Limits = Limits {
+    min: 180.,
+    max_fraction: 0.5,
 };
 /// The commit message box: at least 72px, at most 50% of the window's height.
 pub const COMMIT: Limits = Limits {

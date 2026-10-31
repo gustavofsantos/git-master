@@ -5,7 +5,8 @@
 //! it through `run_action`, with `Actor::Human`, like every other path.
 
 use gpui::{
-    Context, Div, MouseButton, MouseDownEvent, Pixels, Point, Stateful, Window, div, prelude::*, px,
+    Context, Div, MouseButton, MouseDownEvent, Pixels, Point, Stateful, Window, anchored, deferred,
+    div, prelude::*, px,
 };
 
 use crate::action_registry::{Action, Args, Context as ActionContext, Reason};
@@ -16,12 +17,6 @@ use crate::view::StatusView;
 use crate::window_chrome;
 
 const ROW_HEIGHT: f32 = 24.;
-/// The gap a separator takes, its line included.
-const SEPARATOR_HEIGHT: f32 = 9.;
-/// The padding above and below the items.
-const PADDING: f32 = 8.;
-/// The confirmation panel: its text and its two buttons.
-const CONFIRM_HEIGHT: f32 = 2. * ROW_HEIGHT + PADDING;
 const MENU_WIDTH: f32 = 300.;
 /// The least space kept between a menu and the window's edges.
 const MARGIN: f32 = 4.;
@@ -298,14 +293,6 @@ pub(crate) fn sections(items: &[Item]) -> Vec<&[Item]> {
     items.chunk_by(|a, b| a.group == b.group).collect()
 }
 
-/// Where a menu of `size` opened at `at` sits in a window of `viewport`: under
-/// the pointer, pulled back in when it would run past the right or bottom edge.
-pub(crate) fn clamp_origin(at: (f32, f32), size: (f32, f32), viewport: (f32, f32)) -> (f32, f32) {
-    let x = at.0.min(viewport.0 - size.0 - MARGIN).max(0.);
-    let y = at.1.min(viewport.1 - size.1 - MARGIN).max(0.);
-    (x, y)
-}
-
 /// The menu on screen: what it was opened on, where, and the destructive item
 /// waiting for its confirmation.
 #[derive(Debug)]
@@ -504,26 +491,12 @@ impl StatusView {
 
     /// The menu and the layer under it that closes it on any click outside.
     /// Drawn last, so it sits above the whole window.
-    pub(crate) fn context_menu_layer(&self, window: &Window, cx: &Context<Self>) -> Div {
+    pub(crate) fn context_menu_layer(&self, cx: &Context<Self>) -> Div {
         let Some(open) = self.context_menu.open.as_ref() else {
             return div();
         };
         let items = self.menu_items(&open.target);
         let groups = sections(&items);
-        let height = if open.armed.is_some() {
-            CONFIRM_HEIGHT
-        } else {
-            let rows = lines(items.len()) * ROW_HEIGHT;
-            let separators = lines(groups.len().saturating_sub(1)) * SEPARATOR_HEIGHT;
-            rows + separators + PADDING
-        };
-        let viewport = window.viewport_size();
-        let (left, top) = clamp_origin(
-            (f32::from(open.position.x), f32::from(open.position.y)),
-            (MENU_WIDTH, height),
-            (f32::from(viewport.width), f32::from(viewport.height)),
-        );
-
         let outside = div()
             .absolute()
             .size_full()
@@ -550,20 +523,24 @@ impl StatusView {
             }
             body.into_any_element()
         };
-        div().absolute().inset_0().child(outside).child(
-            div()
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .w(px(MENU_WIDTH))
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::hairline_strong())
-                .rounded_md()
-                .shadow_lg()
-                .occlude()
-                .child(body),
-        )
+        // Anchored at the pointer and measured by GPUI, so the menu stays inside
+        // the window whatever its height.
+        div().absolute().inset_0().child(outside).child(deferred(
+            anchored()
+                .position(open.position)
+                .snap_to_window_with_margin(px(MARGIN))
+                .child(
+                    div()
+                        .w(px(MENU_WIDTH))
+                        .bg(theme::panel())
+                        .border_1()
+                        .border_color(theme::hairline_strong())
+                        .rounded_md()
+                        .shadow_lg()
+                        .occlude()
+                        .child(body),
+                ),
+        ))
     }
 
     /// One item: its title, and on the right its shortcut or, when it cannot run,
@@ -683,11 +660,6 @@ impl StatusView {
                     ),
             )
     }
-}
-
-/// A count as the pixels it takes; a menu never has 65 536 lines.
-fn lines(count: usize) -> f32 {
-    f32::from(u16::try_from(count).unwrap_or(u16::MAX))
 }
 
 fn separator() -> Div {
@@ -1192,16 +1164,5 @@ mod tests {
         }
         // Copying the hash runs even while the repository is busy.
         assert_eq!(find(&items, Action::CopyCommitHash).state, Ok(()));
-    }
-
-    #[test]
-    fn a_menu_is_pulled_back_inside_the_window() {
-        let size = (MENU_WIDTH, 100.);
-        let viewport = (800., 600.);
-        assert_eq!(clamp_origin((100., 50.), size, viewport), (100., 50.));
-        assert_eq!(
-            clamp_origin((780., 590.), size, viewport),
-            (800. - MENU_WIDTH - MARGIN, 600. - 100. - MARGIN)
-        );
     }
 }

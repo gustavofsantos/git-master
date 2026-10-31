@@ -475,6 +475,56 @@ pub struct Covered {
     pub working: Option<(u32, u32)>,
 }
 
+/// The lines of the file that the rows `from` to `to` show: context and added
+/// lines in order, without the removed ones, which the file no longer has.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Picked {
+    pub lines: Vec<String>,
+    /// Whether those lines follow each other in the file, with no line between
+    /// them that the picked rows skipped (a second hunk, say).
+    pub contiguous: bool,
+}
+
+impl Picked {
+    /// The lines joined with `\n`, as the engine looks for them in the file.
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.lines.join("\n")
+    }
+}
+
+/// What the rows `from` to `to` (both included, in either order) show of the file.
+#[must_use]
+pub fn picked(rows: &[Row], diffs: Diffs<'_>, from: usize, to: usize) -> Picked {
+    let (lo, hi) = (from.min(to), from.max(to));
+    let mut lines = Vec::new();
+    let mut contiguous = true;
+    let mut last: Option<u32> = None;
+    for row in rows.iter().take(hi + 1).skip(lo) {
+        let Row::Line {
+            side,
+            hunk_index,
+            line_index,
+        } = *row
+        else {
+            continue;
+        };
+        let Some(line) = diffs
+            .hunk(side, hunk_index)
+            .and_then(|hunk| hunk.lines.get(line_index))
+        else {
+            continue;
+        };
+        let Some(number) = line.new_no else { continue };
+        if last.is_some_and(|before| before.checked_add(1) != Some(number)) {
+            contiguous = false;
+        }
+        last = Some(number);
+        lines.push(line.text.clone());
+    }
+    Picked { lines, contiguous }
+}
+
 /// What the rows `from` to `to` (both included, in either order) cover.
 #[must_use]
 pub fn covered(rows: &[Row], diffs: Diffs<'_>, from: usize, to: usize) -> Covered {
@@ -994,6 +1044,34 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn picked_is_the_file_text_of_the_rows_without_the_removed_lines() {
+        let (rows, file, _) = fixture();
+        let all = picked(&rows, diffs(&file), 5, 1);
+        assert_eq!(all.lines, ["one", "TWO", "three", "four"]);
+        assert!(all.contiguous);
+        assert_eq!(all.text(), "one\nTWO\nthree\nfour");
+        // The removed line alone is not in the file.
+        assert!(picked(&rows, diffs(&file), 2, 2).lines.is_empty());
+        // The header row adds nothing.
+        assert_eq!(picked(&rows, diffs(&file), 0, 1).lines, ["one"]);
+    }
+
+    #[test]
+    fn picked_lines_across_two_hunks_are_not_contiguous() {
+        let mut file = file();
+        let mut second = file.hunks[0].clone();
+        second.id = HunkId("h2".into());
+        second.lines = vec![line(LineKind::Context, Some(10), Some(10), "ten")];
+        file.hunks.push(second);
+        let diffs = diffs(&file);
+        let rows = build_rows(diffs, Side::Unstaged);
+        let last = rows.len() - 1;
+        let across = picked(&rows, diffs, 5, last);
+        assert_eq!(across.lines, ["four", "ten"]);
+        assert!(!across.contiguous);
     }
 
     #[test]

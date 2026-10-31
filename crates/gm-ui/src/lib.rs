@@ -225,6 +225,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-f", OpenSearch, None),
         KeyBinding::new("alt-secondary-c", CopyCurrentBranch, None),
         KeyBinding::new("secondary-s", SaveWorkflow, None),
+        KeyBinding::new("secondary-shift-m", diff_pane::CommentOnSelection, None),
     ]);
     composer::bind_keys(cx);
     diff_pane::bind_keys(cx);
