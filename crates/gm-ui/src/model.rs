@@ -15,7 +15,8 @@ use crate::code_page::CodePage;
 use crate::commit_threads::CommitThreads;
 use crate::conflict_resolver::ResolverState;
 use crate::file_discard::Discarding;
-use crate::history_graph::GraphLayout;
+use crate::history_graph::{GraphLayout, StackMarks};
+use crate::history_scope::ScopeChoice;
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
 use crate::local_review::LocalReview;
@@ -76,6 +77,8 @@ pub struct Model {
     pub branches: Branches,
     /// The branch stacks the sidebar's By stack view draws, and the read in flight.
     pub stacks: Stacks,
+    /// The scope of the History list chosen for this window, and the one on screen.
+    pub(crate) history_scope: ScopeChoice,
     /// The branch dragged onto another to set its parent, while the drag runs.
     pub(crate) branch_drag: BranchDrag,
     /// The prepare-commit hooks: what is listed, the run and its suggestion.
@@ -423,6 +426,13 @@ impl HistoryList {
         }
     }
 
+    /// Lays the graph out again with the stack `marks` of a new snapshot (D139).
+    pub fn remark(&mut self, marks: StackMarks) {
+        if let Self::Shown(listing) = self {
+            listing.graph.remark(marks, &listing.history.commits);
+        }
+    }
+
     /// Records the request for the next page.
     pub fn request_page(&mut self, id: OperationId) {
         if let Self::Shown(listing) = self {
@@ -439,7 +449,8 @@ impl HistoryList {
         if listing.top == Some(id) {
             listing.top = None;
             listing.loaded = true;
-            listing.graph = GraphLayout::from_commits(&history.commits);
+            let marks = listing.graph.marks().clone();
+            listing.graph = GraphLayout::with_marks(marks, &history.commits);
             listing.history = history;
         } else if listing.page == Some(id) {
             listing.page = None;
@@ -862,6 +873,7 @@ impl Model {
                 None
             }
             Event::StacksLoaded { id, stacks } => {
+                self.history.remark(StackMarks::from_snapshot(&stacks));
                 self.stacks.loaded(id, stacks);
                 None
             }
@@ -871,6 +883,10 @@ impl Model {
             }
             Event::HistoryLoaded { id, history } => {
                 self.history.received(id, history);
+                // A list made before the first snapshot has no marks yet.
+                if let Some(snapshot) = self.stacks.snapshot() {
+                    self.history.remark(StackMarks::from_snapshot(snapshot));
+                }
                 None
             }
             Event::CommitDetailLoaded { id, detail } => {
@@ -1241,6 +1257,7 @@ impl Model {
         self.history = HistoryList::default();
         self.commit = CommitPane::Empty;
         self.stacks.clear();
+        self.history_scope.reset();
         self.stashes = StashList::default();
         self.stash_commit = CommitPane::Empty;
         self.stash_stack = OpenStack::default();

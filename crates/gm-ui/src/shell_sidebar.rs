@@ -6,7 +6,7 @@
 
 use std::ops::Range;
 
-use gm_schema::{BranchEntry, StackBranch, StackState};
+use gm_schema::{BranchEntry, HistoryScope, StackBranch, StackState};
 use gpui::{
     AnyElement, Context, Div, ElementId, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
     SharedString, Stateful, Subscription, Window, div, prelude::*, px, uniform_list,
@@ -787,8 +787,7 @@ fn tree_row(
                         .text_xs()
                         .child("HEAD")
                 }))
-                // A left click does nothing: there is no branch view yet, and
-                // switching on click is not what a click on a name should mean.
+                .on_mouse_down(MouseButton::Left, show_history_of(&name, cx))
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -806,6 +805,21 @@ fn tree_row(
                 .into_any_element()
         }
     }
+}
+
+/// The left click on a branch row: on the History page it shows the branch's
+/// history (One ref, D34); it never checks the branch out.
+fn show_history_of(
+    name: &str,
+    cx: &Context<StatusView>,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut gpui::App) + 'static {
+    let name = name.to_owned();
+    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+        if this.screen == Screen::History {
+            let scope = HistoryScope::Ref { name: name.clone() };
+            this.choose_history_scope(scope, cx);
+        }
+    })
 }
 
 /// The stack indicators after a branch name (D138): the amber dot of a stale

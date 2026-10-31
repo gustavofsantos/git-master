@@ -12,12 +12,14 @@ use gm_schema::{
 };
 use gpui::{
     App, ClickEvent, Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
-    PathBuilder, Pixels, Stateful, Window, canvas, div, img, point, prelude::*, px, uniform_list,
+    PathBuilder, Pixels, Stateful, Window, canvas, deferred, div, img, point, prelude::*, px,
+    uniform_list,
 };
 
 use crate::action_registry::{Action, Args, Context as ActionContext};
 use crate::avatar::{self, Avatars};
-use crate::history_graph::{self, Drawing, GraphRow, Tint};
+use crate::history_graph::{self, Drawing, GraphRow, StackMarks, Tint};
+use crate::history_scope;
 use crate::model::{CommitPage, CommitPane, HistoryList};
 use crate::shell_list::change_letter;
 use crate::shell_threads::chip;
@@ -34,6 +36,8 @@ const TIME_WIDTH: f32 = 96.;
 const ROW_PADDING: f32 = 16.;
 /// The stroke of a graph line, the radius of a node and of the ring around HEAD's.
 const LINE_WIDTH: f32 = 1.5;
+/// The length of a dash, and of the gap after it, on a lag edge (D25).
+const DASH: f32 = 3.0;
 const NODE_RADIUS: f32 = 3.5;
 const HEAD_RING_RADIUS: f32 = 6.;
 const DETAIL_WIDTH: f32 = 360.;
@@ -87,7 +91,15 @@ impl StatusView {
                     .justify_between()
                     .border_b_1()
                     .border_color(theme::hairline())
-                    .child(div().font_weight(FontWeight::MEDIUM).child("History"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .child(div().font_weight(FontWeight::MEDIUM).child("History"))
+                            .child(self.scope_pill(cx)),
+                    )
                     .child(div().text_xs().text_color(theme::muted()).child(count)),
             )
             .child(if self.model.commit_stack.is_open() {
@@ -117,6 +129,103 @@ impl StatusView {
                     ))
             })
     }
+}
+
+impl StatusView {
+    /// The scope pill of the history header (H6, D139): the scope on screen, and
+    /// its menu below it while open. A line that cannot be chosen says why.
+    fn scope_pill(&self, cx: &Context<Self>) -> Div {
+        let head = self.head_name();
+        let scope = self
+            .model
+            .history_scope
+            .effective(head.as_deref(), &self.model.stacks);
+        let pill = div()
+            .id("history-scope")
+            .px_2()
+            .h(px(22.))
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded_full()
+            .border_1()
+            .border_color(theme::hairline_strong())
+            .text_xs()
+            .text_color(theme::text())
+            .cursor_pointer()
+            .hover(|style| style.bg(theme::selected_row()))
+            .child(history_scope::label(&scope))
+            .child(div().text_color(theme::muted()).child("▾"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.history_scope_menu = !this.history_scope_menu;
+                    cx.notify();
+                }),
+            );
+        let menu = self.history_scope_menu.then(|| {
+            let lines = history_scope::options(&scope, head.as_deref(), &self.model.stacks);
+            div()
+                .absolute()
+                .top(px(26.))
+                .left_0()
+                .w(px(260.))
+                .py_1()
+                .flex()
+                .flex_col()
+                .bg(theme::panel())
+                .border_1()
+                .border_color(theme::hairline_strong())
+                .rounded_md()
+                .shadow_lg()
+                .occlude()
+                .children(lines.into_iter().map(|line| scope_line(line, cx)))
+        });
+        // Deferred, so it paints over the commit rows that come after the header.
+        div()
+            .relative()
+            .child(pill)
+            .children(menu.map(|menu| deferred(menu).with_priority(1)))
+    }
+}
+
+/// One line of the scope menu: a check on the scope on screen, the title, and
+/// the reason when it cannot be chosen.
+fn scope_line(line: history_scope::ScopeOption, cx: &Context<StatusView>) -> Stateful<Div> {
+    let enabled = line.state.is_ok();
+    let reason = line.state.err();
+    div()
+        .id(line.title)
+        .px_3()
+        .py_1()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .text_sm()
+        .when(enabled, |row| {
+            row.cursor_pointer()
+                .hover(|style| style.bg(theme::selected_row()))
+        })
+        .when(!enabled, |row| row.text_color(theme::muted()))
+        .child(
+            div()
+                .w(px(12.))
+                .flex_none()
+                .text_color(theme::accent())
+                .child(if line.current { "✓" } else { "" }),
+        )
+        .child(div().flex_1().child(line.title))
+        .children(reason.map(|reason| div().text_xs().text_color(theme::muted()).child(reason)))
+        .when_some(line.scope.filter(|_| enabled), |row, scope| {
+            row.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.choose_history_scope(scope.clone(), cx);
+                }),
+            )
+        })
 }
 
 fn message(text: &'static str) -> Div {
@@ -149,7 +258,8 @@ fn history_list(count: usize, cx: &mut Context<StatusView>) -> Div {
                     };
                     let now = now_secs();
                     let selected = listing.selected.as_deref();
-                    let graph_width = history_graph::graph_width(&listing.graph);
+                    let width = history_graph::graph_width(&listing.graph);
+                    let marks = listing.graph.marks();
                     listing
                         .history
                         .commits
@@ -159,8 +269,12 @@ fn history_list(count: usize, cx: &mut Context<StatusView>) -> Div {
                         .zip(range)
                         .map(|(commit, index)| {
                             let is_selected = selected == Some(commit.oid.as_str());
-                            let graph = listing.graph.row(index);
-                            commit_row(commit, index, now, is_selected, graph, graph_width, cx)
+                            let graph = RowGraph {
+                                row: listing.graph.row(index),
+                                width,
+                                marks,
+                            };
+                            commit_row(commit, index, now, is_selected, &graph, cx)
                         })
                         .collect()
                 },
@@ -171,15 +285,35 @@ fn history_list(count: usize, cx: &mut Context<StatusView>) -> Div {
     )
 }
 
+/// What a commit row draws of the graph: its row of the layout, the width of the
+/// graph column and the stack marks the layout was made with.
+struct RowGraph<'a> {
+    row: Option<&'a GraphRow>,
+    width: f32,
+    marks: &'a StackMarks,
+}
+
 fn commit_row(
     commit: &CommitSummary,
     index: usize,
     now: i64,
     selected: bool,
-    graph: Option<&GraphRow>,
-    graph_width: f32,
+    graph: &RowGraph<'_>,
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
+    let graph_width = graph.width;
+    // Each branch's badge follows its own chip, so it is never read as another's.
+    let chips: Vec<Div> = commit
+        .refs
+        .iter()
+        .flat_map(|label| {
+            let behind = (label.kind == RefKind::Branch)
+                .then(|| graph.marks.behind(&label.name))
+                .flatten();
+            std::iter::once(ref_chip(label)).chain(behind.map(behind_badge))
+        })
+        .collect();
+    let graph = graph.row;
     let oid = commit.oid.clone();
     let is_head = commit.refs.iter().any(|label| label.kind == RefKind::Head);
     div()
@@ -216,7 +350,7 @@ fn commit_row(
                 .items_center()
                 .gap_2()
                 .overflow_hidden()
-                .children(commit.refs.iter().map(ref_chip))
+                .children(chips)
                 .child(
                     div()
                         .flex_1()
@@ -251,7 +385,7 @@ fn commit_row(
 /// `history_graph::drawing`; this paints it.
 fn graph_cell(row: &GraphRow, width: f32, is_head: bool) -> Div {
     let drawn = history_graph::drawing(row, ROW_HEIGHT);
-    let node_tint = row.tint;
+    let node_tint = row.node_tint;
     let overflow = history_graph::overflow_label(row);
     div()
         .absolute()
@@ -286,6 +420,7 @@ fn tint_color(tint: Tint) -> Hsla {
     match tint {
         Tint::Trunk => theme::graph_trunk(),
         Tint::Slot(slot) => theme::graph_lane(slot),
+        Tint::Lag => theme::warn_fg(),
     }
 }
 
@@ -301,6 +436,9 @@ fn paint_graph(
     let at = |(x, y): (f32, f32)| point(origin.x + px(x), origin.y + px(y));
     for line in &drawn.lines {
         let mut path = PathBuilder::stroke(px(LINE_WIDTH));
+        if line.dashed {
+            path = path.dash_array(&[px(DASH), px(DASH)]);
+        }
         path.move_to(at(line.from));
         if (line.from.0 - line.to.0).abs() < f32::EPSILON {
             path.line_to(at(line.to));
@@ -348,6 +486,20 @@ fn paint_circle(
     if let Ok(path) = path.build() {
         window.paint_path(path, color);
     }
+}
+
+/// The badge of a branch tip that is behind its parent (D25): amber, and the
+/// words say it, so the colour is not the only signal.
+fn behind_badge(count: u32) -> Div {
+    let commits = if count == 1 { "commit" } else { "commits" };
+    div()
+        .flex_none()
+        .px_1p5()
+        .rounded_sm()
+        .text_xs()
+        .bg(theme::warn_bg())
+        .text_color(theme::warn_fg())
+        .child(format!("{count} {commits} behind parent"))
 }
 
 /// A ref as a small chip: HEAD in the accent colour, branches in the selection

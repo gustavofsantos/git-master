@@ -25,8 +25,15 @@
 //! the colour of that name (`main`, `master` and `trunk` are the trunk colour);
 //! any other lane takes the colour of the oid it starts waiting for. Both are
 //! a hash with a fixed definition, so a colour is the same in every session.
+//!
+//! Stacks (D25, D139) come in as [`StackMarks`], read from the stack snapshot,
+//! never from names: a node owned by a stack branch takes that branch's colour,
+//! and the first-parent edge from the oldest own commit of a branch that is
+//! behind its parent is dashed and amber down to the commit it was based on.
 
-use gm_schema::{CommitSummary, RefKind};
+use std::collections::{HashMap, HashSet};
+
+use gm_schema::{CommitSummary, OWN_COMMITS_LIMIT, RefKind, StackSnapshot};
 
 use crate::theme::GRAPH_SLOTS;
 use crate::worktree_list::name_hash;
@@ -41,6 +48,63 @@ pub enum Tint {
     Trunk,
     /// One of `GRAPH_SLOTS` accents.
     Slot(usize),
+    /// The amber of a stack branch that is behind its parent (D25).
+    Lag,
+}
+
+/// What the stack snapshot says about the commits of the graph (D139).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StackMarks {
+    /// The stack branch that owns each commit: the first, in the walk of each
+    /// stack (parents first), whose own commits list it.
+    owners: HashMap<String, String>,
+    /// The oldest own commit of each branch behind its parent: its first-parent
+    /// edge is the dashed one.
+    lag_starts: HashSet<String>,
+    /// How many commits each branch behind its parent lacks.
+    behind: HashMap<String, u32>,
+}
+
+impl StackMarks {
+    #[must_use]
+    pub fn from_snapshot(snapshot: &StackSnapshot) -> Self {
+        let mut marks = Self::default();
+        for entry in snapshot.stacks.iter().flat_map(|stack| &stack.branches) {
+            for oid in &entry.commits {
+                marks
+                    .owners
+                    .entry(oid.clone())
+                    .or_insert_with(|| entry.name.clone());
+            }
+            if entry.behind == 0 || entry.parent.is_none() {
+                continue;
+            }
+            marks.behind.insert(entry.name.clone(), entry.behind);
+            // A cut list does not reach the oldest commit, so no edge is dashed.
+            if entry.commits.len() < OWN_COMMITS_LIMIT
+                && let Some(oldest) = entry.commits.last()
+            {
+                marks.lag_starts.insert(oldest.clone());
+            }
+        }
+        marks
+    }
+
+    /// The stack branch that owns commit `oid`, if one does.
+    #[must_use]
+    pub fn owner(&self, oid: &str) -> Option<&str> {
+        self.owners.get(oid).map(String::as_str)
+    }
+
+    /// How many commits branch `name` is behind its parent; `None` when it is not.
+    #[must_use]
+    pub fn behind(&self, name: &str) -> Option<u32> {
+        self.behind.get(name).copied()
+    }
+
+    fn starts_lag(&self, oid: &str) -> bool {
+        self.lag_starts.contains(oid)
+    }
 }
 
 /// A line at the edge of a row: the column it is in and its colour.
@@ -48,6 +112,8 @@ pub enum Tint {
 pub struct Link {
     pub column: usize,
     pub tint: Tint,
+    /// The line is part of a lag edge (D25).
+    pub dashed: bool,
 }
 
 /// A line that crosses a row from one column at the top to another at the
@@ -57,6 +123,7 @@ pub struct Shift {
     pub from: usize,
     pub to: usize,
     pub tint: Tint,
+    pub dashed: bool,
 }
 
 /// What one row draws. The row is cut in two halves at the node: lines above
@@ -65,9 +132,16 @@ pub struct Shift {
 pub struct GraphRow {
     /// The column of the node.
     pub column: usize,
+    /// The colour of the node's lane: of the line that reaches the node from the
+    /// top, unless that line is dashed.
     pub tint: Tint,
+    /// The colour of the node: its owner's when a stack branch owns the commit,
+    /// else the lane's.
+    pub node_tint: Tint,
     /// A line reaches the node from the top edge: some lane waited for it.
     pub incoming: bool,
+    /// That line is the end of a lag edge, dashed and amber.
+    pub incoming_dashed: bool,
     /// Lanes that go straight through the row, top to bottom.
     pub through: Vec<Link>,
     /// Other lanes that wait for this commit: they end at the node, coming
@@ -87,6 +161,7 @@ pub struct GraphRow {
 struct Lane {
     expects: String,
     tint: Tint,
+    dashed: bool,
 }
 
 /// The graph of the commits read so far, and the lanes still open below them.
@@ -95,15 +170,34 @@ pub struct GraphLayout {
     rows: Vec<GraphRow>,
     lanes: Vec<Option<Lane>>,
     columns: usize,
+    /// Boxed: three maps, kept beside every listing.
+    marks: Box<StackMarks>,
 }
 
 impl GraphLayout {
-    /// The layout of `commits`, in one pass.
+    /// The layout of `commits` with the stack `marks`, in one pass.
     #[must_use]
-    pub fn from_commits(commits: &[CommitSummary]) -> Self {
-        let mut layout = Self::default();
+    pub fn with_marks(marks: StackMarks, commits: &[CommitSummary]) -> Self {
+        let mut layout = Self {
+            marks: Box::new(marks),
+            ..Self::default()
+        };
         layout.extend(commits);
         layout
+    }
+
+    /// The layout again with new stack `marks`, over the same `commits`. Nothing
+    /// is redone when the marks did not change.
+    pub fn remark(&mut self, marks: StackMarks, commits: &[CommitSummary]) {
+        if marks != *self.marks {
+            *self = Self::with_marks(marks, commits);
+        }
+    }
+
+    /// The stack marks the layout was made with.
+    #[must_use]
+    pub fn marks(&self) -> &StackMarks {
+        &self.marks
     }
 
     /// Adds the next commits of the walk, which follow the ones laid out.
@@ -143,10 +237,14 @@ impl GraphLayout {
             .map(|(column, _)| column)
             .collect();
         let incoming = !waiting.is_empty();
+        // A dashed lane ends here: the lane below the node starts a colour of its own.
+        let incoming_dashed = waiting.first().is_some_and(|&at| self.lane_dashed(at));
         let (column, tint) = match waiting.first() {
-            Some(&column) => (column, self.lane_tint(column)),
+            Some(&column) if !incoming_dashed => (column, self.lane_tint(column)),
+            Some(&column) => (column, tip_tint(commit)),
             None => (self.free_column(), tip_tint(commit)),
         };
+        let node_tint = self.marks.owner(&commit.oid).map_or(tint, named_tint);
 
         let mut through: Vec<Link> = self
             .lanes
@@ -157,6 +255,7 @@ impl GraphLayout {
                 lane.as_ref().map(|lane| Link {
                     column: at,
                     tint: lane.tint,
+                    dashed: lane.dashed,
                 })
             })
             .collect();
@@ -165,6 +264,7 @@ impl GraphLayout {
             .map(|&at| Link {
                 column: at,
                 tint: self.lane_tint(at),
+                dashed: self.lane_dashed(at),
             })
             .collect();
         for &at in &waiting {
@@ -185,8 +285,10 @@ impl GraphLayout {
             .fold(column, usize::max);
         GraphRow {
             column,
-            tint,
+            tint: if incoming_dashed { Tint::Lag } else { tint },
+            node_tint,
             incoming,
+            incoming_dashed,
             through,
             converging,
             outgoing,
@@ -208,6 +310,13 @@ impl GraphLayout {
         let mut outgoing = Vec::new();
         let mut shifts = Vec::new();
         let mut parents: Vec<&str> = Vec::new();
+        // The first-parent edge of a lag start is dashed and amber down to its parent.
+        let lag = self.marks.starts_lag(&commit.oid);
+        let (first_tint, first_dashed) = if lag {
+            (Tint::Lag, true)
+        } else {
+            (tint, false)
+        };
         for parent in &commit.parents {
             if parents.contains(&parent.as_str()) {
                 continue;
@@ -219,19 +328,42 @@ impl GraphLayout {
                     outgoing.push(Link {
                         column: at,
                         tint: self.lane_tint(at),
+                        dashed: self.lane_dashed(at),
                     });
                 } else {
                     let at = self.free_column();
                     let tint = Tint::Slot(slot_of(parent));
-                    self.set_lane(at, parent, tint);
-                    outgoing.push(Link { column: at, tint });
+                    self.set_lane(at, parent, tint, false);
+                    outgoing.push(Link {
+                        column: at,
+                        tint,
+                        dashed: false,
+                    });
                 }
                 continue;
             }
             match existing {
+                // Another line already waits for the parent: the dashed part is
+                // the line from the node to it.
+                Some(at) if at < column && lag => outgoing.push(Link {
+                    column: at,
+                    tint: Tint::Lag,
+                    dashed: true,
+                }),
+                // A solid line joining a dashed lane wins: below the join the lane
+                // carries this line's history too, so it is drawn solid.
+                Some(at) if at < column && self.lane_dashed(at) => {
+                    self.set_lane(at, parent, tint, false);
+                    outgoing.push(Link {
+                        column: at,
+                        tint,
+                        dashed: false,
+                    });
+                }
                 Some(at) if at < column => outgoing.push(Link {
                     column: at,
                     tint: self.lane_tint(at),
+                    dashed: false,
                 }),
                 Some(at) => {
                     // The lane on the right shifts into the node's column.
@@ -239,15 +371,24 @@ impl GraphLayout {
                         from: at,
                         to: column,
                         tint: self.lane_tint(at),
+                        dashed: self.lane_dashed(at),
                     });
                     through.retain(|link| link.column != at);
                     self.lanes[at] = None;
-                    self.set_lane(column, parent, tint);
-                    outgoing.push(Link { column, tint });
+                    self.set_lane(column, parent, first_tint, first_dashed);
+                    outgoing.push(Link {
+                        column,
+                        tint: first_tint,
+                        dashed: first_dashed,
+                    });
                 }
                 None => {
-                    self.set_lane(column, parent, tint);
-                    outgoing.push(Link { column, tint });
+                    self.set_lane(column, parent, first_tint, first_dashed);
+                    outgoing.push(Link {
+                        column,
+                        tint: first_tint,
+                        dashed: first_dashed,
+                    });
                 }
             }
         }
@@ -258,6 +399,10 @@ impl GraphLayout {
         self.lanes[column]
             .as_ref()
             .map_or(Tint::Slot(0), |lane| lane.tint)
+    }
+
+    fn lane_dashed(&self, column: usize) -> bool {
+        self.lanes[column].as_ref().is_some_and(|lane| lane.dashed)
     }
 
     fn waiting_for(&self, oid: &str) -> Option<usize> {
@@ -274,19 +419,26 @@ impl GraphLayout {
             .unwrap_or(self.lanes.len())
     }
 
-    fn set_lane(&mut self, column: usize, expects: &str, tint: Tint) {
+    fn set_lane(&mut self, column: usize, expects: &str, tint: Tint, dashed: bool) {
         if column >= self.lanes.len() {
             self.lanes.resize(column + 1, None);
         }
         self.lanes[column] = Some(Lane {
             expects: expects.to_owned(),
             tint,
+            dashed,
         });
     }
 }
 
 #[cfg(test)]
 impl GraphLayout {
+    /// The layout of `commits` without stacks, in one pass.
+    #[must_use]
+    pub fn from_commits(commits: &[CommitSummary]) -> Self {
+        Self::with_marks(StackMarks::default(), commits)
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.rows.len()
     }
@@ -344,6 +496,8 @@ pub struct Line {
     pub from: (f32, f32),
     pub to: (f32, f32),
     pub tint: Tint,
+    /// Painted dashed: part of a lag edge (D25).
+    pub dashed: bool,
 }
 
 /// What the graph column of one row paints.
@@ -383,29 +537,51 @@ pub fn graph_width(layout: &GraphLayout) -> f32 {
 pub fn drawing(row: &GraphRow, height: f32) -> Drawing {
     let middle = height / 2.0;
     let mut lines = Vec::new();
-    let mut add = |from: (usize, f32), to: (usize, f32), tint: Tint| {
+    let mut add = |from: (usize, f32), to: (usize, f32), tint: Tint, dashed: bool| {
         if from.0 < MAX_COLUMNS && to.0 < MAX_COLUMNS {
             lines.push(Line {
                 from: (column_x(from.0), from.1),
                 to: (column_x(to.0), to.1),
                 tint,
+                dashed,
             });
         }
     };
     for link in &row.through {
-        add((link.column, 0.0), (link.column, height), link.tint);
+        add(
+            (link.column, 0.0),
+            (link.column, height),
+            link.tint,
+            link.dashed,
+        );
     }
     if row.incoming {
-        add((row.column, 0.0), (row.column, middle), row.tint);
+        let at = (row.column, 0.0);
+        add(at, (row.column, middle), row.tint, row.incoming_dashed);
     }
     for link in &row.converging {
-        add((link.column, 0.0), (row.column, middle), link.tint);
+        add(
+            (link.column, 0.0),
+            (row.column, middle),
+            link.tint,
+            link.dashed,
+        );
     }
     for link in &row.outgoing {
-        add((row.column, middle), (link.column, height), link.tint);
+        add(
+            (row.column, middle),
+            (link.column, height),
+            link.tint,
+            link.dashed,
+        );
     }
     for shift in &row.shifts {
-        add((shift.from, 0.0), (shift.to, height), shift.tint);
+        add(
+            (shift.from, 0.0),
+            (shift.to, height),
+            shift.tint,
+            shift.dashed,
+        );
     }
     Drawing {
         lines,
@@ -502,7 +678,8 @@ mod tests {
             [Shift {
                 from: 1,
                 to: 0,
-                tint: feat.tint
+                tint: feat.tint,
+                dashed: false,
             }]
         );
         assert!(main.through.is_empty());
@@ -528,7 +705,8 @@ mod tests {
             y.outgoing,
             [Link {
                 column: 0,
-                tint: layout.row(0).unwrap().tint
+                tint: layout.row(0).unwrap().tint,
+                dashed: false,
             }]
         );
         assert_eq!(layout.open_lanes(), 0);
@@ -980,5 +1158,125 @@ mod tests {
             paged.extend(&commits[cut..]);
             prop_assert_eq!(whole, paged);
         }
+    }
+
+    /// main: m2 -> init; base: b1 -> init (behind main by m2); top: t1 -> b1.
+    /// `--topo-order` lists t1, b1, m2, init.
+    fn stacked() -> (Vec<CommitSummary>, StackSnapshot) {
+        use gm_schema::{Stack, StackBranch, StackState};
+        let entry = |name: &str, parent: Option<&str>, behind, commits: &[&str]| StackBranch {
+            name: name.into(),
+            parent: parent.map(str::to_owned),
+            depth: 0,
+            state: StackState::Current,
+            ahead: 0,
+            behind,
+            restack: 0,
+            commits: commits.iter().map(|c| (*c).to_owned()).collect(),
+        };
+        let commits = vec![
+            labelled(commit("t1", &["b1"]), "top"),
+            labelled(commit("b1", &["init"]), "base"),
+            labelled(commit("m2", &["init"]), "main"),
+            commit("init", &[]),
+        ];
+        let snapshot = StackSnapshot {
+            stacks: vec![Stack {
+                branches: vec![
+                    entry("main", None, 0, &[]),
+                    entry("base", Some("main"), 1, &["b1"]),
+                    entry("top", Some("base"), 0, &["t1"]),
+                ],
+            }],
+            looped: Vec::new(),
+        };
+        (commits, snapshot)
+    }
+
+    #[test]
+    fn marks_come_from_the_snapshot_not_the_names() {
+        let (_, snapshot) = stacked();
+        let marks = StackMarks::from_snapshot(&snapshot);
+        assert_eq!(marks.owner("t1"), Some("top"));
+        assert_eq!(marks.owner("b1"), Some("base"));
+        assert_eq!(marks.owner("init"), None);
+        assert_eq!(marks.behind("base"), Some(1));
+        assert_eq!(marks.behind("top"), None);
+        assert!(marks.starts_lag("b1"));
+        assert!(!marks.starts_lag("t1"));
+    }
+
+    #[test]
+    fn a_branch_behind_its_parent_draws_its_first_edge_dashed_down_to_its_base() {
+        let (commits, snapshot) = stacked();
+        let layout = GraphLayout::with_marks(StackMarks::from_snapshot(&snapshot), &commits);
+        // b1 leaves dashed and amber.
+        let b1 = layout.row(1).unwrap();
+        assert!(
+            b1.outgoing
+                .iter()
+                .all(|link| link.dashed && link.tint == Tint::Lag)
+        );
+        assert_eq!(b1.node_tint, named_tint("base"));
+        // The dashed lane passes m2's row, where main's own line joins it.
+        let m2 = layout.row(2).unwrap();
+        assert!(m2.through.iter().any(|link| link.dashed));
+        assert!(m2.outgoing.iter().all(|link| !link.dashed));
+        // Below the join the lane carries main's history too: solid into init,
+        // whose node keeps a colour of its own.
+        let init = layout.row(3).unwrap();
+        assert!(!init.incoming_dashed);
+        assert!(init.converging.iter().all(|link| !link.dashed));
+        assert_ne!(init.node_tint, Tint::Lag);
+        // top is current: its edge is plain.
+        let t1 = layout.row(0).unwrap();
+        assert!(t1.outgoing.iter().all(|link| !link.dashed));
+        assert_eq!(t1.node_tint, named_tint("top"));
+    }
+
+    #[test]
+    fn without_marks_nothing_is_dashed_and_new_marks_redo_the_rows() {
+        let (commits, snapshot) = stacked();
+        let mut layout = GraphLayout::from_commits(&commits);
+        let dashed = |layout: &GraphLayout| {
+            (0..layout.len()).any(|index| {
+                let row = layout.row(index).unwrap();
+                row.incoming_dashed
+                    || row
+                        .outgoing
+                        .iter()
+                        .chain(&row.through)
+                        .any(|link| link.dashed)
+            })
+        };
+        assert!(!dashed(&layout));
+        layout.remark(StackMarks::from_snapshot(&snapshot), &commits);
+        assert!(dashed(&layout));
+        assert_eq!(layout.len(), commits.len());
+        // Drawing turns a dashed link into a dashed line.
+        let lines = drawing(layout.row(1).unwrap(), 48.0).lines;
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.dashed && line.tint == Tint::Lag)
+        );
+    }
+
+    #[test]
+    fn a_cut_list_draws_no_dashed_edge() {
+        let (commits, mut snapshot) = stacked();
+        let base = &mut snapshot.stacks[0].branches[1];
+        base.commits = (0..OWN_COMMITS_LIMIT).map(|n| format!("c{n}")).collect();
+        let marks = StackMarks::from_snapshot(&snapshot);
+        assert_eq!(marks.behind("base"), Some(1));
+        let layout = GraphLayout::with_marks(marks, &commits);
+        assert!(
+            layout
+                .row(1)
+                .unwrap()
+                .outgoing
+                .iter()
+                .all(|link| !link.dashed)
+        );
     }
 }

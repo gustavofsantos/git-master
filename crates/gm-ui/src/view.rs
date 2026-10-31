@@ -10,7 +10,9 @@ use std::time::Duration;
 use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
 use gm_core::watch::{Notice, Notices, WatchHandle};
-use gm_schema::{Actor, CommandKind, DiffSide, Event, FileDiff, OperationId, OperationState};
+use gm_schema::{
+    Actor, CommandKind, DiffSide, Event, FileDiff, HistoryScope, OperationId, OperationState,
+};
 use gpui::{
     ClipboardItem, Context, Div, Entity, FocusHandle, KeyDownEvent, Render, ScrollHandle,
     Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
@@ -175,6 +177,8 @@ pub struct StatusView {
     pub(crate) new_branch_dialog: Option<NewBranchDialog>,
     /// The branch Set Parent… was run on, while the palette picks its parent.
     pub(crate) stack_subject: Option<String>,
+    /// The History scope pill's menu is open.
+    pub(crate) history_scope_menu: bool,
     /// The stash dialog, while it is open (B2).
     pub(crate) new_stash_dialog: Option<NewStashDialog>,
     /// The review comment composer, while it is open (B4c).
@@ -418,6 +422,7 @@ impl StatusView {
             prune_dialog: None,
             new_branch_dialog: None,
             stack_subject: None,
+            history_scope_menu: false,
             new_stash_dialog: None,
             review_dialog: None,
             workflow_inputs_dialog: None,
@@ -505,6 +510,7 @@ impl StatusView {
 
     fn on_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         let reload = matches!(event, Event::StatusLoaded { .. });
+        let stacks_loaded = matches!(event, Event::StacksLoaded { .. });
         let listed = matches!(event, Event::BranchesLoaded { .. });
         let stashes_listed = matches!(event, Event::StashesListed { .. });
         let threads_flags = shell_threads::follow_flags(&event);
@@ -599,9 +605,7 @@ impl StatusView {
         }
         // The watcher refreshes the status when HEAD or a ref moves; the open
         // history re-reads its top then, so an outside commit shows up.
-        if reload && self.screen == Screen::History && self.model.history.can_refresh() {
-            self.refresh_history();
-        }
+        self.follow_history(reload, stacks_loaded);
         // The Stashes page reads its list again after every status refresh (B2). A
         // repository open ends with a status too, so it reads the list then.
         if reload && self.screen == Screen::Stashes {
@@ -710,7 +714,7 @@ impl StatusView {
             .children((self.screen == Screen::Conflicts).then(|| self.conflicts_page(cx)))
     }
 
-    fn head_name(&self) -> Option<String> {
+    pub(crate) fn head_name(&self) -> Option<String> {
         self.model
             .status()
             .and_then(|status| status.branch.head.clone())
@@ -894,15 +898,46 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Asks for the first page. A list already shown stays until the answer comes.
+    /// Asks for the first page of the scope to read now (D139). A list already
+    /// shown stays until the answer comes.
     pub(crate) fn refresh_history(&mut self) {
-        let id = self.engine.dispatch(
-            Actor::Human,
-            CommandKind::LoadHistory {
-                scope: gm_schema::HistoryScope::default(),
-            },
-        );
+        let head = self.head_name();
+        let scope = self
+            .model
+            .history_scope
+            .effective(head.as_deref(), &self.model.stacks);
+        self.model.history_scope.loaded(scope.clone());
+        let id = self
+            .engine
+            .dispatch(Actor::Human, CommandKind::LoadHistory { scope });
         self.model.history.request_top(id);
+    }
+
+    /// Reads the History list again when it is open and a status refresh came, or
+    /// a stack snapshot changed the scope to read (the first one does, when HEAD
+    /// is in a stack).
+    fn follow_history(&mut self, reload: bool, stacks_loaded: bool) {
+        if self.screen != Screen::History || !self.model.history.can_refresh() {
+            return;
+        }
+        let head = self.head_name();
+        let stale = stacks_loaded
+            && self
+                .model
+                .history_scope
+                .stale(head.as_deref(), &self.model.stacks);
+        if reload || stale {
+            self.refresh_history();
+        }
+    }
+
+    /// Shows the history of `scope`, chosen in the pill's menu or by a click on a
+    /// sidebar branch on the History page.
+    pub(crate) fn choose_history_scope(&mut self, scope: HistoryScope, cx: &mut Context<Self>) {
+        self.history_scope_menu = false;
+        self.model.history_scope.choose(scope);
+        self.refresh_history();
+        cx.notify();
     }
 
     /// Asks for the page after the last commit listed, when there is one to ask for.

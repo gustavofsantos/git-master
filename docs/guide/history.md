@@ -139,7 +139,7 @@ The default branch is the branch of `origin/HEAD`, else the first of `main`, `ma
 The graph reads the stack metadata, never the branch names, to draw stacks:
 
 - Each commit belongs to the branch whose recorded range contains it: from the commit the branch was based on to the branch tip. The node of a commit takes the color of the branch that owns it. A commit that no stack branch owns keeps the color of its lane.
-- When a branch is behind its parent, because the parent has commits the branch does not have, the edge from the branch's first commit down to the commit it was based on is dashed and amber. The tip of the branch shows the badge **N commits behind parent**. A branch with no commits of its own shows only the badge.
+- When a branch is behind its parent, because the parent has commits the branch does not have, the edge from the branch's first commit is dashed and amber down to the commit it was based on, or down to where it meets the line of its parent, which is drawn solid from there. The tip of the branch shows the badge **N commits behind parent**. A branch with no commits of its own shows only the badge.
 - The dashed edge and the badge carry the state, so color is never the only signal.
 
 > **Planned.** The **Commits | Stacks** switch is not available yet.

@@ -24,6 +24,7 @@ mod editor;
 mod file_discard;
 mod fuzzy;
 mod history_graph;
+mod history_scope;
 mod hook_run;
 mod icon;
 mod local_review;
