@@ -94,3 +94,25 @@ impl RestackPlan {
                 .any(|branch| branch.block.is_none() && branch.new_tip.is_some())
     }
 }
+
+/// One branch a restack moved, with what undo needs to put it back (D142).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RestackMove {
+    pub name: String,
+    pub parent: String,
+    pub old_tip: String,
+    pub new_tip: String,
+    /// The recorded base before; `None` when the branch had none.
+    pub old_base: Option<String>,
+    /// The parent's tip the branch now sits on, recorded as its base.
+    pub new_base: String,
+}
+
+/// A restack that ran, kept in `.git/gitmaster/restack.json` until it is undone
+/// or the next one replaces it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RestackRecord {
+    pub plan_id: String,
+    pub from: String,
+    pub moves: Vec<RestackMove>,
+}

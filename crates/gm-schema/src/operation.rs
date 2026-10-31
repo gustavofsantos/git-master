@@ -11,7 +11,7 @@ use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::hook::{HookFailure, HookInfo};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
-use crate::restack::RestackPlan;
+use crate::restack::{RestackPlan, RestackRecord};
 use crate::review::{ReviewChange, ReviewComment};
 use crate::stack::StackSnapshot;
 use crate::stash::StashEntry;
@@ -196,6 +196,19 @@ pub enum CommandKind {
     PlanRestack {
         branch: String,
     },
+    /// Runs the restack `PlanRestack { branch }` answers with `plan_id`: moves
+    /// every branch of the plan that is not blocked to its new tip in one ref
+    /// transaction, then records the new bases (D142). Refused when the plan
+    /// changed since, and when it cannot apply. Answers `RestackFinished`. Human
+    /// only.
+    ApplyRestack {
+        branch: String,
+        plan_id: String,
+    },
+    /// Puts back every branch and base of the last restack, in one ref
+    /// transaction. Refused when a branch moved since. Answers `RestackFinished`
+    /// with no record. Human only.
+    UndoRestack,
     /// Creates the local branch `name` at the tip of the local branch `parent`
     /// and records `parent` as its stack parent, with that tip as its base
     /// (D138). Checks it out when `checkout` is set. Human only.
@@ -716,6 +729,12 @@ pub enum Event {
     RestackPlanned {
         id: OperationId,
         plan: RestackPlan,
+    },
+    /// Answers `ApplyRestack` (the record that undo will use) and `UndoRestack`
+    /// (`None`); the branches, the status and the stacks follow.
+    RestackFinished {
+        id: OperationId,
+        record: Option<RestackRecord>,
     },
     /// Answers `LoadHistory`.
     HistoryLoaded {

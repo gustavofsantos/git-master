@@ -1145,6 +1145,7 @@ impl Model {
             // dialog (W6), not here yet.
             // The restack screen (5e) shows the plan; nothing keeps it yet.
             Event::RestackPlanned { .. }
+            | Event::RestackFinished { .. }
             | Event::HookFailed { .. }
             | Event::HookCancelled { .. }
             | Event::WorktreeInspected { .. }
@@ -1491,6 +1492,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::BranchesLoaded { id, .. }
         | Event::StacksLoaded { id, .. }
         | Event::RestackPlanned { id, .. }
+        | Event::RestackFinished { id, .. }
         | Event::HistoryLoaded { id, .. }
         | Event::CommitDetailLoaded { id, .. }
         | Event::CommitStackLoaded { id, .. }

@@ -32,6 +32,14 @@ impl std::error::Error for GitError {}
 /// it ends early and its answer is not wanted.
 pub type DetailRead = Box<dyn FnOnce(&AtomicBool) -> Result<CommitDetail, GitError> + Send>;
 
+/// One ref of `GitPort::update_refs`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefMove {
+    pub name: String,
+    pub new: String,
+    pub old: String,
+}
+
 /// The read of every file's diff in a commit, started by `GitPort::commit_stack`.
 /// It stops the same way a `DetailRead` does (H4c).
 pub type StackRead = Box<dyn FnOnce(&AtomicBool) -> Result<Vec<FileDiff>, GitError> + Send>;
@@ -612,6 +620,25 @@ pub trait GitPort: Send {
         _two: &str,
     ) -> Result<Option<String>, GitError> {
         Err(GitError("stacks are not supported by this adapter".into()))
+    }
+
+    /// Moves several branches at once, in one transaction: each `(ref, new, old)`
+    /// is applied only when every ref is at its `old` value, else none is.
+    /// Recorded in the command log.
+    fn update_refs(&self, _root: &Path, _moves: &[RefMove]) -> Result<(), GitError> {
+        Err(GitError(
+            "update refs is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Brings the index and working tree of the open checkout from `old` to
+    /// `new`, the commit HEAD's branch was just moved away from and to
+    /// (`git read-tree -m -u`). Fails rather than overwrite local changes.
+    /// Recorded in the command log.
+    fn refresh_checkout(&self, _root: &Path, _old: &str, _new: &str) -> Result<(), GitError> {
+        Err(GitError(
+            "refresh checkout is not supported by this adapter".into(),
+        ))
     }
 
     /// Replays `commit` onto `onto` the way a restack will (D142): a three-way
