@@ -13,6 +13,7 @@ use crate::file_index::FileIndex;
 use crate::grep::GrepRequest;
 use crate::history::HistoryStream;
 use crate::hook::ConfigValue;
+use crate::stack::{EdgeFacts, StackLink};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitError(pub String);
@@ -507,6 +508,67 @@ pub trait GitPort: Send {
         Err(GitError(
             "delete branch is not supported by this adapter".into(),
         ))
+    }
+
+    /// Every stack link of the repository's own config (D13): each
+    /// `branch.<name>.stackParent`, with its `stackParentBase`. Never records
+    /// anything.
+    fn stack_links(&self, _root: &Path) -> Result<Vec<StackLink>, GitError> {
+        Err(GitError("stacks are not supported by this adapter".into()))
+    }
+
+    /// The graph facts of the link from local branch `branch` to its existing
+    /// local parent `parent`, with the recorded `base` (D138). Never records anything.
+    fn stack_edge(
+        &self,
+        _root: &Path,
+        _branch: &str,
+        _parent: &str,
+        _base: Option<&str>,
+    ) -> Result<EdgeFacts, GitError> {
+        Err(GitError("stacks are not supported by this adapter".into()))
+    }
+
+    /// Whether the changes of local branch `branch`, whose own commits start at
+    /// `own_base`, are already in local branch `into`: its tip is reachable from
+    /// `into` and it has commits of its own, or its own commits or its whole diff
+    /// match commits of `into` by patch id (D138). Never records anything.
+    fn branch_landed(
+        &self,
+        _root: &Path,
+        _branch: &str,
+        _own_base: Option<&str>,
+        _into: &str,
+    ) -> Result<bool, GitError> {
+        Err(GitError("stacks are not supported by this adapter".into()))
+    }
+
+    /// The full id of the tip of local branch `name`; `None` when there is no such
+    /// branch. Never records anything.
+    fn branch_tip(&self, _root: &Path, _name: &str) -> Result<Option<String>, GitError> {
+        Err(GitError("stacks are not supported by this adapter".into()))
+    }
+
+    /// The merge base of local branches `one` and `two`; `None` when they share
+    /// no history. Never records anything.
+    fn branch_merge_base(
+        &self,
+        _root: &Path,
+        _one: &str,
+        _two: &str,
+    ) -> Result<Option<String>, GitError> {
+        Err(GitError("stacks are not supported by this adapter".into()))
+    }
+
+    /// Writes the stack link of `branch` as `(parent, base)` with `git config`,
+    /// or removes both keys for `None`. Recorded in the command log.
+    fn write_stack_link(
+        &self,
+        _root: &Path,
+        _branch: &str,
+        _link: Option<(&str, &str)>,
+    ) -> Result<(), GitError> {
+        Err(GitError("stacks are not supported by this adapter".into()))
     }
 
     /// The branch `refs/remotes/origin/HEAD` names, as `git symbolic-ref --short`

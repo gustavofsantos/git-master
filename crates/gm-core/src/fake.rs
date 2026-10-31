@@ -1,5 +1,6 @@
 //! In-memory `GitPort` for tests of the engine and the front-ends.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -12,6 +13,7 @@ use crate::file_index::FileIndex;
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryPage, HistoryStream};
 use crate::port::{DetailRead, FileListRead, GrepRead, StackRead};
+use crate::stack::{EdgeFacts, StackLink};
 use crate::{GitError, GitPort};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -42,6 +44,13 @@ pub struct FakeGit {
     stashes: Arc<Mutex<Result<Vec<StashEntry>, GitError>>>,
     reflog: Arc<Mutex<Result<Vec<ReflogEntry>, GitError>>>,
     conflict: Arc<Mutex<Result<ConflictFileRead, GitError>>>,
+    /// The stack links of the config; `write_stack_link` changes them.
+    links: Arc<Mutex<Vec<StackLink>>>,
+    /// The graph facts of each stack edge, by child branch. A missing one reads
+    /// as a current edge whose parent tip is the recorded base.
+    edges: Arc<Mutex<HashMap<String, EdgeFacts>>>,
+    /// The tip of each branch `branch_tip` and `branch_merge_base` know.
+    tips: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl FakeGit {
@@ -66,6 +75,9 @@ impl FakeGit {
             stashes: Arc::new(Mutex::new(Ok(Vec::new()))),
             reflog: Arc::new(Mutex::new(Ok(Vec::new()))),
             conflict: Arc::new(Mutex::new(Err(GitError("no conflict is set".into())))),
+            links: Arc::new(Mutex::new(Vec::new())),
+            edges: Arc::new(Mutex::new(HashMap::new())),
+            tips: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -214,6 +226,42 @@ impl FakeGit {
     /// If another thread panicked while holding the created lock.
     pub fn created(&self) -> Vec<(String, WorktreeMode)> {
         self.created.lock().unwrap().clone()
+    }
+
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the lock.
+    pub fn set_stack_links(&self, links: Vec<StackLink>) {
+        *self.links.lock().unwrap() = links;
+    }
+
+    /// The stack links as the last write left them.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the lock.
+    pub fn stack_links_now(&self) -> Vec<StackLink> {
+        self.links.lock().unwrap().clone()
+    }
+
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the lock.
+    pub fn set_stack_edge(&self, branch: &str, facts: EdgeFacts) {
+        self.edges.lock().unwrap().insert(branch.to_owned(), facts);
+    }
+
+    /// Sets the tip of `branch`; two branches with tips share the first one's tip
+    /// as their merge base.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the lock.
+    pub fn set_tip(&self, branch: &str, oid: &str) {
+        self.tips
+            .lock()
+            .unwrap()
+            .insert(branch.to_owned(), oid.to_owned());
     }
 
     /// # Panics
@@ -443,6 +491,73 @@ impl GitPort for FakeGit {
         Ok(Some(Box::new(FakeWalk {
             commits: history.commits.into(),
         })))
+    }
+
+    fn stack_links(&self, _root: &Path) -> Result<Vec<StackLink>, GitError> {
+        Ok(self.links.lock().unwrap().clone())
+    }
+
+    fn stack_edge(
+        &self,
+        _root: &Path,
+        branch: &str,
+        _parent: &str,
+        base: Option<&str>,
+    ) -> Result<EdgeFacts, GitError> {
+        Ok(self
+            .edges
+            .lock()
+            .unwrap()
+            .get(branch)
+            .cloned()
+            .unwrap_or_else(|| EdgeFacts {
+                parent_tip: base.unwrap_or_default().to_owned(),
+                base_in_branch: true,
+                ..EdgeFacts::default()
+            }))
+    }
+
+    fn branch_landed(
+        &self,
+        _root: &Path,
+        _branch: &str,
+        _own_base: Option<&str>,
+        _into: &str,
+    ) -> Result<bool, GitError> {
+        Ok(false)
+    }
+
+    fn branch_tip(&self, _root: &Path, name: &str) -> Result<Option<String>, GitError> {
+        Ok(self.tips.lock().unwrap().get(name).cloned())
+    }
+
+    fn branch_merge_base(
+        &self,
+        _root: &Path,
+        one: &str,
+        two: &str,
+    ) -> Result<Option<String>, GitError> {
+        let tips = self.tips.lock().unwrap();
+        Ok(tips.get(two).and(tips.get(one)).cloned())
+    }
+
+    fn write_stack_link(
+        &self,
+        _root: &Path,
+        branch: &str,
+        link: Option<(&str, &str)>,
+    ) -> Result<(), GitError> {
+        self.writes.lock().unwrap().push("stack link");
+        let mut links = self.links.lock().unwrap();
+        links.retain(|existing| existing.branch != branch);
+        if let Some((parent, base)) = link {
+            links.push(StackLink {
+                branch: branch.to_owned(),
+                parent: parent.to_owned(),
+                base: Some(base.to_owned()),
+            });
+        }
+        Ok(())
     }
 }
 

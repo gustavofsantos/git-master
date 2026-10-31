@@ -42,6 +42,7 @@ use crate::script::run::{RunSpec, Runtime};
 use crate::script::trust::{self, TrustStore};
 use crate::script::{api_docs, input as script_input, templates as script_templates};
 use crate::script_session::{self, EffectRequest, ScriptLink, ScriptSession};
+use crate::stack_session;
 use crate::syntax;
 use crate::threads::config;
 use crate::threads_session::{self, ThreadsSession};
@@ -1495,6 +1496,11 @@ impl Engine {
                 self.delete_branch(id, actor, name, *force)
             }
             CommandKind::ListMergedBranches => self.list_merged(id),
+            CommandKind::LoadStacks
+            | CommandKind::CreateChildBranch { .. }
+            | CommandKind::SetStackParent { .. }
+            | CommandKind::ClearStackParent { .. }
+            | CommandKind::ReparentToGrandparent { .. } => self.stack_command(id, actor, kind),
             CommandKind::DeleteMergedBranches { branches } => {
                 self.delete_merged(id, actor, branches)
             }
@@ -1531,6 +1537,55 @@ impl Engine {
             .create_branch(&root, name, start_point, checkout)
             .map_err(|e| e.0)?;
         self.branches_changed(id, &root)
+    }
+
+    /// The stack commands (D68, D138): the read of every stack, and the writes of
+    /// the stack metadata, which are human only. A write answers with a fresh
+    /// `StacksLoaded`; a new child also brings the status and the branch list.
+    fn stack_command(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let git = self.git.as_ref();
+        let mut events = Vec::new();
+        match kind {
+            CommandKind::LoadStacks => {}
+            CommandKind::CreateChildBranch {
+                name,
+                parent,
+                checkout,
+            } => {
+                only_a_human(actor, "create a branch")?;
+                if let Some(problem) = branch::name_problem(name) {
+                    return Err(problem.to_owned());
+                }
+                let tip = stack_session::child_start(git, &root, parent)?;
+                git.create_branch(&root, name, Some(&tip), *checkout)
+                    .map_err(|e| e.0)?;
+                git.write_stack_link(&root, name, Some((parent, &tip)))
+                    .map_err(|e| e.0)?;
+                events = self.branches_changed(id, &root)?;
+            }
+            CommandKind::SetStackParent { branch, parent } => {
+                only_a_human(actor, "set a stack parent")?;
+                stack_session::set_parent(git, &root, branch, parent)?;
+            }
+            CommandKind::ClearStackParent { branch } => {
+                only_a_human(actor, "remove a branch from its stack")?;
+                stack_session::clear_parent(git, &root, branch)?;
+            }
+            CommandKind::ReparentToGrandparent { branch } => {
+                only_a_human(actor, "reparent a branch")?;
+                stack_session::reparent_to_grandparent(git, &root, branch)?;
+            }
+            _ => return Err("not a stack command".to_owned()),
+        }
+        let stacks = stack_session::snapshot(git, &root)?;
+        events.push(Event::StacksLoaded { id, stacks });
+        Ok(events)
     }
 
     /// Deletes a local branch, safely (`-d`) unless `force` (`-D`). A branch that a
@@ -2892,6 +2947,7 @@ impl Engine {
         if !matches!(
             op.command.kind,
             CommandKind::ListStashes
+                | CommandKind::LoadStacks
                 | CommandKind::ListWorkflows
                 | CommandKind::LoadReflog { .. }
                 | CommandKind::ListWorkflowRuns { .. }

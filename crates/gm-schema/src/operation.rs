@@ -12,6 +12,7 @@ use crate::hook::{HookFailure, HookInfo};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
 use crate::review::ReviewComment;
+use crate::stack::StackSnapshot;
 use crate::stash::StashEntry;
 use crate::status::{
     BranchEntry, BranchFailure, MergedBranch, PruneCandidate, RepoStatus, WorktreeEntry,
@@ -178,6 +179,37 @@ pub enum CommandKind {
         name: String,
         start_point: Option<String>,
         checkout: bool,
+    },
+    /// Reads every branch stack (D68's `stack.tree`): the recorded parents, and
+    /// the state each branch derives from its base. Answers `StacksLoaded`.
+    /// Never recorded in the command log (D28).
+    LoadStacks,
+    /// Creates the local branch `name` at the tip of the local branch `parent`
+    /// and records `parent` as its stack parent, with that tip as its base
+    /// (D138). Checks it out when `checkout` is set. Human only.
+    CreateChildBranch {
+        name: String,
+        parent: String,
+        checkout: bool,
+    },
+    /// Records the local branch `parent` as the stack parent of `branch`, with
+    /// their merge base as the base (D138). Refused for the branch itself, a
+    /// branch under it, and a branch that shares no history with it. Moves no
+    /// commit. Human only.
+    SetStackParent {
+        branch: String,
+        parent: String,
+    },
+    /// Removes the stack parent and base of `branch`. Its children keep theirs.
+    /// Human only.
+    ClearStackParent {
+        branch: String,
+    },
+    /// Records the parent of the old parent as the stack parent of `branch`,
+    /// keeping its base, when the old parent is gone or merged. With the old
+    /// parent's own parent unknown, the default branch is taken (D138). Human only.
+    ReparentToGrandparent {
+        branch: String,
     },
     /// Detaches HEAD at commit `oid` (`git checkout --detach`), as a reflog entry
     /// is checked out (B3, D95). The id is 7 to 64 hex characters; Git's text is
@@ -643,6 +675,11 @@ pub enum Event {
         branches: Vec<BranchEntry>,
         /// The configured `user.email`, without angle brackets; `None` when unset.
         user_email: Option<String>,
+    },
+    /// Answers `LoadStacks`, and follows each stack write after the branch list.
+    StacksLoaded {
+        id: OperationId,
+        stacks: StackSnapshot,
     },
     /// Answers `LoadHistory`.
     HistoryLoaded {

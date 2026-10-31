@@ -1,6 +1,7 @@
 //! `GitPort` over the `git` executable. Status uses porcelain v2 with `-z`:
 //! stable, machine-readable, and it honors fsmonitor and the untracked cache.
 
+use std::collections::HashSet;
 use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
@@ -8,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use git2::{BranchType, ErrorCode, ObjectType, Oid, Repository};
+use git2::{BranchType, ConfigLevel, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, CommitFile, ConflictFileRead, ConflictOperation, DiffSide,
     FileDiff, HookScope, Hunk, HunkId, MergedBranch, PruneCandidate, RecordedResolution,
@@ -30,6 +31,7 @@ use crate::port::{DetailRead, FileListRead, GrepRead, RemoteRun, StackRead};
 use crate::port::{DiscardOutcome, FileMerge, TreeMerge};
 use crate::reflog;
 use crate::remote;
+use crate::stack::{self, EdgeFacts, StackLink};
 use crate::stage_math;
 use crate::stash;
 use crate::worktree;
@@ -1533,6 +1535,168 @@ impl GitPort for SubprocessGit {
         self.logged(command, None).map(drop)
     }
 
+    fn stack_links(&self, root: &Path) -> Result<Vec<StackLink>, GitError> {
+        let repo = open(root)?;
+        let config = repo.config().map_err(|e| git_err(&e))?;
+        // Only the repository's own file holds stack links (D13).
+        let local = match config.open_level(ConfigLevel::Local) {
+            Ok(local) => local,
+            Err(e) if e.code() == ErrorCode::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(git_err(&e)),
+        };
+        let mut entries = Vec::new();
+        let mut iter = local
+            .entries(Some(r"^branch\..*\.stackparent(base)?$"))
+            .map_err(|e| git_err(&e))?;
+        while let Some(entry) = iter.next() {
+            let entry = entry.map_err(|e| git_err(&e))?;
+            if let (Some(name), Some(value)) = (entry.name(), entry.value()) {
+                entries.push((name.to_owned(), value.to_owned()));
+            }
+        }
+        Ok(stack::links_from_config(&entries))
+    }
+
+    fn stack_edge(
+        &self,
+        root: &Path,
+        branch: &str,
+        parent: &str,
+        base: Option<&str>,
+    ) -> Result<EdgeFacts, GitError> {
+        let repo = open(root)?;
+        let tip = local_tip(&repo, branch)?
+            .ok_or_else(|| GitError(format!("there is no local branch {branch}")))?;
+        let parent_tip = local_tip(&repo, parent)?
+            .ok_or_else(|| GitError(format!("there is no local branch {parent}")))?;
+        let (ahead, behind) = repo
+            .graph_ahead_behind(tip, parent_tip)
+            .map_err(|e| git_err(&e))?;
+        let merge_base = optional_merge_base(&repo, tip, parent_tip)?;
+        // A base that is not a commit of this repository any more is not in the branch.
+        let base = base
+            .and_then(|text| Oid::from_str(text).ok())
+            .filter(|oid| repo.find_commit(*oid).is_ok());
+        let (base_in_branch, merge_base_past_base) = match base {
+            None => (false, false),
+            Some(base) => {
+                let in_branch = base == tip || descends(&repo, tip, base)?;
+                let past = match merge_base {
+                    Some(merge_base) if merge_base != base => descends(&repo, merge_base, base)?,
+                    _ => false,
+                };
+                (in_branch, past)
+            }
+        };
+        Ok(EdgeFacts {
+            parent_tip: parent_tip.to_string(),
+            ahead: u32::try_from(ahead).unwrap_or(u32::MAX),
+            behind: u32::try_from(behind).unwrap_or(u32::MAX),
+            base_in_branch,
+            merge_base_past_base,
+        })
+    }
+
+    fn branch_landed(
+        &self,
+        root: &Path,
+        branch: &str,
+        own_base: Option<&str>,
+        into: &str,
+    ) -> Result<bool, GitError> {
+        let repo = open(root)?;
+        let (Some(tip), Some(into_tip)) = (local_tip(&repo, branch)?, local_tip(&repo, into)?)
+        else {
+            return Ok(false);
+        };
+        let Some(merge_base) = optional_merge_base(&repo, tip, into_tip)? else {
+            return Ok(false);
+        };
+        let own_base = own_base.and_then(|text| Oid::from_str(text).ok());
+        if merge_base == tip {
+            // Reachable from `into`: merged when the branch had commits of its own.
+            return Ok(match own_base {
+                Some(base) => base != tip && descends(&repo, tip, base)?,
+                None => false,
+            });
+        }
+        let own = commits_between(&repo, tip, merge_base, usize::MAX)?;
+        let landed: HashSet<Oid> = commits_between(&repo, into_tip, merge_base, LANDED_SCAN)?
+            .into_iter()
+            .filter_map(|oid| commit_patch_id(&repo, oid).transpose())
+            .collect::<Result<_, _>>()?;
+        if landed.is_empty() {
+            return Ok(false);
+        }
+        let mut every_commit = true;
+        for oid in own {
+            match commit_patch_id(&repo, oid)? {
+                Some(id) if landed.contains(&id) => {}
+                // A merge commit of the branch has no patch of its own to look for.
+                None => {}
+                Some(_) => {
+                    every_commit = false;
+                    break;
+                }
+            }
+        }
+        if every_commit {
+            return Ok(true);
+        }
+        let squash = tree_patch_id(&repo, merge_base, tip)?;
+        Ok(squash.is_some_and(|id| landed.contains(&id)))
+    }
+
+    fn branch_tip(&self, root: &Path, name: &str) -> Result<Option<String>, GitError> {
+        let repo = open(root)?;
+        Ok(local_tip(&repo, name)?.map(|oid| oid.to_string()))
+    }
+
+    fn branch_merge_base(
+        &self,
+        root: &Path,
+        one: &str,
+        two: &str,
+    ) -> Result<Option<String>, GitError> {
+        let repo = open(root)?;
+        let (Some(one), Some(two)) = (local_tip(&repo, one)?, local_tip(&repo, two)?) else {
+            return Ok(None);
+        };
+        Ok(optional_merge_base(&repo, one, two)?.map(|oid| oid.to_string()))
+    }
+
+    fn write_stack_link(
+        &self,
+        root: &Path,
+        branch: &str,
+        link: Option<(&str, &str)>,
+    ) -> Result<(), GitError> {
+        if let Some(problem) = branch::name_problem(branch) {
+            return Err(GitError(problem.into()));
+        }
+        let parent_key = format!("branch.{branch}.{}", stack::PARENT_KEY);
+        let base_key = format!("branch.{branch}.{}", stack::BASE_KEY);
+        match link {
+            Some((parent, base)) => {
+                for (key, value) in [(&parent_key, parent), (&base_key, base)] {
+                    let mut command = self.git(root);
+                    command.args(["config", "--local", key.as_str(), value]);
+                    self.logged(command, None)?;
+                }
+            }
+            None => {
+                for key in [&parent_key, &base_key] {
+                    let mut command = self.git(root);
+                    command.args(["config", "--local", "--unset-all", key.as_str()]);
+                    // Exit 5 is git's answer for a key that is not set.
+                    let output = self.logged_output(command, None)?;
+                    Self::checked(output, &[0, 5])?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn origin_head(&self, root: &Path) -> Result<Option<String>, GitError> {
         // Git fails when origin/HEAD is not a symbolic ref, which is an answer here.
         let mut command = self.git(root);
@@ -2276,6 +2440,92 @@ fn remote_names(repo: &Repository) -> Result<Vec<String>, GitError> {
 
 fn has_ref(repo: &Repository, name: &str) -> bool {
     repo.find_reference(name).is_ok()
+}
+
+/// How many commits of the root `branch_landed` reads for patch ids (D138).
+const LANDED_SCAN: usize = 2_000;
+
+/// The tip of local branch `name`; `None` when there is no such branch.
+fn local_tip(repo: &Repository, name: &str) -> Result<Option<Oid>, GitError> {
+    match repo.find_branch(name, BranchType::Local) {
+        Ok(branch) => branch
+            .get()
+            .peel_to_commit()
+            .map(|commit| Some(commit.id()))
+            .map_err(|e| git_err(&e)),
+        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
+        Err(e) => Err(git_err(&e)),
+    }
+}
+
+/// The merge base of two commits; `None` when they share no history.
+fn optional_merge_base(repo: &Repository, one: Oid, two: Oid) -> Result<Option<Oid>, GitError> {
+    match repo.merge_base(one, two) {
+        Ok(oid) => Ok(Some(oid)),
+        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
+        Err(e) => Err(git_err(&e)),
+    }
+}
+
+/// Whether `commit` strictly descends from `ancestor`.
+fn descends(repo: &Repository, commit: Oid, ancestor: Oid) -> Result<bool, GitError> {
+    repo.graph_descendant_of(commit, ancestor)
+        .map_err(|e| git_err(&e))
+}
+
+/// The commits reachable from `tip` and not from `stop`, newest first, at most `limit`.
+fn commits_between(
+    repo: &Repository,
+    tip: Oid,
+    stop: Oid,
+    limit: usize,
+) -> Result<Vec<Oid>, GitError> {
+    let mut walk = repo.revwalk().map_err(|e| git_err(&e))?;
+    walk.push(tip).map_err(|e| git_err(&e))?;
+    walk.hide(stop).map_err(|e| git_err(&e))?;
+    walk.take(limit)
+        .map(|oid| oid.map_err(|e| git_err(&e)))
+        .collect()
+}
+
+/// The patch id of what a commit changed against its parent, as
+/// `git patch-id --stable` computes it; `None` for a merge commit.
+fn commit_patch_id(repo: &Repository, oid: Oid) -> Result<Option<Oid>, GitError> {
+    let commit = repo.find_commit(oid).map_err(|e| git_err(&e))?;
+    match commit.parent_count() {
+        0 => {
+            let tree = commit.tree().map_err(|e| git_err(&e))?;
+            let diff = repo
+                .diff_tree_to_tree(None, Some(&tree), None)
+                .map_err(|e| git_err(&e))?;
+            diff.patchid(None).map(Some).map_err(|e| git_err(&e))
+        }
+        1 => {
+            let parent = commit.parent_id(0).map_err(|e| git_err(&e))?;
+            tree_patch_id(repo, parent, oid)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The patch id of the diff from commit `from` to commit `to`; `None` when they
+/// have the same tree.
+fn tree_patch_id(repo: &Repository, from: Oid, to: Oid) -> Result<Option<Oid>, GitError> {
+    let old = repo
+        .find_commit(from)
+        .and_then(|commit| commit.tree())
+        .map_err(|e| git_err(&e))?;
+    let new = repo
+        .find_commit(to)
+        .and_then(|commit| commit.tree())
+        .map_err(|e| git_err(&e))?;
+    if old.id() == new.id() {
+        return Ok(None);
+    }
+    let diff = repo
+        .diff_tree_to_tree(Some(&old), Some(&new), None)
+        .map_err(|e| git_err(&e))?;
+    diff.patchid(None).map(Some).map_err(|e| git_err(&e))
 }
 
 fn open(root: &Path) -> Result<Repository, GitError> {

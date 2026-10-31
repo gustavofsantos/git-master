@@ -1112,6 +1112,7 @@ impl Model {
             | Event::WorktreeInspected { .. }
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
+            | Event::StacksLoaded { .. }
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
@@ -1449,6 +1450,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::DiffLoaded { id, .. }
         | Event::Committed { id, .. }
         | Event::BranchesLoaded { id, .. }
+        | Event::StacksLoaded { id, .. }
         | Event::HistoryLoaded { id, .. }
         | Event::CommitDetailLoaded { id, .. }
         | Event::CommitStackLoaded { id, .. }

@@ -29,6 +29,8 @@ pub mod review_store;
 mod runner;
 pub mod script;
 mod script_session;
+pub mod stack;
+mod stack_session;
 pub mod stage_math;
 mod stash;
 pub mod syntax;

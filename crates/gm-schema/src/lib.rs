@@ -11,6 +11,7 @@ mod move_changes;
 mod operation;
 mod reflog;
 mod review;
+mod stack;
 mod stash;
 mod status;
 mod syntax;
@@ -43,6 +44,7 @@ pub use operation::{
 };
 pub use reflog::{REFLOG_PAGE, ReflogEntry};
 pub use review::{ReviewAnchor, ReviewComment, ReviewLocation, ReviewStatus};
+pub use stack::{Stack, StackBranch, StackSnapshot, StackState};
 pub use stash::StashEntry;
 pub use status::{
     Blocker, BranchEntry, BranchFailure, BranchInfo, Change, MergedBranch, PruneCandidate,
