@@ -3,7 +3,9 @@
 //! repository. A match is exact, as whole lines, and only a unique one counts;
 //! anything else is outdated, never a guess.
 
-use gm_schema::{ReviewAnchor, ReviewLocation};
+use std::ops::Range;
+
+use gm_schema::{ReviewAnchor, ReviewChange, ReviewLocation};
 
 /// The most lines one comment may cover.
 pub const MAX_SELECTION: usize = 200;
@@ -93,6 +95,15 @@ pub fn locate(file_text: &str, anchor: &ReviewAnchor) -> Option<ReviewLocation> 
 /// exactly once, as `locate` requires. Empty when neither holds.
 pub fn snapshot_region(file_text: &str, anchor: &ReviewAnchor) -> Vec<String> {
     let lines = lines_of(file_text);
+    snapshot_range(file_text, anchor)
+        .map(|range| owned(&lines[range]))
+        .unwrap_or_default()
+}
+
+/// Where `snapshot_region` finds the anchor, as 0-based indexes of the lines
+/// of `file_text`.
+fn snapshot_range(file_text: &str, anchor: &ReviewAnchor) -> Option<Range<usize>> {
+    let lines = lines_of(file_text);
     let needle: Vec<&str> = anchor.text.split('\n').collect();
     let recorded = usize::try_from(anchor.start_line)
         .ok()
@@ -104,14 +115,125 @@ pub fn snapshot_region(file_text: &str, anchor: &ReviewAnchor) -> Vec<String> {
                 .ok()
                 .and_then(|line| line.checked_sub(1))
         })
-    });
-    match at {
-        Some(at) => lines[at..at + needle.len()]
-            .iter()
-            .map(|line| (*line).to_owned())
-            .collect(),
-        None => Vec::new(),
+    })?;
+    Some(at..at + needle.len())
+}
+
+/// One hunk of a zero-context diff, as its header `@@ -old_start,old_lines
+/// +new_start,new_lines @@` gives it. A side with no lines starts after the
+/// line it names, as Git writes it: `-4,0` is an insertion after line 4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineHunk {
+    pub old_start: u32,
+    pub old_lines: u32,
+    pub new_start: u32,
+    pub new_lines: u32,
+}
+
+impl LineHunk {
+    /// The lines this hunk replaces, as 0-based indexes of the old file.
+    fn old_side(&self) -> Range<usize> {
+        span(self.old_start, self.old_lines)
     }
+
+    /// The lines it puts in their place, as 0-based indexes of the new file.
+    fn new_side(&self) -> Range<usize> {
+        span(self.new_start, self.new_lines)
+    }
+}
+
+/// The 0-based range of a hunk side that starts at the 1-based `start` and has
+/// `count` lines; an empty side sits after line `start`.
+fn span(start: u32, count: u32) -> Range<usize> {
+    let start = usize::try_from(start).unwrap_or(usize::MAX);
+    let count = usize::try_from(count).unwrap_or(usize::MAX);
+    let at = if count == 0 {
+        start
+    } else {
+        start.saturating_sub(1)
+    };
+    at..at.saturating_add(count)
+}
+
+/// The anchored lines of a comment in its "before" snapshot and the same
+/// region in its "after" one (D140). The region is found in `before_text` by
+/// `snapshot_region`'s rule, then mapped through `hunks`, the zero-context diff
+/// of the file between the two snapshots, in order: a hunk that overlaps the
+/// region or touches its edges (it ends on the line above, starts on the line
+/// below, or inserts right before or after) widens it to cover the hunk's new
+/// side, and hunks above it shift it. `changed` is whether any hunk overlapped
+/// or touched it. `after_text` is `None` when the file is gone from the "after"
+/// snapshot: the after side is then empty and changed. `None` when the anchor
+/// is not in `before_text`.
+pub fn review_change(
+    before_text: &str,
+    after_text: Option<&str>,
+    anchor: &ReviewAnchor,
+    hunks: &[LineHunk],
+) -> Option<ReviewChange> {
+    let before_lines = lines_of(before_text);
+    let region = snapshot_range(before_text, anchor)?;
+    let before = owned(&before_lines[region.clone()]);
+    let Some(after_text) = after_text else {
+        return Some(ReviewChange {
+            before,
+            after: Vec::new(),
+            changed: true,
+        });
+    };
+    let (range, changed) = after_range(&region, hunks);
+    let after_lines = lines_of(after_text);
+    let end = range.end.min(after_lines.len());
+    let start = range.start.min(end);
+    Some(ReviewChange {
+        before,
+        after: owned(&after_lines[start..end]),
+        changed,
+    })
+}
+
+/// Where the old lines `region` are in the new file, through `hunks`, and
+/// whether a hunk overlapped or touched them. See `review_change`.
+fn after_range(region: &Range<usize>, hunks: &[LineHunk]) -> (Range<usize>, bool) {
+    let touching: Vec<&LineHunk> = hunks
+        .iter()
+        .filter(|hunk| {
+            let old = hunk.old_side();
+            old.start <= region.end && old.end >= region.start
+        })
+        .collect();
+    let mut start = map_boundary(region.start, hunks, false);
+    let mut end = map_boundary(region.end, hunks, true);
+    for hunk in &touching {
+        start = start.min(hunk.new_side().start);
+        end = end.max(hunk.new_side().end);
+    }
+    (start..end.max(start), !touching.is_empty())
+}
+
+/// Where the boundary before old line `at` (0-based) is in the new file: moved
+/// by every hunk wholly before it. Inside a hunk, it is the start of the hunk's
+/// new side, or its end when `upper`.
+fn map_boundary(at: usize, hunks: &[LineHunk], upper: bool) -> usize {
+    let mut shift: isize = 0;
+    for hunk in hunks {
+        let (old, new) = (hunk.old_side(), hunk.new_side());
+        if old.start < at && at < old.end {
+            return if upper { new.end } else { new.start };
+        }
+        if old.end <= at && old.start < at {
+            shift += signed(new.len()) - signed(old.len());
+        }
+    }
+    at.checked_add_signed(shift).unwrap_or(0)
+}
+
+fn signed(count: usize) -> isize {
+    isize::try_from(count).unwrap_or(isize::MAX)
+}
+
+fn owned(lines: &[&str]) -> Vec<String> {
+    lines.iter().map(|line| (*line).to_owned()).collect()
 }
 
 /// The lines `anchor` covers in `file_text` now: the run `locate` finds, which
@@ -342,6 +464,122 @@ mod tests {
         assert!(current_region(&file(&["b", "x"]), &anchor).is_empty());
     }
 
+    fn hunk(old_start: u32, old_lines: u32, new_start: u32, new_lines: u32) -> LineHunk {
+        LineHunk {
+            old_start,
+            old_lines,
+            new_start,
+            new_lines,
+        }
+    }
+
+    fn strings(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_owned()).collect()
+    }
+
+    /// The change of the anchor on lines 3-4 ("c", "d") of "a".."g", once the
+    /// file became `after` through `hunks`.
+    fn change_of(after: &[&str], hunks: &[LineHunk]) -> ReviewChange {
+        let before = file(&["a", "b", "c", "d", "e", "f", "g"]);
+        let anchor = anchored(&before, 3, 4);
+        review_change(&before, Some(&file(after)), &anchor, hunks).expect("a change")
+    }
+
+    #[test]
+    fn with_no_hunks_the_after_side_is_the_before_side() {
+        let change = change_of(&["a", "b", "c", "d", "e", "f", "g"], &[]);
+        assert_eq!(change.before, strings(&["c", "d"]));
+        assert_eq!(change.after, strings(&["c", "d"]));
+        assert!(!change.changed);
+    }
+
+    #[test]
+    fn an_edit_inside_the_region_shows_on_the_after_side() {
+        let change = change_of(&["a", "b", "C", "d", "e", "f", "g"], &[hunk(3, 1, 3, 1)]);
+        assert_eq!(change.before, strings(&["c", "d"]));
+        assert_eq!(change.after, strings(&["C", "d"]));
+        assert!(change.changed);
+    }
+
+    #[test]
+    fn an_edit_that_crosses_an_edge_widens_the_region_to_cover_it() {
+        // "d" and "e" became "D", "E", "x".
+        let change = change_of(
+            &["a", "b", "c", "D", "E", "x", "f", "g"],
+            &[hunk(4, 2, 4, 3)],
+        );
+        assert_eq!(change.after, strings(&["c", "D", "E", "x"]));
+        assert!(change.changed);
+        // "a" to "c" became "z": the region starts where the hunk does.
+        let change = change_of(&["z", "d", "e", "f", "g"], &[hunk(1, 3, 1, 1)]);
+        assert_eq!(change.after, strings(&["z", "d"]));
+    }
+
+    #[test]
+    fn edits_on_the_lines_next_to_the_region_touch_it() {
+        let above = change_of(&["a", "B", "c", "d", "e", "f", "g"], &[hunk(2, 1, 2, 1)]);
+        assert_eq!(above.after, strings(&["B", "c", "d"]));
+        assert!(above.changed);
+        let below = change_of(&["a", "b", "c", "d", "E", "f", "g"], &[hunk(5, 1, 5, 1)]);
+        assert_eq!(below.after, strings(&["c", "d", "E"]));
+        assert!(below.changed);
+    }
+
+    #[test]
+    fn insertions_right_before_or_after_the_region_touch_it() {
+        let before = change_of(
+            &["a", "b", "new", "c", "d", "e", "f", "g"],
+            &[hunk(2, 0, 3, 1)],
+        );
+        assert_eq!(before.after, strings(&["new", "c", "d"]));
+        assert!(before.changed);
+        let after = change_of(
+            &["a", "b", "c", "d", "new", "e", "f", "g"],
+            &[hunk(4, 0, 5, 1)],
+        );
+        assert_eq!(after.after, strings(&["c", "d", "new"]));
+        assert!(after.changed);
+    }
+
+    #[test]
+    fn edits_away_from_the_region_move_it_or_leave_it() {
+        let above = change_of(
+            &["x", "y", "A", "b", "c", "d", "e", "f"],
+            &[hunk(1, 1, 1, 3), hunk(7, 1, 8, 0)],
+        );
+        assert_eq!(above.after, strings(&["c", "d"]));
+        assert!(!above.changed);
+        let below = change_of(&["a", "b", "c", "d", "e", "F", "g"], &[hunk(6, 1, 6, 1)]);
+        assert_eq!(below.after, strings(&["c", "d"]));
+        assert!(!below.changed);
+    }
+
+    #[test]
+    fn a_deleted_region_has_an_empty_after_side() {
+        let change = change_of(&["a", "b", "e", "f", "g"], &[hunk(3, 2, 2, 0)]);
+        assert!(change.after.is_empty());
+        assert!(change.changed);
+    }
+
+    #[test]
+    fn a_file_gone_from_the_after_snapshot_has_an_empty_after_side() {
+        let before = file(&["a", "b", "c"]);
+        let anchor = anchored(&before, 2, 2);
+        let change = review_change(&before, None, &anchor, &[]).expect("a change");
+        assert_eq!(change.before, strings(&["b"]));
+        assert!(change.after.is_empty());
+        assert!(change.changed);
+    }
+
+    #[test]
+    fn an_anchor_missing_from_the_before_snapshot_has_no_change() {
+        let anchor = anchored(&file(&["a", "b"]), 2, 2);
+        assert_eq!(
+            review_change(&file(&["x"]), Some(&file(&["x"])), &anchor, &[]),
+            None
+        );
+    }
+
     /// Lines that are unique in a file: each starts with its own index.
     fn unique_lines(words: &[String]) -> Vec<String> {
         words
@@ -412,6 +650,55 @@ mod tests {
                 prop_assert_eq!(moved, Some(ReviewLocation { start_line: start, end_line: end }));
             } else {
                 prop_assert_eq!(moved, None);
+            }
+        }
+
+        #[test]
+        fn one_edit_maps_the_region_to_the_lines_it_became(
+            words in prop::collection::vec("[a-z]{1,8}", 1..40),
+            pick in (0usize..40, 0usize..40),
+            edit in (0usize..41, 0usize..41),
+            inserted in 0usize..5,
+        ) {
+            let lines = unique_lines(&words);
+            let first = pick.0 % lines.len();
+            let last = first + pick.1 % (lines.len() - first);
+            let text = file(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+            let anchor = anchored(&text, u32::try_from(first + 1).unwrap(), u32::try_from(last + 1).unwrap());
+            // Replace the lines [from, to) with `inserted` new ones, as one hunk.
+            let from = edit.0 % (lines.len() + 1);
+            let to = from + edit.1 % (lines.len() - from + 1);
+            let mut edited = lines[..from].to_vec();
+            edited.extend((0..inserted).map(|n| format!("new {n}")));
+            edited.extend_from_slice(&lines[to..]);
+            let after = file(&edited.iter().map(String::as_str).collect::<Vec<_>>());
+            let side = |at: usize, count: usize| {
+                let start = if count == 0 { at } else { at + 1 };
+                u32::try_from(start).unwrap()
+            };
+            let hunks = if to == from && inserted == 0 {
+                Vec::new()
+            } else {
+                vec![LineHunk {
+                    old_start: side(from, to - from),
+                    old_lines: u32::try_from(to - from).unwrap(),
+                    new_start: side(from, inserted),
+                    new_lines: u32::try_from(inserted).unwrap(),
+                }]
+            };
+            let change = review_change(&text, Some(&after), &anchor, &hunks).unwrap();
+            prop_assert_eq!(&change.before, &lines[first..=last].to_vec());
+            let (start, end) = (first, last + 1);
+            if hunks.is_empty() || to < start || from > end {
+                // Away from the region: the same lines, wherever they moved.
+                prop_assert!(!change.changed);
+                prop_assert_eq!(&change.after, &change.before);
+            } else {
+                // Overlapping or touching: the region and the edit, as they are now.
+                prop_assert!(change.changed);
+                let lo = start.min(from);
+                let hi = end.max(to) + inserted - (to - from);
+                prop_assert_eq!(&change.after, &edited[lo..hi].to_vec());
             }
         }
 

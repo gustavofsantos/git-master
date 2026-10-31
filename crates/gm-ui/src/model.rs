@@ -1142,6 +1142,8 @@ impl Model {
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
+            // The After side read from the two snapshots (D140) is not shown yet.
+            | Event::ReviewChange { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
             | Event::ThreadsChanged => None,
             // The read opens the resolver; the staged note is the resolver's own.
@@ -1514,6 +1516,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ReviewCommentsListed { id, .. }
         | Event::ReviewSnapshotText { id, .. }
         | Event::ReviewCurrentText { id, .. }
+        | Event::ReviewChange { id, .. }
         | Event::ThreadsListed { id, .. }
         | Event::ThreadSearchResults { id, .. }
         | Event::ThreadRead { id, .. }
@@ -2735,6 +2738,7 @@ mod stash_tests {
             resolved_at: None,
             summary: None,
             snapshot: Some("abc".into()),
+            after_snapshot: None,
             location: Some(gm_schema::ReviewLocation {
                 start_line: 2,
                 end_line: 2,

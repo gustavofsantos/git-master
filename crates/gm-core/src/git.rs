@@ -29,7 +29,7 @@ use crate::grep::{Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
 use crate::port::{DetailRead, FileListRead, GrepRead, HistoryRevs, RemoteRun, StackRead};
-use crate::port::{DiscardOutcome, FileMerge, TreeMerge};
+use crate::port::{DiscardOutcome, FileMerge, ReviewSide, TreeMerge};
 use crate::reflog;
 use crate::remote;
 use crate::stack::{self, EdgeFacts, StackLink};
@@ -1024,16 +1024,56 @@ impl GitPort for SubprocessGit {
         Ok(DiscardOutcome::Discarded)
     }
 
-    fn set_review_ref(&self, root: &Path, comment: i64, oid: &str) -> Result<(), GitError> {
+    fn set_review_ref(
+        &self,
+        root: &Path,
+        comment: i64,
+        side: ReviewSide,
+        oid: &str,
+    ) -> Result<(), GitError> {
         let mut command = self.git(root);
-        command.args(["update-ref", &review_ref(comment), oid]);
+        command.args(["update-ref", &review_ref(comment, side), oid]);
         self.logged(command, None).map(drop)
     }
 
-    fn delete_review_ref(&self, root: &Path, comment: i64) -> Result<(), GitError> {
+    fn delete_review_ref(
+        &self,
+        root: &Path,
+        comment: i64,
+        side: ReviewSide,
+    ) -> Result<(), GitError> {
         let mut command = self.git(root);
-        command.args(["update-ref", "-d", &review_ref(comment)]);
+        command.args(["update-ref", "-d", &review_ref(comment, side)]);
         self.logged(command, None).map(drop)
+    }
+
+    fn diff_commits(
+        &self,
+        root: &Path,
+        from: &str,
+        to: &str,
+        path: &str,
+    ) -> Result<FileDiff, GitError> {
+        let from = self.commit_of(root, from)?;
+        let to = self.commit_of(root, to)?;
+        let mut command = self.git(root);
+        command.args([
+            "--literal-pathspecs",
+            "-c",
+            "core.quotepath=off",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-renames",
+            "--histogram",
+            "-U0",
+            &from,
+            &to,
+            "--",
+            path,
+        ]);
+        let raw = Self::run(command)?;
+        parse_unified(path, &raw)
     }
 
     fn resolve_commit(&self, root: &Path, rev: &str) -> Result<String, GitError> {
@@ -2382,9 +2422,14 @@ pub fn parse_null_config(bytes: &[u8]) -> Vec<ConfigValue> {
 const NOTHING_TO_STASH: &str = "No local changes to save";
 
 /// The revision of `stash@{index}`.
-/// The private ref that keeps the snapshot of review comment `comment` alive (D97).
-fn review_ref(comment: i64) -> String {
-    format!("refs/gitmaster/review/{comment}/before")
+/// The private ref that keeps the `side` snapshot of review comment `comment`
+/// alive (D97, D140).
+fn review_ref(comment: i64, side: ReviewSide) -> String {
+    let side = match side {
+        ReviewSide::Before => "before",
+        ReviewSide::After => "after",
+    };
+    format!("refs/gitmaster/review/{comment}/{side}")
 }
 
 /// The identity of snapshot commits: they are the engine's, not the user's work.

@@ -8,10 +8,10 @@ use std::process::Command as Process;
 
 use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
-use gm_core::{Engine, GitPort};
+use gm_core::{Engine, GitPort, ReviewSide};
 use gm_schema::{
-    Actor, Command, CommandKind, Event, OperationId, OperationState, ReviewComment, ReviewLocation,
-    ReviewStatus,
+    Actor, Command, CommandKind, Event, OperationId, OperationState, ReviewChange, ReviewComment,
+    ReviewLocation, ReviewStatus,
 };
 
 fn git_output(dir: &Path, args: &[&str]) -> std::process::Output {
@@ -589,7 +589,9 @@ fn a_linked_worktree_shares_the_private_ref_and_keeps_its_own_index() {
     );
 
     let oid = port().snapshot_worktree(&linked).unwrap();
-    port().set_review_ref(&linked, 7, &oid).unwrap();
+    port()
+        .set_review_ref(&linked, 7, ReviewSide::Before, &oid)
+        .unwrap();
 
     assert!(git(dir.path(), &["ls-tree", "-r", "--name-only", &oid]).contains("only-here.txt"));
     assert_eq!(
@@ -621,7 +623,9 @@ fn a_linked_worktree_shares_the_private_ref_and_keeps_its_own_index() {
             .unwrap()
             .any(|_| true)
     );
-    port().delete_review_ref(&linked, 7).unwrap();
+    port()
+        .delete_review_ref(&linked, 7, ReviewSide::Before)
+        .unwrap();
     assert!(private_refs(dir.path()).is_empty());
 }
 
@@ -865,4 +869,282 @@ fn reads_are_not_recorded_and_the_writes_reach_the_command_log() {
             .iter()
             .any(|arg| arg == "ls-tree" || arg == "cat-file")
     }));
+}
+
+/// Marks comment `id` handled as the agent, which takes the "after" snapshot (D140).
+fn handle(engine: &mut Engine, id: i64, summary: &str) -> ReviewComment {
+    let events = engine.handle(
+        OperationId(40),
+        &agent(CommandKind::HandleReviewComment {
+            id,
+            summary: summary.to_owned(),
+        }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    listed(&events)
+        .into_iter()
+        .find(|comment| comment.id == id)
+        .expect("the handled comment")
+}
+
+/// The change of comment `id`, read by the agent: it may run the read.
+fn change(engine: &mut Engine, id: i64) -> Option<ReviewChange> {
+    let events = engine.handle(
+        OperationId(41),
+        &agent(CommandKind::LoadReviewChange { id }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    events
+        .iter()
+        .find_map(|e| match e {
+            Event::ReviewChange {
+                comment,
+                path,
+                change,
+                ..
+            } => {
+                assert_eq!(*comment, id);
+                assert_eq!(path, "f.txt");
+                Some(change.clone())
+            }
+            _ => None,
+        })
+        .expect("a review change")
+}
+
+fn strings(lines: &[&str]) -> Vec<String> {
+    lines.iter().map(|line| (*line).to_owned()).collect()
+}
+
+fn after_ref(id: i64) -> String {
+    format!("refs/gitmaster/review/{id}/after")
+}
+
+fn before_ref(id: i64) -> String {
+    format!("refs/gitmaster/review/{id}/before")
+}
+
+#[test]
+fn handling_a_comment_takes_an_after_snapshot_under_its_own_ref() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 2, 3, "about b and c")));
+    let id = only(&mut engine).id;
+    assert_eq!(change(&mut engine, id), None, "no after snapshot yet");
+
+    write(dir.path(), "f.txt", "a\nB\nc\nd\ne\n");
+    let handled = handle(&mut engine, id, "capitalised b");
+    let after = handled.after_snapshot.clone().expect("an after snapshot");
+    assert_ne!(Some(&after), handled.snapshot.as_ref());
+    assert_eq!(
+        private_refs(dir.path()),
+        vec![after_ref(id), before_ref(id)]
+    );
+    assert_eq!(
+        git(dir.path(), &["rev-parse", &after_ref(id)]).trim(),
+        after
+    );
+    assert_eq!(
+        git(dir.path(), &["show", &format!("{after}:f.txt")]),
+        "a\nB\nc\nd\ne\n"
+    );
+    assert_eq!(read(dir.path(), "f.txt"), "a\nB\nc\nd\ne\n");
+    assert_eq!(only(&mut engine).after_snapshot, Some(after));
+}
+
+#[test]
+fn an_edit_inside_the_region_shows_as_a_change() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 2, 3, "about b and c")));
+    let id = only(&mut engine).id;
+
+    write(dir.path(), "f.txt", "a\nB\nc\nd\ne\n");
+    handle(&mut engine, id, "capitalised b");
+    // A later edit of the working tree does not change what was observed.
+    write(dir.path(), "f.txt", "zzz\n");
+    assert_eq!(
+        change(&mut engine, id),
+        Some(ReviewChange {
+            before: strings(&["b", "c"]),
+            after: strings(&["B", "c"]),
+            changed: true,
+        })
+    );
+}
+
+#[test]
+fn a_comment_handled_without_an_edit_is_unchanged() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 2, 3, "about b and c")));
+    let id = only(&mut engine).id;
+    // An edit away from the region is not a change of it.
+    write(dir.path(), "f.txt", "a\nb\nc\nd\nE\n");
+    handle(&mut engine, id, "nothing to do");
+    assert_eq!(
+        change(&mut engine, id),
+        Some(ReviewChange {
+            before: strings(&["b", "c"]),
+            after: strings(&["b", "c"]),
+            changed: false,
+        })
+    );
+}
+
+#[test]
+fn an_edit_above_the_region_moves_it_and_keeps_its_text() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 4, 5, "about d and e")));
+    let id = only(&mut engine).id;
+    write(dir.path(), "f.txt", "x\ny\nz\na\nb\nc\nd\nE2\n");
+    handle(&mut engine, id, "renamed e");
+    assert_eq!(
+        change(&mut engine, id),
+        Some(ReviewChange {
+            before: strings(&["d", "e"]),
+            after: strings(&["d", "E2"]),
+            changed: true,
+        })
+    );
+
+    // Lines inserted above, and none touching it: the same lines, moved.
+    engine.handle(OperationId(11), &human(add("f.txt", 7, 7, "about d")));
+    let second = list(&mut engine)
+        .into_iter()
+        .find(|comment| comment.anchor.text == "d" && comment.id != id)
+        .expect("the second comment")
+        .id;
+    write(dir.path(), "f.txt", "top\nx\ny\nz\na\nb\nc\nd\nE2\n");
+    let moved = handle(&mut engine, second, "nothing");
+    assert!(moved.after_snapshot.is_some());
+    assert_eq!(
+        change(&mut engine, second),
+        Some(ReviewChange {
+            before: strings(&["d"]),
+            after: strings(&["d"]),
+            changed: false,
+        })
+    );
+}
+
+#[test]
+fn a_file_gone_from_the_after_snapshot_has_an_empty_after_side() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 2, 2, "about b")));
+    let id = only(&mut engine).id;
+    std::fs::remove_file(dir.path().join("f.txt")).unwrap();
+    handle(&mut engine, id, "removed the file");
+    assert_eq!(
+        change(&mut engine, id),
+        Some(ReviewChange {
+            before: strings(&["b"]),
+            after: Vec::new(),
+            changed: true,
+        })
+    );
+}
+
+#[test]
+fn handling_again_replaces_the_after_snapshot() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 3, 3, "about c")));
+    let id = only(&mut engine).id;
+    write(dir.path(), "f.txt", "a\nb\nC\nd\ne\n");
+    let first = handle(&mut engine, id, "first").after_snapshot.unwrap();
+    write(dir.path(), "f.txt", "a\nb\nCC\nd\ne\n");
+    let second = handle(&mut engine, id, "second").after_snapshot.unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        git(dir.path(), &["rev-parse", &after_ref(id)]).trim(),
+        second
+    );
+    assert_eq!(change(&mut engine, id).unwrap().after, strings(&["CC"]));
+}
+
+#[test]
+fn reopening_drops_the_after_snapshot_and_its_ref_and_deleting_drops_both_refs() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 3, 3, "about c")));
+    let id = only(&mut engine).id;
+    write(dir.path(), "f.txt", "a\nb\nC\nd\ne\n");
+    handle(&mut engine, id, "done");
+
+    // Resolving keeps it: the human resolves what the agent did.
+    let events = engine.handle(
+        OperationId(11),
+        &human(CommandKind::ResolveReviewComment { id }),
+    );
+    assert!(listed(&events)[0].after_snapshot.is_some());
+    let events = engine.handle(
+        OperationId(12),
+        &human(CommandKind::ReopenReviewComment { id }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    let reopened = listed(&events).remove(0);
+    assert_eq!(reopened.after_snapshot, None);
+    assert_eq!(reopened.summary, None);
+    assert!(reopened.snapshot.is_some());
+    assert_eq!(private_refs(dir.path()), vec![before_ref(id)]);
+    assert_eq!(change(&mut engine, id), None);
+
+    handle(&mut engine, id, "again");
+    assert_eq!(
+        private_refs(dir.path()),
+        vec![after_ref(id), before_ref(id)]
+    );
+    let events = engine.handle(
+        OperationId(13),
+        &human(CommandKind::DeleteReviewComment { id }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    assert!(private_refs(dir.path()).is_empty());
+}
+
+#[test]
+fn a_comment_is_handled_without_an_after_when_the_snapshot_fails() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 3, 3, "about c")));
+    let id = only(&mut engine).id;
+    handle(&mut engine, id, "first");
+    assert!(private_refs(dir.path()).contains(&after_ref(id)));
+
+    // The snapshot folder cannot be made when a file takes its place.
+    let gitmaster = dir.path().join(".git").join("gitmaster");
+    std::fs::remove_dir_all(gitmaster.join("tmp")).unwrap();
+    write(&gitmaster, "tmp", "not a folder");
+    let handled = handle(&mut engine, id, "second");
+    assert_eq!(handled.status, ReviewStatus::Handled);
+    assert_eq!(handled.summary.as_deref(), Some("second"));
+    assert_eq!(handled.after_snapshot, None);
+    assert_eq!(private_refs(dir.path()), vec![before_ref(id)]);
+    assert_eq!(change(&mut engine, id), None);
+}
+
+#[test]
+fn reading_the_change_is_not_recorded() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 3, 3, "about c")));
+    let id = only(&mut engine).id;
+    handle(&mut engine, id, "done");
+    let before = engine.log().len();
+    let records = log.entries().len();
+    change(&mut engine, id);
+    assert_eq!(engine.log().len(), before, "a read leaves no entry");
+    assert_eq!(log.entries().len(), records, "and runs no logged git");
 }

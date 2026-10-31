@@ -89,6 +89,15 @@ pub enum DiscardOutcome {
     },
 }
 
+/// Which snapshot of a review comment a private ref keeps (D97, D140): the one
+/// taken when the comment was made, or the one taken when an agent marked it
+/// handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewSide {
+    Before,
+    After,
+}
+
 /// What the core needs from Git. Adapters implement it; the core tests with fakes.
 pub trait GitPort: Send {
     /// The working tree root that contains `path`.
@@ -468,16 +477,28 @@ pub trait GitPort: Send {
         ))
     }
 
-    /// Points the private ref that keeps comment `comment`'s snapshot alive at
-    /// `oid` (B4, D97).
-    fn set_review_ref(&self, _root: &Path, _comment: i64, _oid: &str) -> Result<(), GitError> {
+    /// Points the private ref that keeps comment `comment`'s `side` snapshot
+    /// alive at `oid` (B4, D97, D140).
+    fn set_review_ref(
+        &self,
+        _root: &Path,
+        _comment: i64,
+        _side: ReviewSide,
+        _oid: &str,
+    ) -> Result<(), GitError> {
         Err(GitError(
             "snapshots are not supported by this adapter".into(),
         ))
     }
 
-    /// Deletes the private ref of comment `comment`, so its snapshot can go.
-    fn delete_review_ref(&self, _root: &Path, _comment: i64) -> Result<(), GitError> {
+    /// Deletes the private ref of comment `comment`'s `side` snapshot, so the
+    /// snapshot can go.
+    fn delete_review_ref(
+        &self,
+        _root: &Path,
+        _comment: i64,
+        _side: ReviewSide,
+    ) -> Result<(), GitError> {
         Err(GitError(
             "snapshots are not supported by this adapter".into(),
         ))
@@ -499,6 +520,22 @@ pub trait GitPort: Send {
         _oid: &str,
         _path: &str,
     ) -> Result<Option<Vec<u8>>, GitError> {
+        Err(GitError(
+            "snapshots are not supported by this adapter".into(),
+        ))
+    }
+
+    /// The zero-context diff of `path` from commit `from` to commit `to`
+    /// (D140): every hunk with no context lines, so its header says exactly
+    /// which lines changed. A path in neither commit, or the same in both, has
+    /// no hunks. Never records anything (D28).
+    fn diff_commits(
+        &self,
+        _root: &Path,
+        _from: &str,
+        _to: &str,
+        _path: &str,
+    ) -> Result<FileDiff, GitError> {
         Err(GitError(
             "snapshots are not supported by this adapter".into(),
         ))

@@ -4717,6 +4717,7 @@ mod tests {
             resolved_at: None,
             summary: None,
             snapshot: None,
+            after_snapshot: None,
             location: Some(gm_schema::ReviewLocation {
                 start_line: 1,
                 end_line: 1,

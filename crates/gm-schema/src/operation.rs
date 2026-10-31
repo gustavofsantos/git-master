@@ -11,7 +11,7 @@ use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::hook::{HookFailure, HookInfo};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
-use crate::review::ReviewComment;
+use crate::review::{ReviewChange, ReviewComment};
 use crate::stack::StackSnapshot;
 use crate::stash::StashEntry;
 use crate::status::{
@@ -458,18 +458,21 @@ pub enum CommandKind {
     },
     /// Marks review comment `id` handled by an agent, with its `summary` of what it
     /// did (D135). Refused for a resolved comment and for a blank summary. Writes
-    /// only the app's own store. Answers `ReviewCommentsListed`.
+    /// the app's own store, then takes the "after" snapshot of the working tree
+    /// and keeps it under a private ref (D140); a snapshot that fails leaves the
+    /// comment handled without one. Answers `ReviewCommentsListed`.
     HandleReviewComment {
         id: i64,
         summary: String,
     },
     /// Marks review comment `id` open again, which is refused when it is already
-    /// open. Human only.
+    /// open. The agent's summary and the "after" snapshot are dropped (D140).
+    /// Human only.
     ReopenReviewComment {
         id: i64,
     },
-    /// Deletes review comment `id` and the private ref that keeps its snapshot.
-    /// Human only.
+    /// Deletes review comment `id` and the private refs that keep its
+    /// snapshots. Human only.
     DeleteReviewComment {
         id: i64,
     },
@@ -483,6 +486,12 @@ pub enum CommandKind {
     /// the After side of the diff. Answers `ReviewCurrentText`. A read: never
     /// recorded (D28).
     LoadReviewCurrentText {
+        id: i64,
+    },
+    /// Reads the anchored lines of review comment `id` in its "before" and
+    /// "after" snapshots (D140). Answers `ReviewChange`. A read: never recorded
+    /// (D28).
+    LoadReviewChange {
         id: i64,
     },
     /// Reads the conflicted file `path` of the operation that stopped (D114):
@@ -931,6 +940,15 @@ pub enum Event {
         path: String,
         lines: Vec<String>,
     },
+    /// Answers `LoadReviewChange` for comment `comment`: the anchored lines in
+    /// both snapshots, `None` when either snapshot is missing or the file is not
+    /// UTF-8 text.
+    ReviewChange {
+        id: OperationId,
+        comment: i64,
+        path: String,
+        change: Option<ReviewChange>,
+    },
     /// Answers `ReadConflict`.
     ConflictRead {
         id: OperationId,
@@ -1105,6 +1123,9 @@ mod tests {
         assert_eq!(resolve["id"], 7);
         let list = serde_json::to_value(CommandKind::ListReviewComments).unwrap();
         assert_eq!(list["type"], "list_review_comments");
+        let change = serde_json::to_value(CommandKind::LoadReviewChange { id: 3 }).unwrap();
+        assert_eq!(change["type"], "load_review_change");
+        assert_eq!(change["id"], 3);
     }
 
     #[test]

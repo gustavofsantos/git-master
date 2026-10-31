@@ -452,6 +452,7 @@ mod tests {
             resolved_at: None,
             summary: None,
             snapshot: Some("abc".into()),
+            after_snapshot: None,
             location: line.map(|start_line| ReviewLocation {
                 start_line,
                 end_line: start_line,

@@ -54,9 +54,52 @@ pub struct ReviewComment {
     /// Object id of the snapshot taken when the comment was made; `None` when
     /// the snapshot failed.
     pub snapshot: Option<String>,
+    /// Object id of the snapshot taken when an agent marked the comment handled
+    /// (D140); `None` before that, when the snapshot failed, and once the
+    /// comment is reopened.
+    #[serde(default)]
+    pub after_snapshot: Option<String>,
     /// Where the anchor is now; `None` when it is outdated.
     pub location: Option<ReviewLocation>,
     /// True when the anchor is not found exactly once in the file now, or the
     /// file is gone.
     pub outdated: bool,
+}
+
+/// The anchored lines of a comment as the two snapshots hold them (D140): the
+/// region in the "before" snapshot, and the same region in the "after" one,
+/// widened to cover the edits that overlap or touch it. Observed by the app,
+/// not reported by the agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewChange {
+    /// The anchored lines in the "before" snapshot.
+    pub before: Vec<String>,
+    /// The same region in the "after" snapshot; empty when the file is gone.
+    pub after: Vec<String>,
+    /// True when an edit between the snapshots overlaps or touches the region.
+    pub changed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_comment_written_before_the_after_snapshot_reads_without_one() {
+        let json = serde_json::json!({
+            "id": 1,
+            "path": "a.rs",
+            "body": "rename",
+            "status": "handled",
+            "anchor": { "text": "x", "before": [], "after": [], "start_line": 1 },
+            "created_at": 5,
+            "resolved_at": null,
+            "snapshot": "abc",
+            "location": null,
+            "outdated": true
+        });
+        let comment: ReviewComment = serde_json::from_value(json).unwrap();
+        assert_eq!(comment.after_snapshot, None);
+        assert_eq!(comment.summary, None);
+    }
 }

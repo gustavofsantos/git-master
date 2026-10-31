@@ -9,8 +9,8 @@ use serde_json::{Map, json};
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event, FileBody,
     FileView, GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch,
-    OperationId, OperationState, REFLOG_PAGE, ReviewComment, ReviewStatus, STASH_LIST_CHANGED,
-    WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
+    OperationId, OperationState, REFLOG_PAGE, ReviewChange, ReviewComment, ReviewStatus,
+    STASH_LIST_CHANGED, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -26,7 +26,7 @@ use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, Histo
 use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::move_exec;
 use crate::move_preview;
-use crate::port::HistoryRevs;
+use crate::port::{HistoryRevs, ReviewSide};
 use crate::reflog;
 use crate::remote::{RemoteJob, RemoteReport};
 use crate::review;
@@ -2275,6 +2275,7 @@ impl Engine {
             CommandKind::LoadReviewCurrentText { id: comment } => {
                 self.load_review_current(id, *comment)
             }
+            CommandKind::LoadReviewChange { id: comment } => self.load_review_change(id, *comment),
             CommandKind::AddReviewComment {
                 path,
                 start_line,
@@ -2326,7 +2327,8 @@ impl Engine {
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
         let comment = store.add(path, body, &anchor, now_ms()).map_err(|e| e.0)?;
         let snapshot = self.git.snapshot_worktree(&root).and_then(|oid| {
-            self.git.set_review_ref(&root, comment, &oid)?;
+            self.git
+                .set_review_ref(&root, comment, ReviewSide::Before, &oid)?;
             Ok(oid)
         });
         if let Ok(oid) = snapshot {
@@ -2357,7 +2359,8 @@ impl Engine {
     ) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        if find_review(store, comment)?.status == status {
+        let current = find_review(store, comment)?;
+        if current.status == status {
             return Err(match status {
                 ReviewStatus::Resolved => "the comment is already resolved".to_owned(),
                 ReviewStatus::Open | ReviewStatus::Handled => {
@@ -2368,12 +2371,20 @@ impl Engine {
         store
             .set_status(comment, status, now_ms())
             .map_err(|e| e.0)?;
+        // Reopening drops the "after" snapshot (D140); the row no longer names it.
+        if status == ReviewStatus::Open && current.after_snapshot.is_some() {
+            self.git
+                .delete_review_ref(&root, comment, ReviewSide::After)
+                .map_err(|e| e.0)?;
+        }
         self.review_listed(id, &root)
     }
 
     /// An agent's note that it worked on comment `comment` (D135): the status becomes
     /// `Handled` and the summary is kept. A resolved comment is a human's decision
-    /// and is not touched.
+    /// and is not touched. Then the "after" snapshot of the working tree is taken
+    /// and kept under its private ref (D140), in place of an earlier one; a snapshot
+    /// that fails leaves the comment handled without one, and its old ref is dropped.
     fn handle_review_comment(
         &mut self,
         id: OperationId,
@@ -2386,13 +2397,30 @@ impl Engine {
         }
         let root = self.open_root()?;
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let earlier = find_review(store, comment)?.after_snapshot;
         if !store.set_handled(comment, summary).map_err(|e| e.0)? {
             return Err("the comment is already resolved".to_owned());
+        }
+        let snapshot = self.git.snapshot_worktree(&root).and_then(|oid| {
+            self.git
+                .set_review_ref(&root, comment, ReviewSide::After, &oid)?;
+            Ok(oid)
+        });
+        match snapshot {
+            Ok(oid) => store.set_after_snapshot(comment, &oid).map_err(|e| e.0)?,
+            Err(_) if earlier.is_some() => {
+                // The comment stays handled without an "after"; a ref left behind
+                // would keep an old snapshot alive for nothing.
+                let _ = self
+                    .git
+                    .delete_review_ref(&root, comment, ReviewSide::After);
+            }
+            Err(_) => {}
         }
         self.review_listed(id, &root)
     }
 
-    /// Deletes comment `comment` and the private ref that kept its snapshot.
+    /// Deletes comment `comment` and the private refs that kept its snapshots.
     fn delete_review_comment(
         &mut self,
         id: OperationId,
@@ -2404,7 +2432,12 @@ impl Engine {
         store.delete(comment).map_err(|e| e.0)?;
         if current.snapshot.is_some() {
             self.git
-                .delete_review_ref(&root, comment)
+                .delete_review_ref(&root, comment, ReviewSide::Before)
+                .map_err(|e| e.0)?;
+        }
+        if current.after_snapshot.is_some() {
+            self.git
+                .delete_review_ref(&root, comment, ReviewSide::After)
                 .map_err(|e| e.0)?;
         }
         self.review_listed(id, &root)
@@ -2457,6 +2490,74 @@ impl Engine {
             path: current.path,
             lines,
         }])
+    }
+
+    /// The anchored lines of comment `comment` in its "before" and "after"
+    /// snapshots (D140). No change when either snapshot is missing, the file
+    /// was not in the "before" one, either side is not UTF-8, or the anchor is
+    /// not in the "before" text. A file gone from the "after" snapshot has an
+    /// empty after side.
+    fn load_review_change(&mut self, id: OperationId, comment: i64) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let current = find_review(store, comment)?;
+        let change = match (&current.snapshot, &current.after_snapshot) {
+            (Some(before), Some(after)) => self.review_change(&root, &current, before, after)?,
+            _ => None,
+        };
+        Ok(vec![Event::ReviewChange {
+            id,
+            comment,
+            path: current.path,
+            change,
+        }])
+    }
+
+    /// Reads both snapshots of `current` and maps its region from one to the other.
+    fn review_change(
+        &self,
+        root: &Path,
+        current: &ReviewComment,
+        before: &str,
+        after: &str,
+    ) -> Result<Option<ReviewChange>, String> {
+        let text_at = |oid: &str| -> Result<Option<Result<String, ()>>, String> {
+            Ok(self
+                .git
+                .file_at_commit(root, oid, &current.path)
+                .map_err(|e| e.0)?
+                .map(|bytes| String::from_utf8(bytes).map_err(drop)))
+        };
+        let Some(Ok(before_text)) = text_at(before)? else {
+            return Ok(None);
+        };
+        let after_text = match text_at(after)? {
+            Some(Ok(text)) => Some(text),
+            Some(Err(())) => return Ok(None),
+            None => None,
+        };
+        let hunks: Vec<review::LineHunk> = if after_text.is_some() {
+            self.git
+                .diff_commits(root, before, after, &current.path)
+                .map_err(|e| e.0)?
+                .hunks
+                .iter()
+                .map(|hunk| review::LineHunk {
+                    old_start: hunk.old_start,
+                    old_lines: hunk.old_lines,
+                    new_start: hunk.new_start,
+                    new_lines: hunk.new_lines,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(review::review_change(
+            &before_text,
+            after_text.as_deref(),
+            &current.anchor,
+            &hunks,
+        ))
     }
 
     /// Every comment with its location in the file now, as the front-ends list them.
@@ -2970,6 +3071,7 @@ impl Engine {
                 | CommandKind::ListReviewComments
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }
+                | CommandKind::LoadReviewChange { .. }
                 | CommandKind::PreviewMoveChanges { .. }
                 | CommandKind::ReadConflict { .. }
                 | CommandKind::ListThreads { .. }
@@ -3114,6 +3216,7 @@ fn is_review_command(kind: &CommandKind) -> bool {
             | CommandKind::DeleteReviewComment { .. }
             | CommandKind::LoadReviewSnapshotText { .. }
             | CommandKind::LoadReviewCurrentText { .. }
+            | CommandKind::LoadReviewChange { .. }
     )
 }
 

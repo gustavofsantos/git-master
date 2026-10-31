@@ -10,7 +10,7 @@ use gm_schema::{ReviewAnchor, ReviewComment, ReviewStatus};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 /// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 /// How long a writer waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -24,16 +24,20 @@ CREATE TABLE comments (
     created_at INTEGER NOT NULL,
     resolved_at INTEGER,
     snapshot TEXT,
-    summary TEXT
+    summary TEXT,
+    after_snapshot TEXT
 );
 ";
 
 /// Version 1 to 2 (D135): the agent's summary of a handled comment.
 const V2: &str = "ALTER TABLE comments ADD COLUMN summary TEXT;";
 
+/// Version 2 to 3 (D140): the snapshot taken when an agent marks a comment handled.
+const V3: &str = "ALTER TABLE comments ADD COLUMN after_snapshot TEXT;";
+
 /// Columns read back for a `ReviewComment`, in the order `raw_comment` expects.
-const COLUMNS: &str =
-    "id, path, body, status, anchor_json, created_at, resolved_at, snapshot, summary";
+const COLUMNS: &str = "id, path, body, status, anchor_json, created_at, resolved_at, snapshot, \
+     summary, after_snapshot";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreError(pub String);
@@ -53,7 +57,7 @@ impl From<rusqlite::Error> for StoreError {
 }
 
 /// One row as SQLite gives it: id, path, body, status, anchor JSON, created,
-/// resolved, snapshot and summary.
+/// resolved, snapshot, summary and the "after" snapshot.
 type RawComment = (
     i64,
     String,
@@ -62,6 +66,7 @@ type RawComment = (
     String,
     i64,
     Option<i64>,
+    Option<String>,
     Option<String>,
     Option<String>,
 );
@@ -160,13 +165,16 @@ impl ReviewStore {
     }
 
     /// Sets the status. `resolved_at` is `now` when the comment becomes resolved
-    /// and cleared otherwise; the agent's summary is cleared when it is reopened.
+    /// and cleared otherwise; the agent's summary and the "after" snapshot are
+    /// cleared when it is reopened (D140).
     pub fn set_status(&self, id: i64, status: ReviewStatus, now: i64) -> Result<(), StoreError> {
         let resolved_at = (status == ReviewStatus::Resolved).then_some(now);
         Self::changed(
             self.conn.execute(
                 "UPDATE comments SET status = ?2, resolved_at = ?3,
-                 summary = CASE WHEN ?2 = 'open' THEN NULL ELSE summary END WHERE id = ?1",
+                 summary = CASE WHEN ?2 = 'open' THEN NULL ELSE summary END,
+                 after_snapshot = CASE WHEN ?2 = 'open' THEN NULL ELSE after_snapshot END
+                 WHERE id = ?1",
                 params![id, status_text(status), resolved_at],
             )?,
             id,
@@ -175,11 +183,12 @@ impl ReviewStore {
 
     /// Marks the comment handled by an agent, with its `summary` (D135). A comment the
     /// person resolved stays resolved, even when they resolved it a moment ago in another
-    /// process; the check and the write are one statement. Returns whether it changed.
+    /// process; the check and the write are one statement. Any earlier "after" snapshot
+    /// is dropped: the caller records the new one (D140). Returns whether it changed.
     pub fn set_handled(&self, id: i64, summary: &str) -> Result<bool, StoreError> {
         let rows = self.conn.execute(
-            "UPDATE comments SET status = ?2, resolved_at = NULL, summary = ?3
-             WHERE id = ?1 AND status != ?4",
+            "UPDATE comments SET status = ?2, resolved_at = NULL, summary = ?3,
+             after_snapshot = NULL WHERE id = ?1 AND status != ?4",
             params![
                 id,
                 status_text(ReviewStatus::Handled),
@@ -198,6 +207,18 @@ impl ReviewStore {
         Self::changed(
             self.conn.execute(
                 "UPDATE comments SET snapshot = ?2 WHERE id = ?1",
+                params![id, oid],
+            )?,
+            id,
+        )
+    }
+
+    /// Records the snapshot object id taken when an agent marked the comment
+    /// handled (D140), in place of any earlier one.
+    pub fn set_after_snapshot(&self, id: i64, oid: &str) -> Result<(), StoreError> {
+        Self::changed(
+            self.conn.execute(
+                "UPDATE comments SET after_snapshot = ?2 WHERE id = ?1",
                 params![id, oid],
             )?,
             id,
@@ -231,7 +252,11 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     match version {
         0 => tx.execute_batch(SCHEMA)?,
-        1 => tx.execute_batch(V2)?,
+        1 => {
+            tx.execute_batch(V2)?;
+            tx.execute_batch(V3)?;
+        }
+        2 => tx.execute_batch(V3)?,
         v if v == SCHEMA_VERSION => return Ok(()),
         v if v > SCHEMA_VERSION => {
             return Err(StoreError(
@@ -276,11 +301,23 @@ fn raw_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawComment> {
         row.get(6)?,
         row.get(7)?,
         row.get(8)?,
+        row.get(9)?,
     ))
 }
 
 fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
-    let (id, path, body, status, anchor_json, created_at, resolved_at, snapshot, summary) = raw;
+    let (
+        id,
+        path,
+        body,
+        status,
+        anchor_json,
+        created_at,
+        resolved_at,
+        snapshot,
+        summary,
+        after_snapshot,
+    ) = raw;
     Ok(ReviewComment {
         id,
         path,
@@ -292,6 +329,7 @@ fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
         resolved_at,
         summary,
         snapshot,
+        after_snapshot,
         location: None,
         outdated: false,
     })
@@ -342,6 +380,69 @@ mod tests {
         let comment = store.get(id).expect("get").expect("found");
         assert_eq!(comment.status, ReviewStatus::Handled);
         assert_eq!(comment.summary.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn a_version_two_database_gains_the_after_snapshot_column() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("review.db");
+        {
+            let conn = Connection::open(&path).expect("open");
+            conn.execute_batch(
+                "CREATE TABLE comments (id INTEGER PRIMARY KEY, path TEXT NOT NULL,
+                 body TEXT NOT NULL, status TEXT NOT NULL, anchor_json TEXT NOT NULL,
+                 created_at INTEGER NOT NULL, resolved_at INTEGER, snapshot TEXT,
+                 summary TEXT);
+                 INSERT INTO comments (path, body, status, anchor_json, created_at, summary)
+                 VALUES ('a', 'b', 'handled', '{\"text\":\"x\",\"before\":[],\"after\":[],\"start_line\":1}', 1, 'done');
+                 PRAGMA user_version = 2;",
+            )
+            .expect("v2");
+        }
+        let store = ReviewStore::open(&path).expect("migrate");
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
+        let kept = store.list().expect("list").remove(0);
+        assert_eq!(kept.summary.as_deref(), Some("done"));
+        assert_eq!(kept.after_snapshot, None);
+        store
+            .set_after_snapshot(kept.id, &"d".repeat(40))
+            .expect("after");
+        let comment = store.get(kept.id).expect("get").expect("found");
+        assert_eq!(comment.after_snapshot, Some("d".repeat(40)));
+    }
+
+    #[test]
+    fn reopening_drops_the_after_snapshot_and_resolving_keeps_it() {
+        let store = ReviewStore::open_in_memory().expect("open");
+        let id = store.add("a", "b", &anchor("x", 1), 1).expect("add");
+        assert!(store.set_handled(id, "done").expect("handled"));
+        store.set_after_snapshot(id, "first").expect("after");
+        assert!(store.set_handled(id, "again").expect("handled again"));
+        assert_eq!(
+            store.get(id).expect("get").expect("found").after_snapshot,
+            None,
+            "handling again drops the old snapshot"
+        );
+        store.set_after_snapshot(id, "second").expect("again");
+        assert_eq!(
+            store.get(id).expect("get").expect("found").after_snapshot,
+            Some("second".to_owned())
+        );
+        store
+            .set_status(id, ReviewStatus::Resolved, 2)
+            .expect("resolve");
+        assert_eq!(
+            store.get(id).expect("get").expect("found").after_snapshot,
+            Some("second".to_owned())
+        );
+        store.set_status(id, ReviewStatus::Open, 3).expect("reopen");
+        let reopened = store.get(id).expect("get").expect("found");
+        assert_eq!(reopened.after_snapshot, None);
+        assert_eq!(reopened.summary, None);
+        assert_eq!(
+            store.set_after_snapshot(99, "x").expect_err("refused").0,
+            "no review comment 99"
+        );
     }
 
     #[test]

@@ -48,7 +48,7 @@ pub use files::{
 pub use history::{HistoryJob, HistoryOutcome, HistoryPage, HistoryReport, HistoryStream};
 pub use port::{
     DetailRead, DiscardOutcome, FileListRead, FileMerge, GitError, GitPort, GrepRead, HistoryRevs,
-    RemoteRun, TreeMerge,
+    RemoteRun, ReviewSide, TreeMerge,
 };
 pub use runner::{EngineHandle, spawn, spawn_with};
 pub use script_session::{EffectRequest, ScriptLink};
