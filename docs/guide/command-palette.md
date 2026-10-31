@@ -60,9 +60,9 @@ The rules are the same for every menu:
 
 ### Branch menu
 
-> **Planned.** The branch menu cannot be opened from the keyboard yet, and **New Child Branch**, **Restack This Stack** and **Rename Branch** are not available yet.
+> **Planned.** The branch menu cannot be opened from the keyboard yet, and **Restack This Stack** and **Rename Branch** are not available yet.
 
-The branch menu has **Checkout Branch**, **New Child Branch**, **Create Worktree**, **Restack This Stack**, **Push With Lease**, **Copy Branch Name**, **Rename Branch** and **Delete Branch**. **Delete Branch** is in red.
+The branch menu has **Checkout Branch**, **New Child Branch**, **Set Parent…**, **Remove From Stack**, **Reparent to Grandparent**, **Create Worktree**, **Restack This Stack**, **Push With Lease**, **Copy Branch Name**, **Rename Branch** and **Delete Branch**. **Delete Branch** is in red.
 
 For a branch that is checked out in a linked worktree, the menu shows the worktree actions instead. See [Worktrees](worktrees.md).
 

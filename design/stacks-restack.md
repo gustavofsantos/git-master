@@ -14,24 +14,24 @@ main
     └ ledger-e2e
 ```
 
-## Metadata (proposed, D13)
+## Metadata (decided, D13)
 
 In the repository's own git config (`.git/config`), outside the working tree:
 
 - `branch.<name>.stackParent`: name of the parent.
 - `branch.<name>.stackParentBase`: SHA of the parent's tip when the branch was created or last re-anchored.
 
-Scalar values, no lists. Key names still to be confirmed (Q4).
+Scalar values, no lists. The rules for the recorded base, the derived states and the grandparent are in D138.
 
 ## Derived states
 
 - **Stale**: the current tip of the parent differs from `stackParentBase`. Emits `stack.parent_moved`.
-- **Diverged base**: the real merge-base between the child and the parent differs from `stackParentBase` (someone rebased outside the app). Flag it when the repo is opened.
+- **Diverged base**: the recorded base no longer marks where the child's own commits start: it is not an ancestor of the child, or the merge base with the parent strictly descends from it (someone rebased or merged outside the app). Flag it when the repo is opened. Exact rule in D138.
 - **Parent gone or merged**: the parent's branch was deleted, or its content is already in `main` (patch-id). Offer "Reparent to grandparent", with confirmation. Typical case: squash merge of the parent. Emits `stack.parent_merged`.
 
 The calculation runs outside the UI thread. The interface shows "calculating" while it runs.
 
-## Primitives and policies (proposed, D68)
+## Primitives and policies (decided, D68)
 
 The engine exposes the stack primitives as Commands: `stack.tree`, `stack.stale`, `restack.plan`, `restack.apply`, `restack.undo`, `reparent.plan`, `reparent.apply`, `push.lease`. It emits the derived events `stack.parent_moved` and `stack.parent_merged`.
 

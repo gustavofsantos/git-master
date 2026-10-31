@@ -1,11 +1,9 @@
 ---
 title: Stacks and restack
 description: Branch stacks, the By stack sidebar view and history graph, and restack with conflict handling, undo, push and automation.
-status: planned
+status: partial
 order: 80
 ---
-
-> **Planned.** Branch stacks and restack are not available in the app yet.
 
 A stack is a chain of branches in which each branch builds on its parent. A typical stack has a base branch, an API branch and a UI branch on top of the base, and an end-to-end branch on top of the UI branch. When the base changes, restack replays each branch on the new tip of its parent, so the whole stack stays current. If you never give a branch a parent, GitMaster works as a normal Git client and the stack views stay out of your way.
 
@@ -30,7 +28,7 @@ GitMaster records the parent in the `.git/config` file of the repository, outsid
 | Key | Value |
 |---|---|
 | `branch.<name>.stackParent` | The name of the parent branch. |
-| `branch.<name>.stackParentBase` | The commit the parent pointed to when the branch was created or last reparented. |
+| `branch.<name>.stackParentBase` | The commit of the parent that the branch's own commits start from. |
 
 ```ini
 [branch "ledger-api"]
@@ -40,16 +38,35 @@ GitMaster records the parent in the `.git/config` file of the repository, outsid
 
 Each value is a single value, not a list. The values stay in your local clone. They never appear in a commit or in a file of the working tree.
 
+GitMaster writes these values with `git config`, and each write shows in the command panel. The recorded base is set as follows:
+
+| Change | Recorded base |
+|---|---|
+| **New Child Branch** | The tip of the parent, where the new branch starts. |
+| **Set Parent…** | The merge base of the branch and its new parent. |
+| **Reparent to Grandparent** | Unchanged. The branch's own commits still start at the same commit, so restack replays only those. |
+| **Remove From Stack** | Both values are removed. |
+
+When `git branch -d` deletes a branch, Git removes that branch's own values too. Its children keep their values, and their parent shows as gone.
+
 ## Derived states
 
-GitMaster compares the stored values with the repository and derives three states. The comparison runs off the UI thread, and the sidebar shows a calculating indicator until it finishes.
+GitMaster compares the stored values with the repository and derives the state of each branch that has a parent. The comparison runs off the UI thread, and the sidebar shows **Calculating…** until it finishes.
 
 | State | When it applies | What you see |
 |---|---|---|
-| Stale | The tip of the parent is no longer the commit in `stackParentBase`, because the parent has new commits. | The child shows an amber dot, and the parent shows a restack indicator. |
-| Diverged base | The real merge base between a branch and its parent differs from `stackParentBase`, for example after a rebase made outside GitMaster. | GitMaster flags the branch when the repository opens. |
-| Parent gone or merged | The parent branch was deleted, or its changes are already in `main`. GitMaster detects this by patch ID, so a squash merge counts. | GitMaster offers to reparent the branch to its grandparent. You confirm before anything changes. |
+| Stale | The tip of the parent is no longer the commit in `stackParentBase`, because the parent has new commits or was rewritten. | The child shows an amber dot, and the parent shows a restack indicator. |
+| Diverged base | The recorded base no longer marks where the branch's own commits start: it is not in the history of the branch, or the branch already contains newer commits of its parent. This happens after a rebase or a merge made outside GitMaster. | The branch shows the **diverged** tag, from the first time the repository opens. |
+| Parent gone | The parent branch no longer exists. | The branch shows the **parent gone** tag, and its menu offers **Reparent to Grandparent**. |
+| Parent merged | The changes of the parent are already in the root of the stack. GitMaster detects this by patch ID, so a squash merge and a rebase merge count, as well as a normal merge. | The branch shows the **parent merged** tag, and its menu offers **Reparent to Grandparent**. |
 
+When a branch is in more than one state, the tag shows the first that applies in this order: parent gone, parent merged, diverged base, stale.
+
+**Reparent to Grandparent** makes the parent of the old parent the new parent. When the old parent is gone and its values went with it, the new parent is the default branch: the branch of `origin/HEAD`, else the first of `main`, `master`, `trunk` and `develop` that exists. You confirm before anything changes, and the branch's commits do not move until you restack.
+
+GitMaster compares patch IDs against the most recent 2,000 commits of the root that the parent's branch does not have. A parent merged further back than that is not detected.
+
+A parent value that points back at its own child, directly or through other branches, is a loop that Git cannot express as a tree. GitMaster shows the branches of a loop under **No stack**, with the **parent loop** tag, until you set or remove one of the parents.
 ## The By stack view
 
 The sidebar has two views of your branches: **By stack** and **By name**. **By name** groups branches by prefix, such as `feature/`, as described in [Branches](branches.md).
@@ -63,15 +80,32 @@ The sidebar shows these indicators:
 
 | Indicator | Where | Meaning |
 |---|---|---|
-| **restack N** | On a parent | N branches below it need a restack. The indicator sits on the parent, because the parent is the branch that changed. |
+| **restack N** | On a parent | N branches below it need a restack: its stale children and every branch under them. The indicator sits on the parent, because the parent is the branch that changed. |
 | **↑N** | On a branch | The branch has N commits that its parent does not have. The count is against the parent, not against `origin`. |
 | Amber dot | On a child | The child is stale. |
+
+Hover a tag or an indicator to read what it means.
+
+## Set a parent
+
+Every action below is in the branch menu of the sidebar and in the command palette. Each one changes only the two values above. No commit moves until you restack.
+
+- **New Child Branch** creates a branch at the tip of this branch, with this branch as its parent. The dialog is the **New Branch** dialog, with the parent shown and the start point fixed.
+- **Set Parent…** makes another local branch the parent of this branch. Pick the parent from the list. GitMaster refuses the branch itself, a branch under it (that would make a loop), a remote branch, and a branch that shares no history with it.
+- **Remove From Stack** removes the parent of this branch. Its children keep it as their parent, so it becomes the root of their stack.
+- **Reparent to Grandparent** is offered when the parent is gone or merged, as described in [Derived states](#derived-states).
+
+### Drag to set a parent
+
+> **Planned.** Dragging a branch onto another branch is not available yet.
 
 To set a parent, drag a branch onto another branch. The target becomes the parent of the dragged branch.
 
 The list is virtualized, so a repository with hundreds of remote branches stays responsive.
 
 ## Stacks in the history graph
+
+> **Planned.** The history graph does not draw stacks yet.
 
 The [History](history.md) page draws stacks in its graph:
 
@@ -82,6 +116,8 @@ The [History](history.md) page draws stacks in its graph:
 - Each branch lane has a color derived from the name of the branch, and the color stays the same across sessions. The dashed edge and the badge also show the state, so color is never the only signal.
 
 ## Restack
+
+> **Planned.** Restack is not available in the app yet.
 
 Restack brings a stack up to date. It walks the tree from the top down, so parents come before their children. For each branch, it replays the branch's own commits onto the new tip of its parent. When the branch is done, its base moves to that tip, and the walk continues with the next branch.
 
@@ -109,6 +145,8 @@ Restack brings a stack up to date. It walks the tree from the top down, so paren
 
 ## Automate stack updates
 
+> **Planned.** The stack events and the stack workflow templates are not available yet.
+
 Automation is built with workflows, not with a restack setting. Three built-in templates are available, and all three are off by default. Turn on each one per repository:
 
 - **Restack children when parent moves** runs on the `stack.parent_moved` event.
@@ -120,5 +158,7 @@ A workflow that restacks shows the same four steps as the manual restack. On a c
 To write your own stack workflows, see the [Workflows overview](../workflows/overview.md) and [Triggers and phases](../workflows/triggers-and-phases.md).
 
 ## Restack with agents
+
+> **Planned.** The stack tools are not available through MCP yet.
 
 Agents use the same stack primitives through MCP. An agent reads the stack with `stack_tree`, builds a plan with `restack_plan`, and asks to apply the plan with `restack_apply`. The apply accepts only a plan ID, so you approve exactly the plan that runs. The apply always waits for your approval in the app. See the [MCP server](../agents/mcp-server.md) page.

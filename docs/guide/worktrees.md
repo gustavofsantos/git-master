@@ -118,7 +118,7 @@ When a branch is checked out in a linked worktree, its branch menu offers worktr
 
 ### Stack actions
 
-> **Planned.** **New Child Branch** and **Restack This Stack** are not available yet.
+> **Planned.** **Restack This Stack** is not available yet.
 
 ## Open in a terminal
 

@@ -57,9 +57,7 @@ The sidebar lists the places in the repository and its branches and worktrees.
 | **Reflog** | The reference log. | |
 | **Local review** | Review comments on local changes. | Planned |
 
-Below the entries, the **Branches** section shows local and remote branches in a tree grouped by prefix, such as `feature/`. The current branch carries a **HEAD** badge. A search box above the tree narrows the list, with a count such as "3 of 12". Click the header of the **Workspace**, **Branches** or **Worktrees** section to fold it. See [Branches](../guide/branches.md).
-
-> **Planned.** The **By stack** view of the branch tree is not available yet. Only the **By name** view works.
+Below the entries, the **Branches** section shows your branches in one of two views. **By stack** shows the local branches as a tree of parents, described in [Stacks](../guide/stacks.md). **By name** shows local and remote branches in a tree grouped by prefix, such as `feature/`. The current branch carries a **HEAD** badge. A search box above the tree narrows the list, with a count such as "3 of 12". Click the header of the **Workspace**, **Branches** or **Worktrees** section to fold it. See [Branches](../guide/branches.md).
 
 Below the branches, the **Worktrees** section lists the worktrees of the repository, with the main checkout first. See [Worktrees](../guide/worktrees.md).
 

@@ -137,15 +137,13 @@ A branch that is checked out in a linked worktree has a different menu, for work
 
 ## Stack actions
 
-> **Planned.** New Child Branch, Restack This Stack and Rename Branch are not available yet.
+> **Planned.** Restack This Stack and Rename Branch are not available yet.
 
-The branch menu shows **New Child Branch**, **Restack This Stack** and **Rename Branch**. New Child Branch creates a branch whose parent is this branch. Restack This Stack brings the branches of the stack that contains this branch up to date with their parents. Rename Branch changes the name of the branch. For stacks, see [Stacks](stacks.md).
+The branch menu shows **New Child Branch**, **Set Parent…**, **Remove From Stack**, **Reparent to Grandparent**, **Restack This Stack** and **Rename Branch**. New Child Branch creates a branch whose parent is this branch. Set Parent… picks another local branch as the parent, and Remove From Stack removes the parent. Reparent to Grandparent is enabled when the parent is gone or merged. Restack This Stack brings the branches of the stack that contains this branch up to date with their parents. Rename Branch changes the name of the branch. For stacks, see [Stacks](stacks.md).
 
 ## By stack view
 
-> **Planned.** The By stack view is not available yet.
-
-The **By stack** view shows the branches as a tree of parents, under a **Stacks** section and a **No stack** section. A branch whose parent has moved shows an amber dot. A branch with commits beyond its parent shows their number, such as `↑3`. A parent that has branches to restack shows the action with their number, such as `restack 3`. For stacks, see [Stacks](stacks.md).
+The **By stack** view shows the local branches as a tree of parents, under a **Stacks** section and a **No stack** section. Remote branches are listed in the **By name** view only. A branch whose parent has moved shows an amber dot. A branch with commits beyond its parent shows their number, such as `↑3`. A parent that has branches to restack shows the action with their number, such as `restack 3`. For stacks, see [Stacks](stacks.md).
 
 ## Set a parent by dragging
 
