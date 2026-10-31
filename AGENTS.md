@@ -90,6 +90,15 @@ Rules that matter day to day:
 - Match the surrounding code: naming, comment density, idiom.
 - With no display available, say plainly that nothing was seen in a window.
 
+## How the author works with the agent
+
+The author works with the main agent as a manager. The main agent delegates implementation tasks to Haiku subagents (`model: "haiku"`), which deliver great value for the price, and reports back to the author like a manager reporting to their lead: what was delegated, what came back, what was verified and what needs a decision. It does not write the implementation itself.
+
+- The main agent is the manager: it breaks the work into self-contained briefs, delegates each one, reviews what comes back (diff, `make check`) and reports the outcome. It pairs with the author and with the Advisor.
+- Haiku subagents implement. Give each a precise brief: the files, the docs page and decision (D) it follows, the acceptance criteria and the tests to run.
+- The main agent verifies before reporting: a subagent's claim is not evidence. Read the diff and run the checks.
+- Decisions that belong to the author (see "Handling decisions") are escalated in the report, never delegated.
+
 ## Driving the app headless
 
 `scripts/ui-smoke.sh` launches the release binary on a private virtual display, drives it with `xdotool`, checks the result with `git` and compares screenshots. Each scenario runs in both themes and stops at the first failed assertion, printing the screenshot path. It needs Xvfb, xdotool, scrot, git and ImageMagick, builds the release binary if missing, uses display `:97` and creates fixtures under `~/.cache/gm-smoke/smoke-run`. Screenshots go to `$SMOKE_OUT` (default `~/.cache/gm-smoke/smoke-out`).
