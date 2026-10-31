@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use gm_schema::{ReviewAnchor, ReviewComment, ReviewStatus};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 /// Schema version written to `PRAGMA user_version`.
 const SCHEMA_VERSION: i64 = 2;
@@ -173,15 +173,24 @@ impl ReviewStore {
         )
     }
 
-    /// Marks the comment handled by an agent, with its `summary` (D135).
-    pub fn set_handled(&self, id: i64, summary: &str) -> Result<(), StoreError> {
-        Self::changed(
-            self.conn.execute(
-                "UPDATE comments SET status = ?2, resolved_at = NULL, summary = ?3 WHERE id = ?1",
-                params![id, status_text(ReviewStatus::Handled), summary],
-            )?,
-            id,
-        )
+    /// Marks the comment handled by an agent, with its `summary` (D135). A comment the
+    /// person resolved stays resolved, even when they resolved it a moment ago in another
+    /// process; the check and the write are one statement. Returns whether it changed.
+    pub fn set_handled(&self, id: i64, summary: &str) -> Result<bool, StoreError> {
+        let rows = self.conn.execute(
+            "UPDATE comments SET status = ?2, resolved_at = NULL, summary = ?3
+             WHERE id = ?1 AND status != ?4",
+            params![
+                id,
+                status_text(ReviewStatus::Handled),
+                summary,
+                status_text(ReviewStatus::Resolved)
+            ],
+        )?;
+        if rows == 0 && self.get(id)?.is_none() {
+            return Err(StoreError(format!("no review comment {id}")));
+        }
+        Ok(rows > 0)
     }
 
     /// Records the snapshot object id taken when the comment was made.
@@ -213,31 +222,30 @@ impl ReviewStore {
     }
 }
 
-/// Creates the schema of an empty database; refuses one written by another
-/// version of the app. Each step is one transaction.
+/// Creates the schema of an empty database, or brings an older one up to date; refuses one
+/// written by a newer version of the app. Several processes can open the same file at once
+/// (the app and any number of `gitmaster mcp`), so the version is read inside a write
+/// transaction: the second to arrive waits, sees the finished work and changes nothing.
 fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     match version {
-        0 => {
-            let tx = conn.transaction()?;
-            tx.execute_batch(SCHEMA)?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            tx.commit().map_err(StoreError::from)
+        0 => tx.execute_batch(SCHEMA)?,
+        1 => tx.execute_batch(V2)?,
+        v if v == SCHEMA_VERSION => return Ok(()),
+        v if v > SCHEMA_VERSION => {
+            return Err(StoreError(
+                "review.db was written by a newer GitMaster".to_owned(),
+            ));
         }
-        1 => {
-            let tx = conn.transaction()?;
-            tx.execute_batch(V2)?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            tx.commit().map_err(StoreError::from)
+        v => {
+            return Err(StoreError(format!(
+                "review.db has unknown schema version {v}"
+            )));
         }
-        v if v == SCHEMA_VERSION => Ok(()),
-        v if v > SCHEMA_VERSION => Err(StoreError(
-            "review.db was written by a newer GitMaster".to_owned(),
-        )),
-        v => Err(StoreError(format!(
-            "review.db has unknown schema version {v}"
-        ))),
     }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit().map_err(StoreError::from)
 }
 
 fn status_text(status: ReviewStatus) -> &'static str {
@@ -330,10 +338,24 @@ mod tests {
         let store = ReviewStore::open(&path).expect("migrate");
         assert_eq!(user_version(&store), SCHEMA_VERSION);
         let id = store.add("a", "b", &anchor("x", 1), 1).expect("add");
-        store.set_handled(id, "done").expect("handled");
+        assert!(store.set_handled(id, "done").expect("handled"));
         let comment = store.get(id).expect("get").expect("found");
         assert_eq!(comment.status, ReviewStatus::Handled);
         assert_eq!(comment.summary.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn a_resolved_comment_is_not_marked_handled() {
+        let store = ReviewStore::open_in_memory().expect("open");
+        let id = store.add("a", "b", &anchor("x", 1), 1).expect("add");
+        store
+            .set_status(id, ReviewStatus::Resolved, 2)
+            .expect("resolve");
+        assert!(!store.set_handled(id, "late").expect("handled"));
+        let comment = store.get(id).expect("get").expect("found");
+        assert_eq!(comment.status, ReviewStatus::Resolved);
+        assert_eq!(comment.summary, None);
+        assert!(store.set_handled(99, "x").is_err());
     }
 
     #[test]

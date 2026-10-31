@@ -335,3 +335,88 @@ fn an_agent_searches_a_thread_then_reads_it_in_pages() {
     assert_eq!(entries[0]["untrusted"], true);
     assert_eq!(page["has_more"], true);
 }
+
+/// Several servers on one repository at the same time, in its main worktree and in a linked
+/// one, starting on a repository that has no store yet. None may fail, and every comment ends
+/// handled exactly once.
+#[test]
+fn parallel_servers_share_one_repository_and_its_worktrees() {
+    const SERVERS: usize = 8;
+    let dir = repo();
+    let linked = dir.path().join("linked");
+    git(
+        dir.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            linked.to_str().unwrap(),
+            "-b",
+            "other",
+        ],
+    );
+    let worktrees = [dir.path().to_path_buf(), linked];
+
+    // All servers start on a fresh repository, so the stores are created in a race.
+    let start = std::sync::Barrier::new(SERVERS);
+    std::thread::scope(|scope| {
+        for n in 0..SERVERS {
+            let (start, worktree) = (&start, &worktrees[n % 2]);
+            scope.spawn(move || {
+                start.wait();
+                let replies = session(
+                    worktree,
+                    &[
+                        initialize(),
+                        call(2, "review_comments_list", &json!({})),
+                        call(3, "threads_search", &json!({ "query": "anything" })),
+                    ],
+                );
+                assert_eq!(result(&replies[1])["comments"], json!([]));
+                assert_eq!(result(&replies[2])["hits"], json!([]));
+            });
+        }
+    });
+
+    for line in 1..=3 {
+        comment(dir.path(), line, &format!("comment {line}"));
+    }
+    store_thread(dir.path());
+
+    // Each server handles every comment; they overlap, so the same comment is handled by
+    // several of them, and the last summary wins.
+    let start = std::sync::Barrier::new(SERVERS);
+    std::thread::scope(|scope| {
+        for n in 0..SERVERS {
+            let (start, worktree) = (&start, &worktrees[n % 2]);
+            scope.spawn(move || {
+                start.wait();
+                let mut requests = vec![initialize()];
+                for id in 1..=3 {
+                    requests.push(call(
+                        10 + id,
+                        "review_comment_resolve",
+                        &json!({ "id": id, "summary": format!("server {n}") }),
+                    ));
+                    requests.push(call(
+                        20 + id,
+                        "threads_search",
+                        &json!({ "query": "backoff" }),
+                    ));
+                }
+                for reply in &session(worktree, &requests)[1..] {
+                    assert_eq!(reply["result"]["isError"], false, "{reply}");
+                }
+            });
+        }
+    });
+
+    let replies = session(
+        &worktrees[1],
+        &[
+            initialize(),
+            call(2, "review_comments_list", &json!({ "status": "handled" })),
+        ],
+    );
+    assert_eq!(result(&replies[1])["comments"].as_array().unwrap().len(), 3);
+}

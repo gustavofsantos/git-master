@@ -29,6 +29,12 @@ See [CLI](../reference/cli.md) for the command.
 
 The server and the app share what they store in the repository's `.git/gitmaster/` directory. A comment the agent marks as handled appears in the app, and a comment you write in the app is there the next time the agent lists comments. Neither one waits for the other.
 
+## Several servers at once
+
+Each agent session starts its own `gitmaster mcp`, so several can run on the same repository at the same time, in the same worktree or in different worktrees, and next to the app. They do not talk to each other and none of them blocks the others. Review comments and threads belong to the repository, so every worktree sees the same ones, and a comment handled by one server is handled for all. The comment's lines are found in the files of the worktree the server runs in.
+
+When two servers write the same comment at the same time, the last summary stays. A comment you resolved stays resolved: no server can mark it handled again.
+
 ## What the server may do
 
 The server offers two kinds of tool:

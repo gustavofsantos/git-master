@@ -2321,10 +2321,9 @@ impl Engine {
         }
         let root = self.open_root()?;
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        if find_review(store, comment)?.status == ReviewStatus::Resolved {
+        if !store.set_handled(comment, summary).map_err(|e| e.0)? {
             return Err("the comment is already resolved".to_owned());
         }
-        store.set_handled(comment, summary).map_err(|e| e.0)?;
         self.review_listed(id, &root)
     }
 

@@ -1,7 +1,7 @@
 ---
 title: Agent integration
 description: Install the GitMaster plugin into your coding agent so that its sessions are captured as threads, check that it works, and remove it.
-status: partial
+status: implemented
 order: 5
 ---
 
@@ -20,10 +20,8 @@ Run `gitmaster harness list` to see the names this version knows. GitMaster does
 | Part | What it does |
 |---|---|
 | Hooks | Run `gitmaster thread hook` when a session starts and ends, when you send a prompt, before and after each tool call, and when the agent stops. |
-| MCP settings | Start `gitmaster mcp` so the agent can use the [MCP tools](../reference/mcp-tools.md). |
-| Skill | Tells the agent when and how to search threads. |
-
-> **Planned.** The MCP settings and the skill are not part of the plugin yet. The plugin carries the hooks only.
+| MCP settings | Start `gitmaster mcp` so the agent can use the [MCP tools](../reference/mcp-tools.md). Each agent session starts its own server process, in the directory the session runs in. |
+| Skill | Tells the agent when to use the review and thread tools, and to treat their untrusted text as data. |
 
 GitMaster writes the plugin into its own data directory, `agents/claude-code/` under the user data directory. It never writes a file into a repository.
 

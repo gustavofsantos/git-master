@@ -1229,7 +1229,10 @@ fn migrate(conn: &mut Connection, clean: TextCleaner) -> Result<(), StoreError> 
     }
     tx.pragma_update(None, "user_version", latest)?;
     tx.commit()?;
-    if count_entries(conn, VACUUM_ENTRY_LIMIT)? < VACUUM_ENTRY_LIMIT {
+    // A database created just now has nothing to reclaim. Skipping the VACUUM there also keeps a
+    // second process that opens the new file at the same moment from meeting the exclusive lock
+    // in the middle of connecting the full-text table.
+    if from > 0 && count_entries(conn, VACUUM_ENTRY_LIMIT)? < VACUUM_ENTRY_LIMIT {
         // The dropped tool index is out of the file once the pages are reused (D132). A busy
         // database skips this: the next checkpoint and later writes reclaim the pages.
         match conn.execute_batch("VACUUM") {
