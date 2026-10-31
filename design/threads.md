@@ -349,7 +349,7 @@ edit(
   patch TEXT NOT NULL, added INTEGER NOT NULL, removed INTEGER NOT NULL,
   pre_oid TEXT, post_oid TEXT, from_input INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL)
 
-thread_link(thread_id, kind /* 'commit' | 'branch' | 'file' */, ref, origin /* 'observed' | 'manual' */,
+thread_link(thread_id, kind /* 'commit' | 'branch' | 'file' */, ref, origin /* 'observed' | 'manual', becomes 'human' in v5 */,
   PRIMARY KEY(thread_id, kind, ref))
 
 thread_tag(thread_id, tag, PRIMARY KEY(thread_id, tag))
@@ -392,7 +392,7 @@ Commands and events in `gm-schema`; the UI and the MCP front end use the same on
 | `SearchThreads { query, filter, limit }` | read | any | Cancellable; late answer dropped by `OperationId`. |
 | `ReadThread { uid, from_seq, limit }` | read | any | Entries in order, with edits. Default limit keeps output small. |
 | `ReadThreadEdit { id }` | read | any | The patch and the derived state. |
-| `UpdateThread { uid, title?, note?, starred?, tags? }` | apply | human | Edits metadata only; never entry text. |
+| `UpdateThread { uid, title?, note?, starred? }` | apply | human | Edits metadata only; never entry text. Tags are labels from schema v5. |
 | `LinkThread` / `UnlinkThread` | apply | human | Manual commit links. |
 | `DeleteThread { uid }` / `DeleteThreadEntry { id }` | apply | human | A real delete (`secure_delete`); confirmation lists what goes. |
 | `ExportThread { uid, path }` | read | human | Markdown; redacted again on the way out. |
@@ -402,7 +402,7 @@ Commands and events in `gm-schema`; the UI and the MCP front end use the same on
 
 Ingest is **not** a `Command`. It runs in the hook process, which has no engine and no operation state, and it writes only GitMaster's own database; it does not touch the repository. The engine in the window opens `threads.db` read-mostly (reads, plus its own writes for the commands above) and learns about new data from a watcher on the database file (`-wal` included), debounced like the status watcher, which emits `ThreadsChanged { uids }`. No socket is needed, so the capture works with the app closed.
 
-An agent can never call a write command: the agent actor is refused for everything except the reads, and the reads are exposed through MCP only in T9.
+An agent can call the reads, which are exposed through MCP in T9 (and the provenance and label reads in P2 and P3, see below), and the three **record** commands `CreateLabel`, `AttachLabel` and `LinkThreads` (D146). Record commands write only `threads.db`, carry no approval marker and record the actor on the row. The agent actor is refused for every other write: anything that changes thread text, deletes a thread or an entry, renames or deletes a label, or detaches a label or a link.
 
 ## UI
 
@@ -515,6 +515,108 @@ A working-tree snapshot at `UserPromptSubmit` and at `Stop` through the temporar
 ### T9: MCP read tools (with slice 7)
 
 `threads_search`, `thread_get`, `thread_read` over the same commands, untrusted-marked output, small by default; the `gitmaster-threads` skill in the plugin; the policy switch. Done when an agent finds a decision made in an earlier thread and cites its `uid` and entry.
+
+## Graph, provenance and labels (D143 to D146)
+
+Decided by the author on 2026-10-31 as **proposed** (D143 to D146); Q34 is open. The user-facing behavior is in `docs/guide/threads.md` and `docs/reference/mcp-tools.md`, marked `Planned`. This section is the build plan.
+
+### Edges
+
+- **Derived** edges are computed on read and never stored: a thread edited a file (`edit.rel_path`), a commit appeared on the thread's branch during the thread, blame owns a line range, and an edit's `post_oid` equals a file's blob in a commit.
+- **Stored** edges are label attachments, thread-to-thread links and the commit links D126 observes (the time window cannot be recomputed). Every stored row has an `origin`: `observed` (GitMaster, from a fact), `human` or `agent:<client>`.
+
+### Schema (v5)
+
+```text
+label(
+  id          INTEGER PRIMARY KEY,
+  name        TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  color       TEXT,                    -- '#rrggbb', NULL for none
+  origin      TEXT NOT NULL,           -- 'human' | 'agent:<client>'  (a label is never 'observed')
+  created_at  INTEGER NOT NULL)
+
+label_attach(
+  label_id     INTEGER NOT NULL REFERENCES label(id) ON DELETE CASCADE,
+  kind         TEXT NOT NULL,          -- 'thread' | 'file' | 'commit' | 'label'
+  ref          TEXT NOT NULL,          -- thread uid | repo-relative path | commit id | label id
+  origin       TEXT NOT NULL,
+  at           INTEGER NOT NULL,
+  subject      TEXT, author TEXT, committed_at INTEGER,  -- kind 'commit': snapshot, so a collected commit still shows
+  resolved     TEXT,                   -- kind 'commit': cached id after a rewrite; never overwrites ref
+  PRIMARY KEY(label_id, kind, ref))
+
+thread_rel(                            -- thread-to-thread link; not thread_link, which holds commit, branch and file links
+  from_thread INTEGER NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+  to_thread   INTEGER NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL CHECK (kind IN ('continues', 'relates', 'supersedes')),
+  origin      TEXT NOT NULL,
+  at          INTEGER NOT NULL,
+  PRIMARY KEY(from_thread, to_thread, kind))
+
+thread_link (existing, D126)           -- origin 'manual' becomes 'human' in the migration; add subject, author, committed_at and resolved for kind 'commit'
+
+edit                                   -- add rel_path TEXT, repo-relative, derived from thread.worktree
+CREATE INDEX edit_rel_path ON edit(rel_path)
+```
+
+Migration to v5, in one transaction, tested from v4: `thread_tag` rows become `label` rows (origin `human`) and `label_attach` rows of kind `thread`; then `thread_tag` is dropped. `edit.rel_path` is filled from `path` and `thread.worktree`.
+
+Resolved in the decisions: one `origin` vocabulary (`manual` becomes `human`); observed commit links stay stored; the migration fills the snapshot of existing commit links from Git while the commit exists and leaves it empty otherwise; each `thread_tag` becomes a `human` label attached to its thread, and `UpdateThread` loses `tags`.
+
+### Commands (D08 table style)
+
+| Command | Level | Actor | Notes |
+|---|---|---|---|
+| `ReadProvenance { path, from_line, to_line }` | read | any | Blame, then threads, entries and labels, each with its evidence. Bounded. Not in the command log. |
+| `ListLabels { query, limit }` | read | any | Labels with their attachment counts. |
+| `ReadLabel { id }` | read | any | The label and what is attached to it. File paths are followed with `git log --follow` on read. |
+| `CreateLabel { name, description, color }` | record | any | Writes `threads.db` only. Actor recorded. |
+| `AttachLabel { label, kind, ref }` | record | any | Origin recorded. A commit attachment stores its snapshot. |
+| `LinkThreads { from, to, kind }` | record | any | One `thread_rel` row. |
+| `RenameLabel { id, name }` | apply | human | |
+| `DeleteLabel { id }` | apply | human | Removes its attachments. |
+| `DetachLabel { label, kind, ref }` | apply | human | Removes one attachment. |
+| `RemoveThreadRelation { from, to, kind }` | apply | human | Removes one `thread_rel` row. Named apart from `UnlinkThread`, which removes a commit link. |
+
+Record commands are written to the command log with their actor (D28). Level **record** is new: it writes only GitMaster's own store, needs no approval marker and records the actor. `UpdateThread { tags? }` loses its `tags` field when `thread_tag` is replaced; that change is part of P3.
+
+### Evidence and bounds (D144)
+
+| Evidence | Rule |
+|---|---|
+| `blob_match` | The edit's `post_oid` equals the file's blob in the blamed commit. |
+| `line_match` | A contiguous run of at least N lines, where N is open (Q34), and blank and brace-only lines do not count, appears contiguously in the added lines of one edit. The path is the one blame reports for the line. The edit's `at` is not after the blamed commit's author date. All matching edits are returned and the result is marked ambiguous. A line match never creates a stored link. |
+| `hunk_overlap` | Named in D144 only. The rule is defined in P1. |
+| `observed_commit` | Shown as "created during this thread" (D126). |
+| `manual` | Shown as "linked by you". |
+
+- An edit that was redacted (D121), truncated by the cap or recorded `from_input` reports `unverifiable`, never "no match".
+- No whitespace normalization. A formatter run after the edit breaks the match.
+- Bounds: at most 10 commits per query, 5 threads per commit, two edges out. A cut result says so.
+- Open for P1 (Q34): how `post_oid` is computed (D123), with `hash-object --path` or not, so it holds with CRLF and LFS.
+
+### Commit links after a rewrite (D145)
+
+- GitMaster's own restack remaps links from the old-to-new pairs of D142. The stored id is never overwritten; the remap goes to `resolved`.
+- A rewrite outside GitMaster: the engine looks only in the rewritten range (old tip from `ORIG_HEAD` or the reflog, new tip from the branch) for an exact unique `git patch-id --stable` match. A duplicate is `ambiguous`. No match is `gone`, meaning unreachable from any ref, not a missing object.
+- Not used: similarity matching, `range-diff`, a `post-rewrite` hook, `notes.rewriteRef` (D75, D98).
+
+### P1: provenance engine
+
+Pure ranking and bounds, and the blame and patch-id adapters in `gm-core`. Real-git tests in `crates/gm-core/tests/provenance_real_git.rs`: a blob match, a line match, an ambiguous line match, a formatter run after the edit, a rebase, a squash and a reorder, a redacted and a truncated edit. Measure N on real threads and record it (closes Q34). Done when each fixture returns its evidence and the release build answers a range within the budget set in P1.
+
+### P2: MCP provenance tool
+
+`provenance` in `gm-mcp` over `ReadProvenance`, untrusted-marked, bounded, with the cut stated. Depends on slice 7 for the server. Done when an agent asks about a range and gets the thread, its entries and the evidence, and a cut result says so.
+
+### P3: labels and links
+
+Schema v5 with its migration test; `ListLabels`, `ReadLabel`, `CreateLabel`, `AttachLabel`, `LinkThreads`, and the human-only commands; the rewrite resolution above; MCP `label_create`, `label_attach` and `thread_link`; the allow rules the docs recommend for those three (the plugin cannot ship permission rules). Done when the migration keeps every tag as a label, a commit link survives a restack and resolves after an outside rewrite only on an exact unique match, and a row an agent wrote shows the agent and can be removed.
+
+### P4: UI
+
+The **Labels** page, chips on rows and headers, label dialogs, the provenance view for a range on the Code page, **Link to Thread** in the header's **⋯** menu, and the actor shown on each agent row. Done when a range can be asked about and its evidence read in a window, the layout is checked at its smallest width, and the screens are recorded in `design/screens.md`.
 
 ## To confirm with the author
 

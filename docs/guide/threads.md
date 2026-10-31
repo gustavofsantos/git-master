@@ -35,7 +35,7 @@ The title comes from your first prompt, as plain text: the Markdown markers, emp
 
 ### Read a thread
 
-The header of the thread takes two lines. The first has the title, then the star (★ or ☆), **Copy as Markdown** and **⋯**. The **⋯** button opens the less used actions: Rename, Add Note, Tags, Link to Commit, Export, Expand all tool calls, Collapse all tool calls and Delete. The second line has the agent, the branch, when the thread started and whether it is still open, then the chips: **N commits**, **N files**, **N edits** and, when the thread has one, **Note**.
+The header of the thread takes two lines. The first has the title, then the star (★ or ☆), **Copy as Markdown** and **⋯**. The **⋯** button opens the less used actions: Rename, Add Note, Labels, Link to Commit, Export, Expand all tool calls, Collapse all tool calls and Delete. The second line has the agent, the branch, when the thread started and whether it is still open, then the chips: **N commits**, **N files**, **N edits** and, when the thread has one, **Note**.
 
 A commit chip, a file chip or the **Note** chip opens a details panel under the header. Only one panel is open at a time, and a click on its chip closes it. The commits panel lists each commit with whether it was created during this thread or linked by you; a link you made has **Unlink**. The files panel lists each edited file once, with the lines its edits added and removed. A path inside the worktree is shown relative to it, a path inside your home folder starts with `~`, and a long path is cut at its start so the file name stays visible. The **Note** panel shows the note in full. A panel is at most six rows high and scrolls past that.
 
@@ -109,6 +109,77 @@ The **Commits** chip of the header counts both kinds. The **Files** panel lists 
 
 GitMaster never guesses that a thread produced a commit because the contents look alike.
 
+### After a rewrite
+
+> **Planned.** Commit links do not follow a rewrite yet, and the **gone** and **ambiguous** states are not shown.
+
+A rewrite gives commits new ids: a rebase, an amend or a squash makes new commits from the old ones. A commit link follows the rewrite as follows:
+
+- **A restack in GitMaster** keeps every link. GitMaster records which commit replaced each old one and moves the links with it.
+- **A rewrite made elsewhere**, with another tool or in a terminal, reattaches a link only when exactly one commit in the rewritten range has the same patch as the old commit. GitMaster does not match commits by how alike their text looks.
+
+A link that cannot be matched shows **gone**, with the subject, author and date that GitMaster saved when it made the link, so you still see what it pointed to. A commit is gone when no branch, tag or other reference reaches it any more. When two commits in the rewritten range have the same patch, the link shows **ambiguous** and GitMaster does not pick one.
+
+## Link threads
+
+> **Planned.** Links between threads are not available in the app yet.
+
+Link one thread to another to record how their work connects. A link has one of three kinds:
+
+| Kind | Meaning |
+|---|---|
+| **continues** | This thread carries on the work of the other thread. |
+| **relates** | The two threads touch the same work, and neither follows from the other. |
+| **supersedes** | This thread replaces the work of the other thread, which stays in the list. |
+
+Link threads from the **⋯** menu of a thread's header, as you link a commit. Each link is a row that shows who made it, you or an agent. GitMaster never infers a link from what two threads say.
+
+## Understand why code is the way it is
+
+> **Planned.** Provenance is not available in the app or through MCP yet.
+
+Ask GitMaster why a file, or a range of lines in it, is the way it is. GitMaster works back from the code to the agent sessions that wrote it:
+
+1. It finds the commits that last changed each line.
+2. It finds the threads linked to those commits, and in each thread the edits that match the code.
+3. It shows the prompts and replies around each matching edit, and the labels and linked threads of that thread.
+
+Every result states the evidence that ties it to the code. The strongest evidence comes first:
+
+| Evidence | Meaning |
+|---|---|
+| **blob match** | The file at the commit has exactly the content the edit wrote. |
+| **line match** | A run of consecutive lines in the code also appears, consecutively, in the lines one edit added. Blank lines and lines with only a brace do not count toward the run. |
+| **hunk overlap** | The edit changed lines that the commit also changed. |
+| **created during this thread** | The commit appeared on the thread's branch during the thread. |
+| **linked by you** | You linked the thread to the commit. |
+
+Other rules:
+
+- If several edits match the same lines, GitMaster lists all of them and marks the result **ambiguous**. It does not pick one.
+- An edit that GitMaster cannot compare shows as **unverifiable**, not as "no match". That covers an edit whose text was redacted, an edit cut at the size limit, and an edit known only from the agent's input (**From tool input**).
+- A formatter run after the edit changes the lines, so the match stops. Whitespace is compared exactly.
+- The match is by content, not by commit id, so the result holds after a rebase, a squash or a reorder.
+- A result shows at most 10 commits, 5 threads for each commit, and two steps out from each. When a result is cut, it says so.
+- Asking changes nothing in the repository or in any thread.
+
+## Labels
+
+> **Planned.** Labels are not available in the app yet.
+
+A label is a name for things that belong together, such as `auth-refactor` or `needs-review`. A label belongs to the repository. It has a name, an optional description and an optional color, and it shows as a chip wherever it is attached.
+
+You can attach a label to:
+
+- a thread;
+- a file, which keeps the label when the file is renamed;
+- a commit, which keeps the label through a rewrite as a commit link does (see [After a rewrite](#after-a-rewrite));
+- another label.
+
+Open the **Labels** page to see every label. Choose one to list everything attached to it: threads, files, commits and other labels.
+
+You create labels, attach them and remove attachments. Only you can rename or delete a label. An agent connected through MCP can create a label and attach it; the label and each attachment it made show the agent's name, and you can remove them.
+
 ## Keep and clean up
 
 | Action | What it does |
@@ -116,7 +187,7 @@ GitMaster never guesses that a thread produced a commit because the contents loo
 | **Rename** | Changes the title. |
 | **Add Note** | Attaches a note of your own to the thread. The note is shown with the thread and is not searched. |
 | **Star** | Marks the thread so you can filter for it. |
-| **Tags** | Adds your own labels. |
+| **Labels** | Attaches labels to the thread. See [Labels](#labels). |
 | **Export** | Writes the thread as a Markdown file at a path you choose. Redaction is applied again on the way out. |
 | **Copy as Markdown** | Puts the thread on the clipboard as the Markdown that Export writes, with the same redaction. |
 | **Delete** | Removes the thread from the database. The confirmation says what is removed. |
@@ -124,9 +195,11 @@ GitMaster never guesses that a thread produced a commit because the contents loo
 
 A delete is final. GitMaster overwrites the deleted text in the database file, and it does not keep a copy. It does not touch the agent's own session files; see [What is not removed](#what-is-not-removed).
 
-Rename, Add Note, Tags, Link to Commit, Export and Delete are in the **⋯** menu of the header; Star and Copy as Markdown are buttons beside the title. The thread's right-click menu in the list has the same actions.
+Rename, Add Note, Labels, Link to Commit, Export and Delete are in the **⋯** menu of the header; Star and Copy as Markdown are buttons beside the title. The thread's right-click menu in the list has the same actions.
 
-Only you can change or delete a thread. An agent connected through MCP can read threads and cannot write to them.
+Only you can delete a thread or an entry, and rename or delete a label. An agent connected through MCP can read threads, and it can create labels and attach labels and links. Each row an agent makes shows the agent's name, and you can remove it.
+
+> **Planned.** Agents cannot create labels or links yet, and the agent's name is not shown on a row yet.
 
 ## Secrets
 
@@ -181,8 +254,6 @@ A pattern you add applies to what is captured from then on. To apply it to threa
 Threads are stored in `.git/gitmaster/threads.db`, in the Git common directory of the repository, readable only by you. Nothing is written to the working tree, so no `.gitignore` entry is needed. Deleting the repository deletes its threads. See [Configuration](../reference/configuration.md).
 
 ## Search from an agent
-
-> **Planned.** The MCP tools that let an agent search and read threads are not available in the app yet.
 
 Once the MCP server is on, an agent can search earlier threads, for example to find why a past change was made. The text of a thread is returned marked as untrusted, because it came from earlier prompts and tool output. See [MCP tools](../reference/mcp-tools.md).
 

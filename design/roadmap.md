@@ -634,6 +634,23 @@ Requested by the author on 2026-10-29. Decisions D119 to D129 and open questions
 - Follow-up (2026-10-29): the thread detail is a virtualized variable-height list (`gpui::list`) that pages in as you scroll (200 entries, earlier and later), a search hit loads around its entry and scrolls to it, tool calls are grouped and collapsible (closed by default, Expand all / Collapse all), the commit panel lists linked threads (`ThreadFilter.commit`), **Copy as Markdown** (`ReadThreadMarkdown`) and **Copy Commands** exist. Gaps: the commit panel has no "created during this thread" mark and no exact "and N more" (the summary carries no link origin and `total` is the whole store); Expand all opens only the groups loaded at the click; none of it was seen in a window.
 - The prompts of a session appear when the next event of the agent arrives, because the adapter reads prompts only from the session file (D130).
 
+## Slice 6g: thread graph (planned 2026-10-31)
+
+Decided by the author on 2026-10-31 as proposed decisions D143 to D146, with Q34 open. The design, schema, command table and sub-slices are in `design/threads.md`, section "Graph, provenance and labels"; the behavior is in `docs/guide/threads.md` and `docs/reference/mcp-tools.md`, marked `Planned`. Pillars 2 and 3: a range of code explained by the sessions that wrote it, and labels and links an agent can record without writing thread text.
+
+**Goal.** Ask why a line range is the way it is and get the commits, threads, edits and labels behind it, each with the evidence that ties it to the code. Let agents record labels and links, under the human's control.
+
+**Scope**
+
+1. **P1, provenance engine.** Blame, blob and line matching, the ambiguous and unverifiable states, the bounds. Real-git tests. Measures N and closes Q34. Done when each real-git fixture (blob match, line match, ambiguous, formatter after the edit, rebase, squash, reorder, redacted and truncated edit) returns the evidence the docs promise, and a range is answered within the budget in the release build.
+2. **P2, MCP provenance tool.** `provenance` over the engine, untrusted-marked and bounded. Needs slice 7 for the server. Done when an agent asks about a range and gets the thread, its entries and the evidence, and a cut result says so.
+3. **P3, labels and links.** Schema v5 with its migration from `thread_tag`, the commands, commit links that survive a restack and resolve after an outside rewrite on an exact patch match only, MCP `label_create`, `label_attach` and `thread_link`, and the allow rules the docs recommend (the plugin cannot ship permission rules). Done when the migration keeps every tag as a label, the rewrite cases behave as the docs say, and a row an agent wrote shows the agent and can be removed.
+4. **P4, UI.** The Labels page, chips, label dialogs, the provenance view for a range on the Code page, link threads from the header and the actor on each agent row. Done when a range can be asked about and its evidence read in a window, and the screens are recorded.
+
+**Done when:** the whole of P1 to P4 meets the docs, `make docs-status` shows no `Planned` marker left on the pages of this slice, and D143 to D146 are accepted or superseded by the author.
+
+**Status (2026-10-31).** Planned. Nothing built. Q34 is open until P1 measures it.
+
 ## Slice 7: MCP
 
 Redirected by the author on 2026-10-31 (D135): `gitmaster mcp` is a second process over stdio, with no socket, token or app-side server. It runs its own engine on the repository and shares only the `.git/gitmaster/` files with the app. Its first tools are the ones an agent does not already have: review comments and threads. No grep, file read or symbol tool (D48 is superseded).

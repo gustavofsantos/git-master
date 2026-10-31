@@ -5,7 +5,7 @@ status: partial
 order: 10
 ---
 
-> **Planned.** Only the review and thread tools are available. The tools that propose or apply a change to the repository, and the agent policy, are not.
+> **Planned.** Only the review and thread tools are available. The provenance and label tools, the tools that record labels and links, the tools that propose or apply a change to the repository, and the agent policy are not.
 
 `gitmaster mcp` is an MCP server that your agent starts as a separate process and talks to over its standard input and output. It offers the tools that only GitMaster can offer: the review comments you wrote on a diff, and the threads GitMaster captured from earlier agent sessions. It does not repeat what the agent already has. Reading files, searching text and running `git` stay with the agent's own tools.
 
@@ -48,6 +48,8 @@ A record tool takes effect on GitMaster's record, and a person still decides wha
 
 There is no tool that commits, pushes, restacks, edits a file or deletes anything. An agent that changes your code does it with its own tools, as it does without GitMaster, and the [thread](../guide/threads.md) records what it did.
 
+> **Planned.** Record tools also create labels, attach them to threads, files, commits and other labels, and link threads to each other. They write labels and links only, never thread text, and they never delete or rename anything. Each row an agent writes is marked with the agent's name, and you can remove it in the app.
+
 > **Planned.** Tools that propose a change, such as a restack plan, and that apply it. See [Approval](#approval).
 
 ## Approval
@@ -85,7 +87,9 @@ Claude Code asks before it uses an MCP tool you have not allowed. The read tools
 }
 ```
 
-Do not allow the whole server with `mcp__plugin_gitmaster_gitmaster__*` once the apply tools exist. The apply tools ask anyway, but a narrow list keeps the intent clear. The plugin cannot add these rules for you.
+Do not allow the whole server with `mcp__plugin_gitmaster_gitmaster__*` once the apply tools exist. The apply tools ask anyway, but a narrow list keeps the intent clear. The plugin adds no allow rules of its own.
+
+> **Planned.** The three record tools that write labels and links, `mcp__plugin_gitmaster_gitmaster__label_create`, `mcp__plugin_gitmaster_gitmaster__label_attach` and `mcp__plugin_gitmaster_gitmaster__thread_link`, ask before each call until you allow them. Add them to `allow` to let the agent record labels and links without asking, or to `deny` to forbid it.
 
 ## Untrusted content
 
