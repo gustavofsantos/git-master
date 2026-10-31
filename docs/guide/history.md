@@ -1,11 +1,11 @@
 ---
 title: History
-description: The commit list of HEAD, the commit details, the diff of a commit, copying a hash or message, and the commit graph.
+description: The commit list and its scope, the commit details, the diff of a commit, copying a hash or message, and the commit graph with its stacks.
 status: partial
 order: 30
 ---
 
-The History page shows the commits of HEAD, with a graph that draws how they connect. Select a commit to see what it changed, then open one of its files to read the diff. The page follows the repository: a commit made outside GitMaster appears at the top of the list while the page is open.
+The History page shows the commits of the current branch, its stack or every reference, with a graph that draws how they connect. Select a commit to see what it changed, then open one of its files to read the diff. The page follows the repository: a commit made outside GitMaster appears at the top of the list while the page is open.
 
 ## Open the history
 
@@ -121,15 +121,30 @@ As you load more pages, the graph grows with the list. A commit keeps its row wh
 
 ## Scope of the list
 
-> **Planned.** The scope control is not available yet.
+The scope pill in the history header chooses which commits the list shows. Click it to pick one of these:
 
-The scope control chooses which commits the list shows: the current branch, all refs, one ref, or the current stack. The list shows the commits of HEAD until the control is available.
+| Scope | The list shows |
+|---|---|
+| **Current branch** | The commits of HEAD. |
+| **Current stack** | The commits of every branch in the stack of HEAD, plus the default branch. |
+| **All refs** | The commits of every local branch, remote branch and tag, plus HEAD. |
+| **One ref** | The commits of one branch. On the History page, click a branch in the sidebar to show only that branch. |
+
+When the checked-out branch is in a stack, the list opens on **Current stack**, shown by the chip **Scope: current stack**. Otherwise it opens on **Current branch**, and **Current stack** is disabled with the reason. The choice lasts while the window is open. A left click on a branch in the sidebar shows its history and does not check it out: double-click it, or use its menu, to check it out.
+
+The default branch is the branch of `origin/HEAD`, else the first of `main`, `master`, `trunk` and `develop` that exists.
 
 ## Stacks in the graph
 
-> **Planned.** Stack-aware graph is not available yet.
+The graph reads the stack metadata, never the branch names, to draw stacks:
 
-When a branch is stacked on a parent, the graph draws the edge between them dashed and amber. When the branch starts from a commit that is not the tip of its parent, the edge carries a badge with the text `N commits behind parent`. A **Commits | Stacks** switch changes the graph: **Commits** shows the commits, and **Stacks** shows one node per branch, with its commits folded under it. Each commit belongs to the stack that owns it, which is read from the stack metadata and not from the branch name. For stacks, see [Stacks](stacks.md).
+- Each commit belongs to the branch whose recorded range contains it: from the commit the branch was based on to the branch tip. The node of a commit takes the color of the branch that owns it. A commit that no stack branch owns keeps the color of its lane.
+- When a branch is behind its parent, because the parent has commits the branch does not have, the edge from the branch's first commit down to the commit it was based on is dashed and amber. The tip of the branch shows the badge **N commits behind parent**. A branch with no commits of its own shows only the badge.
+- The dashed edge and the badge carry the state, so color is never the only signal.
+
+> **Planned.** The **Commits | Stacks** switch is not available yet.
+
+A **Commits | Stacks** switch changes the graph: **Commits** shows the commits, and **Stacks** shows one node per branch, with its commits folded under it. For stacks, see [Stacks](stacks.md).
 
 ## Search by content
 

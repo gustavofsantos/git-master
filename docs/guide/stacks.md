@@ -103,15 +103,18 @@ In the **By stack** view, drag a branch onto another branch. The branch you drop
 
 ## Stacks in the history graph
 
-> **Planned.** The history graph does not draw stacks yet.
-
 The [History](history.md) page draws stacks in its graph:
 
 - A child branch that starts from a commit other than the tip of its parent has a dashed amber edge, with the badge **N commits behind parent**.
-- Each commit belongs to the branch whose range, from the recorded base to the branch tip, contains it. GitMaster does not guess from branch names.
-- The graph has two modes. **Commits** shows the graph of commits. **Stacks** shows one node per branch, with its commits collapsed or expanded.
-- The default scope is the stack of HEAD plus `main`, shown by the chip **Scope: current stack**. Choose the **All refs** option to show every reference.
-- Each branch lane has a color derived from the name of the branch, and the color stays the same across sessions. The dashed edge and the badge also show the state, so color is never the only signal.
+- Each commit belongs to the branch whose range, from the recorded base to the branch tip, contains it, and its node takes that branch's color. GitMaster does not guess from branch names.
+- When HEAD is in a stack, the default scope is the stack of HEAD plus the default branch, shown by the chip **Scope: current stack**. Choose **All refs** in the scope pill to show every reference.
+- Each branch has a color derived from its name, and the color stays the same across sessions. The dashed edge and the badge also show the state, so color is never the only signal.
+
+### Commits and Stacks modes
+
+> **Planned.** The **Commits | Stacks** switch is not available yet.
+
+The graph has two modes. **Commits** shows the graph of commits. **Stacks** shows one node per branch, with its commits collapsed or expanded.
 
 ## Restack
 
