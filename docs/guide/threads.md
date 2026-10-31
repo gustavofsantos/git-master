@@ -82,7 +82,7 @@ When these matches are few (fewer than eight), GitMaster also looks further, aft
 
 Words shorter than three characters are matched at the start of a word only, so `in` does not find `join`. In quotes, the text is matched exactly, inside words too, and a phrase is never matched by misspelling.
 
-Results show a snippet around the match. Select one to open the thread at that entry. Narrow the list with the **Starred** and **Has edits** filters, and with a file: choose **Show Threads for File** on a file to list the threads that edited it. A removable chip shows the file.
+Each thread appears once, with its best match: a snippet around the match, the agent, the branch, when the thread started and how many edits it made. The results load a page at a time as you scroll. When a search with a filter finds nothing, GitMaster says which filter, removed, would bring matches back. Select a result to open the thread at that entry. Narrow the list with the **Starred** and **Has edits** filters, and with a file: choose **Show Threads for File** on a file to list the threads that edited it. A removable chip shows the file.
 
 > **Planned.** Filters for the agent, the branch and the dates are not available in the app yet.
 

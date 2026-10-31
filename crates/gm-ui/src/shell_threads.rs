@@ -37,7 +37,7 @@ use crate::threads::{
 use crate::view::{Screen, StatusView};
 
 const THREAD_ROW_HEIGHT: f32 = 64.;
-const HIT_ROW_HEIGHT: f32 = 56.;
+const HIT_ROW_HEIGHT: f32 = 64.;
 const BRANCH_WIDTH: f32 = 120.;
 /// The next page of threads is asked for when the rows drawn reach this close to the end.
 const PREFETCH: usize = 20;
@@ -243,6 +243,13 @@ impl StatusView {
         }
     }
 
+    /// Asks for the page of hits after the ones shown, when there is one.
+    pub(crate) fn request_threads_search_next(&mut self) {
+        if let Some(request) = self.model.threads.plan_search_next() {
+            self.send_threads(request);
+        }
+    }
+
     /// Dispatches a planned read and records which read the answer belongs to.
     fn send_threads(&mut self, request: Request) {
         let Request { kind, read } = request;
@@ -361,7 +368,9 @@ impl StatusView {
             Mode::Threads if page.is_loaded() => {
                 threads::count_label(page.threads().len(), page.has_more())
             }
-            Mode::Results if page.hits_shown() => threads::hits_label(page.hits().len()),
+            Mode::Results if page.hits_shown() => {
+                threads::hits_label(page.hits().len(), page.hits_more())
+            }
             _ => String::new(),
         };
         let ctx = self.action_context("");
@@ -496,9 +505,9 @@ impl StatusView {
         });
         let body: AnyElement = match page.mode() {
             Mode::Results if !page.hits_shown() => note("Searching…".to_owned()).into_any_element(),
-            Mode::Results if page.hits().is_empty() => {
-                self.empty_view(Empty::Matches, cx).into_any_element()
-            }
+            Mode::Results if page.hits().is_empty() => self
+                .empty_view(Empty::Matches, page.diagnosis_hint(), cx)
+                .into_any_element(),
             Mode::Results => {
                 hit_rows(page.hits().len(), self.threads_view.list.clone(), cx).into_any_element()
             }
@@ -506,7 +515,7 @@ impl StatusView {
                 note("Loading threads…".to_owned()).into_any_element()
             }
             Mode::Threads => match page.empty() {
-                Some(empty) => self.empty_view(empty, cx).into_any_element(),
+                Some(empty) => self.empty_view(empty, None, cx).into_any_element(),
                 None => thread_rows(page.threads().len(), self.threads_view.list.clone(), cx)
                     .into_any_element(),
             },
@@ -1405,7 +1414,7 @@ fn note(text: String) -> Div {
 impl StatusView {
     /// The text of an empty list. The missing integration also gets the button that
     /// installs it, above the command that does the same from a terminal.
-    fn empty_view(&self, empty: Empty, cx: &mut Context<Self>) -> Div {
+    fn empty_view(&self, empty: Empty, hint: Option<String>, cx: &mut Context<Self>) -> Div {
         let ctx = self.action_context("");
         div()
             .flex_1()
@@ -1422,6 +1431,7 @@ impl StatusView {
                     .font_weight(FontWeight::MEDIUM)
                     .child(threads::empty_text(empty)),
             )
+            .children(hint.map(|text| small_note(&text)))
             .children((empty == Empty::Integration).then(|| {
                 div()
                     .flex()
@@ -1494,6 +1504,10 @@ fn hit_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Status
                       range: Range<usize>,
                       _window: &mut Window,
                       cx: &mut Context<StatusView>| {
+                    if range.end + PREFETCH >= count {
+                        this.request_threads_search_next();
+                    }
+                    let now = now_secs();
                     let selected = this.model.threads.selected();
                     this.model
                         .threads
@@ -1504,7 +1518,7 @@ fn hit_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Status
                         .zip(range)
                         .map(|(hit, index)| {
                             let is_selected = selected == Some(hit.thread_uid.as_str());
-                            hit_row(hit, index, is_selected, cx)
+                            hit_row(hit, index, now, is_selected, cx)
                         })
                         .collect()
                 },
@@ -1643,10 +1657,12 @@ fn thread_row(
         .child(meta)
 }
 
-/// One hit: the thread's title, its turn, and the snippet around the match.
+/// One hit: the thread's title, its turn, the snippet around the match, and the thread's
+/// agent, branch, start time and edit count.
 fn hit_row(
     hit: &ThreadHit,
     index: usize,
+    now: i64,
     selected: bool,
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
@@ -1701,6 +1717,15 @@ fn hit_row(
                 .text_xs()
                 .text_color(theme::muted())
                 .child(hit.snippet.replace('\n', " ")),
+        )
+        .child(
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(threads::hit_meta(hit, now)),
         )
 }
 

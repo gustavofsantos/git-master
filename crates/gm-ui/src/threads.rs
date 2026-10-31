@@ -78,6 +78,15 @@ impl MarkdownCopy {
     }
 }
 
+/// What a search answer carries besides its id: the hits of the page, the cursor that reads
+/// the next page (none when no more follow) and the diagnosis of an empty search (D147).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HitPage {
+    pub hits: Vec<ThreadHit>,
+    pub next_cursor: Option<String>,
+    pub diagnosis: Option<Vec<(String, u32)>>,
+}
+
 /// Threads per page of the list, and hits per search.
 pub const PAGE: u32 = 50;
 /// Entries per page of a thread.
@@ -136,11 +145,10 @@ pub enum Chip {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Read {
     /// A page of the list. `append` adds it after the rows shown; `limit` says whether more follow.
-    List {
-        append: bool,
-        limit: u32,
-    },
-    Search,
+    List { append: bool, limit: u32 },
+    /// A search. `append` adds its page after the hits shown (load more); otherwise it
+    /// replaces them.
+    Search { append: bool },
     /// The entries of thread `uid` from `from_seq` on, placed as `place` says.
     Detail {
         uid: String,
@@ -148,9 +156,7 @@ pub enum Read {
         place: Place,
     },
     /// The state of edit `id`.
-    Edit {
-        id: i64,
-    },
+    Edit { id: i64 },
 }
 
 /// Where a page of a thread's entries goes when its answer arrives.
@@ -188,7 +194,13 @@ pub struct ThreadsPage {
     list_pending: Option<(OperationId, bool, u32)>,
     hits: Vec<ThreadHit>,
     hits_shown: bool,
-    search_pending: Option<OperationId>,
+    /// The search read in flight, and whether its page is appended to the hits.
+    search_pending: Option<(OperationId, bool)>,
+    /// The cursor that reads the hits after the ones shown. The engine sets one exactly when
+    /// more hits follow, so it also says whether there are more (`has_more`).
+    search_cursor: Option<String>,
+    /// Why the last search found nothing, when it had filters (see `diagnosis_hint`).
+    diagnosis: Option<Vec<(String, u32)>>,
     selected: Option<String>,
     detail: Option<ThreadDetail>,
     /// The entries read in flight, the `from_seq` they start at and where they go.
@@ -265,6 +277,22 @@ impl ThreadsPage {
     #[must_use]
     pub fn hits_shown(&self) -> bool {
         self.hits_shown
+    }
+
+    /// Whether the search has more hits than the ones shown.
+    #[must_use]
+    pub fn hits_more(&self) -> bool {
+        self.search_cursor.is_some()
+    }
+
+    /// The hint for a search that found nothing while filters were set: each filter that,
+    /// removed alone, would bring hits back (D147). `None` when there is nothing to say.
+    #[must_use]
+    pub fn diagnosis_hint(&self) -> Option<String> {
+        if !self.hits_shown || !self.hits.is_empty() {
+            return None;
+        }
+        diagnosis_text(self.diagnosis.as_deref()?)
     }
 
     #[must_use]
@@ -402,6 +430,8 @@ impl ThreadsPage {
         self.generation += 1;
         self.search_pending = None;
         self.hits_shown = false;
+        self.search_cursor = None;
+        self.diagnosis = None;
         if self.query.trim().is_empty() {
             self.hits.clear();
         }
@@ -414,9 +444,26 @@ impl ThreadsPage {
         self.generation == generation
     }
 
-    /// The search for the text as it is, or `None` for a blank text.
+    /// The search for the text as it is, from its first page, or `None` for a blank text.
     #[must_use]
     pub fn plan_search(&self) -> Option<Request> {
+        self.search_request(None, PAGE)
+    }
+
+    /// The search's next page after the hits shown, with the same text, filter, grouping
+    /// and order. `None` when no page follows, one is in flight or the last read failed.
+    #[must_use]
+    pub fn plan_search_next(&self) -> Option<Request> {
+        if !self.hits_shown || self.search_pending.is_some() || self.failure.is_some() {
+            return None;
+        }
+        let cursor = self.search_cursor.clone()?;
+        let mut request = self.search_request(Some(cursor), PAGE)?;
+        request.read = Read::Search { append: true };
+        Some(request)
+    }
+
+    fn search_request(&self, cursor: Option<String>, limit: u32) -> Option<Request> {
         let query = self.query.trim();
         if query.is_empty() {
             return None;
@@ -425,14 +472,14 @@ impl ThreadsPage {
             kind: CommandKind::SearchThreads {
                 query: query.to_owned(),
                 filter: self.filter.clone(),
-                limit: PAGE,
-                cursor: None,
-                group: SearchGroup::Entry,
+                limit,
+                cursor,
+                group: SearchGroup::Thread,
                 order: SearchOrder::Relevance,
                 context: 0,
                 facets: false,
             },
-            read: Read::Search,
+            read: Read::Search { append: false },
         })
     }
 
@@ -463,7 +510,9 @@ impl ThreadsPage {
     #[must_use]
     pub fn plan_refresh(&self) -> Vec<Request> {
         let mut requests = vec![self.plan_list()];
-        requests.extend(self.plan_search());
+        // The search asks for as many hits as are shown, so a refresh keeps the pages read.
+        let shown = u32::try_from(self.hits.len()).unwrap_or(u32::MAX).max(PAGE);
+        requests.extend(self.search_request(None, shown));
         requests
     }
 
@@ -593,10 +642,14 @@ impl ThreadsPage {
                 self.failure = None;
                 self.list_pending = Some((id, *append, *limit));
             }
-            Read::Search => {
+            Read::Search { append } => {
                 self.failure = None;
-                self.search_pending = Some(id);
-                self.hits_shown = false;
+                self.search_pending = Some((id, *append));
+                if !append {
+                    self.hits_shown = false;
+                    self.search_cursor = None;
+                    self.diagnosis = None;
+                }
             }
             Read::Detail {
                 from_seq, place, ..
@@ -614,7 +667,9 @@ impl ThreadsPage {
     pub fn owns(&self, id: OperationId) -> bool {
         self.list_pending
             .is_some_and(|(pending, _, _)| pending == id)
-            || self.search_pending == Some(id)
+            || self
+                .search_pending
+                .is_some_and(|(pending, _)| pending == id)
             || self
                 .detail_pending
                 .is_some_and(|(pending, _, _)| pending == id)
@@ -642,14 +697,23 @@ impl ThreadsPage {
         true
     }
 
-    /// Applies the hits of a search answered by `id`. Returns false for an answer
-    /// that is not the search in flight.
-    pub fn searched(&mut self, id: OperationId, hits: Vec<ThreadHit>) -> bool {
-        if self.search_pending != Some(id) {
+    /// Applies the hits of a search answered by `id`: a page is appended after the hits
+    /// shown, or replaces them. Returns false for an answer that is not the search in flight.
+    pub fn searched(&mut self, id: OperationId, page: HitPage) -> bool {
+        let Some((pending, append)) = self.search_pending else {
+            return false;
+        };
+        if pending != id {
             return false;
         }
         self.search_pending = None;
-        self.hits = hits;
+        if append {
+            self.hits.extend(page.hits);
+        } else {
+            self.hits = page.hits;
+        }
+        self.search_cursor = page.next_cursor;
+        self.diagnosis = page.diagnosis;
         self.hits_shown = true;
         true
     }
@@ -751,7 +815,10 @@ impl ThreadsPage {
         {
             self.list_pending = None;
         }
-        if self.search_pending == Some(id) {
+        if self
+            .search_pending
+            .is_some_and(|(pending, _)| pending == id)
+        {
             self.search_pending = None;
         }
         if self
@@ -1323,14 +1390,58 @@ pub fn relative(now_secs: i64, at_ms: i64) -> String {
     relative_time(now_secs, at_ms.div_euclid(1000))
 }
 
-/// The header's count of search hits: "1 match", "3 matches".
+/// The header's count of search hits: "1 match", "3 matches", or "First 50 matches"
+/// while more follow.
 #[must_use]
-pub fn hits_label(count: usize) -> String {
-    if count == 1 {
+pub fn hits_label(count: usize, more: bool) -> String {
+    if more {
+        format!("First {count} matches")
+    } else if count == 1 {
         "1 match".to_owned()
     } else {
         format!("{count} matches")
     }
+}
+
+/// The text of a search's diagnosis: each filter that, removed alone, would bring hits
+/// back, most first, as `Removing branch would give 5 hits; removing path would give 1 hit.`
+/// Entries with no hit are left out; `None` when none is left.
+#[must_use]
+pub fn diagnosis_text(options: &[(String, u32)]) -> Option<String> {
+    let clauses: Vec<String> = options
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .enumerate()
+        .map(|(index, (name, count))| {
+            let lead = if index == 0 { "Removing" } else { "removing" };
+            let hits = if *count == 1 { "hit" } else { "hits" };
+            format!("{lead} {name} would give {count} {hits}")
+        })
+        .collect();
+    if clauses.is_empty() {
+        return None;
+    }
+    Some(format!("{}.", clauses.join("; ")))
+}
+
+/// The metadata line of a search hit: its agent, branch, start time and edit count,
+/// as `claude-code · main · started 2h ago · 3 edits`.
+#[must_use]
+pub fn hit_meta(hit: &ThreadHit, now_secs: i64) -> String {
+    let mut parts = Vec::new();
+    if !hit.harness.is_empty() {
+        parts.push(hit.harness.clone());
+    }
+    parts.push(
+        hit.branch
+            .clone()
+            .unwrap_or_else(|| "detached HEAD".to_owned()),
+    );
+    if hit.started_at > 0 {
+        parts.push(format!("started {}", relative(now_secs, hit.started_at)));
+    }
+    parts.push(edits_label(hit.edit_count));
+    parts.join(" · ")
 }
 
 /// The number of edits: "1 edit", "3 edits".
@@ -1903,7 +2014,7 @@ mod tests {
             kind: HitKind::Fuzzy,
             ..hit("a", 3)
         };
-        assert!(page.searched(id(2), vec![hit("a", 1), fuzzy]));
+        assert!(page.searched(id(2), page_of(vec![hit("a", 1), fuzzy], false)));
         let kinds: Vec<HitKind> = page.hits().iter().map(|hit| hit.kind).collect();
         assert_eq!(kinds, vec![HitKind::Exact, HitKind::Fuzzy]);
     }
@@ -2107,10 +2218,10 @@ mod tests {
         page.sent(&search.read, id(7));
         assert!(!page.hits_shown());
         assert!(
-            !page.searched(id(6), vec![hit("a", 1)]),
+            !page.searched(id(6), page_of(vec![hit("a", 1)], false)),
             "an older search is dropped"
         );
-        assert!(page.searched(id(7), vec![hit("a", 1)]));
+        assert!(page.searched(id(7), page_of(vec![hit("a", 1)], false)));
         assert_eq!(page.hits().len(), 1);
         assert!(page.hits_shown());
     }
@@ -2123,7 +2234,7 @@ mod tests {
         page.sent(&search.read, id(2));
         page.set_query("");
         assert!(page.hits().is_empty());
-        assert!(!page.searched(id(2), vec![hit("a", 1)]));
+        assert!(!page.searched(id(2), page_of(vec![hit("a", 1)], false)));
         assert_eq!(page.mode(), Mode::Threads);
     }
 
@@ -2229,7 +2340,7 @@ mod tests {
         page.set_query("retry");
         let search = page.plan_search().expect("search");
         page.sent(&search.read, id(1));
-        assert!(page.searched(id(1), vec![hit("a", 99)]));
+        assert!(page.searched(id(1), page_of(vec![hit("a", 99)], false)));
         let request = page.choose(0).expect("opens the hit's thread");
         assert_eq!(read_uid(&request), Some("a"));
         page.sent(&request.read, id(2));
@@ -2367,7 +2478,7 @@ mod tests {
         page.set_query("q");
         let search = page.plan_search().expect("search");
         page.sent(&search.read, id(1));
-        page.searched(id(1), vec![hit("a", 4), hit("b", 8)]);
+        page.searched(id(1), page_of(vec![hit("a", 4), hit("b", 8)], false));
         let request = page.choose(1).expect("b");
         assert_eq!(read_uid(&request), Some("b"));
         assert_eq!(page.focus(), Some(8));
@@ -2440,7 +2551,7 @@ mod tests {
         assert_eq!(page.empty(), None, "no answer yet");
         let search = page.plan_search().expect("search");
         page.sent(&search.read, id(1));
-        page.searched(id(1), Vec::new());
+        page.searched(id(1), page_of(Vec::new(), false));
         assert_eq!(page.empty(), Some(Empty::Matches));
     }
 
@@ -3077,7 +3188,7 @@ mod tests {
             entry_id: 30,
             ..hit("a", 30)
         };
-        assert!(page.searched(id(2), vec![hit_at_30]));
+        assert!(page.searched(id(2), page_of(vec![hit_at_30], false)));
         let request = page.choose(0).expect("the hit opens its thread");
         assert!(matches!(
             request.kind,
@@ -3189,5 +3300,238 @@ mod tests {
         copy.sent(id(3));
         assert!(copy.cancelled(id(3)));
         assert_eq!(copy.take(), None);
+    }
+
+    /// A search answer of `hits` with a cursor when `more` follows.
+    fn page_of(hits: Vec<ThreadHit>, more: bool) -> HitPage {
+        HitPage {
+            hits,
+            next_cursor: more.then(|| "cursor-1".to_owned()),
+            diagnosis: None,
+        }
+    }
+
+    /// A page with `text` searched and its first answer applied under operation `op`.
+    fn searched_page(text: &str, op: u64, hits: Vec<ThreadHit>, more: bool) -> ThreadsPage {
+        let mut page = ThreadsPage::default();
+        page.set_query(text);
+        let request = page.plan_search().expect("a search");
+        page.sent(&request.read, id(op));
+        assert!(page.searched(id(op), page_of(hits, more)));
+        page
+    }
+
+    #[test]
+    fn the_search_asks_for_one_hit_per_thread_from_the_first_page() {
+        let mut page = ThreadsPage::default();
+        page.set_query("retry");
+        let request = page.plan_search().expect("a search");
+        match &request.kind {
+            CommandKind::SearchThreads {
+                query,
+                cursor,
+                group,
+                order,
+                context,
+                facets,
+                ..
+            } => {
+                assert_eq!(query, "retry");
+                assert_eq!(*cursor, None);
+                assert_eq!(*group, SearchGroup::Thread);
+                assert_eq!(*order, SearchOrder::Relevance);
+                assert_eq!(*context, 0);
+                assert!(!facets);
+            }
+            other => panic!("not a search: {other:?}"),
+        }
+        assert_eq!(request.read, Read::Search { append: false });
+    }
+
+    #[test]
+    fn a_load_more_sends_the_cursor_with_the_same_query_and_appends_its_hits() {
+        let mut page = searched_page("retry", 1, vec![hit("a", 1)], true);
+        assert!(page.hits_more());
+        let next = page.plan_search_next().expect("a next page");
+        match &next.kind {
+            CommandKind::SearchThreads {
+                query,
+                cursor,
+                group,
+                ..
+            } => {
+                assert_eq!(query, "retry");
+                assert_eq!(cursor.as_deref(), Some("cursor-1"));
+                assert_eq!(*group, SearchGroup::Thread);
+            }
+            other => panic!("not a search: {other:?}"),
+        }
+        assert_eq!(next.read, Read::Search { append: true });
+        page.sent(&next.read, id(2));
+        assert!(page.plan_search_next().is_none(), "one page at a time");
+        assert!(page.searched(id(2), page_of(vec![hit("b", 5)], false)));
+        let uids: Vec<&str> = page.hits().iter().map(|h| h.thread_uid.as_str()).collect();
+        assert_eq!(
+            uids,
+            vec!["a", "b"],
+            "the page is appended after the hits shown"
+        );
+        assert!(!page.hits_more(), "the last page ends the paging");
+        assert!(page.plan_search_next().is_none());
+    }
+
+    #[test]
+    fn a_new_query_resets_the_paging_and_drops_a_page_in_flight() {
+        let mut page = searched_page("retry", 1, vec![hit("a", 1)], true);
+        let next = page.plan_search_next().expect("a next page");
+        page.sent(&next.read, id(2));
+        page.set_query("backoff");
+        assert!(!page.hits_more());
+        assert!(page.plan_search_next().is_none());
+        assert!(
+            !page.searched(id(2), page_of(vec![hit("b", 5)], false)),
+            "a page of the old query is dropped"
+        );
+        assert!(page.hits().iter().all(|h| h.thread_uid == "a"));
+    }
+
+    #[test]
+    fn a_new_first_page_drops_a_load_more_answer_still_in_flight() {
+        let mut page = searched_page("retry", 1, vec![hit("a", 1)], true);
+        let next = page.plan_search_next().expect("a next page");
+        page.sent(&next.read, id(2));
+        let refresh = page.plan_refresh();
+        let search = refresh
+            .iter()
+            .find(|request| matches!(request.kind, CommandKind::SearchThreads { .. }))
+            .expect("the refresh searches");
+        page.sent(&search.read, id(3));
+        assert!(!page.searched(id(2), page_of(vec![hit("z", 9)], false)));
+        assert!(page.searched(id(3), page_of(vec![hit("a", 1)], true)));
+        assert_eq!(page.hits().len(), 1);
+    }
+
+    #[test]
+    fn a_refresh_keeps_as_many_hits_as_are_shown() {
+        let few = searched_page("retry", 1, vec![hit("a", 1), hit("b", 2)], false);
+        assert_eq!(refreshed_limit(&few), Some(PAGE), "at least a page");
+        let shown: Vec<ThreadHit> = (0..PAGE + 7)
+            .map(|n| hit(&format!("t{n}"), i64::from(n)))
+            .collect();
+        let many = searched_page("retry", 2, shown, true);
+        assert_eq!(
+            refreshed_limit(&many),
+            Some(PAGE + 7),
+            "a refresh reads the hits shown again, from the first"
+        );
+    }
+
+    /// The limit of the search a refresh sends, which starts from the first hit.
+    fn refreshed_limit(page: &ThreadsPage) -> Option<u32> {
+        page.plan_refresh()
+            .iter()
+            .find_map(|request| match &request.kind {
+                CommandKind::SearchThreads { limit, cursor, .. } => {
+                    assert_eq!(*cursor, None);
+                    Some(*limit)
+                }
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn a_failed_load_more_keeps_the_hits_and_is_not_retried_by_scrolling() {
+        let mut page = searched_page("retry", 1, vec![hit("a", 1)], true);
+        let next = page.plan_search_next().expect("a next page");
+        page.sent(&next.read, id(2));
+        page.ended(
+            id(2),
+            OperationState::Failed,
+            Some("engine said no".to_owned()),
+        );
+        assert_eq!(page.hits().len(), 1, "the hits shown stay");
+        assert_eq!(page.failure(), Some("engine said no"));
+        assert!(page.plan_search_next().is_none(), "no retry on each scroll");
+    }
+
+    #[test]
+    fn a_diagnosis_hint_shows_only_for_an_empty_search_with_filters() {
+        let mut page = ThreadsPage::default();
+        page.set_query("retry");
+        let request = page.plan_search().expect("a search");
+        page.sent(&request.read, id(1));
+        let empty = HitPage {
+            diagnosis: Some(vec![("branch".to_owned(), 5)]),
+            ..HitPage::default()
+        };
+        assert!(page.searched(id(1), empty));
+        assert_eq!(
+            page.diagnosis_hint().as_deref(),
+            Some("Removing branch would give 5 hits.")
+        );
+        let found = page_of(vec![hit("a", 1)], false);
+        let diagnosed = HitPage {
+            diagnosis: Some(vec![("branch".to_owned(), 5)]),
+            ..found
+        };
+        page.sent(&request.read, id(2));
+        assert!(page.searched(id(2), diagnosed));
+        assert_eq!(
+            page.diagnosis_hint(),
+            None,
+            "a search with hits has no hint"
+        );
+    }
+
+    #[test]
+    fn the_diagnosis_text_names_each_filter_with_its_count_and_drops_empty_ones() {
+        assert_eq!(diagnosis_text(&[]), None);
+        assert_eq!(diagnosis_text(&[("path".to_owned(), 0)]), None);
+        assert_eq!(
+            diagnosis_text(&[("branch".to_owned(), 1)]).as_deref(),
+            Some("Removing branch would give 1 hit.")
+        );
+        assert_eq!(
+            diagnosis_text(&[("branch".to_owned(), 5), ("path".to_owned(), 1)]).as_deref(),
+            Some("Removing branch would give 5 hits; removing path would give 1 hit.")
+        );
+        assert_eq!(
+            diagnosis_text(&[("path".to_owned(), 0), ("starred".to_owned(), 2)]).as_deref(),
+            Some("Removing starred would give 2 hits.")
+        );
+    }
+
+    #[test]
+    fn the_hits_label_says_when_more_follow() {
+        assert_eq!(hits_label(1, false), "1 match");
+        assert_eq!(hits_label(3, false), "3 matches");
+        assert_eq!(hits_label(50, true), "First 50 matches");
+    }
+
+    #[test]
+    fn a_hit_shows_its_agent_branch_start_and_edits() {
+        let now = 10_000;
+        let full = ThreadHit {
+            harness: "claude-code".to_owned(),
+            branch: Some("main".to_owned()),
+            started_at: 1_000,
+            edit_count: 3,
+            ..hit("a", 1)
+        };
+        assert_eq!(
+            hit_meta(&full, now),
+            format!(
+                "claude-code · main · started {} · 3 edits",
+                relative(now, 1_000)
+            )
+        );
+        let detached = ThreadHit {
+            harness: String::new(),
+            branch: None,
+            started_at: 0,
+            edit_count: 1,
+            ..hit("a", 1)
+        };
+        assert_eq!(hit_meta(&detached, now), "detached HEAD · 1 edit");
     }
 }

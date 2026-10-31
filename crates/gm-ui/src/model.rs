@@ -35,7 +35,7 @@ use crate::stash_drop::Dropping;
 use crate::stashes::StashList;
 use crate::text_search::TextSearch;
 use crate::thread_curate::{Outcome as ThreadOutcome, ThreadWork};
-use crate::threads::{MarkdownCopy, ThreadsPage};
+use crate::threads::{HitPage, MarkdownCopy, ThreadsPage};
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
 use crate::worktree_create::Creating;
@@ -935,8 +935,21 @@ impl Model {
                 }
                 None
             }
-            Event::ThreadSearchResults { id, hits, .. } => {
-                self.threads.searched(id, hits);
+            Event::ThreadSearchResults {
+                id,
+                hits,
+                next_cursor,
+                diagnosis,
+                ..
+            } => {
+                self.threads.searched(
+                    id,
+                    HitPage {
+                        hits,
+                        next_cursor,
+                        diagnosis,
+                    },
+                );
                 None
             }
             Event::ThreadRead { id, detail } => {
