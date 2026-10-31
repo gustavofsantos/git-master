@@ -2285,6 +2285,10 @@ impl Engine {
                 only_a_human(actor, "comment on the code")?;
                 self.add_review_comment(id, path, *start_line, *end_line, body)
             }
+            CommandKind::AddReviewCommentByText { path, text, body } => {
+                only_a_human(actor, "comment on the code")?;
+                self.add_review_comment_by_text(id, path, text, body)
+            }
             CommandKind::EditReviewComment { id: comment, body } => {
                 only_a_human(actor, "edit a review comment")?;
                 self.edit_review_comment(id, *comment, body)
@@ -2335,6 +2339,20 @@ impl Engine {
             store.set_snapshot(comment, &oid).map_err(|e| e.0)?;
         }
         self.review_listed(id, &root)
+    }
+
+    /// Comments on `text` where it is in `path` now (D141): found exactly once, or refused.
+    fn add_review_comment_by_text(
+        &mut self,
+        id: OperationId,
+        path: &str,
+        text: &str,
+        body: &str,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let file = review_session::read_text(&root, path)?;
+        let place = review::lines_of_text(&file, text)?;
+        self.add_review_comment(id, path, place.start_line, place.end_line, body)
     }
 
     fn edit_review_comment(
@@ -3208,6 +3226,7 @@ fn is_review_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
         CommandKind::AddReviewComment { .. }
+            | CommandKind::AddReviewCommentByText { .. }
             | CommandKind::ListReviewComments
             | CommandKind::EditReviewComment { .. }
             | CommandKind::ResolveReviewComment { .. }

@@ -274,3 +274,7 @@ Agents can search files, search text and symbols, and read a range of lines of a
 - It does not provide language-server features, such as semantic references that find every use of a symbol by its meaning.
 - It does not rename symbols.
 - It does not search inside submodules or Git LFS content.
+
+## Comment on a range of lines
+
+Select lines in the viewer by dragging over their numbers, or by clicking one and Shift-clicking another, then press **Ctrl+Shift+M**. The comment goes to the local review loop, anchored to that text; see [Local review](../agents/local-review.md#comment-on-code).

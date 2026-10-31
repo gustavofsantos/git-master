@@ -9,14 +9,27 @@ order: 20
 
 Local review is a loop between you and an agent on your machine. You comment on lines of a diff. The agent reads the comments through MCP, works on the code and resolves each comment with a summary. GitMaster then shows what changed for each comment, from snapshots of the working tree, not from the agent's own account.
 
-## Comment on a diff
+## Comment on code
 
-1. Open a diff and select the lines the agent should look at.
-2. Write a comment on the selection. The comment appears inline in the diff.
+You can comment on any lines of any code in the repository: lines of a diff, changed or not, and lines of a file in the **Code** viewer.
+
+1. Press on a line number and drag to the last line, or click a line number and Shift-click another. The range is highlighted. This selection is separate from the checkboxes that stage lines.
+2. Press **Ctrl+Shift+M**, or choose **Comment** in the small bar that appears over the selection.
+3. Write the comment. It appears inline, and the comments of the repository are listed on the **Local review** page.
+
+Where you can select:
+
+- the **Working Copy** diff, on both sides, in changed lines and in the lines around them;
+- a file in the **Code** viewer, changed or not;
+- a **commit** or **stash** diff.
+
+A comment is always about text in the working tree. In the Working Copy diff (unstaged side) and in the Code viewer the lines are the file's own, so the comment is anchored at once. In a staged, commit or stash diff GitMaster looks for the selected text in the file as it is now: if it appears exactly once, the comment is anchored there; if it is gone or appears more than once, GitMaster says so and writes nothing. Lines a diff shows as removed are not in the working tree, so a selection of only removed lines cannot be commented.
+
+> **Planned.** Comments already written are drawn inline in the Code viewer and in commit and stash diffs; today they show in the Working Copy diff and on the Local review page.
 
 ## The loop
 
-1. You comment on the lines.
+1. You comment on the code.
 2. The agent reads the open comments with `review_comments_list`.
 3. The agent changes the code, then calls `review_comment_resolve` on each comment it handled, with a summary of what it did.
 4. The comment becomes `handled`, with the summary beside it. You read the change and resolve the comment, or reopen it.

@@ -443,6 +443,16 @@ pub enum CommandKind {
         end_line: u32,
         body: String,
     },
+    /// Comments on `text`, lines joined with `\n`, found in `path` in the working
+    /// tree (D141). For a surface that does not show the working tree (the staged
+    /// side, a commit, a stash): the run of whole lines must appear exactly once
+    /// in the file now, otherwise the comment is refused and nothing is written.
+    /// Answers `ReviewCommentsListed`. Human only.
+    AddReviewCommentByText {
+        path: String,
+        text: String,
+        body: String,
+    },
     /// Lists every review comment, with where its anchor is in the file now.
     /// Answers `ReviewCommentsListed`. A read: never recorded (D28).
     ListReviewComments,

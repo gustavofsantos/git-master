@@ -64,6 +64,32 @@ pub fn anchor_for(file_text: &str, start_line: u32, end_line: u32) -> Result<Rev
     })
 }
 
+/// Where the run of whole lines `text` is in `file_text`, for a comment made on a
+/// surface that does not show the file (D141). It must be there exactly once;
+/// the refusal says which way it failed, so the person knows what to do.
+pub fn lines_of_text(file_text: &str, text: &str) -> Result<ReviewLocation, String> {
+    let anchor = ReviewAnchor {
+        text: text.to_owned(),
+        before: Vec::new(),
+        after: Vec::new(),
+        start_line: 0,
+    };
+    if text.trim().is_empty() {
+        return Err("the selection has only blank lines".to_owned());
+    }
+    let needle = text.split('\n').count();
+    let lines = lines_of(file_text);
+    let hits = lines
+        .windows(needle)
+        .filter(|window| window.iter().copied().eq(text.split('\n')))
+        .count();
+    match hits {
+        0 => Err("that text is not in the file as it is now".to_owned()),
+        1 => locate(file_text, &anchor).ok_or_else(|| "that text is not in the file".to_owned()),
+        _ => Err("that text appears more than once in the file as it is now".to_owned()),
+    }
+}
+
 /// Where `anchor` is in `file_text` now. The commented lines must appear
 /// exactly once as a run of whole lines; no match, or more than one, is `None`
 /// (outdated). The context lines and the recorded start line never decide.

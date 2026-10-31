@@ -1158,3 +1158,47 @@ fn reading_the_change_is_not_recorded() {
     assert_eq!(engine.log().len(), before, "a read leaves no entry");
     assert_eq!(log.entries().len(), records, "and runs no logged git");
 }
+
+fn add_by_text(path: &str, text: &str) -> CommandKind {
+    CommandKind::AddReviewCommentByText {
+        path: path.to_owned(),
+        text: text.to_owned(),
+        body: "by text".to_owned(),
+    }
+}
+
+#[test]
+fn a_comment_by_text_is_anchored_where_the_text_is_once_and_refused_otherwise() {
+    let dir = repo();
+    write(dir.path(), "g.txt", "x\ny\nx\nz\n");
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+
+    let events = engine.handle(OperationId(10), &human(add_by_text("f.txt", "c\nd")));
+    assert!(done(&events), "{}", failure(&events));
+    let comment = only(&mut engine);
+    assert_eq!(comment.anchor.text, "c\nd");
+    assert_eq!(comment.location, Some(location(3, 4)));
+
+    // Twice in the file: refused, and nothing is written.
+    let events = engine.handle(OperationId(11), &human(add_by_text("g.txt", "x")));
+    assert!(!done(&events));
+    assert!(
+        failure(&events).contains("more than once"),
+        "{}",
+        failure(&events)
+    );
+    // Not in the file now: refused.
+    let events = engine.handle(OperationId(12), &human(add_by_text("f.txt", "gone")));
+    assert!(
+        failure(&events).contains("not in the file"),
+        "{}",
+        failure(&events)
+    );
+    assert_eq!(list(&mut engine).len(), 1);
+
+    // An agent may not write comments.
+    let events = engine.handle(OperationId(13), &agent(add_by_text("f.txt", "a")));
+    assert!(!done(&events));
+    assert_eq!(list(&mut engine).len(), 1);
+}

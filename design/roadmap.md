@@ -623,6 +623,9 @@ Redirected by the author on 2026-10-31 (D135): `gitmaster mcp` is a second proce
 
 Done when: an agent can read the stack, propose a restack and apply it with approval (7b).
 
+- **7b2, comment on any code** (built 2026-10-31, D141). A line pick separate from the staging selection: drag across line numbers or Shift-click, in the Working Copy diff (any line, both sides), the Code viewer and the commit, stash and reflog diffs; Ctrl+Shift+M or the header button opens the composer. Where the surface is the working tree (unstaged side, Code viewer) the comment is by line numbers; elsewhere the engine command `AddReviewCommentByText` finds the picked text exactly once in the file or refuses. Tests: pure (`review::picked`, the registry rule, the composer target), real Git (`review_real_git.rs`: once, twice, absent, agent refused).
+  - Known gaps: comments already written are not drawn inline in the Code viewer or in commit and stash diffs (`Planned` in `docs/agents/local-review.md`); no autoscroll while dragging past the edge of the list; the commit-diff flow and Ctrl+Shift+M were not tried in a window (no key reaches the app under Xvfb without a window manager), the drag and the header button were, in the Working Copy diff and the Code viewer.
+
 ## Slice 8: local review
 
 - Comments, states, anchor without guessing, before and after snapshots.
