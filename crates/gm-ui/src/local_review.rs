@@ -5,13 +5,15 @@
 
 use std::time::Instant;
 
-use gm_schema::{OperationId, ReviewComment, ReviewStatus};
+use gm_schema::{OperationId, ReviewChange, ReviewComment, ReviewStatus};
 
 use crate::review::{self, Badge, Delete, DeleteArm};
 
 const NO_SNAPSHOT: &str = "No snapshot was taken for this comment.";
 const NOT_IN_SNAPSHOT: &str = "The commented text is not in the snapshot.";
 const NOT_IN_FILE: &str = "The commented text is no longer in the file.";
+const NOT_IN_AFTER: &str = "The commented text was not in the file when the agent handled it.";
+const HANDLED_CAPTION: &str = "As it was when the agent marked it handled";
 
 /// Which comments the list shows. Open is the default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -172,7 +174,8 @@ pub enum Version {
     /// The commented lines as the snapshot held them, from when the comment was made.
     #[default]
     Before,
-    /// The commented lines as the file holds them now.
+    /// The commented lines as the "after" snapshot holds them once an agent has
+    /// handled the comment (D140), else as the file holds them now.
     After,
 }
 
@@ -204,12 +207,30 @@ pub fn default_version(comment: &ReviewComment) -> Version {
     }
 }
 
+/// Whether the texts of `comment` come from its two snapshots in one read (D140):
+/// once an agent has handled it, After is its "after" snapshot, not the file now.
+#[must_use]
+pub fn reads_change(comment: &ReviewComment) -> bool {
+    comment.after_snapshot.is_some()
+}
+
+/// The caption over the text of `version` for `comment`: After names the agent's
+/// snapshot when it comes from one, else the file now.
+#[must_use]
+pub fn caption(version: Version, comment: &ReviewComment) -> &'static str {
+    match version {
+        Version::After if reads_change(comment) => HANDLED_CAPTION,
+        _ => version.caption(),
+    }
+}
+
 /// What the page says for a loaded text that has no lines.
 #[must_use]
 pub fn empty_text(version: Version, comment: &ReviewComment) -> &'static str {
     match version {
         Version::Before if comment.snapshot.is_none() => NO_SNAPSHOT,
         Version::Before => NOT_IN_SNAPSHOT,
+        Version::After if reads_change(comment) => NOT_IN_AFTER,
         Version::After => NOT_IN_FILE,
     }
 }
@@ -318,6 +339,31 @@ impl LocalReview {
     pub fn expect(&mut self, before: OperationId, after: OperationId) {
         self.before.pending = Some(before);
         self.after.pending = Some(after);
+    }
+
+    /// Records the one read that answers both texts of a handled comment (D140).
+    /// The lines already shown stay until its answer comes.
+    pub fn expect_change(&mut self, id: OperationId) {
+        self.before.pending = Some(id);
+        self.after.pending = Some(id);
+    }
+
+    /// Takes both texts from the change that `id` answered for comment `comment`:
+    /// Before from its "before" snapshot, After from its "after" one. A change the
+    /// engine could not read (`None`) leaves both texts empty, as a missing snapshot
+    /// does. False when the answer is superseded or is for another comment.
+    pub fn received_change(
+        &mut self,
+        id: OperationId,
+        comment: i64,
+        change: Option<ReviewChange>,
+    ) -> bool {
+        let wanted = self.selected_id();
+        let (before, after) =
+            change.map_or_else(Default::default, |change| (change.before, change.after));
+        let took_before = settle(&mut self.before, wanted, id, comment, before);
+        let took_after = settle(&mut self.after, wanted, id, comment, after);
+        took_before && took_after
     }
 
     /// Takes the Before text that `id` answered for comment `comment`. False when the
@@ -705,6 +751,97 @@ mod tests {
         assert_eq!(
             page.lines(Version::After),
             Some(words(&["first"]).as_slice())
+        );
+    }
+
+    fn handled(id: i64) -> ReviewComment {
+        let mut handled = comment(id, "a", ReviewStatus::Handled, Some(1));
+        handled.after_snapshot = Some("def".into());
+        handled
+    }
+
+    fn change(before: &[&str], after: &[&str]) -> ReviewChange {
+        ReviewChange {
+            before: words(before),
+            after: words(after),
+            changed: before != after,
+        }
+    }
+
+    #[test]
+    fn a_handled_comment_reads_its_change_and_an_unhandled_one_the_file() {
+        assert!(reads_change(&handled(1)));
+        assert!(!reads_change(&comment(1, "a", ReviewStatus::Open, Some(1))));
+    }
+
+    #[test]
+    fn both_texts_of_a_handled_comment_fill_from_its_change() {
+        let mut page = LocalReview::default();
+        page.select(&handled(1));
+        page.expect_change(id(20));
+        assert!(page.received_change(id(20), 1, Some(change(&["a", "old"], &["a", "new"]))));
+        assert_eq!(
+            page.lines(Version::Before),
+            Some(words(&["a", "old"]).as_slice())
+        );
+        assert_eq!(
+            page.lines(Version::After),
+            Some(words(&["a", "new"]).as_slice())
+        );
+        assert_eq!(page.marks(Version::After), vec![false, true]);
+    }
+
+    #[test]
+    fn a_change_the_engine_could_not_read_leaves_both_texts_empty() {
+        let mut page = LocalReview::default();
+        page.select(&handled(1));
+        page.expect_change(id(20));
+        assert!(page.received_change(id(20), 1, None));
+        assert_eq!(page.lines(Version::Before), Some([].as_slice()));
+        assert_eq!(page.lines(Version::After), Some([].as_slice()));
+    }
+
+    #[test]
+    fn a_late_change_for_a_superseded_read_or_another_comment_is_dropped() {
+        let mut page = LocalReview::default();
+        page.select(&handled(1));
+        page.expect_change(id(20));
+        page.expect_change(id(21));
+        assert!(!page.received_change(id(20), 1, Some(change(&["stale"], &["stale"]))));
+        assert!(!page.received_change(id(21), 2, Some(change(&["other"], &["other"]))));
+        assert_eq!(page.lines(Version::Before), None);
+        assert_eq!(page.lines(Version::After), None);
+        page.select(&handled(2));
+        assert!(!page.received_change(id(21), 1, Some(change(&["old"], &["old"]))));
+        assert_eq!(page.lines(Version::After), None);
+    }
+
+    #[test]
+    fn a_text_answer_for_the_two_reads_is_refused_once_a_change_is_expected() {
+        let mut page = LocalReview::default();
+        page.select(&handled(1));
+        page.expect(id(10), id(11));
+        page.expect_change(id(12));
+        assert!(!page.received_before(id(10), 1, words(&["b"])));
+        assert!(!page.received_after(id(11), 1, words(&["c"])));
+        assert!(page.received_change(id(12), 1, Some(change(&["b"], &["c"]))));
+    }
+
+    #[test]
+    fn after_names_the_agent_snapshot_once_the_comment_is_handled() {
+        let open = comment(1, "a", ReviewStatus::Open, Some(1));
+        assert_eq!(caption(Version::After, &open), "Now");
+        assert_eq!(
+            caption(Version::After, &handled(1)),
+            "As it was when the agent marked it handled"
+        );
+        assert_eq!(
+            caption(Version::Before, &handled(1)),
+            "As it was when you commented"
+        );
+        assert_eq!(
+            empty_text(Version::After, &handled(1)),
+            "The commented text was not in the file when the agent handled it."
         );
     }
 

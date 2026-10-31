@@ -265,7 +265,7 @@ impl StatusView {
         let caption = div()
             .text_xs()
             .text_color(theme::muted())
-            .child(version.caption());
+            .child(local_review::caption(version, comment));
         let text = match page.lines(version) {
             None => muted_line(LOADING_TEXT),
             Some([]) => muted_line(local_review::empty_text(version, comment)),
@@ -293,12 +293,26 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Asks the engine for the Before and the After text of the selected comment. The
-    /// answers are kept only for the read in flight, so nothing is asked with no selection.
+    /// Asks the engine for the Before and the After text of the selected comment: one
+    /// read of its two snapshots once an agent has handled it (D140), else its snapshot
+    /// and the file now. The answers are kept only for the read in flight, so nothing is
+    /// asked with no selection.
     pub(crate) fn request_review_texts(&mut self) {
         let Some(id) = self.model.local_review.selected_id() else {
             return;
         };
+        if self
+            .model
+            .review
+            .comment(id)
+            .is_some_and(local_review::reads_change)
+        {
+            let change = self
+                .engine
+                .dispatch(Actor::Human, CommandKind::LoadReviewChange { id });
+            self.model.local_review.expect_change(change);
+            return;
+        }
         let before = self
             .engine
             .dispatch(Actor::Human, CommandKind::LoadReviewSnapshotText { id });

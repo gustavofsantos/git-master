@@ -966,6 +966,15 @@ impl Model {
                 self.local_review.received_after(id, comment, lines);
                 None
             }
+            Event::ReviewChange {
+                id,
+                comment,
+                change,
+                ..
+            } => {
+                self.local_review.received_change(id, comment, change);
+                None
+            }
             // The conflict resolver's view is not built yet (D114, slice C3).
             Event::ReflogLoaded {
                 id,
@@ -1142,8 +1151,6 @@ impl Model {
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
-            // The After side read from the two snapshots (D140) is not shown yet.
-            | Event::ReviewChange { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
             | Event::ThreadsChanged => None,
             // The read opens the resolver; the staged note is the resolver's own.
@@ -2792,6 +2799,53 @@ mod stash_tests {
             comments: vec![listed_comment(8, "other")],
         });
         assert_eq!(model.local_review.selected_id(), None);
+    }
+
+    #[test]
+    fn a_handled_comment_takes_both_texts_from_its_change_and_drops_a_late_one() {
+        use crate::local_review::{self, Version};
+        let mut handled = listed_comment(7, "b");
+        handled.status = gm_schema::ReviewStatus::Handled;
+        handled.after_snapshot = Some("def".into());
+        let mut model = Model::default();
+        let _ = model.apply(Event::ReviewCommentsListed {
+            id: OperationId(1),
+            comments: vec![handled],
+        });
+        let comment = model.review.comment(7).cloned().expect("listed");
+        assert!(local_review::reads_change(&comment));
+        assert!(model.local_review.select(&comment));
+        model.local_review.expect_change(OperationId(5));
+
+        let change = |before: &str, after: &str| {
+            Some(gm_schema::ReviewChange {
+                before: vec![before.into()],
+                after: vec![after.into()],
+                changed: before != after,
+            })
+        };
+        let _ = model.apply(Event::ReviewChange {
+            id: OperationId(4),
+            comment: 7,
+            path: "a.txt".into(),
+            change: change("stale", "stale"),
+        });
+        assert_eq!(model.local_review.lines(Version::Before), None);
+        assert_eq!(model.local_review.lines(Version::After), None);
+        let _ = model.apply(Event::ReviewChange {
+            id: OperationId(5),
+            comment: 7,
+            path: "a.txt".into(),
+            change: change("b", "B"),
+        });
+        assert_eq!(
+            model.local_review.lines(Version::Before),
+            Some(["b".to_owned()].as_slice())
+        );
+        assert_eq!(
+            model.local_review.lines(Version::After),
+            Some(["B".to_owned()].as_slice())
+        );
     }
 }
 
