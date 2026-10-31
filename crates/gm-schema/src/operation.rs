@@ -195,6 +195,10 @@ pub enum CommandKind {
     /// `RestackPlanned`. Never recorded in the command log (D28).
     PlanRestack {
         branch: String,
+        /// Branches left out (Skip branch and children): they and the ones under
+        /// them are not replayed.
+        #[serde(default)]
+        skip: Vec<String>,
     },
     /// Runs the restack `PlanRestack { branch }` answers with `plan_id`: moves
     /// every branch of the plan that is not blocked to its new tip in one ref
@@ -204,6 +208,9 @@ pub enum CommandKind {
     ApplyRestack {
         branch: String,
         plan_id: String,
+        /// The branches the plan was made without.
+        #[serde(default)]
+        skip: Vec<String>,
     },
     /// Puts back every branch and base of the last restack, in one ref
     /// transaction. Refused when a branch moved since. Answers `RestackFinished`

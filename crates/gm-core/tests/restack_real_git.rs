@@ -104,6 +104,7 @@ impl Repo {
             Actor::Human,
             CommandKind::PlanRestack {
                 branch: branch.into(),
+                skip: Vec::new(),
             },
         );
         events
@@ -350,6 +351,7 @@ fn current_stacks_and_unstacked_branches_have_nothing_to_plan() {
         Actor::Human,
         CommandKind::PlanRestack {
             branch: "loose".into(),
+            skip: Vec::new(),
         },
     );
     assert!(refusal(&events).is_some_and(|text| text.contains("no stack")));
@@ -371,6 +373,7 @@ impl Repo {
             CommandKind::ApplyRestack {
                 branch: branch.into(),
                 plan_id: plan_id.into(),
+                skip: Vec::new(),
             },
         )
     }
@@ -511,6 +514,7 @@ fn an_agent_cannot_apply_or_undo() {
         CommandKind::ApplyRestack {
             branch: "main".into(),
             plan_id: plan.plan_id,
+            skip: Vec::new(),
         },
     );
     assert!(refusal(&events).is_some_and(|text| text.contains("only a human")));
@@ -649,4 +653,56 @@ fn an_applied_record_survives_a_new_engine_and_can_be_undone() {
     let events = engine.handle(OperationId(3), &human(CommandKind::UndoRestack));
     assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
     assert_eq!(repo.refs(), refs);
+}
+
+#[test]
+fn a_skipped_branch_and_its_children_stay_while_the_rest_moves() {
+    let mut repo = Repo::new();
+    stale_chain(&mut repo);
+    repo.child("c", "main");
+    repo.commit_on("c", "c.1", "c1");
+    repo.commit_on("main", "m.2", "m2");
+    let (a_tip, b_tip) = (repo.git(&["rev-parse", "a"]), repo.git(&["rev-parse", "b"]));
+    let skip = vec!["a".to_owned()];
+    let events = repo.run_as(
+        Actor::Human,
+        CommandKind::PlanRestack {
+            branch: "main".into(),
+            skip: skip.clone(),
+        },
+    );
+    let plan = events
+        .iter()
+        .find_map(|event| match event {
+            Event::RestackPlanned { plan, .. } => Some(plan.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(branch(&plan, "a").block, Some(RestackBlock::Skipped));
+    assert!(matches!(
+        branch(&plan, "b").block,
+        Some(RestackBlock::ParentBlocked { .. })
+    ));
+    // The plan made without the skip is another plan.
+    let whole = repo.plan("main");
+    assert_ne!(whole.plan_id, plan.plan_id);
+    let events = repo.run_as(
+        Actor::Human,
+        CommandKind::ApplyRestack {
+            branch: "main".into(),
+            plan_id: plan.plan_id.clone(),
+            skip,
+        },
+    );
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    assert_eq!(
+        (repo.git(&["rev-parse", "a"]), repo.git(&["rev-parse", "b"])),
+        (a_tip, b_tip)
+    );
+    assert_eq!(
+        repo.git(&["rev-parse", "c"]),
+        branch(&plan, "c").new_tip.clone().unwrap()
+    );
+    // The skipped ones are still stale: a later plan offers them again.
+    assert!(repo.plan("main").branches.iter().any(|b| b.name == "a"));
 }

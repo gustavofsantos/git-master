@@ -32,6 +32,8 @@ pub struct PlannedCommit {
 pub enum RestackBlock {
     /// A commit of the branch conflicts: the branch and the ones under it wait.
     Conflict { commit: String },
+    /// The person left the branch out; the branches under it wait with it.
+    Skipped,
     /// The parent is blocked or refused, so the branch cannot be replayed.
     ParentBlocked { parent: String },
     /// The branch cannot be restacked now; `reason` is a sentence for the person.

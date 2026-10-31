@@ -1507,7 +1507,7 @@ impl Engine {
                 self.delete_branch(id, actor, name, *force)
             }
             CommandKind::ListMergedBranches => self.list_merged(id),
-            CommandKind::PlanRestack { branch } => self.plan_restack(id, branch),
+            CommandKind::PlanRestack { branch, skip } => self.plan_restack(id, branch, skip),
             CommandKind::ApplyRestack { .. }
             | CommandKind::UndoRestack
             | CommandKind::ResumeRestack => self.restack_command(id, actor, kind),
@@ -1605,9 +1605,14 @@ impl Engine {
 
     /// Plans a restack of `branch` and the branches under it (D142): reads the
     /// stacks and replays each commit without moving a ref. A read.
-    fn plan_restack(&self, id: OperationId, branch: &str) -> Result<Vec<Event>, String> {
+    fn plan_restack(
+        &self,
+        id: OperationId,
+        branch: &str,
+        skip: &[String],
+    ) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
-        let plan = restack_session::plan(self.git.as_ref(), &root, branch, &|path| {
+        let plan = restack_session::plan(self.git.as_ref(), &root, branch, skip, &|path| {
             same_folder(&root, path)
         })?;
         Ok(vec![Event::RestackPlanned { id, plan }])
@@ -1625,11 +1630,16 @@ impl Engine {
         let root = self.open_root()?;
         let git = self.git.as_ref();
         let record = match kind {
-            CommandKind::ApplyRestack { branch, plan_id } => Some(restack_session::apply(
+            CommandKind::ApplyRestack {
+                branch,
+                plan_id,
+                skip,
+            } => Some(restack_session::apply(
                 git,
                 &root,
                 branch,
                 plan_id,
+                skip,
                 &|path| same_folder(&root, path),
             )?),
             CommandKind::UndoRestack => {

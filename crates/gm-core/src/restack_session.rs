@@ -2,7 +2,7 @@
 //! applies a plan as one ref transaction and records it so undo can put it back.
 //! The commands are in `engine`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gm_schema::{RestackMove, RestackPhase, RestackPlan, RestackRecord};
@@ -17,6 +17,7 @@ pub(crate) fn plan(
     git: &dyn GitPort,
     root: &Path,
     branch: &str,
+    skip: &[String],
     same_folder: &dyn Fn(&str) -> bool,
 ) -> Result<RestackPlan, String> {
     let snapshot = stack_session::snapshot(git, root)?;
@@ -45,6 +46,7 @@ pub(crate) fn plan(
         links: &links,
         tips: &tips,
         checked_out: &checked_out,
+        skip: &skip.iter().cloned().collect::<HashSet<_>>(),
     };
     restack::plan(branch, &inputs, &mut |onto, commit| {
         git.restack_replay(root, onto, commit).map_err(|e| e.0)
@@ -92,9 +94,10 @@ pub(crate) fn apply(
     root: &Path,
     branch: &str,
     plan_id: &str,
+    skip: &[String],
     same_folder: &dyn Fn(&str) -> bool,
 ) -> Result<RestackRecord, String> {
-    let plan = plan(git, root, branch, same_folder)?;
+    let plan = plan(git, root, branch, skip, same_folder)?;
     if plan.plan_id != plan_id {
         return Err("The stacks changed since the plan was made. Plan again.".to_owned());
     }

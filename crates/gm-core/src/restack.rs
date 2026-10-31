@@ -50,6 +50,8 @@ pub struct Inputs<'a> {
     /// The tip of each local branch.
     pub tips: &'a HashMap<String, String>,
     pub checked_out: &'a HashMap<String, CheckedOut>,
+    /// Branches the person left out.
+    pub skip: &'a HashSet<String>,
 }
 
 /// Plans a restack of `from` and the branches under it. `replay(onto, commit)`
@@ -136,7 +138,9 @@ pub fn plan(
             new_tip: None,
             block: None,
         };
-        if parent_held_back {
+        if inputs.skip.contains(name) {
+            branch.block = Some(RestackBlock::Skipped);
+        } else if parent_held_back {
             branch.block = Some(RestackBlock::ParentBlocked {
                 parent: parent.to_owned(),
             });
@@ -363,6 +367,7 @@ mod tests {
             links: &[],
             tips: &tips,
             checked_out: placed,
+            skip: &HashSet::new(),
         };
         let mut replay = |onto: &str, commit: &str| {
             let kind = if conflicts_on.contains(&commit) {

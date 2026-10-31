@@ -540,7 +540,7 @@ Sub-slices (agreed with the author on 2026-10-31: engine and sidebar first; D13 
 - **4c2, Commits | Stacks switch** in the history graph: one node per branch, with its commits folded or unfolded.
 - **4d, the derived events** `stack.parent_moved` and `stack.parent_merged` for workflow triggers (with WF3), and `stack_tree` over MCP (slice 7).
 
-## Slice 5: restack (in progress: 5a to 5c done, with gaps)
+## Slice 5: restack (in progress: 5a to 5d (skip) done, with gaps)
 
 - Exact plan per commit, in-memory execution, snapshot and atomic undo, persisted state.
 - Fallback without a resolver: on conflict, pause and deliver the conflict in the working tree to resolve outside.
@@ -567,7 +567,9 @@ Sub-slices (agreed with the author on 2026-10-31; D14 decided, execution in D142
   - The record has a phase: `applying` is saved before the refs move and `applied` after the bases. `ResumeRestack` (human, sent when a repository opens) drops a record whose refs never moved, finishes one whose refs all moved (files of the checked-out branch when the working copy shows changes, then the bases), and reports a mix of old and new tips without touching it. Undo resumes first.
   - Checked: 5 real-Git tests (kill before the bases, before the files, before any ref, a mix, a new engine undoing an applied restack). The kills are simulated by putting the state back by hand, not by killing a process.
   - Known gaps: the UI does not send `ResumeRestack` yet (5e); a kill during the ref transaction itself relies on Git's own atomicity; one record only, so a second restack replaces the undo of the first.
-- **5d, conflict pause** (skip branch and children, abort all).
+- **5d, conflict handling (skip done on 2026-10-31; delivery of a conflict to the working tree not built).**
+  - A conflict already blocks only its branch and the ones under it, and apply moves the rest. `PlanRestack` and `ApplyRestack` take `skip`, the branches to leave out (Skip branch and children): they and their descendants are not replayed, and the plan id changes with the list. Abort all is not sending `ApplyRestack`, since a plan moves nothing. Checked: one real-Git test (skip keeps a branch and its child, moves a sibling, and the skipped ones are offered again) and a unit test.
+  - Not built: delivering a blocked branch's conflict in the working tree to resolve outside, and continuing after. It needs the author's choice between a temporary worktree and the open checkout, and overlaps slice 6.
 - **5e, UI flow** (plan, running, conflict, done; top-bar Restack, Restack This Stack, ⇧⌘R).
 - Out of this slice for now: `before.restack` and `after.restack`, push with lease, MCP.
 
