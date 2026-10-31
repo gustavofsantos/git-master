@@ -517,7 +517,12 @@ mod tests {
     #[test]
     fn finds_the_program_in_the_given_path() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::os::unix::fs::symlink("/bin/echo", dir.path().join("gm-probe-echo")).expect("link");
+        // A script of our own, so the test does not depend on how the system builds
+        // `echo` (a multicall binary changes its behaviour with the name it is linked as).
+        let probe = dir.path().join("gm-probe-echo");
+        std::fs::write(&probe, "#!/bin/sh\necho \"$@\"\n").expect("write");
+        std::fs::set_permissions(&probe, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
         let mut spec = exec(
             &["gm-probe-echo", "hi"],
             None,

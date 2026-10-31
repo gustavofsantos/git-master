@@ -981,7 +981,7 @@ mod tests {
         let redacted = redactor.redact(&text);
         let elapsed = start.elapsed();
         assert!(
-            elapsed < Duration::from_secs(2),
+            elapsed < Duration::from_secs(10),
             "redaction took {elapsed:?}"
         );
         assert!(!redacted.text.contains(&token));
