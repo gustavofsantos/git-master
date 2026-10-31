@@ -128,12 +128,10 @@ The name after the subcommand is the agent's id. `gitmaster harness list` prints
 ```sh
 gitmaster harness list
 gitmaster harness install claude-code
-gitmaster harness status claude-code
 gitmaster harness uninstall claude-code
 ```
 
 - `install` generates the plugin in the user data directory and prints the commands that add it to the agent. Run them, or add `--run` to have GitMaster run them when the agent's command is on your `PATH`.
-- `status` prints whether the plugin is current, whether its hooks point at this `gitmaster`, whether capture is paused and why, and how many events were skipped or are waiting. The exit status is `0` when the integration works and `1` when it needs attention.
 - `uninstall` prints the commands that remove the plugin from the agent, with `--run` as above. Stored threads are kept.
 
 See [Agent integration](../agents/agent-integration.md).

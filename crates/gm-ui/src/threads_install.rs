@@ -1,7 +1,6 @@
 //! The Install Agent Integration dialog (T7). It shows the harness picker, the
 //! folder `GitMaster` generated the agent's plugin in, and the commands that add it
-//! to the agent. **Run Commands** runs them, and **Status** reports on the
-//! integration. The commands are `gitmaster harness` (gm-core `cli.rs`), run on a
+//! to the agent. **Run Commands** runs them. The commands are `gitmaster harness` (gm-core `cli.rs`), run on a
 //! background task: the model here is pure and tested, and the window side is the
 //! `impl StatusView` at the bottom.
 
@@ -39,8 +38,6 @@ pub(crate) enum Kind {
     Generate,
     /// `install <id> --run`: writes the plugin and runs the commands.
     Run,
-    /// `status <id>`.
-    Status,
 }
 
 /// One command to run in the background, with the number of the request that asked.
@@ -94,7 +91,7 @@ pub(crate) enum InstallState {
         steps: Vec<String>,
     },
     Running,
-    /// The output of `Run Commands` or `Status`, and whether the command succeeded.
+    /// The output of `Run Commands`, and whether the command succeeded.
     Done {
         ok: bool,
         output: String,
@@ -151,15 +148,6 @@ impl InstallModel {
         ))
     }
 
-    /// Reports on the integration. `None` while a command runs.
-    pub(crate) fn status(&mut self) -> Option<Job> {
-        if self.is_busy() {
-            return None;
-        }
-        self.state = InstallState::Running;
-        Some(self.job(Kind::Status, vec!["status".into(), self.harness.clone()]))
-    }
-
     /// Applies the answer to request `request`. Returns `false` and changes nothing when
     /// the answer belongs to an earlier request.
     pub(crate) fn finish(&mut self, request: u64, kind: Kind, captured: &Captured) -> bool {
@@ -179,7 +167,7 @@ impl InstallModel {
             Kind::Generate => InstallState::Failed {
                 message: failure_text(&captured.output),
             },
-            Kind::Run | Kind::Status => InstallState::Done {
+            Kind::Run => InstallState::Done {
                 ok: captured.ok,
                 output: captured.output.clone(),
             },
@@ -347,18 +335,6 @@ impl StatusView {
         self.notify_user(&notice, cx);
     }
 
-    /// **Status**: runs `status <id>`.
-    pub(crate) fn check_threads_install(&mut self, cx: &mut Context<Self>) {
-        let job = self
-            .threads_install
-            .as_mut()
-            .and_then(|dialog| dialog.model.status());
-        if let Some(job) = job {
-            Self::run_threads_install_job(job, cx);
-        }
-        cx.notify();
-    }
-
     /// Runs `job` on a background task and applies its answer on the UI thread.
     fn run_threads_install_job(job: Job, cx: &mut Context<Self>) {
         let request = job.request;
@@ -523,9 +499,8 @@ fn state_view(state: &InstallState) -> Div {
     }
 }
 
-/// The buttons: Close, Status, and Run Commands, which waits for the commands to be shown.
+/// The buttons: Close, Copy Commands and Run Commands, which waits for the commands to be shown.
 fn actions(model: &InstallModel, cx: &Context<StatusView>) -> Div {
-    let busy = model.is_busy();
     let can_run = matches!(model.state, InstallState::Generated { .. });
     div()
         .flex()
@@ -540,14 +515,6 @@ fn actions(model: &InstallModel, cx: &Context<StatusView>) -> Div {
             true,
             cx,
             StatusView::close_threads_install,
-        ))
-        .child(button(
-            ("threads-install-status", 0),
-            "Status",
-            ButtonStyle::Secondary,
-            !busy,
-            cx,
-            |this, _, cx| this.check_threads_install(cx),
         ))
         .child(button(
             ("threads-install-copy", 0),
@@ -733,31 +700,14 @@ mod tests {
     }
 
     #[test]
-    fn status_runs_while_idle_and_waits_while_busy() {
-        let mut model = InstallModel::new("claude-code");
-        let job = model.status().expect("status");
-        assert_eq!(job.words, ["status", "claude-code"]);
-        assert!(model.status().is_none());
-        assert!(model.choose("claude-code").is_none());
-        model.finish(job.request, job.kind, &captured(true, "all good\n"));
-        assert_eq!(
-            model.state,
-            InstallState::Done {
-                ok: true,
-                output: "all good\n".into()
-            }
-        );
-    }
-
-    #[test]
     fn an_answer_to_an_earlier_request_is_dropped() {
         let mut model = InstallModel::new("claude-code");
         let first = model.choose("claude-code").expect("job");
         model.finish(first.request, first.kind, &captured(false, "old\n"));
-        let second = model.status().expect("job");
+        let second = model.choose("claude-code").expect("job");
         assert!(!model.finish(first.request, first.kind, &captured(true, OUTPUT)));
-        assert_eq!(model.state, InstallState::Running);
-        assert!(model.finish(second.request, second.kind, &captured(true, "ok\n")));
+        assert_eq!(model.state, InstallState::Generating);
+        assert!(model.finish(second.request, second.kind, &captured(false, "ok\n")));
     }
 
     #[test]

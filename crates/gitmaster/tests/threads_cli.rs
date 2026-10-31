@@ -163,7 +163,7 @@ fn harness_list_names_the_claude_code_adapter() {
 }
 
 #[test]
-fn harness_install_writes_the_plugin_and_status_is_current() {
+fn harness_install_writes_the_plugin() {
     let scratch = Scratch::new();
     let repo = scratch.repo();
     let home = scratch.path().join("home");
@@ -173,9 +173,4 @@ fn harness_install_writes_the_plugin_and_status_is_current() {
     let hooks = home.join("data/gitmaster/agents/claude-code/marketplace/plugin/hooks/hooks.json");
     let text = fs::read_to_string(&hooks).expect("hooks.json");
     assert!(text.contains(BINARY), "{text}");
-
-    let status = gitmaster(&["harness", "status", "claude-code"], b"", &repo, &home);
-    let stdout = String::from_utf8_lossy(&status.stdout);
-    assert_eq!(status.status.code(), Some(0), "{stdout}");
-    assert!(stdout.contains("generated: up to date"), "{stdout}");
 }

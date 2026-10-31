@@ -39,21 +39,6 @@ GitMaster generates the plugin and shows the exact commands that add it to the a
 
 After the install, start a new agent session in a repository. The session appears on the Threads page.
 
-## Check the integration
-
-```sh
-gitmaster harness status claude-code
-```
-
-The status reports:
-
-- whether the plugin is generated and up to date with the app;
-- whether the hooks point at the `gitmaster` command that is running. If you moved or reinstalled GitMaster, the hooks name a path that no longer exists and the status says **stale path**. Run the install again.
-- whether capture is paused, and why;
-- how many events were skipped because capture was paused, and how many are waiting to be written.
-
-The Threads page shows the same information in its empty state and in a banner when something needs attention.
-
 ## What the hooks do and do not do
 
 - **They never block the agent.** A hook always ends without an error, whatever happens inside it. If GitMaster fails, the agent carries on and the event may be missing from the thread.

@@ -141,7 +141,7 @@ The first adapter. The left column is the harness's contract and **unverified un
 | tool `Task` | `ToolKind::Agent` |
 | any other tool, or an MCP tool | `ToolKind::Other`, name kept |
 
-An event or record the adapter does not recognize is **not an error**: it is skipped, counted in a `capture_gap` row with the native type name, and visible in `harness status`. A payload that does not parse at all is a gap too. That makes harness version drift visible instead of silent.
+An event or record the adapter does not recognize is **not an error**: it is skipped, counted in a `capture_gap` row with the native type name. A payload that does not parse at all is a gap too. That makes harness version drift visible instead of silent.
 
 ### Adding a harness
 
@@ -176,7 +176,7 @@ agent harness ──hook event (JSON on stdin)──▶ gitmaster thread hook
 The adapter's `integration()` generates the plugin or configuration for its harness. For Claude Code it is a plugin directory that holds:
 
 - `.claude-plugin/plugin.json`: name `gitmaster`, version equal to the app's.
-- `hooks/hooks.json`: one command hook per event: `SessionStart`, `UserPromptSubmit`, `PreToolUse` (matcher: the file-editing tools), `PostToolUse` (all tools), `Stop`, `SubagentStop`, `SessionEnd`. Every command is `<absolute path of gitmaster> thread hook --harness claude-code`, with a short `timeout`. The path is absolute so the hook does not depend on `PATH`; `agent status` reports a stale path after the app moves.
+- `hooks/hooks.json`: one command hook per event: `SessionStart`, `UserPromptSubmit`, `PreToolUse` (matcher: the file-editing tools), `PostToolUse` (all tools), `Stop`, `SubagentStop`, `SessionEnd`. Every command is `<absolute path of gitmaster> thread hook --harness claude-code`, with a short `timeout`. The path is absolute so the hook does not depend on `PATH`; running the install again rewrites it after the app moves.
 - `skills/gitmaster-threads/SKILL.md`: added in T9, together with the MCP tools it explains. Until then the plugin carries hooks only.
 - `.mcp.json`: added in slice 7; it starts `gitmaster mcp`.
 
@@ -283,7 +283,7 @@ The user adds patterns in `settings.json` under `threads.redact` (D127):
 - The regex engine is the `regex` crate (D51), which runs in linear time, so a pattern cannot hang the hook. User patterns are built with a size limit; a pattern that fails to build is **invalid**.
 - `group` (optional) is the capture group that holds the secret. Default: the whole match.
 - `paths` are globs on repository-relative paths; the defaults above apply unless the user sets the list.
-- **Fail closed (D121):** while any enabled pattern is invalid, capture in every repository pauses. Events are dropped, not stored raw, and counted; the Threads page and `agent status` say "N events not captured: pattern `acme-token` is invalid". Completeness is traded for the guarantee.
+- **Fail closed (D121):** while any enabled pattern is invalid, capture in every repository pauses. Events are dropped, not stored raw, and counted; the Threads page says "N events not captured: pattern `acme-token` is invalid". Completeness is traded for the guarantee.
 - A **test field** in the settings dialog (and `gitmaster thread redact-test`) takes a sample text and shows the result, so a pattern is checked before it is relied on.
 - **Scrub** re-applies the current patterns to every stored thread. Because stored text is already redacted, scrub only adds redactions. It is the answer to "I added a pattern after the fact". It runs off the UI thread, in batches, and reports how many entries changed.
 
@@ -398,7 +398,7 @@ Commands and events in `gm-schema`; the UI and the MCP front end use the same on
 | `ExportThread { uid, path }` | read | human | Markdown; redacted again on the way out. |
 | `ScrubThreads` | apply | human | Re-applies the patterns, off-thread, with progress. |
 | `ImportThreads { agent }` | apply | human | Reads existing session files for this repository. |
-| `ThreadIntegrationStatus` / `InstallThreadIntegration` / `UninstallThreadIntegration` | read / apply | human | Never reaches an agent. |
+| `InstallThreadIntegration` / `UninstallThreadIntegration` | read / apply | human | Never reaches an agent. |
 
 Ingest is **not** a `Command`. It runs in the hook process, which has no engine and no operation state, and it writes only GitMaster's own database; it does not touch the repository. The engine in the window opens `threads.db` read-mostly (reads, plus its own writes for the commands above) and learns about new data from a watcher on the database file (`-wal` included), debounced like the status watcher, which emits `ThreadsChanged { uids }`. No socket is needed, so the capture works with the app closed.
 
@@ -486,7 +486,7 @@ Done when: the conformance kit passes for `claude-code` with the real fixtures; 
 
 ### T4: integration installer
 
-Per-adapter `integration()` output (Claude Code's first), `gitmaster harness list | install | status | uninstall <harness>`, `ThreadIntegrationStatus` and the install commands, stale-path detection, and the palette actions **Install Agent Integration…** and **Remove Agent Integration**. Until the settings dialog exists (slice 9), the Threads page empty state carries the install step.
+Per-adapter `integration()` output (Claude Code's first), `gitmaster harness list | install | uninstall <harness>` (`status` was removed, D136), `ThreadIntegrationStatus` and the install commands, stale-path detection, and the palette actions **Install Agent Integration…** and **Remove Agent Integration**. Until the settings dialog exists (slice 9), the Threads page empty state carries the install step.
 
 Done when: the generated plugin matches a golden copy; install, status and uninstall work against a temporary harness configuration directory in tests; nothing is written into any repository; the commands shown are the ones T0 verified.
 

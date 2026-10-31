@@ -15,24 +15,16 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gm_schema::threads::{CaptureGap, ThreadFilter};
 use serde::Deserialize;
-use serde_json::Value;
 
 use super::config::{self, ThreadsConfig};
-use super::harness::{self, HarnessAdapter, InstallContext, Integration};
+use super::harness::{self, HarnessAdapter, InstallContext};
 use super::pipeline::{self, Context};
 use super::redact::Redactor;
 use super::store::{HookStore, ThreadStore};
 
 /// The largest hook payload read from standard input, in bytes. A larger one is dropped.
 const PAYLOAD_LIMIT: u64 = 8 * 1024 * 1024;
-
-/// How many of the newest skipped-event reasons `harness status` prints.
-const LAST_GAPS: usize = 5;
-
-/// Threads read per page when `harness status` counts skipped events.
-const PAGE: u32 = 200;
 
 const THREAD_USAGE: &str = "usage: gitmaster thread hook --harness <id>
        gitmaster thread redact-test [--text <text>]
@@ -43,7 +35,6 @@ const REDACT_USAGE: &str = "usage: gitmaster thread redact-test [--text <text>]
 
 const HARNESS_USAGE: &str = "usage: gitmaster harness list
        gitmaster harness install <id> [--run]
-       gitmaster harness status <id>
        gitmaster harness uninstall <id> [--run]
 ";
 
@@ -278,32 +269,29 @@ fn redact_test(
     0
 }
 
-/// Runs `gitmaster harness <args…>`. `words` are the words after `harness`. `cwd` is the
-/// directory the command runs in; `status` reads the thread store of the repository it is in.
+/// Runs `gitmaster harness <args…>`. `words` are the words after `harness`.
 pub fn harness_command(
     words: &[String],
     out: &mut dyn Write,
     err: &mut dyn Write,
     env: &Env,
 ) -> i32 {
-    let cwd = std::env::current_dir().ok();
-    harness_with(words, out, err, env, cwd.as_deref(), &registry())
+    harness_with(words, out, err, env, &registry())
 }
 
-/// `harness_command` with the adapters and the directory passed in.
+/// `harness_command` with the adapters passed in.
 fn harness_with(
     words: &[String],
     out: &mut dyn Write,
     err: &mut dyn Write,
     env: &Env,
-    cwd: Option<&Path>,
     adapters: &[&dyn HarnessAdapter],
 ) -> i32 {
     let Some((command, rest)) = words.split_first() else {
         return usage(err, HARNESS_USAGE);
     };
     let command = command.as_str();
-    if !matches!(command, "list" | "install" | "status" | "uninstall") {
+    if !matches!(command, "list" | "install" | "uninstall") {
         let _ = writeln!(err, "gitmaster harness: unknown subcommand `{command}`");
         return usage(err, HARNESS_USAGE);
     }
@@ -313,7 +301,7 @@ fn harness_with(
         }
         return list(out, adapters);
     }
-    let (id, run) = match parse_target(rest, command != "status") {
+    let (id, run) = match parse_target(rest) {
         Ok(parsed) => parsed,
         Err(message) => {
             let _ = writeln!(err, "gitmaster harness {command}: {message}");
@@ -328,10 +316,10 @@ fn harness_with(
         );
         return 2;
     };
-    match command {
-        "install" => install(adapter, env, out, err, run),
-        "uninstall" => uninstall(adapter, env, out, err, run),
-        _ => status(adapter, env, cwd, out, err),
+    if command == "install" {
+        install(adapter, env, out, err, run)
+    } else {
+        uninstall(adapter, env, out, err, run)
     }
 }
 
@@ -345,13 +333,13 @@ fn list(out: &mut dyn Write, adapters: &[&dyn HarnessAdapter]) -> i32 {
     0
 }
 
-/// The id and the `--run` flag of `install`, `status` or `uninstall`.
-fn parse_target(words: &[String], allow_run: bool) -> Result<(&str, bool), String> {
+/// The id and the `--run` flag of `install` or `uninstall`.
+fn parse_target(words: &[String]) -> Result<(&str, bool), String> {
     let mut id = None;
     let mut run = false;
     for word in words {
         match word.as_str() {
-            "--run" if allow_run => run = true,
+            "--run" => run = true,
             flag if flag.starts_with('-') => return Err(format!("unknown option `{flag}`")),
             value if id.is_none() => id = Some(value),
             _ => return Err("expected one harness id".to_owned()),
@@ -437,223 +425,6 @@ fn uninstall(
     let _ = writeln!(out, "Removed the integration in {}", dir.display());
     let _ = writeln!(out, "Stored threads are kept.");
     0
-}
-
-/// `harness status <id>`: whether the integration is generated and current, whether its hooks
-/// name this binary, whether capture is on, and how many events were skipped. Exit `1` when
-/// something needs attention.
-fn status(
-    adapter: &dyn HarnessAdapter,
-    env: &Env,
-    cwd: Option<&Path>,
-    out: &mut dyn Write,
-    err: &mut dyn Write,
-) -> i32 {
-    let Some(data) = data_dir_of(env, err) else {
-        return 1;
-    };
-    let dir = agent_dir(data, adapter.id());
-    let expected = adapter.integration(&context(&env.binary, data));
-    let installed: Vec<Option<String>> = expected
-        .files
-        .iter()
-        .map(|(relative, _)| fs::read_to_string(dir.join(relative)).ok())
-        .collect();
-    let mut report = Report::default();
-    integration_status(adapter, env, data, &expected, &installed, &mut report);
-    capture_status(env, &mut report);
-    for line in gap_lines(cwd) {
-        report.note(line);
-    }
-    for line in &report.lines {
-        let _ = writeln!(out, "{line}");
-    }
-    i32::from(report.attention)
-}
-
-/// The lines of a status report, and whether one of them needs attention.
-#[derive(Default)]
-struct Report {
-    lines: Vec<String>,
-    attention: bool,
-}
-
-impl Report {
-    fn note(&mut self, line: impl Into<String>) {
-        self.lines.push(line.into());
-    }
-
-    fn problem(&mut self, line: impl Into<String>) {
-        self.note(line);
-        self.attention = true;
-    }
-}
-
-fn integration_status(
-    adapter: &dyn HarnessAdapter,
-    env: &Env,
-    data: &Path,
-    expected: &Integration,
-    installed: &[Option<String>],
-    report: &mut Report,
-) {
-    let none = installed.iter().all(Option::is_none);
-    let all_match = !expected.files.is_empty() && matches_all(expected, installed);
-    if none {
-        report.problem("generated: not installed (run install)");
-    } else if all_match {
-        report.note("generated: up to date");
-        if let Some(binary) = hooks_binary(expected, installed) {
-            report.note(format!("hooks path: {binary}"));
-        }
-    } else {
-        report.problem("generated: out of date (run install again)");
-        if let Some(old) = stale_binary(adapter, env, data, expected, installed) {
-            report.problem(format!(
-                "stale path: hooks name {old} but this is {}",
-                env.binary.display()
-            ));
-        }
-    }
-}
-
-/// Whether every expected file is present with exactly the expected content.
-fn matches_all(expected: &Integration, installed: &[Option<String>]) -> bool {
-    expected.files.len() == installed.len()
-        && expected
-            .files
-            .iter()
-            .zip(installed)
-            .all(|((_, text), found)| found.as_deref() == Some(text.as_str()))
-}
-
-/// The old binary, when the installed files differ from the expected ones only because they
-/// were generated for another binary.
-fn stale_binary(
-    adapter: &dyn HarnessAdapter,
-    env: &Env,
-    data: &Path,
-    expected: &Integration,
-    installed: &[Option<String>],
-) -> Option<String> {
-    let old = hooks_binary(expected, installed)?;
-    if Path::new(&old) == env.binary {
-        return None;
-    }
-    let regenerated = adapter.integration(&context(Path::new(&old), data));
-    matches_all(&regenerated, installed).then_some(old)
-}
-
-/// The binary named by the installed hooks file, when it has one.
-fn hooks_binary(expected: &Integration, installed: &[Option<String>]) -> Option<String> {
-    let index = expected
-        .files
-        .iter()
-        .position(|(relative, _)| relative.ends_with("hooks.json"))?;
-    let text = installed.get(index)?.as_deref()?;
-    binary_in_hooks(text)
-}
-
-/// The program of the first hook command that runs `thread hook`, unquoted.
-fn binary_in_hooks(text: &str) -> Option<String> {
-    const NEEDLE: &str = " thread hook --harness ";
-    let value: Value = serde_json::from_str(text).ok()?;
-    let command = first_command(&value, NEEDLE)?;
-    let head = command.split(NEEDLE).next()?;
-    Some(unquote(head.trim()))
-}
-
-fn first_command<'a>(value: &'a Value, needle: &str) -> Option<&'a str> {
-    match value {
-        Value::String(text) if text.contains(needle) => Some(text.as_str()),
-        Value::Array(items) => items.iter().find_map(|item| first_command(item, needle)),
-        Value::Object(map) => map.values().find_map(|item| first_command(item, needle)),
-        _ => None,
-    }
-}
-
-/// Removes the single quotes of a shell word, as `shell_quote` adds them.
-fn unquote(text: &str) -> String {
-    match text
-        .strip_prefix('\'')
-        .and_then(|inner| inner.strip_suffix('\''))
-    {
-        Some(inner) => inner.replace("'\\''", "'"),
-        None => text.to_owned(),
-    }
-}
-
-fn capture_status(env: &Env, report: &mut Report) {
-    let config = load_config(env);
-    let mut paused = false;
-    if let Err(problems) = Redactor::new(&config.redact) {
-        for problem in problems {
-            paused = true;
-            report.problem(format!(
-                "capture is paused: pattern {} is invalid",
-                problem.name
-            ));
-        }
-    }
-    if !config.capture {
-        report.problem("capture is off in settings");
-    } else if !paused {
-        report.note("capture: on");
-    }
-}
-
-/// The skipped-event lines for the repository `cwd` is in. Nothing when there is no repository
-/// or no thread store yet.
-fn gap_lines(cwd: Option<&Path>) -> Vec<String> {
-    let Some(repo) = cwd.and_then(pipeline::locate_repo) else {
-        return Vec::new();
-    };
-    if !repo
-        .common_dir
-        .join("gitmaster")
-        .join("threads.db")
-        .is_file()
-    {
-        return Vec::new();
-    }
-    let unreadable = || vec!["skipped events: the thread store cannot be read".to_owned()];
-    let Ok(store) = ThreadStore::open(&repo.common_dir) else {
-        return unreadable();
-    };
-    let Some(mut gaps) = all_gaps(&store) else {
-        return unreadable();
-    };
-    gaps.sort_by_key(|gap| gap.at);
-    let total: u64 = gaps.iter().map(|gap| u64::from(gap.count)).sum();
-    let mut lines = vec![format!("skipped events: {total}")];
-    lines.extend(
-        gaps.iter()
-            .rev()
-            .take(LAST_GAPS)
-            .map(|gap| format!("  {} (at {}, {} events)", gap.reason, gap.at, gap.count)),
-    );
-    lines
-}
-
-/// The capture gaps of every thread in the store.
-fn all_gaps(store: &ThreadStore) -> Option<Vec<CaptureGap>> {
-    let mut gaps = Vec::new();
-    let mut before: Option<(i64, String)> = None;
-    loop {
-        let page = store
-            .list_threads(&ThreadFilter::default(), before.take(), PAGE)
-            .ok()?;
-        for summary in &page {
-            gaps.extend(store.gaps(&summary.uid).ok()?);
-        }
-        let full = usize::try_from(PAGE).is_ok_and(|size| page.len() >= size);
-        before = page
-            .last()
-            .map(|last| (last.last_event_at, last.uid.clone()));
-        if !full || before.is_none() {
-            return Some(gaps);
-        }
-    }
 }
 
 /// Writes each generated file under `dir`, atomically. A path that is absolute or contains
@@ -786,7 +557,10 @@ mod tests {
 
     use super::*;
     use crate::threads::harness::fake::FakeAdapter;
-    use crate::threads::harness::{Capabilities, HookInput, LogChunk, ParseError, SessionLog};
+    use crate::threads::harness::{
+        Capabilities, HookInput, Integration, LogChunk, ParseError, SessionLog,
+    };
+    use gm_schema::threads::ThreadFilter;
 
     /// An adapter for the tests. It parses the fake harness's payloads and generates an
     /// integration whose hooks file names the binary and whose steps the test sets.
@@ -949,15 +723,13 @@ mod tests {
         )
     }
 
-    /// Runs `harness` with the given current directory.
     fn run_harness(
         list: &[&str],
         env: &Env,
-        cwd: Option<&Path>,
         adapters: &[&dyn HarnessAdapter],
     ) -> (i32, String, String) {
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = harness_with(&words(list), &mut out, &mut err, env, cwd, adapters);
+        let code = harness_with(&words(list), &mut out, &mut err, env, adapters);
         (
             code,
             String::from_utf8(out).expect("utf-8"),
@@ -1143,7 +915,7 @@ mod tests {
         let fake = FakeAdapter;
         let test = TestAdapter::plain();
         let adapters: [&dyn HarnessAdapter; 2] = [&test, &fake];
-        let (code, out, _) = run_harness(&["list"], &env, None, &adapters);
+        let (code, out, _) = run_harness(&["list"], &env, &adapters);
         assert_eq!(code, 0);
         assert_eq!(out, "fake  Fake harness (tests)\ntest  Test harness\n");
     }
@@ -1164,14 +936,14 @@ mod tests {
         let env = sandbox.env("/bin/gitmaster");
         let test = TestAdapter::plain();
         let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        let (code, _, err) = run_harness(&["install", "nope"], &env, None, &adapters);
+        let (code, _, err) = run_harness(&["install", "nope"], &env, &adapters);
         assert_eq!(code, 2);
         assert_eq!(err, "unknown harness 'nope'; known: test\n");
-        let (code, _, _) = run_harness(&["install"], &env, None, &adapters);
+        let (code, _, _) = run_harness(&["install"], &env, &adapters);
         assert_eq!(code, 2);
-        let (code, _, _) = run_harness(&["status", "test", "--run"], &env, None, &adapters);
+        let (code, _, _) = run_harness(&["status", "test"], &env, &adapters);
         assert_eq!(code, 2);
-        let (code, _, _) = run_harness(&["bogus"], &env, None, &adapters);
+        let (code, _, _) = run_harness(&["bogus"], &env, &adapters);
         assert_eq!(code, 2);
     }
 
@@ -1184,7 +956,7 @@ mod tests {
             ..TestAdapter::plain()
         };
         let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        let (code, out, _) = run_harness(&["install", "test"], &env, None, &adapters);
+        let (code, out, _) = run_harness(&["install", "test"], &env, &adapters);
         assert_eq!(code, 0);
         let dir = env.data_dir.join("agents/test");
         assert!(out.starts_with(&format!(
@@ -1211,7 +983,7 @@ mod tests {
             ..TestAdapter::plain()
         };
         let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        let (code, _, err) = run_harness(&["install", "test", "--run"], &env, None, &adapters);
+        let (code, _, err) = run_harness(&["install", "test", "--run"], &env, &adapters);
         assert_eq!(code, 1);
         assert!(err.contains("step 2 failed: false"), "{err}");
         assert!(first.exists());
@@ -1228,7 +1000,7 @@ mod tests {
             ..TestAdapter::plain()
         };
         let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        let (code, _, _) = run_harness(&["install", "test", "--run"], &env, None, &adapters);
+        let (code, _, _) = run_harness(&["install", "test", "--run"], &env, &adapters);
         assert_eq!(code, 0);
         assert!(marker.exists());
     }
@@ -1242,7 +1014,7 @@ mod tests {
             ..TestAdapter::plain()
         };
         let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        let (code, _, err) = run_harness(&["install", "test"], &env, None, &adapters);
+        let (code, _, err) = run_harness(&["install", "test"], &env, &adapters);
         assert_eq!(code, 1);
         assert!(err.contains("refusing the integration path"), "{err}");
         assert!(!env.data_dir.join("escape.txt").exists());
@@ -1256,100 +1028,9 @@ mod tests {
         env.data_dir = PathBuf::new();
         let test = TestAdapter::plain();
         let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        let (code, _, err) = run_harness(&["install", "test"], &env, None, &adapters);
+        let (code, _, err) = run_harness(&["install", "test"], &env, &adapters);
         assert_eq!(code, 1);
         assert!(err.contains("no data directory"));
-    }
-
-    #[test]
-    fn status_reports_not_installed_then_up_to_date() {
-        let sandbox = Sandbox::new();
-        let env = sandbox.env("/opt/gm/gitmaster");
-        let test = TestAdapter::plain();
-        let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        let (code, out, _) = run_harness(&["status", "test"], &env, None, &adapters);
-        assert_eq!(code, 1);
-        assert_eq!(out, "generated: not installed (run install)\ncapture: on\n");
-        run_harness(&["install", "test"], &env, None, &adapters);
-        let (code, out, _) = run_harness(&["status", "test"], &env, None, &adapters);
-        assert_eq!(code, 0);
-        assert!(out.starts_with("generated: up to date\nhooks path: /opt/gm/gitmaster\n"));
-    }
-
-    #[test]
-    fn status_reports_a_changed_file_as_out_of_date() {
-        let sandbox = Sandbox::new();
-        let env = sandbox.env("/opt/gm/gitmaster");
-        let test = TestAdapter::plain();
-        let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        run_harness(&["install", "test"], &env, None, &adapters);
-        fs::write(env.data_dir.join("agents/test/hooks/hooks.json"), "{}").expect("edit");
-        let (code, out, _) = run_harness(&["status", "test"], &env, None, &adapters);
-        assert_eq!(code, 1);
-        assert!(out.contains("generated: out of date (run install again)\n"));
-        assert!(!out.contains("stale path"));
-    }
-
-    #[test]
-    fn status_names_a_stale_binary_path() {
-        let sandbox = Sandbox::new();
-        let test = TestAdapter::plain();
-        let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        let old = sandbox.env("/old/gitmaster");
-        run_harness(&["install", "test"], &old, None, &adapters);
-        let moved = sandbox.env("/new/gitmaster");
-        let (code, out, _) = run_harness(&["status", "test"], &moved, None, &adapters);
-        assert_eq!(code, 1);
-        assert!(
-            out.contains("stale path: hooks name /old/gitmaster but this is /new/gitmaster\n"),
-            "{out}"
-        );
-    }
-
-    #[test]
-    fn status_reports_capture_off_and_paused_patterns() {
-        let sandbox = Sandbox::new();
-        let test = TestAdapter::plain();
-        let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        let mut env = sandbox.env("/opt/gm/gitmaster");
-        run_harness(&["install", "test"], &env, None, &adapters);
-
-        env.settings = Some(sandbox.write("off.json", r#"{"threads":{"capture":false}}"#));
-        let (code, out, _) = run_harness(&["status", "test"], &env, None, &adapters);
-        assert_eq!(code, 1);
-        assert!(out.contains("capture is off in settings\n"), "{out}");
-
-        env.settings = Some(sandbox.write(
-            "bad.json",
-            r#"{"threads":{"redact":{"patterns":[{"name":"bad","regex":"("}]}}}"#,
-        ));
-        let (code, out, _) = run_harness(&["status", "test"], &env, None, &adapters);
-        assert_eq!(code, 1);
-        assert!(
-            out.contains("capture is paused: pattern bad is invalid\n"),
-            "{out}"
-        );
-    }
-
-    #[test]
-    fn status_counts_the_events_skipped_in_the_repository() {
-        let sandbox = Sandbox::new();
-        let repo = sandbox.repo();
-        let env = sandbox.env("/opt/gm/gitmaster");
-        let test = TestAdapter::plain();
-        let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        run_harness(&["install", "test"], &env, None, &adapters);
-        let unknown = json!({"event": "mystery", "session": "s1", "id": "m1", "at": 1, "cwd": repo.display().to_string()});
-        let adapters_for_hook: [&dyn HarnessAdapter; 1] = [&test];
-        run_thread(
-            &["hook", "--harness", "test"],
-            unknown.to_string().as_bytes(),
-            &env,
-            &adapters_for_hook,
-        );
-        let (code, out, _) = run_harness(&["status", "test"], &env, Some(&repo), &adapters);
-        assert_eq!(code, 0, "{out}");
-        assert!(out.contains("skipped events: 1\n"), "{out}");
     }
 
     #[test]
@@ -1361,8 +1042,8 @@ mod tests {
             ..TestAdapter::plain()
         };
         let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        run_harness(&["install", "test"], &env, None, &adapters);
-        let (code, out, _) = run_harness(&["uninstall", "test"], &env, None, &adapters);
+        run_harness(&["install", "test"], &env, &adapters);
+        let (code, out, _) = run_harness(&["uninstall", "test"], &env, &adapters);
         assert_eq!(code, 0);
         assert!(out.contains("Run these commands to remove it:\n  1. echo removed\n"));
         assert!(out.contains("Stored threads are kept.\n"));
@@ -1379,23 +1060,10 @@ mod tests {
             ..TestAdapter::plain()
         };
         let adapters: [&dyn HarnessAdapter; 1] = [&test];
-        run_harness(&["install", "test"], &env, None, &adapters);
-        let (code, _, err) = run_harness(&["uninstall", "test", "--run"], &env, None, &adapters);
+        run_harness(&["install", "test"], &env, &adapters);
+        let (code, _, err) = run_harness(&["uninstall", "test", "--run"], &env, &adapters);
         assert_eq!(code, 1);
         assert!(err.contains("step 1 failed"), "{err}");
         assert!(env.data_dir.join("agents/test/hooks/hooks.json").exists());
-    }
-
-    #[test]
-    fn binary_is_read_back_from_the_hooks_file() {
-        let text = r"{}";
-        assert_eq!(binary_in_hooks(text), None);
-        let hooks = json!({"hooks": {"Stop": [{"hooks": [{
-            "command": "'/a b/it'\\''s/gitmaster' thread hook --harness claude-code"
-        }]}]}});
-        assert_eq!(
-            binary_in_hooks(&hooks.to_string()).as_deref(),
-            Some("/a b/it's/gitmaster")
-        );
     }
 }
