@@ -9,7 +9,8 @@ use gm_schema::{ReplayStep, RestackMove, RestackPhase, RestackPlan, RestackRecor
 
 use crate::GitPort;
 use crate::port::RefMove;
-use crate::restack::{self, CheckedOut};
+use crate::restack::{self, CheckedOut, ReplayKind, Replayed};
+use crate::restack_resolutions::{self, Resolution};
 use crate::stack_session;
 
 /// Plans a restack of `branch` and the branches under it. A read.
@@ -48,9 +49,49 @@ pub(crate) fn plan(
         checked_out: &checked_out,
         skip: &skip.iter().cloned().collect::<HashSet<_>>(),
     };
+    // A commit replayed onto exactly the base its resolution was made on is the resolved
+    // commit (D154); any other base replays again.
+    let resolutions = restack_resolutions::load(git, root)?;
     restack::plan(branch, &inputs, &mut |onto, commit| {
-        git.restack_replay(root, onto, commit).map_err(|e| e.0)
+        let replayed = git.restack_replay(root, onto, commit).map_err(|e| e.0)?;
+        match restack_resolutions::lookup(&resolutions, onto, commit) {
+            Some(new) => Ok(Replayed {
+                subject: replayed.subject,
+                kind: ReplayKind::Resolved {
+                    new: new.to_owned(),
+                },
+            }),
+            None => Ok(replayed),
+        }
     })
+}
+
+/// The resolutions a plan replays: each `Resolved` step, with the base it was replayed onto
+/// (the base is the one the walk had at that point). Pure.
+fn used_resolutions(plan: &RestackPlan) -> Vec<Resolution> {
+    let mut used = Vec::new();
+    for branch in plan
+        .branches
+        .iter()
+        .filter(|branch| branch.block.is_none() && branch.new_tip.is_some())
+    {
+        let mut cur = branch.onto.as_str();
+        for commit in &branch.commits {
+            match &commit.step {
+                ReplayStep::Clean { new } => cur = new,
+                ReplayStep::Resolved { new } => {
+                    used.push(Resolution {
+                        onto: cur.to_owned(),
+                        commit: commit.oid.clone(),
+                        resolved: new.clone(),
+                    });
+                    cur = new;
+                }
+                ReplayStep::Dropped | ReplayStep::Conflict { .. } => {}
+            }
+        }
+    }
+    used
 }
 
 fn local(name: &str) -> String {
@@ -131,10 +172,14 @@ pub(crate) fn apply(
         .filter(|entry| entry.block.is_none() && entry.new_tip.is_some())
         .flat_map(|entry| entry.commits.iter())
         .filter_map(|commit| match &commit.step {
-            ReplayStep::Clean { new } => Some((commit.oid.clone(), new.clone())),
-            _ => None,
+            ReplayStep::Clean { new } | ReplayStep::Resolved { new } => {
+                Some((commit.oid.clone(), new.clone()))
+            }
+            ReplayStep::Dropped | ReplayStep::Conflict { .. } => None,
         })
         .collect();
+    // The resolutions this apply uses are spent once the refs have moved (D154).
+    let used = used_resolutions(&plan);
     let record = RestackRecord {
         plan_id: plan.plan_id,
         from: branch.to_owned(),
@@ -144,7 +189,11 @@ pub(crate) fn apply(
     let path = store_path(git, root)?;
     save(&path, &record)?;
     transact(git, root, &record, false)?;
-    Ok((finish(git, root, record, &path)?, remaps))
+    let record = finish(git, root, record, &path)?;
+    // Best effort: the refs and bases are already written, so a failed removal must not fail
+    // the apply. A stale entry matches only its exact `onto`, so it is harmless.
+    let _ = restack_resolutions::remove(git, root, &used);
+    Ok((record, remaps))
 }
 
 /// Writes the bases and marks the record applied.

@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use gm_schema::{
-    BranchEntry, CommandKind, DiffSide, HunkId, OperationId, ReviewComment, ReviewStatus,
-    StageTarget, StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
+    BranchEntry, CommandKind, ConflictSite, DiffSide, HunkId, OperationId, ReviewComment,
+    ReviewStatus, StageTarget, StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
 };
 
 use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, SAME_WORKTREE};
@@ -1474,6 +1474,7 @@ fn resolve_conflict_effect(args: &Args) -> Result<Effect, Reason> {
     };
     Ok(Effect::Send(vec![CommandKind::ReadConflict {
         path: path.clone(),
+        site: ConflictSite::WorkingCopy,
     }]))
 }
 
@@ -5695,6 +5696,7 @@ mod tests {
             Action::ResolveConflict.plan(&file, &ctx(&conflicted, "")),
             Ok(Effect::Send(vec![CommandKind::ReadConflict {
                 path: "a.txt".into(),
+                site: ConflictSite::WorkingCopy,
             }]))
         );
     }

@@ -8,10 +8,11 @@ use serde_json::{Map, json};
 
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
-    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event, FileBody,
-    FileView, GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch,
-    OperationId, OperationState, REFLOG_PAGE, ReviewChange, ReviewComment, ReviewStatus,
-    STASH_LIST_CHANGED, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
+    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictSite, DirListing,
+    Event, FileBody, FileView, GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED,
+    MergedBranch, OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackResolution,
+    ReviewChange, ReviewComment, ReviewStatus, STASH_LIST_CHANGED, WorkflowDiagnostic,
+    WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -31,6 +32,7 @@ use crate::move_preview;
 use crate::port::{HistoryRevs, ReviewSide};
 use crate::reflog;
 use crate::remote::{RemoteJob, RemoteReport};
+use crate::restack_resolutions::{self, Resolution};
 use crate::restack_session;
 use crate::review;
 use crate::review_session::{self, ReviewSession};
@@ -133,6 +135,20 @@ pub struct Engine {
     review: Option<ReviewSession>,
     /// The threads of the open repository; see `threads_session`.
     threads: Option<ThreadsSession>,
+    /// The restack conflict being resolved in its worktree (D154), if any.
+    restack_resolution: Option<ResolutionSession>,
+}
+
+/// The restack conflict being resolved (D154): the plan it came from, and the conflict
+/// whose commit is replayed in `worktree`. One at a time, in memory; a worktree left by a
+/// crash is removed when the repository opens (`ResumeRestack`).
+struct ResolutionSession {
+    from: String,
+    skip: Vec<String>,
+    parent: String,
+    commit: String,
+    onto: String,
+    worktree: PathBuf,
 }
 
 /// The walk behind the history list: the stream while no job reads it, how to
@@ -241,6 +257,7 @@ impl Engine {
             api_written: false,
             review: None,
             threads: None,
+            restack_resolution: None,
         }
     }
 
@@ -1649,6 +1666,11 @@ impl Engine {
             CommandKind::ApplyRestack { .. }
             | CommandKind::UndoRestack
             | CommandKind::ResumeRestack => self.restack_command(id, actor, kind),
+            CommandKind::StartRestackResolution { .. }
+            | CommandKind::FinishRestackResolution
+            | CommandKind::CancelRestackResolution => {
+                self.restack_resolution_command(id, actor, kind)
+            }
             CommandKind::LoadStacks
             | CommandKind::CreateChildBranch { .. }
             | CommandKind::SetStackParent { .. }
@@ -1785,7 +1807,13 @@ impl Engine {
                 restack_session::undo(git, &root)?;
                 None
             }
-            CommandKind::ResumeRestack => restack_session::resume(git, &root)?,
+            CommandKind::ResumeRestack => {
+                // A resolution worktree left by a crash, or a session of an earlier
+                // repository, is dropped (D154).
+                self.git.restack_resolution_close(&root).map_err(|e| e.0)?;
+                self.restack_resolution = None;
+                restack_session::resume(git, &root)?
+            }
             _ => return Err("not a restack command".to_owned()),
         };
         let mut events = self.branches_changed(id, &root)?;
@@ -1795,6 +1823,133 @@ impl Engine {
             stacks: stack_session::snapshot(git, &root)?,
         });
         Ok(events)
+    }
+
+    /// Starts, finishes or cancels the resolution of a restack conflict (D154). Human only.
+    fn restack_resolution_command(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "resolve a restack conflict")?;
+        match kind {
+            CommandKind::StartRestackResolution {
+                branch,
+                plan_id,
+                skip,
+                conflicted,
+            } => self.start_restack_resolution(id, branch, plan_id, skip, conflicted),
+            CommandKind::FinishRestackResolution => self.finish_restack_resolution(id),
+            CommandKind::CancelRestackResolution => self.cancel_restack_resolution(id),
+            _ => Err("not a restack resolution command".to_owned()),
+        }
+    }
+
+    /// Opens the resolution worktree on the conflict of `conflicted` in the plan `branch`
+    /// makes, if the plan is still `plan_id` (D154). Starting another closes the one open.
+    fn start_restack_resolution(
+        &mut self,
+        id: OperationId,
+        branch: &str,
+        plan_id: &str,
+        skip: &[String],
+        conflicted: &str,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let git = self.git.as_ref();
+        let plan =
+            restack_session::plan(git, &root, branch, skip, &|path| same_folder(&root, path))?;
+        if plan.plan_id != plan_id {
+            return Err("The stack changed since the plan; plan again.".to_owned());
+        }
+        let not_conflicted = || format!("{conflicted} has no conflict in the plan.");
+        let planned = plan
+            .branches
+            .iter()
+            .find(|entry| entry.name == conflicted)
+            .ok_or_else(not_conflicted)?;
+        let Some(RestackBlock::Conflict { commit, onto }) = &planned.block else {
+            return Err(not_conflicted());
+        };
+        let subject = planned
+            .commits
+            .iter()
+            .find(|entry| &entry.oid == commit)
+            .map(|entry| entry.subject.clone())
+            .unwrap_or_default();
+        let parent = planned.parent.clone();
+        self.restack_resolution = None;
+        let worktree = self
+            .git
+            .restack_resolution_open(&root, onto, commit)
+            .map_err(|e| e.0)?;
+        let paths = self
+            .git
+            .restack_resolution_unmerged(&worktree)
+            .map_err(|e| e.0)?;
+        let resolution = RestackResolution {
+            from: branch.to_owned(),
+            conflicted: conflicted.to_owned(),
+            parent: parent.clone(),
+            commit: commit.clone(),
+            subject,
+            onto: onto.clone(),
+            paths,
+        };
+        self.restack_resolution = Some(ResolutionSession {
+            from: branch.to_owned(),
+            skip: skip.to_vec(),
+            parent,
+            commit: commit.clone(),
+            onto: onto.clone(),
+            worktree,
+        });
+        Ok(vec![Event::RestackResolutionStarted { id, resolution }])
+    }
+
+    /// Records the resolved commit of the open conflict, closes its worktree and plans the
+    /// restack again (D154). Refused while a path is unmerged; the session stays then.
+    fn finish_restack_resolution(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let session = self.open_resolution()?;
+        let resolved = self
+            .git
+            .restack_resolution_commit(&root, &session.worktree, &session.onto, &session.commit)
+            .map_err(|e| e.0)?;
+        let resolution = Resolution {
+            onto: session.onto.clone(),
+            commit: session.commit.clone(),
+            resolved: resolved.clone(),
+        };
+        let from = session.from.clone();
+        let skip = session.skip.clone();
+        let git = self.git.as_ref();
+        restack_resolutions::add(git, &root, resolution)?;
+        self.git.restack_resolution_close(&root).map_err(|e| e.0)?;
+        self.restack_resolution = None;
+        let plan =
+            restack_session::plan(git, &root, &from, &skip, &|path| same_folder(&root, path))?;
+        Ok(vec![
+            Event::RestackResolutionFinished { id, resolved },
+            Event::RestackPlanned { id, plan },
+        ])
+    }
+
+    /// Closes the resolution worktree and forgets the open conflict. Succeeds when none is
+    /// open; a resolution already finished stays in the store (D154).
+    fn cancel_restack_resolution(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        self.git.restack_resolution_close(&root).map_err(|e| e.0)?;
+        self.restack_resolution = None;
+        Ok(vec![Event::RestackResolutionCancelled { id }])
+    }
+
+    /// The open restack conflict, or the refusal when none is being resolved.
+    fn open_resolution(&self) -> Result<&ResolutionSession, String> {
+        self.restack_resolution
+            .as_ref()
+            .ok_or_else(|| "No restack conflict is being resolved.".to_owned())
     }
 
     /// Deletes a local branch, safely (`-d`) unless `force` (`-D`). A branch that a
@@ -2228,6 +2383,9 @@ impl Engine {
         events.extend(self.drop_stack());
         events.extend(self.drop_files());
         events.extend(self.drop_provenance());
+        // A resolution belongs to the repository it was started in. Its worktree is left for
+        // `ResumeRestack` to remove when that repository opens again (D154).
+        self.restack_resolution = None;
         self.root = Some(root);
         Ok(events)
     }
@@ -2254,27 +2412,62 @@ impl Engine {
         kind: &CommandKind,
     ) -> Result<Vec<Event>, String> {
         match kind {
-            CommandKind::ReadConflict { path } => {
-                let root = self.open_root()?;
-                let read = self.git.read_conflict(&root, path).map_err(|e| e.0)?;
+            CommandKind::ReadConflict { path, site } => {
+                let read = match site {
+                    ConflictSite::WorkingCopy => {
+                        let root = self.open_root()?;
+                        self.git.read_conflict(&root, path)
+                    }
+                    ConflictSite::Restack => {
+                        let session = self.open_resolution()?;
+                        self.git.read_restack_conflict(
+                            &session.worktree,
+                            path,
+                            &session.parent,
+                            &session.onto,
+                            &session.commit,
+                        )
+                    }
+                }
+                .map_err(|e| e.0)?;
                 Ok(vec![Event::ConflictRead { id, read }])
             }
-            CommandKind::ResolveConflict { path, text, .. } => {
+            CommandKind::ResolveConflict {
+                path, text, site, ..
+            } => {
                 only_a_human(actor, "resolve a conflict")?;
-                let root = self.open_root()?;
-                self.git
-                    .resolve_conflict(&root, path, text)
-                    .map_err(|e| e.0)?;
-                let mut events = self.reload_status(id, &root)?;
-                events.push(Event::ConflictResolved {
-                    id,
-                    path: path.clone(),
-                });
-                Ok(events)
+                match site {
+                    ConflictSite::WorkingCopy => {
+                        let root = self.open_root()?;
+                        self.git
+                            .resolve_conflict(&root, path, text)
+                            .map_err(|e| e.0)?;
+                        let mut events = self.reload_status(id, &root)?;
+                        events.push(Event::ConflictResolved {
+                            id,
+                            path: path.clone(),
+                        });
+                        Ok(events)
+                    }
+                    // The resolution worktree is not the checkout: its status is not shown.
+                    ConflictSite::Restack => {
+                        let worktree = self.open_resolution()?.worktree.clone();
+                        self.git
+                            .resolve_conflict(&worktree, path, text)
+                            .map_err(|e| e.0)?;
+                        Ok(vec![Event::ConflictResolved {
+                            id,
+                            path: path.clone(),
+                        }])
+                    }
+                }
             }
-            CommandKind::ForgetRecordedResolution { path } => {
+            CommandKind::ForgetRecordedResolution { path, site } => {
                 only_a_human(actor, "forget a recorded resolution")?;
-                let root = self.open_root()?;
+                let root = match site {
+                    ConflictSite::WorkingCopy => self.open_root()?,
+                    ConflictSite::Restack => self.open_resolution()?.worktree.clone(),
+                };
                 self.git
                     .forget_recorded_resolution(&root, path)
                     .map_err(|e| e.0)?;
@@ -3457,7 +3650,9 @@ mod tests {
     use super::*;
     use crate::GitError;
     use crate::fake::FakeGit;
-    use gm_schema::{ConflictFileRead, HistoryScope, HunkOrigin, RepoStatus, WorktreeMode};
+    use gm_schema::{
+        ConflictFileRead, ConflictSite, HistoryScope, HunkOrigin, RepoStatus, WorktreeMode,
+    };
     use proptest::prelude::*;
 
     fn engine() -> Engine {
@@ -4482,6 +4677,7 @@ mod tests {
             OperationId(2),
             &command(CommandKind::ReadConflict {
                 path: "a.txt".into(),
+                site: ConflictSite::WorkingCopy,
             }),
         );
         assert_eq!(failure(&events), None);
@@ -4507,6 +4703,7 @@ mod tests {
                     path: "a.txt".into(),
                     text: "ok\n".into(),
                     origins: Vec::new(),
+                    site: ConflictSite::WorkingCopy,
                 },
             },
         );
@@ -4519,6 +4716,7 @@ mod tests {
                 path: "a.txt".into(),
                 text: "ok\n".into(),
                 origins: vec![HunkOrigin::Human, HunkOrigin::Rerere],
+                site: ConflictSite::WorkingCopy,
             }),
         );
         assert_eq!(failure(&events), None);
@@ -4547,6 +4745,7 @@ mod tests {
                 actor: agent,
                 kind: CommandKind::ForgetRecordedResolution {
                     path: "a.txt".into(),
+                    site: ConflictSite::WorkingCopy,
                 },
             },
         );
@@ -4557,6 +4756,7 @@ mod tests {
             OperationId(3),
             &command(CommandKind::ForgetRecordedResolution {
                 path: "a.txt".into(),
+                site: ConflictSite::WorkingCopy,
             }),
         );
         assert_eq!(failure(&events), None);

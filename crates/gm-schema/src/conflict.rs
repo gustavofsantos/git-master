@@ -67,3 +67,14 @@ pub enum HunkOrigin {
     /// Taken from a workflow script's suggestion. No script produces one yet.
     Script,
 }
+
+/// Which worktree a conflict command reads or writes (D154). `WorkingCopy` is the open
+/// checkout, the default; `Restack` is the resolution worktree of a restack conflict, the
+/// only other one a command can reach.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictSite {
+    #[default]
+    WorkingCopy,
+    Restack,
+}

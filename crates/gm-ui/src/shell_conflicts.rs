@@ -6,7 +6,7 @@
 //! the engine, the way the other commands are sent.
 
 use gm_core::conflict::Resolution;
-use gm_schema::{Actor, CommandKind};
+use gm_schema::{Actor, CommandKind, ConflictSite};
 use gpui::{
     Context, Div, ElementId, FontWeight, MouseButton, MouseDownEvent, Stateful, div, prelude::*, px,
 };
@@ -119,6 +119,7 @@ impl StatusView {
                     path,
                     text,
                     origins,
+                    site: ConflictSite::WorkingCopy,
                 },
             );
         }
@@ -139,8 +140,13 @@ impl StatusView {
     /// engine has restored its markers, so the read shows them.
     pub(crate) fn reread_forgotten_conflict(&mut self) {
         if let Some(path) = self.model.take_conflict_reread() {
-            self.engine
-                .dispatch(Actor::Human, CommandKind::ReadConflict { path });
+            self.engine.dispatch(
+                Actor::Human,
+                CommandKind::ReadConflict {
+                    path,
+                    site: ConflictSite::WorkingCopy,
+                },
+            );
         }
     }
 
@@ -153,8 +159,13 @@ impl StatusView {
             .as_ref()
             .and_then(ResolverState::forget_request);
         if let Some(path) = request {
-            self.engine
-                .dispatch(Actor::Human, CommandKind::ForgetRecordedResolution { path });
+            self.engine.dispatch(
+                Actor::Human,
+                CommandKind::ForgetRecordedResolution {
+                    path,
+                    site: ConflictSite::WorkingCopy,
+                },
+            );
         }
         cx.notify();
     }

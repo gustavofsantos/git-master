@@ -1239,8 +1239,11 @@ impl Model {
             // The failure reason arrives on the operation's own event; a cancel has no text.
             // An inspection nobody asked for is dropped; pruning's preview is shown by its
             // dialog (W6), not here yet.
-            // A plan nobody asked for in this window.
+            // A plan nobody asked for in this window. The restack resolver is not shown yet (D154).
             Event::RestackPlanned { .. }
+            | Event::RestackResolutionStarted { .. }
+            | Event::RestackResolutionFinished { .. }
+            | Event::RestackResolutionCancelled { .. }
             | Event::HookFailed { .. }
             | Event::HookCancelled { .. }
             | Event::WorktreeInspected { .. }
@@ -1594,6 +1597,9 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::StacksLoaded { id, .. }
         | Event::RestackPlanned { id, .. }
         | Event::RestackFinished { id, .. }
+        | Event::RestackResolutionStarted { id, .. }
+        | Event::RestackResolutionFinished { id, .. }
+        | Event::RestackResolutionCancelled { id }
         | Event::HistoryLoaded { id, .. }
         | Event::CommitDetailLoaded { id, .. }
         | Event::CommitStackLoaded { id, .. }

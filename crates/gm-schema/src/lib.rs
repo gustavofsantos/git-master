@@ -20,7 +20,7 @@ pub mod threads;
 mod workflow;
 
 pub use conflict::{
-    ConflictFileRead, ConflictOperation, ConflictSide, HunkOrigin, RecordedResolution,
+    ConflictFileRead, ConflictOperation, ConflictSide, ConflictSite, HunkOrigin, RecordedResolution,
 };
 pub use diff::{DiffLine, DiffSide, FileDiff, Hunk, HunkId, LineKind, StageTarget};
 pub use files::{
@@ -46,7 +46,7 @@ pub use operation::{
 pub use reflog::{REFLOG_PAGE, ReflogEntry};
 pub use restack::{
     PlannedBranch, PlannedCommit, ReplayStep, RestackBlock, RestackMove, RestackPhase, RestackPlan,
-    RestackRecord,
+    RestackRecord, RestackResolution,
 };
 pub use review::{ReviewAnchor, ReviewChange, ReviewComment, ReviewLocation, ReviewStatus};
 pub use stack::{OWN_COMMITS_LIMIT, Stack, StackBranch, StackSnapshot, StackState};

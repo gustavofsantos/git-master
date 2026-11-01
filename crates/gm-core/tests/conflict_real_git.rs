@@ -10,8 +10,8 @@ use gm_core::command_log::CommandLog;
 use gm_core::conflict::parse;
 use gm_core::git::SubprocessGit;
 use gm_schema::{
-    Actor, Command, CommandKind, ConflictFileRead, ConflictOperation, ConflictSide, Event,
-    HunkOrigin, OperationId, OperationState, RecordedResolution,
+    Actor, Command, CommandKind, ConflictFileRead, ConflictOperation, ConflictSide, ConflictSite,
+    Event, HunkOrigin, OperationId, OperationState, RecordedResolution,
 };
 
 fn git_in(dir: &Path, args: &[&str]) -> String {
@@ -133,6 +133,7 @@ fn read(engine: &mut Engine, path: &str) -> Result<ConflictFileRead, String> {
         next_id(),
         &human(CommandKind::ReadConflict {
             path: path.to_owned(),
+            site: ConflictSite::WorkingCopy,
         }),
     );
     if let Some(detail) = failure(&events) {
@@ -154,6 +155,7 @@ fn resolve(engine: &mut Engine, path: &str, text: &str) -> Result<(), String> {
             path: path.to_owned(),
             text: text.to_owned(),
             origins: Vec::new(),
+            site: ConflictSite::WorkingCopy,
         }),
     );
     if let Some(detail) = failure(&events) {
@@ -385,6 +387,7 @@ fn resolving_writes_the_file_and_stages_it() {
             path: "a.txt".into(),
             text: "resolved\n".into(),
             origins: Vec::new(),
+            site: ConflictSite::WorkingCopy,
         }),
     );
 
@@ -490,6 +493,7 @@ fn forget(engine: &mut Engine, path: &str) -> Result<(), String> {
         next_id(),
         &human(CommandKind::ForgetRecordedResolution {
             path: path.to_owned(),
+            site: ConflictSite::WorkingCopy,
         }),
     );
     if let Some(detail) = failure(&events) {
@@ -627,6 +631,7 @@ fn the_origins_of_a_resolution_are_in_the_operation_log() {
             path: "a.txt".into(),
             text: "resolved\n".into(),
             origins: vec![HunkOrigin::Human],
+            site: ConflictSite::WorkingCopy,
         }),
     );
 

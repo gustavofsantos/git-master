@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::conflict::{ConflictFileRead, HunkOrigin};
+use crate::conflict::{ConflictFileRead, ConflictSite, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
 use crate::grep::{GrepOptions, GrepResult};
@@ -11,7 +11,7 @@ use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::hook::{HookFailure, HookInfo};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
-use crate::restack::{RestackPlan, RestackRecord};
+use crate::restack::{RestackPlan, RestackRecord, RestackResolution};
 use crate::review::{ReviewChange, ReviewComment};
 use crate::stack::StackSnapshot;
 use crate::stash::StashEntry;
@@ -217,6 +217,30 @@ pub enum CommandKind {
     /// transaction. Refused when a branch moved since. Answers `RestackFinished`
     /// with no record. Human only.
     UndoRestack,
+    /// Opens the resolution worktree on the conflict of `conflicted`, a branch the
+    /// plan `branch` (its `from`) blocks on a conflict (D154): the worktree is checked
+    /// out at that conflict's `onto` with its commit replayed, so the resolver works
+    /// there. Refused when the plan changed since `plan_id` was made, or when
+    /// `conflicted` has no conflict in it. Starting one closes the one open before.
+    /// Answers `RestackResolutionStarted`. Human only, and recorded in the command log.
+    StartRestackResolution {
+        branch: String,
+        plan_id: String,
+        /// The branches the plan was made without.
+        #[serde(default)]
+        skip: Vec<String>,
+        conflicted: String,
+    },
+    /// Builds the resolved commit of the open restack conflict from the resolution
+    /// worktree (D154), records it as the resolution of that (onto, commit), closes the
+    /// worktree and plans the restack again with the `from` and `skip` it was started
+    /// with. Refused while a path is unmerged. Answers `RestackResolutionFinished` and
+    /// `RestackPlanned`. Human only, and recorded in the command log.
+    FinishRestackResolution,
+    /// Closes the resolution worktree and forgets the open restack conflict; a
+    /// resolution already finished stays. Succeeds when nothing is open. Answers
+    /// `RestackResolutionCancelled`. Human only, and recorded in the command log.
+    CancelRestackResolution,
     /// Finishes a restack that a crash or a kill interrupted, or drops its record
     /// when no ref had moved, and answers `RestackFinished` with the record undo
     /// would use (`None` when there is none). Sent when a repository opens. Human
@@ -543,6 +567,10 @@ pub enum CommandKind {
     /// Answers `ConflictRead`. A read: never recorded (D28).
     ReadConflict {
         path: String,
+        /// The worktree the file is read from; `restack` reads the restack conflict
+        /// being resolved, and the sides are named as a rebase (D154).
+        #[serde(default)]
+        site: ConflictSite,
     },
     /// Writes `text` as the resolution of the conflicted file `path`, refused
     /// while markers remain, then stages it. `origins` holds who resolved each
@@ -553,6 +581,9 @@ pub enum CommandKind {
         text: String,
         #[serde(default)]
         origins: Vec<HunkOrigin>,
+        /// The worktree the file is in (D154): `restack` is the resolution worktree.
+        #[serde(default)]
+        site: ConflictSite,
     },
     /// Forgets the resolution Git recorded for the conflicted file `path` and
     /// restores its conflict markers in the working tree. Refused when nothing is
@@ -560,6 +591,9 @@ pub enum CommandKind {
     /// command log. Answers `RecordedResolutionForgotten`.
     ForgetRecordedResolution {
         path: String,
+        /// The worktree the file is in (D154): `restack` is the resolution worktree.
+        #[serde(default)]
+        site: ConflictSite,
     },
     /// Lists thread summaries, newest first, with `total` threads in the store.
     /// `before_at` and `before_uid` name the last row of the previous page, and
@@ -819,6 +853,20 @@ pub enum Event {
     StacksLoaded {
         id: OperationId,
         stacks: StackSnapshot,
+    },
+    /// Answers `StartRestackResolution`: the worktree is open, with the conflict.
+    RestackResolutionStarted {
+        id: OperationId,
+        resolution: RestackResolution,
+    },
+    /// Answers `FinishRestackResolution`: `resolved` is the commit the conflict became.
+    RestackResolutionFinished {
+        id: OperationId,
+        resolved: String,
+    },
+    /// Answers `CancelRestackResolution`.
+    RestackResolutionCancelled {
+        id: OperationId,
     },
     /// Answers `PlanRestack`.
     RestackPlanned {

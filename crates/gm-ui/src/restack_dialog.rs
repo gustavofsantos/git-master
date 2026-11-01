@@ -201,7 +201,7 @@ pub(crate) fn summary(branch: &PlannedBranch) -> String {
             format!("Waits for {parent}, which does not move.")
         }
         Some(RestackBlock::Skipped) => "Left out. It stays where it is.".to_owned(),
-        Some(RestackBlock::Conflict { commit }) => {
+        Some(RestackBlock::Conflict { commit, .. }) => {
             let at = branch.commits.iter().find(|planned| &planned.oid == commit);
             let subject = at.map_or("", |planned| planned.subject.as_str());
             let paths = match at.map(|planned| &planned.step) {
@@ -636,6 +636,7 @@ mod tests {
             "a",
             Some(RestackBlock::Conflict {
                 commit: "c0".into(),
+                onto: "base".into(),
             }),
             &[step],
         );

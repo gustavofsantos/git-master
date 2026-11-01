@@ -30,6 +30,11 @@ pub enum ReplayKind {
     Conflict {
         paths: Vec<String>,
     },
+    /// The commit conflicted onto this base and the person resolved it (D154): it replays
+    /// as `new`, and the walk goes on as after a clean replay.
+    Resolved {
+        new: String,
+    },
     /// The commit has no single parent, so it has no change to replay.
     NotLinear,
 }
@@ -220,6 +225,10 @@ fn replay_branch(
                 cur.clone_from(&new);
                 ReplayStep::Clean { new }
             }
+            ReplayKind::Resolved { new } => {
+                cur.clone_from(&new);
+                ReplayStep::Resolved { new }
+            }
             ReplayKind::Dropped => ReplayStep::Dropped,
             ReplayKind::Conflict { paths } => {
                 branch.commits.push(PlannedCommit {
@@ -229,6 +238,7 @@ fn replay_branch(
                 });
                 branch.block = Some(RestackBlock::Conflict {
                     commit: oid.clone(),
+                    onto: cur.clone(),
                 });
                 return Ok(());
             }
@@ -281,8 +291,10 @@ fn link_base(links: &[StackLink], branch: &str) -> Option<String> {
 
 /// A digest of everything apply relies on: each branch, its tip and base now,
 /// its commits and what their replay gave, and the tip it lands on when its
-/// parent is not restacked. The new commits are left out: they carry the time of
-/// the replay, so planning again gives other ids for the same plan (D66).
+/// parent is not restacked. A clean replay's new commit is left out: it carries
+/// the time of the replay, so planning again gives other ids for the same plan
+/// (D66). A resolved one is in: a resolution is an input of the plan, so a
+/// different resolution is a different plan (D154).
 fn plan_id(plan: &RestackPlan) -> String {
     let planned: HashSet<&str> = plan
         .branches
@@ -306,9 +318,10 @@ fn plan_id(plan: &RestackPlan) -> String {
         );
         for commit in &branch.commits {
             let step = match &commit.step {
-                ReplayStep::Clean { .. } => "clean",
-                ReplayStep::Dropped => "dropped",
-                ReplayStep::Conflict { .. } => "conflict",
+                ReplayStep::Clean { .. } => "clean".to_owned(),
+                ReplayStep::Dropped => "dropped".to_owned(),
+                ReplayStep::Conflict { .. } => "conflict".to_owned(),
+                ReplayStep::Resolved { new } => format!("resolved {new}"),
             };
             let _ = writeln!(text, "  {} {step}", commit.oid);
         }
@@ -356,20 +369,7 @@ mod tests {
         placed: &HashMap<String, CheckedOut>,
         conflicts_on: &[&str],
     ) -> RestackPlan {
-        let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
-        let tips = tips(&names);
-        let snapshot = StackSnapshot {
-            stacks: vec![Stack { branches }],
-            looped: vec![],
-        };
-        let inputs = Inputs {
-            snapshot: &snapshot,
-            links: &[],
-            tips: &tips,
-            checked_out: placed,
-            skip: &HashSet::new(),
-        };
-        let mut replay = |onto: &str, commit: &str| {
+        run_with(branches, from, placed, &mut |onto, commit| {
             let kind = if conflicts_on.contains(&commit) {
                 ReplayKind::Conflict {
                     paths: vec!["a.txt".into()],
@@ -387,8 +387,29 @@ mod tests {
                 subject: format!("subject of {commit}"),
                 kind,
             })
+        })
+    }
+
+    fn run_with(
+        branches: Vec<StackBranch>,
+        from: &str,
+        placed: &HashMap<String, CheckedOut>,
+        replay: &mut dyn FnMut(&str, &str) -> Result<Replayed, String>,
+    ) -> RestackPlan {
+        let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+        let tips = tips(&names);
+        let snapshot = StackSnapshot {
+            stacks: vec![Stack { branches }],
+            looped: vec![],
         };
-        plan(from, &inputs, &mut replay).unwrap()
+        let inputs = Inputs {
+            snapshot: &snapshot,
+            links: &[],
+            tips: &tips,
+            checked_out: placed,
+            skip: &HashSet::new(),
+        };
+        plan(from, &inputs, replay).unwrap()
     }
 
     fn chain() -> Vec<StackBranch> {
@@ -432,7 +453,8 @@ mod tests {
         assert_eq!(
             a.block,
             Some(RestackBlock::Conflict {
-                commit: "a2".into()
+                commit: "a2".into(),
+                onto: "a1@main-tip".into(),
             })
         );
         assert!(a.new_tip.is_none());
@@ -508,6 +530,79 @@ mod tests {
     fn planning_from_a_branch_leaves_its_parents_alone() {
         let plan = run(chain(), "b", &HashMap::new(), &[]);
         assert!(plan.branches.is_empty());
+    }
+
+    #[test]
+    fn a_conflict_records_the_base_it_was_replayed_onto() {
+        let plan = run(chain(), "main", &HashMap::new(), &["a2"]);
+        assert_eq!(
+            plan.branches[0].block,
+            Some(RestackBlock::Conflict {
+                commit: "a2".into(),
+                onto: "a1@main-tip".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_resolved_commit_continues_the_walk_and_its_children_plan() {
+        // a1 replays clean onto main; a2 is resolved onto a1's replay; b1 goes on from there.
+        let mut replay = |onto: &str, commit: &str| {
+            let kind = match (onto, commit) {
+                ("main-tip", "a1") => ReplayKind::Clean { new: "a1n".into() },
+                ("a1n", "a2") => ReplayKind::Resolved { new: "a2r".into() },
+                _ => ReplayKind::Clean {
+                    new: format!("{commit}@{onto}"),
+                },
+            };
+            Ok(Replayed {
+                subject: format!("subject of {commit}"),
+                kind,
+            })
+        };
+        let plan = run_with(chain(), "main", &HashMap::new(), &mut replay);
+        let [a, b] = plan.branches.as_slice() else {
+            panic!("{plan:?}")
+        };
+        assert_eq!(a.block, None);
+        assert_eq!(
+            a.commits.iter().map(|c| c.step.clone()).collect::<Vec<_>>(),
+            [
+                ReplayStep::Clean { new: "a1n".into() },
+                ReplayStep::Resolved { new: "a2r".into() },
+            ]
+        );
+        assert_eq!(a.replayed(), 2);
+        assert_eq!(a.new_tip.as_deref(), Some("a2r"));
+        assert_eq!(b.onto, "a2r");
+        assert_eq!(b.new_tip.as_deref(), Some("b1@a2r"));
+        assert!(plan.can_apply());
+    }
+
+    #[test]
+    fn the_id_tells_a_conflict_from_a_resolution_and_one_resolution_from_another() {
+        let resolved = |new: &'static str| {
+            move |onto: &str, commit: &str| {
+                let kind = if commit == "a2" {
+                    ReplayKind::Resolved { new: new.into() }
+                } else {
+                    ReplayKind::Clean {
+                        new: format!("{commit}@{onto}"),
+                    }
+                };
+                Ok(Replayed {
+                    subject: String::new(),
+                    kind,
+                })
+            }
+        };
+        let conflict = run(chain(), "main", &HashMap::new(), &["a2"]);
+        let one = run_with(chain(), "main", &HashMap::new(), &mut resolved("r1"));
+        let same = run_with(chain(), "main", &HashMap::new(), &mut resolved("r1"));
+        let other = run_with(chain(), "main", &HashMap::new(), &mut resolved("r2"));
+        assert_ne!(conflict.plan_id, one.plan_id);
+        assert_ne!(one.plan_id, other.plan_id);
+        assert_eq!(one.plan_id, same.plan_id);
     }
 
     #[test]

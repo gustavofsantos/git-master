@@ -922,6 +922,23 @@ pub trait GitPort: Send {
         ))
     }
 
+    /// Reads the conflicted file `path` of the restack conflict open in the resolution
+    /// worktree `worktree` (D154), as `read_conflict` does, with the sides named as in a
+    /// rebase: `parent` (on `onto`) is the new parent, `commit` the commit being replayed.
+    /// Runs rerere in that worktree, and changes nothing else.
+    fn read_restack_conflict(
+        &self,
+        _worktree: &Path,
+        _path: &str,
+        _parent: &str,
+        _onto: &str,
+        _commit: &str,
+    ) -> Result<ConflictFileRead, GitError> {
+        Err(GitError(
+            "conflict resolution is not supported by this adapter".into(),
+        ))
+    }
+
     /// Writes `text` as the content of the conflicted file `path` and stages it.
     /// Refused while `text` still holds conflict markers. Recorded in the command
     /// log: it changes the index.

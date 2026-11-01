@@ -2449,55 +2449,37 @@ impl GitPort for SubprocessGit {
     /// depend on `merge.conflictStyle`. It is built from the stages, not the
     /// working tree: edits already made in the file are not in it.
     fn read_conflict(&self, root: &Path, path: &str) -> Result<ConflictFileRead, GitError> {
-        check_worktree_path(root, path)?;
-        let entries = self.unmerged_entries(root, path)?;
-        if entries.is_empty() {
-            return Err(GitError(format!("{path} is not conflicted")));
-        }
-        let stage = |number: u8| entries.iter().find(|entry| entry.stage == number);
-        let (Some(ours), Some(theirs)) = (stage(2), stage(3)) else {
-            return Err(GitError(format!(
-                "{path} is a conflict with a deleted side; the resolver handles only files edited on both sides"
-            )));
+        self.read_conflict_labelled(root, path, None)
+    }
+
+    /// The restack conflict is read as a rebase: the sides are the new parent `parent`
+    /// on `onto` and the commit being replayed (D154, D22).
+    fn read_restack_conflict(
+        &self,
+        worktree: &Path,
+        path: &str,
+        parent: &str,
+        onto: &str,
+        commit: &str,
+    ) -> Result<ConflictFileRead, GitError> {
+        require_commit_id(onto)?;
+        require_commit_id(commit)?;
+        let onto_side = SideCommit {
+            branch: Some(parent.to_owned()),
+            short: short_id(onto),
+            subject: self.subject(worktree, onto)?,
         };
-        let base = stage(1);
-        let ours_content = self.blob(root, &ours.oid)?;
-        let theirs_content = self.blob(root, &theirs.oid)?;
-        let base_content = match base {
-            Some(entry) => self.blob(root, &entry.oid)?,
-            None => Vec::new(),
+        let facts = SideFacts {
+            operation: ConflictOperation::Rebase,
+            head: onto_side.clone(),
+            incoming: Some(SideCommit {
+                branch: None,
+                short: short_id(commit),
+                subject: self.subject(worktree, commit)?,
+            }),
+            onto: Some(onto_side),
         };
-        if [&ours_content, &theirs_content, &base_content]
-            .iter()
-            .any(|content| looks_binary(content))
-        {
-            return Err(GitError(format!(
-                "{path} is binary; the resolver handles text files only"
-            )));
-        }
-        // Records the conflicts not yet known and applies a recorded resolution to
-        // the working tree, so the file below is read after that (rerere).
-        self.rerere(root)?;
-        let operation = self.operation_in_progress(root)?;
-        let facts = self.side_facts(root, operation)?;
-        let labels = conflict_sides::conflict_labels(&facts);
-        let text = self.merge_with_markers(
-            root,
-            &base_content,
-            &ours_content,
-            &theirs_content,
-            [&labels.left.branch, "base", &labels.right.branch],
-        )?;
-        let recorded = self.recorded_resolution(root, path)?;
-        Ok(ConflictFileRead {
-            path: path.to_owned(),
-            operation,
-            left: labels.left,
-            right: labels.right,
-            text,
-            has_base: base.is_some(),
-            recorded,
-        })
+        self.read_conflict_labelled(worktree, path, Some(facts))
     }
 
     /// Refuses text that still holds conflict markers, then writes it into the
@@ -2588,6 +2570,69 @@ impl GitPort for SubprocessGit {
 }
 
 impl SubprocessGit {
+    /// Reads `path` for the resolver. The sides come from `facts` when given, else from the
+    /// operation in progress at `root`.
+    fn read_conflict_labelled(
+        &self,
+        root: &Path,
+        path: &str,
+        facts: Option<SideFacts>,
+    ) -> Result<ConflictFileRead, GitError> {
+        check_worktree_path(root, path)?;
+        let entries = self.unmerged_entries(root, path)?;
+        if entries.is_empty() {
+            return Err(GitError(format!("{path} is not conflicted")));
+        }
+        let stage = |number: u8| entries.iter().find(|entry| entry.stage == number);
+        let (Some(ours), Some(theirs)) = (stage(2), stage(3)) else {
+            return Err(GitError(format!(
+                "{path} is a conflict with a deleted side; the resolver handles only files edited on both sides"
+            )));
+        };
+        let base = stage(1);
+        let ours_content = self.blob(root, &ours.oid)?;
+        let theirs_content = self.blob(root, &theirs.oid)?;
+        let base_content = match base {
+            Some(entry) => self.blob(root, &entry.oid)?,
+            None => Vec::new(),
+        };
+        if [&ours_content, &theirs_content, &base_content]
+            .iter()
+            .any(|content| looks_binary(content))
+        {
+            return Err(GitError(format!(
+                "{path} is binary; the resolver handles text files only"
+            )));
+        }
+        // Records the conflicts not yet known and applies a recorded resolution to
+        // the working tree, so the file below is read after that (rerere).
+        self.rerere(root)?;
+        let (operation, facts) = if let Some(facts) = facts {
+            (ConflictOperation::Rebase, facts)
+        } else {
+            let operation = self.operation_in_progress(root)?;
+            (operation, self.side_facts(root, operation)?)
+        };
+        let labels = conflict_sides::conflict_labels(&facts);
+        let text = self.merge_with_markers(
+            root,
+            &base_content,
+            &ours_content,
+            &theirs_content,
+            [&labels.left.branch, "base", &labels.right.branch],
+        )?;
+        let recorded = self.recorded_resolution(root, path)?;
+        Ok(ConflictFileRead {
+            path: path.to_owned(),
+            operation,
+            left: labels.left,
+            right: labels.right,
+            text,
+            has_base: base.is_some(),
+            recorded,
+        })
+    }
+
     /// `git rerere` with rerere on for this process only: the user's config is
     /// never written. Logged, since it can change the rerere cache and the working
     /// tree. It records the conflicts not yet known, records the resolution of the

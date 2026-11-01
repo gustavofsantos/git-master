@@ -8,9 +8,10 @@ use std::process::Command as Process;
 use gm_core::Engine;
 use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
+use gm_core::restack_resolutions;
 use gm_schema::{
-    Actor, Command, CommandKind, Event, OperationId, OperationState, ReplayStep, RestackBlock,
-    RestackPlan,
+    Actor, Command, CommandKind, ConflictFileRead, ConflictOperation, ConflictSite, Event,
+    OperationId, OperationState, ReplayStep, RestackBlock, RestackPlan, RestackResolution,
 };
 
 fn git_in(dir: &Path, args: &[&str]) -> String {
@@ -146,6 +147,11 @@ impl Repo {
             "refs/heads",
         ])
     }
+}
+
+/// A second repository with one commit, for tests that open another one.
+fn another_repo(base: &Path) -> PathBuf {
+    repo(base)
 }
 
 fn state_of(events: &[Event]) -> Option<OperationState> {
@@ -705,4 +711,439 @@ fn a_skipped_branch_and_its_children_stay_while_the_rest_moves() {
     );
     // The skipped ones are still stale: a later plan offers them again.
     assert!(repo.plan("main").branches.iter().any(|b| b.name == "a"));
+}
+
+// Restack conflict resolution (D154), through the engine: start, resolve in the resolution
+// worktree, finish, plan again, apply.
+
+/// `main` -> `a` (one commit on `a.txt`), then `main` changes `a.txt` too, so replaying `a`
+/// onto the new `main` conflicts in its one commit. `b` is a child of `a` with its own file.
+fn conflicting_chain(repo: &mut Repo) -> String {
+    repo.child("a", "main");
+    repo.commit_on("a", "a.txt", "from a\n");
+    repo.child("b", "a");
+    repo.commit_on("b", "b.1", "b1");
+    repo.commit_on("main", "a.txt", "from main\n")
+}
+
+impl Repo {
+    fn start(&mut self, plan_id: &str, conflicted: &str) -> Vec<Event> {
+        self.run_as(
+            Actor::Human,
+            CommandKind::StartRestackResolution {
+                branch: "main".into(),
+                plan_id: plan_id.into(),
+                skip: Vec::new(),
+                conflicted: conflicted.into(),
+            },
+        )
+    }
+
+    fn finish(&mut self) -> Vec<Event> {
+        self.run_as(Actor::Human, CommandKind::FinishRestackResolution)
+    }
+
+    fn cancel(&mut self) -> Vec<Event> {
+        self.run_as(Actor::Human, CommandKind::CancelRestackResolution)
+    }
+
+    /// Reads `a.txt` of the resolution worktree, or of the checkout when `restack` is false.
+    fn read(&mut self, restack: bool) -> Vec<Event> {
+        let site = if restack {
+            ConflictSite::Restack
+        } else {
+            ConflictSite::WorkingCopy
+        };
+        self.run_as(
+            Actor::Human,
+            CommandKind::ReadConflict {
+                path: "a.txt".into(),
+                site,
+            },
+        )
+    }
+
+    /// Writes `text` as the resolution of `a.txt` in the resolution worktree.
+    fn resolve_restack(&mut self, text: &str) -> Vec<Event> {
+        self.run_as(
+            Actor::Human,
+            CommandKind::ResolveConflict {
+                path: "a.txt".into(),
+                text: text.into(),
+                origins: Vec::new(),
+                site: ConflictSite::Restack,
+            },
+        )
+    }
+
+    fn worktree_count(&self) -> usize {
+        self.git(&["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count()
+    }
+
+    fn ref_exists(&self, name: &str) -> bool {
+        Process::new("git")
+            .args(["rev-parse", "--verify", "--quiet", name])
+            .current_dir(&self.root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    fn resolutions(&self) -> Vec<restack_resolutions::Resolution> {
+        restack_resolutions::load(&SubprocessGit::default(), &self.root.join(".git")).unwrap()
+    }
+}
+
+fn resolution_started(events: &[Event]) -> Option<RestackResolution> {
+    events.iter().find_map(|e| match e {
+        Event::RestackResolutionStarted { resolution, .. } => Some(resolution.clone()),
+        _ => None,
+    })
+}
+
+fn resolved_commit(events: &[Event]) -> Option<String> {
+    events.iter().find_map(|e| match e {
+        Event::RestackResolutionFinished { resolved, .. } => Some(resolved.clone()),
+        _ => None,
+    })
+}
+
+fn read_of(events: &[Event]) -> Option<ConflictFileRead> {
+    events.iter().find_map(|e| match e {
+        Event::ConflictRead { read, .. } => Some(read.clone()),
+        _ => None,
+    })
+}
+
+fn planned_by_finish(events: &[Event]) -> Option<RestackPlan> {
+    events.iter().find_map(|e| match e {
+        Event::RestackPlanned { plan, .. } => Some(plan.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_conflict_is_resolved_in_the_worktree_and_the_restack_applies_it() {
+    let mut repo = Repo::new();
+    let main_tip = conflicting_chain(&mut repo);
+    // The checkout has a file of its own, and stays as it is.
+    std::fs::write(repo.root.join("dirty.txt"), "x\n").unwrap();
+    let plan = repo.plan("main");
+    let conflict = branch(&plan, "a").commits.last().unwrap().oid.clone();
+    assert!(
+        matches!(
+            branch(&plan, "a").block,
+            Some(RestackBlock::Conflict { .. })
+        ),
+        "{plan:?}"
+    );
+
+    let events = repo.start(&plan.plan_id, "a");
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    let started = resolution_started(&events).expect("the worktree is open");
+    assert_eq!(started.from, "main");
+    assert_eq!(started.conflicted, "a");
+    assert_eq!(started.parent, "main");
+    assert_eq!(started.commit, conflict);
+    assert_eq!(started.subject, "a.txt: from a");
+    assert_eq!(started.onto, main_tip);
+    assert_eq!(started.paths, ["a.txt"]);
+    assert_eq!(repo.worktree_count(), 2);
+
+    // The sides are named as in a rebase: the new parent, then the commit being replayed.
+    let read = read_of(&repo.read(true)).expect("the restack conflict is read");
+    assert_eq!(read.operation, ConflictOperation::Rebase);
+    assert_eq!(read.left.branch, "main");
+    assert_eq!(read.left.role, "new parent");
+    assert_eq!(read.right.role, "commit being replayed");
+    assert_eq!(read.right.subject, "a.txt: from a");
+    assert!(read.text.contains("<<<<<<< main"), "{}", read.text);
+
+    let events = repo.resolve_restack("resolved\n");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ConflictResolved { .. })),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::StatusLoaded { .. })),
+        "a restack resolution does not reload the checkout's status: {events:?}"
+    );
+
+    let events = repo.finish();
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    let resolved = resolved_commit(&events).expect("the resolution is recorded");
+    let plan = planned_by_finish(&events).expect("the restack is planned again");
+    let a = branch(&plan, "a");
+    assert_eq!(a.block, None, "{a:?}");
+    assert_eq!(
+        a.commits[0].step,
+        ReplayStep::Resolved {
+            new: resolved.clone()
+        }
+    );
+    assert_eq!(a.new_tip.as_deref(), Some(resolved.as_str()));
+    assert!(branch(&plan, "b").new_tip.is_some());
+    assert_eq!(repo.worktree_count(), 1);
+    assert_eq!(repo.resolutions().len(), 1);
+    assert!(repo.ref_exists(&format!("refs/gitmaster/restack/resolved/{resolved}")));
+    assert!(plan.can_apply());
+
+    let events = repo.apply("main", &plan.plan_id);
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    assert_applied(&mut repo, &plan, &main_tip, &resolved);
+}
+
+/// What apply of the resolved restack leaves: every ref moved, the resolved text in `a`, the
+/// store and its ref gone, and the checkout as it was.
+fn assert_applied(repo: &mut Repo, plan: &RestackPlan, main_tip: &str, resolved: &str) {
+    let a_tip = branch(plan, "a").new_tip.clone().unwrap();
+    let b_tip = branch(plan, "b").new_tip.clone().unwrap();
+    assert_eq!(repo.git(&["rev-parse", "a"]), a_tip);
+    assert_eq!(repo.git(&["rev-parse", "b"]), b_tip);
+    assert_eq!(repo.git(&["show", &format!("{a_tip}:a.txt")]), "resolved");
+    assert_eq!(repo.git(&["rev-parse", &format!("{b_tip}^")]), a_tip);
+    // The resolved commit keeps the author and message of the commit it resolves.
+    assert_eq!(
+        repo.git(&["log", "-1", "--format=%s", &a_tip]),
+        "a.txt: from a"
+    );
+    assert_eq!(
+        repo.git(&["log", "-1", "--format=%an <%ae>", &a_tip]),
+        "t <t@t>"
+    );
+    // The entry is spent and its ref is gone.
+    assert!(repo.resolutions().is_empty());
+    assert!(!repo.ref_exists(&format!("refs/gitmaster/restack/resolved/{resolved}")));
+    assert_eq!(repo.worktree_count(), 1);
+    // The checkout is untouched: same branch, same file, the untracked file still there.
+    assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+    assert_eq!(repo.git(&["rev-parse", "main"]), main_tip);
+    assert_eq!(repo.git(&["status", "--porcelain"]), "?? dirty.txt");
+    assert_eq!(repo.git(&["show", "HEAD:a.txt"]), "from main");
+    // Reading without a site is still the checkout's read, which is not conflicted.
+    let refused = repo.read(false);
+    assert!(refusal(&refused).is_some_and(|text| text.contains("is not conflicted")));
+    assert_eq!(state_of(&refused), Some(OperationState::Failed));
+    // The engine logged the commands that change state, and not the reads.
+    let logged: Vec<_> = repo.engine.log().iter().map(|e| e.kind.clone()).collect();
+    assert!(
+        logged
+            .iter()
+            .any(|k| matches!(k, CommandKind::StartRestackResolution { .. }))
+    );
+    assert!(
+        logged
+            .iter()
+            .any(|k| matches!(k, CommandKind::FinishRestackResolution))
+    );
+    assert!(
+        !logged
+            .iter()
+            .any(|k| matches!(k, CommandKind::ReadConflict { .. }))
+    );
+}
+
+#[test]
+fn a_moved_parent_ignores_a_stale_resolution_and_conflicts_again() {
+    let mut repo = Repo::new();
+    conflicting_chain(&mut repo);
+    let plan = repo.plan("main");
+    let events = repo.start(&plan.plan_id, "a");
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    repo.resolve_restack("resolved\n");
+    let resolved = resolved_commit(&repo.finish()).expect("resolved");
+    assert_eq!(repo.resolutions().len(), 1);
+
+    // `main` moves on: the resolution was made onto the old `main`, so it does not apply.
+    repo.commit_on("main", "m.2", "m2");
+    let plan = repo.plan("main");
+    let a = branch(&plan, "a");
+    assert!(
+        matches!(a.block, Some(RestackBlock::Conflict { .. })),
+        "{a:?}"
+    );
+    assert_ne!(a.commits[0].step, ReplayStep::Resolved { new: resolved });
+    assert!(a.new_tip.is_none());
+}
+
+#[test]
+fn a_second_conflict_in_the_same_branch_is_resolved_the_same_way() {
+    let mut repo = Repo::new();
+    repo.child("a", "main");
+    repo.commit_on("a", "a.txt", "from a1\n");
+    repo.commit_on("a", "a.txt", "from a2\n");
+    repo.commit_on("main", "a.txt", "from main\n");
+
+    let plan = repo.plan("main");
+    let events = repo.start(&plan.plan_id, "a");
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    repo.resolve_restack("first\n");
+    let first = resolved_commit(&repo.finish()).expect("the first is resolved");
+
+    // The first commit now replays clean from the resolution; the second conflicts on it.
+    let plan = repo.plan("main");
+    let a = branch(&plan, "a");
+    assert_eq!(a.commits[0].step, ReplayStep::Resolved { new: first });
+    let second = a.commits[1].oid.clone();
+    assert_eq!(
+        a.block,
+        Some(RestackBlock::Conflict {
+            commit: second.clone(),
+            onto: match &a.commits[0].step {
+                ReplayStep::Resolved { new } => new.clone(),
+                other => panic!("{other:?}"),
+            },
+        })
+    );
+
+    let events = repo.start(&plan.plan_id, "a");
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    let started = resolution_started(&events).expect("the second conflict is open");
+    assert_eq!(started.commit, second);
+    assert_eq!(started.paths, ["a.txt"]);
+    repo.resolve_restack("final\n");
+    let second_resolved = resolved_commit(&repo.finish()).expect("the second is resolved");
+
+    let plan = repo.plan("main");
+    let a = branch(&plan, "a");
+    assert_eq!(a.block, None, "{a:?}");
+    assert_eq!(a.replayed(), 2);
+    assert_eq!(a.new_tip.as_deref(), Some(second_resolved.as_str()));
+    assert_eq!(repo.resolutions().len(), 2);
+    assert!(plan.can_apply());
+    let events = repo.apply("main", &plan.plan_id);
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    assert_eq!(repo.git(&["show", "a:a.txt"]), "final");
+    assert!(repo.resolutions().is_empty());
+    assert_eq!(repo.worktree_count(), 1);
+}
+
+#[test]
+fn cancelling_leaves_no_worktree_and_the_plan_unchanged() {
+    let mut repo = Repo::new();
+    conflicting_chain(&mut repo);
+    let before = repo.plan("main");
+    let refs = repo.refs();
+
+    let events = repo.start(&before.plan_id, "a");
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    assert_eq!(repo.worktree_count(), 2);
+
+    let events = repo.cancel();
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::RestackResolutionCancelled { .. }))
+    );
+    assert_eq!(repo.worktree_count(), 1);
+    assert_eq!(repo.refs(), refs);
+    assert!(repo.resolutions().is_empty());
+    let after = repo.plan("main");
+    assert_eq!(after.plan_id, before.plan_id);
+
+    // Nothing is open any more: reading, resolving and finishing are refused.
+    let read = repo.read(true);
+    assert!(
+        refusal(&read).is_some_and(|text| text.contains("No restack conflict is being resolved."))
+    );
+    let finished = repo.finish();
+    assert!(
+        refusal(&finished)
+            .is_some_and(|text| text.contains("No restack conflict is being resolved."))
+    );
+    // Cancelling when nothing is open succeeds.
+    assert_eq!(state_of(&repo.cancel()), Some(OperationState::Done));
+}
+
+#[test]
+fn an_agent_cannot_start_finish_or_cancel_a_resolution() {
+    let mut repo = Repo::new();
+    conflicting_chain(&mut repo);
+    let plan = repo.plan("main");
+    let agent = Actor::Agent { name: "x".into() };
+    let events = repo.run_as(
+        agent.clone(),
+        CommandKind::StartRestackResolution {
+            branch: "main".into(),
+            plan_id: plan.plan_id.clone(),
+            skip: Vec::new(),
+            conflicted: "a".into(),
+        },
+    );
+    assert!(refusal(&events).is_some_and(|text| text.contains("only a human")));
+    assert_eq!(repo.worktree_count(), 1);
+
+    let events = repo.start(&plan.plan_id, "a");
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    let events = repo.run_as(agent.clone(), CommandKind::FinishRestackResolution);
+    assert!(refusal(&events).is_some_and(|text| text.contains("only a human")));
+    let events = repo.run_as(agent, CommandKind::CancelRestackResolution);
+    assert!(refusal(&events).is_some_and(|text| text.contains("only a human")));
+    assert_eq!(repo.worktree_count(), 2);
+    repo.cancel();
+}
+
+#[test]
+fn a_start_with_a_plan_that_changed_is_refused() {
+    let mut repo = Repo::new();
+    conflicting_chain(&mut repo);
+    let events = repo.start("not-the-plan", "a");
+    assert_eq!(
+        state_of(&events),
+        Some(OperationState::Failed),
+        "{events:?}"
+    );
+    assert!(
+        refusal(&events)
+            .is_some_and(|text| text.contains("The stack changed since the plan; plan again."))
+    );
+    assert_eq!(repo.worktree_count(), 1);
+}
+
+#[test]
+fn opening_another_repository_drops_the_resolution_of_the_first() {
+    let mut repo = Repo::new();
+    conflicting_chain(&mut repo);
+    let plan = repo.plan("main");
+    let events = repo.start(&plan.plan_id, "a");
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+
+    let other = tempfile::tempdir().unwrap();
+    let other_root = another_repo(other.path());
+    let events = repo.run_as(
+        Actor::Human,
+        CommandKind::OpenRepo {
+            path: other_root.to_string_lossy().into_owned(),
+        },
+    );
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    // The second repository has no conflict, and the first one's session is not reached.
+    let read = repo.read(true);
+    assert!(
+        refusal(&read).is_some_and(|text| text.contains("No restack conflict is being resolved."))
+    );
+    let finished = repo.finish();
+    assert!(
+        refusal(&finished)
+            .is_some_and(|text| text.contains("No restack conflict is being resolved."))
+    );
+}
+
+#[test]
+fn a_start_on_a_branch_without_a_conflict_is_refused() {
+    let mut repo = Repo::new();
+    conflicting_chain(&mut repo);
+    let plan = repo.plan("main");
+    let events = repo.start(&plan.plan_id, "b");
+    assert!(refusal(&events).is_some_and(|text| text.contains("b has no conflict in the plan.")));
+    assert_eq!(repo.worktree_count(), 1);
 }

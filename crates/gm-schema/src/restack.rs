@@ -16,6 +16,9 @@ pub enum ReplayStep {
     Dropped,
     /// It conflicts in `paths`; the branch stops here.
     Conflict { paths: Vec<String> },
+    /// It conflicted when replayed onto this base, and the person resolved it: the
+    /// commit replays as `new`, the resolution (D154). The walk goes on from `new`.
+    Resolved { new: String },
 }
 
 /// One commit of a branch and what its replay gives.
@@ -31,7 +34,9 @@ pub struct PlannedCommit {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RestackBlock {
     /// A commit of the branch conflicts: the branch and the ones under it wait.
-    Conflict { commit: String },
+    /// `onto` is the base the commit was replayed onto (the parent's planned tip plus
+    /// the commits of the branch already replayed); a resolution is keyed on it (D154).
+    Conflict { commit: String, onto: String },
     /// The person left the branch out; the branches under it wait with it.
     Skipped,
     /// The parent is blocked or refused, so the branch cannot be replayed.
@@ -60,12 +65,17 @@ pub struct PlannedBranch {
 }
 
 impl PlannedBranch {
-    /// Commits that are replayed (not dropped).
+    /// Commits that are replayed (not dropped): clean ones and resolved ones (D154).
     #[must_use]
     pub fn replayed(&self) -> usize {
         self.commits
             .iter()
-            .filter(|commit| matches!(commit.step, ReplayStep::Clean { .. }))
+            .filter(|commit| {
+                matches!(
+                    commit.step,
+                    ReplayStep::Clean { .. } | ReplayStep::Resolved { .. }
+                )
+            })
             .count()
     }
 }
@@ -108,6 +118,27 @@ pub struct RestackMove {
     pub old_base: Option<String>,
     /// The parent's tip the branch now sits on, recorded as its base.
     pub new_base: String,
+}
+
+/// A conflict of a restack being resolved (D154): what `StartRestackResolution` opened,
+/// and what the resolver shows. The sides are named as in a rebase: `parent` is the new
+/// parent, `commit` the commit being replayed onto `onto`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RestackResolution {
+    /// The branch the restack starts from (the plan's `from`).
+    pub from: String,
+    /// The blocked branch whose commit conflicts.
+    pub conflicted: String,
+    /// The parent of `conflicted`, the new parent of the replay.
+    pub parent: String,
+    /// The commit being replayed.
+    pub commit: String,
+    /// The subject line of `commit`.
+    pub subject: String,
+    /// The base `commit` is replayed onto.
+    pub onto: String,
+    /// The conflicted paths, sorted. Empty when rerere resolved every path already.
+    pub paths: Vec<String>,
 }
 
 /// How far a restack got.
