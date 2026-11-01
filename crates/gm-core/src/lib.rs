@@ -25,6 +25,7 @@ mod port;
 mod reflog;
 pub mod remote;
 pub mod restack;
+pub mod restack_resolutions;
 mod restack_session;
 pub mod review;
 mod review_session;

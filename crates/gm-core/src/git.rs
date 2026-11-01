@@ -76,6 +76,79 @@ impl SubprocessGit {
         command
     }
 
+    fn all_worktrees(&self, root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
+        // `-z` needs git 2.36; older gits get the newline form, which cannot
+        // tell a path with a newline from two lines.
+        let mut command = self.git(root);
+        command.args(["worktree", "list", "--porcelain", "-z"]);
+        if let Ok(out) = Self::run(command) {
+            return worktree::parse(&out, true);
+        }
+        let mut command = self.git(root);
+        command.args(["worktree", "list", "--porcelain"]);
+        let out = Self::run(command)?;
+        worktree::parse(&out, false)
+    }
+
+    /// The commit's parents, author, dates and message, as a replay keeps them (D142).
+    fn replay_metadata(&self, root: &Path, commit: &str) -> Result<ReplayMetadata, GitError> {
+        // One read: parents, author, author date (raw keeps the offset) and message.
+        let mut command = self.git(root);
+        command.args([
+            "log",
+            "-1",
+            "--no-show-signature",
+            "--date=raw",
+            "--format=%P%x00%an%x00%ae%x00%ad%x00%cd%x00%B",
+            commit,
+        ]);
+        let out = Self::run(command)?;
+        let text = String::from_utf8_lossy(&out);
+        let mut fields = text.splitn(6, '\0');
+        let mut next = || fields.next().unwrap_or_default().to_owned();
+        let (parents, name, email, date, committed, message) =
+            (next(), next(), next(), next(), next(), next());
+        Ok(ReplayMetadata {
+            parents: parents.split_whitespace().map(str::to_owned).collect(),
+            name,
+            email,
+            date,
+            committed,
+            message,
+        })
+    }
+
+    /// Writes `tree` as a commit on `parent` with the metadata of `meta`: the author and both
+    /// dates are kept, the committer is the user's own identity (D142). Only an object is
+    /// written: no ref moves.
+    fn commit_replayed(
+        &self,
+        dir: &Path,
+        tree: &str,
+        parent: &str,
+        meta: &ReplayMetadata,
+    ) -> Result<String, GitError> {
+        let mut command = self.git(dir);
+        command
+            .args(["commit-tree", tree, "-p", parent])
+            .env("GIT_AUTHOR_NAME", &meta.name)
+            .env("GIT_AUTHOR_EMAIL", &meta.email)
+            .env("GIT_AUTHOR_DATE", &meta.date)
+            .env("GIT_COMMITTER_DATE", &meta.committed);
+        let output = Self::execute(&mut command, Some(meta.message.as_bytes()))
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        let new = Self::checked(output, &[0])?;
+        Ok(String::from_utf8_lossy(&new).trim().to_owned())
+    }
+
+    /// The worktree that resolves a restack conflict (D154), inside the common dir.
+    fn resolution_worktree(&self, root: &Path) -> Result<PathBuf, GitError> {
+        Ok(self
+            .common_dir(root)?
+            .join("gitmaster")
+            .join("restack-resolve"))
+    }
+
     fn run(command: Command) -> Result<Vec<u8>, GitError> {
         Self::run_allowing(command, &[0])
     }
@@ -1677,17 +1750,11 @@ impl GitPort for SubprocessGit {
     }
 
     fn worktrees(&self, root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
-        // `-z` needs git 2.36; older gits get the newline form, which cannot
-        // tell a path with a newline from two lines.
-        let mut command = self.git(root);
-        command.args(["worktree", "list", "--porcelain", "-z"]);
-        if let Ok(out) = Self::run(command) {
-            return worktree::parse(&out, true);
-        }
-        let mut command = self.git(root);
-        command.args(["worktree", "list", "--porcelain"]);
-        let out = Self::run(command)?;
-        worktree::parse(&out, false)
+        // The folders under `<common dir>/gitmaster/` are internal (D154): not listed.
+        let internal = canonical_or_as_is(&self.common_dir(root)?).join("gitmaster");
+        let mut entries = self.all_worktrees(root)?;
+        entries.retain(|entry| !canonical_or_as_is(Path::new(&entry.path)).starts_with(&internal));
+        Ok(entries)
     }
 
     fn create_worktree(
@@ -2079,30 +2146,9 @@ impl GitPort for SubprocessGit {
     fn restack_replay(&self, root: &Path, onto: &str, commit: &str) -> Result<Replayed, GitError> {
         require_commit_id(onto)?;
         require_commit_id(commit)?;
-        // One read: parents, author, author date (raw keeps the offset) and message.
-        let mut command = self.git(root);
-        command.args([
-            "log",
-            "-1",
-            "--no-show-signature",
-            "--date=raw",
-            "--format=%P%x00%an%x00%ae%x00%ad%x00%cd%x00%B",
-            commit,
-        ]);
-        let out = Self::run(command)?;
-        let text = String::from_utf8_lossy(&out);
-        let mut fields = text.splitn(6, '\0');
-        let (parents, name, email, date, committed, message) = (
-            fields.next().unwrap_or_default(),
-            fields.next().unwrap_or_default(),
-            fields.next().unwrap_or_default(),
-            fields.next().unwrap_or_default(),
-            fields.next().unwrap_or_default(),
-            fields.next().unwrap_or_default(),
-        );
-        let subject = message.lines().next().unwrap_or_default().to_owned();
-        let parents: Vec<&str> = parents.split_whitespace().collect();
-        let [parent] = parents.as_slice() else {
+        let meta = self.replay_metadata(root, commit)?;
+        let subject = meta.message.lines().next().unwrap_or_default().to_owned();
+        let [parent] = meta.parents.as_slice() else {
             return Ok(Replayed {
                 subject,
                 kind: ReplayKind::NotLinear,
@@ -2119,26 +2165,136 @@ impl GitPort for SubprocessGit {
                 if tree == onto_tree {
                     ReplayKind::Dropped
                 } else {
-                    // The user's own identity commits, as a rebase does; the author is
-                    // kept, and the committer date too, so the same plan gives the
-                    // same commits (D09). Only an object is written: no ref moves.
-                    let mut command = self.git(root);
-                    command
-                        .args(["commit-tree", &tree, "-p", onto])
-                        .env("GIT_AUTHOR_NAME", name)
-                        .env("GIT_AUTHOR_EMAIL", email)
-                        .env("GIT_AUTHOR_DATE", date)
-                        .env("GIT_COMMITTER_DATE", committed);
-                    let output = Self::execute(&mut command, Some(message.as_bytes()))
-                        .map_err(|e| GitError(format!("cannot run git: {e}")))?;
-                    let new = Self::checked(output, &[0])?;
                     ReplayKind::Clean {
-                        new: String::from_utf8_lossy(&new).trim().to_owned(),
+                        new: self.commit_replayed(root, &tree, onto, &meta)?,
                     }
                 }
             }
         };
         Ok(Replayed { subject, kind })
+    }
+
+    fn restack_resolution_open(
+        &self,
+        root: &Path,
+        onto: &str,
+        commit: &str,
+    ) -> Result<PathBuf, GitError> {
+        require_commit_id(onto)?;
+        require_commit_id(commit)?;
+        let path = self.resolution_worktree(root)?;
+        // A worktree left by an earlier resolution is replaced, not reused.
+        self.restack_resolution_close(root)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| GitError(format!("cannot create {}: {e}", parent.display())))?;
+        }
+        let mut command = self.git(root);
+        command
+            .args(["worktree", "add", "--detach", "--"])
+            .arg(&path)
+            .arg(onto);
+        self.logged(command, None)?;
+        // Exit 1 is a conflict, which is what this is for; the index keeps the stages.
+        let mut command = self.git(&path);
+        command.args([
+            "-c",
+            "rerere.enabled=true",
+            "cherry-pick",
+            "--no-commit",
+            commit,
+        ]);
+        let picked = self
+            .logged_output(command, None)
+            .and_then(|output| Self::checked(output, &[0, 1]).map(drop));
+        if let Err(error) = picked {
+            let _ = self.restack_resolution_close(root);
+            return Err(error);
+        }
+        Ok(path)
+    }
+
+    fn restack_resolution_unmerged(&self, worktree: &Path) -> Result<Vec<String>, GitError> {
+        let mut command = self.git(worktree);
+        command.args(["ls-files", "-u", "-z"]);
+        // Each record is `mode oid stage<TAB>path`; a path repeats once per stage.
+        let out = Self::run(command)?;
+        let mut paths: Vec<String> = out
+            .split(|byte| *byte == 0)
+            .filter_map(|record| {
+                String::from_utf8_lossy(record)
+                    .split_once('\t')
+                    .map(|(_, path)| path.to_owned())
+            })
+            .collect();
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    fn restack_resolution_commit(
+        &self,
+        root: &Path,
+        worktree: &Path,
+        onto: &str,
+        commit: &str,
+    ) -> Result<String, GitError> {
+        require_commit_id(onto)?;
+        require_commit_id(commit)?;
+        let unmerged = self.restack_resolution_unmerged(worktree)?;
+        if !unmerged.is_empty() {
+            return Err(GitError(format!(
+                "resolve the conflicts first: {}",
+                unmerged.join(", ")
+            )));
+        }
+        let mut command = self.git(worktree);
+        command.arg("write-tree");
+        let tree = String::from_utf8_lossy(&Self::run(command)?)
+            .trim()
+            .to_owned();
+        let meta = self.replay_metadata(root, commit)?;
+        self.commit_replayed(worktree, &tree, onto, &meta)
+    }
+
+    fn restack_resolution_close(&self, root: &Path) -> Result<(), GitError> {
+        let path = self.resolution_worktree(root)?;
+        let wanted = canonical_or_as_is(&path);
+        let registered = self
+            .all_worktrees(root)?
+            .iter()
+            .any(|entry| canonical_or_as_is(Path::new(&entry.path)) == wanted);
+        if registered {
+            let mut command = self.git(root);
+            command
+                .args(["worktree", "remove", "--force", "--"])
+                .arg(&path);
+            let removed = self.logged(command, None).map(drop);
+            // A folder deleted by hand leaves nothing to remove; that is not a failure.
+            if removed.is_err() && path.exists() {
+                return removed;
+            }
+        }
+        if path.exists() {
+            std::fs::remove_dir_all(&path)
+                .map_err(|e| GitError(format!("cannot remove {}: {e}", path.display())))?;
+        }
+        self.prune_worktrees(root)
+    }
+
+    fn set_ref(&self, root: &Path, name: &str, oid: &str) -> Result<(), GitError> {
+        ref_under_refs(name)?;
+        require_commit_id(oid)?;
+        let mut command = self.git(root);
+        command.args(["update-ref", name, oid]);
+        self.logged(command, None).map(drop)
+    }
+
+    fn delete_ref(&self, root: &Path, name: &str) -> Result<(), GitError> {
+        ref_under_refs(name)?;
+        let mut command = self.git(root);
+        command.args(["update-ref", "-d", name]);
+        self.logged(command, None).map(drop)
     }
 
     fn write_stack_link(
@@ -3392,6 +3548,29 @@ impl Drop for LogStream {
 }
 
 /// A full or abbreviated id is hex; anything else never reaches git's arguments.
+/// What a replay keeps of a commit (D142): its parents, author, dates and message.
+struct ReplayMetadata {
+    parents: Vec<String>,
+    name: String,
+    email: String,
+    date: String,
+    committed: String,
+    message: String,
+}
+
+/// `path` canonicalized, or as given when it cannot be (a folder that is gone).
+fn canonical_or_as_is(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// A ref name under `refs/`, with no spaces or line breaks that would break `update-ref`.
+fn ref_under_refs(name: &str) -> Result<(), GitError> {
+    if !name.starts_with("refs/") || name.contains(['\n', '\0', ' ']) {
+        return Err(GitError(format!("{name} is not a ref under refs/")));
+    }
+    Ok(())
+}
+
 fn require_commit_id(oid: &str) -> Result<(), GitError> {
     if oid.is_empty() || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(GitError(format!("not a commit id: {oid:?}")));

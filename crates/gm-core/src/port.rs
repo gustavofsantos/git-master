@@ -735,6 +735,67 @@ pub trait GitPort: Send {
         Err(GitError("restack is not supported by this adapter".into()))
     }
 
+    /// Opens the resolution worktree of a restack conflict (D154): a detached linked worktree at
+    /// `<common dir>/gitmaster/restack-resolve`, checked out at `onto`, with `commit` cherry-picked
+    /// into it without a commit (rerere on), so the index holds the conflict. Replaces a worktree
+    /// that is already there. Returns the worktree's path. Recorded in the command log.
+    fn restack_resolution_open(
+        &self,
+        _root: &Path,
+        _onto: &str,
+        _commit: &str,
+    ) -> Result<PathBuf, GitError> {
+        Err(GitError(
+            "restack resolution is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The paths of the resolution worktree that are still unmerged, sorted, each once (D154).
+    /// Never records anything (D28).
+    fn restack_resolution_unmerged(&self, _worktree: &Path) -> Result<Vec<String>, GitError> {
+        Err(GitError(
+            "restack resolution is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Builds the resolved commit of a restack conflict (D154): refused while any path is
+    /// unmerged; otherwise the worktree's index is written as a tree and committed on `onto`
+    /// with the message, author and dates of `commit` (as D142). Returns the new commit's id.
+    /// The worktree is not removed. Only an object is written, so nothing is recorded (D28).
+    fn restack_resolution_commit(
+        &self,
+        _root: &Path,
+        _worktree: &Path,
+        _onto: &str,
+        _commit: &str,
+    ) -> Result<String, GitError> {
+        Err(GitError(
+            "restack resolution is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Removes the resolution worktree, if it exists or is registered, and prunes the
+    /// registrations. Succeeds when there is nothing to remove. Recorded in the command log.
+    fn restack_resolution_close(&self, _root: &Path) -> Result<(), GitError> {
+        Err(GitError(
+            "restack resolution is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Points the ref `name` (under `refs/`) at `oid`, creating it when needed. Recorded in the
+    /// command log.
+    fn set_ref(&self, _root: &Path, _name: &str, _oid: &str) -> Result<(), GitError> {
+        Err(GitError("set ref is not supported by this adapter".into()))
+    }
+
+    /// Deletes the ref `name`; deleting a ref that is gone is not an error. Recorded in the
+    /// command log.
+    fn delete_ref(&self, _root: &Path, _name: &str) -> Result<(), GitError> {
+        Err(GitError(
+            "delete ref is not supported by this adapter".into(),
+        ))
+    }
+
     /// Whether `oid` is reachable from a ref or from HEAD, or is missing (D145). Never records
     /// anything (D28).
     fn commit_presence(&self, _root: &Path, _oid: &str) -> Result<CommitPresence, GitError> {
