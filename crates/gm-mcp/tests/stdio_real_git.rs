@@ -560,8 +560,8 @@ fn related_to_narrows_a_search_to_the_linked_threads() {
             json!({ "label": ["auth", "missing"] }),
         ],
     );
-    assert_eq!(thread_ids(&replies[0]), [b.clone()], "either direction");
-    assert_eq!(thread_ids(&replies[1]), [a.clone()]);
+    assert_eq!(thread_ids(&replies[0]), [b], "either direction");
+    assert_eq!(thread_ids(&replies[1]), [a]);
     assert!(thread_ids(&replies[2]).is_empty());
     refused_with(&replies[3], "related_kind needs related_to");
     assert!(
