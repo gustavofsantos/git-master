@@ -79,6 +79,8 @@ The first time you run a version of a script, GitMaster shows you the script and
 
 Confirming is also the moment you can allow event-triggered apply actions to run without asking. That choice applies only to the version you reviewed. See [Approvals and security](approvals-and-security.md).
 
+A workflow that runs on a trigger or in a phase never passes through **Run**, so you review it on the Workflows page: **Review** shows the script and asks the same question, with the choice of automatic approval for its event runs. When such a workflow wants to run before you reviewed it, a notice says so, with **Review**.
+
 ### Dry run
 
 A dry run executes a script against your real repository without changing it. Reads run for real. Actions that propose, apply or run `exec` are recorded with the values they would receive, but they do not run, and `exec` never runs in a dry run. The dry run lists the calls in order. A value that comes after a simulated value is an estimate, and GitMaster marks it as one.
@@ -99,8 +101,6 @@ The Workflows page lists your workflows on the left and shows the selected one o
 Press **Run** to start the open workflow.
 
 ### Colors in the Script tab
-
-> **Planned.** The script editor does not color the text yet. It shows the file in plain text.
 
 The script editor colors keywords, strings, comments and the rest of the code with the same twelve colors as the file viewer, in the light and the dark theme. See [Syntax highlighting](../guide/code-navigation.md#syntax-highlighting).
 
