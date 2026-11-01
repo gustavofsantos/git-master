@@ -159,6 +159,8 @@ pub fn owners(lines: &[BlameLine]) -> Vec<Owner> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditRow {
     pub edit_id: i64,
+    /// The row id of the entry that carried the edit.
+    pub entry_id: i64,
     pub thread_uid: String,
     /// The sequence number of the entry that carried the edit.
     pub seq: u32,
@@ -175,6 +177,8 @@ pub struct EditRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditFact {
     pub edit_id: i64,
+    /// The row id of the entry that carried the edit.
+    pub entry_id: i64,
     pub thread_uid: String,
     pub seq: u32,
     pub path: String,
@@ -200,6 +204,7 @@ impl EditFact {
         };
         Self {
             edit_id: row.edit_id,
+            entry_id: row.entry_id,
             thread_uid: row.thread_uid,
             seq: row.seq,
             path: row.path,
@@ -369,6 +374,7 @@ mod tests {
     fn row(patch: &str) -> EditRow {
         EditRow {
             edit_id: 1,
+            entry_id: 2,
             thread_uid: "t".to_owned(),
             seq: 3,
             path: "src/a.rs".to_owned(),

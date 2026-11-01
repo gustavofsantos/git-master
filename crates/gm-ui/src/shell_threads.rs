@@ -213,8 +213,20 @@ impl StatusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_thread_at(uid, None, window, cx);
+    }
+
+    /// Opens thread `uid` on the Threads page, focused on entry `focus` (its row id and `seq`)
+    /// when one is given, as a search hit is.
+    pub(crate) fn open_thread_at(
+        &mut self,
+        uid: &str,
+        focus: Option<(i64, u32)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.show_threads(window, cx);
-        if let Some(request) = self.model.threads.select(uid, None) {
+        if let Some(request) = self.model.threads.select(uid, focus) {
             self.send_threads(request);
         }
         cx.notify();

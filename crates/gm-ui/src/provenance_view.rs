@@ -223,6 +223,8 @@ fn push_thread(rows: &mut Vec<Row>, thread: &ProvenanceThread) {
     for edit in &thread.edits {
         rows.push(Row::Edit {
             uid: thread.uid.clone(),
+            entry_id: edit.entry_id,
+            seq: edit.seq,
             path: flatten(&edit.path, TEXT_CAP),
             at: civil_date(edit.at),
             evidence: evidence_labels(&edit.evidence),
@@ -265,9 +267,12 @@ pub enum Row {
         title: String,
         origin: String,
     },
-    /// An edit of the thread above that was compared with the lines.
+    /// An edit of the thread above that was compared with the lines. `entry_id` and `seq` are
+    /// the entry that carried the edit, where the thread opens focused.
     Edit {
         uid: String,
+        entry_id: i64,
+        seq: u32,
         path: String,
         at: String,
         evidence: Vec<&'static str>,
@@ -282,6 +287,12 @@ pub enum Row {
 pub enum Jump {
     /// The Threads page, on this thread.
     Thread(String),
+    /// The Threads page, on this thread, focused on the entry that carried an edit.
+    Edit {
+        uid: String,
+        entry_id: i64,
+        seq: u32,
+    },
     /// The History page, on this commit.
     Commit(String),
 }
@@ -343,9 +354,14 @@ impl Row {
     pub fn jump(&self) -> Option<Jump> {
         match self {
             Self::Commit { oid, .. } => Some(Jump::Commit(oid.clone())),
-            Self::Thread { uid, .. } | Self::Link { uid, .. } | Self::Edit { uid, .. } => {
-                Some(Jump::Thread(uid.clone()))
-            }
+            Self::Thread { uid, .. } | Self::Link { uid, .. } => Some(Jump::Thread(uid.clone())),
+            Self::Edit {
+                uid, entry_id, seq, ..
+            } => Some(Jump::Edit {
+                uid: uid.clone(),
+                entry_id: *entry_id,
+                seq: *seq,
+            }),
             _ => None,
         }
     }
@@ -759,6 +775,7 @@ mod tests {
         }];
         busy.edits = vec![ProvenanceEdit {
             edit_id: 7,
+            entry_id: 70,
             seq: 4,
             path: "src/a.rs".to_owned(),
             at: 1_700_000_000_000,
@@ -783,6 +800,7 @@ mod tests {
         let mut busy = thread("t1");
         busy.edits = vec![ProvenanceEdit {
             edit_id: 1,
+            entry_id: 10,
             seq: 1,
             path: "src/a.rs".to_owned(),
             at: 0,
@@ -792,7 +810,15 @@ mod tests {
         }];
         let panel = answered_panel(answer(vec![commit(vec![busy])]));
         let rows = panel.rows();
-        assert_eq!(rows[2].jump(), Some(Jump::Thread("t1".to_owned())));
+        assert_eq!(
+            rows[2].jump(),
+            Some(Jump::Edit {
+                uid: "t1".to_owned(),
+                entry_id: 10,
+                seq: 1,
+            }),
+            "an edit row opens the thread focused on the entry that carried the edit"
+        );
         assert_eq!(rows[1].jump(), Some(Jump::Thread("t1".to_owned())));
         assert_eq!(rows[0].jump(), Some(Jump::Commit(OID.to_owned())));
         assert_eq!(

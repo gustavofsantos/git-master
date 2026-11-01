@@ -314,6 +314,18 @@ fn a_blob_match_is_the_strongest_evidence() {
     assert!(!found.ambiguous);
     let edit = &found.edits[0];
     assert_eq!(edit.seq, 1, "entries are numbered from 0");
+    let detail = store_of(&repo.root)
+        .read_thread(&uid, 0, 10)
+        .expect("read the thread");
+    let carrier = detail
+        .entries
+        .iter()
+        .find(|entry| entry.seq == edit.seq)
+        .expect("the entry that carried the edit");
+    assert_eq!(
+        edit.entry_id, carrier.id,
+        "the edit names its entry's row id"
+    );
     assert_eq!(edit.evidence[0], Evidence::BlobMatch);
     assert_eq!(edit.unverifiable, None);
     assert!(

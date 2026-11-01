@@ -663,23 +663,7 @@ fn commit_provenance(
         };
         drafts.entry(uid).or_default().evidence.push(evidence);
     }
-    for (fact, verdict) in judged {
-        let entries = store
-            .entries_around(&fact.thread_uid, fact.seq, CONTEXT)
-            .map_err(|e| e.to_string())?;
-        let draft = drafts.entry(fact.thread_uid.clone()).or_default();
-        draft.evidence.extend(verdict.evidence.iter().copied());
-        draft.ambiguous |= ambiguous && verdict.decisive();
-        draft.edits.push(ProvenanceEdit {
-            edit_id: fact.edit_id,
-            seq: fact.seq,
-            path: fact.path,
-            at: fact.at,
-            evidence: verdict.evidence,
-            unverifiable: verdict.unverifiable,
-            entries,
-        });
-    }
+    add_edits(store, &mut drafts, judged, ambiguous)?;
 
     let mut threads = Vec::new();
     for (uid, mut draft) in drafts {
@@ -724,6 +708,35 @@ fn commit_provenance(
         lines: owner.runs.clone(),
         threads: threads.into_iter().map(|(thread, _)| thread).collect(),
     })
+}
+
+/// Adds each judged edit to the draft of its thread, with the entries around it (D144).
+/// `ambiguous` says that other edits also match the lines (D144).
+fn add_edits(
+    store: &ThreadStore,
+    drafts: &mut BTreeMap<String, Draft>,
+    judged: Vec<(EditFact, Verdict)>,
+    ambiguous: bool,
+) -> Result<(), String> {
+    for (fact, verdict) in judged {
+        let entries = store
+            .entries_around(&fact.thread_uid, fact.seq, CONTEXT)
+            .map_err(|e| e.to_string())?;
+        let draft = drafts.entry(fact.thread_uid.clone()).or_default();
+        draft.evidence.extend(verdict.evidence.iter().copied());
+        draft.ambiguous |= ambiguous && verdict.decisive();
+        draft.edits.push(ProvenanceEdit {
+            edit_id: fact.edit_id,
+            entry_id: fact.entry_id,
+            seq: fact.seq,
+            path: fact.path,
+            at: fact.at,
+            evidence: verdict.evidence,
+            unverifiable: verdict.unverifiable,
+            entries,
+        });
+    }
+    Ok(())
 }
 
 /// What one thread contributes to a commit's answer, before it is cut to `THREAD_LIMIT`.

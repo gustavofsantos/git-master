@@ -86,6 +86,9 @@ impl StatusView {
     fn open_provenance_jump(&mut self, jump: Jump, window: &mut Window, cx: &mut Context<Self>) {
         match jump {
             Jump::Thread(uid) => self.open_thread_from_commit(&uid, window, cx),
+            Jump::Edit { uid, entry_id, seq } => {
+                self.open_thread_at(&uid, Some((entry_id, seq)), window, cx);
+            }
             Jump::Commit(oid) => {
                 self.show_history(cx);
                 self.select_commit(&oid, cx);

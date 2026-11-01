@@ -1278,7 +1278,8 @@ impl ThreadStore {
         limit: u32,
     ) -> Result<Vec<EditRow>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT ed.id, t.uid, e.seq, ed.path, ed.at, ed.post_oid, ed.from_input, ed.patch
+            "SELECT ed.id, t.uid, e.seq, ed.path, ed.at, ed.post_oid, ed.from_input, ed.patch,
+                    ed.entry_id
              FROM edit ed
              JOIN thread t ON t.id = ed.thread_id
              JOIN entry e ON e.id = ed.entry_id
@@ -1298,6 +1299,7 @@ impl ThreadStore {
                     post_oid: row.get(5)?,
                     from_input: row.get(6)?,
                     patch: row.get(7)?,
+                    entry_id: row.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

@@ -530,6 +530,10 @@ pub struct LineRun {
 #[serde(rename_all = "snake_case")]
 pub struct ProvenanceEdit {
     pub edit_id: i64,
+    /// The row id of the entry that carried the edit, as a thread's entries carry it. A client
+    /// opens the thread focused on this entry. A payload without it reads as zero.
+    #[serde(default)]
+    pub entry_id: i64,
     /// The sequence number of the entry that carried the edit.
     pub seq: u32,
     /// The path as the edit recorded it.
