@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::time::Duration;
 
 use gm_schema::{
-    Actor, CommandKind, Event, LinkKind, LinkOrigin, ThreadDetail, ThreadHit, ThreadLink,
+    Actor, CommandKind, Event, Label, LinkKind, LinkOrigin, ThreadDetail, ThreadHit, ThreadLink,
     ThreadSummary,
 };
 use gpui::{
@@ -259,6 +259,7 @@ impl StatusView {
     /// After a thread's entries are shown: the states of its edits are read, and
     /// the entries of a search hit are read on until the hit's entry is loaded.
     pub(crate) fn after_thread_read(&mut self) {
+        self.sync_thread_relations(false);
         for request in self.model.threads.plan_edit_states() {
             self.send_threads(request);
         }
@@ -267,6 +268,66 @@ impl StatusView {
         {
             self.send_threads(request);
         }
+    }
+
+    /// Reads the threads linked to the thread shown, once for each thread (D143). `force` reads
+    /// them again for the same thread, after a link was made here.
+    pub(crate) fn sync_thread_relations(&mut self, force: bool) {
+        let Some(uid) = self.model.threads.selected().map(str::to_owned) else {
+            return;
+        };
+        if !force && self.model.relations.uid() == Some(uid.as_str()) {
+            return;
+        }
+        self.model.relations.reset(&uid);
+        for (kind, command) in curate::ThreadRelations::plan(&uid) {
+            let id = self.engine.dispatch(Actor::Human, command);
+            self.model.relations.sent(id, kind);
+        }
+    }
+
+    /// Shows the thread `uid` a relation row names, in the detail of the page.
+    fn open_related_thread(&mut self, uid: &str, cx: &mut Context<Self>) {
+        if let Some(request) = self.model.threads.select(uid, None) {
+            self.send_threads(request);
+        }
+        cx.notify();
+    }
+
+    /// The linked threads of the thread shown, one row each: the kind, then the title. A click
+    /// opens that thread. Nothing when the thread has none, or while they are read.
+    fn relation_rows(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let rows = self.model.relations.rows();
+        // Rows of the thread shown before this one are not its links, so they are not drawn.
+        if rows.is_empty() || self.model.threads.selected() != self.model.relations.uid() {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .text_xs()
+                .children(rows.iter().enumerate().map(|(index, (kind, thread))| {
+                    let uid = thread.uid.clone();
+                    div()
+                        .id(("thread-relation", index))
+                        .cursor_pointer()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(theme::muted())
+                        .child(format!(
+                            "{} · {}",
+                            curate::kind_label(*kind),
+                            threads::title(thread)
+                        ))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.open_related_thread(&uid, cx);
+                        }))
+                })),
+        )
     }
 
     /// The box changed: the model takes the new text, and the search runs after a pause.
@@ -422,7 +483,8 @@ impl StatusView {
             )
             .child(self.threads_chip(Chip::Starred, "Starred", "threads-chip-starred", cx))
             .child(self.threads_chip(Chip::HasEdits, "Has edits", "threads-chip-edits", cx))
-            .children(self.threads_path_chip(cx));
+            .children(self.threads_path_chip(cx))
+            .children(self.threads_label_chip(cx));
         let body = div()
             .flex_1()
             .min_h(px(0.))
@@ -629,6 +691,11 @@ impl StatusView {
             .min_w(px(0.))
             .text_xs()
             .child(meta)
+            .child(label_chip_row(
+                &summary.tags,
+                self.model.labels.labels(),
+                cx,
+            ))
             .child(self.header_chips(detail, cx));
         div()
             .flex_none()
@@ -641,6 +708,7 @@ impl StatusView {
             .gap_0p5()
             .child(first)
             .child(second)
+            .children(self.relation_rows(cx))
     }
 
     /// The chips of the header's second line: the commits and the files, which open the
@@ -765,6 +833,57 @@ impl StatusView {
             self.request_threads_refresh();
         }
         cx.notify();
+    }
+
+    /// Filters the list by the label `name`, or clears the label filter when `name` is none
+    /// (D145), and reads the list again from the top.
+    fn set_threads_label(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        if self.model.threads.set_label(name) {
+            self.request_threads_refresh();
+        }
+        self.threads_view
+            .list
+            .scroll_to_item(0, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    /// The toolbar chip of the label filter, which clears the filter when clicked.
+    fn threads_label_chip(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let name = self.model.threads.label_filter()?;
+        Some(
+            div()
+                .id("threads-chip-label")
+                .cursor_pointer()
+                .flex_none()
+                .max_w(px(PATH_CHIP_WIDTH))
+                .px_2()
+                .h(px(24.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .rounded_full()
+                .border_1()
+                .border_color(theme::accent())
+                .bg(theme::selection())
+                .text_xs()
+                .text_color(theme::accent())
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(format!("Label: {name}")),
+                )
+                .child(icon::view(Icon::Close, icon::SMALL, theme::accent()))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.set_threads_label(None, cx);
+                    }),
+                ),
+        )
     }
 
     /// Removes a manual link of the thread shown. Nothing to confirm: a link is
@@ -1460,6 +1579,7 @@ fn thread_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Sta
                     }
                     let now = now_secs();
                     let page = &this.model.threads;
+                    let labels = this.model.labels.labels();
                     let selected = page.selected();
                     page.threads()
                         .get(range.clone())
@@ -1468,7 +1588,7 @@ fn thread_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Sta
                         .zip(range)
                         .map(|(thread, index)| {
                             let is_selected = selected == Some(thread.uid.as_str());
-                            thread_row(thread, index, now, is_selected, cx)
+                            thread_row(thread, index, now, is_selected, labels, cx)
                         })
                         .collect()
                 },
@@ -1495,6 +1615,7 @@ fn hit_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Status
                         this.request_threads_search_next();
                     }
                     let now = now_secs();
+                    let labels = this.model.labels.labels();
                     let selected = this.model.threads.selected();
                     this.model
                         .threads
@@ -1505,7 +1626,7 @@ fn hit_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Status
                         .zip(range)
                         .map(|(hit, index)| {
                             let is_selected = selected == Some(hit.thread_uid.as_str());
-                            hit_row(hit, index, now, is_selected, cx)
+                            hit_row(hit, index, now, is_selected, labels, cx)
                         })
                         .collect()
                 },
@@ -1555,6 +1676,7 @@ fn thread_row(
     index: usize,
     now: i64,
     selected: bool,
+    labels: &[Label],
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
     let mut head = div().flex().flex_row().items_center().gap_2().min_w(px(0.));
@@ -1617,7 +1739,8 @@ fn thread_row(
                 .rounded_sm()
                 .bg(theme::selected_row())
                 .child("redacted")
-        }));
+        }))
+        .child(label_chip_row(&thread.tags, labels, cx));
     div()
         .id(("thread-row", index))
         .cursor_pointer()
@@ -1651,6 +1774,7 @@ fn hit_row(
     index: usize,
     now: i64,
     selected: bool,
+    labels: &[Label],
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
     div()
@@ -1707,13 +1831,72 @@ fn hit_row(
         )
         .child(
             div()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w(px(0.))
                 .text_xs()
                 .text_color(theme::muted())
-                .child(threads::hit_meta(hit, now)),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(threads::hit_meta(hit, now)),
+                )
+                .child(label_chip_row(&hit.tags, labels, cx)),
         )
+}
+
+/// The label chips of a thread: a colour dot when the repository has the label, then the
+/// name. A click filters the list by the label and does not select the row (D145).
+fn label_chip_row(names: &[String], labels: &[Label], cx: &Context<StatusView>) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .min_w(px(0.))
+        .children(threads::label_chips(names, labels).into_iter().map(|chip| {
+            let dot = div()
+                .flex_none()
+                .w(px(6.))
+                .h(px(6.))
+                .rounded_full()
+                .bg(chip.colour.map_or_else(theme::faint, theme::color));
+            let name = chip.name.clone();
+            div()
+                .cursor_pointer()
+                .flex_none()
+                .max_w(px(LABEL_CHIP_WIDTH))
+                .px_1p5()
+                .rounded_sm()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .bg(theme::selection())
+                .text_color(theme::text())
+                .child(dot)
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(chip.name),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.set_threads_label(Some(name.clone()), cx);
+                    }),
+                )
+        }))
 }
 
 /// The muted `approx.` chip of a hit found by a fallback stage (D131).
@@ -1812,6 +1995,8 @@ fn patch_view(patch: &str) -> Div {
 
 /// The width the file filter's chip may take before its text is cut.
 const PATH_CHIP_WIDTH: f32 = 260.;
+/// The longest label chip on a row or header, in pixels; a longer name is cut.
+const LABEL_CHIP_WIDTH: f32 = 140.;
 
 /// The commit links of the details panel: the commit each one names, who made the link,
 /// and Unlink for a link the user made. Nothing else is said of a commit.

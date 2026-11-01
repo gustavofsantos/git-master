@@ -63,7 +63,7 @@ use crate::stash_drop::DropStashDialog;
 use crate::stashes;
 use crate::text_area::{TextArea, TextAreaEvent, TextStyle};
 use crate::theme;
-use crate::thread_dialogs::{ConfirmDialog, FieldDialog};
+use crate::thread_dialogs::{ConfirmDialog, FieldDialog, LinkDialog};
 use crate::threads_settings::ThreadsSettingsDialog;
 use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
@@ -210,6 +210,8 @@ pub struct StatusView {
     pub(crate) drop_stash_dialog: Option<DropStashDialog>,
     /// The field dialog of a thread (rename, note, tags, link, export), while it is open (T6).
     pub(crate) thread_field: Option<FieldDialog>,
+    /// The Link to Thread dialog, open while its picker is (D143).
+    pub(crate) thread_link: Option<LinkDialog>,
     /// The confirmation of a thread delete or of a scrub, while it is open (T6).
     pub(crate) thread_confirm: Option<ConfirmDialog>,
     /// The New Label or Rename Label dialog, while it is open (P4).
@@ -457,6 +459,7 @@ impl StatusView {
             move_popover: None,
             drop_stash_dialog: None,
             thread_field: None,
+            thread_link: None,
             thread_confirm: None,
             label_form: None,
             label_confirm: None,
@@ -1246,6 +1249,9 @@ impl StatusView {
             }
             Ok(Effect::OpenThreadField { field, uid }) => {
                 self.open_thread_field(field, &uid, window, cx);
+            }
+            Ok(Effect::OpenLinkThread(uid)) => {
+                self.open_link_thread(&uid, window, cx);
             }
             Ok(Effect::OpenDeleteThreadDialog(uid)) => {
                 self.open_delete_thread_dialog(&uid, window, cx);

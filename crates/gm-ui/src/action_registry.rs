@@ -245,6 +245,7 @@ pub enum Effect {
         label: String,
     },
     /// Opens the dialog that edits one field of thread `uid`, or exports it (T6).
+    OpenLinkThread(String),
     OpenThreadField {
         field: ThreadField,
         uid: String,
@@ -436,7 +437,7 @@ pub struct LabelRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 99] = [
+const SPECS: [Spec; 100] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1048,6 +1049,13 @@ const SPECS: [Spec; 99] = [
         Category::Repository,
     ),
     spec(
+        "threads.link_thread",
+        "Link to Thread…",
+        None,
+        ArgKind::Thread,
+        Category::Repository,
+    ),
+    spec(
         "threads.export",
         "Export Thread…",
         None,
@@ -1234,6 +1242,7 @@ pub enum Action {
     ThreadNote,
     ThreadTags,
     ThreadLinkCommit,
+    ThreadLinkThread,
     ThreadExport,
     ThreadCopyMarkdown,
     ThreadExpandAll,
@@ -1391,6 +1400,7 @@ fn thread_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
             field: thread_field(action),
             uid: uid.clone(),
         },
+        (Action::ThreadLinkThread, Args::Thread { uid, .. }) => Effect::OpenLinkThread(uid.clone()),
         (Action::ThreadCopyMarkdown, Args::Thread { uid, .. }) => {
             Effect::CopyThreadMarkdown(uid.clone())
         }
@@ -1513,7 +1523,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 99] = [
+    pub const ALL: [Action; 100] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1602,6 +1612,7 @@ impl Action {
         Action::ThreadNote,
         Action::ThreadTags,
         Action::ThreadLinkCommit,
+        Action::ThreadLinkThread,
         Action::ThreadExport,
         Action::ThreadCopyMarkdown,
         Action::ThreadExpandAll,
@@ -1773,6 +1784,7 @@ impl Action {
                 | Action::ThreadNote
                 | Action::ThreadTags
                 | Action::ThreadLinkCommit
+                | Action::ThreadLinkThread
                 | Action::ThreadExport
                 | Action::ThreadCopyMarkdown
                 | Action::ThreadExpandAll
@@ -1810,6 +1822,7 @@ impl Action {
                 | Action::ThreadNote
                 | Action::ThreadTags
                 | Action::ThreadLinkCommit
+                | Action::ThreadLinkThread
                 | Action::ThreadExport
                 | Action::ThreadDelete
                 | Action::ThreadScrub
@@ -1915,6 +1928,7 @@ impl Action {
             | Action::ThreadNote
             | Action::ThreadTags
             | Action::ThreadLinkCommit
+            | Action::ThreadLinkThread
             | Action::ThreadExport
             | Action::ThreadCopyMarkdown
             | Action::ThreadExpandAll
@@ -5602,6 +5616,11 @@ mod tests {
                 "threads.link_commit",
                 ArgKind::Thread,
             ),
+            (
+                Action::ThreadLinkThread,
+                "threads.link_thread",
+                ArgKind::Thread,
+            ),
             (Action::ThreadExport, "threads.export", ArgKind::Thread),
             (
                 Action::ThreadCopyMarkdown,
@@ -5673,6 +5692,7 @@ mod tests {
             Action::ThreadNote,
             Action::ThreadTags,
             Action::ThreadLinkCommit,
+            Action::ThreadLinkThread,
             Action::ThreadExport,
             Action::ThreadCopyMarkdown,
             Action::ThreadExpandAll,
@@ -5783,12 +5803,39 @@ mod tests {
     }
 
     #[test]
+    fn link_to_thread_opens_the_picker_of_the_thread_and_is_not_a_field_dialog() {
+        let context = ctx(&[], "");
+        let target = thread_args(ThreadRef {
+            uid: "u1",
+            starred: false,
+        });
+        assert_eq!(
+            Action::from_id("threads.link_thread"),
+            Some(Action::ThreadLinkThread)
+        );
+        assert_eq!(Action::ThreadLinkThread.spec().title, "Link to Thread…");
+        assert_eq!(Action::ThreadLinkThread.spec().shortcut, None);
+        assert!(Action::ThreadLinkThread.opens_dialog());
+        assert!(!Action::ThreadLinkThread.destructive());
+        assert_eq!(
+            Action::ThreadLinkThread.plan(&target, &context),
+            Ok(Effect::OpenLinkThread("u1".into()))
+        );
+        assert_eq!(
+            Action::ThreadLinkThread.plan(&Args::None, &context),
+            Err(SELECT_THREAD)
+        );
+        assert!(Action::ALL.contains(&Action::ThreadLinkThread));
+    }
+
+    #[test]
     fn the_thread_dialogs_open_a_dialog_and_only_delete_is_destructive() {
         for action in [
             Action::ThreadRename,
             Action::ThreadNote,
             Action::ThreadTags,
             Action::ThreadLinkCommit,
+            Action::ThreadLinkThread,
             Action::ThreadExport,
             Action::ThreadDelete,
             Action::ThreadScrub,

@@ -5,10 +5,10 @@
 //! A refusal from the engine stays in its dialog. The window side is the
 //! `impl StatusView` below.
 
-use gm_schema::{Actor, CommandKind};
+use gm_schema::{Actor, CommandKind, ThreadRelKind};
 use gpui::{
-    App, Context, Div, Entity, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
-    Stateful, Subscription, Window, div, prelude::*, px,
+    App, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
+    MouseDownEvent, Stateful, Subscription, Window, div, prelude::*, px,
 };
 
 use crate::FocusNext;
@@ -16,10 +16,13 @@ use crate::FocusPrev;
 use crate::text_area::{Newline, TextArea, TextAreaEvent};
 use crate::theme;
 use crate::thread_curate::{self as curate, Outcome, ThreadField, Work};
+use crate::threads;
 use crate::view::StatusView;
 use crate::worktree_create::field_row;
 
 const WIDTH: f32 = 520.;
+/// The height the Link to Thread picker's rows may take before they are cut.
+const PICK_HEIGHT: f32 = 240.;
 /// The dialogs hang this far below the top of the window.
 const TOP: f32 = 96.;
 
@@ -40,6 +43,16 @@ impl FieldDialog {
     fn text(&self, cx: &App) -> String {
         self.input.read(cx).text().to_owned()
     }
+}
+
+/// The Link to Thread dialog while it is open (D143): the text typed to narrow the threads and
+/// the error the last try got. The threads and the choice are on the model (`link_picker`).
+pub(crate) struct LinkDialog {
+    pub(crate) input: Entity<TextArea>,
+    pub(crate) error: Option<String>,
+    /// The text the dialog last saw, as `FieldDialog::seen`.
+    seen: String,
+    _subscriptions: Vec<Subscription>,
 }
 
 /// What a confirmation sends when its button is pressed.
@@ -117,6 +130,104 @@ impl StatusView {
             _subscriptions: subscriptions,
         });
         input.update(cx, |area, cx| area.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Opens the Link to Thread dialog from thread `uid` and reads the threads it can link to (D143).
+    /// A thread the list no longer has gets a notice and no dialog.
+    pub(crate) fn open_link_thread(
+        &mut self,
+        uid: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.threads.summary(uid).is_none() {
+            self.notify_user(
+                "This thread is no longer listed. Open the Threads page again.",
+                cx,
+            );
+            return;
+        }
+        let id = self.engine.dispatch(Actor::Human, curate::pick_plan());
+        self.model.link_picker = curate::LinkPicker::new(uid);
+        self.model.link_picker.request(id);
+        let input = cx.new(|cx| TextArea::new("Search threads by title", cx));
+        let subscriptions = vec![
+            cx.observe(&input, |this, _, cx| this.on_link_query_edited(cx)),
+            cx.subscribe_in(
+                &input,
+                window,
+                |this, _, event: &TextAreaEvent, window, cx| {
+                    if *event == TextAreaEvent::Cancel {
+                        this.close_link_thread(window, cx);
+                    }
+                },
+            ),
+        ];
+        self.thread_link = Some(LinkDialog {
+            input: input.clone(),
+            error: None,
+            seen: String::new(),
+            _subscriptions: subscriptions,
+        });
+        input.update(cx, |area, cx| area.focus(window, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn close_link_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread_link.take().is_some() {
+            self.list_focus.focus(window);
+        }
+        cx.notify();
+    }
+
+    /// The query changed: the error of the last try goes, since it may be about the old choice.
+    fn on_link_query_edited(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.thread_link.as_mut() else {
+            return;
+        };
+        let text = dialog.input.read(cx).text().to_owned();
+        if dialog.seen == text {
+            return;
+        }
+        dialog.seen = text;
+        dialog.error = None;
+        cx.notify();
+    }
+
+    /// Chooses the listed thread `uid` to link to.
+    pub(crate) fn pick_link_thread(&mut self, uid: &str, cx: &mut Context<Self>) {
+        if self.model.link_picker.choose(uid)
+            && let Some(dialog) = self.thread_link.as_mut()
+        {
+            dialog.error = None;
+        }
+        cx.notify();
+    }
+
+    /// Chooses the kind of the link (D143).
+    pub(crate) fn set_link_kind(&mut self, kind: ThreadRelKind, cx: &mut Context<Self>) {
+        self.model.link_picker.set_kind(kind);
+        cx.notify();
+    }
+
+    /// The button and Enter: sends `LinkThreads` with `Actor::Human` once a thread is chosen. A
+    /// choice the picker refuses stays in the dialog with the reason.
+    pub(crate) fn submit_link_thread(&mut self, cx: &mut Context<Self>) {
+        if self.model.thread_work.is_pending() {
+            return;
+        }
+        let Some(dialog) = self.thread_link.as_mut() else {
+            return;
+        };
+        match self.model.link_picker.command() {
+            Err(reason) => dialog.error = Some(reason.to_owned()),
+            Ok(kind) => {
+                dialog.error = None;
+                let id = self.engine.dispatch(Actor::Human, kind);
+                self.model.thread_work.start(id, Work::Link);
+            }
+        }
         cx.notify();
     }
 
@@ -313,6 +424,11 @@ impl StatusView {
             Outcome::Done(work) => {
                 match work {
                     Work::Field(_) => self.thread_field = None,
+                    Work::Link => {
+                        self.thread_link = None;
+                        // The new link is listed with the thread's others.
+                        self.sync_thread_relations(true);
+                    }
                     Work::Delete | Work::DeleteEntry | Work::Scrub => self.thread_confirm = None,
                 }
                 self.list_focus.focus(window);
@@ -331,6 +447,8 @@ impl StatusView {
             Outcome::Failed(message) => {
                 if let Some(dialog) = self.thread_field.as_mut() {
                     dialog.error = Some(message);
+                } else if let Some(dialog) = self.thread_link.as_mut() {
+                    dialog.error = Some(message);
                 } else if let Some(dialog) = self.thread_confirm.as_mut() {
                     dialog.error = Some(message);
                 } else {
@@ -345,8 +463,126 @@ impl StatusView {
     pub(crate) fn thread_layers(&self, window: &Window, cx: &Context<Self>) -> Vec<Div> {
         self.thread_field_layer(window, cx)
             .into_iter()
+            .chain(self.thread_link_layer(window, cx))
             .chain(self.thread_confirm_layer(window, cx))
             .collect()
+    }
+
+    fn thread_link_layer(&self, window: &Window, cx: &Context<Self>) -> Option<Div> {
+        self.thread_link.as_ref()?;
+        let outside = dialog_backdrop(cx, StatusView::close_link_thread);
+        let left = dialog_left(window);
+        let enter = cx.entity().downgrade();
+        let panel = self
+            .thread_link_panel(left, cx)
+            // The picker has one text field and its own rows, so Tab has nowhere else to go.
+            .capture_action(|_: &FocusNext, _, cx| cx.stop_propagation())
+            .capture_action(|_: &FocusPrev, _, cx| cx.stop_propagation())
+            .capture_action(move |_: &Newline, _, cx| {
+                let _ = enter.update(cx, StatusView::submit_link_thread);
+                cx.stop_propagation();
+            });
+        Some(div().absolute().inset_0().child(outside).child(panel))
+    }
+
+    /// The picker: the query, the matching threads, the kind choice, then the error and the buttons.
+    fn thread_link_panel(&self, left: f32, cx: &Context<Self>) -> Div {
+        let Some(dialog) = self.thread_link.as_ref() else {
+            return div();
+        };
+        let working = self.model.thread_work.is_working(Work::Link);
+        panel_base(left)
+            .child(
+                div()
+                    .text_color(theme::text())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Link to Thread"),
+            )
+            .child(field_row("THREAD", dialog.input.clone()))
+            .child(self.link_list(dialog, cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .children(link_kinds(self.model.link_picker.kind(), cx)),
+            )
+            .children(error_lines(dialog.error.as_deref()))
+            .child(buttons(
+                ("thread-link-cancel", "thread-link-confirm"),
+                if working { "Linking…" } else { "Link" },
+                false,
+                working,
+                StatusView::close_link_thread,
+                StatusView::submit_link_thread,
+                cx,
+            ))
+    }
+
+    /// The threads the query matches, the first `PICK_SHOWN` of them, and what the list says
+    /// about the rest: that it is loading, that none matches, or that more match or are not listed.
+    fn link_list(&self, dialog: &LinkDialog, cx: &Context<Self>) -> Div {
+        let picker = &self.model.link_picker;
+        let query = dialog.input.read(cx).text().to_owned();
+        let matches = picker.matches(&query);
+        let total = matches.len();
+        let mut notes = Vec::new();
+        if picker.is_loading() {
+            notes.push("Loading threads…".to_owned());
+        } else if total == 0 {
+            notes.push("No thread matches.".to_owned());
+        } else if total > curate::PICK_SHOWN {
+            notes.push(format!(
+                "Showing {} of {total} threads. Type more of the title.",
+                curate::PICK_SHOWN
+            ));
+        }
+        if picker.is_full() {
+            notes.push(format!(
+                "Only the newest {} threads are listed.",
+                curate::PICK_LIMIT
+            ));
+        }
+        let rows = matches
+            .iter()
+            .take(curate::PICK_SHOWN)
+            .enumerate()
+            .map(|(index, thread)| {
+                let uid = thread.uid.clone();
+                let chosen = picker.target() == Some(thread.uid.as_str());
+                div()
+                    .id(("thread-link-row", index))
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_sm()
+                    .text_color(theme::text())
+                    .when(chosen, |row| {
+                        row.bg(theme::selection())
+                            .border_1()
+                            .border_color(theme::accent())
+                    })
+                    .child(threads::title(thread))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            this.pick_link_thread(&uid, cx);
+                        }),
+                    )
+            });
+        div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .max_h(px(PICK_HEIGHT))
+            .overflow_hidden()
+            .children(rows)
+            .children(
+                notes
+                    .into_iter()
+                    .map(|note| div().text_xs().text_color(theme::muted()).child(note)),
+            )
     }
 
     fn thread_field_layer(&self, window: &Window, cx: &Context<Self>) -> Option<Div> {
@@ -453,6 +689,44 @@ impl StatusView {
 }
 
 /// The dialog's panel at `left`, before its content.
+/// The three kind buttons of the picker, the chosen one filled (D143).
+fn link_kinds(chosen: ThreadRelKind, cx: &Context<StatusView>) -> Vec<Stateful<Div>> {
+    curate::LINK_KINDS
+        .iter()
+        .enumerate()
+        .map(|(index, kind)| {
+            let kind = *kind;
+            let on = chosen == kind;
+            div()
+                .id(("thread-link-kind", index))
+                .cursor_pointer()
+                .flex_1()
+                .py_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .border_1()
+                .text_sm()
+                .when(on, |button| {
+                    button
+                        .bg(theme::selection())
+                        .border_color(theme::accent())
+                        .text_color(theme::accent())
+                })
+                .when(!on, |button| {
+                    button
+                        .border_color(theme::hairline())
+                        .text_color(theme::muted())
+                })
+                .child(curate::kind_label(kind))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.set_link_kind(kind, cx);
+                }))
+        })
+        .collect()
+}
+
 pub(crate) fn panel_base(left: f32) -> Div {
     div()
         .absolute()

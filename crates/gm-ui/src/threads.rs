@@ -9,12 +9,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use gm_schema::{
-    CommandKind, EditState, EntryKind, HitKind, LinkKind, LinkOrigin, OperationId, OperationState,
-    SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadEntry, ThreadFilter, ThreadHit,
-    ThreadLink, ThreadSummary,
+    CommandKind, EditState, EntryKind, HitKind, Label, LinkKind, LinkOrigin, OperationId,
+    OperationState, SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadEntry, ThreadFilter,
+    ThreadHit, ThreadLink, ThreadSummary,
 };
 use serde_json::Value;
 
+use crate::labels_page;
 use crate::shell_history::relative_time;
 use crate::thread_rows::{self, GroupKey, Row};
 
@@ -892,6 +893,23 @@ impl ThreadsPage {
         true
     }
 
+    /// Sets or clears the label filter: the threads carrying `name` (D145). Returns whether it
+    /// changed; the caller reads the list again.
+    pub fn set_label(&mut self, name: Option<String>) -> bool {
+        let wanted = name.map(|name| vec![name]);
+        if self.filter.label == wanted {
+            return false;
+        }
+        self.filter.label = wanted;
+        true
+    }
+
+    /// The name the label filter holds, when one is set.
+    #[must_use]
+    pub fn label_filter(&self) -> Option<&str> {
+        self.filter.label.as_ref()?.first().map(String::as_str)
+    }
+
     /// The summary of thread `uid`, from the thread shown or from the list.
     #[must_use]
     pub fn summary(&self, uid: &str) -> Option<&ThreadSummary> {
@@ -1462,6 +1480,30 @@ pub fn edits_label(count: u32) -> String {
 #[must_use]
 pub fn counts_label(added: u32, removed: u32) -> String {
     format!("+{added} −{removed}")
+}
+
+/// A label of a thread row or header: its name, and its colour (`0xRRGGBB`) when the label
+/// list the page holds has the name (D145). A name it does not know is neutral.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabelChip {
+    pub name: String,
+    pub colour: Option<u32>,
+}
+
+/// The chips of a thread's label names, in their order, coloured from `labels`.
+#[must_use]
+pub fn label_chips(names: &[String], labels: &[Label]) -> Vec<LabelChip> {
+    names
+        .iter()
+        .map(|name| LabelChip {
+            name: name.clone(),
+            colour: labels
+                .iter()
+                .find(|label| &label.name == name)
+                .and_then(|label| label.color.as_deref())
+                .and_then(labels_page::hex_colour),
+        })
+        .collect()
 }
 
 /// The state chip of an edit: how the file stands now. An edit the pipeline could
@@ -3159,6 +3201,63 @@ mod tests {
         assert!(page.set_path(None));
         assert_eq!(page.path(), None);
         assert!(!page.filter_active());
+    }
+
+    #[test]
+    fn the_label_filter_is_one_name_set_and_cleared_and_only_a_change_says_so() {
+        let mut page = ThreadsPage::default();
+        assert_eq!(page.label_filter(), None);
+        assert!(page.set_label(Some("auth".to_owned())));
+        assert!(!page.set_label(Some("auth".to_owned())));
+        assert_eq!(page.label_filter(), Some("auth"));
+        assert_eq!(page.filter.label, Some(vec!["auth".to_owned()]));
+        assert!(page.filter_active());
+        assert!(page.set_label(None));
+        assert_eq!(page.label_filter(), None);
+        assert!(!page.filter_active());
+    }
+
+    #[test]
+    fn a_label_filter_with_no_match_says_so_and_is_not_the_integration_empty_state() {
+        let mut page = ThreadsPage::default();
+        assert!(page.set_label(Some("auth".to_owned())));
+        listed_page(&mut page, 1, &[], 1);
+        assert_eq!(page.empty(), Some(Empty::Matches));
+    }
+
+    #[test]
+    fn label_chips_are_coloured_only_for_a_label_the_repository_has() {
+        let labels = vec![Label {
+            id: 1,
+            name: "auth".to_owned(),
+            description: String::new(),
+            color: Some("#1a2b3c".to_owned()),
+            origin: "human".to_owned(),
+            created_at: 0,
+            attachments: 1,
+        }];
+        let chips = label_chips(&["auth".to_owned(), "wip".to_owned()], &labels);
+        assert_eq!(
+            chips,
+            vec![
+                LabelChip {
+                    name: "auth".to_owned(),
+                    colour: Some(0x001a_2b3c),
+                },
+                LabelChip {
+                    name: "wip".to_owned(),
+                    colour: None,
+                },
+            ]
+        );
+        let uncoloured = vec![Label {
+            color: None,
+            ..labels[0].clone()
+        }];
+        assert_eq!(
+            label_chips(&["auth".to_owned()], &uncoloured)[0].colour,
+            None
+        );
     }
 
     #[test]
