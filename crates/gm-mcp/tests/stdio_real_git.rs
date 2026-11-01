@@ -126,7 +126,8 @@ fn the_handshake_lists_only_the_tools_the_agent_does_not_have() {
             "review_comment_resolve",
             "threads_search",
             "thread_get",
-            "thread_read"
+            "thread_read",
+            "provenance"
         ]
     );
 }
@@ -957,4 +958,389 @@ fn a_server_started_outside_a_repository_falls_back_to_the_project_directory() {
             .unwrap()
             .contains("\"comments\":[]")
     );
+}
+
+/// The full id of `rev` in `dir`, as blame and the commit links store it.
+fn rev(dir: &Path, rev: &str) -> String {
+    let output = Process::new("git")
+        .args(["rev-parse", rev])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "rev-parse {rev}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// A `f.txt` edit with the given patch. `post_oid` is what the edit wrote, when it is known.
+fn file_edit(patch: &str, added: u32, post_oid: Option<String>, from_input: bool) -> NewEdit {
+    NewEdit {
+        path: "f.txt".to_owned(),
+        old_path: None,
+        change: EditChange::Modify,
+        patch: patch.to_owned(),
+        added,
+        removed: 0,
+        pre_oid: None,
+        post_oid,
+        from_input,
+        hits: Vec::new(),
+    }
+}
+
+/// A thread of session `session` that explains `f.txt`: a prompt, a reply, the edit and a
+/// closing reply. Its entries are stamped before the commit, so the edit counts as earlier.
+fn store_provenance_thread(dir: &Path, session: &str, edit: NewEdit) -> String {
+    let mut edited = new_entry(
+        &format!("{session}2"),
+        EntryKind::ToolCall,
+        "Edit f.txt",
+        12,
+    );
+    edited.edit = Some(edit);
+    let batch = new_batch(
+        dir,
+        session,
+        "claude-opus-4",
+        "main",
+        vec![
+            new_entry(
+                &format!("{session}0"),
+                EntryKind::User,
+                "why is the loop written this way",
+                10,
+            ),
+            new_entry(
+                &format!("{session}1"),
+                EntryKind::Assistant,
+                "because the retry loop needs it",
+                11,
+            ),
+            edited,
+            new_entry(&format!("{session}3"), EntryKind::Assistant, "done", 13),
+        ],
+    );
+    let mut store = ThreadStore::open(&dir.join(".git")).unwrap();
+    store.apply(&batch).unwrap();
+    ThreadStore::thread_uid("claude-code", session)
+}
+
+/// The text of a refused call, which must be an error.
+fn refusal(reply: &Value) -> String {
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// The three lines of `f.txt` as a run of added lines, which a line match needs.
+const ABC_PATCH: &str = "@@ -0,0 +1,3 @@\n+a\n+b\n+c\n";
+
+#[test]
+fn a_blob_match_is_the_strongest_evidence_and_its_entries_are_untrusted() {
+    let dir = repo();
+    let head = rev(dir.path(), "HEAD");
+    let blob = rev(dir.path(), "HEAD:f.txt");
+    let uid = store_provenance_thread(
+        dir.path(),
+        "blob",
+        file_edit(ABC_PATCH, 3, Some(blob), false),
+    );
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "provenance",
+                &json!({ "path": "f.txt", "from_line": 1, "to_line": 3 }),
+            ),
+        ],
+    );
+    let answer = result(&replies[1]);
+    assert_eq!(answer["untrusted"], true);
+    assert_eq!(answer["complete"], true);
+    assert!(answer["cuts"].as_array().unwrap().is_empty());
+    let commits = answer["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0]["id"], head.as_str());
+    assert_eq!(commits[0]["subject"], "init");
+    assert_eq!(commits[0]["author"], "t");
+    assert_eq!(commits[0]["lines"], json!([{ "from": 1, "to": 3 }]));
+    let thread = &commits[0]["threads"][0];
+    assert_eq!(thread["thread"], uid.as_str());
+    assert_eq!(thread["ambiguous"], false);
+    assert_eq!(thread["evidence"][0], "blob_match");
+    let edit = &thread["edits"][0];
+    assert_eq!(edit["path"], "f.txt");
+    assert_eq!(edit["evidence"][0], "blob_match");
+    assert!(edit["unverifiable"].is_null());
+    let entries = edit["entries"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|entry| entry["untrusted"] == true));
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["text"] == "because the retry loop needs it")
+    );
+}
+
+#[test]
+fn a_line_match_is_found_when_the_edit_did_not_write_the_file_as_it_is() {
+    let dir = repo();
+    store_provenance_thread(dir.path(), "line", file_edit(ABC_PATCH, 3, None, false));
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "provenance",
+                &json!({ "path": "f.txt", "from_line": 1, "to_line": 3 }),
+            ),
+            call(3, "provenance", &json!({ "path": "f.txt", "from_line": 2 })),
+        ],
+    );
+    let thread = &result(&replies[1])["commits"][0]["threads"][0];
+    // The edit also added lines the commit owns, which is the weaker hunk overlap.
+    assert_eq!(thread["evidence"], json!(["line_match", "hunk_overlap"]));
+    assert_eq!(
+        thread["edits"][0]["evidence"],
+        json!(["line_match", "hunk_overlap"])
+    );
+    let single = result(&replies[2]);
+    assert_eq!(single["to_line"], 2, "to_line defaults to from_line");
+    assert_eq!(
+        single["commits"][0]["lines"],
+        json!([{ "from": 2, "to": 2 }])
+    );
+}
+
+#[test]
+fn several_matching_edits_are_all_listed_and_marked_ambiguous() {
+    let dir = repo();
+    let first = store_provenance_thread(dir.path(), "x", file_edit(ABC_PATCH, 3, None, false));
+    let second = store_provenance_thread(dir.path(), "y", file_edit(ABC_PATCH, 3, None, false));
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "provenance",
+                &json!({ "path": "f.txt", "from_line": 1, "to_line": 3 }),
+            ),
+        ],
+    );
+    let threads = result(&replies[1])["commits"][0]["threads"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let mut ids: Vec<&str> = threads
+        .iter()
+        .map(|t| t["thread"].as_str().unwrap())
+        .collect();
+    ids.sort_unstable();
+    let mut expected = [first.as_str(), second.as_str()];
+    expected.sort_unstable();
+    assert_eq!(ids, expected);
+    assert!(threads.iter().all(|thread| thread["ambiguous"] == true));
+}
+
+#[test]
+fn an_edit_that_cannot_be_compared_is_unverifiable_not_no_match() {
+    let dir = repo();
+    store_provenance_thread(dir.path(), "input", file_edit(ABC_PATCH, 3, None, true));
+    store_provenance_thread(
+        dir.path(),
+        "redacted",
+        file_edit(
+            "@@ -0,0 +1,3 @@\n+[REDACTED:token]\n+b\n+c\n",
+            3,
+            None,
+            false,
+        ),
+    );
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "provenance",
+                &json!({ "path": "f.txt", "from_line": 1, "to_line": 3 }),
+            ),
+        ],
+    );
+    let threads = result(&replies[1])["commits"][0]["threads"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let mut reasons: Vec<String> = threads
+        .iter()
+        .map(|thread| {
+            assert_eq!(thread["evidence"], json!([]), "no evidence is claimed");
+            thread["edits"][0]["unverifiable"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    reasons.sort();
+    assert_eq!(reasons, ["from_input", "redacted"]);
+}
+
+#[test]
+fn a_cut_answer_says_which_bound_cut_it() {
+    let dir = repo();
+    let head = rev(dir.path(), "HEAD");
+    let mut store = ThreadStore::open(&dir.path().join(".git")).unwrap();
+    for index in 0..6 {
+        let session = format!("c{index}");
+        let batch = new_batch(
+            dir.path(),
+            &session,
+            "claude-opus-4",
+            "main",
+            vec![new_entry(
+                &format!("{session}0"),
+                EntryKind::User,
+                "why",
+                10 + index,
+            )],
+        );
+        store.apply(&batch).unwrap();
+        let uid = ThreadStore::thread_uid("claude-code", &session);
+        store
+            .link(
+                &uid,
+                &ThreadLink {
+                    kind: LinkKind::Commit,
+                    reference: head.clone(),
+                    origin: LinkOrigin::Manual,
+                },
+            )
+            .unwrap();
+    }
+    drop(store);
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "provenance",
+                &json!({ "path": "f.txt", "from_line": 1, "to_line": 3 }),
+            ),
+        ],
+    );
+    let answer = result(&replies[1]);
+    assert_eq!(answer["complete"], false);
+    let cut = &answer["cuts"][0];
+    assert_eq!(cut["bound"], "threads");
+    assert_eq!(cut["limit"], 5);
+    assert_eq!(cut["commit"], head.as_str());
+    assert!(cut["text"].as_str().unwrap().starts_with("only 5 threads"));
+    assert_eq!(answer["commits"][0]["threads"].as_array().unwrap().len(), 5);
+}
+
+#[test]
+fn bad_provenance_arguments_are_refused_with_what_to_change() {
+    let dir = repo();
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "provenance",
+                &json!({ "path": "/etc/passwd", "from_line": 1 }),
+            ),
+            call(
+                3,
+                "provenance",
+                &json!({ "path": "../f.txt", "from_line": 1 }),
+            ),
+            call(4, "provenance", &json!({ "from_line": 1 })),
+            call(5, "provenance", &json!({ "path": "f.txt" })),
+            call(
+                6,
+                "provenance",
+                &json!({ "path": "f.txt", "from_line": "3" }),
+            ),
+            call(
+                7,
+                "provenance",
+                &json!({ "path": "f.txt", "from_line": -1 }),
+            ),
+            call(8, "provenance", &json!({ "path": "f.txt", "from_line": 0 })),
+            call(
+                9,
+                "provenance",
+                &json!({ "path": "f.txt", "from_line": 3, "to_line": 2 }),
+            ),
+            call(
+                10,
+                "provenance",
+                &json!({ "path": "f.txt", "from_line": 1, "to_line": 1001 }),
+            ),
+        ],
+    );
+    let texts: Vec<String> = replies[1..].iter().map(refusal).collect();
+    assert!(
+        texts[0].contains("relative to the repository root"),
+        "{}",
+        texts[0]
+    );
+    assert!(
+        texts[1].contains("stay inside the repository"),
+        "{}",
+        texts[1]
+    );
+    assert_eq!(texts[2], "path is required");
+    assert_eq!(texts[3], "from_line is required");
+    assert_eq!(texts[4], "from_line must be an integer");
+    assert!(
+        texts[5].contains("from_line must be a line number"),
+        "{}",
+        texts[5]
+    );
+    assert_eq!(texts[6], "not a line range: 0 to 0");
+    assert_eq!(texts[7], "not a line range: 3 to 2");
+    assert_eq!(texts[8], "the range is longer than 1000 lines");
+}
+
+#[test]
+fn the_provenance_schema_is_read_only_and_names_its_arguments() {
+    let dir = repo();
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        ],
+    );
+    let tool = replies[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "provenance")
+        .expect("provenance is listed")
+        .clone();
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
+    assert_eq!(tool["annotations"]["destructiveHint"], false);
+    assert_eq!(
+        tool["inputSchema"]["required"],
+        json!(["path", "from_line"])
+    );
+    assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+    for key in ["path", "from_line", "to_line"] {
+        assert!(
+            tool["inputSchema"]["properties"].get(key).is_some(),
+            "{key}"
+        );
+    }
+    let description = tool["description"].as_str().unwrap();
+    assert!(description.contains("complete"), "a partial answer says so");
+    assert!(description.contains("blob_match"));
 }

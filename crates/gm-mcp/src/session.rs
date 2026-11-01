@@ -43,7 +43,12 @@ impl Session {
             },
             kind,
         };
-        let events = self.engine.handle(id, &command);
+        let mut events = self.engine.handle(id, &command);
+        // A provenance read answers after its blame runs as a job (D144). This server has no
+        // runner thread, so each job runs to its end here, as the app's runner does.
+        for job in self.engine.take_provenance_jobs() {
+            events.extend(self.engine.provenance_report(job.run()));
+        }
         for event in &events {
             if let Event::OperationChanged {
                 id: got,

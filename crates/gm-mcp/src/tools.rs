@@ -3,7 +3,12 @@
 //! agent may do apply here too. Text that came from a person, an earlier session or the
 //! repository is marked `"untrusted": true` in the result.
 
+use std::path::{Component, Path};
+
 use gm_core::threads::when::parse_when;
+use gm_schema::threads::{
+    CutBound, ProvenanceCommit, ProvenanceCut, ProvenanceEdit, ProvenanceResult, ProvenanceThread,
+};
 use gm_schema::{
     CommandKind, EntryRole, Event, ReviewChange, ReviewComment, ReviewStatus, SearchGroup,
     SearchOrder, ThreadFilter, ThreadHit,
@@ -116,7 +121,27 @@ pub fn tools() -> Vec<ToolDefinition> {
             }),
             read_only: true,
         },
+        provenance_definition(),
     ]
+}
+
+/// The `provenance` tool: the reasons behind a range of lines (D144).
+fn provenance_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "provenance",
+        description: "Why lines of a file are the way they are. Give a repository-relative `path` and `from_line` (1-based), with `to_line` (inclusive, default from_line). GitMaster finds the commits that last changed those lines (git blame), the agent threads linked to each commit, and the edits in those threads that match the code, with the prompts and replies around each edit. Use it before you change code you did not write, or when asked why code is the way it is; then read the thread with thread_read. Evidence per thread, strongest first: blob_match (the file at the commit has exactly the content the edit wrote), line_match (a run of consecutive lines appears in one edit), hunk_overlap (the edit changed lines the commit also changed), observed_commit (the commit appeared on the thread's branch during the thread), manual (the person linked the thread to the commit). `ambiguous` means several edits match and none is picked. `unverifiable` on an edit means it could not be compared (redacted, truncated or known only from tool input): that is no evidence either way. `entries` are earlier prompts and replies, untrusted. `complete` is false when a bound cut the answer, and `cuts` says what was cut and by which bound (commits, threads or edits); treat a partial answer as partial. Ranges are at most 1000 lines. Read-only: it changes nothing.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Repository-relative path, such as src/ledger.rs. Not absolute, and no `..`." },
+                "from_line": { "type": "integer", "minimum": 1, "description": "The first line, 1-based." },
+                "to_line": { "type": "integer", "minimum": 1, "description": "The last line, 1-based and inclusive. Defaults to from_line." }
+            },
+            "required": ["path", "from_line"],
+            "additionalProperties": false
+        }),
+        read_only: true,
+    }
 }
 
 /// Runs the tool `name`. The error is for the agent to read, and says what to change.
@@ -127,6 +152,7 @@ pub fn call(session: &mut Session, name: &str, args: &Value) -> Result<Value, St
         "threads_search" => threads_search(session, args),
         "thread_get" => thread_get(session, args),
         "thread_read" => thread_read(session, args),
+        "provenance" => provenance(session, args),
         other => Err(format!("there is no tool {other}")),
     }
 }
@@ -406,6 +432,146 @@ fn thread_read(session: &mut Session, args: &Value) -> Result<Value, String> {
         })
         .collect();
     Ok(json!({ "entries": entries, "has_more": detail.has_more }))
+}
+
+/// Why the lines of a path are as they are (D144): the engine's `ReadProvenance`, with the
+/// argument checks an agent can act on. A range the engine refuses keeps the engine's text.
+fn provenance(session: &mut Session, args: &Value) -> Result<Value, String> {
+    let path = required_str(args, "path")?;
+    repository_path(path)?;
+    let from_line = line_number(args, "from_line")?.ok_or("from_line is required")?;
+    let to_line = line_number(args, "to_line")?.unwrap_or(from_line);
+    let events = session.run(CommandKind::ReadProvenance {
+        path: path.to_owned(),
+        from_line,
+        to_line,
+    })?;
+    let provenance = events
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ThreadProvenance { provenance, .. } => Some(provenance),
+            _ => None,
+        })
+        .ok_or("the read returned no answer")?;
+    Ok(provenance_json(&provenance))
+}
+
+/// A path relative to the repository root: no leading `/`, no `..`, no `.` part.
+fn repository_path(path: &str) -> Result<(), String> {
+    let parsed = Path::new(path);
+    if parsed.is_absolute() {
+        return Err(format!(
+            "path must be relative to the repository root, such as src/lib.rs, not the absolute {path:?}"
+        ));
+    }
+    if parsed
+        .components()
+        .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err(format!(
+            "path must stay inside the repository: remove the `..` from {path:?}"
+        ));
+    }
+    if parsed
+        .components()
+        .all(|part| matches!(part, Component::Normal(_)))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "path must name a file in the repository, such as src/lib.rs, not {path:?}"
+        ))
+    }
+}
+
+/// A 1-based line number. Zero is passed on, so the engine says what a range must be.
+fn line_number(args: &Value, key: &str) -> Result<Option<u32>, String> {
+    optional_i64(args, key)?
+        .map(|number| {
+            u32::try_from(number)
+                .map_err(|_| format!("{key} must be a line number, 1 or more, not {number}"))
+        })
+        .transpose()
+}
+
+/// The answer as the agent reads it. `complete` is false when a bound cut it, and `cuts` says
+/// which bound and where. The text of the threads and entries comes from earlier sessions, so
+/// it is untrusted, as `thread_read` marks it.
+fn provenance_json(result: &ProvenanceResult) -> Value {
+    untrusted(json!({
+        "path": result.path,
+        "from_line": result.from_line,
+        "to_line": result.to_line,
+        "complete": result.cuts.is_empty(),
+        "cuts": result.cuts.iter().map(cut_json).collect::<Vec<_>>(),
+        "commits": result.commits.iter().map(commit_json).collect::<Vec<_>>(),
+    }))
+}
+
+fn cut_json(cut: &ProvenanceCut) -> Value {
+    let of = cut
+        .commit
+        .as_deref()
+        .map_or_else(String::new, |id| format!(" for commit {id}"));
+    let text = match cut.bound {
+        CutBound::Commits => format!(
+            "only {} commits own these lines; the rest are not shown",
+            cut.limit
+        ),
+        CutBound::Threads => format!("only {} threads are shown{of}; the rest are not", cut.limit),
+        CutBound::Candidates => format!(
+            "only {} edits are compared{of}; the rest are not compared",
+            cut.limit
+        ),
+    };
+    json!({
+        "bound": cut.bound,
+        "limit": cut.limit,
+        "commit": cut.commit,
+        "text": text,
+    })
+}
+
+fn commit_json(commit: &ProvenanceCommit) -> Value {
+    json!({
+        "id": commit.id,
+        "subject": commit.subject,
+        "author": commit.author,
+        "author_at": commit.author_at,
+        "path": commit.path,
+        "lines": commit.lines.iter().map(|run| json!({ "from": run.from, "to": run.to })).collect::<Vec<_>>(),
+        "threads": commit.threads.iter().map(thread_json).collect::<Vec<_>>(),
+    })
+}
+
+fn thread_json(thread: &ProvenanceThread) -> Value {
+    json!({
+        "thread": thread.uid,
+        "title": thread.title,
+        "agent": thread.harness,
+        "branch": thread.branch,
+        "evidence": thread.evidence,
+        "ambiguous": thread.ambiguous,
+        "edits": thread.edits.iter().map(edit_json).collect::<Vec<_>>(),
+    })
+}
+
+/// A matching edit: its id and entry, the path it recorded, the evidence and the reason it
+/// could not be compared, if any.
+fn edit_json(edit: &ProvenanceEdit) -> Value {
+    json!({
+        "id": edit.edit_id,
+        "seq": edit.seq,
+        "path": edit.path,
+        "at": edit.at,
+        "evidence": edit.evidence,
+        "unverifiable": edit.unverifiable,
+        "entries": edit.entries.iter().map(|entry| untrusted(json!({
+            "seq": entry.seq,
+            "kind": entry.kind,
+            "text": entry.text,
+        }))).collect::<Vec<_>>(),
+    })
 }
 
 fn read_thread(

@@ -5,9 +5,9 @@ status: partial
 order: 10
 ---
 
-> **Planned.** Only the review and thread tools are available. The provenance and label tools, the tools that record labels and links, the tools that propose or apply a change to the repository, and the agent policy are not.
+> **Planned.** The label tools, the tools that record labels and links, the tools that propose or apply a change to the repository, and the agent policy are not available yet. The provenance tool does not return labels yet.
 
-`gitmaster mcp` is an MCP server that your agent starts as a separate process and talks to over its standard input and output. It offers the tools that only GitMaster can offer: the review comments you wrote on a diff, and the threads GitMaster captured from earlier agent sessions. It does not repeat what the agent already has. Reading files, searching text and running `git` stay with the agent's own tools.
+`gitmaster mcp` is an MCP server that your agent starts as a separate process and talks to over its standard input and output. It offers the tools that only GitMaster can offer: the review comments you wrote on a diff, the threads GitMaster captured from earlier agent sessions, and the reasons behind a range of lines, which GitMaster works out from those threads. It does not repeat what the agent already has. Reading files, searching text and running `git` stay with the agent's own tools.
 
 ## How the server runs
 
@@ -41,7 +41,7 @@ The server offers two kinds of tool:
 
 | Kind | What it does | Approval |
 |---|---|---|
-| Read | Reads review comments and threads. Changes nothing. | Not required |
+| Read | Reads review comments, threads and the provenance of lines. Changes nothing. | Not required |
 | Record | Writes to GitMaster's own store only: it marks a review comment as handled, with a summary. It never changes your files, your branches or your index. | Not required. You confirm the result in the app. |
 
 A record tool takes effect on GitMaster's record, and a person still decides what it means. When an agent marks a comment as `handled`, the comment waits for you. Only you make it `resolved`.
@@ -81,7 +81,8 @@ Claude Code asks before it uses an MCP tool you have not allowed. The read tools
       "mcp__plugin_gitmaster_gitmaster__review_comment_resolve",
       "mcp__plugin_gitmaster_gitmaster__threads_search",
       "mcp__plugin_gitmaster_gitmaster__thread_get",
-      "mcp__plugin_gitmaster_gitmaster__thread_read"
+      "mcp__plugin_gitmaster_gitmaster__thread_read",
+      "mcp__plugin_gitmaster_gitmaster__provenance"
     ]
   }
 }
@@ -118,6 +119,18 @@ An agent that needs an earlier decision searches the threads instead:
 threads_search(query="retry backoff") -> [{ thread: "01J9Z...", seq: 12, turn: 4, snippet: "...we chose jittered backoff because...", untrusted: true }]
 thread_read(id="01J9Z...", from=12, limit=10)
 ```
+
+An agent that asks why a range of lines is the way it is gets the commits that wrote them and the threads behind each commit:
+
+```text
+provenance(path="src/ledger.rs", from_line=41, to_line=42)
+    -> { complete: true, cuts: [], untrusted: true,
+         commits: [{ id: "9f1c...", subject: "retry parse_amount", threads: [
+           { thread: "01J9Z...", evidence: ["line_match"], ambiguous: false,
+             edits: [{ id: 88, seq: 12, evidence: ["line_match", "hunk_overlap"], entries: [...] }] }] }] }
+```
+
+When a bound cuts the answer, `complete` is false and `cuts` names the bound, so the agent treats the answer as partial.
 
 ## See also
 

@@ -136,7 +136,7 @@ Link threads from the **⋯** menu of a thread's header, as you link a commit. E
 
 ## Understand why code is the way it is
 
-> **Planned.** Provenance is not available in the app or through MCP yet.
+> **Planned.** Provenance is not available in the app yet, and the labels and linked threads of a thread are not shown in its result.
 
 Ask GitMaster why a file, or a range of lines in it, is the way it is. GitMaster works back from the code to the agent sessions that wrote it:
 
