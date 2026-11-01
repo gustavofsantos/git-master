@@ -19,6 +19,7 @@ use crate::gate_wait::{self, GateWait};
 use crate::icon::{self, Icon};
 use crate::text_area::{Newline, TextArea, TextAreaEvent};
 use crate::theme;
+use crate::transform_run::{self, Field};
 use crate::view::StatusView;
 use crate::worktree_create::{command_block, field_row};
 
@@ -185,6 +186,9 @@ pub(crate) struct NewBranchDialog {
     pub(crate) parent: Option<String>,
     /// Git's refusal, or the reason the form cannot run.
     pub(crate) error: Option<String>,
+    /// The name a branch name transform suggested, when the typed name had changed meanwhile
+    /// (`WF3d`). Replace puts it in the field; Discard keeps the typed name.
+    pub(crate) name_suggestion: Option<String>,
     /// The two texts the dialog last saw. The fields notify on every caret
     /// blink, so an error is cleared only when a text really changed.
     seen: (String, String),
@@ -249,6 +253,7 @@ impl StatusView {
             checkout: true,
             parent: parent.map(str::to_owned),
             error: None,
+            name_suggestion: None,
             seen,
             _subscriptions: subscriptions,
         });
@@ -277,6 +282,50 @@ impl StatusView {
         }
         dialog.seen = texts;
         dialog.error = None;
+        cx.notify();
+    }
+
+    /// Suggest Name: asks the `transform.branch_name` workflows for a name, with the typed name as
+    /// the value so far (`WF3d`). Nothing is asked while one is in flight.
+    pub(crate) fn suggest_branch_name(&mut self, cx: &mut Context<Self>) {
+        if self.model.transforms.waiting_for(Field::BranchName) {
+            return;
+        }
+        let Some(dialog) = self.new_branch_dialog.as_ref() else {
+            return;
+        };
+        let typed = dialog.name.read(cx).text().to_owned();
+        let id = self.engine.dispatch(
+            Actor::Human,
+            CommandKind::RunTransform {
+                field: Field::BranchName.name().to_owned(),
+                current: typed.clone(),
+            },
+        );
+        self.model.transforms.start(id, Field::BranchName, typed);
+        cx.notify();
+    }
+
+    /// Cancel of a name suggestion in flight: the field stays as it was (`WF3d`).
+    pub(crate) fn cancel_name_suggestion(&mut self, cx: &mut Context<Self>) {
+        self.cancel_transform(Field::BranchName, cx);
+    }
+
+    /// Replace: the suggested name goes into the field.
+    pub(crate) fn use_branch_name_suggestion(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.new_branch_dialog.as_mut()
+            && let Some(name) = dialog.name_suggestion.take()
+        {
+            dialog.name.update(cx, |area, cx| area.set_text(&name, cx));
+        }
+        cx.notify();
+    }
+
+    /// Discard: the suggested name is dropped and the typed one stays.
+    pub(crate) fn drop_branch_name_suggestion(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.new_branch_dialog.as_mut() {
+            dialog.name_suggestion = None;
+        }
         cx.notify();
     }
 
@@ -417,6 +466,7 @@ impl StatusView {
             )
             .child(field_row("NAME", dialog.name.clone()))
             .children(live.map(|message| div().text_sm().text_color(theme::error()).child(message)))
+            .children(self.name_suggest_row(dialog, cx))
             .child(match &dialog.parent {
                 Some(parent) => parent_row(parent),
                 None => field_row("STARTS FROM", dialog.start.clone()),
@@ -439,6 +489,100 @@ impl StatusView {
             }))
             .child(buttons(pending, waiting, allowed, cx))
     }
+}
+
+impl StatusView {
+    /// Suggest Name and the suggestion of a branch name transform, under the name field (`WF3d`).
+    /// The button shows while a `transform.branch_name` workflow applies; the suggestion row shows
+    /// once one answered with a name that differs from the typed one.
+    fn name_suggest_row(&self, dialog: &NewBranchDialog, cx: &Context<Self>) -> Option<Div> {
+        let loaded =
+            transform_run::loaded(self.model.workflows.listed.as_deref(), Field::BranchName);
+        if !loaded && dialog.name_suggestion.is_none() {
+            return None;
+        }
+        let mut row = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2();
+        if let Some(suggestion) = &dialog.name_suggestion {
+            row = row
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_color(theme::muted())
+                        .child(format!("Suggested: {suggestion}")),
+                )
+                .child(small_button(
+                    "new-branch-replace",
+                    "Replace",
+                    StatusView::use_branch_name_suggestion,
+                    cx,
+                ))
+                .child(small_button(
+                    "new-branch-discard",
+                    "Discard",
+                    StatusView::drop_branch_name_suggestion,
+                    cx,
+                ));
+        }
+        if loaded {
+            let suggesting = self.model.transforms.waiting_for(Field::BranchName);
+            if suggesting {
+                row = row.child(small_button(
+                    "new-branch-cancel-suggest",
+                    transform_run::CANCEL,
+                    StatusView::cancel_name_suggestion,
+                    cx,
+                ));
+            }
+            row = row.child(small_button(
+                "new-branch-suggest",
+                if suggesting {
+                    "Suggesting…"
+                } else {
+                    "Suggest Name"
+                },
+                StatusView::suggest_branch_name,
+                cx,
+            ));
+        }
+        Some(row)
+    }
+}
+
+/// A small bordered button that runs `on_click` on the window.
+fn small_button(
+    id: &'static str,
+    label: &'static str,
+    on_click: fn(&mut StatusView, &mut Context<StatusView>),
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .px_2()
+        .h(px(18.))
+        .flex()
+        .items_center()
+        .rounded_md()
+        .border_1()
+        .border_color(theme::hairline_strong())
+        .text_color(theme::text())
+        .cursor_pointer()
+        .child(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                on_click(this, cx);
+            }),
+        )
 }
 
 /// The fixed parent of a new child branch, where the start field would be.

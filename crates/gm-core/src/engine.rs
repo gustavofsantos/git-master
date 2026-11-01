@@ -46,6 +46,7 @@ use crate::script::phases::{self, Facts, Gate, Timing};
 use crate::script::policy::StartedBy;
 use crate::script::run::ScriptEvent;
 use crate::script::run::{RunSpec, Runtime};
+use crate::script::transforms;
 use crate::script::triggers::{self, Decision, Lanes, TriggerEvent};
 use crate::script::trust::{self, TrustStore};
 use crate::script::{api_docs, input as script_input, templates as script_templates};
@@ -149,6 +150,9 @@ pub struct Engine {
     gate: Option<GatedOp>,
     /// The `after.<op>` observer runs in progress, by run: the workflow's name and the operation.
     observers: BTreeMap<ScriptRunId, (String, &'static str)>,
+    /// The transform operation whose `transform.<field>` runs are in progress (`WF3d`), if any.
+    /// One at a time: a new one supersedes it.
+    transform: Option<TransformRun>,
 }
 
 /// The phases of one operation, as the engine read them when the operation started (`WF3c`).
@@ -175,6 +179,24 @@ struct GatedOp {
     waiting: VecDeque<(String, String)>,
     /// The run of the gate in progress.
     run: Option<ScriptRunId>,
+}
+
+/// A transform operation whose `transform.<field>` runs are in progress (`WF3d`, D155). The runs
+/// go one after another in file-name order; each reads the value so far.
+struct TransformRun {
+    id: OperationId,
+    command: Command,
+    root: PathBuf,
+    field: String,
+    /// The branch HEAD was on when the operation started: what `match` reads.
+    branch: Option<String>,
+    /// The transforms not started yet: name and hash, in file-name order.
+    waiting: VecDeque<(String, String)>,
+    seq: transforms::Sequence,
+    /// HEAD and the staged diff when the operation started, for `commit_message`.
+    fingerprint: Option<Fingerprint>,
+    /// The run of the transform in progress, and its workflow's name.
+    run: Option<(ScriptRunId, String)>,
 }
 
 /// The restack conflict being resolved (D154): the plan it came from, and the conflict
@@ -301,6 +323,7 @@ impl Engine {
             tips: None,
             gate: None,
             observers: BTreeMap::new(),
+            transform: None,
         }
     }
 
@@ -467,6 +490,7 @@ impl Engine {
                 run,
                 status,
                 reason,
+                value,
                 ..
             } => {
                 // The run's script may have a pending trigger, which starts now (WF3a).
@@ -481,6 +505,13 @@ impl Engine {
                 }
                 // A gate or an observer of a phase moves its operation on (`WF3c`).
                 started.extend(self.phase_finished(*run, *status, reason.as_deref()));
+                // A transform run gives its answer to the sequence of its field (`WF3d`).
+                started.extend(self.transform_finished(
+                    *run,
+                    *status,
+                    reason.as_deref(),
+                    value.as_ref(),
+                ));
             }
             _ => {}
         }
@@ -939,6 +970,17 @@ impl Engine {
     /// operation ends `Cancelled` with nothing written. Refused for any other operation.
     fn cancel_operation(&mut self, actor: &Actor, op: OperationId) -> Result<Vec<Event>, String> {
         only_a_human(actor, "cancel an operation")?;
+        if self
+            .transform
+            .as_ref()
+            .is_some_and(|transform| transform.id == op)
+        {
+            let mut events = Vec::new();
+            if let Some(transform) = self.transform.take() {
+                self.stop_transform(&transform, &mut events);
+            }
+            return Ok(events);
+        }
         let gate = match self.gate.take() {
             Some(gate) if gate.id == op => gate,
             other => {
@@ -962,6 +1004,180 @@ impl Engine {
         let mut events = Vec::new();
         self.advance(&mut state, OperationState::Cancelled, &mut events);
         Ok(events)
+    }
+
+    /// Starts a transform operation (`WF3d`, D155). `composer` is set for `ComposerOpened`, which
+    /// fires `composer.opened` before the transforms run. An operation in progress is superseded:
+    /// its run is cancelled and it ends with no value. With the triggers off nothing runs, and the
+    /// answer has no value.
+    fn start_transform(
+        &mut self,
+        id: OperationId,
+        command: &Command,
+        field: &str,
+        current: &str,
+        composer: bool,
+        events: &mut Vec<Event>,
+    ) -> Result<(), String> {
+        only_a_human(&command.actor, "run a transform")?;
+        if !transforms::is_field(field) {
+            return Err(format!("no transform runs for the field `{field}`"));
+        }
+        if let Some(earlier) = self.transform.take() {
+            self.stop_transform(&earlier, events);
+        }
+        let mut run = TransformRun {
+            id,
+            command: command.clone(),
+            root: PathBuf::new(),
+            field: field.to_owned(),
+            branch: None,
+            waiting: VecDeque::new(),
+            seq: transforms::Sequence::new(current),
+            fingerprint: None,
+            run: None,
+        };
+        if self.triggers {
+            let root = self.open_root()?;
+            let (branch, head) = self.current(&root)?;
+            // Taken before anything runs, so a change while the transforms run shows (D155(1)).
+            let fingerprint = if field == "commit_message" {
+                let staged = self.git.staged_diff(&root).map_err(|e| e.0)?;
+                Some(hook::fingerprint(head.as_deref(), &staged))
+            } else {
+                None
+            };
+            let loaded = self.load_scripts(&root)?;
+            if composer {
+                let opened = TriggerEvent {
+                    on: "composer.opened".to_owned(),
+                    branch: branch.clone(),
+                    payload: json!({}),
+                };
+                events.extend(self.fire_triggers(id, &root, &opened));
+            }
+            let event = transforms::trigger(field, branch.clone(), current);
+            run.waiting = phases::select(&loaded.entries, &event)
+                .into_iter()
+                .collect();
+            run.root = root;
+            run.branch = branch;
+            run.fingerprint = fingerprint;
+        }
+        self.next_transform(run, events);
+        Ok(())
+    }
+
+    /// Starts the next transform of `run` that is reviewed, or ends the operation when none is left
+    /// (`WF3d`). A transform that is not reviewed, or cannot start, is skipped with a notice, and
+    /// the sequence goes on.
+    fn next_transform(&mut self, mut run: TransformRun, events: &mut Vec<Event>) {
+        while let Some((name, hash)) = run.waiting.pop_front() {
+            let on = format!("transform.{}", run.field);
+            let reviewed = self
+                .trust_store()
+                .and_then(|trust| trust.is_reviewed(&hash).map_err(|e| e.0));
+            let skipped = match reviewed {
+                Ok(true) => None,
+                Ok(false) => Some(transforms::unreviewed(&name, &on)),
+                Err(reason) => Some(format!("{name} did not run on {on}: {reason}")),
+            };
+            if let Some(notice) = skipped {
+                run.seq = std::mem::take(&mut run.seq).skipped(notice);
+                flush_notices(&mut run.seq, events);
+                continue;
+            }
+            let trigger = transforms::trigger(&run.field, run.branch.clone(), &run.seq.current);
+            match self.start_event_run(run.id, &run.root, &name, &trigger) {
+                Ok(script_run) => {
+                    run.run = Some((script_run, name));
+                    self.transform = Some(run);
+                    return;
+                }
+                Err(reason) => {
+                    run.seq =
+                        std::mem::take(&mut run.seq).skipped(format!("{name} failed: {reason}"));
+                    flush_notices(&mut run.seq, events);
+                }
+            }
+        }
+        self.end_transform(&run, events);
+    }
+
+    /// Ends the transform operation `run` (`WF3d`): `TransformFinished` with its value and whether
+    /// the repository moved while it ran, then the operation is `Done`.
+    fn end_transform(&mut self, run: &TransformRun, events: &mut Vec<Event>) {
+        let changed = run
+            .fingerprint
+            .as_ref()
+            .is_some_and(|before| self.moved_since(&run.root, before));
+        events.push(Event::TransformFinished {
+            id: run.id,
+            field: run.field.clone(),
+            value: run.seq.value(),
+            changed,
+        });
+        let mut op = Op {
+            id: run.id,
+            command: &run.command,
+            state: OperationState::Executing,
+        };
+        self.advance(&mut op, OperationState::Done, events);
+    }
+
+    /// Stops a transform operation (`WF3d`): its run, if one is in progress, is cancelled, and the
+    /// operation ends `Cancelled` with no value.
+    fn stop_transform(&mut self, transform: &TransformRun, events: &mut Vec<Event>) {
+        if let (Some((run, _)), Some(runtime)) = (transform.run.as_ref(), self.script_runtime()) {
+            runtime.cancel(*run);
+        }
+        events.push(Event::TransformFinished {
+            id: transform.id,
+            field: transform.field.clone(),
+            value: None,
+            changed: false,
+        });
+        let mut op = Op {
+            id: transform.id,
+            command: &transform.command,
+            state: OperationState::Executing,
+        };
+        self.advance(&mut op, OperationState::Cancelled, events);
+    }
+
+    /// A script run ended (`WF3d`). When it was a transform of the operation in progress, its answer
+    /// goes into the sequence and the next transform starts. A run that was cancelled on its own
+    /// ends the operation with no value. Runs that belong to no transform return nothing.
+    fn transform_finished(
+        &mut self,
+        run: ScriptRunId,
+        status: RunStatus,
+        reason: Option<&str>,
+        value: Option<&serde_json::Value>,
+    ) -> Vec<Event> {
+        let mut events = Vec::new();
+        let owned = self
+            .transform
+            .as_ref()
+            .and_then(|transform| transform.run.as_ref())
+            .is_some_and(|(script_run, _)| *script_run == run);
+        if !owned {
+            return events;
+        }
+        let Some(mut transform) = self.transform.take() else {
+            return events;
+        };
+        let Some((_, name)) = transform.run.take() else {
+            return events;
+        };
+        if status == RunStatus::Cancelled {
+            self.stop_transform(&transform, &mut events);
+            return events;
+        }
+        transform.seq = std::mem::take(&mut transform.seq).advance(&name, status, reason, value);
+        flush_notices(&mut transform.seq, &mut events);
+        self.next_transform(transform, &mut events);
+        events
     }
 
     /// The watcher saw refs move, after its quiet period (`WF3a`). The local branch tips are compared
@@ -1533,6 +1749,23 @@ impl Engine {
             }
             return events;
         }
+        // A transform operation runs its workflows and answers with `TransformFinished` (`WF3d`).
+        let transform = match &command.kind {
+            CommandKind::RunTransform { field, current } => {
+                Some((field.clone(), current.clone(), false))
+            }
+            CommandKind::ComposerOpened => Some(("commit_message".to_owned(), String::new(), true)),
+            _ => None,
+        };
+        if let Some((field, current, composer)) = transform {
+            self.advance(&mut op, OperationState::Executing, &mut events);
+            if let Err(message) =
+                self.start_transform(id, command, &field, &current, composer, &mut events)
+            {
+                self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
+            }
+            return events;
+        }
         if let CommandKind::RunPrepareCommit { message } = &command.kind {
             match self.prepare_run(id, command, message) {
                 Ok(accepted) => {
@@ -1651,9 +1884,7 @@ impl Engine {
             CommandKind::ApproveHook { name, command_hash } => {
                 self.approve_hook(id, actor, name, command_hash)
             }
-            CommandKind::RunPrepareCommit { .. } => {
-                Err("a prepare-commit run is started by handle, not execute".to_owned())
-            }
+            _ if is_handled_run(kind) => Err("a run is started by handle, not execute".to_owned()),
             CommandKind::CancelHook { run } => self.cancel_hook(*run),
             CommandKind::StageAll => self.stage_all(id),
             CommandKind::CancelOperation { op } => self.cancel_operation(actor, *op),
@@ -1756,13 +1987,19 @@ impl Engine {
     /// Whether HEAD or the staged diff moved since the run started. When the
     /// repository cannot be read now, it counts as changed.
     fn repo_changed(&self, active: &ActiveRun) -> bool {
-        let Ok((_, head)) = self.current(&active.root) else {
+        self.moved_since(&active.root, &active.fingerprint)
+    }
+
+    /// Whether HEAD or the staged diff of `root` moved since `fingerprint` was taken. When the
+    /// repository cannot be read now, it counts as changed.
+    fn moved_since(&self, root: &Path, fingerprint: &Fingerprint) -> bool {
+        let Ok((_, head)) = self.current(root) else {
             return true;
         };
-        let Ok(staged) = self.git.staged_diff(&active.root) else {
+        let Ok(staged) = self.git.staged_diff(root) else {
             return true;
         };
-        hook::fingerprint(head.as_deref(), &staged) != active.fingerprint
+        hook::fingerprint(head.as_deref(), &staged) != *fingerprint
     }
 
     /// Starts a page request. It continues the walk when the walk stands right
@@ -4165,6 +4402,16 @@ fn check_workflow_script(id: OperationId, source: &str) -> Vec<Event> {
 }
 
 /// The conflict commands (D114, D115): reads and writes of a conflicted file.
+/// The runs `handle` starts, which `execute` never runs: hooks and transforms.
+fn is_handled_run(kind: &CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::RunPrepareCommit { .. }
+            | CommandKind::RunTransform { .. }
+            | CommandKind::ComposerOpened
+    )
+}
+
 fn is_conflict_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
@@ -4246,6 +4493,11 @@ pub(crate) fn same_folder(open: &Path, path: &str) -> bool {
 /// A notice of the Workflows page. It is not about a run, so it carries no run id.
 fn workflow_notice(text: String) -> Event {
     Event::WorkflowNotice { run: 0, text }
+}
+
+/// Moves the notices of a transform sequence into the events, in order (`WF3d`).
+fn flush_notices(seq: &mut transforms::Sequence, events: &mut Vec<Event>) {
+    events.extend(seq.take_notices().into_iter().map(workflow_notice));
 }
 
 #[cfg(test)]

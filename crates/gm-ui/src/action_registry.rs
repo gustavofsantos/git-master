@@ -19,6 +19,7 @@ use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, S
 use crate::stacks::Stacks;
 use crate::stashes;
 use crate::thread_curate::{self, ThreadField};
+use crate::transform_run;
 use crate::workflows_page::PageState;
 
 /// Why an action is not enabled, as a short English sentence for the user.
@@ -311,6 +312,9 @@ pub struct HookCtx<'a> {
     pub suggestion: Option<&'a str>,
     /// The first repository hook awaiting approval: its name and command hash.
     pub pending_approval: Option<(&'a str, &'a str)>,
+    /// Whether a `transform.commit_message` workflow is loaded (`WF3d`): Suggest Message then runs
+    /// the transforms, and needs no prepare-commit hook.
+    pub transform: bool,
 }
 
 /// What the window knows of the manual workflows, for the rules.
@@ -2374,6 +2378,9 @@ fn hook_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
     match action {
         Action::SuggestMessage => {
             idle(ctx)?;
+            if ctx.hooks.transform {
+                return Ok(());
+            }
             if ctx.hooks.running.is_some() {
                 return Err("A hook is already running.");
             }
@@ -2883,9 +2890,10 @@ fn file_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a StatusEntry, Rea
 /// What a hook action does, given the state of the hooks in `ctx`.
 fn hook_effect(action: Action, ctx: &Context<'_>) -> Result<Effect, Reason> {
     Ok(match action {
-        Action::SuggestMessage => Effect::Send(vec![CommandKind::RunPrepareCommit {
-            message: ctx.message.to_owned(),
-        }]),
+        Action::SuggestMessage => Effect::Send(vec![transform_run::suggest_message(
+            ctx.message,
+            ctx.hooks.transform,
+        )]),
         Action::CancelHook => match ctx.hooks.running {
             Some(run) => Effect::Send(vec![CommandKind::CancelHook { run }]),
             None => return Err("No hook is running."),
@@ -4671,6 +4679,25 @@ mod tests {
             Action::SuggestMessage.plan(&Args::None, &with_hooks(one)),
             Ok(Effect::Send(vec![CommandKind::RunPrepareCommit {
                 message: "draft".into(),
+            }]))
+        );
+    }
+
+    #[test]
+    fn suggesting_runs_the_transform_when_one_is_loaded_and_needs_no_hook() {
+        let loaded = HookCtx {
+            transform: true,
+            ..HookCtx::default()
+        };
+        assert_eq!(
+            Action::SuggestMessage.enabled(&Args::None, &with_hooks(loaded)),
+            Ok(())
+        );
+        assert_eq!(
+            Action::SuggestMessage.plan(&Args::None, &with_hooks(loaded)),
+            Ok(Effect::Send(vec![CommandKind::RunTransform {
+                field: "commit_message".into(),
+                current: "draft".into(),
             }]))
         );
     }

@@ -88,6 +88,7 @@ mod thread_rows;
 mod threads;
 mod threads_settings;
 mod title_bar;
+mod transform_run;
 mod view;
 mod welcome;
 mod window_chrome;

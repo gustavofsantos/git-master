@@ -67,6 +67,7 @@ use crate::theme;
 use crate::thread_dialogs::{ConfirmDialog, FieldDialog, LinkDialog};
 use crate::threads_settings::ThreadsSettingsDialog;
 use crate::title_bar;
+use crate::transform_run::{self, Field};
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
 use crate::workflow_editor;
@@ -342,6 +343,8 @@ impl StatusView {
         // Both diffs open in the saved layout (D39, D40).
         diff_pane.update(cx, |pane, cx| pane.set_layout(settings.diff_layout, cx));
         commit_diff_pane.update(cx, |pane, cx| pane.set_layout(settings.diff_layout, cx));
+        // The commit message box's focus: an empty box with something staged asks the workflows (`WF3d`).
+        let composer_focus = composer.read(cx).focus_handle(cx);
         let mut subscriptions = vec![
             cx.observe(&branch_filter, |this, filter, cx| {
                 this.on_branch_filter_changed(&filter, cx);
@@ -383,6 +386,9 @@ impl StatusView {
                     this.watch.request();
                     this.request_hook_list();
                 }
+            }),
+            cx.on_focus_in(&composer_focus, window, |this, _, cx| {
+                this.on_composer_focus(cx);
             }),
             // Also fires when the compositor answers the decoration request, so
             // the title bar appears or goes as soon as the grant is known.
@@ -554,6 +560,8 @@ impl StatusView {
         let detail_loaded = matches!(event, Event::CommitDetailLoaded { .. });
         let file_event = is_file_event(&event);
         let finished = matches!(event, Event::HookFinished { .. });
+        let transform = transform_answer(&event);
+        self.model.transforms.settle_event(&event);
         let workflow_refresh = self.on_workflow_event(&event, cx);
         let workflows_listed = matches!(event, Event::WorkflowsListed { .. });
         let remote_ended = matches!(
@@ -602,6 +610,10 @@ impl StatusView {
                 self.composer
                     .update(cx, |composer, cx| composer.set_text(&message, cx));
             }
+        }
+        // A transform's answer follows the same rule for the composer and for the branch name (`WF3d`).
+        if let Some((id, value, changed)) = transform {
+            self.on_transform_finished(id, value, changed, cx);
         }
         // A workflow's message follows the hook rule: an empty composer takes it, otherwise
         // it waits as the suggestion, which Replace and Discard answer.
@@ -897,6 +909,89 @@ impl StatusView {
         }
     }
 
+    /// The commit message box got focus (`WF3d`, D155(1)): an empty box with something staged
+    /// asks the engine once per staged state, which fires `composer.opened` and runs the
+    /// commit message transforms. Staging alone asks nothing.
+    fn on_composer_focus(&mut self, cx: &mut Context<Self>) {
+        let typed = self.composer.read(cx).text(cx);
+        let staged = self.model.status().and_then(|status| {
+            transform_run::staged_key(
+                status.branch.oid.as_deref(),
+                status
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.staged.is_some())
+                    .map(|entry| entry.path.as_str()),
+            )
+        });
+        if !self
+            .model
+            .transforms
+            .composer_opened(&typed, staged.as_deref())
+        {
+            return;
+        }
+        let id = self
+            .engine
+            .dispatch(Actor::Human, CommandKind::ComposerOpened);
+        self.model.transforms.start(id, Field::CommitMessage, typed);
+    }
+
+    /// Cancel of a transform in flight for `field` (`WF3d`): the engine stops its run and answers
+    /// with no value, so the field stays as it was and nothing is reported as an error.
+    pub(crate) fn cancel_transform(&mut self, field: Field, cx: &mut Context<Self>) {
+        if let Some(op) = self.model.transforms.cancel_target(field) {
+            self.engine
+                .dispatch(Actor::Human, CommandKind::CancelOperation { op });
+        }
+        cx.notify();
+    }
+
+    /// A transform answered (`WF3d`). The commit message goes to the composer when its text is as it
+    /// was sent and nothing changed, and otherwise waits as the hooks' suggestion, which Replace and
+    /// Discard answer. The branch name fills the New Branch dialog the same way, or waits as its
+    /// suggestion. No value does nothing.
+    fn on_transform_finished(
+        &mut self,
+        id: OperationId,
+        value: Option<String>,
+        changed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(field) = self.model.transforms.field_of(id) else {
+            return;
+        };
+        match field {
+            Field::CommitMessage => {
+                let typed = self.composer.read(cx).text(cx);
+                match self.model.transforms.finish(id, &typed, value, changed) {
+                    Some((_, Fill::Apply(text))) => self
+                        .composer
+                        .update(cx, |composer, cx| composer.set_text(&text, cx)),
+                    Some((_, Fill::Suggest(text))) => self.model.hooks.offer(text),
+                    None => {}
+                }
+            }
+            Field::BranchName => {
+                let typed = self
+                    .new_branch_dialog
+                    .as_ref()
+                    .map(|dialog| dialog.name.read(cx).text().to_owned())
+                    .unwrap_or_default();
+                let fill = self.model.transforms.finish(id, &typed, value, changed);
+                if let (Some(dialog), Some((_, fill))) = (self.new_branch_dialog.as_mut(), fill) {
+                    match fill {
+                        Fill::Apply(text) => {
+                            dialog.name.update(cx, |area, cx| area.set_text(&text, cx));
+                        }
+                        Fill::Suggest(text) => dialog.name_suggestion = Some(text),
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// Asks the engine for the manual workflows of the open repository. Nothing
     /// is asked before one is open.
     pub(crate) fn request_workflow_list(&mut self) {
@@ -921,6 +1016,7 @@ impl StatusView {
         self.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
         self.model.branches.clear();
         self.model.hooks.reset();
+        self.model.transforms.reset();
         self.model.workflows.reset();
         self.model.workflows_page.reset();
         self.request_branch_list();
@@ -1326,7 +1422,16 @@ impl StatusView {
                 CommandKind::RunPrepareCommit { message } => Some(message.clone()),
                 _ => None,
             };
+            let transform = match &kind {
+                CommandKind::RunTransform { field, current } => {
+                    Field::from_name(field).map(|field| (field, current.clone()))
+                }
+                _ => None,
+            };
             let id = self.engine.dispatch(Actor::Human, kind);
+            if let Some((field, sent)) = transform {
+                self.model.transforms.start(id, field, sent);
+            }
             if let Some((apply, index)) = applying {
                 self.model.stash_apply.start(id, apply, index);
             }
@@ -1457,6 +1562,10 @@ impl StatusView {
                     .hooks
                     .pending_approval()
                     .map(|hook| (hook.name.as_str(), hook.command_hash.as_str())),
+                transform: transform_run::loaded(
+                    self.model.workflows.listed.as_deref(),
+                    Field::CommitMessage,
+                ),
             },
             workflows: WorkflowCtx {
                 listed: self.model.workflows.listed.as_deref(),
@@ -1830,4 +1939,14 @@ fn is_file_event(event: &Event) -> bool {
             | Event::FileHighlighted { .. }
             | Event::FilesIndexed { .. }
     )
+}
+
+/// The answer of a transform operation, when the event is one (`WF3d`).
+fn transform_answer(event: &Event) -> Option<(OperationId, Option<String>, bool)> {
+    match event {
+        Event::TransformFinished {
+            id, value, changed, ..
+        } => Some((*id, value.clone(), *changed)),
+        _ => None,
+    }
 }

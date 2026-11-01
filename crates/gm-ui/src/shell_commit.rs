@@ -14,6 +14,7 @@ use crate::name_fit::{self, name_label};
 use crate::resize::{self, COMMIT};
 use crate::resize_handle::{self, Edge};
 use crate::theme;
+use crate::transform_run::{self, Field};
 use crate::view::StatusView;
 use crate::window_chrome;
 
@@ -30,6 +31,21 @@ pub(crate) fn gate_cancel_link(cx: &Context<StatusView>) -> Stateful<Div> {
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _: &MouseDownEvent, _, cx| this.cancel_gate(cx)),
+        )
+}
+
+/// The link that cancels a waiting commit message transform (`WF3d`), beside its waiting line.
+fn suggest_cancel_link(cx: &Context<StatusView>) -> Stateful<Div> {
+    div()
+        .id("suggest-cancel")
+        .flex_none()
+        .text_sm()
+        .text_color(theme::accent())
+        .cursor_pointer()
+        .child(transform_run::CANCEL)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| this.cancel_suggestion(cx)),
         )
 }
 
@@ -64,6 +80,43 @@ fn chip_button(
         )
 }
 
+/// The commit button under the message box: the dark primary button when enabled, the panel with
+/// muted text and an outline when not, so the label stays readable. A click commits.
+fn commit_button(branch: &str, enabled: bool, cx: &mut Context<StatusView>) -> Stateful<Div> {
+    let muted = theme::muted();
+    // Enabled: the dark primary button. Disabled: the panel with muted text
+    // and an outline, so the label stays readable.
+    let (button_fill, button_text, button_edge) = if enabled {
+        (theme::text(), theme::ground(), theme::text())
+    } else {
+        (theme::panel(), muted, theme::hairline_strong())
+    };
+    let full = branch.to_owned();
+    div()
+        .id("commit-button")
+        .w_full()
+        .when(name_fit::needs_hover(&full), |this| {
+            this.tooltip(window_chrome::hint(full))
+        })
+        .h(px(28.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .border_1()
+        .border_color(button_edge)
+        .bg(button_fill)
+        .text_color(button_text)
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.run_action(Action::Commit, &Args::None, window, cx);
+            }),
+        )
+        .child(commit_label(branch))
+}
+
 impl StatusView {
     /// The commit box, with its message box `height` tall. Its top edge is the
     /// strip that resizes the message box.
@@ -84,37 +137,7 @@ impl StatusView {
             .unwrap_or("detached HEAD")
             .to_owned();
         let enabled = self.commit_enabled(&text);
-        // Enabled: the dark primary button. Disabled: the panel with muted text
-        // and an outline, so the label stays readable.
-        let (button_fill, button_text, button_edge) = if enabled {
-            (theme::text(), theme::ground(), theme::text())
-        } else {
-            (theme::panel(), muted, theme::hairline_strong())
-        };
-        let full = branch.clone();
-        let button = div()
-            .id("commit-button")
-            .w_full()
-            .when(name_fit::needs_hover(&full), |this| {
-                this.tooltip(window_chrome::hint(full))
-            })
-            .h(px(28.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_md()
-            .border_1()
-            .border_color(button_edge)
-            .bg(button_fill)
-            .text_color(button_text)
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                    this.run_action(Action::Commit, &Args::None, window, cx);
-                }),
-            )
-            .child(commit_label(&branch));
+        let button = commit_button(&branch, enabled, cx);
         let height_strip = resize_handle::handle(
             "commit-height-resize",
             Edge::Top,
@@ -170,6 +193,7 @@ impl StatusView {
             .children(self.suggestion_row(cx))
             .children(self.approval_row(cx))
             .children(self.gate_line(cx))
+            .children(self.suggest_line(cx))
             .child(button)
             .child(height_strip)
     }
@@ -205,7 +229,10 @@ impl StatusView {
         }
         if in_flight {
             row = row.child(chip_button("hook-cancel", "Cancel", Action::CancelHook, cx));
-        } else if hooks.applicable().is_some_and(|count| count > 0) {
+        } else if hooks.applicable().is_some_and(|count| count > 0)
+            || transform_run::loaded(self.model.workflows.listed.as_deref(), Field::CommitMessage)
+        {
+            // A commit message transform suggests without a hook (`WF3d`).
             row = row.child(chip_button(
                 "hook-suggest",
                 "Suggest message",
@@ -231,6 +258,33 @@ impl StatusView {
                 .child(div().text_color(theme::muted()).child(gate_wait::WAITING))
                 .child(gate_cancel_link(cx))
         })
+    }
+
+    /// A commit message transform waits for its workflow (`WF3d`): a line above the button, with the
+    /// link that cancels it.
+    fn suggest_line(&self, cx: &Context<Self>) -> Option<Div> {
+        self.model.transforms.cancel_target(Field::CommitMessage)?;
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .text_color(theme::muted())
+                        .child(transform_run::WAITING),
+                )
+                .child(suggest_cancel_link(cx)),
+        )
+    }
+
+    /// Stops the transform that the message box waits for (`WF3d`).
+    pub(crate) fn cancel_suggestion(&mut self, cx: &mut Context<Self>) {
+        self.cancel_transform(Field::CommitMessage, cx);
     }
 
     /// Stops the operation that waits for its gates (`WF3c`): sends `CancelOperation` for it.

@@ -227,7 +227,7 @@ pub fn observer_failure(
 }
 
 /// The text on one line: a reason that spans lines reads as one.
-fn one_line(text: &str) -> String {
+pub(super) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

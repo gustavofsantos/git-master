@@ -40,6 +40,7 @@ use crate::stashes::StashList;
 use crate::text_search::TextSearch;
 use crate::thread_curate::{LinkPicker, Outcome as ThreadOutcome, ThreadWork};
 use crate::threads::{HitPage, MarkdownCopy, ThreadsPage};
+use crate::transform_run::Transforms;
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
 use crate::worktree_create::Creating;
@@ -88,6 +89,8 @@ pub struct Model {
     pub(crate) branch_drag: BranchDrag,
     /// The prepare-commit hooks: what is listed, the run and its suggestion.
     pub hooks: Hooks,
+    /// The transform in flight (`WF3d`): the field it fills and the text it was sent with.
+    pub transforms: Transforms,
     /// The gated operation that waits for its workflow gates now, if any (`WF3c`, D157).
     pub gate_wait: GateWait,
     /// The working-copy `ResolveConflict` the resolver sent last; its note shows the wait (`WF3c`).
@@ -1319,6 +1322,8 @@ impl Model {
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
+            // A transform's answer is the composer's or the dialog's to place (`WF3d`).
+            | Event::TransformFinished { .. }
             // The wait is kept by `gate_wait` above; each surface reads it.
             | Event::GateStarted { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
@@ -1734,7 +1739,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ThreadRelationChanged { id, .. }
         | Event::ConflictRead { id, .. }
         | Event::ConflictResolved { id, .. }
-        | Event::RecordedResolutionForgotten { id, .. } => Some(*id),
+        | Event::RecordedResolutionForgotten { id, .. }
+        | Event::TransformFinished { id, .. } => Some(*id),
         Event::ThreadsChanged
         | Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }

@@ -418,6 +418,17 @@ pub enum CommandKind {
     CancelOperation {
         op: OperationId,
     },
+    /// Runs every reviewed `transform.<field>` workflow, in file-name order, for `field`
+    /// (`commit_message` or `branch_name`), whose value so far is `current` (`WF3d`, D155). Answers
+    /// with `TransformFinished`. Human only.
+    RunTransform {
+        field: String,
+        current: String,
+    },
+    /// The empty message box of the commit composer got focus while something is staged (`WF3d`,
+    /// D155(1)): fires `composer.opened`, then runs `transform.commit_message` with nothing typed
+    /// yet. Answers with `TransformFinished`. Human only.
+    ComposerOpened,
     /// Lists the workflow files of the user's directory and of every
     /// `gitmaster.workflowPath`, with what loading each gave. Reads only; never
     /// recorded in the command log (D28).
@@ -1095,6 +1106,15 @@ pub enum Event {
     WorkflowNotice {
         run: i64,
         text: String,
+    },
+    /// The transform operation `id` ended (`WF3d`). `value` is the field's value when a transform
+    /// produced one. `changed` is true when HEAD or the staged diff moved since the command started
+    /// (`commit_message` only). A cancelled or superseded operation answers with no value.
+    TransformFinished {
+        id: OperationId,
+        field: String,
+        value: Option<String>,
+        changed: bool,
     },
     /// A `before.<operation>` gate started for the operation `id`, which waits for it (`WF3c`,
     /// D157). `workflow` is the gate's name.

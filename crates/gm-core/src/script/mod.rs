@@ -21,5 +21,6 @@ pub mod port;
 pub mod run;
 pub mod surface;
 pub mod templates;
+pub mod transforms;
 pub mod triggers;
 pub mod trust;
