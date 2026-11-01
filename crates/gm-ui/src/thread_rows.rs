@@ -571,6 +571,7 @@ mod tests {
             entries,
             edits,
             links: Vec::new(),
+            relations: Vec::new(),
             redactions: Vec::new(),
             has_more: more,
         }

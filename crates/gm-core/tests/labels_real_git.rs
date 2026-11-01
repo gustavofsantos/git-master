@@ -10,8 +10,8 @@ use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
 use gm_core::threads::store::{Batch, ThreadStore};
 use gm_schema::threads::{
-    AttachKind, Label, LabelDetail, SearchFacets, SearchGroup, SearchOrder, ThreadFilter,
-    ThreadHit, ThreadRelKind,
+    AttachKind, Label, LabelDetail, SearchFacets, SearchGroup, SearchOrder, ThreadDetail,
+    ThreadFilter, ThreadHit, ThreadRelKind,
 };
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId, OperationState};
 
@@ -578,6 +578,98 @@ fn rusqlite_subject(root: &Path, commit: &str) -> String {
         |row| row.get(0),
     )
     .unwrap()
+}
+
+/// Reads thread `uid` from its first entry, as the Threads page does when it opens a thread.
+fn read_detail(engine: &mut Engine, uid: &str) -> ThreadDetail {
+    let events = send(
+        engine,
+        &Actor::Human,
+        CommandKind::ReadThread {
+            uid: uid.into(),
+            from_seq: 0,
+            limit: 50,
+        },
+    );
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::ThreadRead { detail, .. } => Some(detail.clone()),
+            _ => None,
+        })
+        .expect("a thread read")
+}
+
+#[test]
+fn a_thread_detail_carries_its_links_with_direction_kind_and_origin() {
+    let repo = repo();
+    let a = thread(&repo.root, "a");
+    let b = thread(&repo.root, "b");
+    let c = thread(&repo.root, "c");
+    let mut engine = engine_on(&repo.root);
+    let linked = send(
+        &mut engine,
+        &agent(),
+        CommandKind::LinkThreads {
+            from: a.clone(),
+            to: b.clone(),
+            kind: ThreadRelKind::Continues,
+        },
+    );
+    assert_eq!(state_of(&linked), OperationState::Done);
+    let by_human = send(
+        &mut engine,
+        &Actor::Human,
+        CommandKind::LinkThreads {
+            from: c.clone(),
+            to: a.clone(),
+            kind: ThreadRelKind::Relates,
+        },
+    );
+    assert_eq!(state_of(&by_human), OperationState::Done);
+
+    // The thread that continues the other one: the link points out of it, and the agent made it.
+    let from_a = read_detail(&mut engine, &a);
+    assert_eq!(from_a.relations.len(), 2, "{:?}", from_a.relations);
+    let continues = from_a
+        .relations
+        .iter()
+        .find(|relation| relation.kind == ThreadRelKind::Continues)
+        .expect("the continues link");
+    assert_eq!(continues.from, a);
+    assert_eq!(continues.to, b);
+    assert_eq!(continues.origin, "agent:claude-code");
+    assert!(continues.at > 0);
+
+    // The same link read from the other end points in: the thread is continued by `a`.
+    let from_b = read_detail(&mut engine, &b);
+    assert_eq!(from_b.relations.len(), 1, "{:?}", from_b.relations);
+    assert_eq!(from_b.relations[0].from, a);
+    assert_eq!(from_b.relations[0].to, b);
+    assert_eq!(from_b.relations[0].kind, ThreadRelKind::Continues);
+    assert_eq!(from_b.relations[0].origin, "agent:claude-code");
+
+    // A link a human made to `a` points in, and is marked as the human's.
+    let relates = from_a
+        .relations
+        .iter()
+        .find(|relation| relation.kind == ThreadRelKind::Relates)
+        .expect("the relates link");
+    assert_eq!(relates.from, c);
+    assert_eq!(relates.to, a);
+    assert_eq!(relates.origin, "human");
+
+    let removed = send(
+        &mut engine,
+        &Actor::Human,
+        CommandKind::RemoveThreadRelation {
+            from: a.clone(),
+            to: b.clone(),
+            kind: ThreadRelKind::Continues,
+        },
+    );
+    assert_eq!(state_of(&removed), OperationState::Done);
+    assert!(read_detail(&mut engine, &b).relations.is_empty());
 }
 
 #[test]

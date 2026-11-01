@@ -36,7 +36,7 @@ use crate::stash_apply::Applying;
 use crate::stash_drop::Dropping;
 use crate::stashes::StashList;
 use crate::text_search::TextSearch;
-use crate::thread_curate::{LinkPicker, Outcome as ThreadOutcome, ThreadRelations, ThreadWork};
+use crate::thread_curate::{LinkPicker, Outcome as ThreadOutcome, ThreadWork};
 use crate::threads::{HitPage, MarkdownCopy, ThreadsPage};
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
@@ -120,8 +120,6 @@ pub struct Model {
     pub commit_threads: CommitThreads,
     /// The Link to Thread picker's threads and choice, while its dialog is open (D143).
     pub link_picker: LinkPicker,
-    /// The threads linked to the selected thread, by kind, read read-only (D143).
-    pub relations: ThreadRelations,
     /// The Labels page: the labels, the filter and the selected label's attachments (P4).
     pub labels: LabelsPage,
     /// The copy of a thread as Markdown in flight, and its outcome for the window (T6).
@@ -795,12 +793,6 @@ impl Model {
                 self.link_picker.ended(id);
                 None
             }
-            Event::OperationChanged { id, state, .. }
-                if self.relations.owns(id) && state.is_terminal() =>
-            {
-                self.relations.ended(id);
-                None
-            }
             // A label read that failed is shown on the Labels page; a cancelled one simply ends (P4).
             Event::OperationChanged {
                 id, state, detail, ..
@@ -986,8 +978,6 @@ impl Model {
             Event::ThreadsListed { id, threads, total } => {
                 if self.link_picker.owns(id) {
                     self.link_picker.listed(id, threads);
-                } else if self.relations.owns(id) {
-                    self.relations.listed(id, threads);
                 } else if self.commit_threads.owns(id) {
                     self.commit_threads.listed(id, threads);
                 } else {
@@ -1376,7 +1366,6 @@ impl Model {
         self.threads = ThreadsPage::default();
         self.commit_threads = CommitThreads::default();
         self.link_picker = LinkPicker::default();
-        self.relations = ThreadRelations::default();
         self.labels = LabelsPage::default();
         self.thread_copy = MarkdownCopy::default();
         self.quick_open = QuickOpen::default();

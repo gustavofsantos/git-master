@@ -866,6 +866,13 @@ impl ThreadsPage {
         Some(detail_request(uid, from_seq, ENTRY_PAGE, Place::Replace))
     }
 
+    /// The read that brings the selected thread's first page up to date, after one of its links
+    /// changed (D143). It replaces the page shown. None when no thread is selected.
+    pub fn plan_reread(&mut self) -> Option<Request> {
+        let uid = self.selected.clone()?;
+        Some(detail_request(&uid, 0, ENTRY_PAGE, Place::Replace))
+    }
+
     /// Drops what the page shows of the selected thread, not the selection itself.
     fn clear_selection(&mut self) {
         self.detail = None;
@@ -2027,6 +2034,7 @@ mod tests {
             entries,
             edits,
             links: Vec::<ThreadLink>::new(),
+            relations: Vec::new(),
             redactions: Vec::new(),
             has_more: more,
         }

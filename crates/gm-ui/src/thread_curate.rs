@@ -517,6 +517,20 @@ pub(crate) fn kind_label(kind: ThreadRelKind) -> &'static str {
     }
 }
 
+/// The words of a link as the thread shown reads it (D143). `outgoing` is true when the thread
+/// shown is the `from` end of the link. `Relates` has no order, so each side says it relates.
+#[must_use]
+pub(crate) fn relation_phrase(kind: ThreadRelKind, outgoing: bool) -> &'static str {
+    match (kind, outgoing) {
+        (ThreadRelKind::Continues, true) => "Continues",
+        (ThreadRelKind::Continues, false) => "Continued by",
+        (ThreadRelKind::Relates, true) => "Relates to",
+        (ThreadRelKind::Relates, false) => "Related by",
+        (ThreadRelKind::Supersedes, true) => "Supersedes",
+        (ThreadRelKind::Supersedes, false) => "Superseded by",
+    }
+}
+
 /// The state of the Link to Thread picker (D143): the thread it links from, the threads
 /// the store lists (the thread itself left out), the target chosen and the kind. The read of
 /// the threads is answered by `pending`; the model routes that answer here.
@@ -647,93 +661,6 @@ impl LinkPicker {
             to,
             kind: self.kind,
         })
-    }
-}
-
-/// The most threads per kind the relations of the selected thread read (D143).
-pub(crate) const RELATION_LIMIT: u32 = 50;
-
-/// The threads linked to the selected thread, by kind (D143). Each kind is one `ListThreads`
-/// read with `related_to` and `related_kind`, so a row has the other thread's kind and title.
-/// The listing does not give the link's direction or who made it: `ThreadRelation` is on no
-/// read yet, so these rows are read-only and carry no Remove.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ThreadRelations {
-    uid: Option<String>,
-    pending: Vec<(OperationId, ThreadRelKind)>,
-    rows: Vec<(ThreadRelKind, ThreadSummary)>,
-}
-
-impl ThreadRelations {
-    /// The reads of thread `uid`, one per kind of link, in the order of `LINK_KINDS`.
-    #[must_use]
-    pub(crate) fn plan(uid: &str) -> Vec<(ThreadRelKind, CommandKind)> {
-        LINK_KINDS
-            .iter()
-            .map(|kind| {
-                (
-                    *kind,
-                    CommandKind::ListThreads {
-                        filter: ThreadFilter {
-                            related_to: Some(uid.to_owned()),
-                            related_kind: Some(*kind),
-                            ..ThreadFilter::default()
-                        },
-                        before_at: None,
-                        before_uid: None,
-                        limit: RELATION_LIMIT,
-                    },
-                )
-            })
-            .collect()
-    }
-
-    /// Forgets the rows and the reads of the thread shown, and takes `uid` as the thread shown.
-    pub(crate) fn reset(&mut self, uid: &str) {
-        *self = Self {
-            uid: Some(uid.to_owned()),
-            ..Self::default()
-        };
-    }
-
-    /// Notes a read of `kind` in flight, answered by `id`.
-    pub(crate) fn sent(&mut self, id: OperationId, kind: ThreadRelKind) {
-        self.pending.push((id, kind));
-    }
-
-    /// Whether `id` is one of the reads in flight.
-    #[must_use]
-    pub(crate) fn owns(&self, id: OperationId) -> bool {
-        self.pending.iter().any(|(pending, _)| *pending == id)
-    }
-
-    /// Keeps the answer to a read in flight: the rows of its kind are replaced. Returns false for any other.
-    pub(crate) fn listed(&mut self, id: OperationId, threads: Vec<ThreadSummary>) -> bool {
-        let Some(index) = self.pending.iter().position(|(pending, _)| *pending == id) else {
-            return false;
-        };
-        let (_, kind) = self.pending.remove(index);
-        self.rows.retain(|(known, _)| *known != kind);
-        self.rows
-            .extend(threads.into_iter().map(|thread| (kind, thread)));
-        true
-    }
-
-    /// The read `id` ended without an answer: it is no longer in flight.
-    pub(crate) fn ended(&mut self, id: OperationId) {
-        self.pending.retain(|(pending, _)| *pending != id);
-    }
-
-    /// The thread the rows belong to.
-    #[must_use]
-    pub(crate) fn uid(&self) -> Option<&str> {
-        self.uid.as_deref()
-    }
-
-    /// The linked threads, by kind, in the order the reads answered.
-    #[must_use]
-    pub(crate) fn rows(&self) -> &[(ThreadRelKind, ThreadSummary)] {
-        &self.rows
     }
 }
 
@@ -1220,55 +1147,21 @@ mod tests {
     }
 
     #[test]
-    fn the_relation_reads_are_one_per_kind_for_the_thread_shown() {
-        let plan = ThreadRelations::plan("me");
-        let kinds: Vec<ThreadRelKind> = plan.iter().map(|(kind, _)| *kind).collect();
-        assert_eq!(kinds, LINK_KINDS.to_vec());
-        for (kind, command) in plan {
-            assert_eq!(
-                command,
-                CommandKind::ListThreads {
-                    filter: ThreadFilter {
-                        related_to: Some("me".to_owned()),
-                        related_kind: Some(kind),
-                        ..ThreadFilter::default()
-                    },
-                    before_at: None,
-                    before_uid: None,
-                    limit: RELATION_LIMIT,
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn a_kind_answer_replaces_only_its_own_rows_and_a_stale_one_is_dropped() {
-        let mut relations = ThreadRelations::default();
-        relations.reset("me");
-        relations.sent(OperationId(1), ThreadRelKind::Continues);
-        relations.sent(OperationId(2), ThreadRelKind::Relates);
-        assert!(relations.owns(OperationId(2)));
-        assert!(relations.listed(OperationId(1), vec![picked("a", "A")]));
-        assert!(relations.listed(OperationId(2), vec![picked("b", "B")]));
-        assert!(!relations.listed(OperationId(2), vec![picked("c", "C")]));
-        assert_eq!(relations.uid(), Some("me"));
-        let shown: Vec<(&str, ThreadRelKind)> = relations
-            .rows()
-            .iter()
-            .map(|(kind, thread)| (thread.uid.as_str(), *kind))
-            .collect();
+    fn each_link_kind_reads_one_way_from_each_end() {
+        assert_eq!(relation_phrase(ThreadRelKind::Continues, true), "Continues");
         assert_eq!(
-            shown,
-            vec![
-                ("a", ThreadRelKind::Continues),
-                ("b", ThreadRelKind::Relates)
-            ]
+            relation_phrase(ThreadRelKind::Continues, false),
+            "Continued by"
         );
-        relations.sent(OperationId(3), ThreadRelKind::Continues);
-        relations.ended(OperationId(3));
-        assert!(!relations.owns(OperationId(3)));
-        relations.reset("other");
-        assert!(relations.rows().is_empty());
-        assert_eq!(relations.uid(), Some("other"));
+        assert_eq!(relation_phrase(ThreadRelKind::Relates, true), "Relates to");
+        assert_eq!(relation_phrase(ThreadRelKind::Relates, false), "Related by");
+        assert_eq!(
+            relation_phrase(ThreadRelKind::Supersedes, true),
+            "Supersedes"
+        );
+        assert_eq!(
+            relation_phrase(ThreadRelKind::Supersedes, false),
+            "Superseded by"
+        );
     }
 }

@@ -476,6 +476,10 @@ pub struct ThreadDetail {
     pub entries: Vec<ThreadEntry>,
     pub edits: Vec<ThreadEdit>,
     pub links: Vec<ThreadLink>,
+    /// The thread-to-thread links in either direction, newest first, at most 50 (D143). Each
+    /// names both ends by uid, so `from` tells the direction of the link.
+    #[serde(default)]
+    pub relations: Vec<ThreadRelation>,
     /// Redaction pattern name and how many times it fired.
     pub redactions: Vec<(String, u32)>,
     /// True when more entries follow `from_seq + limit`.

@@ -19,7 +19,7 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 
 use super::harness;
-use super::labels::rel_kind_text;
+use super::labels::{DETAIL_RELATIONS, rel_kind_text};
 use super::provenance::EditRow;
 use super::query::{
     MIN_FUZZY_CHARS, TrigramQuery, build_fts_query, build_trigram_queries, dice, is_word_char,
@@ -1252,11 +1252,14 @@ impl ThreadStore {
                 .collect::<rusqlite::Result<Vec<(String, u32)>>>()?
         };
 
+        let relations = self.thread_relation_rows(uid, DETAIL_RELATIONS)?;
+
         Ok(ThreadDetail {
             summary,
             entries,
             edits,
             links,
+            relations,
             redactions,
             has_more,
         })

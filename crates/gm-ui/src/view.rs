@@ -542,6 +542,7 @@ impl StatusView {
         let listed = matches!(event, Event::BranchesLoaded { .. });
         let stashes_listed = matches!(event, Event::StashesListed { .. });
         let threads_flags = shell_threads::follow_flags(&event);
+        let relation_changed = shell_threads::changed_relation(&event);
         let labels_changed = shell_labels::follows_change(&event);
         let review_listed = matches!(event, Event::ReviewCommentsListed { .. });
         let stash_stale = stashes::is_stale_refusal(&event);
@@ -573,6 +574,7 @@ impl StatusView {
             self.request_stash_list();
         }
         self.follow_threads(threads_flags, reload, cx);
+        self.follow_relation(relation_changed.as_ref());
         self.follow_labels(labels_changed);
         if detail_loaded {
             self.show_commit_texts(cx);

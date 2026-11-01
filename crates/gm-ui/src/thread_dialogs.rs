@@ -424,11 +424,8 @@ impl StatusView {
             Outcome::Done(work) => {
                 match work {
                     Work::Field(_) => self.thread_field = None,
-                    Work::Link => {
-                        self.thread_link = None;
-                        // The new link is listed with the thread's others.
-                        self.sync_thread_relations(true);
-                    }
+                    // The new link is read back with the thread's detail when the engine answers.
+                    Work::Link => self.thread_link = None,
                     Work::Delete | Work::DeleteEntry | Work::Scrub => self.thread_confirm = None,
                 }
                 self.list_focus.focus(window);

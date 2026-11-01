@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use gm_schema::{
     Actor, CommandKind, Event, Label, LinkKind, LinkOrigin, ThreadDetail, ThreadHit, ThreadLink,
-    ThreadSummary,
+    ThreadRelKind, ThreadRelation, ThreadSummary,
 };
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity, FontWeight,
@@ -22,6 +22,7 @@ use gpui::{
 use crate::action_registry::{Action, Args, ThreadRef, thread_args};
 use crate::commit_threads;
 use crate::icon::{self, Icon};
+use crate::labels_page;
 use crate::resize::{self};
 use crate::resize_handle::{self, Edge};
 use crate::shell_history::{action_button, now_secs};
@@ -259,7 +260,6 @@ impl StatusView {
     /// After a thread's entries are shown: the states of its edits are read, and
     /// the entries of a search hit are read on until the hit's entry is loaded.
     pub(crate) fn after_thread_read(&mut self) {
-        self.sync_thread_relations(false);
         for request in self.model.threads.plan_edit_states() {
             self.send_threads(request);
         }
@@ -270,19 +270,19 @@ impl StatusView {
         }
     }
 
-    /// Reads the threads linked to the thread shown, once for each thread (D143). `force` reads
-    /// them again for the same thread, after a link was made here.
-    pub(crate) fn sync_thread_relations(&mut self, force: bool) {
-        let Some(uid) = self.model.threads.selected().map(str::to_owned) else {
+    /// Reads the selected thread again after one of its links changed, so its detail lists the
+    /// change (D143). A link between other threads leaves the page as it is.
+    pub(crate) fn follow_relation(&mut self, relation: Option<&ThreadRelation>) {
+        let Some(relation) = relation else {
             return;
         };
-        if !force && self.model.relations.uid() == Some(uid.as_str()) {
-            return;
-        }
-        self.model.relations.reset(&uid);
-        for (kind, command) in curate::ThreadRelations::plan(&uid) {
-            let id = self.engine.dispatch(Actor::Human, command);
-            self.model.relations.sent(id, kind);
+        let touches = self
+            .model
+            .threads
+            .selected()
+            .is_some_and(|uid| relation.from == uid || relation.to == uid);
+        if touches && let Some(request) = self.model.threads.plan_reread() {
+            self.send_threads(request);
         }
     }
 
@@ -294,40 +294,120 @@ impl StatusView {
         cx.notify();
     }
 
-    /// The linked threads of the thread shown, one row each: the kind, then the title. A click
-    /// opens that thread. Nothing when the thread has none, or while they are read.
-    fn relation_rows(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let rows = self.model.relations.rows();
-        // Rows of the thread shown before this one are not its links, so they are not drawn.
-        if rows.is_empty() || self.model.threads.selected() != self.model.relations.uid() {
+    /// Sends the engine a Remove of the link `from` to `to` of `kind`, made by a person. The
+    /// answer re-reads the thread (see `follow_relation`).
+    fn remove_thread_relation(
+        &mut self,
+        from: String,
+        to: String,
+        kind: ThreadRelKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.engine.dispatch(
+            Actor::Human,
+            CommandKind::RemoveThreadRelation { from, to, kind },
+        );
+        cx.notify();
+    }
+
+    /// The links of the thread shown, one row each (D143). A row says what the link means from
+    /// this thread's side, names the other thread, and shows the agent that made the link when
+    /// one did. A click opens the other thread; Remove is always shown for an agent's link and on
+    /// hover for a person's. Nothing when the thread has no links.
+    fn relation_rows(&self, detail: &ThreadDetail, cx: &mut Context<Self>) -> Option<Div> {
+        if detail.relations.is_empty() {
             return None;
         }
+        let shown = detail.summary.uid.as_str();
         Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .text_xs()
-                .children(rows.iter().enumerate().map(|(index, (kind, thread))| {
-                    let uid = thread.uid.clone();
-                    div()
-                        .id(("thread-relation", index))
-                        .cursor_pointer()
-                        .min_w(px(0.))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_color(theme::muted())
-                        .child(format!(
-                            "{} · {}",
-                            curate::kind_label(*kind),
-                            threads::title(thread)
-                        ))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.open_related_thread(&uid, cx);
-                        }))
-                })),
+            div().flex().flex_col().gap_0p5().text_xs().children(
+                detail
+                    .relations
+                    .iter()
+                    .enumerate()
+                    .map(|(index, relation)| {
+                        let outgoing = relation.from == shown;
+                        let other = if outgoing {
+                            relation.to.as_str()
+                        } else {
+                            relation.from.as_str()
+                        };
+                        let title = self
+                            .model
+                            .threads
+                            .threads()
+                            .iter()
+                            .find(|summary| summary.uid == other)
+                            .map_or_else(|| short_uid(other), threads::title);
+                        Self::relation_row(index, relation, outgoing, other.to_owned(), &title, cx)
+                    }),
+            ),
         )
+    }
+
+    /// One link row of the thread shown. See `relation_rows`.
+    fn relation_row(
+        index: usize,
+        relation: &ThreadRelation,
+        outgoing: bool,
+        other: String,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let group = format!("thread-relation-{index}");
+        let (origin, agent) = labels_page::origin_text(&relation.origin);
+        let text = format!(
+            "{} · {title}",
+            curate::relation_phrase(relation.kind, outgoing)
+        );
+        let open = other;
+        let read = div()
+            .id(("thread-relation", index))
+            .flex_1()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .cursor_pointer()
+            .text_color(theme::muted())
+            .child(text)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.open_related_thread(&open, cx);
+            }));
+        let remove = div()
+            .id(("thread-relation-remove", index))
+            .flex_none()
+            .px_1()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_color(theme::muted())
+            .child("Remove");
+        let remove = if agent {
+            remove
+        } else {
+            remove
+                .invisible()
+                .group_hover(group.clone(), gpui::Styled::visible)
+        };
+        let (from, to, kind) = (relation.from.clone(), relation.to.clone(), relation.kind);
+        let remove = remove.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                // The row beside the button opens its thread; a Remove must not.
+                cx.stop_propagation();
+                this.remove_thread_relation(from.clone(), to.clone(), kind, cx);
+            }),
+        );
+        div()
+            .group(group)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .min_w(px(0.))
+            .child(read)
+            .children(agent.then(|| chip(origin)))
+            .child(remove)
     }
 
     /// The box changed: the model takes the new text, and the search runs after a pause.
@@ -708,7 +788,7 @@ impl StatusView {
             .gap_0p5()
             .child(first)
             .child(second)
-            .children(self.relation_rows(cx))
+            .children(self.relation_rows(detail, cx))
     }
 
     /// The chips of the header's second line: the commits and the files, which open the
@@ -2203,6 +2283,21 @@ fn chip_toggle(
 
 /// The characters of a commit id a link row shows.
 const COMMIT_CHARS: usize = 12;
+/// The characters of a thread uid a link row shows when the thread is not in the list.
+const UID_CHARS: usize = 8;
+
+/// The start of a thread uid, for a link to a thread the list does not hold.
+fn short_uid(uid: &str) -> String {
+    uid.chars().take(UID_CHARS).collect()
+}
+
+/// The link an answer to a link change carries, so the thread shown can be read again.
+pub(crate) fn changed_relation(event: &Event) -> Option<ThreadRelation> {
+    match event {
+        Event::ThreadRelationChanged { relation, .. } => Some(relation.clone()),
+        _ => None,
+    }
+}
 
 /// Which of the engine's events the Threads page follows: a changed thread database,
 /// an answer with a thread's entries, and an answer with a page of the list.

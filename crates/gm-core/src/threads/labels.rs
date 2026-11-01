@@ -15,6 +15,8 @@ use crate::CommitSnapshot;
 pub const NAME_CHARS: usize = 64;
 /// Characters of a label description.
 pub const DESCRIPTION_CHARS: usize = 500;
+/// Thread links a thread detail carries, newest first (D143).
+pub const DETAIL_RELATIONS: u32 = 50;
 
 /// The label's columns, in the order `label_row` reads them. `attachments` counts every kind.
 const LABEL_COLUMNS: &str = "l.id, l.name, l.description, l.color, l.origin, l.created_at,
@@ -342,6 +344,44 @@ impl ThreadStore {
         let rows = statement
             .query_map(params![uid, i64::from(limit)], |row| {
                 Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The thread-to-thread links of thread `uid` in either direction as whole rows, newest first,
+    /// at most `limit` (D143). Both ends are uids, so the detail of a thread can say which way each
+    /// link points and who made it.
+    pub fn thread_relation_rows(
+        &self,
+        uid: &str,
+        limit: u32,
+    ) -> Result<Vec<ThreadRelation>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT f.uid, o.uid, r.kind, r.origin, r.at
+             FROM thread_rel r
+             JOIN thread f ON f.id = r.from_thread
+             JOIN thread o ON o.id = r.to_thread
+             WHERE f.uid = ?1 OR o.uid = ?1
+             ORDER BY r.at DESC, f.uid, o.uid, r.kind LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(params![uid, i64::from(limit)], |row| {
+                let kind: String = row.get(2)?;
+                let parsed = parse_rel_kind(&kind).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        format!("unknown relation kind {kind:?}").into(),
+                    )
+                })?;
+                Ok(ThreadRelation {
+                    from: row.get(0)?,
+                    to: row.get(1)?,
+                    kind: parsed,
+                    origin: row.get(3)?,
+                    at: row.get(4)?,
+                })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
