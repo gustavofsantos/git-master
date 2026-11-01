@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde_json::{Map, json};
 
+use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, DirListing, Event, FileBody,
     FileView, GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED, MergedBranch,
@@ -14,6 +15,7 @@ use gm_schema::{
 };
 
 use crate::GitPort;
+use crate::blame::BlameLine;
 use crate::branch;
 use crate::commit_detail::{DetailJob, DetailReport};
 use crate::commit_diff::{StackJob, StackReport};
@@ -47,7 +49,7 @@ use crate::script_session::{self, EffectRequest, ScriptLink, ScriptSession};
 use crate::stack_session;
 use crate::syntax;
 use crate::threads::config;
-use crate::threads_session::{self, ThreadsSession};
+use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSession};
 use crate::workflow_session;
 use crate::worktree;
 
@@ -107,6 +109,10 @@ pub struct Engine {
     text_search: Option<ActiveDetail>,
     /// Text searches accepted since the last call; see `take_text_jobs`.
     text_jobs: Vec<TextJob>,
+    /// The blame of the provenance read in flight (D144), if any.
+    provenance: Option<ActiveDetail>,
+    /// Provenance reads accepted since the last call; see `take_provenance_jobs`.
+    provenance_jobs: Vec<ProvenanceJob>,
     /// The remote operation in flight, if any. Only one runs at a time.
     remote: Option<ActiveRemote>,
     /// Remote operations accepted since the last call; see `take_remote_jobs`.
@@ -222,6 +228,8 @@ impl Engine {
             highlight_jobs: Vec::new(),
             text_search: None,
             text_jobs: Vec::new(),
+            provenance: None,
+            provenance_jobs: Vec::new(),
             remote: None,
             remote_jobs: Vec::new(),
             workflow_user_dir: loader::default_user_dir(),
@@ -285,6 +293,12 @@ impl Engine {
     /// thread and passes its report to `text_report`.
     pub fn take_text_jobs(&mut self) -> Vec<TextJob> {
         std::mem::take(&mut self.text_jobs)
+    }
+
+    /// The provenance reads accepted since the last call (D144). The caller runs each job on
+    /// a thread of its own and passes its report back to `provenance_report`.
+    pub fn take_provenance_jobs(&mut self) -> Vec<ProvenanceJob> {
+        std::mem::take(&mut self.provenance_jobs)
     }
 
     /// The file reads accepted since the last call. The caller runs each on a
@@ -546,6 +560,50 @@ impl Engine {
             },
             other => {
                 self.text_search = other;
+                Vec::new()
+            }
+        }
+    }
+
+    /// Turns the blame of a provenance read into its answer (D144). A report for a read that was
+    /// superseded, or for a repository that was left, is dropped.
+    pub fn provenance_report(&mut self, report: ProvenanceReport) -> Vec<Event> {
+        match self.provenance.take() {
+            Some(active) if active.op.id == report.id => {
+                let CommandKind::ReadProvenance {
+                    path,
+                    from_line,
+                    to_line,
+                } = &active.op.kind
+                else {
+                    return vec![Self::operation_changed(
+                        &active.op,
+                        OperationState::Failed,
+                        None,
+                    )];
+                };
+                let answer = report
+                    .lines
+                    .and_then(|lines| self.provenance_answer(path, *from_line, *to_line, &lines));
+                match answer {
+                    Ok(provenance) => vec![
+                        Self::operation_changed(&active.op, OperationState::Done, None),
+                        Event::ThreadProvenance {
+                            id: report.id,
+                            provenance,
+                        },
+                    ],
+                    Err(message) => {
+                        vec![Self::operation_changed(
+                            &active.op,
+                            OperationState::Failed,
+                            Some(message),
+                        )]
+                    }
+                }
+            }
+            other => {
+                self.provenance = other;
                 Vec::new()
             }
         }
@@ -825,6 +883,11 @@ impl Engine {
                 options,
                 paths,
             } => self.start_text_search(id, actor, kind, query, *options, paths),
+            CommandKind::ReadProvenance {
+                path,
+                from_line,
+                to_line,
+            } => self.start_provenance(id, actor, kind, path, *from_line, *to_line),
             _ => return None,
         })
     }
@@ -1404,6 +1467,71 @@ impl Engine {
         Ok(superseded)
     }
 
+    /// Starts the blame of a provenance read (D144). A read in flight is superseded: it is
+    /// stopped and cancelled. A request the rules refuse is refused before anything is
+    /// cancelled. Returns the events of the cancellation.
+    fn start_provenance(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        path: &str,
+        from: u32,
+        to: u32,
+    ) -> Result<Vec<Event>, String> {
+        threads_session::check_provenance(path, from, to)?;
+        let root = self.open_root()?;
+        let read = self
+            .git
+            .blame_lines(&root, path, from, to)
+            .map_err(|e| e.0)?;
+        let superseded = self.drop_provenance();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.provenance = Some(ActiveDetail {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            stop: Arc::clone(&stop),
+        });
+        self.provenance_jobs.push(ProvenanceJob { id, read, stop });
+        Ok(superseded)
+    }
+
+    /// Ends the provenance read: it is stopped, and a request in flight is cancelled.
+    fn drop_provenance(&mut self) -> Vec<Event> {
+        let Some(active) = self.provenance.take() else {
+            return Vec::new();
+        };
+        active.stop.store(true, Ordering::SeqCst);
+        vec![Self::operation_changed(
+            &active.op,
+            OperationState::Cancelled,
+            None,
+        )]
+    }
+
+    /// Answers a provenance read from the lines blame gave (D144): the threads, read from the
+    /// store of the open repository.
+    fn provenance_answer(
+        &mut self,
+        path: &str,
+        from: u32,
+        to: u32,
+        lines: &[BlameLine],
+    ) -> Result<ProvenanceResult, String> {
+        let root = self.open_root()?;
+        let settings = config::settings_path();
+        let store = threads_session::store(&mut self.threads, self.git.as_ref(), &root)?;
+        let ctx = threads_session::Context {
+            git: self.git.as_ref(),
+            root: &root,
+            settings: settings.as_deref(),
+        };
+        threads_session::provenance_from_lines(store, &ctx, path, from, to, lines)
+    }
+
     /// Ends the text search: it is stopped, and a request in flight is cancelled.
     fn drop_text_search(&mut self) -> Vec<Event> {
         let Some(active) = self.text_search.take() else {
@@ -1480,6 +1608,16 @@ impl Engine {
             kind: active.kind.clone(),
             state,
         });
+        Self::operation_changed(active, state, detail)
+    }
+
+    /// The event that ends an operation, without a log entry. A read ends this way: reads are
+    /// not in the command log (D28, D144).
+    fn operation_changed(
+        active: &ActiveHistory,
+        state: OperationState,
+        detail: Option<String>,
+    ) -> Event {
         Event::OperationChanged {
             id: active.id,
             actor: active.actor.clone(),
@@ -2088,6 +2226,7 @@ impl Engine {
         events.extend(self.drop_detail());
         events.extend(self.drop_stack());
         events.extend(self.drop_files());
+        events.extend(self.drop_provenance());
         self.root = Some(root);
         Ok(events)
     }

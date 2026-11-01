@@ -227,8 +227,9 @@ fn done(events: &[Event]) -> bool {
 }
 
 /// Asks why lines `from` to `to` of `path` are as they are, as an agent (reads are open to it).
+/// The blame runs as a job, as the runner runs it: the answer comes when the job reports back.
 fn explain(engine: &mut Engine, path: &str, from: u32, to: u32) -> ProvenanceResult {
-    let events = engine.handle(
+    let started = engine.handle(
         OperationId(9),
         &Command {
             actor: Actor::Agent {
@@ -241,6 +242,9 @@ fn explain(engine: &mut Engine, path: &str, from: u32, to: u32) -> ProvenanceRes
             },
         },
     );
+    assert!(!done(&started), "the read answers later, not in the call");
+    let job = engine.take_provenance_jobs().pop().expect("a blame job");
+    let events = engine.provenance_report(job.run());
     assert!(done(&events), "read failed: {events:?}");
     events
         .iter()
@@ -757,4 +761,76 @@ fn bad_paths_and_ranges_are_refused() {
         );
         assert!(!done(&events), "{path} {from} {to} must be refused");
     }
+}
+
+fn ask(path: &str, from: u32, to: u32) -> Command {
+    Command {
+        actor: Actor::Human,
+        kind: CommandKind::ReadProvenance {
+            path: path.into(),
+            from_line: from,
+            to_line: to,
+        },
+    }
+}
+
+fn is_state(events: &[Event], id: u64, wanted: OperationState) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            Event::OperationChanged { id: got, state, .. }
+                if *got == OperationId(id) && *state == wanted
+        )
+    })
+}
+
+#[test]
+fn a_newer_read_cancels_the_blame_in_flight_and_its_answer_is_dropped() {
+    let repo = repo();
+    commit_file(&repo.root, "src/lib.rs", &body(&BODY), FIRST, "add compute");
+    let mut engine = engine_on(&repo.root);
+    engine.handle(OperationId(3), &ask("src/lib.rs", 1, 5));
+
+    let superseding = engine.handle(OperationId(4), &ask("src/lib.rs", 1, 3));
+
+    assert!(is_state(&superseding, 3, OperationState::Cancelled));
+    let mut jobs = engine.take_provenance_jobs().into_iter();
+    let stale = jobs.next().expect("the stale blame");
+    assert!(
+        stale.stop.load(std::sync::atomic::Ordering::SeqCst),
+        "the stale blame must be stopped"
+    );
+    assert!(
+        engine.provenance_report(stale.run()).is_empty(),
+        "a cancelled read answers nothing"
+    );
+    let current = jobs.next().expect("the current blame");
+    let events = engine.provenance_report(current.run());
+    assert!(is_state(&events, 4, OperationState::Done));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::ThreadProvenance { id: OperationId(4), provenance } if provenance.to_line == 3
+    )));
+}
+
+#[test]
+fn leaving_the_repository_cancels_the_blame_in_flight() {
+    let repo = repo();
+    commit_file(&repo.root, "src/lib.rs", &body(&BODY), FIRST, "add compute");
+    let mut engine = engine_on(&repo.root);
+    engine.handle(OperationId(3), &ask("src/lib.rs", 1, 5));
+    let job = engine.take_provenance_jobs().pop().expect("a blame job");
+
+    let reopened = engine.handle(
+        OperationId(5),
+        &Command {
+            actor: Actor::Human,
+            kind: CommandKind::OpenRepo {
+                path: repo.root.to_string_lossy().into_owned(),
+            },
+        },
+    );
+
+    assert!(is_state(&reopened, 3, OperationState::Cancelled));
+    assert!(engine.provenance_report(job.run()).is_empty());
 }

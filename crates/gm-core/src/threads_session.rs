@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use gm_schema::threads::{
@@ -14,13 +15,14 @@ use gm_schema::threads::{
 };
 use gm_schema::{CommandKind, Event, OperationId};
 
-use crate::GitPort;
+use crate::blame::BlameLine;
 use crate::threads::config::ThreadsConfig;
 use crate::threads::provenance::{
     self, COMMIT_LIMIT, CONTEXT, EDIT_LIMIT, EditFact, Owner, THREAD_LIMIT, Verdict,
 };
 use crate::threads::redact::Redactor;
 use crate::threads::store::{MetaUpdate, SearchRequest, StoreError, ThreadStore};
+use crate::{BlameRead, GitPort};
 
 /// The most rows one read returns; a larger `limit` is cut to this.
 pub(crate) const MAX_PAGE: u32 = 500;
@@ -161,11 +163,6 @@ pub(crate) fn run(
                 .map_err(|e| named(e, THREAD_MISSING))?;
             Ok(vec![Event::ThreadRead { id, detail }])
         }
-        CommandKind::ReadProvenance {
-            path,
-            from_line,
-            to_line,
-        } => provenance_of(id, store, ctx, path, *from_line, *to_line),
         CommandKind::ReadThreadEdit { id: edit_id } => {
             let edit = store
                 .read_edit(*edit_id)
@@ -192,25 +189,47 @@ pub(crate) fn run(
     }
 }
 
-/// Explains lines `from` to `to` of `path` (D144): blame gives the commits, each commit the
-/// threads linked to it and the edits that match its lines, each edit the entries around it.
-/// The bounds are the rules' (`provenance`), and a cut result says what it cut.
-fn provenance_of(
-    id: OperationId,
-    store: &ThreadStore,
+/// Checks a provenance request before anything is read (D144).
+pub(crate) fn check_provenance(path: &str, from: u32, to: u32) -> Result<(), String> {
+    provenance::check_path(path)?;
+    provenance::check_range(from, to)
+}
+
+/// The blame of a provenance request, started by `ReadProvenance` (D144). It runs on a thread of
+/// its own and stops like a search once `stop` is set; its answer is dropped by `id`.
+pub struct ProvenanceJob {
+    pub id: OperationId,
+    pub read: BlameRead,
+    pub stop: Arc<AtomicBool>,
+}
+
+/// The lines blame gave for a provenance request, or Git's message.
+pub struct ProvenanceReport {
+    pub id: OperationId,
+    pub lines: Result<Vec<BlameLine>, String>,
+}
+
+impl ProvenanceJob {
+    /// Runs the blame to its end or to the stop request.
+    #[must_use]
+    pub fn run(self) -> ProvenanceReport {
+        let lines = (self.read)(&self.stop).map_err(|error| error.0);
+        ProvenanceReport { id: self.id, lines }
+    }
+}
+
+/// Explains lines `from` to `to` of `path` (D144) from the lines blame gave: the commits, each
+/// commit the threads linked to it and the edits that match its lines, each edit the entries
+/// around it. The bounds are the rules' (`provenance`), and a cut result says what it cut.
+pub(crate) fn provenance_from_lines(
+    store: &mut ThreadStore,
     ctx: &Context<'_>,
     path: &str,
     from: u32,
     to: u32,
-) -> Result<Vec<Event>, String> {
-    provenance::check_path(path)?;
-    provenance::check_range(from, to)?;
-    let read = ctx
-        .git
-        .blame_lines(ctx.root, path, from, to)
-        .map_err(|e| e.0)?;
-    let lines = read(&AtomicBool::new(false)).map_err(|e| e.0)?;
-    let owners = provenance::owners(&lines);
+    lines: &[BlameLine],
+) -> Result<ProvenanceResult, String> {
+    let owners = provenance::owners(lines);
     let mut result = ProvenanceResult {
         path: path.to_owned(),
         from_line: from,
@@ -229,10 +248,7 @@ fn provenance_of(
         let commit = commit_provenance(store, ctx, &owner, &mut result.cuts)?;
         result.commits.push(commit);
     }
-    Ok(vec![Event::ThreadProvenance {
-        id,
-        provenance: result,
-    }])
+    Ok(result)
 }
 
 /// The threads that explain one commit's lines, at most `THREAD_LIMIT` of them.

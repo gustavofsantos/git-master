@@ -55,3 +55,4 @@ pub use port::{
 };
 pub use runner::{EngineHandle, spawn, spawn_with};
 pub use script_session::{EffectRequest, ScriptLink};
+pub use threads_session::{ProvenanceJob, ProvenanceReport};

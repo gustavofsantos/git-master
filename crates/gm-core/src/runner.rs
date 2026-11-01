@@ -20,6 +20,7 @@ use crate::hook::{ApprovalStore, Report};
 use crate::remote::RemoteReport;
 use crate::script::run::ScriptEvent;
 use crate::script_session::{EffectRequest, ScriptLink};
+use crate::threads_session::{ProvenanceJob, ProvenanceReport};
 use crate::{Engine, GitPort};
 
 enum Message {
@@ -40,6 +41,8 @@ enum Message {
     Read(ReadReport, Sender<Message>),
     Highlight(HighlightReport),
     Text(TextReport),
+    /// The blame of a provenance read was read.
+    Provenance(ProvenanceReport),
     /// A script run asks the engine to carry out an effect. The run waits for the answer.
     ScriptEffect(EffectRequest),
     /// A script run reports; the front ends hear it as events.
@@ -221,6 +224,10 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                 let events = engine.text_report(report);
                 broadcast(events, &mut subscribers);
             }
+            Message::Provenance(report) => {
+                let events = engine.provenance_report(report);
+                broadcast(events, &mut subscribers);
+            }
         }
     }
 }
@@ -288,6 +295,9 @@ fn spawn_file_jobs(engine: &mut Engine, reports: &Sender<Message>) {
     for job in engine.take_text_jobs() {
         spawn_text(job, reports.clone());
     }
+    for job in engine.take_provenance_jobs() {
+        spawn_provenance(job, reports.clone());
+    }
 }
 
 fn spawn_highlight(job: HighlightJob, reports: Sender<Message>) {
@@ -308,6 +318,16 @@ fn spawn_text(job: TextJob, reports: Sender<Message>) {
             let _ = reports.send_blocking(Message::Text(report));
         })
         .expect("spawn a text search thread");
+}
+
+fn spawn_provenance(job: ProvenanceJob, reports: Sender<Message>) {
+    std::thread::Builder::new()
+        .name("gm-blame".into())
+        .spawn(move || {
+            let report = job.run();
+            let _ = reports.send_blocking(Message::Provenance(report));
+        })
+        .expect("spawn a blame thread");
 }
 
 fn spawn_index(job: IndexJob, reports: Sender<Message>) {

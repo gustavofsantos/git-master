@@ -10,8 +10,9 @@ use gm_schema::threads::{Evidence, LineRun, Unverifiable};
 
 use crate::blame::BlameLine;
 
-/// The shortest run of significant lines that is a fact (D144). A placeholder: Q34 measures it on
-/// real threads in P1 before it is fixed.
+/// The shortest run of significant lines that is a fact (D144). Measured on real threads (Q34,
+/// `tests/provenance_measure.rs`): 3 keeps 46 of the 53 window line matches that 2 gives and
+/// 12 of the 14 whole-file ones; 4 would keep 42 and 7.
 pub const LINE_MATCH_MIN: usize = 3;
 /// Commits one query shows (D144).
 pub const COMMIT_LIMIT: usize = 10;
@@ -232,7 +233,14 @@ fn close(segments: &mut Vec<Vec<String>>, current: &mut Vec<String>) {
 /// segment (D144). The text is compared exactly. A run shorter than `LINE_MATCH_MIN` is never a fact.
 #[must_use]
 pub fn run_matches(run: &[String], segment: &[String]) -> bool {
-    if run.len() < LINE_MATCH_MIN {
+    run_matches_min(run, segment, LINE_MATCH_MIN)
+}
+
+/// `run_matches` with the shortest run given by the caller. The engine uses `LINE_MATCH_MIN`;
+/// the measurement of Q34 varies it.
+#[must_use]
+pub fn run_matches_min(run: &[String], segment: &[String], min_run: usize) -> bool {
+    if run.len() < min_run {
         return false;
     }
     let kept: Vec<&String> = segment.iter().filter(|line| !is_trivial(line)).collect();
@@ -263,6 +271,12 @@ impl Verdict {
 /// owner's commit. An edit made after the commit's author date is never a line match.
 #[must_use]
 pub fn judge(owner: &Owner, blob: Option<&str>, edit: &EditFact) -> Verdict {
+    judge_with(owner, blob, edit, LINE_MATCH_MIN)
+}
+
+/// `judge` with the shortest run for a line match given by the caller (see `run_matches_min`).
+#[must_use]
+pub fn judge_with(owner: &Owner, blob: Option<&str>, edit: &EditFact, min_run: usize) -> Verdict {
     let mut evidence = Vec::new();
     let blob_match = blob.is_some() && blob == edit.post_oid.as_deref();
     if blob_match {
@@ -279,7 +293,7 @@ pub fn judge(owner: &Owner, blob: Option<&str>, edit: &EditFact) -> Verdict {
         let line_match = owner.blocks.iter().any(|block| {
             edit.segments
                 .iter()
-                .any(|segment| run_matches(&block.significant, segment))
+                .any(|segment| run_matches_min(&block.significant, segment, min_run))
         });
         if line_match {
             evidence.push(Evidence::LineMatch);

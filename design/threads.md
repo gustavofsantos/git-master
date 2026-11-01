@@ -518,7 +518,7 @@ A working-tree snapshot at `UserPromptSubmit` and at `Stop` through the temporar
 
 ## Graph, provenance and labels (D143 to D146)
 
-Decided by the author on 2026-10-31 as **proposed** (D143 to D146); Q34 is open. The user-facing behavior is in `docs/guide/threads.md` and `docs/reference/mcp-tools.md`, marked `Planned`. This section is the build plan.
+Decided by the author on 2026-10-31 as **proposed** (D143 to D146); Q34 is answered (N = 3, see `decisions.md`). The user-facing behavior is in `docs/guide/threads.md` and `docs/reference/mcp-tools.md`, marked `Planned`. This section is the build plan.
 
 ### Edges
 
@@ -586,7 +586,7 @@ Record commands are written to the command log with their actor (D28). Level **r
 | Evidence | Rule |
 |---|---|
 | `blob_match` | The edit's `post_oid` equals the file's blob in the blamed commit. |
-| `line_match` | A contiguous run of at least N lines, where N is open (Q34), and blank and brace-only lines do not count, appears contiguously in the added lines of one edit. The path is the one blame reports for the line. The edit's `at` is not after the blamed commit's author date. All matching edits are returned and the result is marked ambiguous. A line match never creates a stored link. |
+| `line_match` | A contiguous run of at least N lines, where N is 3 (Q34), and blank and brace-only lines do not count, appears contiguously in the added lines of one edit. The path is the one blame reports for the line. The edit's `at` is not after the blamed commit's author date. All matching edits are returned and the result is marked ambiguous. A line match never creates a stored link. |
 | `hunk_overlap` | Named in D144 only. The rule is defined in P1. |
 | `observed_commit` | Shown as "created during this thread" (D126). |
 | `manual` | Shown as "linked by you". |
@@ -594,7 +594,7 @@ Record commands are written to the command log with their actor (D28). Level **r
 - An edit that was redacted (D121), truncated by the cap or recorded `from_input` reports `unverifiable`, never "no match".
 - No whitespace normalization. A formatter run after the edit breaks the match.
 - Bounds: at most 10 commits per query, 5 threads per commit, two edges out. A cut result says so.
-- Open for P1 (Q34): how `post_oid` is computed (D123), with `hash-object --path` or not, so it holds with CRLF and LFS.
+- `post_oid` (D123) is computed as the raw hash; Q34 answers the `--path` question (see below).
 
 ### Commit links after a rewrite (D145)
 
@@ -606,11 +606,11 @@ Record commands are written to the command log with their actor (D28). Level **r
 
 Pure ranking and bounds, and the blame and patch-id adapters in `gm-core`. Real-git tests in `crates/gm-core/tests/provenance_real_git.rs`: a blob match, a line match, an ambiguous line match, a formatter run after the edit, a rebase, a squash and a reorder, a redacted and a truncated edit. Measure N on real threads and record it (closes Q34). Done when each fixture returns its evidence and the release build answers a range within the budget set in P1.
 
-**Built (engine only, 2026-10-31; Q34 still open).** `ReadProvenance` and `ThreadProvenance` in `gm-schema`; the rules in `gm-core/src/threads/provenance.rs` (pure); `git blame --line-porcelain` parsed in `gm-core/src/blame.rs`; the adapters `blame_lines` and `blob_at_commit` on `GitPort`; the queries `path_edits`, `commit_links`, `thread_summary` and `entries_around` in the store. Reads are excluded from the operation log, as the other thread reads are.
+**Built (engine only, 2026-10-31; Q34 answered in the same slice).** `ReadProvenance` and `ThreadProvenance` in `gm-schema`; the rules in `gm-core/src/threads/provenance.rs` (pure); `git blame --line-porcelain` parsed in `gm-core/src/blame.rs`; the adapters `blame_lines` and `blob_at_commit` on `GitPort`; the queries `path_edits`, `commit_links`, `thread_summary` and `entries_around` in the store. Reads are excluded from the operation log, as the other thread reads are.
 
 Decisions taken in P1 (the docs do not cover them; they are the engine's rules until the author decides otherwise):
 
-- **Constants.** `LINE_MATCH_MIN` = 3 (N, a placeholder until Q34 is measured), 10 commits per query, 5 threads per commit, 200 edits compared per commit (`candidates` cut beyond), a range of at most 1000 lines (longer is refused, not cut), 2 entries of context each side of an edit.
+- **Constants.** `LINE_MATCH_MIN` = 3 (N, measured under Q34; see `decisions.md`), 10 commits per query, 5 threads per commit, 200 edits compared per commit (`candidates` cut beyond), a range of at most 1000 lines (longer is refused, not cut), 2 entries of context each side of an edit.
 - **Trivial lines** are blank, or made only of `{}()[];,` and whitespace. They never count toward a run. Comparison is exact: no whitespace normalization.
 - **A run** is the consecutive lines blame gives one commit under one path, with its non-trivial lines. It matches an edit when those lines appear in order and contiguously among the non-trivial added lines of one **segment** of the edit's patch. A segment is a maximal run of `+` lines; a context line or a hunk header ends it, a removed line does not (it is not in the new file).
 - **The date rule** is `edit.at <= commit author date` (milliseconds). It applies to line and hunk evidence. `blob_match` does not use it, because D144 states the blob rule without a date.
@@ -621,10 +621,11 @@ Decisions taken in P1 (the docs do not cover them; they are the engine's rules u
 - **Links.** A thread linked to the commit by `thread_link` shows `observed_commit` (origin `observed`) or `manual` (origin `manual`). A commit link needs the full id, which is what `rev-list` stores.
 - **Order of threads.** Strongest evidence first, then the most recent `last_event_at`, then `uid`. Threads without evidence (unverifiable edits only) come last.
 - **Edges.** P1 walks line to commit to thread to entries, which is two steps from the line. The bound on two edges out applies once labels and `thread_rel` exist (P3); nothing beyond the thread is walked yet.
-- **`post_oid` (Q34, not changed here).** It is libgit2's hash of the raw bytes (`git2::Oid::hash_object`), which is what `git hash-object` gives without `--path`: no CRLF or LFS normalization. Under `core.autocrlf` or a filter, the blob at the commit and the post image can differ, so a blob match fails rather than matching falsely. Whether to use `--path` remains open.
+- **`post_oid` (Q34, decided: raw).** It is libgit2's hash of the raw bytes (`git2::Oid::hash_object`), which is what `git hash-object` gives without `--path`: no CRLF or LFS normalization. Under `core.autocrlf` or a filter, the blob at the commit and the post image can differ, so a blob match fails rather than matching falsely. The measurement found no edited file with CRLF, LFS or an attribute, so `--path` was not adopted. Measure again when a repository with those produces edits.
 - **Blob at commit** is read with `git ls-tree` (it names a missing path cleanly), not `rev-parse <commit>:<path>`.
 - **Blame** is `git blame --line-porcelain -M -C -L from,to -- path` run in the repository root. Uncommitted lines (all-zero ids) belong to no commit and are left out.
-- **Not yet built.** The read runs on the engine thread, as `ReadThread` does, and is not cancellable; a superseded provenance read is not implemented. The release budget is not measured, and N is not measured on real threads, so Q34 stays open.
+- **Cancellable (built after the first note).** `ReadProvenance` starts its blame as a job on a thread of its own, as `SearchText` does: a newer provenance read, or leaving the repository, stops the blame's git process and cancels the read; its late answer is dropped by `OperationId`. A request the rules refuse is refused before anything is cancelled. Reads are not in the command log. Still on the engine thread, and not cancellable: the blob lookup per commit (`ls-tree`, at most 10) and the store reads. They are inside the measured times below.
+- **Measured (Q34, closed).** N = 3, the rule's answer and its numbers are in `decisions.md` (Q34). Release, one repository of 447 commits: a 20-line window p95 36 ms, a whole file of up to 1000 lines p95 111 ms. Proposed budget, to confirm with the author: a 20-line window p95 at or under 100 ms, a whole file of up to 1000 lines p95 at or under 250 ms, both in release.
 
 ### P2: MCP provenance tool
 
