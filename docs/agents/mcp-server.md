@@ -27,7 +27,7 @@ gitmaster mcp --repo ~/src/project
 
 See [CLI](../reference/cli.md) for the command.
 
-The server and the app share what they store in the repository's `.git/gitmaster/` directory. A comment the agent marks as handled appears in the app, and a comment you write in the app is there the next time the agent lists comments. Neither one waits for the other.
+The server and the app share what they store in the repository's `.git/gitmaster/` directory. A comment the agent marks as handled appears in the app, and a comment you write in the app is there the next time the agent lists comments. Neither one waits for the other. The server runs no workflows: workflow triggers and phases run only in the app.
 
 ## Several servers at once
 

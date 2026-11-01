@@ -57,7 +57,7 @@ GitMaster identifies each version of a script by the hash of its text.
 
 1. A version you have not reviewed is **unreviewed**.
 2. The first run of an unreviewed version shows you the script and asks **Run this version?**.
-3. Confirm to mark that version as reviewed.
+3. Confirm to mark that version as reviewed. When an event starts a version you have not reviewed, no dialog interrupts you. The run waits behind a notice, *name wants to run*, with **Review**. Reviewing runs it for that event. Dismissing the notice cancels the run.
 4. Any edit to the script, by you or by an agent, makes it unreviewed again. Automatic approval is tied to the hash, so an edit ends it.
 
 Reviewing a version also approves the `ctx.exec` calls that the script contains. Event runs and agent runs call `ctx.exec` only for a reviewed version.

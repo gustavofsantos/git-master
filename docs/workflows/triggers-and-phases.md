@@ -34,7 +34,7 @@ M.meta = {
 | `after.<operation>` | After the operation finishes. The workflow only observes. |
 | `stack.parent_moved` | The tip of a branch's parent no longer matches the point the branch was based on. |
 | `stack.parent_merged` | The parent branch is gone, or it is already merged into `main`. |
-| `composer.opened` | The commit composer opens. |
+| `composer.opened` | The empty message box of the commit composer gets focus while something is staged. |
 
 ### No time-based triggers
 
@@ -50,7 +50,9 @@ Use `match` to narrow a trigger to branches. The syntax is `branch:` followed by
 
 > **Planned.** Event triggers are not available yet, so this rule has no effect yet.
 
-Events that a run produces carry the ID of that run and never trigger a workflow. A commit that a workflow creates does not start a `commit.created` workflow, so a workflow cannot start another one through the events it causes. There are no cascades.
+Events that a run produces carry the ID of that run and never trigger a workflow. A commit that a workflow creates does not start a `commit.created` workflow, so a workflow cannot start another one through the events it causes. There are no cascades. For the same reason, an operation a run performs runs no phase: a commit made with `ctx.commit.create` is not gated by `before.commit` workflows, and runs no `transform` or `after` workflow. The run's own applying actions follow the rules in [Approvals and security](approvals-and-security.md).
+
+Workflows run only in the app. The MCP server, `gitmaster mcp`, fires no trigger and runs no phase. When an agent changes a branch, the app's file watcher sees it and fires `refs.changed`.
 
 ### Debounce
 
