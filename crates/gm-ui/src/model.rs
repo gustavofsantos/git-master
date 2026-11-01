@@ -3444,6 +3444,30 @@ mod thread_copy_tests {
     }
 
     #[test]
+    fn a_provenance_answer_that_follows_done_is_kept() {
+        use crate::provenance_view::{NO_THREAD, Row};
+        let mut model = Model::default();
+        model.provenance.request("src/a.rs", 3, 5, OperationId(30));
+        // The engine sends `Done` first and the answer after it.
+        let _ = model.apply(changed(30, OperationState::Done, None));
+        assert!(model.provenance.is_pending(), "the answer is still due");
+        let _ = model.apply(Event::ThreadProvenance {
+            id: OperationId(30),
+            provenance: gm_schema::threads::ProvenanceResult {
+                path: "src/a.rs".to_owned(),
+                from_line: 3,
+                to_line: 5,
+                commits: Vec::new(),
+                cuts: Vec::new(),
+            },
+        });
+        assert_eq!(
+            model.provenance.rows(),
+            vec![Row::Note(NO_THREAD.to_owned())]
+        );
+    }
+
+    #[test]
     fn a_repository_change_closes_the_provenance_panel() {
         let mut model = Model::default();
         model.provenance.request("src/a.rs", 3, 5, OperationId(30));

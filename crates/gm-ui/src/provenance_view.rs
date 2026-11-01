@@ -104,9 +104,10 @@ impl ProvenancePanel {
     }
 
     /// The read `id` ended without an answer. A failure keeps its reason for the panel; a
-    /// read that was stopped simply ends.
+    /// read that was stopped simply ends. A read that is `Done` is not over: its answer follows.
     pub fn ended(&mut self, id: OperationId, state: OperationState, detail: Option<&str>) {
-        if !self.owns(id) {
+        // The engine sends `Done` before the answer, so a read that is done keeps waiting for it.
+        if !self.owns(id) || state == OperationState::Done {
             return;
         }
         self.pending = None;
