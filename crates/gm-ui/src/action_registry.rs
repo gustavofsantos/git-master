@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use gm_schema::{
-    BranchEntry, CommandKind, ConflictSite, DiffSide, HunkId, OperationId, ReviewComment,
-    ReviewStatus, StageTarget, StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
+    BranchEntry, CommandKind, ConflictSite, DiffSide, HunkId, ReviewComment, ReviewStatus,
+    StageTarget, StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
 };
 
 use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, SAME_WORKTREE};
@@ -145,8 +145,6 @@ pub enum Effect {
     UseSuggestion(String),
     /// Drops the suggestion; the composer keeps its text.
     DiscardSuggestion,
-    /// Hides the approval prompt of the repository hook with this command hash.
-    DenyHook(String),
     /// A path on disk, for the system file manager.
     Reveal(PathBuf),
     FocusCommitMessage,
@@ -301,20 +299,16 @@ pub enum Effect {
     },
 }
 
-/// What the window knows of the prepare-commit hooks, for the rules.
+/// What the window knows of the commit message suggestions and their workflows, for the rules.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct HookCtx<'a> {
-    /// The run that is starting or running, if one is.
-    pub running: Option<OperationId>,
-    /// How many hooks apply to this branch and are not disabled; `None` until listed.
-    pub applicable: Option<usize>,
-    /// The message the last run offered and the user has not used or dropped.
-    pub suggestion: Option<&'a str>,
-    /// The first repository hook awaiting approval: its name and command hash.
-    pub pending_approval: Option<(&'a str, &'a str)>,
-    /// Whether a `transform.commit_message` workflow is loaded (`WF3d`): Suggest Message then runs
-    /// the transforms, and needs no prepare-commit hook.
+pub struct MessageCtx<'a> {
+    /// Whether a `transform.commit_message` workflow is loaded (`WF3d`): Suggest Message runs it.
     pub transform: bool,
+    /// The message a workflow offered and the person has not used or dropped.
+    pub suggestion: Option<&'a str>,
+    /// The `prepare-commit` sections the Git config holds, as the listing gave them (`WF3e`); empty
+    /// when there are none or the listing has not come yet.
+    pub sections: &'a [String],
 }
 
 /// What the window knows of the manual workflows, for the rules.
@@ -380,7 +374,7 @@ pub struct Context<'a> {
     pub current_branch: Option<&'a str>,
     /// The repository's working tree root; `None` when no repository is open.
     pub root: Option<&'a str>,
-    pub hooks: HookCtx<'a>,
+    pub messages: MessageCtx<'a>,
     pub workflows: WorkflowCtx<'a>,
     /// The worktrees listed for the open repository, main checkout first.
     pub worktrees: &'a [WorktreeEntry],
@@ -454,7 +448,7 @@ pub struct LabelRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 101] = [
+const SPECS: [Spec; 99] = [
     spec(
         "file.stage",
         "Stage File",
@@ -652,22 +646,8 @@ const SPECS: [Spec; 101] = [
         Category::Commit,
     ),
     spec(
-        "hook.cancel",
-        "Cancel Hook Run",
-        None,
-        ArgKind::None,
-        Category::Commit,
-    ),
-    spec(
-        "hook.approve",
-        "Approve Repository Hook",
-        None,
-        ArgKind::None,
-        Category::Repository,
-    ),
-    spec(
-        "hook.deny",
-        "Deny Repository Hook",
+        "hook.convert",
+        "Convert Hooks to Workflows",
         None,
         ArgKind::None,
         Category::Repository,
@@ -1206,9 +1186,7 @@ pub enum Action {
     SuggestMessage,
     UseSuggestion,
     DiscardSuggestion,
-    CancelHook,
-    ApproveHook,
-    DenyHook,
+    ConvertHooks,
     RunWorkflow,
     ApproveWorkflowStep,
     RejectWorkflowStep,
@@ -1550,7 +1528,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 101] = [
+    pub const ALL: [Action; 99] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1579,9 +1557,7 @@ impl Action {
         Action::SuggestMessage,
         Action::UseSuggestion,
         Action::DiscardSuggestion,
-        Action::CancelHook,
-        Action::ApproveHook,
-        Action::DenyHook,
+        Action::ConvertHooks,
         Action::RunWorkflow,
         Action::ApproveWorkflowStep,
         Action::RejectWorkflowStep,
@@ -1933,12 +1909,10 @@ impl Action {
             Action::ShowAuthorPictures | Action::HideAuthorPictures => Ok(()),
             _ if self.copies_its_target() => Ok(()),
             Action::Fetch | Action::Pull | Action::PushWithLease => remote_rule(self, args, ctx),
-            Action::SuggestMessage
-            | Action::CancelHook
-            | Action::UseSuggestion
-            | Action::DiscardSuggestion
-            | Action::ApproveHook
-            | Action::DenyHook => hook_rule(self, ctx),
+            Action::SuggestMessage | Action::UseSuggestion | Action::DiscardSuggestion => {
+                message_rule(self, ctx)
+            }
+            Action::ConvertHooks => convert_rule(ctx),
             _ if self.is_workflow_rule() => workflow_rule(self, args, ctx),
             Action::StashApply | Action::StashPop | Action::StashDrop => {
                 stash_entry_rule(args, ctx)
@@ -2056,15 +2030,10 @@ impl Action {
                     include_staged: self == Action::DiscardAllChanges,
                 }
             }
-            (
-                Action::SuggestMessage
-                | Action::CancelHook
-                | Action::UseSuggestion
-                | Action::DiscardSuggestion
-                | Action::ApproveHook
-                | Action::DenyHook,
-                _,
-            ) => hook_effect(self, ctx)?,
+            (Action::SuggestMessage | Action::UseSuggestion | Action::DiscardSuggestion, _) => {
+                message_effect(self, ctx)?
+            }
+            (Action::ConvertHooks, _) => Effect::Send(vec![CommandKind::ConvertHooksToWorkflows]),
             (action, _) if action.is_workflow_rule() => workflow_effect(action, args, ctx)?,
             (action, _) if action.is_thread_action() => thread_effect(action, args)?,
             (action, _) if action.is_label_action() => label_effect(action, args)?,
@@ -2373,34 +2342,39 @@ fn move_to_worktree(path: &str, ctx: &Context<'_>) -> Result<(), Reason> {
     Ok(())
 }
 
-/// The rules of the prepare-commit actions: what the window's hook state allows.
-fn hook_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
+/// Convert Hooks to Workflows is offered while a `prepare-commit` section is in the Git config
+/// (`WF3e`, D160). The sections are the listing's, `<scope> gitmaster.prepare-commit.<name>`.
+#[must_use]
+pub fn convert_offered(sections: &[String]) -> bool {
+    !sections.is_empty()
+}
+
+/// The rule of Convert Hooks to Workflows: offered while a section is listed (`WF3e`).
+fn convert_rule(ctx: &Context<'_>) -> Result<(), Reason> {
+    if convert_offered(ctx.messages.sections) {
+        Ok(())
+    } else {
+        Err("No prepare-commit section is in your Git config.")
+    }
+}
+
+/// The rules of the commit message actions: Suggest Message needs a commit transform (`WF3d`, `WF3e`),
+/// and a suggestion can be used or dropped while it waits.
+fn message_rule(action: Action, ctx: &Context<'_>) -> Result<(), Reason> {
     match action {
         Action::SuggestMessage => {
             idle(ctx)?;
-            if ctx.hooks.transform {
-                return Ok(());
-            }
-            if ctx.hooks.running.is_some() {
-                return Err("A hook is already running.");
-            }
-            match ctx.hooks.applicable {
-                None => Err("Hooks are still being read."),
-                Some(0) => Err("No prepare-commit hook applies to this repository."),
-                Some(_) => Ok(()),
+            if ctx.messages.transform {
+                Ok(())
+            } else {
+                Err(NO_SUGGESTER)
             }
         }
-        Action::CancelHook => ctx.hooks.running.map(|_| ()).ok_or("No hook is running."),
         Action::UseSuggestion | Action::DiscardSuggestion => ctx
-            .hooks
+            .messages
             .suggestion
             .map(|_| ())
             .ok_or("There is no suggestion."),
-        Action::ApproveHook | Action::DenyHook => ctx
-            .hooks
-            .pending_approval
-            .map(|_| ())
-            .ok_or("No repository hook waits for approval."),
         _ => Err(NOT_AVAILABLE),
     }
 }
@@ -2517,6 +2491,9 @@ fn page_open<'a>(ctx: &Context<'a>) -> Result<PageState<'a>, Reason> {
 
 /// The reason of the workflows folder when the engine has no folder to give.
 const NO_WORKFLOWS_FOLDER: Reason = "No workflows folder: HOME is not set";
+/// Suggest Message needs a workflow on the commit message phase; there is no other suggester (`WF3e`).
+const NO_SUGGESTER: Reason =
+    "No workflow suggests commit messages. Add one on the transform.commit_message phase.";
 
 /// The rule of Open Workflows Folder: the listing gave a folder to open.
 fn workflows_folder<'a>(ctx: &Context<'a>) -> Result<&'a str, Reason> {
@@ -2887,35 +2864,15 @@ fn file_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a StatusEntry, Rea
         .ok_or("That file is not in the working copy")
 }
 
-/// What a hook action does, given the state of the hooks in `ctx`.
-fn hook_effect(action: Action, ctx: &Context<'_>) -> Result<Effect, Reason> {
+/// What a commit message action does, given the suggestion in `ctx`.
+fn message_effect(action: Action, ctx: &Context<'_>) -> Result<Effect, Reason> {
     Ok(match action {
-        Action::SuggestMessage => Effect::Send(vec![transform_run::suggest_message(
-            ctx.message,
-            ctx.hooks.transform,
-        )]),
-        Action::CancelHook => match ctx.hooks.running {
-            Some(run) => Effect::Send(vec![CommandKind::CancelHook { run }]),
-            None => return Err("No hook is running."),
-        },
-        Action::UseSuggestion => match ctx.hooks.suggestion {
+        Action::SuggestMessage => Effect::Send(vec![transform_run::suggest_message(ctx.message)]),
+        Action::UseSuggestion => match ctx.messages.suggestion {
             Some(text) => Effect::UseSuggestion(text.to_owned()),
             None => return Err("There is no suggestion."),
         },
         Action::DiscardSuggestion => Effect::DiscardSuggestion,
-        Action::ApproveHook | Action::DenyHook => {
-            let Some((name, hash)) = ctx.hooks.pending_approval else {
-                return Err("No repository hook waits for approval.");
-            };
-            if action == Action::ApproveHook {
-                Effect::Send(vec![CommandKind::ApproveHook {
-                    name: name.to_owned(),
-                    command_hash: hash.to_owned(),
-                }])
-            } else {
-                Effect::DenyHook(hash.to_owned())
-            }
-        }
         _ => return Err(NOT_AVAILABLE),
     })
 }
@@ -2924,7 +2881,7 @@ fn hook_effect(action: Action, ctx: &Context<'_>) -> Result<Effect, Reason> {
 mod tests {
     use std::collections::HashSet;
 
-    use gm_schema::{Change, WorkflowInfo, WorkflowInput};
+    use gm_schema::{Change, OperationId, WorkflowInfo, WorkflowInput};
 
     use super::*;
 
@@ -2959,7 +2916,7 @@ mod tests {
             message,
             current_branch: Some("main"),
             root: Some("/repo"),
-            hooks: crate::action_registry::HookCtx::default(),
+            messages: crate::action_registry::MessageCtx::default(),
             workflows: WorkflowCtx::default(),
             worktrees: &[],
             author_pictures: AuthorPictures::Hidden,
@@ -4649,52 +4606,35 @@ mod tests {
         );
     }
 
-    fn with_hooks(hooks: HookCtx<'_>) -> Context<'_> {
+    fn with_messages(messages: MessageCtx<'_>) -> Context<'_> {
         Context {
-            hooks,
+            messages,
             ..ctx(&[], "draft")
         }
     }
 
     #[test]
-    fn suggesting_waits_for_the_listing_and_needs_a_hook_that_applies() {
-        let none = HookCtx::default();
+    fn suggesting_needs_a_commit_transform_and_says_how_to_add_one() {
         assert_eq!(
-            Action::SuggestMessage.enabled(&Args::None, &with_hooks(none)),
-            Err("Hooks are still being read.")
-        );
-        let nothing = HookCtx {
-            applicable: Some(0),
-            ..HookCtx::default()
-        };
-        assert_eq!(
-            Action::SuggestMessage.enabled(&Args::None, &with_hooks(nothing)),
-            Err("No prepare-commit hook applies to this repository.")
-        );
-        let one = HookCtx {
-            applicable: Some(1),
-            ..HookCtx::default()
-        };
-        assert_eq!(
-            Action::SuggestMessage.plan(&Args::None, &with_hooks(one)),
-            Ok(Effect::Send(vec![CommandKind::RunPrepareCommit {
-                message: "draft".into(),
-            }]))
+            Action::SuggestMessage.enabled(&Args::None, &with_messages(MessageCtx::default())),
+            Err(
+                "No workflow suggests commit messages. Add one on the transform.commit_message phase."
+            )
         );
     }
 
     #[test]
-    fn suggesting_runs_the_transform_when_one_is_loaded_and_needs_no_hook() {
-        let loaded = HookCtx {
+    fn suggesting_runs_the_transform_when_one_is_loaded() {
+        let loaded = MessageCtx {
             transform: true,
-            ..HookCtx::default()
+            ..MessageCtx::default()
         };
         assert_eq!(
-            Action::SuggestMessage.enabled(&Args::None, &with_hooks(loaded)),
+            Action::SuggestMessage.enabled(&Args::None, &with_messages(loaded)),
             Ok(())
         );
         assert_eq!(
-            Action::SuggestMessage.plan(&Args::None, &with_hooks(loaded)),
+            Action::SuggestMessage.plan(&Args::None, &with_messages(loaded)),
             Ok(Effect::Send(vec![CommandKind::RunTransform {
                 field: "commit_message".into(),
                 current: "draft".into(),
@@ -4703,68 +4643,22 @@ mod tests {
     }
 
     #[test]
-    fn a_second_run_is_refused_and_cancel_names_the_running_one() {
-        let running = HookCtx {
-            running: Some(OperationId(5)),
-            applicable: Some(1),
-            ..HookCtx::default()
-        };
-        assert_eq!(
-            Action::SuggestMessage.enabled(&Args::None, &with_hooks(running)),
-            Err("A hook is already running.")
-        );
-        assert_eq!(
-            Action::CancelHook.plan(&Args::None, &with_hooks(running)),
-            Ok(Effect::Send(vec![CommandKind::CancelHook {
-                run: OperationId(5),
-            }]))
-        );
-        assert_eq!(
-            Action::CancelHook.enabled(&Args::None, &with_hooks(HookCtx::default())),
-            Err("No hook is running.")
-        );
-    }
-
-    #[test]
     fn a_suggestion_is_used_or_dropped_and_needs_to_exist() {
-        let offered = HookCtx {
+        let offered = MessageCtx {
             suggestion: Some("feat: x"),
-            ..HookCtx::default()
+            ..MessageCtx::default()
         };
         assert_eq!(
-            Action::UseSuggestion.plan(&Args::None, &with_hooks(offered)),
+            Action::UseSuggestion.plan(&Args::None, &with_messages(offered)),
             Ok(Effect::UseSuggestion("feat: x".into()))
         );
         assert_eq!(
-            Action::DiscardSuggestion.plan(&Args::None, &with_hooks(offered)),
+            Action::DiscardSuggestion.plan(&Args::None, &with_messages(offered)),
             Ok(Effect::DiscardSuggestion)
         );
         assert_eq!(
-            Action::UseSuggestion.enabled(&Args::None, &with_hooks(HookCtx::default())),
+            Action::UseSuggestion.enabled(&Args::None, &with_messages(MessageCtx::default())),
             Err("There is no suggestion.")
-        );
-    }
-
-    #[test]
-    fn approval_sends_the_listed_hash_and_deny_stays_local() {
-        let waiting = HookCtx {
-            pending_approval: Some(("team", "abc")),
-            ..HookCtx::default()
-        };
-        assert_eq!(
-            Action::ApproveHook.plan(&Args::None, &with_hooks(waiting)),
-            Ok(Effect::Send(vec![CommandKind::ApproveHook {
-                name: "team".into(),
-                command_hash: "abc".into(),
-            }]))
-        );
-        assert_eq!(
-            Action::DenyHook.plan(&Args::None, &with_hooks(waiting)),
-            Ok(Effect::DenyHook("abc".into()))
-        );
-        assert_eq!(
-            Action::ApproveHook.enabled(&Args::None, &with_hooks(HookCtx::default())),
-            Err("No repository hook waits for approval.")
         );
     }
 
@@ -6192,5 +6086,24 @@ mod tests {
         );
         assert!(Action::ReparentToGrandparent.asks_first());
         assert!(!Action::ReparentToGrandparent.destructive());
+    }
+
+    #[test]
+    fn convert_is_offered_only_while_a_prepare_commit_section_exists() {
+        assert!(!convert_offered(&[]));
+        let listed = ["local gitmaster.prepare-commit.team".to_owned()];
+        assert!(convert_offered(&listed));
+        assert_eq!(
+            Action::ConvertHooks.enabled(&Args::None, &with_messages(MessageCtx::default())),
+            Err("No prepare-commit section is in your Git config.")
+        );
+        let offered = MessageCtx {
+            sections: &listed,
+            ..MessageCtx::default()
+        };
+        assert_eq!(
+            Action::ConvertHooks.plan(&Args::None, &with_messages(offered)),
+            Ok(Effect::Send(vec![CommandKind::ConvertHooksToWorkflows]))
+        );
     }
 }

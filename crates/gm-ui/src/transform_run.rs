@@ -6,7 +6,7 @@
 
 use gm_schema::{CommandKind, Event, OperationId, WorkflowInfo};
 
-use crate::hook_run::Fill;
+use crate::suggestion::Fill;
 
 /// A field a transform builds: the commit message, or the name of a new branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,20 +53,13 @@ pub fn loaded(listed: Option<&[WorkflowInfo]>, field: Field) -> bool {
     })
 }
 
-/// What Suggest Message sends (D155(1)). With a `transform.commit_message` workflow loaded it runs
-/// the transforms; otherwise it runs the `prepare-commit` chain, as before. Both paths coexist until
-/// `WF3e` removes the hooks.
+/// What Suggest Message sends (D155(1)): the commit message transform, which runs the
+/// `transform.commit_message` workflows.
 #[must_use]
-pub fn suggest_message(message: &str, transform_loaded: bool) -> CommandKind {
-    if transform_loaded {
-        CommandKind::RunTransform {
-            field: Field::CommitMessage.name().to_owned(),
-            current: message.to_owned(),
-        }
-    } else {
-        CommandKind::RunPrepareCommit {
-            message: message.to_owned(),
-        }
+pub fn suggest_message(message: &str) -> CommandKind {
+    CommandKind::RunTransform {
+        field: Field::CommitMessage.name().to_owned(),
+        current: message.to_owned(),
     }
 }
 
@@ -231,22 +224,12 @@ mod tests {
     }
 
     #[test]
-    fn suggest_message_runs_the_transforms_when_one_is_loaded() {
+    fn suggest_message_runs_the_transform_on_the_message() {
         assert_eq!(
-            suggest_message("draft", true),
+            suggest_message("draft"),
             CommandKind::RunTransform {
                 field: "commit_message".into(),
                 current: "draft".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn suggest_message_keeps_the_prepare_commit_path_without_a_transform() {
-        assert_eq!(
-            suggest_message("draft", false),
-            CommandKind::RunPrepareCommit {
-                message: "draft".into(),
             }
         );
     }

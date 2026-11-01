@@ -4,8 +4,8 @@ use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
     BranchEntry, CommitDetail, CommitFile, ConflictFileRead, ConflictOperation, DiffSide, FileDiff,
-    GrepResult, HookScope, HunkId, MergedBranch, PruneCandidate, ReflogEntry, RepoStatus,
-    StageTarget, StashEntry, WorktreeEntry, WorktreeMode,
+    GrepResult, HunkId, MergedBranch, PruneCandidate, ReflogEntry, RepoStatus, StageTarget,
+    StashEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::blame::BlameLine;
@@ -13,9 +13,35 @@ use crate::command_log::CommandLog;
 use crate::file_index::FileIndex;
 use crate::grep::GrepRequest;
 use crate::history::HistoryStream;
-use crate::hook::ConfigValue;
 use crate::restack::Replayed;
 use crate::stack::{EdgeFacts, StackLink};
+
+/// Which Git config a read covers: `Global` is the user's config (with its includes), `Local`
+/// the repository's own config.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigScope {
+    Global,
+    Local,
+}
+
+impl ConfigScope {
+    /// The word `git config` takes for this scope, and the one the UI shows.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Local => "local",
+        }
+    }
+}
+
+/// One key from `git config --null --get-regexp`. `value` is `None` for a bare key, which git
+/// reads as `true`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigValue {
+    pub key: String,
+    pub value: Option<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitError(pub String);
@@ -895,12 +921,15 @@ pub trait GitPort: Send {
         ))
     }
 
-    /// The `gitmaster.prepare-commit.*` keys of one scope, in config order.
-    /// `User` is global config only; `Repo` is the repository's own config.
-    /// Never records anything.
-    fn hook_config(&self, _root: &Path, _scope: HookScope) -> Result<Vec<ConfigValue>, GitError> {
+    /// The `gitmaster.prepare-commit.*` keys of one scope, in config order. Read only by the
+    /// convert action (`WF3e`, D160). Never records anything.
+    fn prepare_commit_config(
+        &self,
+        _root: &Path,
+        _scope: ConfigScope,
+    ) -> Result<Vec<ConfigValue>, GitError> {
         Err(GitError(
-            "hook config is not supported by this adapter".into(),
+            "prepare-commit config is not supported by this adapter".into(),
         ))
     }
 
@@ -965,13 +994,13 @@ pub trait GitPort: Send {
         ))
     }
 
-    /// The login-shell PATH, which git and the hook scripts run with. Empty
+    /// The login-shell PATH, which git and the workflow scripts run with. Empty
     /// until it is read; an adapter without one keeps the process's PATH.
     fn login_path(&self) -> Arc<OnceLock<String>> {
         Arc::default()
     }
 
-    /// The log that hook steps and git writes are recorded in, when the
+    /// The log that git writes are recorded in, when the
     /// adapter keeps one. Reads are never recorded.
     fn command_log(&self) -> Option<CommandLog> {
         None

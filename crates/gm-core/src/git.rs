@@ -13,9 +13,8 @@ use std::time::{Duration, Instant};
 use git2::{BranchType, ConfigLevel, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, CommitFile, ConflictFileRead, ConflictOperation, DiffSide,
-    FileDiff, HookScope, Hunk, HunkId, MergedBranch, OWN_COMMITS_LIMIT, PruneCandidate,
-    RecordedResolution, ReflogEntry, RepoStatus, StageTarget, StashEntry, StatusEntry,
-    WorktreeEntry, WorktreeMode,
+    FileDiff, Hunk, HunkId, MergedBranch, OWN_COMMITS_LIMIT, PruneCandidate, RecordedResolution,
+    ReflogEntry, RepoStatus, StageTarget, StashEntry, StatusEntry, WorktreeEntry, WorktreeMode,
 };
 
 use crate::blame;
@@ -29,12 +28,13 @@ use crate::diff::{hunk_patch, parse_unified};
 use crate::file_index::FileIndex;
 use crate::grep::{Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
-use crate::hook::ConfigValue;
 use crate::port::{
     BlameRead, CommitPresence, CommitSnapshot, DetailRead, FileListRead, GrepRead, HistoryRevs,
     RemoteRun, Rewrite, StackRead,
 };
-use crate::port::{DiscardOutcome, FileMerge, RefMove, ReviewSide, TreeMerge};
+use crate::port::{
+    ConfigScope, ConfigValue, DiscardOutcome, FileMerge, RefMove, ReviewSide, TreeMerge,
+};
 use crate::reflog;
 use crate::remote;
 use crate::restack::{ReplayKind, Replayed};
@@ -2424,13 +2424,16 @@ impl GitPort for SubprocessGit {
         Ok(self.remote_run(root, args))
     }
 
-    fn hook_config(&self, root: &Path, scope: HookScope) -> Result<Vec<ConfigValue>, GitError> {
-        // `--includes` follows `includeIf` and `include`: for the user scope
-        // that is the point (D17), and for the repo scope it is why such hooks
-        // still need approval.
+    fn prepare_commit_config(
+        &self,
+        root: &Path,
+        scope: ConfigScope,
+    ) -> Result<Vec<ConfigValue>, GitError> {
+        // `--includes` follows `includeIf` and `include`: for the user scope that is the point
+        // (D17). The sections are read for the convert action only (`WF3e`, D160).
         let flag = match scope {
-            HookScope::User => "--global",
-            HookScope::Repo => "--local",
+            ConfigScope::Global => "--global",
+            ConfigScope::Local => "--local",
         };
         let mut command = self.git(root);
         command.args([
@@ -2439,7 +2442,7 @@ impl GitPort for SubprocessGit {
             "--includes",
             "--null",
             "--get-regexp",
-            HOOK_KEYS,
+            PREPARE_COMMIT_KEYS,
         ]);
         // Exit 1 means no key matches.
         let bytes = Self::run_allowing(command, &[0, 1])?;
@@ -3117,8 +3120,8 @@ fn check_worktree_path(root: &Path, path: &str) -> Result<(), GitError> {
     Ok(())
 }
 
-/// Keys of every prepare-commit hook section, as a regular expression.
-const HOOK_KEYS: &str = r"^gitmaster\.prepare-commit\.";
+/// Keys of every prepare-commit section, as a regular expression (`WF3e`, D160).
+const PREPARE_COMMIT_KEYS: &str = r"^gitmaster\.prepare-commit\.";
 
 /// `git config --null --get-regexp` output: each record is `key\nvalue`, or
 /// just `key` for a bare key.

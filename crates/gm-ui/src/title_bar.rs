@@ -176,7 +176,7 @@ impl StatusView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action_registry::{Context as RuleContext, HookCtx, WorkflowCtx};
+    use crate::action_registry::{Context as RuleContext, MessageCtx, WorkflowCtx};
 
     #[test]
     fn the_home_directory_shows_as_a_tilde() {
@@ -236,7 +236,7 @@ mod tests {
             message: "",
             current_branch: Some("main"),
             root: Some("/repo"),
-            hooks: HookCtx::default(),
+            messages: MessageCtx::default(),
             workflows: WorkflowCtx::default(),
             remote_running: false,
             stashes: None,
@@ -271,7 +271,7 @@ mod tests {
             message: "",
             current_branch: Some("main"),
             root: Some("/repo"),
-            hooks: HookCtx::default(),
+            messages: MessageCtx::default(),
             workflows: WorkflowCtx::default(),
             author_pictures: crate::action_registry::AuthorPictures::Hidden,
             remote_running: true,

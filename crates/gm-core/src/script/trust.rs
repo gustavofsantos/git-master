@@ -67,8 +67,7 @@ pub struct TrustStore {
     conn: Arc<Mutex<Connection>>,
 }
 
-/// `<data dir>/gitmaster/gitmaster.db`: `$XDG_DATA_HOME` or `~/.local/share` on Linux,
-/// `~/Library/Application Support` on macOS. `None` without a home.
+/// `<data dir>/gitmaster/gitmaster.db` (see `paths`), or `None` without a home.
 #[must_use]
 pub fn default_file() -> Option<PathBuf> {
     data_file(
@@ -78,28 +77,14 @@ pub fn default_file() -> Option<PathBuf> {
     )
 }
 
-/// The database under the given environment values. Same rules as the approvals file: a relative
-/// `XDG_DATA_HOME` is ignored, and without a home directory there is no file.
+/// The database under the given environment values.
 #[must_use]
 pub fn data_file(
     xdg_data_home: Option<OsString>,
     home: Option<OsString>,
     macos: bool,
 ) -> Option<PathBuf> {
-    let absolute = |value: Option<OsString>| {
-        value
-            .map(PathBuf::from)
-            .filter(|path| !path.as_os_str().is_empty() && path.is_absolute())
-    };
-    let base = if macos {
-        absolute(home)?.join("Library/Application Support")
-    } else {
-        match absolute(xdg_data_home) {
-            Some(base) => base,
-            None => absolute(home)?.join(".local/share"),
-        }
-    };
-    Some(base.join("gitmaster").join(FILE_NAME))
+    crate::paths::data_dir_under(xdg_data_home, home, macos).map(|dir| dir.join(FILE_NAME))
 }
 
 impl TrustStore {

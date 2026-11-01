@@ -9,6 +9,7 @@ pub mod cli;
 pub mod dry;
 pub mod exec;
 pub mod fake;
+pub mod hook_convert;
 pub mod input;
 pub mod inspect;
 pub mod journal;

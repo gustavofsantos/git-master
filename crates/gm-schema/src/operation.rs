@@ -8,7 +8,6 @@ use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
-use crate::hook::{HookFailure, HookInfo};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
 use crate::restack::{RestackPlan, RestackRecord, RestackResolution};
@@ -395,23 +394,13 @@ pub enum CommandKind {
         index: u32,
         oid: String,
     },
-    /// Lists the hooks read from config, with their state (design/hooks-transitional.md).
-    ListHooks,
-    /// Approves the repository hook `name` whose command still hashes to
-    /// `command_hash`, as the last `HooksListed` showed it.
-    ApproveHook {
-        name: String,
-        command_hash: String,
-    },
-    /// Runs the `prepare-commit` chain on `message`. Asynchronous: the hook
-    /// events for the run carry the run's own operation id.
-    RunPrepareCommit {
-        message: String,
-    },
-    /// Stops the `RunPrepareCommit` operation `run`, if it is still running.
-    CancelHook {
-        run: OperationId,
-    },
+    /// Lists the `gitmaster.prepare-commit.*` sections of the user's and the repository's Git
+    /// config, each as `<scope> gitmaster.prepare-commit.<name>` (`WF3e`, D160). Never records
+    /// anything.
+    ListHookSections,
+    /// Converts the user's `prepare-commit` sections into a `transform.commit_message` workflow in
+    /// the user's workflows directory (`WF3e`, D160). Writes a file, never Git config. Human only.
+    ConvertHooksToWorkflows,
     /// Cancels the operation `op` while it waits for its workflow gates (`WF3c`, D157): the gate
     /// run is stopped and the operation ends `Cancelled`, with nothing written. Refused for any
     /// other operation. Human only.
@@ -1000,34 +989,19 @@ pub enum Event {
         deleted: Vec<String>,
         failures: Vec<BranchFailure>,
     },
-    HooksListed {
+    /// Answers `ListHookSections`: each section as `<scope> gitmaster.prepare-commit.<name>`.
+    HookSectionsListed {
         id: OperationId,
-        hooks: Vec<HookInfo>,
+        sections: Vec<String>,
     },
-    /// A chain step is about to run; `step` counts from 1 of `of`.
-    HookStarted {
+    /// Answers `ConvertHooksToWorkflows`. `written` holds the workflow files created; `skipped`
+    /// holds each section left out with its reason; `sections` holds every section the person can
+    /// now remove, with the scope the `git config --remove-section` command needs.
+    HooksConverted {
         id: OperationId,
-        hook: String,
-        step: u32,
-        of: u32,
-    },
-    /// The whole chain answered; `message` is the last hook's output.
-    /// `repo_changed` is true when HEAD or the staged diff differs from the
-    /// fingerprint taken when the run started: the message is then a
-    /// suggestion for the new state, not for the state the user saw.
-    HookFinished {
-        id: OperationId,
-        message: String,
-        repo_changed: bool,
-    },
-    HookFailed {
-        id: OperationId,
-        hook: String,
-        failure: HookFailure,
-    },
-    HookCancelled {
-        id: OperationId,
-        hook: String,
+        written: Vec<String>,
+        skipped: Vec<(String, String)>,
+        sections: Vec<String>,
     },
     /// Answers `ListWorkflows`. `ignored` holds each directory or file that was not
     /// read, as `<path>: <reason>` (a `.toml` file is one of these).

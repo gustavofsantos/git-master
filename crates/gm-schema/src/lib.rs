@@ -1,4 +1,4 @@
-//! Types shared by the UI, the MCP server and (later) hooks: commands going in,
+//! Types shared by the UI and the MCP server: commands going in,
 //! events coming out, and the repository status they carry.
 
 mod conflict;
@@ -6,7 +6,6 @@ mod diff;
 mod files;
 mod grep;
 mod history;
-mod hook;
 mod move_changes;
 mod operation;
 mod reflog;
@@ -33,10 +32,6 @@ pub use grep::{
 pub use history::{
     CommitDetail, CommitFile, CommitSummary, DETAIL_FILE_LIMIT, HISTORY_PAGE, History,
     HistoryScope, RefKind, RefLabel,
-};
-pub use hook::{
-    CONTRACT_VERSION, HookFailure, HookInfo, HookInput, HookOutput, HookPayload, HookRepo,
-    HookResult, HookScope, HookState, PREPARE_COMMIT,
 };
 pub use move_changes::{MoveBlocker, MoveOutcome, MovePreview, MoveTarget};
 pub use operation::{

@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use gm_core::EngineHandle;
 use gm_core::git::SubprocessGit;
-use gm_core::hook::ApprovalStore;
 use gm_core::watch::{self, Notice, WatchConfig, WatchHandle};
 use gm_schema::{Actor, CommandKind, Event, StageTarget, WorktreeEntry};
 
@@ -60,10 +59,7 @@ struct Session {
 }
 
 fn session(config: WatchConfig) -> Session {
-    let engine = gm_core::spawn_with(
-        Box::new(SubprocessGit::default()),
-        ApprovalStore::unavailable(),
-    );
+    let engine = gm_core::spawn_with(Box::new(SubprocessGit::default()), false);
     let (watch, async_notices) =
         watch::spawn_with(engine.clone(), Arc::new(OnceLock::new()), config);
     // The front-ends await the async channel; the tests bridge it to a bounded wait.

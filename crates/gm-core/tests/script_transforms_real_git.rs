@@ -1,8 +1,8 @@
 //! Transforms of field values (design/workflow-scripts.md, `WF3d`, D155) end to end: real
 //! repositories in temporary directories and real Lua workflows. This harness plays the engine
 //! thread that carries a run's effects and events, as the runner does. The parity checks run the
-//! `prepare-commit` chain on the app's threads (`spawn_with`) and the same fake program as a
-//! transform.
+//! fake programs of the `prepare-commit` hooks as transforms and compare the message with the one
+//! the hook gave (the hook path is gone since `WF3e`; the messages are the literals it gave).
 
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
@@ -10,12 +10,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use async_channel::Receiver as AsyncReceiver;
 use gm_core::git::SubprocessGit;
-use gm_core::hook::ApprovalStore;
 use gm_core::script::run::ScriptEvent;
 use gm_core::script::trust::TrustStore;
-use gm_core::{EffectRequest, Engine, EngineHandle, ScriptLink, spawn_with};
+use gm_core::{EffectRequest, Engine, ScriptLink};
 use gm_schema::{
     Actor, Command, CommandKind, Event, OperationId, OperationState, WorkflowRunStatus,
 };
@@ -673,7 +671,7 @@ fn a_field_without_transforms_is_refused() {
     );
 }
 
-/// The `prepare-commit` fake of the hooks tests: reads its stdin for `invocation_id`, runs `body`,
+/// The `prepare-commit` fake of the parity checks: reads its stdin for `invocation_id`, runs `body`,
 /// and answers with the message `$MSG`.
 fn answer(body: &str) -> String {
     format!(
@@ -688,75 +686,12 @@ fn fake(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
-/// The message the app's `prepare-commit` chain gives for `repo`, with the user hooks of
-/// `config`: the engine on its threads, as the app runs it.
-fn prepare_commit_message(repo: &Path, config: &Path, approvals: &Path) -> String {
-    let git = SubprocessGit {
-        global_config: Some(config.to_path_buf()),
-        ..SubprocessGit::default()
-    };
-    let handle: EngineHandle =
-        spawn_with(Box::new(git), ApprovalStore::at(approvals.to_path_buf()));
-    let events = handle.subscribe();
-    let opened = handle.dispatch(
-        Actor::Human,
-        CommandKind::OpenRepo {
-            path: repo.display().to_string(),
-        },
-    );
-    until_done(&events, opened);
-    let id = handle.dispatch(
-        Actor::Human,
-        CommandKind::RunPrepareCommit {
-            message: String::new(),
-        },
-    );
-    let seen = until_done(&events, id);
-    assert_eq!(
-        final_state(&seen, id).map(|(state, _)| state),
-        Some(OperationState::Done),
-        "{seen:#?}"
-    );
-    seen.iter()
-        .find_map(|e| match e {
-            Event::HookFinished { message, .. } => Some(message.clone()),
-            _ => None,
-        })
-        .expect("the chain answered")
-}
-
-/// Every event up to the operation's terminal state.
-fn until_done(events: &AsyncReceiver<Event>, id: OperationId) -> Vec<Event> {
-    let mut seen = Vec::new();
-    loop {
-        let event = events.recv_blocking().unwrap();
-        let terminal = matches!(
-            &event,
-            Event::OperationChanged { id: got, state, .. } if *got == id && state.is_terminal()
-        );
-        seen.push(event);
-        if terminal {
-            return seen;
-        }
-    }
-}
-
 #[test]
-fn parity_one_fake_program_gives_the_same_message_as_prepare_commit() {
+fn parity_one_fake_program_gives_the_message_the_prepare_commit_hook_gave() {
     let (dir, repo, flows) = staged_repo();
     std::fs::write(repo.join("a.txt"), "two\n").unwrap();
     git(&repo, &["add", "a.txt"]);
     let program = fake(dir.path(), "llm", "MSG='feat: suggested'");
-    let config = dir.path().join("global.gitconfig");
-    std::fs::write(
-        &config,
-        format!(
-            "[gitmaster \"prepare-commit.llm\"]\n\tcommand = sh {}\n",
-            program.display()
-        ),
-    )
-    .unwrap();
-    let from_hook = prepare_commit_message(&repo, &config, &dir.path().join("approvals.json"));
 
     // The same program, run by a transform through `ctx.exec` with the JSON contract of the hook.
     write_script(
@@ -776,8 +711,8 @@ fn parity_one_fake_program_gives_the_same_message_as_prepare_commit() {
     let (id, events) = h.handle(commit_message(""));
     let events = h.finish(id, events);
     let from_transform = finished(&events, id).and_then(|(value, _)| value);
-    assert_eq!(from_hook, "feat: suggested");
-    assert_eq!(from_transform.as_deref(), Some(from_hook.as_str()));
+    // The message the `prepare-commit` hook gave for this program.
+    assert_eq!(from_transform.as_deref(), Some("feat: suggested"));
 }
 
 #[test]
@@ -791,19 +726,6 @@ fn parity_a_chain_passes_each_answer_to_the_next_step_as_prepare_commit_does() {
         "second",
         "printf '%s' \"$IN\" | grep -q '\"message\":\"one\"' || exit 3\nMSG=one+two",
     );
-    let config = dir.path().join("global.gitconfig");
-    std::fs::write(
-        &config,
-        format!(
-            "[gitmaster \"prepare-commit.first\"]\n\tcommand = sh {}\n\
-             [gitmaster \"prepare-commit.second\"]\n\tcommand = sh {}\n",
-            first.display(),
-            second.display()
-        ),
-    )
-    .unwrap();
-    let from_hook = prepare_commit_message(&repo, &config, &dir.path().join("approvals.json"));
-
     let step = |program: &Path, name: &str| {
         format!(
             "local r = ctx.exec({{ \"sh\", \"{}\" }}, {{ stdin = '{{\"invocation_id\":\"{name}\",\"input\":{{\"message\":\"' .. input.trigger.current .. '\"}}}}', format = \"json\", timeout = \"30s\" }})\nif r.json == nil then return nil end\nreturn r.json.output.message",
@@ -826,6 +748,6 @@ fn parity_a_chain_passes_each_answer_to_the_next_step_as_prepare_commit_does() {
     let (id, events) = h.handle(commit_message(""));
     let events = h.finish(id, events);
     let from_transform = finished(&events, id).and_then(|(value, _)| value);
-    assert_eq!(from_hook, "one+two");
-    assert_eq!(from_transform.as_deref(), Some(from_hook.as_str()));
+    // The message the `prepare-commit` chain gave for these two programs.
+    assert_eq!(from_transform.as_deref(), Some("one+two"));
 }

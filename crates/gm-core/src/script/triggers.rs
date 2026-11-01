@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value, json};
 
 use super::meta::{Concurrency, Meta};
-use crate::hook::config::glob_match;
 
 /// One engine event that can start a script. `on` is the trigger's name, such as `commit.created`.
 #[derive(Clone, Debug, PartialEq)]
@@ -290,6 +289,33 @@ impl<R: Copy + PartialEq, P> Lanes<R, P> {
             .filter_map(|lane| lane.active.as_mut())
             .find(|active| active.run == Some(run))
     }
+}
+
+/// Glob matching for `match`: `*` matches any run of characters, including
+/// `/`, and `?` matches one character.
+#[must_use]
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let (mut p, mut t) = (0, 0);
+    // The last `*`, and the text position it currently absorbs up to.
+    let mut star: Option<(usize, usize)> = None;
+    while t < text.len() {
+        if p < pattern.len() && pattern[p] == '*' {
+            star = Some((p, t));
+            p += 1;
+        } else if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if let Some((star_p, star_t)) = star {
+            p = star_p + 1;
+            t = star_t + 1;
+            star = Some((star_p, star_t + 1));
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|&c| c == '*')
 }
 
 #[cfg(test)]
@@ -582,5 +608,20 @@ mod tests {
     fn a_run_no_lane_holds_finishes_with_nothing() {
         let mut lanes: Lanes<u64, &str> = Lanes::default();
         assert_eq!(lanes.finished(5), None);
+    }
+
+    #[test]
+    fn glob_matches_branch_names() {
+        assert!(glob_match("feat/*", "feat/x"));
+        assert!(glob_match("feat/*", "feat/x/y"));
+        assert!(!glob_match("feat/*", "main"));
+        assert!(!glob_match("feat/*", "feature"));
+        assert!(glob_match("main", "main"));
+        assert!(!glob_match("main", "main2"));
+        assert!(glob_match("a?c", "abc"));
+        assert!(!glob_match("a?c", "ac"));
+        assert!(glob_match("*", ""));
+        assert!(glob_match("*fix*", "hotfix-12"));
+        assert!(!glob_match("", "x"));
     }
 }

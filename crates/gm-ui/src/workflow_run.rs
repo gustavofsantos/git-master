@@ -1,12 +1,12 @@
 //! The window's view of the manual workflows: the files the engine found, and
 //! the runs it has been told about, newest last. No GPUI in here. The composer
-//! rule for a suggested message is a plain function, shared with the hooks.
+//! rule for a suggested message is a plain function, shared with the transforms.
 
 use std::collections::BTreeMap;
 
 use gm_schema::{WorkflowEnd, WorkflowInfo, WorkflowRunStatus};
 
-use crate::hook_run::Fill;
+use crate::suggestion::Fill;
 use crate::workflow_keys::KeyPlan;
 
 /// How many runs the window keeps. Older ones are forgotten.

@@ -1076,7 +1076,7 @@ fn trigger_help(field: &str) -> &'static str {
     match field {
         "on" => "The trigger. Required. See the list below.",
         "match" => {
-            "Narrows an event trigger with the pattern syntax of hooks, such as `branch:feat/*`. Not for `manual`."
+            "Narrows an event trigger to the branches a glob matches, such as `branch:feat/*`. Not for `manual`."
         }
         "key" => "A keyboard shortcut of a manual workflow. Not for any other trigger.",
         _ => "",

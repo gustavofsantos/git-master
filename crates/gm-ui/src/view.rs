@@ -20,8 +20,8 @@ use gpui::{
 };
 
 use crate::action_registry::{
-    self, Action, Args, CommentSpot, Context as ActionContext, Effect, HookCtx, LabelRef, Reason,
-    ReviewCtx, ThreadRef, WorkflowCtx,
+    self, Action, Args, CommentSpot, Context as ActionContext, Effect, LabelRef, MessageCtx,
+    Reason, ReviewCtx, ThreadRef, WorkflowCtx,
 };
 use crate::app_settings::{self, AppSettings};
 use crate::avatar::Avatars;
@@ -34,7 +34,7 @@ use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::diff_rows::Layout;
 use crate::editor_theme;
 use crate::file_discard::DiscardDialog;
-use crate::hook_run::Fill;
+use crate::hook_convert::{self, CONVERT_TITLE};
 use crate::icon::{self, Icon};
 use crate::merged_branches::MergedDialog;
 use crate::message_dialog::MessageDialog;
@@ -62,6 +62,7 @@ use crate::sidebar::{Folded, Grouping};
 use crate::stash_apply;
 use crate::stash_drop::DropStashDialog;
 use crate::stashes;
+use crate::suggestion::Fill;
 use crate::text_area::{TextArea, TextAreaEvent, TextStyle};
 use crate::theme;
 use crate::thread_dialogs::{ConfirmDialog, FieldDialog, LinkDialog};
@@ -384,7 +385,7 @@ impl StatusView {
             cx.observe_window_activation(window, |this, window, _cx| {
                 if window.is_window_active() {
                     this.watch.request();
-                    this.request_hook_list();
+                    this.request_hook_sections();
                 }
             }),
             cx.on_focus_in(&composer_focus, window, |this, _, cx| {
@@ -559,7 +560,6 @@ impl StatusView {
         let committed = matches!(event, Event::Committed { .. });
         let detail_loaded = matches!(event, Event::CommitDetailLoaded { .. });
         let file_event = is_file_event(&event);
-        let finished = matches!(event, Event::HookFinished { .. });
         let transform = transform_answer(&event);
         self.model.transforms.settle_event(&event);
         let workflow_refresh = self.on_workflow_event(&event, cx);
@@ -571,7 +571,11 @@ impl StatusView {
         );
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
+        let converted = convert_answer(&event);
         let shown = self.model.apply(event);
+        if let Some(text) = converted {
+            self.open_message(CONVERT_TITLE.to_owned(), text, window, cx);
+        }
         if stacks_loaded && self.model.restacking.take_resume() {
             self.engine
                 .dispatch(Actor::Human, CommandKind::ResumeRestack);
@@ -602,20 +606,11 @@ impl StatusView {
         }
         self.show_fresh_commit_stacks(window, cx);
         self.settle_dialogs(window, cx);
-        // A finished hook run fills the composer only while it still holds what the run was
-        // started from; otherwise the answer waits as a suggestion (see hook_run).
-        if finished {
-            let typed = self.composer.read(cx).text(cx);
-            if let Some(Fill::Apply(message)) = self.model.hooks.take_fill(&typed) {
-                self.composer
-                    .update(cx, |composer, cx| composer.set_text(&message, cx));
-            }
-        }
         // A transform's answer follows the same rule for the composer and for the branch name (`WF3d`).
         if let Some((id, value, changed)) = transform {
             self.on_transform_finished(id, value, changed, cx);
         }
-        // A workflow's message follows the hook rule: an empty composer takes it, otherwise
+        // A workflow's message follows the suggestion rule: an empty composer takes it, otherwise
         // it waits as the suggestion, which Replace and Discard answer.
         // On the welcome screen the error belongs to the screen, not the status bar.
         if let Some(welcome) = self.welcome.as_mut()
@@ -803,12 +798,12 @@ impl StatusView {
     }
 
     /// What every status refresh asks for again: the stacks, the branch list and
-    /// the hooks when HEAD moved (the tree marks the new branch), and the diff.
+    /// the Git config's hook sections when HEAD moved (the tree marks the new branch), and the diff.
     fn after_status(&mut self, head_before: Option<&str>, cx: &mut Context<Self>) {
         self.request_stacks();
         if self.head_name().as_deref() != head_before {
             self.request_branch_list();
-            self.request_hook_list();
+            self.request_hook_sections();
         }
         self.load_selected(cx);
     }
@@ -824,11 +819,12 @@ impl StatusView {
         self.model.stacks.request(id);
     }
 
-    /// Asks the engine for the prepare-commit hooks of the open repository. Nothing
-    /// is asked before one is open.
-    pub(crate) fn request_hook_list(&mut self) {
+    /// Asks the engine for the `prepare-commit` sections of the Git config (`WF3e`), for Convert
+    /// Hooks to Workflows. Nothing is asked before a repository is open.
+    pub(crate) fn request_hook_sections(&mut self) {
         if self.model.status().is_some() {
-            self.engine.dispatch(Actor::Human, CommandKind::ListHooks);
+            self.engine
+                .dispatch(Actor::Human, CommandKind::ListHookSections);
         }
     }
 
@@ -900,12 +896,12 @@ impl StatusView {
     }
 
     /// Puts a message a workflow suggested in the composer when it is empty, and
-    /// otherwise offers it as the hooks' suggestion, which Replace and Discard answer.
+    /// otherwise offers it as the suggestion, which Replace and Discard answer.
     fn place_workflow_message(&mut self, message: &str, cx: &mut Context<Self>) {
         let typed = self.composer.read(cx).text(cx);
         match fill_for_message(&typed, message) {
             Fill::Apply(text) => self.composer.update(cx, |c, cx| c.set_text(&text, cx)),
-            Fill::Suggest(text) => self.model.hooks.offer(text),
+            Fill::Suggest(text) => self.model.suggestion.offer(text),
         }
     }
 
@@ -948,7 +944,7 @@ impl StatusView {
     }
 
     /// A transform answered (`WF3d`). The commit message goes to the composer when its text is as it
-    /// was sent and nothing changed, and otherwise waits as the hooks' suggestion, which Replace and
+    /// was sent and nothing changed, and otherwise waits as the suggestion, which Replace and
     /// Discard answer. The branch name fills the New Branch dialog the same way, or waits as its
     /// suggestion. No value does nothing.
     fn on_transform_finished(
@@ -968,7 +964,7 @@ impl StatusView {
                     Some((_, Fill::Apply(text))) => self
                         .composer
                         .update(cx, |composer, cx| composer.set_text(&text, cx)),
-                    Some((_, Fill::Suggest(text))) => self.model.hooks.offer(text),
+                    Some((_, Fill::Suggest(text))) => self.model.suggestion.offer(text),
                     None => {}
                 }
             }
@@ -1015,12 +1011,13 @@ impl StatusView {
         self.show_diffs(None, None, cx);
         self.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
         self.model.branches.clear();
-        self.model.hooks.reset();
+        self.model.suggestion.drop_suggestion();
+        self.model.hook_sections.clear();
         self.model.transforms.reset();
         self.model.workflows.reset();
         self.model.workflows_page.reset();
         self.request_branch_list();
-        self.request_hook_list();
+        self.request_hook_sections();
         self.request_workflow_list();
         if self.screen == Screen::History {
             self.refresh_history();
@@ -1316,10 +1313,9 @@ impl StatusView {
             Ok(Effect::UseSuggestion(text)) => {
                 self.composer
                     .update(cx, |composer, cx| composer.set_text(&text, cx));
-                self.model.hooks.drop_suggestion();
+                self.model.suggestion.drop_suggestion();
             }
-            Ok(Effect::DiscardSuggestion) => self.model.hooks.drop_suggestion(),
-            Ok(Effect::DenyHook(hash)) => self.model.hooks.deny(&hash),
+            Ok(Effect::DiscardSuggestion) => self.model.suggestion.drop_suggestion(),
             Ok(Effect::OpenWorktreeDialog { branch }) => {
                 self.open_worktree_dialog(branch.as_deref(), window, cx);
             }
@@ -1390,11 +1386,11 @@ impl StatusView {
 
     /// Sends the engine commands of a run, in order, all as the human, and tracks
     /// the ones whose outcome the window shows: an apply or a pop, a checkout, a
-    /// remote operation, a hook run, a detached checkout and a refresh.
+    /// remote operation, a detached checkout and a refresh.
     fn send_commands(&mut self, action: Action, kinds: Vec<CommandKind>, cx: &mut Context<Self>) {
         if action == Action::Refresh {
             self.request_branch_list();
-            self.request_hook_list();
+            self.request_hook_sections();
         }
         for kind in kinds {
             // While a restack conflict is open, the resolver's events carry its worktree; a
@@ -1418,10 +1414,6 @@ impl StatusView {
                 kind,
                 CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease
             );
-            let prepare = match &kind {
-                CommandKind::RunPrepareCommit { message } => Some(message.clone()),
-                _ => None,
-            };
             let transform = match &kind {
                 CommandKind::RunTransform { field, current } => {
                     Field::from_name(field).map(|field| (field, current.clone()))
@@ -1429,6 +1421,10 @@ impl StatusView {
                 _ => None,
             };
             let id = self.engine.dispatch(Actor::Human, kind);
+            // A new commit message request replaces the suggestion waiting for the person.
+            if matches!(transform, Some((Field::CommitMessage, _))) {
+                self.model.suggestion.drop_suggestion();
+            }
             if let Some((field, sent)) = transform {
                 self.model.transforms.start(id, field, sent);
             }
@@ -1443,9 +1439,6 @@ impl StatusView {
             }
             if remote {
                 self.model.remote.begin(id, action);
-            }
-            if let Some(sent) = prepare {
-                self.model.hooks.start(id, sent);
             }
             if refresh {
                 self.start_refresh_indicator(id, cx);
@@ -1553,19 +1546,13 @@ impl StatusView {
                 comments: self.model.review.comments(),
                 spot,
             },
-            hooks: HookCtx {
-                running: self.model.hooks.in_flight(),
-                applicable: self.model.hooks.applicable(),
-                suggestion: self.model.hooks.suggestion.as_deref(),
-                pending_approval: self
-                    .model
-                    .hooks
-                    .pending_approval()
-                    .map(|hook| (hook.name.as_str(), hook.command_hash.as_str())),
+            messages: MessageCtx {
                 transform: transform_run::loaded(
                     self.model.workflows.listed.as_deref(),
                     Field::CommitMessage,
                 ),
+                suggestion: self.model.suggestion.current(),
+                sections: &self.model.hook_sections,
             },
             workflows: WorkflowCtx {
                 listed: self.model.workflows.listed.as_deref(),
@@ -1939,6 +1926,19 @@ fn is_file_event(event: &Event) -> bool {
             | Event::FileHighlighted { .. }
             | Event::FilesIndexed { .. }
     )
+}
+
+/// The text of the dialog that shows a conversion's answer (`WF3e`), when the event is one.
+fn convert_answer(event: &Event) -> Option<String> {
+    match event {
+        Event::HooksConverted {
+            written,
+            skipped,
+            sections,
+            ..
+        } => Some(hook_convert::convert_report(written, skipped, sections)),
+        _ => None,
+    }
 }
 
 /// The answer of a transform operation, when the event is one (`WF3d`).

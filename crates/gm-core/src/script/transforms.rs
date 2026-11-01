@@ -5,6 +5,8 @@
 
 use serde_json::{Value, json};
 
+use super::loader::sha256_hex;
+
 use super::journal::RunStatus;
 use super::phases::one_line;
 use super::triggers::TriggerEvent;
@@ -26,6 +28,25 @@ pub fn trigger(field: &str, branch: Option<String>, current: &str) -> TriggerEve
         on: format!("transform.{field}"),
         branch,
         payload: json!({ "field": field, "current": current }),
+    }
+}
+
+/// What the repository looked like when a transform started: HEAD and the staged diff. Compared
+/// when the transform answers, for `changed` (D155(1)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fingerprint {
+    /// The commit HEAD points at; `None` on an unborn branch.
+    pub head: Option<String>,
+    /// sha256 of the staged diff. The index is compared through its diff, so a restat that
+    /// changes nothing staged does not count as a change.
+    pub staged: String,
+}
+
+#[must_use]
+pub fn fingerprint(head: Option<&str>, staged_diff: &str) -> Fingerprint {
+    Fingerprint {
+        head: head.map(str::to_owned),
+        staged: sha256_hex(staged_diff.as_bytes()),
     }
 }
 
@@ -221,5 +242,14 @@ mod tests {
     #[test]
     fn with_no_transform_the_text_is_not_a_value() {
         assert_eq!(Sequence::new("typed").value(), None);
+    }
+
+    #[test]
+    fn the_fingerprint_moves_with_head_or_the_staged_diff() {
+        let base = fingerprint(Some("a1"), "diff one");
+        assert_eq!(base, fingerprint(Some("a1"), "diff one"));
+        assert_ne!(base, fingerprint(Some("b2"), "diff one"));
+        assert_ne!(base, fingerprint(Some("a1"), "diff two"));
+        assert_ne!(base, fingerprint(None, "diff one"));
     }
 }

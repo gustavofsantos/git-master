@@ -18,7 +18,6 @@ use crate::file_discard::Discarding;
 use crate::gate_wait::GateWait;
 use crate::history_graph::{GraphLayout, StackMarks};
 use crate::history_scope::ScopeChoice;
-use crate::hook_run::Hooks;
 use crate::icon::Icon;
 use crate::label_curate::LabelWrites;
 use crate::labels_page::LabelsPage;
@@ -37,6 +36,7 @@ use crate::stacks::Stacks;
 use crate::stash_apply::Applying;
 use crate::stash_drop::Dropping;
 use crate::stashes::StashList;
+use crate::suggestion::Suggestion;
 use crate::text_search::TextSearch;
 use crate::thread_curate::{LinkPicker, Outcome as ThreadOutcome, ThreadWork};
 use crate::threads::{HitPage, MarkdownCopy, ThreadsPage};
@@ -87,8 +87,10 @@ pub struct Model {
     pub(crate) history_scope: ScopeChoice,
     /// The branch dragged onto another to set its parent, while the drag runs.
     pub(crate) branch_drag: BranchDrag,
-    /// The prepare-commit hooks: what is listed, the run and its suggestion.
-    pub hooks: Hooks,
+    /// The message a workflow offered for the commit box, until the person uses or drops it.
+    pub suggestion: Suggestion,
+    /// The `prepare-commit` sections of the Git config, for Convert Hooks to Workflows (`WF3e`).
+    pub hook_sections: Vec<String>,
     /// The transform in flight (`WF3d`): the field it fills and the text it was sent with.
     pub transforms: Transforms,
     /// The gated operation that waits for its workflow gates now, if any (`WF3c`, D157).
@@ -938,13 +940,6 @@ impl Model {
                 self.pruning.settle(state, detail);
                 None
             }
-            // A hook run's failure belongs to the composer's chip, not to the status bar.
-            Event::OperationChanged {
-                id, state, detail, ..
-            } if self.hooks.owns(id) => {
-                self.hooks.ended(id, state, detail);
-                None
-            }
             // A remote operation's answer is the status bar's notice, or its error.
             Event::OperationChanged {
                 id, state, detail, ..
@@ -1216,20 +1211,8 @@ impl Model {
                 }
                 None
             }
-            Event::HooksListed { hooks, .. } => {
-                self.hooks.listed(hooks);
-                None
-            }
-            Event::HookStarted { id, hook, step, of } => {
-                self.hooks.step_started(id, hook, step, of);
-                None
-            }
-            Event::HookFinished {
-                id,
-                message,
-                repo_changed,
-            } => {
-                self.hooks.answered(id, message, repo_changed);
+            Event::HookSectionsListed { sections, .. } => {
+                self.hook_sections = sections;
                 None
             }
             Event::WorkflowsListed {
@@ -1314,8 +1297,6 @@ impl Model {
             | Event::RestackResolutionStarted { .. }
             | Event::RestackResolutionFinished { .. }
             | Event::RestackResolutionCancelled { .. }
-            | Event::HookFailed { .. }
-            | Event::HookCancelled { .. }
             | Event::WorktreeInspected { .. }
             | Event::PrunableListed { .. }
             | Event::MergedBranchesListed { .. }
@@ -1324,6 +1305,8 @@ impl Model {
             | Event::WorkflowMessageSuggested { .. }
             // A transform's answer is the composer's or the dialog's to place (`WF3d`).
             | Event::TransformFinished { .. }
+            // The view opens the conversion's dialog from the event (`WF3e`).
+            | Event::HooksConverted { .. }
             // The wait is kept by `gate_wait` above; each surface reads it.
             | Event::GateStarted { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
@@ -1707,11 +1690,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::MergedBranchesDeleted { id, .. }
         | Event::StashesListed { id, .. }
         | Event::ReflogLoaded { id, .. }
-        | Event::HooksListed { id, .. }
-        | Event::HookStarted { id, .. }
-        | Event::HookFinished { id, .. }
-        | Event::HookFailed { id, .. }
-        | Event::HookCancelled { id, .. }
+        | Event::HookSectionsListed { id, .. }
+        | Event::HooksConverted { id, .. }
         | Event::WorkflowsListed { id, .. }
         | Event::WorkflowCreated { id, .. }
         | Event::WorkflowReviewRequested { id, .. }
@@ -1832,20 +1812,6 @@ mod tests {
         assert_eq!(model.entry_count(), 3);
         assert!(!model.loading);
         assert_eq!(model.error, None);
-    }
-
-    #[test]
-    fn a_failed_hook_run_shows_on_the_chip_and_not_in_the_status_bar() {
-        use crate::hook_run::Phase;
-
-        let mut model = Model::default();
-        model.hooks.start(OperationId(9), String::new());
-        let _ = model.apply(failed(9, Some("hook llm exited with code 2")));
-        assert_eq!(model.error, None);
-        assert_eq!(
-            model.hooks.run.as_ref().map(|run| run.phase.clone()),
-            Some(Phase::Failed("hook llm exited with code 2".into()))
-        );
     }
 
     #[test]

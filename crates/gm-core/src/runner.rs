@@ -1,7 +1,7 @@
 //! One thread owns the engine (one writer per repository, design/architecture.md rule 3) and
-//! talks to the front-ends over channels, so the UI never waits for it. Hook
-//! runs are slow, so each gets its own thread; it reports back over the same
-//! channel and the engine thread records the result.
+//! talks to the front-ends over channels, so the UI never waits for it. Slow
+//! reads and the workflow runs have their own threads; they report back over
+//! the same channel and the engine thread records the result.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,7 +16,6 @@ use crate::files::{
     SearchReport, TextJob, TextReport,
 };
 use crate::history::HistoryReport;
-use crate::hook::{ApprovalStore, Report};
 use crate::remote::RemoteReport;
 use crate::script::run::ScriptEvent;
 use crate::script_session::{EffectRequest, ScriptLink};
@@ -24,12 +23,11 @@ use crate::threads_session::{ProvenanceJob, ProvenanceReport};
 use crate::{Engine, GitPort};
 
 enum Message {
-    /// The sender lets the engine start a hook thread that reports back. It is
+    /// The sender lets the engine start a thread that reports back. It is
     /// dropped with the message, so the engine thread stops once every handle
-    /// is gone and no hook is running.
+    /// is gone and no run is in progress.
     Dispatch(OperationId, Command, Sender<Message>),
     Subscribe(Sender<Event>),
-    Hook(Report),
     History(HistoryReport),
     Detail(DetailReport),
     Stack(StackReport),
@@ -104,37 +102,36 @@ impl EngineHandle {
     }
 }
 
-/// Starts the engine with approvals kept in the app's data directory. No workflow runs on an
-/// event: this is the engine of the MCP server and of tests.
+/// Starts the engine. No workflow runs on an event: this is the engine of the MCP server and of
+/// tests.
 ///
 /// # Panics
 ///
 /// If the OS cannot start the engine thread.
 pub fn spawn(git: Box<dyn GitPort>) -> EngineHandle {
-    spawn_with(git, ApprovalStore::default_location())
+    spawn_engine(git, false)
 }
 
-/// The engine of the app, which runs the workflows on their triggers (D155(4)). Approvals are kept
-/// in the app's data directory.
+/// The engine of the app, which runs the workflows on their triggers (D155(4)).
 ///
 /// # Panics
 ///
 /// If the OS cannot start the engine thread.
 pub fn spawn_app(git: Box<dyn GitPort>) -> EngineHandle {
-    spawn_engine(git, ApprovalStore::default_location(), true)
+    spawn_engine(git, true)
 }
 
-/// Like `spawn`, with the approvals file given by the caller (tests use a
-/// temporary one).
+/// Like `spawn`, with the workflow triggers on or off as `triggers` says: tests use it to
+/// turn the triggers on.
 ///
 /// # Panics
 ///
 /// If the OS cannot start the engine thread.
-pub fn spawn_with(git: Box<dyn GitPort>, approvals: ApprovalStore) -> EngineHandle {
-    spawn_engine(git, approvals, false)
+pub fn spawn_with(git: Box<dyn GitPort>, triggers: bool) -> EngineHandle {
+    spawn_engine(git, triggers)
 }
 
-fn spawn_engine(git: Box<dyn GitPort>, approvals: ApprovalStore, triggers: bool) -> EngineHandle {
+fn spawn_engine(git: Box<dyn GitPort>, triggers: bool) -> EngineHandle {
     let (tx, rx) = async_channel::unbounded::<Message>();
     let busy = Arc::new(AtomicBool::new(false));
     let thread_busy = Arc::clone(&busy);
@@ -156,7 +153,7 @@ fn spawn_engine(git: Box<dyn GitPort>, approvals: ApprovalStore, triggers: bool)
     std::thread::Builder::new()
         .name("gm-engine".into())
         .spawn(move || {
-            let mut engine = Engine::with_approvals(git, approvals);
+            let mut engine = Engine::new(git);
             engine.set_script_link(link);
             engine.set_triggers(triggers);
             run(engine, &rx, &thread_busy);
@@ -199,21 +196,6 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                 busy.store(false, Ordering::SeqCst);
                 spawn_read_jobs(&mut engine, &reports);
                 spawn_file_jobs(&mut engine, &reports);
-                for plan in engine.take_jobs() {
-                    let reports = reports.clone();
-                    std::thread::Builder::new()
-                        .name("gm-hook".into())
-                        .spawn(move || {
-                            plan.execute(|report| {
-                                let _ = reports.send_blocking(Message::Hook(report));
-                            });
-                        })
-                        .expect("spawn a hook thread");
-                }
-            }
-            Message::Hook(report) => {
-                let events = engine.hook_report(report);
-                broadcast(events, &mut subscribers);
             }
             Message::History(report) => {
                 let events = engine.history_report(report);

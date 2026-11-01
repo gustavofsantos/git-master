@@ -9,7 +9,6 @@ use gpui::{
 use crate::action_registry::{Action, Args};
 use crate::composer;
 use crate::gate_wait;
-use crate::hook_run::Phase;
 use crate::name_fit::{self, name_label};
 use crate::resize::{self, COMMIT};
 use crate::resize_handle::{self, Edge};
@@ -166,7 +165,7 @@ impl StatusView {
                     .gap_2()
                     .text_color(muted)
                     .child("Message")
-                    .child(self.hook_chip(cx))
+                    .child(self.suggest_chip(cx))
                     .child(
                         div()
                             .flex_none()
@@ -191,19 +190,15 @@ impl StatusView {
             )
             .children(self.workflow_line())
             .children(self.suggestion_row(cx))
-            .children(self.approval_row(cx))
             .children(self.gate_line(cx))
             .children(self.suggest_line(cx))
             .child(button)
             .child(height_strip)
     }
 
-    /// The prepare-commit state in the message header: what the run is doing,
-    /// with Cancel while it runs, or the Suggest button when a hook applies.
-    /// It shares the header row, so nothing below it moves.
-    fn hook_chip(&self, cx: &mut Context<Self>) -> Div {
-        let hooks = &self.model.hooks;
-        let in_flight = hooks.in_flight().is_some();
+    /// The Suggest button in the message header, when a commit message transform is loaded
+    /// (`WF3d`). It shares the header row, so nothing below it moves.
+    fn suggest_chip(&self, cx: &mut Context<Self>) -> Div {
         let mut row = div()
             .flex_1()
             .min_w_0()
@@ -212,29 +207,9 @@ impl StatusView {
             .items_center()
             .gap_2()
             .overflow_hidden();
-        if let Some(run) = &hooks.run {
-            let colour = match run.phase {
-                Phase::Failed(_) => theme::error(),
-                Phase::Ready { .. } => theme::text(),
-                _ => theme::muted(),
-            };
-            row = row.child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_color(colour)
-                    .child(run.phase.label()),
-            );
-        }
-        if in_flight {
-            row = row.child(chip_button("hook-cancel", "Cancel", Action::CancelHook, cx));
-        } else if hooks.applicable().is_some_and(|count| count > 0)
-            || transform_run::loaded(self.model.workflows.listed.as_deref(), Field::CommitMessage)
-        {
-            // A commit message transform suggests without a hook (`WF3d`).
+        if transform_run::loaded(self.model.workflows.listed.as_deref(), Field::CommitMessage) {
             row = row.child(chip_button(
-                "hook-suggest",
+                "suggest-message",
                 "Suggest message",
                 Action::SuggestMessage,
                 cx,
@@ -314,10 +289,10 @@ impl StatusView {
         )
     }
 
-    /// The message a hook run offered, with Replace and Discard. Replace fills
+    /// The message a workflow offered, with Replace and Discard. Replace fills
     /// the composer with it, which the user asked for; Discard keeps the text.
     fn suggestion_row(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let suggestion = self.model.hooks.suggestion.as_deref()?;
+        let suggestion = self.model.suggestion.current()?;
         let first_line = suggestion.lines().next().unwrap_or("");
         Some(
             div()
@@ -335,61 +310,17 @@ impl StatusView {
                         .child(format!("Suggested: {first_line}")),
                 )
                 .child(chip_button(
-                    "hook-replace",
+                    "suggest-replace",
                     "Replace",
                     Action::UseSuggestion,
                     cx,
                 ))
                 .child(chip_button(
-                    "hook-discard",
+                    "suggest-discard",
                     "Discard",
                     Action::DiscardSuggestion,
                     cx,
                 )),
-        )
-    }
-
-    /// The prompt for a repository hook that has no approval yet: its command,
-    /// in full, with Approve and Deny. Deny only hides the prompt for this
-    /// session; the hook stays unapproved.
-    fn approval_row(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let hook = self.model.hooks.pending_approval()?;
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_2()
-                .rounded_md()
-                .border_1()
-                .border_color(theme::hairline_strong())
-                .child(
-                    div()
-                        .text_color(theme::muted())
-                        .child(format!("Repository hook {} wants to run:", hook.name)),
-                )
-                .child(
-                    div()
-                        .font_family(theme::code_font())
-                        .text_color(theme::text())
-                        .child(hook.command.clone()),
-                )
-                .child(div().text_color(theme::muted()).child(
-                    "Approval is kept outside the repository and ends if the command changes.",
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .child(chip_button(
-                            "hook-approve",
-                            "Approve",
-                            Action::ApproveHook,
-                            cx,
-                        ))
-                        .child(chip_button("hook-deny", "Deny", Action::DenyHook, cx)),
-                ),
         )
     }
 

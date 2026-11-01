@@ -671,7 +671,7 @@ mod tests {
             message,
             current_branch: Some("main"),
             root: Some("/repo"),
-            hooks: crate::action_registry::HookCtx::default(),
+            messages: crate::action_registry::MessageCtx::default(),
             workflows: crate::action_registry::WorkflowCtx::default(),
             worktrees: &[],
             author_pictures: crate::action_registry::AuthorPictures::Hidden,

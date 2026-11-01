@@ -16,16 +16,10 @@ pub const KEPT: usize = 1000;
 /// The most bytes of each stream kept in a record.
 pub const MAX_TEXT: usize = 16 * 1024;
 
-/// What ran: a git process, or one step of a `prepare-commit` hook run.
+/// What ran: a git process.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     Git,
-    /// `outcome` is one short line, such as `ok`, `exit 2` or `cancelled`.
-    /// A hook's input (the staged diff) and output are never kept.
-    Hook {
-        name: String,
-        outcome: String,
-    },
 }
 
 /// One finished process. The stdin payload (a commit message, a blob, a staged
@@ -54,9 +48,6 @@ impl CommandRecord {
     /// The command as one shell-like line.
     #[must_use]
     pub fn line(&self) -> String {
-        if let Source::Hook { name, .. } = &self.source {
-            return format!("hook {name}: {}", self.args.join(" "));
-        }
         let mut line = format!("{} -C {}", self.program, self.dir.display());
         for arg in &self.args {
             line.push(' ');
@@ -180,17 +171,6 @@ mod tests {
         let mut r = record("commit");
         r.args.push("-F".into());
         assert_eq!(r.line(), "git -C /w commit -F");
-    }
-
-    #[test]
-    fn a_hook_step_reads_as_its_name_and_command() {
-        let mut r = record("unused");
-        r.source = Source::Hook {
-            name: "llm".into(),
-            outcome: "ok".into(),
-        };
-        r.args = vec!["suggest --style conventional".into()];
-        assert_eq!(r.line(), "hook llm: suggest --style conventional");
     }
 
     #[test]

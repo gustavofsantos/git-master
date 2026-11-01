@@ -2,17 +2,16 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use serde_json::{Map, json};
 
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictSite, DirListing,
-    Event, FileBody, FileView, GrepOptions, History, HookFailure, HookScope, MERGED_LIST_CHANGED,
-    MergedBranch, OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackResolution,
-    ReviewChange, ReviewComment, ReviewStatus, STASH_LIST_CHANGED, WorkflowDiagnostic,
-    WorktreeEntry, WorktreeInspection,
+    Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED, MergedBranch,
+    OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackResolution, ReviewChange,
+    ReviewComment, ReviewStatus, STASH_LIST_CHANGED, WorkflowDiagnostic, WorktreeEntry,
+    WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -26,7 +25,6 @@ use crate::files::{
 };
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
-use crate::hook::{self, ApprovalStore, Fingerprint, HookOutcome, HookRecord, Plan, Report, Step};
 use crate::move_exec;
 use crate::move_preview;
 use crate::port::{HistoryRevs, ReviewSide};
@@ -38,6 +36,7 @@ use crate::review;
 use crate::review_session::{self, ReviewSession};
 use crate::review_store::ReviewStore;
 use crate::script::dry;
+use crate::script::hook_convert;
 use crate::script::inspect::inspect;
 use crate::script::journal::{Journal, RETAINED_RUNS, RunId as ScriptRunId, RunStatus};
 use crate::script::loader;
@@ -47,6 +46,7 @@ use crate::script::policy::StartedBy;
 use crate::script::run::ScriptEvent;
 use crate::script::run::{RunSpec, Runtime};
 use crate::script::transforms;
+use crate::script::transforms::Fingerprint;
 use crate::script::triggers::{self, Decision, Lanes, TriggerEvent};
 use crate::script::trust::{self, TrustStore};
 use crate::script::{api_docs, input as script_input, templates as script_templates};
@@ -74,12 +74,6 @@ pub struct Engine {
     git: Box<dyn GitPort>,
     root: Option<PathBuf>,
     log: Vec<LogEntry>,
-    approvals: ApprovalStore,
-    /// Hook runs that started and have not answered yet, by run id.
-    runs: BTreeMap<OperationId, ActiveRun>,
-    /// Runs accepted but not yet handed to a thread; see `take_jobs`.
-    jobs: Vec<Plan>,
-    hook_log: Vec<HookRecord>,
     /// The walk the history list reads, while a repository is open.
     history: Option<HistorySession>,
     /// History pages accepted since the last call; see `take_history_jobs`.
@@ -242,29 +236,6 @@ struct ActiveRemote {
     root: PathBuf,
 }
 
-/// What the engine keeps of a `RunPrepareCommit` until it answers.
-struct ActiveRun {
-    command: Command,
-    root: PathBuf,
-    fingerprint: Fingerprint,
-    cancel: Arc<AtomicBool>,
-    /// Command and command hash of each step, by hook name.
-    scripts: BTreeMap<String, (String, String)>,
-}
-
-impl ActiveRun {
-    /// The command and its hash of the step `hook`; empty when unknown.
-    fn script(&self, hook: &str) -> (String, String) {
-        self.scripts.get(hook).cloned().unwrap_or_default()
-    }
-}
-
-/// A run the engine accepted: its record, and the plan for its thread.
-struct Accepted {
-    active: ActiveRun,
-    plan: Plan,
-}
-
 struct Op<'a> {
     id: OperationId,
     command: &'a Command,
@@ -272,21 +243,11 @@ struct Op<'a> {
 }
 
 impl Engine {
-    /// An engine whose approvals are not saved anywhere: repository hooks
-    /// never get approved.
     pub fn new(git: Box<dyn GitPort>) -> Self {
-        Self::with_approvals(git, ApprovalStore::unavailable())
-    }
-
-    pub fn with_approvals(git: Box<dyn GitPort>, approvals: ApprovalStore) -> Self {
         Self {
             git,
             root: None,
             log: Vec::new(),
-            approvals,
-            runs: BTreeMap::new(),
-            jobs: Vec::new(),
-            hook_log: Vec::new(),
             history: None,
             history_jobs: Vec::new(),
             detail: None,
@@ -309,8 +270,7 @@ impl Engine {
             remote: None,
             remote_jobs: Vec::new(),
             workflow_user_dir: loader::default_user_dir(),
-            workflow_trash_dir: crate::hook::approval::default_file()
-                .and_then(|file| file.parent().map(|data| data.join("workflow-trash"))),
+            workflow_trash_dir: crate::paths::data_dir().map(|data| data.join("workflow-trash")),
             script_link: None,
             script: None,
             trust: None,
@@ -341,17 +301,6 @@ impl Engine {
 
     pub fn log(&self) -> &[LogEntry] {
         &self.log
-    }
-
-    /// One record per hook step that ended, in the order they ended.
-    pub fn hook_log(&self) -> &[HookRecord] {
-        &self.hook_log
-    }
-
-    /// The hook runs accepted since the last call. The caller executes each
-    /// `Plan` on its own thread and passes every `Report` back to `hook_report`.
-    pub fn take_jobs(&mut self) -> Vec<Plan> {
-        std::mem::take(&mut self.jobs)
     }
 
     /// The history pages accepted since the last call. The caller runs each on
@@ -1043,7 +992,7 @@ impl Engine {
             // Taken before anything runs, so a change while the transforms run shows (D155(1)).
             let fingerprint = if field == "commit_message" {
                 let staged = self.git.staged_diff(&root).map_err(|e| e.0)?;
-                Some(hook::fingerprint(head.as_deref(), &staged))
+                Some(transforms::fingerprint(head.as_deref(), &staged))
             } else {
                 None
             };
@@ -1576,108 +1525,6 @@ impl Engine {
         events
     }
 
-    /// Turns one report of a hook run into events, and records the run's
-    /// state when it ends. A report for a run that already ended is ignored.
-    pub fn hook_report(&mut self, report: Report) -> Vec<Event> {
-        let mut events = Vec::new();
-        match report {
-            Report::Started {
-                run,
-                hook,
-                step,
-                of,
-            } => {
-                if self.runs.contains_key(&run) {
-                    events.push(Event::HookStarted {
-                        id: run,
-                        hook,
-                        step,
-                        of,
-                    });
-                }
-            }
-            Report::StepDone { run, hook } => {
-                if let Some(active) = self.runs.get(&run) {
-                    let (command, command_hash) = active.script(&hook);
-                    self.hook_log.push(HookRecord {
-                        run,
-                        hook,
-                        command,
-                        command_hash,
-                        exit_code: Some(0),
-                        outcome: HookOutcome::Ok,
-                    });
-                }
-            }
-            Report::Finished { run, message } => {
-                let Some(active) = self.runs.remove(&run) else {
-                    return events;
-                };
-                let repo_changed = self.repo_changed(&active);
-                let mut op = Op {
-                    id: run,
-                    command: &active.command,
-                    state: OperationState::Executing,
-                };
-                events.push(Event::HookFinished {
-                    id: run,
-                    message,
-                    repo_changed,
-                });
-                self.advance(&mut op, OperationState::Done, &mut events);
-            }
-            Report::Failed { run, hook, failure } => {
-                let Some(active) = self.runs.remove(&run) else {
-                    return events;
-                };
-                let summary = hook::run::failure_summary(&hook, &failure);
-                self.hook_log.push(HookRecord {
-                    run,
-                    command: active.script(&hook).0,
-                    command_hash: active.script(&hook).1,
-                    hook: hook.clone(),
-                    exit_code: match &failure {
-                        HookFailure::Exited { code, .. } => *code,
-                        _ => None,
-                    },
-                    outcome: HookOutcome::Failed(summary.clone()),
-                });
-                events.push(Event::HookFailed {
-                    id: run,
-                    hook,
-                    failure,
-                });
-                let mut op = Op {
-                    id: run,
-                    command: &active.command,
-                    state: OperationState::Executing,
-                };
-                self.advance_with(&mut op, OperationState::Failed, Some(summary), &mut events);
-            }
-            Report::Cancelled { run, hook } => {
-                let Some(active) = self.runs.remove(&run) else {
-                    return events;
-                };
-                self.hook_log.push(HookRecord {
-                    run,
-                    command: active.script(&hook).0,
-                    command_hash: active.script(&hook).1,
-                    hook: hook.clone(),
-                    exit_code: None,
-                    outcome: HookOutcome::Cancelled,
-                });
-                events.push(Event::HookCancelled { id: run, hook });
-                let mut op = Op {
-                    id: run,
-                    command: &active.command,
-                    state: OperationState::Executing,
-                };
-                self.advance(&mut op, OperationState::Cancelled, &mut events);
-            }
-        }
-        events
-    }
-
     /// Starts the read a command asks for when it is one of the reads that run
     /// on a thread and answer later: the history, a commit, a stack of file
     /// diffs, a file search or a file. `None` for any other command. A read in
@@ -1715,7 +1562,6 @@ impl Engine {
     }
 
     /// Runs one command to a terminal state and returns the events, in order.
-    /// A `RunPrepareCommit` returns at `Executing`; it ends in `hook_report`.
     pub fn handle(&mut self, id: OperationId, command: &Command) -> Vec<Event> {
         let mut events = Vec::new();
         let mut op = Op {
@@ -1763,19 +1609,6 @@ impl Engine {
                 self.start_transform(id, command, &field, &current, composer, &mut events)
             {
                 self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
-            }
-            return events;
-        }
-        if let CommandKind::RunPrepareCommit { message } = &command.kind {
-            match self.prepare_run(id, command, message) {
-                Ok(accepted) => {
-                    self.advance(&mut op, OperationState::Executing, &mut events);
-                    self.runs.insert(id, accepted.active);
-                    self.jobs.push(accepted.plan);
-                }
-                Err(message) => {
-                    self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
-                }
             }
             return events;
         }
@@ -1875,17 +1708,13 @@ impl Engine {
                 self.git.checkout(&root, branch).map_err(|e| e.0)?;
                 self.reload_status(id, &root)
             }
-            CommandKind::ListHooks => {
+            CommandKind::ListHookSections => {
                 let root = self.open_root()?;
-                let (branch, _) = self.current(&root)?;
-                let hooks = self.list_hooks(&root, branch.as_deref())?;
-                Ok(vec![Event::HooksListed { id, hooks }])
+                let sections = hook_convert::section_entries(self.git.as_ref(), &root)?;
+                Ok(vec![Event::HookSectionsListed { id, sections }])
             }
-            CommandKind::ApproveHook { name, command_hash } => {
-                self.approve_hook(id, actor, name, command_hash)
-            }
+            CommandKind::ConvertHooksToWorkflows => self.convert_hooks(id, actor),
             _ if is_handled_run(kind) => Err("a run is started by handle, not execute".to_owned()),
-            CommandKind::CancelHook { run } => self.cancel_hook(*run),
             CommandKind::StageAll => self.stage_all(id),
             CommandKind::CancelOperation { op } => self.cancel_operation(actor, *op),
             _ if is_conflict_command(kind) => self.conflict_command(id, actor, kind),
@@ -1908,86 +1737,10 @@ impl Engine {
         }
     }
 
-    /// Checks a run and captures what it needs. Quick git reads only; the
-    /// hooks themselves run later, on their own thread.
-    fn prepare_run(
-        &self,
-        id: OperationId,
-        command: &Command,
-        message: &str,
-    ) -> Result<Accepted, String> {
-        let root = self.open_root()?;
-        let (branch, head) = self.current(&root)?;
-        let hooks = self.list_hooks(&root, branch.as_deref())?;
-        let chain = hook::chain(&hooks)?;
-        if chain.steps.is_empty() {
-            return Err(match chain.awaiting_approval.first() {
-                Some(name) => format!("hook {name} needs approval: list the hooks and approve it"),
-                None => "no prepare-commit hook applies to this repository".to_owned(),
-            });
-        }
-        let scripts = chain
-            .steps
-            .iter()
-            .map(|hook| {
-                (
-                    hook.name.clone(),
-                    (hook.command.clone(), hook.command_hash.clone()),
-                )
-            })
-            .collect();
-        let steps: Vec<Step> = chain
-            .steps
-            .into_iter()
-            .map(|hook| Step {
-                name: hook.name.clone(),
-                command: hook.command.clone(),
-                timeout: Duration::from_millis(hook.timeout_ms),
-            })
-            .collect();
-        let staged_diff = self.git.staged_diff(&root).map_err(|e| e.0)?;
-        let fingerprint = hook::fingerprint(head.as_deref(), &staged_diff);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let plan = Plan {
-            run: id,
-            root: root.clone(),
-            branch,
-            head,
-            staged_diff,
-            message: message.to_owned(),
-            steps,
-            login_path: self.git.login_path(),
-            cancel: Arc::clone(&cancel),
-            log: self.git.command_log(),
-        };
-        let active = ActiveRun {
-            command: command.clone(),
-            root,
-            fingerprint,
-            cancel,
-            scripts,
-        };
-        Ok(Accepted { active, plan })
-    }
-
-    fn list_hooks(
-        &self,
-        root: &std::path::Path,
-        branch: Option<&str>,
-    ) -> Result<Vec<gm_schema::HookInfo>, String> {
-        hook::list(self.git.as_ref(), root, branch, &self.approvals).map_err(|e| e.0)
-    }
-
     /// Branch name and HEAD commit, both `None` when they do not apply.
     fn current(&self, root: &std::path::Path) -> Result<(Option<String>, Option<String>), String> {
         let status = self.git.status(root).map_err(|e| e.0)?;
         Ok((status.branch.head, status.branch.oid))
-    }
-
-    /// Whether HEAD or the staged diff moved since the run started. When the
-    /// repository cannot be read now, it counts as changed.
-    fn repo_changed(&self, active: &ActiveRun) -> bool {
-        self.moved_since(&active.root, &active.fingerprint)
     }
 
     /// Whether HEAD or the staged diff of `root` moved since `fingerprint` was taken. When the
@@ -1999,7 +1752,7 @@ impl Engine {
         let Ok(staged) = self.git.staged_diff(root) else {
             return true;
         };
-        hook::fingerprint(head.as_deref(), &staged) != *fingerprint
+        transforms::fingerprint(head.as_deref(), &staged) != *fingerprint
     }
 
     /// Starts a page request. It continues the walk when the walk stands right
@@ -3424,34 +3177,23 @@ impl Engine {
         Ok(vec![Event::StatusLoaded { id, status }])
     }
 
-    /// Approves the repository hook `name` at `command_hash`. Human only.
-    fn approve_hook(
-        &self,
-        id: OperationId,
-        actor: &Actor,
-        name: &str,
-        command_hash: &str,
-    ) -> Result<Vec<Event>, String> {
-        // Approval is the human's decision (docs/concepts/principles.md); an agent may only propose.
-        if !matches!(actor, Actor::Human) {
-            return Err("only a human can approve a hook".to_owned());
-        }
+    /// Converts the user's `prepare-commit` sections into a workflow in the user's workflows
+    /// directory (`WF3e`, D160). The answer lists the file, the skipped sections and the sections
+    /// the person can remove. Human only.
+    fn convert_hooks(&self, id: OperationId, actor: &Actor) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "convert hooks to workflows")?;
         let root = self.open_root()?;
-        let (branch, _) = self.current(&root)?;
-        let hooks = self.list_hooks(&root, branch.as_deref())?;
-        let hook = hooks
-            .iter()
-            .find(|h| h.scope == HookScope::Repo && h.name == name)
-            .ok_or_else(|| format!("no repository hook named {name}"))?;
-        if hook.command_hash != command_hash {
-            return Err(format!(
-                "the command of {name} changed since the hooks were listed; list them again"
-            ));
-        }
-        self.approvals
-            .approve(&root.to_string_lossy(), name, command_hash)?;
-        let hooks = self.list_hooks(&root, branch.as_deref())?;
-        Ok(vec![Event::HooksListed { id, hooks }])
+        let dir = self
+            .workflow_user_dir
+            .as_deref()
+            .ok_or_else(|| "there is no user workflows directory (HOME is not set)".to_owned())?;
+        let converted = hook_convert::convert(self.git.as_ref(), &root, dir)?;
+        Ok(vec![Event::HooksConverted {
+            id,
+            written: converted.written,
+            skipped: converted.skipped,
+            sections: converted.sections,
+        }])
     }
 
     /// Stages every change of the working tree, then reads the status again.
@@ -3811,17 +3553,6 @@ impl Engine {
         let store = review_store(&mut self.review, self.git.as_ref(), root)?;
         let comments = review_session::listed(store, root)?;
         Ok(vec![Event::ReviewCommentsListed { id, comments }])
-    }
-
-    /// Stops the hook run `run`, if it is still active.
-    fn cancel_hook(&self, run: OperationId) -> Result<Vec<Event>, String> {
-        match self.runs.get(&run) {
-            Some(active) => {
-                active.cancel.store(true, Ordering::SeqCst);
-                Ok(Vec::new())
-            }
-            None => Err(format!("no hook run {} is active", run.0)),
-        }
     }
 
     /// The workflow commands: the listing, and a run's start, approval and cancel.
@@ -4307,6 +4038,7 @@ impl Engine {
                 | CommandKind::LoadStacks
                 | CommandKind::PlanRestack { .. }
                 | CommandKind::ListWorkflows
+                | CommandKind::ListHookSections
                 | CommandKind::LoadReflog { .. }
                 | CommandKind::ListWorkflowRuns { .. }
                 | CommandKind::LoadWorkflowRun { .. }
@@ -4401,17 +4133,15 @@ fn check_workflow_script(id: OperationId, source: &str) -> Vec<Event> {
     vec![Event::WorkflowChecked { id, diagnostics }]
 }
 
-/// The conflict commands (D114, D115): reads and writes of a conflicted file.
-/// The runs `handle` starts, which `execute` never runs: hooks and transforms.
+/// The runs `handle` starts, which `execute` never runs: the transforms (`WF3d`).
 fn is_handled_run(kind: &CommandKind) -> bool {
     matches!(
         kind,
-        CommandKind::RunPrepareCommit { .. }
-            | CommandKind::RunTransform { .. }
-            | CommandKind::ComposerOpened
+        CommandKind::RunTransform { .. } | CommandKind::ComposerOpened
     )
 }
 
+/// The conflict commands (D114, D115): reads and writes of a conflicted file.
 fn is_conflict_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
@@ -5333,16 +5063,13 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_cannot_approve_a_hook() {
+    fn an_agent_cannot_convert_hooks() {
         let mut engine = engine();
         let command = Command {
             actor: Actor::Agent {
                 name: "agent".into(),
             },
-            kind: CommandKind::ApproveHook {
-                name: "team".into(),
-                command_hash: "0".repeat(64),
-            },
+            kind: CommandKind::ConvertHooksToWorkflows,
         };
 
         let events = engine.handle(OperationId(1), &command);
@@ -5351,7 +5078,10 @@ mod tests {
             panic!("no events");
         };
         assert_eq!(*state, OperationState::Failed);
-        assert_eq!(detail.as_deref(), Some("only a human can approve a hook"));
+        assert_eq!(
+            detail.as_deref(),
+            Some("only a human can convert hooks to workflows")
+        );
     }
 
     #[test]

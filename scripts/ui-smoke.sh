@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-smoke/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-smoke/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette n-typed-text-kept o-suggestion-replace p-hook-failure q-repo-hook-approval r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split w-script-editor)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette x-convert-hooks r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split w-script-editor)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -47,7 +47,6 @@ BRANCH_X=140; BRANCH_Y=81                   # branch button, right of the projec
 SIDEBAR_FEATURE_X=160; SIDEBAR_FEATURE_Y=423  # feature/x row in the sidebar (non-current)
 MENU_STAGE_X=470; MENU_STAGE_Y=163          # "Stage File" in the file row's menu, opened at NAME_X, ROW_MOD_Y
 MENU_CHECKOUT_X=190; MENU_CHECKOUT_Y=439    # "Checkout Branch" in the branch menu, opened at SIDEBAR_FEATURE_X/Y
-CHIP_X=316; CHIP_Y=590; CHIP_W=142; CHIP_H=28   # the hook chip's text in the message header, window-relative
 TITLE_BAR_H=44                              # the title bar: name row over the branch and path row
 TOOLBAR_Y=72; TOOLBAR_FETCH_X=1082; TOOLBAR_RESTACK_X=1322   # Fetch and Restack buttons, right of the title bar
 SECTION_CROP="240x84+0+612"                  # the WORKTREES rows at the sidebar's foot, window-relative
@@ -786,28 +785,6 @@ scenario_m() {
 }
 
 
-# --- Prepare-commit hooks (slice 2) -------------------------------------------
-# The hook fixture is a script outside the repository. Each run appends a line to
-# hook-runs.log, waits two seconds, then answers with the message or fails with
-# the exit code.
-write_hook() {
-  # $1: script path, $2: message to answer with, $3: exit code (0 answers)
-  cat > "$1" <<'HOOK'
-#!/bin/sh
-# smoke fixture: prepare-commit hook
-echo run >> '__MARKER__'
-id=$(sed -n 's/.*"invocation_id":"\([^"]*\)".*/\1/p')
-sleep 2
-if [ __EXIT__ -ne 0 ]; then
-  echo 'llm: no model configured' >&2
-  exit __EXIT__
-fi
-printf '{"invocation_id":"%s","output":{"message":"__MESSAGE__"}}\n' "$id"
-HOOK
-  sed -i -e "s|__MARKER__|$RUN_DIR/hook-runs.log|" -e "s|__EXIT__|$3|" -e "s|__MESSAGE__|$2|" "$1"
-  chmod +x "$1"
-}
-
 # Opens the palette, types $1 and runs the first match with Enter.
 run_from_palette() {
   xdotool key ctrl+k; sleep 1
@@ -815,102 +792,17 @@ run_from_palette() {
   xdotool key Return; sleep 1
 }
 
-hook_ran() { [ -s "$RUN_DIR/hook-runs.log" ]; }
-
-# --- 3n. Text typed while the hook runs is kept; the answer is a suggestion ---
-scenario_n() {
-  local repo="$RUN_DIR/repo" theme="$1" got
-  run_from_palette "suggest commit"
-  xdotool mousemove "$COMPOSER_X" "$COMPOSER_Y" click 1; sleep 0.5
-  xdotool type --delay 20 -- "my own"; sleep 3
-  hook_ran || fail "the hook did not run"
-  shoot "$SMOKE_OUT/n-typed-text-kept-$theme.png"
-
-  # Enable Commit with a staged file, then commit whatever the composer holds.
-  git -C "$repo" add src/ledger/mod.rs; sleep 2.5
-  xdotool mousemove "$COMPOSER_X" "$COMPOSER_Y" click 1; sleep 0.5
-  xdotool key ctrl+Return; sleep 1.5
-  got="$(git -C "$repo" log -1 --format=%B)"
-  [ "$got" = "my own" ] || fail "commit message is '$got': the typed text was overwritten by the hook"
-}
-
-# --- 3o. Repository changed during the run: Replace fills the composer -------
-scenario_o() {
-  local repo="$RUN_DIR/repo" theme="$1" got
-  run_from_palette "suggest commit"
-  # Staging while the hook runs moves the repository: its answer becomes a suggestion.
-  sleep 0.5
-  git -C "$repo" add src/ledger/mod.rs
-  sleep 3
-  hook_ran || fail "the hook did not run"
-  shoot "$SMOKE_OUT/o-suggestion-replace-$theme.png"
-
-  run_from_palette "replace with suggestion"; sleep 0.5
-  xdotool mousemove "$COMPOSER_X" "$COMPOSER_Y" click 1; sleep 0.5
-  xdotool key ctrl+Return; sleep 1.5
-  got="$(git -C "$repo" log -1 --format=%B)"
-  [ "$got" = "feat: from hook" ] || fail "after Replace the commit message is '$got', expected the suggestion"
-}
-
-# --- 3p. A failed hook shows a failed chip (error colour in the header) -------
-scenario_p() {
-  local theme="$1" shot="$SMOKE_OUT/p-hook-failure-$1.png" red error_hex
-  run_from_palette "suggest commit"; sleep 3
-  hook_ran || fail "the hook did not run"
-  shoot "$shot"
-  case "$theme" in
-    light) error_hex="#89323a" ;;
-    dark) error_hex="#fea1a4" ;;
-  esac
-  red="$(convert "$shot" -crop "${CHIP_W}x${CHIP_H}+${CHIP_X}+${CHIP_Y}" +repage \
-    -fuzz 10% -fill white -opaque "$error_hex" -fuzz 0 -fill black +opaque white \
-    -format '%[fx:mean]' info:)"
-  awk -v m="$red" 'BEGIN { exit !(m > 0.01) }' \
-    || fail "no failure-coloured text in the hook chip (mean=$red): $shot"
-
-  # The failed step is in the command log: the panel opens over the window.
-  xdotool mousemove "$LOG_BUTTON_X" "$LOG_BUTTON_Y" click 1; sleep 1
-  local logged="$SMOKE_OUT/p-hook-log-$theme.png" differing
-  shoot "$logged"
-  differing="$(compare -metric AE "$shot" "$logged" null: 2>&1 || true)"
-  read -r differing _ <<<"$differing"
-  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
-  [ "$differing" -gt 20000 ] || fail "the command log did not open after the hook run (only $differing pixels changed): $logged"
-}
-
-# --- 3q. A repository hook waits for approval; approval is stored outside the repo
-scenario_q() {
-  local repo="$RUN_DIR/repo" theme="$1" hook="$RUN_DIR/hook.sh"
-  local approvals="$RUN_DIR/xdg/gitmaster/hook-approvals.json" want differing got status_before
-  status_before="$(git -C "$repo" status --porcelain)"
-  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y" click 1; sleep 1
-  shoot "$RUN_DIR/approval-asked.png"
-
-  run_from_palette "suggest commit"; sleep 3
-  hook_ran && fail "a repository hook ran before it was approved"
-  [ -e "$approvals" ] && fail "an approval was stored before the user approved"
-
-  run_from_palette "approve repository hook"; sleep 1.5
-  shoot "$RUN_DIR/approved.png"
-  differing="$(compare -metric AE "$RUN_DIR/approval-asked.png" "$RUN_DIR/approved.png" null: 2>&1 || true)"
-  read -r differing _ <<<"$differing"
-  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare approval screenshots: $differing"
-  [ "$differing" -gt 2000 ] || fail "the approval prompt did not go away after Approve ($differing pixels changed)"
-
-  [ -f "$approvals" ] || fail "Approve stored nothing in $approvals"
-  want="$(printf '%s' "sh $hook" | sha256sum | cut -d' ' -f1)"
-  grep -qF "$want" "$approvals" || fail "the stored approval does not name the command hash"
-  [ "$(git -C "$repo" status --porcelain)" = "$status_before" ] \
-    || fail "the working copy changed: approval must live outside the repository"
-
-  run_from_palette "suggest commit"; sleep 3.5
-  hook_ran || fail "the approved hook did not run"
-  shoot "$SMOKE_OUT/q-repo-hook-approval-$theme.png"
-  git -C "$repo" add src/ledger/mod.rs; sleep 2.5
-  xdotool mousemove "$COMPOSER_X" "$COMPOSER_Y" click 1; sleep 0.5
-  xdotool key ctrl+Return; sleep 1.5
-  got="$(git -C "$repo" log -1 --format=%B)"
-  [ "$got" = "feat: from repo hook" ] || fail "commit message is '$got', expected the approved hook's answer"
+# --- 3x. Convert Hooks to Workflows writes an unreviewed workflow and edits no config ---
+# The palette offers the action while a prepare-commit section is in the Git config. The file is
+# written into the user's workflows folder; the config is only read (WF3e, D160).
+scenario_x() {
+  local theme="$1" config="$RUN_DIR/gitconfig" file="$RUN_DIR/xdg-config/gitmaster/workflows/prepare-commit-llm.lua" before
+  before="$(cat "$config")"
+  run_from_palette "convert hooks to workflows"; sleep 1.5
+  shoot "$SMOKE_OUT/x-convert-hooks-$theme.png"
+  [ -f "$file" ] || fail "the conversion wrote no workflow to $file"
+  grep -qF 'transform.commit_message' "$file" || fail "the workflow does not run on transform.commit_message"
+  [ "$(cat "$config")" = "$before" ] || fail "the Git config changed: the conversion must not edit it"
 }
 
 # --- 3r. Title bar: Fetch and Restack are disabled; a click says why ----------
@@ -1153,17 +1045,8 @@ run_scenario() {
       # A -/+ pair (entry becomes ledger) and a surplus + (audit) in mod.rs.
       printf 'pub mod total;\npub mod ledger;\npub mod audit;\n' > "$RUN_DIR/repo/src/ledger/mod.rs"
       ;;
-    n-typed-text-kept | o-suggestion-replace)
-      write_hook "$RUN_DIR/hook.sh" "feat: from hook" 0
-      printf '[gitmaster "prepare-commit.llm"]\n\tcommand = sh %s\n' "$RUN_DIR/hook.sh" > "$RUN_DIR/gitconfig"
-      ;;
-    p-hook-failure)
-      write_hook "$RUN_DIR/hook.sh" "unused" 3
-      printf '[gitmaster "prepare-commit.llm"]\n\tcommand = sh %s\n' "$RUN_DIR/hook.sh" > "$RUN_DIR/gitconfig"
-      ;;
-    q-repo-hook-approval)
-      write_hook "$RUN_DIR/hook.sh" "feat: from repo hook" 0
-      git -C "$RUN_DIR/repo" config gitmaster.prepare-commit.team.command "sh $RUN_DIR/hook.sh"
+    x-convert-hooks)
+      printf '[gitmaster "prepare-commit.llm"]\n\tcommand = cat\n' > "$RUN_DIR/gitconfig"
       ;;
   esac
   if [ "$base" = g-switch-branch ]; then prepare_branches "$RUN_DIR/repo"; fi
@@ -1250,10 +1133,7 @@ run_scenario() {
     k-file-menu) scenario_k "$theme" ;;
     l-branch-menu) scenario_l "$theme" ;;
     m-command-palette) scenario_m "$theme" ;;
-    n-typed-text-kept) scenario_n "$theme" ;;
-    o-suggestion-replace) scenario_o "$theme" ;;
-    p-hook-failure) scenario_p "$theme" ;;
-    q-repo-hook-approval) scenario_q "$theme" ;;
+    x-convert-hooks) scenario_x "$theme" ;;
     r-title-bar) scenario_r "$theme" ;;
     s-worktrees) scenario_s "$theme" ;;
     t-create-worktree) scenario_t "$theme" ;;

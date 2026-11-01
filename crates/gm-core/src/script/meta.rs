@@ -42,7 +42,7 @@ impl Concurrency {
 pub struct Trigger {
     /// `manual`, an event, `before.<op>`, `after.<op>` or `transform.<field>`.
     pub on: String,
-    /// The hook-style filter of an event trigger, such as `branch:feat/*`.
+    /// The branch filter of an event trigger, such as `branch:feat/*`.
     pub filter: Option<String>,
     /// The keyboard shortcut of a manual workflow, in the app's notation.
     pub key: Option<String>,
