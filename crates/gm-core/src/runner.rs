@@ -49,6 +49,8 @@ enum Message {
     ScriptEvent(ScriptEvent),
     /// The thread database changed on disk; the subscribers hear `ThreadsChanged`.
     ThreadsChanged,
+    /// Refs of the open repository may have moved; the engine checks the branch tips (`WF3a`).
+    RefsChanged(OperationId),
 }
 
 /// Cloneable front door to the engine thread. The thread stops when every
@@ -81,6 +83,13 @@ impl EngineHandle {
         let _ = self.tx.send_blocking(Message::ThreadsChanged);
     }
 
+    /// Tells the engine that refs of the open repository may have moved. The watcher calls it after
+    /// its quiet period; the engine fires `refs.changed` for each branch whose tip moved.
+    pub fn refs_changed(&self) {
+        let id = OperationId(self.next_id.fetch_add(1, Ordering::SeqCst));
+        let _ = self.tx.send_blocking(Message::RefsChanged(id));
+    }
+
     /// Whether the engine thread is handling a command right now. A status
     /// started meanwhile would queue behind it and see its writes twice.
     pub fn is_busy(&self) -> bool {
@@ -95,13 +104,24 @@ impl EngineHandle {
     }
 }
 
-/// Starts the engine with approvals kept in the app's data directory.
+/// Starts the engine with approvals kept in the app's data directory. No workflow runs on an
+/// event: this is the engine of the MCP server and of tests.
 ///
 /// # Panics
 ///
 /// If the OS cannot start the engine thread.
 pub fn spawn(git: Box<dyn GitPort>) -> EngineHandle {
     spawn_with(git, ApprovalStore::default_location())
+}
+
+/// The engine of the app, which runs the workflows on their triggers (D155(4)). Approvals are kept
+/// in the app's data directory.
+///
+/// # Panics
+///
+/// If the OS cannot start the engine thread.
+pub fn spawn_app(git: Box<dyn GitPort>) -> EngineHandle {
+    spawn_engine(git, ApprovalStore::default_location(), true)
 }
 
 /// Like `spawn`, with the approvals file given by the caller (tests use a
@@ -111,6 +131,10 @@ pub fn spawn(git: Box<dyn GitPort>) -> EngineHandle {
 ///
 /// If the OS cannot start the engine thread.
 pub fn spawn_with(git: Box<dyn GitPort>, approvals: ApprovalStore) -> EngineHandle {
+    spawn_engine(git, approvals, false)
+}
+
+fn spawn_engine(git: Box<dyn GitPort>, approvals: ApprovalStore, triggers: bool) -> EngineHandle {
     let (tx, rx) = async_channel::unbounded::<Message>();
     let busy = Arc::new(AtomicBool::new(false));
     let thread_busy = Arc::clone(&busy);
@@ -134,6 +158,7 @@ pub fn spawn_with(git: Box<dyn GitPort>, approvals: ApprovalStore) -> EngineHand
         .spawn(move || {
             let mut engine = Engine::with_approvals(git, approvals);
             engine.set_script_link(link);
+            engine.set_triggers(triggers);
             run(engine, &rx, &thread_busy);
         })
         .expect("spawn the engine thread");
@@ -163,6 +188,10 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
                 broadcast(events, &mut subscribers);
             }
             Message::ThreadsChanged => broadcast(vec![Event::ThreadsChanged], &mut subscribers),
+            Message::RefsChanged(id) => {
+                let events = engine.refs_changed(id);
+                broadcast(events, &mut subscribers);
+            }
             Message::Dispatch(id, command, reports) => {
                 busy.store(true, Ordering::SeqCst);
                 let events = engine.handle(id, &command);

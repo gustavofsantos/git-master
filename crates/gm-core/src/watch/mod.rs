@@ -12,6 +12,9 @@
 //! - the thread folder, `gitmaster/` in the common dir, non-recursively: only
 //!   `threads.db` and `threads.db-wal` count, and they raise `ThreadsChanged`
 //!   through the engine after a quiet period (design/threads.md);
+//! - the refs, `refs/` and `packed-refs` in the git dir or the common dir: after
+//!   a quiet period the engine compares the branch tips and fires `refs.changed`
+//!   (`WF3a`);
 //! - the worktree: the root and each directory holding tracked files
 //!   (`set::watch_dirs`); changes whose paths `check-ignore` reports as ignored
 //!   are dropped, so `target/` and `node_modules/` cost nothing;
@@ -43,6 +46,8 @@ pub use set::MAX_WATCHED_DIRS;
 
 /// The quiet period a change waits for.
 pub const DEBOUNCE: Duration = Duration::from_millis(150);
+/// The quiet period a ref change waits for, before the engine checks the branch tips (`WF3a`).
+pub const REFS_QUIET: Duration = Duration::from_millis(500);
 /// The longest a change waits, however long the stream of changes.
 pub const MAX_WAIT: Duration = Duration::from_secs(1);
 /// How often a due refresh is re-checked while the engine is busy.
@@ -167,6 +172,8 @@ pub fn spawn_with(
         threads_dir: false,
         threads_first: None,
         threads_last: None,
+        refs_first: None,
+        refs_last: None,
     };
     std::thread::Builder::new()
         .name("gm-watch".into())
@@ -202,6 +209,10 @@ struct Worker {
     threads_first: Option<Instant>,
     /// When the last thread database change of the pending burst came.
     threads_last: Option<Instant>,
+    /// When the first ref change of the pending burst came.
+    refs_first: Option<Instant>,
+    /// When the last ref change of the pending burst came.
+    refs_last: Option<Instant>,
 }
 
 impl Worker {
@@ -213,6 +224,7 @@ impl Worker {
                 .due()
                 .into_iter()
                 .chain(self.threads_due())
+                .chain(self.refs_due())
                 .min();
             let timeout = due.map(|due| if due <= now { BUSY_POLL } else { due - now });
             let first = match timeout {
@@ -234,6 +246,11 @@ impl Worker {
                 self.threads_first = None;
                 self.threads_last = None;
                 self.engine.threads_changed();
+            }
+            if self.refs_due().is_some_and(|due| due <= now) {
+                self.refs_first = None;
+                self.refs_last = None;
+                self.engine.refs_changed();
             }
             // Without an open repository there is nothing to refresh; the request waits.
             if self.root.is_some() && self.coalescer.should_start(now, self.engine.is_busy()) {
@@ -310,6 +327,8 @@ impl Worker {
         self.threads_dir = false;
         self.threads_first = None;
         self.threads_last = None;
+        self.refs_first = None;
+        self.refs_last = None;
         self.root = Some(root.to_path_buf());
         match self.install(root) {
             Ok(dirs) => {
@@ -393,6 +412,20 @@ impl Worker {
         Some((last + DEBOUNCE).min(first + MAX_WAIT))
     }
 
+    /// Notes a change of a ref. The check goes out after a quiet period, or once `MAX_WAIT` has
+    /// passed since the burst began.
+    fn note_refs_change(&mut self, now: Instant) {
+        self.refs_first.get_or_insert(now);
+        self.refs_last = Some(now);
+    }
+
+    /// When the pending ref change is checked, if there is one.
+    fn refs_due(&self) -> Option<Instant> {
+        let first = self.refs_first?;
+        let last = self.refs_last?;
+        Some((last + REFS_QUIET).min(first + MAX_WAIT))
+    }
+
     /// Brings the worktree watches in line with the tracked set. Returns the
     /// number of directories watched.
     fn sync_worktree(&mut self, root: &Path) -> Result<usize, String> {
@@ -458,6 +491,7 @@ impl Worker {
         let mut registry_appeared = false;
         let mut threads_touched = false;
         let mut threads_folder_appeared = false;
+        let mut refs_touched = false;
         for path in paths.drain(..) {
             if let Ok(rel) = path
                 .strip_prefix(&git_dir)
@@ -469,6 +503,7 @@ impl Worker {
                 }
                 registry_appeared |= !self.registry && rel == Path::new("worktrees");
                 threads_touched |= filter::threads_database_changed(rel);
+                refs_touched |= filter::refs_changed(rel);
                 threads_folder_appeared |= !self.threads_dir && filter::threads_dir_appeared(rel);
             } else if let Ok(rel) = path.strip_prefix(&root)
                 && !filter::is_inside_dot_git(rel)
@@ -490,6 +525,9 @@ impl Worker {
         }
         if threads_touched {
             self.note_threads_change(now);
+        }
+        if refs_touched {
+            self.note_refs_change(now);
         }
         if tracked_set_changed && let Err(reason) = self.sync_worktree(&root) {
             self.degrade(reason);

@@ -226,6 +226,14 @@ fn trigger(object: &Map<String, Value>, problems: &mut Vec<MetaProblem>) -> Opti
             "M.meta.trigger.match narrows an event trigger; a manual workflow has nothing to match",
         ));
     }
+    if let Some(rule) = &filter
+        && rule.strip_prefix("branch:").is_none_or(str::is_empty)
+    {
+        problems.push(problem(
+            "trigger.match",
+            "M.meta.trigger.match must be branch:<glob>, such as branch:feat/*",
+        ));
+    }
     if let Some(key) = &key {
         if on != "manual" {
             problems.push(problem(
@@ -531,6 +539,14 @@ mod tests {
             json!({ "name": "w", "trigger": { "on": "commit.created", "key": "secondary-b" } });
         assert_eq!(fields(&event_key), ["trigger.key"]);
         assert!(parse(&json!({ "name": "w", "trigger": { "on": "commit.created", "match": "branch:feat/*" } })).is_ok());
+    }
+
+    #[test]
+    fn match_is_a_branch_glob() {
+        for rule in ["main", "branch:", "ref:feat/*"] {
+            let value = json!({ "name": "w", "trigger": { "on": "refs.changed", "match": rule } });
+            assert_eq!(fields(&value), ["trigger.match"], "{rule}");
+        }
     }
 
     #[test]

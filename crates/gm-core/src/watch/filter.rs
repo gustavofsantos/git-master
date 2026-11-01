@@ -68,6 +68,17 @@ pub fn threads_dir_appeared(rel: &Path) -> bool {
     rel == Path::new("gitmaster")
 }
 
+/// Whether `rel`, relative to the git dir or the common dir, may move a branch or another ref:
+/// a loose ref under `refs/`, or `packed-refs`. Lock files do not count (`WF3a`, `refs.changed`).
+pub fn refs_changed(rel: &Path) -> bool {
+    let is_ref = rel.starts_with("refs") || rel == Path::new("packed-refs");
+    let is_lock = rel
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_lock);
+    is_ref && !is_lock
+}
+
 /// Whether a git metadata change means the set of tracked paths, and so the
 /// set of directories to watch, may have changed.
 pub fn changes_tracked_set(rel: &Path) -> bool {
@@ -98,6 +109,16 @@ mod tests {
         assert!(!threads_database_changed(Path::new("gitmaster")));
         assert!(threads_dir_appeared(Path::new("gitmaster")));
         assert!(!threads_dir_appeared(Path::new("gitmaster/threads.db")));
+    }
+
+    #[test]
+    fn loose_refs_and_packed_refs_are_ref_changes() {
+        assert!(refs_changed(Path::new("refs/heads/feat/x")));
+        assert!(refs_changed(Path::new("refs/remotes/origin/main")));
+        assert!(refs_changed(Path::new("packed-refs")));
+        assert!(!refs_changed(Path::new("refs/heads/main.lock")));
+        assert!(!refs_changed(Path::new("HEAD")));
+        assert!(!refs_changed(Path::new("logs/refs/heads/main")));
     }
 
     fn matters(path: &str) -> bool {

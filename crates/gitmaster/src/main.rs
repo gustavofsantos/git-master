@@ -89,7 +89,7 @@ fn main() {
         });
     }
     let login_path = git.login_path.clone();
-    let engine = gm_core::spawn(Box::new(git));
+    let engine = gm_core::spawn_app(Box::new(git));
     // Started before the window dispatches its open, so the watcher sees the repository open.
     let watch = gm_core::watch::spawn(engine.clone(), login_path);
     let start = gm_ui::StartPath {

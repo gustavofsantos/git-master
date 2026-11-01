@@ -41,6 +41,9 @@ pub enum ScriptEvent {
     Notify { run: RunId, text: String },
     /// `ctx.commit.suggest_message`: the composer shows `message` as a suggestion.
     SuggestMessage { run: RunId, message: String },
+    /// The run reached an applying call, before any approval of it (`WF3a`): a trigger may no
+    /// longer cancel it. Not shown to the person.
+    Applying { run: RunId },
     /// The run waits for `Runtime::approve`. `summary` is what the person reads; `args` are the
     /// resolved arguments of the call (D101).
     AwaitingApproval {
@@ -81,6 +84,16 @@ pub struct EffectResult {
 }
 
 impl EffectResult {
+    /// The answer to an effect posted by a run that was cancelled meanwhile: nothing was written.
+    #[must_use]
+    pub fn cancelled() -> Self {
+        Self {
+            outcome: "cancelled".to_owned(),
+            value: Value::Null,
+            message: "cancelled".to_owned(),
+        }
+    }
+
     #[must_use]
     pub fn done(value: Value) -> Self {
         Self {
@@ -285,6 +298,16 @@ impl Runtime {
     pub fn approve(&self, run: RunId, approved: bool) -> bool {
         self.inner
             .signal(run, &Pending::Approval, Signal::Approve(approved))
+    }
+
+    /// Whether a cancel was asked for the run. `false` once the run has ended.
+    #[must_use]
+    pub fn is_cancelling(&self, run: RunId) -> bool {
+        self.inner.controls.lock().is_ok_and(|controls| {
+            controls
+                .get(&run)
+                .is_some_and(|control| control.cancel.load(Ordering::SeqCst))
+        })
     }
 
     /// Cancels a run: stops the script, wakes a blocked call and kills the process of an `exec`.
@@ -704,6 +727,7 @@ impl RunHost<'_> {
 
     fn effect(&mut self, f: &CtxFn, args: &Value) -> Done {
         if f.level == Level::Apply {
+            self.inner.emit(ScriptEvent::Applying { run: self.run });
             let gate = gate_apply(f.path, &self.started_by, self.auto_approve, self.exec_seen);
             if let Gate::Ask(reason) = gate {
                 let summary = format!("{}\n{}", approval_title(f), reason.text());
@@ -727,6 +751,9 @@ impl RunHost<'_> {
             level: f.level,
         };
         let result = self.inner.effects.effect(&call);
+        if result.outcome == "cancelled" {
+            return Done::end(HostEnd::Cancelled, "cancelled", "cancelled");
+        }
         if result.outcome == "done" {
             return Done::value(result.value);
         }

@@ -2106,6 +2106,23 @@ impl GitPort for SubprocessGit {
         Ok(local_tip(&repo, name)?.map(|oid| oid.to_string()))
     }
 
+    fn local_tips(&self, root: &Path) -> Result<Vec<(String, String)>, GitError> {
+        let repo = open(root)?;
+        let mut tips = Vec::new();
+        for item in repo
+            .branches(Some(BranchType::Local))
+            .map_err(|e| git_err(&e))?
+        {
+            let (branch, _) = item.map_err(|e| git_err(&e))?;
+            let name = branch_name(&branch)?;
+            if let Some(oid) = branch.get().target() {
+                tips.push((name, oid.to_string()));
+            }
+        }
+        tips.sort();
+        Ok(tips)
+    }
+
     fn branch_merge_base(
         &self,
         root: &Path,

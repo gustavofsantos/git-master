@@ -653,6 +653,18 @@ impl GitPort for FakeGit {
         Ok(self.tips.lock().unwrap().get(name).cloned())
     }
 
+    fn local_tips(&self, _root: &Path) -> Result<Vec<(String, String)>, GitError> {
+        let mut tips: Vec<(String, String)> = self
+            .tips
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(name, oid)| (name.clone(), oid.clone()))
+            .collect();
+        tips.sort();
+        Ok(tips)
+    }
+
     fn branch_merge_base(
         &self,
         _root: &Path,

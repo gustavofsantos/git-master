@@ -147,6 +147,11 @@ impl ScriptSession {
         request: EffectRequest,
     ) -> bool {
         let EffectRequest { call, reply } = request;
+        // A run cancelled while its effect waited for the engine writes nothing (WF3a).
+        if self.runtime.is_cancelling(call.run) {
+            let _ = reply.send(EffectResult::cancelled());
+            return false;
+        }
         let mut actions = Actions::new(git, &self.root, log, self.origin(call.run));
         let result = effect(&mut actions, &call, &self.events);
         let wrote = actions.wrote();
@@ -264,7 +269,8 @@ pub(crate) fn to_events(event: ScriptEvent) -> Vec<Event> {
         ScriptEvent::Changed {
             status: RunStatus::Interrupted,
             ..
-        } => Vec::new(),
+        }
+        | ScriptEvent::Applying { .. } => Vec::new(),
         ScriptEvent::Changed {
             run,
             workflow,

@@ -261,6 +261,14 @@ pub trait GitPort: Send {
         Err(GitError("branches is not supported by this adapter".into()))
     }
 
+    /// The full id of the tip of every local branch, as `(name, id)` in name order. Never records
+    /// anything. Reads the branch tips for `refs.changed` (`WF3a`).
+    fn local_tips(&self, _root: &Path) -> Result<Vec<(String, String)>, GitError> {
+        Err(GitError(
+            "local tips is not supported by this adapter".into(),
+        ))
+    }
+
     /// The configured `user.email` without angle brackets; `None` when unset.
     /// Never records anything.
     fn user_email(&self, _root: &Path) -> Result<Option<String>, GitError> {

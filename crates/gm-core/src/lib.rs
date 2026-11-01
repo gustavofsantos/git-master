@@ -54,6 +54,6 @@ pub use port::{
     BlameRead, CommitSnapshot, DetailRead, DiscardOutcome, FileListRead, FileMerge, GitError,
     GitPort, GrepRead, HistoryRevs, RefMove, RemoteRun, ReviewSide, TreeMerge,
 };
-pub use runner::{EngineHandle, spawn, spawn_with};
+pub use runner::{EngineHandle, spawn, spawn_app, spawn_with};
 pub use script_session::{EffectRequest, ScriptLink};
 pub use threads_session::{ProvenanceJob, ProvenanceReport};

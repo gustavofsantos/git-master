@@ -45,6 +45,7 @@ use crate::script::luau::LuauEngine;
 use crate::script::policy::StartedBy;
 use crate::script::run::ScriptEvent;
 use crate::script::run::{RunSpec, Runtime};
+use crate::script::triggers::{self, Decision, Lanes, TriggerEvent};
 use crate::script::trust::{self, TrustStore};
 use crate::script::{api_docs, input as script_input, templates as script_templates};
 use crate::script_session::{self, EffectRequest, ScriptLink, ScriptSession};
@@ -137,6 +138,12 @@ pub struct Engine {
     threads: Option<ThreadsSession>,
     /// The restack conflict being resolved in its worktree (D154), if any.
     restack_resolution: Option<ResolutionSession>,
+    /// Whether engine events start workflows (`WF3a`, D155(4)). Only the app turns it on.
+    triggers: bool,
+    /// The event runs in progress, one lane per workflow (D100), in memory.
+    lanes: Lanes<ScriptRunId, (OperationId, TriggerEvent)>,
+    /// The local branch tips of the open repository at the last check, for `refs.changed`.
+    tips: Option<(PathBuf, BTreeMap<String, String>)>,
 }
 
 /// The restack conflict being resolved (D154): the plan it came from, and the conflict
@@ -258,6 +265,9 @@ impl Engine {
             review: None,
             threads: None,
             restack_resolution: None,
+            triggers: false,
+            lanes: Lanes::default(),
+            tips: None,
         }
     }
 
@@ -404,6 +414,11 @@ impl Engine {
         let root = session.root.clone();
         let origin = session.origin(request.call.run);
         let wrote = session.execute(self.git.as_ref(), &mut self.log, request);
+        // A run's own writes become the baseline of `refs.changed`, so they fire nothing (no
+        // cascades, WF3a).
+        if wrote && self.triggers {
+            self.snapshot_tips(&root);
+        }
         self.workflow_events(origin, &root, Vec::new(), wrote)
     }
 
@@ -412,7 +427,267 @@ impl Engine {
         if let (ScriptEvent::Finished { run, .. }, Some(session)) = (&event, self.script.as_mut()) {
             session.drop_diff(*run);
         }
-        script_session::to_events(event)
+        let mut started = Vec::new();
+        match &event {
+            ScriptEvent::Applying { run } => self.lanes.applied(*run),
+            ScriptEvent::Finished { run, .. } => {
+                // The run's script may have a pending trigger, which starts now (WF3a).
+                if let Some((name, (origin, trigger))) = self.lanes.finished(*run) {
+                    let root = self.script.as_ref().map(|session| session.root.clone());
+                    started = if let Some(root) = root {
+                        self.begin_event_run(origin, &root, &name, &trigger)
+                    } else {
+                        self.lanes.start_failed(&name);
+                        Vec::new()
+                    };
+                }
+            }
+            _ => {}
+        }
+        let mut events = script_session::to_events(event);
+        events.extend(started);
+        events
+    }
+
+    /// Turns the event triggers on or off (`WF3a`, D155(4)). They are off by default, so the MCP
+    /// server and the tests run no workflow on an event. The app turns them on (`spawn_app`).
+    pub fn set_triggers(&mut self, on: bool) {
+        self.triggers = on;
+    }
+
+    /// The events a command that succeeded starts (`WF3a`): `repo.opened`, `commit.created`,
+    /// `checkout.done` and `restack.done`. `fetch.done` fires when the fetch ends.
+    fn fire_after(
+        &mut self,
+        id: OperationId,
+        kind: &CommandKind,
+        produced: &[Event],
+    ) -> Vec<Event> {
+        if !self.triggers {
+            return Vec::new();
+        }
+        let Some(root) = self.root.clone() else {
+            return Vec::new();
+        };
+        if matches!(kind, CommandKind::OpenRepo { .. }) {
+            self.snapshot_tips(&root);
+        }
+        match self.trigger_of(&root, kind, produced) {
+            Some(event) => self.fire_triggers(id, &root, &event),
+            None => Vec::new(),
+        }
+    }
+
+    /// The event that a command which succeeded makes, if it makes one.
+    fn trigger_of(
+        &self,
+        root: &Path,
+        kind: &CommandKind,
+        produced: &[Event],
+    ) -> Option<TriggerEvent> {
+        match kind {
+            CommandKind::OpenRepo { .. } => {
+                let branch = self.current(root).ok().and_then(|(branch, _)| branch);
+                Some(triggers::repo_opened(&root.display().to_string(), branch))
+            }
+            CommandKind::Commit { .. } => {
+                let oid = produced.iter().find_map(|event| match event {
+                    Event::Committed { oid, .. } => Some(oid.as_str()),
+                    _ => None,
+                })?;
+                let (branch, _) = self.current(root).ok()?;
+                Some(triggers::commit_created(oid, branch))
+            }
+            CommandKind::Checkout { .. } | CommandKind::CheckoutCommit { .. } => {
+                let (branch, head) = self.current(root).ok()?;
+                Some(triggers::checkout_done(branch, head.as_deref()))
+            }
+            CommandKind::ApplyRestack { .. } => {
+                let record = produced.iter().find_map(|event| match event {
+                    Event::RestackFinished {
+                        record: Some(record),
+                        ..
+                    } => Some(record),
+                    _ => None,
+                })?;
+                let moved: Vec<String> = record
+                    .moves
+                    .iter()
+                    .map(|moved| moved.name.clone())
+                    .collect();
+                Some(triggers::restack_done(&record.from, &moved))
+            }
+            _ => None,
+        }
+    }
+
+    /// Starts, queues or drops the runs that `event` triggers (`WF3a`). A matched script whose version
+    /// the person has not reviewed does not start: a notice says so.
+    fn fire_triggers(&mut self, id: OperationId, root: &Path, event: &TriggerEvent) -> Vec<Event> {
+        if !self.triggers {
+            return Vec::new();
+        }
+        let Ok(loaded) = self.load_scripts(root) else {
+            return Vec::new();
+        };
+        let matched: Vec<&loader::ScriptEntry> = loaded
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .meta
+                    .as_ref()
+                    .is_ok_and(|meta| triggers::matches(meta, event))
+            })
+            .collect();
+        if matched.is_empty() {
+            return Vec::new();
+        }
+        let trust = match self.trust_store() {
+            Ok(trust) => trust,
+            Err(reason) => {
+                return vec![workflow_notice(format!(
+                    "workflows did not run on {}: {reason}",
+                    event.on
+                ))];
+            }
+        };
+        let mut events = Vec::new();
+        for entry in matched {
+            let Ok(meta) = &entry.meta else {
+                continue;
+            };
+            match trust.is_reviewed(&entry.hash) {
+                Ok(true) => {}
+                Ok(false) => {
+                    events.push(workflow_notice(format!(
+                        "{} did not run on {}: review it first.",
+                        entry.name, event.on
+                    )));
+                    continue;
+                }
+                Err(reason) => {
+                    events.push(workflow_notice(format!(
+                        "{} did not run on {}: {}",
+                        entry.name, event.on, reason.0
+                    )));
+                    continue;
+                }
+            }
+            match self
+                .lanes
+                .on_trigger(&entry.name, meta.concurrency, (id, event.clone()))
+            {
+                Decision::Start((origin, trigger)) => {
+                    events.extend(self.begin_event_run(origin, root, &entry.name, &trigger));
+                }
+                Decision::Cancel { run } => {
+                    if let Some(runtime) = self.script_runtime() {
+                        runtime.cancel(run);
+                    }
+                }
+                Decision::Queued | Decision::Dropped => {}
+            }
+        }
+        events
+    }
+
+    /// Starts the run of the script `name` for `trigger`, which the lanes let through. A run that
+    /// does not start frees its lane, and the reason is a notice.
+    fn begin_event_run(
+        &mut self,
+        origin: OperationId,
+        root: &Path,
+        name: &str,
+        trigger: &TriggerEvent,
+    ) -> Vec<Event> {
+        match self.start_event_run(origin, root, name, trigger) {
+            Ok(run) => {
+                self.lanes.started(name, run);
+                Vec::new()
+            }
+            Err(reason) => {
+                self.lanes.start_failed(name);
+                vec![workflow_notice(reason)]
+            }
+        }
+    }
+
+    /// Starts the run of the script `name` for `trigger`: the reviewed version, with its automatic
+    /// approval (D101), no inputs, `input.trigger` and `input.repo`. It is started by an event, so
+    /// its journal row shows `event:<name>` (D64).
+    fn start_event_run(
+        &mut self,
+        id: OperationId,
+        root: &Path,
+        name: &str,
+        trigger: &TriggerEvent,
+    ) -> Result<ScriptRunId, String> {
+        let entry = self.find_script(root, name)?;
+        let trust = self.trust_store()?;
+        if !trust.is_reviewed(&entry.hash).map_err(|e| e.0)? {
+            return Err(format!(
+                "{name} did not run on {}: review it first.",
+                trigger.on
+            ));
+        }
+        let auto_approve = trust.auto_approve(&entry.hash).map_err(|e| e.0)?;
+        let repo = script_input::repo_input(self.git.as_ref(), root);
+        let value = trigger.trigger_value();
+        let input = json!({ "inputs": {}, "trigger": value.clone(), "repo": repo.value });
+        let seed = u64::try_from(now_ms()).unwrap_or(0) ^ id.0.rotate_left(32);
+        let run = self.start_script(
+            id,
+            RunSpec {
+                workflow: entry.name,
+                chunk: entry.file_name,
+                source: entry.source,
+                definition_hash: entry.hash,
+                started_by: StartedBy::Event(trigger.on.clone()),
+                trigger: value,
+                input,
+                reviewed: true,
+                auto_approve,
+                seed,
+            },
+        )?;
+        if let (Some(file), Some(session)) = (repo.diff_file, self.script.as_mut()) {
+            session.keep_diff(run, file);
+        }
+        Ok(run)
+    }
+
+    /// The watcher saw refs move, after its quiet period (`WF3a`). The local branch tips are compared
+    /// with the last check, and `refs.changed` fires once for each branch that moved. The first
+    /// check only takes the baseline.
+    pub fn refs_changed(&mut self, id: OperationId) -> Vec<Event> {
+        if !self.triggers {
+            return Vec::new();
+        }
+        let Ok(root) = self.open_root() else {
+            return Vec::new();
+        };
+        let Ok(tips) = self.git.local_tips(&root) else {
+            return Vec::new();
+        };
+        let now: BTreeMap<String, String> = tips.into_iter().collect();
+        let previous = self.tips.replace((root.clone(), now.clone()));
+        let Some((_, before)) = previous.filter(|(previous_root, _)| *previous_root == root) else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        for change in triggers::ref_changes(&before, &now) {
+            events.extend(self.fire_triggers(id, &root, &triggers::refs_changed(&change)));
+        }
+        events
+    }
+
+    /// Reads the branch tips of `root` as the baseline of `refs.changed`. A failed read keeps the
+    /// baseline it had.
+    fn snapshot_tips(&mut self, root: &Path) {
+        if let Ok(tips) = self.git.local_tips(root) {
+            self.tips = Some((root.to_path_buf(), tips.into_iter().collect()));
+        }
     }
 
     /// Chooses where reviews are kept, in place of the app's data directory (tests).
@@ -456,6 +731,13 @@ impl Engine {
                     branches,
                     user_email,
                 });
+            }
+            if state == OperationState::Done && matches!(active.op.kind, CommandKind::Fetch) {
+                events.extend(self.fire_triggers(
+                    report.id,
+                    &active.root,
+                    &triggers::fetch_done("all"),
+                ));
             }
         }
         // The end comes last: a status clears the error line, and a failure must stay on it.
@@ -962,7 +1244,9 @@ impl Engine {
         self.advance(&mut op, OperationState::Executing, &mut events);
         match self.execute(id, &command.actor, &command.kind) {
             Ok(produced) => {
+                let fired = self.fire_after(id, &command.kind, &produced);
                 events.extend(produced);
+                events.extend(fired);
                 self.advance(&mut op, OperationState::Done, &mut events);
             }
             Err(message) => {
@@ -3643,6 +3927,11 @@ pub(crate) fn same_folder(open: &Path, path: &str) -> bool {
         (Ok(a), Ok(b)) => a == b,
         _ => open == path,
     }
+}
+
+/// A notice of the Workflows page. It is not about a run, so it carries no run id.
+fn workflow_notice(text: String) -> Event {
+    Event::WorkflowNotice { run: 0, text }
 }
 
 #[cfg(test)]
