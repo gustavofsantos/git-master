@@ -88,7 +88,7 @@ Outcomes are the values a call can end with, as listed in the action catalog. A 
 | `ctx.approve(summary)` | `summary` (optional): what you are asked to approve. | `true` when you approve, `false` when you reject. | pauses for a human | `approved`, `rejected`, `failed` |
 | `ctx.wait(event, opts)` | `event`: the event to wait for. `opts.timeout`: a duration such as `"24h"`; without it the wait lasts until the event or until you cancel. | A table whose `outcome` field is `resumed`, `aborted` or `timeout`. The call never raises an error, whatever the outcome. | pauses until an event | `resumed`, `aborted`, `timeout` |
 
-The catalog declares one wait event: `restack.resumed`. It is used after a restack conflict, so that the run can continue once the conflict is resolved.
+The catalog declares one wait event: `restack.resumed`. It is used after a restack conflict, so that the run can continue once the conflict is resolved. The wait ends with `resumed` when you choose **Continue restack** after resolving the conflict, and with `aborted` when you cancel that resolution. Waits exist only while the app is open.
 
 ### Process
 

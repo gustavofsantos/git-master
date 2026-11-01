@@ -32,9 +32,11 @@ M.meta = {
 | `before.<operation>` | Before the operation starts. The workflow is a gate. |
 | `transform.<field>` | The value of a field is being built, such as `transform.commit_message`. |
 | `after.<operation>` | After the operation finishes. The workflow only observes. |
-| `stack.parent_moved` | The tip of a branch's parent no longer matches the point the branch was based on. |
-| `stack.parent_merged` | The parent branch is gone, or it is already merged into `main`. |
+| `stack.parent_moved` | The tip of a branch's parent no longer matches the point the branch was based on. It fires when the branch becomes stale, once per change, with `branch`, `parent`, `base` and `parent_tip` in the payload. |
+| `stack.parent_merged` | The parent branch is gone, or it is already merged into `main`. It fires once when that becomes true, with `branch` and `parent` in the payload. |
 | `composer.opened` | The empty message box of the commit composer gets focus while something is staged. |
+
+The stack events compare the stacks with what GitMaster saw last. The state a repository has when it opens is the starting point, so opening a repository with a stale branch does not fire `stack.parent_moved`.
 
 ### No time-based triggers
 
