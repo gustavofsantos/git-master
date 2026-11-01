@@ -8,13 +8,14 @@ use std::fmt::Write as _;
 
 use gm_schema::{
     Actor, CommandKind, OperationId, OperationState, PlannedBranch, ReplayStep, RestackBlock,
-    RestackPlan, RestackRecord,
+    RestackPlan, RestackRecord, RestackResolution,
 };
 use gpui::{
     ClickEvent, Context, Div, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
     Stateful, Window, div, prelude::*, px,
 };
 
+use crate::conflict_resolver::RestackConflicts;
 use crate::theme;
 use crate::view::StatusView;
 
@@ -40,6 +41,26 @@ pub(crate) enum Outcome {
     Failed(String),
 }
 
+/// A command of a restack conflict the window sent, as the engine answers it (D154).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResolutionStep {
+    /// `StartRestackResolution`: opens the resolution worktree on the conflict.
+    Start,
+    /// `FinishRestackResolution`: records the resolved commit and plans again.
+    Finish,
+    /// `CancelRestackResolution`: closes the resolution worktree.
+    Cancel,
+}
+
+/// Where the window goes after the engine answered a restack conflict command (D154).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Transition {
+    /// The resolution worktree is open: the dialog closes and the resolver opens.
+    Opened,
+    /// The resolver is done (finished or cancelled): the dialog comes back.
+    Returned,
+}
+
 /// The stack being restacked, the plan on screen, the branches left out, the
 /// operation in flight, and the record undo would use.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -56,6 +77,12 @@ pub(crate) struct Restacking {
     outcome: Option<Outcome>,
     /// Whether `ResumeRestack` was sent for the open repository.
     resume_sent: bool,
+    /// The restack conflict the resolver works on, once the engine opened its worktree.
+    resolving: Option<RestackConflicts>,
+    /// A resolution command the window sent and the engine has not answered yet.
+    resolution_pending: Option<(OperationId, ResolutionStep)>,
+    /// What the window does next: the resolver opens, or the dialog comes back.
+    transition: Option<Transition>,
 }
 
 impl Restacking {
@@ -111,6 +138,108 @@ impl Restacking {
 
     pub(crate) fn is_busy(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// The restack conflict the resolver works on, while one is open.
+    pub(crate) fn resolving(&self) -> Option<&RestackConflicts> {
+        self.resolving.as_ref()
+    }
+
+    /// Whether a resolution command is in flight: the dialog and the resolver wait for it.
+    pub(crate) fn resolution_busy(&self) -> bool {
+        self.resolution_pending.is_some()
+    }
+
+    pub(crate) fn begin_resolution(&mut self, id: OperationId, step: ResolutionStep) {
+        self.resolution_pending = Some((id, step));
+    }
+
+    /// Whether `id` is the answer the window waits for, as `step`.
+    pub(crate) fn owns_resolution(&self, id: OperationId, step: ResolutionStep) -> bool {
+        self.resolution_pending == Some((id, step))
+    }
+
+    /// Whether `id` is the operation of the resolution command in flight, whatever its step.
+    pub(crate) fn awaits_resolution(&self, id: OperationId) -> bool {
+        self.resolution_pending
+            .is_some_and(|(pending, _)| pending == id)
+    }
+
+    /// The engine opened the resolution worktree: the resolver takes the conflict (D154).
+    pub(crate) fn resolution_started(&mut self, resolution: RestackResolution) {
+        self.resolution_pending = None;
+        self.resolving = Some(RestackConflicts::new(resolution));
+        self.transition = Some(Transition::Opened);
+    }
+
+    /// The resolution was cancelled: the plan on screen is unchanged, and the dialog returns to it.
+    pub(crate) fn resolution_cancelled(&mut self) {
+        self.resolution_pending = None;
+        self.resolving = None;
+        self.transition = Some(Transition::Returned);
+    }
+
+    /// Finish answered with the plan of the stack, which now holds the resolved commit (D154).
+    pub(crate) fn resolution_finished(&mut self, plan: RestackPlan) {
+        self.resolution_pending = None;
+        self.resolving = None;
+        self.plan = Some(plan);
+        self.transition = Some(Transition::Returned);
+    }
+
+    /// A resolution command the engine refused or failed. A refused Start is the dialog's
+    /// error; a refused Finish or Cancel is the resolver's note, and the resolver stays open.
+    /// Done answers nothing here: the result event carries the change.
+    pub(crate) fn settle_resolution(
+        &mut self,
+        id: OperationId,
+        state: OperationState,
+        detail: Option<String>,
+    ) {
+        if !state.is_terminal() || state == OperationState::Done || !self.awaits_resolution(id) {
+            return;
+        }
+        let Some((_, step)) = self.resolution_pending.take() else {
+            return;
+        };
+        let message = detail.unwrap_or_else(|| {
+            match step {
+                ResolutionStep::Start => "The conflict could not be opened.",
+                ResolutionStep::Finish => "The resolution could not be finished.",
+                ResolutionStep::Cancel => "The resolution could not be cancelled.",
+            }
+            .to_owned()
+        });
+        match step {
+            ResolutionStep::Start => self.outcome = Some(Outcome::Failed(message)),
+            ResolutionStep::Finish | ResolutionStep::Cancel => {
+                if let Some(resolving) = self.resolving.as_mut() {
+                    resolving.set_note(Some(message));
+                }
+            }
+        }
+    }
+
+    /// A file of the restack conflict was applied.
+    pub(crate) fn mark_resolved(&mut self, path: &str) {
+        if let Some(resolving) = self.resolving.as_mut() {
+            resolving.mark_resolved(path);
+        }
+    }
+
+    /// Whether Continue may send Finish. While files remain it says which in the resolver's
+    /// note and returns false, so the answer is a message, not a disabled button (D116(4)).
+    pub(crate) fn may_finish(&mut self) -> bool {
+        let Some(resolving) = self.resolving.as_mut() else {
+            return false;
+        };
+        let refusal = resolving.continue_refusal();
+        resolving.set_note(refusal.clone());
+        refusal.is_none()
+    }
+
+    pub(crate) fn take_transition(&mut self) -> Option<Transition> {
+        self.transition.take()
     }
 
     pub(crate) fn owns(&self, id: OperationId) -> bool {
@@ -212,18 +341,62 @@ pub(crate) fn summary(branch: &PlannedBranch) -> String {
         }
         None => {
             let replayed = branch.replayed();
+            let resolved = branch
+                .commits
+                .iter()
+                .filter(|commit| matches!(commit.step, ReplayStep::Resolved { .. }))
+                .count();
             let dropped = branch.commits.len() - replayed;
-            let mut line = format!(
-                "Replays {replayed} {} onto {}.",
-                plural(replayed, "commit", "commits"),
-                branch.parent
-            );
+            let mut line = if resolved == 0 {
+                format!(
+                    "Replays {replayed} {} onto {}.",
+                    plural(replayed, "commit", "commits"),
+                    branch.parent
+                )
+            } else if resolved == replayed {
+                format!(
+                    "Resolved {resolved} {} onto {}.",
+                    plural(resolved, "commit", "commits"),
+                    branch.parent
+                )
+            } else {
+                let clean = replayed - resolved;
+                format!(
+                    "Replays {clean} {} onto {}. Resolved {resolved} {}.",
+                    plural(clean, "commit", "commits"),
+                    branch.parent,
+                    plural(resolved, "commit", "commits")
+                )
+            };
             if dropped > 0 {
                 let _ = write!(line, " {dropped} already in {} and dropped.", branch.parent);
             }
             line
         }
     }
+}
+
+/// The command Resolve conflict sends for `branch` (D154). It names the plan on screen, so
+/// the engine refuses it when the stacks changed since. `None` for a branch with no conflict.
+#[must_use]
+pub(crate) fn resolve_command(
+    from: &str,
+    plan: &RestackPlan,
+    skip: &[String],
+    branch: &PlannedBranch,
+) -> Option<CommandKind> {
+    can_resolve(branch).then(|| CommandKind::StartRestackResolution {
+        branch: from.to_owned(),
+        plan_id: plan.plan_id.clone(),
+        skip: skip.to_vec(),
+        conflicted: branch.name.clone(),
+    })
+}
+
+/// Whether the branch is blocked on a conflict, so Resolve conflict applies.
+#[must_use]
+pub(crate) fn can_resolve(branch: &PlannedBranch) -> bool {
+    matches!(branch.block, Some(RestackBlock::Conflict { .. }))
 }
 
 /// Whether the branch is one the person can leave out: it is not already held
@@ -251,6 +424,10 @@ impl StatusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.model.restacking.resolving().is_some() || self.model.restacking.resolution_busy() {
+            self.notify_user("Finish or cancel the restack conflict first.", cx);
+            return;
+        }
         let root = self
             .model
             .stacks
@@ -295,6 +472,95 @@ impl StatusView {
         }
         self.model.restacking.toggle_skip(name);
         self.request_restack_plan(cx);
+    }
+
+    /// Resolve conflict on a blocked branch: the engine opens the resolution worktree on its
+    /// conflict, in the plan on screen (D154). The resolver opens when the engine answers.
+    pub(crate) fn resolve_restack_conflict(&mut self, branch: &str, cx: &mut Context<Self>) {
+        let restacking = &self.model.restacking;
+        if restacking.is_busy() || restacking.resolution_busy() || restacking.resolving().is_some()
+        {
+            return;
+        }
+        let command = restacking.plan().and_then(|plan| {
+            plan.branches
+                .iter()
+                .find(|planned| planned.name == branch)
+                .and_then(|planned| {
+                    resolve_command(restacking.from(), plan, restacking.skip(), planned)
+                })
+        });
+        let Some(command) = command else {
+            return;
+        };
+        let id = self.engine.dispatch(Actor::Human, command);
+        self.model
+            .restacking
+            .begin_resolution(id, ResolutionStep::Start);
+        if let Some(dialog) = self.restack_dialog.as_mut() {
+            dialog.error = None;
+        }
+        cx.notify();
+    }
+
+    /// Continue restack: sends Finish once every file is applied. Otherwise the resolver's
+    /// note says what remains, and nothing is sent.
+    pub(crate) fn continue_restack_resolution(&mut self, cx: &mut Context<Self>) {
+        if self.model.restacking.resolution_busy() {
+            return;
+        }
+        if self.model.restacking.may_finish() {
+            let id = self
+                .engine
+                .dispatch(Actor::Human, CommandKind::FinishRestackResolution);
+            self.model
+                .restacking
+                .begin_resolution(id, ResolutionStep::Finish);
+        }
+        cx.notify();
+    }
+
+    /// Cancel in the resolver: sends `CancelRestackResolution`; the dialog returns on its answer.
+    pub(crate) fn cancel_restack_resolution(&mut self, cx: &mut Context<Self>) {
+        if self.model.restacking.resolution_busy() {
+            return;
+        }
+        let id = self
+            .engine
+            .dispatch(Actor::Human, CommandKind::CancelRestackResolution);
+        self.model
+            .restacking
+            .begin_resolution(id, ResolutionStep::Cancel);
+        cx.notify();
+    }
+
+    /// The engine opened the resolution worktree: the dialog closes, the resolver opens, and
+    /// the first conflicted file is read (D154).
+    pub(crate) fn open_restack_resolver(&mut self, cx: &mut Context<Self>) {
+        self.restack_dialog = None;
+        self.restack_return = self.screen;
+        self.model.conflict = None;
+        self.show_conflicts(cx);
+        let first = self
+            .model
+            .restacking
+            .resolving()
+            .and_then(RestackConflicts::first_unresolved)
+            .map(str::to_owned);
+        if let Some(path) = first {
+            self.read_restack_file(&path, cx);
+        }
+    }
+
+    /// Finish or Cancel answered: the resolver closes and the dialog comes back on the plan the
+    /// model holds, on the screen it was opened from (D154).
+    pub(crate) fn return_to_restack_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.model.conflict = None;
+        self.screen = self.restack_return;
+        let focus = cx.focus_handle();
+        focus.focus(window);
+        self.restack_dialog = Some(RestackDialog { focus, error: None });
+        cx.notify();
     }
 
     /// The Restack button, and Enter: applies exactly the plan on screen.
@@ -452,6 +718,7 @@ impl StatusView {
             .children(rows.enumerate().map(|(index, branch)| {
                 let left_out = skipped.contains(&branch.name);
                 let name = branch.name.clone();
+                let conflicted = branch.name.clone();
                 let blocked = branch.block.is_some();
                 div()
                     .flex()
@@ -482,6 +749,19 @@ impl StatusView {
                                     .child(summary(branch)),
                             ),
                     )
+                    .when(can_resolve(branch) && !locked, |row| {
+                        row.child(
+                            div()
+                                .id(("restack-resolve", index))
+                                .text_sm()
+                                .text_color(theme::accent())
+                                .cursor_pointer()
+                                .child("Resolve conflict")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.resolve_restack_conflict(&conflicted, cx);
+                                })),
+                        )
+                    })
                     .when(can_skip(branch) && !locked, |row| {
                         row.child(
                             div()
@@ -747,5 +1027,192 @@ mod tests {
             ))
         );
         assert!(!state.applied());
+    }
+
+    fn conflicting(name: &str, commit: &str) -> PlannedBranch {
+        planned(
+            name,
+            Some(RestackBlock::Conflict {
+                commit: commit.into(),
+                onto: "base".into(),
+            }),
+            &[ReplayStep::Conflict {
+                paths: vec!["a.txt".into()],
+            }],
+        )
+    }
+
+    fn resolution(paths: &[&str]) -> RestackResolution {
+        RestackResolution {
+            from: "main".into(),
+            conflicted: "a".into(),
+            parent: "main".into(),
+            commit: "c0".into(),
+            subject: "subject 0".into(),
+            onto: "base".into(),
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn resolve_conflict_is_offered_on_a_conflict_and_names_the_plan_on_screen() {
+        let blocked = conflicting("a", "c0");
+        let clean = planned("b", None, &[ReplayStep::Clean { new: "n".into() }]);
+        assert!(can_resolve(&blocked));
+        assert!(
+            !can_resolve(&clean),
+            "a clean branch has nothing to resolve"
+        );
+        let ready = plan(vec![blocked.clone(), clean.clone()]);
+        assert_eq!(
+            resolve_command("main", &ready, &["x".to_owned()], &blocked),
+            Some(CommandKind::StartRestackResolution {
+                branch: "main".into(),
+                plan_id: "id".into(),
+                skip: vec!["x".into()],
+                conflicted: "a".into(),
+            })
+        );
+        assert_eq!(resolve_command("main", &ready, &[], &clean), None);
+    }
+
+    #[test]
+    fn a_resolved_step_reads_resolved_and_a_clean_one_keeps_its_replay_wording() {
+        let resolved = ReplayStep::Resolved { new: "r".into() };
+        let clean = ReplayStep::Clean { new: "n".into() };
+        let only_resolved = planned("a", None, std::slice::from_ref(&resolved));
+        assert_eq!(summary(&only_resolved), "Resolved 1 commit onto main.");
+        let mixed = planned("a", None, &[clean.clone(), resolved.clone()]);
+        assert_eq!(
+            summary(&mixed),
+            "Replays 1 commit onto main. Resolved 1 commit."
+        );
+        let clean_only = planned("a", None, &[clean]);
+        assert_eq!(summary(&clean_only), "Replays 1 commit onto main.");
+        assert_eq!(only_resolved.replayed(), 1, "a resolved step is replayed");
+    }
+
+    #[test]
+    fn a_started_resolution_opens_the_resolver_and_a_cancel_returns_to_the_same_plan() {
+        let mut state = Restacking::default();
+        state.begin("main");
+        state.begin_plan(OperationId(1));
+        state.planned(plan(vec![conflicting("a", "c0")]));
+        state.settle(OperationState::Done, None);
+        let before = state.plan().cloned();
+
+        state.begin_resolution(OperationId(2), ResolutionStep::Start);
+        assert!(state.resolution_busy());
+        assert!(state.owns_resolution(OperationId(2), ResolutionStep::Start));
+        assert!(!state.owns_resolution(OperationId(2), ResolutionStep::Finish));
+        state.resolution_started(resolution(&["a.txt"]));
+        assert!(!state.resolution_busy(), "the start is answered");
+        assert_eq!(state.take_transition(), Some(Transition::Opened));
+        assert_eq!(
+            state.resolving().map(RestackConflicts::first_unresolved),
+            Some(Some("a.txt"))
+        );
+
+        state.begin_resolution(OperationId(3), ResolutionStep::Cancel);
+        state.settle_resolution(OperationId(3), OperationState::Done, None);
+        assert!(
+            state.resolution_busy(),
+            "a Done is left to the answer event"
+        );
+        state.resolution_cancelled();
+        assert!(state.resolving().is_none());
+        assert_eq!(state.take_transition(), Some(Transition::Returned));
+        assert_eq!(
+            state.plan().cloned(),
+            before,
+            "a cancel keeps the plan as it was"
+        );
+    }
+
+    #[test]
+    fn a_finish_answers_with_the_plan_that_holds_the_resolved_commit() {
+        let mut state = Restacking::default();
+        state.begin("main");
+        state.planned(plan(vec![conflicting("a", "c0")]));
+        state.resolution_started(resolution(&["a.txt"]));
+        state.take_transition();
+        state.begin_resolution(OperationId(4), ResolutionStep::Finish);
+        let replanned = plan(vec![planned(
+            "a",
+            None,
+            &[ReplayStep::Resolved { new: "r".into() }],
+        )]);
+        state.resolution_finished(replanned.clone());
+        assert_eq!(state.plan(), Some(&replanned));
+        assert!(state.resolving().is_none());
+        assert!(!state.resolution_busy());
+        assert_eq!(state.take_transition(), Some(Transition::Returned));
+    }
+
+    #[test]
+    fn a_refused_finish_stays_in_the_resolver_with_the_engines_reason() {
+        let mut state = Restacking::default();
+        state.resolution_started(resolution(&["a.txt"]));
+        state.take_transition();
+        state.begin_resolution(OperationId(7), ResolutionStep::Finish);
+        state.settle_resolution(
+            OperationId(7),
+            OperationState::Failed,
+            Some("a.txt is still unmerged".into()),
+        );
+        let resolving = state.resolving().expect("the resolver stays open");
+        assert_eq!(resolving.note(), Some("a.txt is still unmerged"));
+        assert_eq!(state.take_transition(), None);
+        assert!(!state.resolution_busy());
+    }
+
+    #[test]
+    fn a_refused_start_is_the_dialogs_error_and_other_operations_are_not_its_answer() {
+        let mut state = Restacking::default();
+        state.begin_resolution(OperationId(2), ResolutionStep::Start);
+        state.settle_resolution(OperationId(9), OperationState::Failed, Some("other".into()));
+        assert!(
+            state.resolution_busy(),
+            "an answer for another operation is ignored"
+        );
+        state.settle_resolution(
+            OperationId(2),
+            OperationState::Failed,
+            Some("The stacks changed since the plan was made. Plan again.".into()),
+        );
+        assert_eq!(
+            state.take_outcome(),
+            Some(Outcome::Failed(
+                "The stacks changed since the plan was made. Plan again.".into()
+            ))
+        );
+        assert!(!state.resolution_busy());
+    }
+
+    #[test]
+    fn continue_is_refused_with_a_message_while_a_file_is_unresolved() {
+        let mut state = Restacking::default();
+        state.resolution_started(resolution(&["a.txt", "b.txt"]));
+        assert!(!state.may_finish());
+        assert_eq!(
+            state.resolving().and_then(RestackConflicts::note),
+            Some("2 files are still unresolved. Resolve them and Apply, or Cancel.")
+        );
+        state.mark_resolved("a.txt");
+        assert!(!state.may_finish(), "one file is still open");
+        state.mark_resolved("b.txt");
+        assert!(state.may_finish());
+        assert_eq!(state.resolving().and_then(RestackConflicts::note), None);
+    }
+
+    #[test]
+    fn continue_may_run_when_rerere_left_no_file() {
+        let mut state = Restacking::default();
+        state.resolution_started(resolution(&[]));
+        assert!(state.may_finish());
+        assert!(
+            !Restacking::default().may_finish(),
+            "nothing is being resolved"
+        );
     }
 }

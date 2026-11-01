@@ -6,7 +6,8 @@
 
 use gm_core::conflict::{self, ConflictDoc, Hunk, Resolution, Segment};
 use gm_schema::{
-    ConflictFileRead, ConflictOperation, ConflictSide, Event, HunkOrigin, RecordedResolution,
+    ConflictFileRead, ConflictOperation, ConflictSide, ConflictSite, Event, HunkOrigin,
+    RecordedResolution, RestackResolution,
 };
 
 /// The note when a choice is made while the Result pane cannot be read.
@@ -20,6 +21,15 @@ const RECORDED_BANNER: &str = "Resolved by recorded resolution";
 
 /// The note after the recorded resolution was forgotten. The file is read again.
 const FORGOTTEN: &str = "Recorded resolution forgotten. The conflict is open again.";
+
+/// The restack header's line while no file is open and the list is empty (rerere resolved all).
+const NOTHING_LEFT: &str = "Nothing is left to resolve. Continue restack replays the commit.";
+
+/// The restack page's line while the first file is being read.
+const OPENING: &str = "Opening the conflicted file.";
+
+/// How many characters of the commit id the restack header shows.
+const SHORT: usize = 7;
 
 /// Which side of a conflict a pane shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +95,8 @@ pub(crate) struct ResolverState {
     origins: Vec<Option<HunkOrigin>>,
     /// Whether the Result pane still holds the recorded text as Review loaded it.
     from_recorded: bool,
+    /// Which worktree the file is in: the open checkout, or the restack's resolution worktree (D154).
+    site: ConflictSite,
 }
 
 /// Git's recorded resolution of the file, as the resolver holds it.
@@ -130,7 +142,22 @@ impl ResolverState {
                 .map_or(Recorded::Absent, Recorded::Present),
             origins: Vec::new(),
             from_recorded: false,
+            site: ConflictSite::WorkingCopy,
         }
+    }
+
+    /// The same resolver, for the worktree `site` names: a restack's conflict is read,
+    /// resolved and forgotten in the resolution worktree (D154).
+    #[must_use]
+    pub(crate) fn with_site(mut self, site: ConflictSite) -> Self {
+        self.site = site;
+        self
+    }
+
+    /// The worktree the file is in: every conflict command it sends names it.
+    #[must_use]
+    pub(crate) fn site(&self) -> ConflictSite {
+        self.site
     }
 
     /// The resolver of a file read again after its recorded resolution was
@@ -499,6 +526,135 @@ impl ResolverState {
                 Segment::Text(_) => None,
             })
             .collect()
+    }
+}
+
+/// The restack conflict the resolver works on (D154): the engine's `RestackResolution`
+/// and its conflicted files, each marked resolved once its Apply succeeded. It also holds
+/// the line the restack header shows when Continue or a command did not run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RestackConflicts {
+    resolution: RestackResolution,
+    files: Vec<RestackFile>,
+    note: Option<String>,
+}
+
+/// One conflicted file of a restack, in the order the engine lists them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RestackFile {
+    pub(crate) path: String,
+    pub(crate) resolved: bool,
+}
+
+impl RestackConflicts {
+    /// The restack conflict `resolution` describes, with every file still to resolve.
+    #[must_use]
+    pub(crate) fn new(resolution: RestackResolution) -> Self {
+        let files = resolution
+            .paths
+            .iter()
+            .map(|path| RestackFile {
+                path: path.clone(),
+                resolved: false,
+            })
+            .collect();
+        Self {
+            resolution,
+            files,
+            note: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn resolution(&self) -> &RestackResolution {
+        &self.resolution
+    }
+
+    #[must_use]
+    pub(crate) fn files(&self) -> &[RestackFile] {
+        &self.files
+    }
+
+    /// The line under the header: why Continue did not run, or why an engine command was refused.
+    #[must_use]
+    pub(crate) fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+
+    pub(crate) fn set_note(&mut self, note: Option<String>) {
+        self.note = note;
+    }
+
+    /// The header's second line: the commit being replayed, with its subject and short id, and
+    /// the new parent it is replayed onto.
+    #[must_use]
+    pub(crate) fn header(&self) -> String {
+        let short: String = self.resolution.commit.chars().take(SHORT).collect();
+        format!(
+            "Commit being replayed: {} ({short}). New parent: {}.",
+            self.resolution.subject, self.resolution.parent
+        )
+    }
+
+    /// Marks the file `path` resolved, once its Apply succeeded. Other paths are not in the list.
+    pub(crate) fn mark_resolved(&mut self, path: &str) {
+        if let Some(file) = self.files.iter_mut().find(|file| file.path == path) {
+            file.resolved = true;
+        }
+    }
+
+    /// How many files are still to resolve.
+    #[must_use]
+    pub(crate) fn unresolved(&self) -> usize {
+        self.files.iter().filter(|file| !file.resolved).count()
+    }
+
+    /// The first file still to resolve: the resolver opens on it at once.
+    #[must_use]
+    pub(crate) fn first_unresolved(&self) -> Option<&str> {
+        self.files
+            .iter()
+            .find(|file| !file.resolved)
+            .map(|file| file.path.as_str())
+    }
+
+    /// The next file still to resolve after `path`, wrapping round the list. Never `path` itself.
+    #[must_use]
+    pub(crate) fn next_unresolved_after(&self, path: &str) -> Option<&str> {
+        let total = self.files.len();
+        let start = self
+            .files
+            .iter()
+            .position(|file| file.path == path)
+            .map_or(0, |at| at + 1);
+        (0..total)
+            .map(|step| &self.files[(start + step) % total])
+            .find(|file| !file.resolved && file.path != path)
+            .map(|file| file.path.as_str())
+    }
+
+    /// What Continue says while files remain, or `None` when it may run. Continue is never
+    /// disabled: it answers with this message instead (D116(4)).
+    #[must_use]
+    pub(crate) fn continue_refusal(&self) -> Option<String> {
+        match self.unresolved() {
+            0 => None,
+            1 => Some("1 file is still unresolved. Resolve it and Apply, or Cancel.".to_owned()),
+            many => Some(format!(
+                "{many} files are still unresolved. Resolve them and Apply, or Cancel."
+            )),
+        }
+    }
+
+    /// The resolver's body while no file is open: the file being read, or, when rerere left
+    /// nothing to resolve, that Continue replays the commit.
+    #[must_use]
+    pub(crate) fn empty_message(&self) -> &'static str {
+        if self.files.is_empty() {
+            NOTHING_LEFT
+        } else {
+            OPENING
+        }
     }
 }
 
@@ -1019,5 +1175,102 @@ mod tests {
             Some("Recorded resolution forgotten. The conflict is open again.")
         );
         assert_eq!(reread.conflict_count(), 2);
+    }
+
+    fn restack(paths: &[&str]) -> RestackResolution {
+        RestackResolution {
+            from: "main".into(),
+            conflicted: "feature/x".into(),
+            parent: "main".into(),
+            commit: "0123456789abcdef".into(),
+            subject: "Rewrite the parser".into(),
+            onto: "base".into(),
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_restack_header_names_the_commit_its_short_id_and_the_new_parent() {
+        let conflicts = RestackConflicts::new(restack(&["a.txt"]));
+        assert_eq!(conflicts.resolution().conflicted, "feature/x");
+        assert_eq!(
+            conflicts.header(),
+            "Commit being replayed: Rewrite the parser (0123456). New parent: main."
+        );
+    }
+
+    #[test]
+    fn marking_a_file_moves_the_first_and_the_next_unresolved_and_never_stays_on_itself() {
+        let mut conflicts = RestackConflicts::new(restack(&["a.txt", "b.txt", "c.txt"]));
+        assert_eq!(conflicts.first_unresolved(), Some("a.txt"));
+        assert_eq!(conflicts.next_unresolved_after("a.txt"), Some("b.txt"));
+        assert_eq!(
+            conflicts.next_unresolved_after("c.txt"),
+            Some("a.txt"),
+            "wraps"
+        );
+        conflicts.mark_resolved("b.txt");
+        assert!(conflicts.files()[1].resolved);
+        assert_eq!(conflicts.unresolved(), 2);
+        assert_eq!(
+            conflicts.next_unresolved_after("a.txt"),
+            Some("c.txt"),
+            "skips the applied one"
+        );
+        conflicts.mark_resolved("a.txt");
+        conflicts.mark_resolved("c.txt");
+        assert_eq!(conflicts.first_unresolved(), None);
+        assert_eq!(conflicts.next_unresolved_after("a.txt"), None);
+        conflicts.mark_resolved("not-listed.txt");
+        assert_eq!(
+            conflicts.unresolved(),
+            0,
+            "a path not in the list changes nothing"
+        );
+    }
+
+    #[test]
+    fn continue_refusal_counts_what_remains_in_the_singular_and_the_plural() {
+        let mut conflicts = RestackConflicts::new(restack(&["a.txt", "b.txt"]));
+        assert_eq!(
+            conflicts.continue_refusal().as_deref(),
+            Some("2 files are still unresolved. Resolve them and Apply, or Cancel.")
+        );
+        conflicts.mark_resolved("a.txt");
+        assert_eq!(
+            conflicts.continue_refusal().as_deref(),
+            Some("1 file is still unresolved. Resolve it and Apply, or Cancel.")
+        );
+        conflicts.mark_resolved("b.txt");
+        assert_eq!(conflicts.continue_refusal(), None);
+    }
+
+    #[test]
+    fn with_no_file_left_to_resolve_the_page_says_so_and_continue_may_run() {
+        let conflicts = RestackConflicts::new(restack(&[]));
+        assert_eq!(conflicts.continue_refusal(), None);
+        assert_eq!(
+            conflicts.empty_message(),
+            "Nothing is left to resolve. Continue restack replays the commit."
+        );
+        let open = RestackConflicts::new(restack(&["a.txt"]));
+        assert_eq!(open.empty_message(), "Opening the conflicted file.");
+    }
+
+    #[test]
+    fn a_resolver_reads_the_working_copy_unless_it_is_told_the_restack() {
+        let read = ConflictFileRead {
+            path: "a.txt".into(),
+            operation: ConflictOperation::Merge,
+            left: side("main", "new parent", "Add"),
+            right: side("feature/x", "commit being replayed", "Rewrite"),
+            text: "one\n".into(),
+            has_base: false,
+            recorded: None,
+        };
+        assert_eq!(ResolverState::new(&read).site(), ConflictSite::WorkingCopy);
+        let in_restack = ResolverState::new(&read).with_site(ConflictSite::Restack);
+        assert_eq!(in_restack.site(), ConflictSite::Restack);
+        assert_eq!(in_restack.path(), "a.txt", "the site changes nothing else");
     }
 }

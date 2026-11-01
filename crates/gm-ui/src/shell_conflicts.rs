@@ -8,10 +8,11 @@
 use gm_core::conflict::Resolution;
 use gm_schema::{Actor, CommandKind, ConflictSite};
 use gpui::{
-    Context, Div, ElementId, FontWeight, MouseButton, MouseDownEvent, Stateful, div, prelude::*, px,
+    ClickEvent, Context, Div, ElementId, FontWeight, MouseButton, MouseDownEvent, Stateful, div,
+    prelude::*, px,
 };
 
-use crate::conflict_resolver::{HunkView, ResolverState, Side};
+use crate::conflict_resolver::{HunkView, ResolverState, RestackConflicts, Side};
 use crate::theme;
 use crate::view::{Screen, StatusView};
 
@@ -21,6 +22,7 @@ const NO_LINES: &str = "(no lines)";
 const NO_CONFLICTS: &str = "No conflicts in this file.";
 const UNREADABLE: &str =
     "The result has conflict markers that cannot be read. Fix them in the result.";
+const NO_CONFLICT_OPEN: &str = "No conflict is open.";
 
 impl StatusView {
     /// Shows the Conflicts page for the file the model's resolver holds.
@@ -113,17 +115,48 @@ impl StatusView {
         if let Some(conflict) = self.model.conflict.as_mut()
             && let Some((path, text, origins)) = conflict.apply()
         {
+            let site = conflict.site();
             self.engine.dispatch(
                 Actor::Human,
                 CommandKind::ResolveConflict {
                     path,
                     text,
                     origins,
-                    site: ConflictSite::WorkingCopy,
+                    site,
                 },
             );
         }
         cx.notify();
+    }
+
+    /// Reads the conflicted file `path` of the open restack conflict, in its resolution
+    /// worktree (D154). The resolver shows it when the engine answers.
+    pub(crate) fn read_restack_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.engine.dispatch(
+            Actor::Human,
+            CommandKind::ReadConflict {
+                path: path.to_owned(),
+                site: ConflictSite::Restack,
+            },
+        );
+        cx.notify();
+    }
+
+    /// Next file: reads the next conflicted file still to resolve after the open one.
+    pub(crate) fn next_restack_file(&mut self, cx: &mut Context<Self>) {
+        let next = self
+            .model
+            .conflict
+            .as_ref()
+            .zip(self.model.restacking.resolving())
+            .and_then(|(conflict, restack)| {
+                restack
+                    .next_unresolved_after(conflict.path())
+                    .map(str::to_owned)
+            });
+        if let Some(path) = next {
+            self.read_restack_file(&path, cx);
+        }
     }
 
     /// Review: loads the recorded resolution into the Result pane. The text stays
@@ -140,58 +173,63 @@ impl StatusView {
     /// engine has restored its markers, so the read shows them.
     pub(crate) fn reread_forgotten_conflict(&mut self) {
         if let Some(path) = self.model.take_conflict_reread() {
-            self.engine.dispatch(
-                Actor::Human,
-                CommandKind::ReadConflict {
-                    path,
-                    site: ConflictSite::WorkingCopy,
-                },
-            );
+            let site = self
+                .model
+                .conflict
+                .as_ref()
+                .map_or(ConflictSite::WorkingCopy, ResolverState::site);
+            self.engine
+                .dispatch(Actor::Human, CommandKind::ReadConflict { path, site });
         }
     }
 
     /// Forget: asks the engine to drop the recorded resolution. The file is read
     /// again when the engine confirms it.
     pub(crate) fn forget_recorded(&mut self, cx: &mut Context<Self>) {
-        let request = self
-            .model
-            .conflict
-            .as_ref()
-            .and_then(ResolverState::forget_request);
-        if let Some(path) = request {
+        let request = self.model.conflict.as_ref().and_then(|conflict| {
+            conflict
+                .forget_request()
+                .map(|path| (path, conflict.site()))
+        });
+        if let Some((path, site)) = request {
             self.engine.dispatch(
                 Actor::Human,
-                CommandKind::ForgetRecordedResolution {
-                    path,
-                    site: ConflictSite::WorkingCopy,
-                },
+                CommandKind::ForgetRecordedResolution { path, site },
             );
         }
         cx.notify();
     }
 
-    /// The whole page: the header, the note, then the three panes.
+    /// The whole page: in a restack, its header with the files; then the header, the note,
+    /// then the three panes.
     pub(crate) fn conflicts_page(&self, cx: &Context<Self>) -> Div {
-        let Some(conflict) = self.model.conflict.as_ref() else {
-            return div()
-                .flex_1()
-                .min_h(px(0.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(theme::muted())
-                .child("No conflict is open.");
-        };
-        let hunks = conflict.hunk_views();
-        let selected = conflict.selected();
-        div()
+        let restack = self.model.restacking.resolving();
+        let page = div()
             .flex_1()
             .min_w(px(0.))
             .min_h(px(0.))
             .flex()
             .flex_col()
-            .bg(theme::ground())
-            .child(Self::conflict_header(conflict, cx))
+            .bg(theme::ground());
+        let Some(conflict) = self.model.conflict.as_ref() else {
+            let message = restack.map_or(NO_CONFLICT_OPEN, RestackConflicts::empty_message);
+            return page
+                .children(restack.map(|restack| restack_header(restack, None, cx)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme::muted())
+                        .child(message),
+                );
+        };
+        let hunks = conflict.hunk_views();
+        let selected = conflict.selected();
+        page.children(restack.map(|restack| restack_header(restack, Some(conflict.path()), cx)))
+            .child(Self::conflict_header(conflict, restack, cx))
             .children(
                 conflict
                     .recorded_banner()
@@ -212,7 +250,11 @@ impl StatusView {
 
     /// The file, its operation and counter on the left; the base toggle, the
     /// steps, Back once staged and Apply on the right. Apply is never disabled.
-    fn conflict_header(conflict: &ResolverState, cx: &Context<Self>) -> Div {
+    fn conflict_header(
+        conflict: &ResolverState,
+        restack: Option<&RestackConflicts>,
+        cx: &Context<Self>,
+    ) -> Div {
         let base_label = if conflict.show_base() {
             "Hide base"
         } else {
@@ -282,11 +324,7 @@ impl StatusView {
                         cx,
                         |this, cx| this.step_conflict(true, cx),
                     ))
-                    .children(conflict.is_staged().then(|| {
-                        header_button("conflict-back", "Back", cx, |this, cx| {
-                            this.show_working_copy(cx);
-                        })
-                    }))
+                    .children(after_apply_button(conflict, restack, cx))
                     .child(header_button("conflict-apply", "Apply", cx, |this, cx| {
                         this.apply_conflict(cx);
                     })),
@@ -327,6 +365,138 @@ impl StatusView {
                     .child(self.conflict_result.clone()),
             )
     }
+}
+
+/// The button after a file is applied: Back to the working copy, or in a restack the next
+/// file still to resolve. Once every file is applied there is none, and Continue restack
+/// goes on from the restack header.
+fn after_apply_button(
+    conflict: &ResolverState,
+    restack: Option<&RestackConflicts>,
+    cx: &Context<StatusView>,
+) -> Option<Stateful<Div>> {
+    if !conflict.is_staged() {
+        return None;
+    }
+    match restack {
+        None => Some(header_button("conflict-back", "Back", cx, |this, cx| {
+            this.show_working_copy(cx);
+        })),
+        Some(restack) => (restack.unresolved() > 0).then(|| {
+            header_button("conflict-next-file", "Next file", cx, |this, cx| {
+                this.next_restack_file(cx);
+            })
+        }),
+    }
+}
+
+/// The restack header (D154): the branch being resolved, the commit being replayed and the new
+/// parent, the conflicted files (the open one is highlighted, an applied one says Resolved),
+/// Cancel and Continue restack, and the line that says why Continue did not run.
+fn restack_header(
+    restack: &RestackConflicts,
+    current: Option<&str>,
+    cx: &Context<StatusView>,
+) -> Div {
+    let files = restack.files().iter().enumerate().map(|(index, file)| {
+        let path = file.path.clone();
+        let open = current == Some(file.path.as_str());
+        div()
+            .id(("restack-file", index))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .h(px(24.))
+            .rounded_sm()
+            .cursor_pointer()
+            .when(open, |row| row.bg(theme::selected_row()))
+            .child(
+                div()
+                    .font_family(theme::code_font())
+                    .text_xs()
+                    .text_color(theme::text())
+                    .child(file.path.clone()),
+            )
+            .children(file.resolved.then(|| {
+                div()
+                    .text_xs()
+                    .text_color(theme::added_fg())
+                    .child("Resolved")
+            }))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.read_restack_file(&path, cx);
+            }))
+    });
+    let title = div()
+        .flex()
+        .flex_col()
+        .min_w(px(0.))
+        .child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .font_family(theme::code_font())
+                .child(restack.resolution().conflicted.clone()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(restack.header()),
+        );
+    let actions = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .flex_none()
+        .child(header_button(
+            "restack-cancel",
+            "Cancel",
+            cx,
+            StatusView::cancel_restack_resolution,
+        ))
+        .child(header_button(
+            "restack-continue",
+            "Continue restack",
+            cx,
+            StatusView::continue_restack_resolution,
+        ));
+    div()
+        .px_4()
+        .py_2()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .border_b_1()
+        .border_color(theme::hairline())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(title)
+                .child(actions),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap_1p5()
+                .children(files),
+        )
+        .children(restack.note().map(|note| {
+            div()
+                .text_sm()
+                .text_color(theme::warn_fg())
+                .child(note.to_owned())
+        }))
 }
 
 /// The line under the header: what the last Apply or choice said, or that the file

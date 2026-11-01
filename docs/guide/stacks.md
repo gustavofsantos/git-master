@@ -140,9 +140,7 @@ Restack brings a stack up to date. It walks the tree from the top down, so paren
 
 1. **Plan.** Review the ordered list of branches, how many commits each one replays, and what depends on what. A conflict shows the commit and the files. **Skip branch and children** leaves that branch and the ones under it out, and **Include** puts them back. Start the restack from here.
 2. **Running.** The branches move together in one step.
-3. **Conflict.** A branch that conflicts is listed in the plan and stays where it is, with its children. Close the dialog (**Abort all**), restack the rest, or resolve the conflict.
-
-   > **Planned.** **Resolve conflict** is not available yet.
+3. **Conflict.** A branch that conflicts is listed in the plan and stays where it is, with its children. Close the dialog with **Cancel**, restack the rest, or resolve the conflict.
 
    **Resolve conflict** opens the resolver on the commit that conflicts. GitMaster replays that commit in a private worktree of its own, so your working copy, your staged changes and your checked-out branch stay as they are, even when the conflicting branch is the one you have checked out. That worktree is not listed under **Worktrees**. When every file is resolved, **Continue restack** turns your resolution into the replayed commit and plans the restack again: the step shows as **Resolved**, the rest of the branch replays, and the branches under it plan as usual. A later commit can conflict too, and you resolve it the same way. **Cancel** drops the resolution in progress. Nothing moves until you choose **Restack N branches**, so a resolution is undone like any other restack. A finished resolution is kept when you close the app, and it is used only while the parent stays where it was: if the parent moves, the commit is replayed again and the conflict comes back, with your recorded resolution offered. See [Resolving conflicts](conflicts.md).
 4. **Done.** Choose **Undo restack** to restore every branch the restack moved. The undo is also offered after you reopen the app.

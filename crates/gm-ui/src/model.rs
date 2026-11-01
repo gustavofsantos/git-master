@@ -3,8 +3,8 @@
 //! renders it and forwards keys to it.
 
 use gm_schema::{
-    CommitFile, CommitSummary, DiffSide, Event, FileDiff, History, OperationId, OperationState,
-    RepoStatus, StatusEntry, WorktreeEntry,
+    CommitFile, CommitSummary, ConflictSite, DiffSide, Event, FileDiff, History, OperationId,
+    OperationState, RepoStatus, StatusEntry, WorktreeEntry,
 };
 
 use crate::branch_delete::Deleting;
@@ -30,7 +30,7 @@ use crate::provenance_view::ProvenancePanel;
 use crate::quick_open::QuickOpen;
 use crate::reflog::{DetachedCheckout, ReflogList};
 use crate::remote_op::{Outcome, RemoteOp};
-use crate::restack_dialog::Restacking;
+use crate::restack_dialog::{ResolutionStep, Restacking};
 use crate::review::{ReviewList, ReviewWrite};
 use crate::stacks::Stacks;
 use crate::stash_apply::Applying;
@@ -849,6 +849,37 @@ impl Model {
                 self.restacking.planned(plan);
                 None
             }
+            // The restack conflict's worktree opened: the resolver takes it (D154).
+            Event::RestackResolutionStarted { id, resolution }
+                if self.restacking.owns_resolution(id, ResolutionStep::Start) =>
+            {
+                self.conflict = None;
+                self.restacking.resolution_started(resolution);
+                None
+            }
+            // Finish answers with the plan of the stack, now holding the resolved commit.
+            Event::RestackPlanned { id, plan }
+                if self.restacking.owns_resolution(id, ResolutionStep::Finish) =>
+            {
+                self.restacking.resolution_finished(plan);
+                None
+            }
+            Event::RestackResolutionCancelled { id }
+                if self.restacking.owns_resolution(id, ResolutionStep::Cancel) =>
+            {
+                self.restacking.resolution_cancelled();
+                None
+            }
+            // A refused or failed resolution command; Done is left to the result event.
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.restacking.awaits_resolution(id)
+                && state.is_terminal()
+                && state != OperationState::Done =>
+            {
+                self.restacking.settle_resolution(id, state, detail);
+                None
+            }
             // An apply, an undo and the resume at open all report the record Undo uses.
             Event::RestackFinished { record, .. } => {
                 self.restacking.recorded(record);
@@ -1258,22 +1289,36 @@ impl Model {
             | Event::ThreadsChanged => None,
             // The read opens the resolver; the staged note is the resolver's own.
             Event::ConflictRead { id, read } => {
-                // A read after a forget keeps the note that says so.
+                // A read after a forget keeps the note that says so. A read while a restack
+                // conflict is open is of its resolution worktree (D154).
                 let after_forget = self
                     .conflict
                     .as_ref()
                     .is_some_and(|conflict| conflict.needs_reread() && conflict.path() == read.path);
-                self.conflict = Some(if after_forget {
-                    ResolverState::reread_after_forget(&read)
+                let site = if self.restacking.resolving().is_some() {
+                    ConflictSite::Restack
                 } else {
-                    ResolverState::new(&read)
-                });
+                    ConflictSite::WorkingCopy
+                };
+                self.conflict = Some(
+                    if after_forget {
+                        ResolverState::reread_after_forget(&read)
+                    } else {
+                        ResolverState::new(&read)
+                    }
+                    .with_site(site),
+                );
                 self.conflict_opened = Some(id);
                 None
             }
-            Event::ConflictResolved { .. } => {
-                if let Some(conflict) = self.conflict.as_mut() {
-                    conflict.on_event(&event);
+            // A file applied in a restack conflict is marked in the restack's list (D154).
+            Event::ConflictResolved { ref path, .. } => {
+                let in_restack = self
+                    .conflict
+                    .as_mut()
+                    .is_some_and(|conflict| conflict.on_event(&event) && conflict.site() == ConflictSite::Restack);
+                if in_restack {
+                    self.restacking.mark_resolved(path);
                 }
                 None
             }

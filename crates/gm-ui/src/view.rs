@@ -11,7 +11,8 @@ use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
 use gm_core::watch::{Notice, Notices, WatchHandle};
 use gm_schema::{
-    Actor, CommandKind, DiffSide, Event, FileDiff, HistoryScope, OperationId, OperationState,
+    Actor, CommandKind, ConflictSite, DiffSide, Event, FileDiff, HistoryScope, OperationId,
+    OperationState,
 };
 use gpui::{
     ClipboardItem, Context, Div, Entity, FocusHandle, KeyDownEvent, Render, ScrollHandle,
@@ -49,7 +50,7 @@ use crate::quick_open_view::{self, QuickOpenView};
 use crate::recent::{self, Recents};
 use crate::reflog;
 use crate::resize;
-use crate::restack_dialog::RestackDialog;
+use crate::restack_dialog::{RestackDialog, Transition};
 use crate::review_composer::ReviewDialog;
 use crate::shell_code::CodeView;
 use crate::shell_history::CommitTexts;
@@ -233,6 +234,8 @@ pub struct StatusView {
     pub(crate) merged_dialog: Option<MergedDialog>,
     /// The restack dialog, while it is open.
     pub(crate) restack_dialog: Option<RestackDialog>,
+    /// The screen the restack conflict was opened from, which the dialog returns to (D154).
+    pub(crate) restack_return: Screen,
     /// The recent repositories, newest first, as last saved or loaded.
     pub(crate) recents: Recents,
     /// Where the list is kept; `None` when there is no home directory.
@@ -467,6 +470,7 @@ impl StatusView {
             message_dialog: None,
             merged_dialog: None,
             restack_dialog: None,
+            restack_return: Screen::default(),
             recents,
             recent_store,
             recent_generation: 0,
@@ -567,6 +571,12 @@ impl StatusView {
         // A read that opened the resolver shows its page.
         if self.model.take_conflict_opened().is_some() {
             self.show_conflicts(cx);
+        }
+        // A restack conflict opened or closed: the dialog and the resolver take turns (D154).
+        match self.model.restacking.take_transition() {
+            Some(Transition::Opened) => self.open_restack_resolver(cx),
+            Some(Transition::Returned) => self.return_to_restack_dialog(window, cx),
+            None => {}
         }
         self.reread_forgotten_conflict();
         self.follow_review(review_listed, reload, cx);
@@ -1291,6 +1301,19 @@ impl StatusView {
             self.request_hook_list();
         }
         for kind in kinds {
+            // While a restack conflict is open, the resolver's events carry its worktree; a
+            // read of the open checkout would be taken for it, so it is refused (D154).
+            if matches!(
+                kind,
+                CommandKind::ReadConflict {
+                    site: ConflictSite::WorkingCopy,
+                    ..
+                }
+            ) && self.model.restacking.resolving().is_some()
+            {
+                self.notify_user("Finish or cancel the restack conflict first.", cx);
+                continue;
+            }
             let applying = stash_apply::tracked(&kind);
             let detached = reflog::checkout_target(&kind).map(str::to_owned);
             let checkout = matches!(kind, CommandKind::Checkout { .. });
