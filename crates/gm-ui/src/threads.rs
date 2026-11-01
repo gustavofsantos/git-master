@@ -1117,15 +1117,19 @@ pub fn count_label(count: usize, more: bool) -> String {
 pub fn empty_text(empty: Empty) -> &'static str {
     match empty {
         Empty::Integration => {
-            "No threads yet. Install the agent integration to capture your agent sessions."
+            "No threads yet. Install the agent integration to capture your agent sessions. The commands are in docs/agents/agent-integration.md."
         }
         Empty::Repository => "No threads in this repository yet.",
         Empty::Matches => "No threads match.",
     }
 }
 
-/// The command that installs the integration, shown under the empty state.
-pub const INSTALL_HINT: &str = "gitmaster harness install claude-code";
+/// The commands that install the Claude Code plugin, shown under the empty state. The same
+/// commands are in docs/agents/agent-integration.md.
+pub const INSTALL_HINT: [&str; 2] = [
+    "claude plugin marketplace add gustavofsantos/git-master",
+    "claude plugin install gitmaster@gitmaster",
+];
 
 /// A thread's title as plain text, or a placeholder when the first prompt had none.
 #[must_use]

@@ -249,7 +249,7 @@ Export and Copy as Markdown do not apply the patterns again. They write the stor
 - Turn off **Capture Threads** in **Threads Settings…** to stop capturing everywhere. Threads already stored stay.
 
 > **Planned.** **Pause Capture in This Repository**, which stops capturing in one repository only, is not available in the app yet.
-- Remove the integration to stop the agent from reporting at all. See [Agent integration](../agents/agent-integration.md#remove-the-integration).
+- Remove the plugin to stop the agent from reporting at all. See [Agent integration](../agents/agent-integration.md#remove-the-plugin).
 
 ## Where threads are stored
 

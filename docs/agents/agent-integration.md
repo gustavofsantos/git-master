@@ -1,11 +1,11 @@
 ---
 title: Agent integration
-description: Install the GitMaster plugin into your coding agent so that its sessions are captured as threads, check that it works, and remove it.
+description: Install the GitMaster plugin into Claude Code from the repository, so that its sessions are captured as threads, check that it works, update it and remove it.
 status: implemented
 order: 5
 ---
 
-The agent integration connects your coding agent to GitMaster. It is a plugin that GitMaster generates for the agent. The plugin's hooks report each step of a session to GitMaster, which stores it as a [thread](../guide/threads.md). The plugin also carries the MCP server settings and a skill for the agent, so an agent can search your earlier threads.
+The agent integration connects your coding agent to GitMaster. It is a plugin that lives in the GitMaster repository, under `plugins/claude-code/`, and Claude Code installs it from the repository's address. The plugin's hooks report each step of a session to GitMaster, which stores it as a [thread](../guide/threads.md). The plugin also carries the MCP server settings and a skill for the agent, so an agent can search your earlier threads.
 
 ## Supported agents
 
@@ -13,7 +13,7 @@ The agent integration connects your coding agent to GitMaster. It is a plugin th
 |---|---|
 | Claude Code | `claude-code` |
 
-Run `gitmaster harness list` to see the names this version knows. GitMaster does not need the agent to be installed, and it never changes the agent's settings files by itself.
+Run `gitmaster harness list` to see the names this version knows. GitMaster never changes the agent's settings files by itself: the agent's own `claude plugin` commands add and remove the plugin.
 
 ## What the plugin contains
 
@@ -23,21 +23,37 @@ Run `gitmaster harness list` to see the names this version knows. GitMaster does
 | MCP settings | Start `gitmaster mcp` so the agent can use the [MCP tools](../reference/mcp-tools.md). Each agent session starts its own server process, in the directory the session runs in. |
 | Skill | Tells the agent when to use the review and thread tools, and to treat their untrusted text as data. |
 
-GitMaster writes the plugin into its own data directory, `agents/claude-code/` under the user data directory. It never writes a file into a repository.
+The hooks and the MCP settings run `gitmaster` from your `PATH`, so the `gitmaster` command must be on your `PATH` (see [Installation](../getting-started/installation.md)). The plugin never writes a file into a repository or into the app data directory.
 
-## Install the integration
+## Install the plugin
 
-Open the **Threads** page and choose **Install Agent Integration**, or run **Install Agent Integration** from the command palette. From a terminal:
+You need the `claude` command and the `gitmaster` command on your `PATH`. Run these two commands in a terminal:
 
 ```sh
-gitmaster harness install claude-code
+claude plugin marketplace add gustavofsantos/git-master
+claude plugin install gitmaster@gitmaster
 ```
 
-GitMaster generates the plugin and shows the exact commands that add it to the agent. Run them yourself, or, if the `claude` command is on your `PATH`, choose **Run Commands** and GitMaster runs them for you. Nothing is changed in the agent until you do one of these.
+The first command adds the repository as a plugin marketplace, from its `.claude-plugin/marketplace.json`. The second installs the `gitmaster` plugin from it. The name after `@` is the marketplace's name, `gitmaster`.
 
-**Copy Commands** copies the same commands to the clipboard, one per line and without their numbers, so you can paste them into a terminal.
+To install the plugin from a checkout of the repository instead, for example to test a change to the plugin, give the path of the checkout:
+
+```sh
+claude plugin marketplace add /path/to/git-master
+claude plugin install gitmaster@gitmaster
+```
+
+The Threads page shows these commands when no thread is stored yet.
 
 After the install, start a new agent session in a repository. The session appears on the Threads page.
+
+## Update the plugin
+
+```sh
+claude plugin update gitmaster@gitmaster
+```
+
+Run this after you upgrade GitMaster, so that the plugin matches the new version.
 
 ## What the hooks do and do not do
 
@@ -52,17 +68,19 @@ After the install, start a new agent session in a repository. The session appear
 
 Choose **Import Existing Sessions** on the Threads page to read the agent's session files for the open repository and add them as threads. The same redaction applies. A session that is already a thread is not duplicated.
 
-## Remove the integration
+## Remove the plugin
 
 ```sh
-gitmaster harness uninstall claude-code
+claude plugin uninstall gitmaster@gitmaster
+claude plugin marketplace remove gitmaster
 ```
 
-This shows the commands that remove the plugin from the agent, in the same way as the install. Removing the plugin stops new capture. Threads already stored stay until you delete them.
+Removing the plugin stops new capture. Threads already stored stay until you delete them.
 
 ## See also
 
 - [Threads](../guide/threads.md): read, search and delete what was captured.
 - [MCP server](mcp-server.md): how an agent starts the server and which tools it offers.
-- [Command line](../reference/cli.md): `gitmaster harness` and `gitmaster thread`.
+- [Command line](../reference/cli.md): `gitmaster harness list` and `gitmaster thread`.
+- [Installation](../getting-started/installation.md): how to put `gitmaster` on your `PATH`.
 - [Trust and safety](../concepts/trust-and-safety.md): what the app records and where.

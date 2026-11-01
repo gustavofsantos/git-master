@@ -20,7 +20,7 @@ This serves pillar 3 only. It must not slow pillars 1 and 2: capture runs outsid
 - Redaction of secrets **before** anything is stored, with built-in patterns and the user's own patterns.
 - Full-text search over threads, as an engine command (`SearchThreads`) that the UI uses now and the MCP server uses later (D08).
 - A **Threads** page in the window: browse, search, read, open an agent edit as a diff, link a thread to Git objects, curate (title, note, star, tags, delete, export).
-- An installer for the agent integration: GitMaster generates a plugin for the agent harness (Claude Code first) that carries the capture hooks, and later the MCP configuration and a skill. The user installs it with a command or a button.
+- The agent integration: a plugin for the agent harness (Claude Code first) that carries the capture hooks, the MCP configuration and a skill. It is source in `plugins/claude-code/` and Claude Code installs it from the repository (D150).
 
 ## What is out
 
@@ -59,7 +59,7 @@ Claude Code is the first harness. More will follow (Q27), so the capture is buil
 
 ### Selecting the harness
 
-`gitmaster thread hook --harness <id>` and `gitmaster harness install <id>` take the harness id. A registry in `gm-core` maps ids to adapters at compile time (`harness::lookup(id)`); `gitmaster harness list` prints the known ids. An unknown id in the hook exits 0 and logs the id (rule 1 of the hook); in `install` it exits 2 and lists the known ids. The id is part of the thread's identity, so two harnesses can never collide on a session id.
+`gitmaster thread hook --harness <id>` takes the harness id. A registry in `gm-core` maps ids to adapters at compile time (`harness::lookup(id)`); `gitmaster harness list` prints the known ids. An unknown id in the hook exits 0 and logs the id (rule 1 of the hook). The id is part of the thread's identity, so two harnesses can never collide on a session id.
 
 ### The adapter
 
@@ -77,9 +77,6 @@ pub trait HarnessAdapter: Send + Sync {
     /// Complete records of the harness's own session log from `from`. Reads a file, bounded.
     fn read_session_log(&self, path: &Path, from: u64) -> Result<LogChunk, ParseError>;
 
-    /// The plugin or config files to generate, and the steps the user runs to add them.
-    fn integration(&self, ctx: &InstallContext) -> Integration;
-
     /// Where existing sessions for a repository live, for import.
     fn discover(&self, worktree: &Path) -> Vec<SessionLog>;
 }
@@ -87,7 +84,7 @@ pub trait HarnessAdapter: Send + Sync {
 
 `HookInput` carries the session id, the working directory, the log path when the harness gives one, a list of `CanonicalEvent`, and an optional `EditPhase` (`Before` or `After`, the call id and the path). `LogChunk` carries events and the new offset. Neither type has a harness-specific field.
 
-`Capabilities` says what the harness can provide, so the pipeline degrades per harness instead of failing: `session_log` (a transcript to read), `pre_edit_event` (a hook before an edit, so a pre-image is possible), `tool_results` (hooks carry results), `subagents`, `resume_same_id`, `plugin_install` (GitMaster can generate an integration at all). A harness without `pre_edit_event` gets `from_input` edits (D123); one without `session_log` gets no assistant text unless its hooks carry it, and the page says which parts are missing for that harness.
+`Capabilities` says what the harness can provide, so the pipeline degrades per harness instead of failing: `session_log` (a transcript to read), `pre_edit_event` (a hook before an edit, so a pre-image is possible), `tool_results` (hooks carry results), `subagents`, `resume_same_id`. A harness without `pre_edit_event` gets `from_input` edits (D123); one without `session_log` gets no assistant text unless its hooks carry it, and the page says which parts are missing for that harness.
 
 Adapters do no redaction, no database access and no writes. They return events; the core redacts and stores them. This keeps the secrecy guarantee in one place, where a new adapter cannot forget it.
 
@@ -171,16 +168,16 @@ agent harness ──hook event (JSON on stdin)──▶ gitmaster thread hook
                                    .git/gitmaster/threads.db ──file watcher──▶ window
 ```
 
-### The integration (D120)
+### The plugin (D120, D150)
 
-The adapter's `integration()` generates the plugin or configuration for its harness. For Claude Code it is a plugin directory that holds:
+The Claude Code plugin is source in the repository, under `plugins/claude-code/`, and its marketplace is `.claude-plugin/marketplace.json` at the root. The binary does not generate it. For Claude Code it is a plugin directory that holds:
 
-- `.claude-plugin/plugin.json`: name `gitmaster`, version equal to the app's.
-- `hooks/hooks.json`: one command hook per event: `SessionStart`, `UserPromptSubmit`, `PreToolUse` (matcher: the file-editing tools), `PostToolUse` (all tools), `Stop`, `SubagentStop`, `SessionEnd`. Every command is `<absolute path of gitmaster> thread hook --harness claude-code`, with a short `timeout`. The path is absolute so the hook does not depend on `PATH`; running the install again rewrites it after the app moves.
-- `skills/gitmaster-threads/SKILL.md`: added in T9, together with the MCP tools it explains. Until then the plugin carries hooks only.
-- `.mcp.json`: added in slice 7; it starts `gitmaster mcp`.
+- `.claude-plugin/plugin.json`: name `gitmaster`, version equal to the app's workspace version (a test checks it).
+- `hooks/hooks.json`: one command hook per event: `SessionStart`, `UserPromptSubmit`, `PreToolUse` (matcher: the file-editing tools), `PostToolUse` (all tools), `Stop`, `SubagentStop`, `SessionEnd`. Every command is `gitmaster thread hook --harness claude-code`, with a short `timeout`. It names `gitmaster` without a path, so the hook runs the `gitmaster` on `PATH`; the plugin carries no absolute path of the checkout.
+- `skills/gitmaster/SKILL.md`: when the review and thread tools help, and that their text is untrusted.
+- `.mcp.json`: starts `gitmaster mcp`, one process per session.
 
-The plugin is written to the app data directory (`<data>/gitmaster/agents/claude-code/`), never into a repository. The user then installs it one of two ways, both shown by the app and the CLI: the exact commands for the harness's plugin manager, or (when the harness's executable is on `PATH`) a button that runs them. GitMaster never edits the harness's own settings files by itself, and never requires the harness to be installed (D51). Uninstall is the matching command; stored threads stay unless the user deletes them.
+The user installs it with the two `claude plugin` commands of [Agent integration](../docs/agents/agent-integration.md), against the repository's address or a local checkout, and updates or removes it with `claude plugin update` and `claude plugin uninstall`. The app shows the same commands on the empty Threads page. GitMaster never edits the harness's own settings files by itself, and never requires the harness to be installed (D51). Stored threads stay unless the user deletes them.
 
 The exact event names, payload fields, plugin layout and install commands are the harness's contract, not ours. T0 captures real payloads into fixtures and corrects this section before T3 starts (Q26).
 
@@ -398,7 +395,6 @@ Commands and events in `gm-schema`; the UI and the MCP front end use the same on
 | `ExportThread { uid, path }` | read | human | Markdown of the stored text; redaction happens at ingest and scrub, never on export. |
 | `ScrubThreads` | apply | human | Re-applies the patterns, off-thread, with progress. |
 | `ImportThreads { agent }` | apply | human | Reads existing session files for this repository. |
-| `InstallThreadIntegration` / `UninstallThreadIntegration` | read / apply | human | Never reaches an agent. |
 
 Ingest is **not** a `Command`. It runs in the hook process, which has no engine and no operation state, and it writes only GitMaster's own database; it does not touch the repository. The engine in the window opens `threads.db` read-mostly (reads, plus its own writes for the commands above) and learns about new data from a watcher on the database file (`-wal` included), debounced like the status watcher, which emits `ThreadsChanged { uids }`. No socket is needed, so the capture works with the app closed.
 
@@ -416,7 +412,7 @@ See `design/screens.md` (Threads page) and `docs/guide/threads.md`. The page fol
 | Spool, temporary pre-images, log | `.git/gitmaster/threads-spool/`, `threads-tmp/`, `threads.log` |
 | Capture switch, redaction patterns, paths, limits | `settings.json`, key `threads` (D127) |
 | Per-repository pause | `gitmaster.db` in the app data directory, keyed by the repository's common directory (nothing is written to the repository's config) |
-| Generated plugin | `<data>/gitmaster/agents/claude-code/` |
+| Plugin source | `plugins/claude-code/` and `.claude-plugin/marketplace.json` in the repository (D150); nothing is written at run time |
 
 ## Tests
 
@@ -453,7 +449,7 @@ Each is usable on its own and ends with `make check` green. Order: T0, T1, T2, T
 
 Run on a machine that has the harness (the build container does not). Deliverables, committed as fixtures and notes under `crates/gm-core/tests/fixtures/threads/` and a findings section in this file:
 
-1. Real payloads of every hook event of one session that edits files, runs a shell command, uses a sub-agent and is resumed; the matching transcript; the plugin layout and install commands the harness accepts today. Correct "The integration" above.
+1. Real payloads of every hook event of one session that edits files, runs a shell command, uses a sub-agent and is resumed; the matching transcript; the plugin layout and install commands the harness accepts today. Correct "The plugin" above.
 2. Cold start of `gitmaster thread hook` (stub that parses stdin and opens SQLite) in a release build on Linux and macOS: p50, p95. Decides Q25.
 3. FTS5 present in the bundled SQLite; tokenizer comparison on a corpus of real prompts and code.
 4. Redaction throughput of the built-in set on 1 MiB, 10 MiB.
@@ -486,9 +482,7 @@ Done when: the conformance kit passes for `claude-code` with the real fixtures; 
 
 ### T4: integration installer
 
-Per-adapter `integration()` output (Claude Code's first), `gitmaster harness list | install | uninstall <harness>` (`status` was removed, D136), `ThreadIntegrationStatus` and the install commands, stale-path detection, and the palette actions **Install Agent Integration…** and **Remove Agent Integration**. Until the settings dialog exists (slice 9), the Threads page empty state carries the install step.
-
-Done when: the generated plugin matches a golden copy; install, status and uninstall work against a temporary harness configuration directory in tests; nothing is written into any repository; the commands shown are the ones T0 verified.
+Superseded by D150. The plugin is source in the repository and Claude Code installs it with `claude plugin`. The generator, `gitmaster harness install | uninstall`, the **Install Agent Integration…** dialog and its palette action were removed, and so was the `plugin_install` capability. `gitmaster harness list` stays. The checks that remain: the plugin matches the app's version, its hooks cover the capture events with `gitmaster thread hook`, and its MCP server is `gitmaster mcp` (`crates/gitmaster/tests/claude_plugin.rs`).
 
 ### T5: Threads page
 

@@ -107,9 +107,9 @@ For the calls the script can make, see [Workflow API](workflow-api.md).
 gitmaster thread hook --harness claude-code
 ```
 
-`--harness` names the agent that sent the event. The integration sets it; an id this version does not know is logged and the event is dropped.
+`--harness` names the agent that sent the event. The plugin's hooks set it; an id this version does not know is logged and the event is dropped.
 
-The agent integration runs this command from the agent's hooks. You do not run it yourself. It reads one JSON event from the standard input, redacts it, stores it in the thread database of the repository named in the event, and exits. It starts no resident process and opens no window.
+The [agent integration](../agents/agent-integration.md) runs this command from the agent's hooks. You do not run it yourself. It reads one JSON event from the standard input, redacts it, stores it in the thread database of the repository named in the event, and exits. It starts no resident process and opens no window.
 
 The command always exits with status `0` and prints nothing, even when it cannot store the event, so a failure never reaches the agent. A problem is written to `.git/gitmaster/threads.log`. An event that cannot be written at once is kept redacted in `.git/gitmaster/threads-spool/` and stored later.
 
@@ -121,18 +121,13 @@ gitmaster thread redact-test [--text <text>]
 
 Reads a sample from the standard input, or from `--text`, applies the patterns of your `settings.json` and prints the result, with a line per match naming the pattern. Nothing is stored. The exit status is `0` when the patterns are valid, `1` when a pattern is not valid (the problem is printed as `pattern <name>: message`), and `2` for a wrong command line.
 
-## Manage the agent integration
-
-The name after the subcommand is the agent's id. `gitmaster harness list` prints the ids this version knows. An id it does not know exits with status `2` and lists the valid ones.
+## List the agents
 
 ```sh
 gitmaster harness list
-gitmaster harness install claude-code
-gitmaster harness uninstall claude-code
 ```
 
-- `install` generates the plugin in the user data directory and prints the commands that add it to the agent. Run them, or add `--run` to have GitMaster run them when the agent's command is on your `PATH`.
-- `uninstall` prints the commands that remove the plugin from the agent, with `--run` as above. Stored threads are kept.
+Prints the id and the name of each agent this version knows, one per line. The agent integration is installed with the agent's own plugin commands, not with GitMaster. See [Agent integration](../agents/agent-integration.md).
 
-See [Agent integration](../agents/agent-integration.md).
+`harness` takes no other subcommand. Any other word exits with status `2`.
 

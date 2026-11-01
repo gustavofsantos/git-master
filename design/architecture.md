@@ -56,7 +56,7 @@ Agent sessions are captured into `.git/gitmaster/threads.db`. Full design in `de
 
 - **Ingest is outside the engine.** A harness hook starts `gitmaster thread hook`, a one-shot process that redacts, normalizes and writes one SQLite transaction, then exits with status 0 (D124). It has no `OperationId` and is not a `Command`: it writes only GitMaster's own database and never touches the repository. The window learns of new data from a watcher on the database file.
 - **Reads and edits are commands.** `ListThreads`, `SearchThreads`, `ReadThread` and the curation commands go through the engine like any other, so the UI and MCP share them (D08). An agent actor gets reads only.
-- **Ports.** `ThreadStore` (SQLite adapter) and one `HarnessAdapter` per harness (payload parsing, session-log reading, plugin generation), which map the harness's shapes to canonical events (D129); nothing past the adapter knows which harness it was. The pure pieces (`redact`, `query`, normalization) hold the logic and are tested without SQLite or a window.
+- **Ports.** `ThreadStore` (SQLite adapter) and one `HarnessAdapter` per harness (payload parsing, session-log reading); the Claude Code plugin is source in `plugins/claude-code/`, not generated (D150), which map the harness's shapes to canonical events (D129); nothing past the adapter knows which harness it was. The pure pieces (`redact`, `query`, normalization) hold the logic and are tested without SQLite or a window.
 - **Redaction is a pure function in front of every write** (D121). Nothing downstream, including the spool and the log, ever sees unredacted text.
 
 ## Persistence

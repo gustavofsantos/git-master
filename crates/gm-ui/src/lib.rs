@@ -78,7 +78,6 @@ mod thread_curate;
 mod thread_dialogs;
 mod thread_rows;
 mod threads;
-mod threads_install;
 mod threads_settings;
 mod title_bar;
 mod view;

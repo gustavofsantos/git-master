@@ -252,8 +252,6 @@ pub enum Effect {
     ShowThreadsFor(String),
     /// Opens the Threads settings dialog (T7).
     OpenThreadsSettings,
-    /// Opens the Install Agent Integration dialog (T7).
-    OpenThreadsInstall,
     /// Writes the open workflow's buffer to its file.
     SaveWorkflow,
     /// Drops the open workflow's unsaved changes.
@@ -400,7 +398,7 @@ pub struct ThreadRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 96] = [
+const SPECS: [Spec; 95] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1060,13 +1058,6 @@ const SPECS: [Spec; 96] = [
         ArgKind::None,
         Category::Repository,
     ),
-    spec(
-        "threads.install",
-        "Install Agent Integration…",
-        None,
-        ArgKind::None,
-        Category::Repository,
-    ),
 ];
 
 const fn spec(
@@ -1184,7 +1175,6 @@ pub enum Action {
     ThreadScrub,
     ShowThreadsForFile,
     ThreadsSettings,
-    ThreadsInstall,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1287,7 +1277,6 @@ fn thread_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
         }
         (Action::ThreadScrub, _) => Effect::OpenScrubDialog,
         (Action::ThreadsSettings, _) => Effect::OpenThreadsSettings,
-        (Action::ThreadsInstall, _) => Effect::OpenThreadsInstall,
         (Action::ShowThreadsForFile, Args::File(path)) => Effect::ShowThreadsFor(path.clone()),
         _ => return Err(NOT_AVAILABLE),
     })
@@ -1400,7 +1389,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 96] = [
+    pub const ALL: [Action; 95] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1496,7 +1485,6 @@ impl Action {
         Action::ThreadScrub,
         Action::ShowThreadsForFile,
         Action::ThreadsSettings,
-        Action::ThreadsInstall,
     ];
 
     #[must_use]
@@ -1655,7 +1643,6 @@ impl Action {
                 | Action::ThreadScrub
                 | Action::ShowThreadsForFile
                 | Action::ThreadsSettings
-                | Action::ThreadsInstall
         )
     }
 
@@ -1689,7 +1676,6 @@ impl Action {
                 | Action::ThreadDelete
                 | Action::ThreadScrub
                 | Action::ThreadsSettings
-                | Action::ThreadsInstall
         )
     }
 
@@ -1787,8 +1773,8 @@ impl Action {
             | Action::ThreadCollapseAll
             | Action::ThreadDelete => thread_rule(args, ctx),
             Action::ThreadScrub | Action::ShowThreadsForFile => repository_open(ctx),
-            // The settings and the install dialog need no repository.
-            Action::ThreadsSettings | Action::ThreadsInstall => Ok(()),
+            // The settings dialog needs no repository.
+            Action::ThreadsSettings => Ok(()),
             // The placeholders, refused above by `available`.
             _ => Err(NOT_AVAILABLE),
         }
@@ -5506,35 +5492,19 @@ mod tests {
     }
 
     #[test]
-    fn the_threads_dialogs_open_without_a_repository_and_have_their_ids_and_titles() {
+    fn the_threads_settings_dialog_opens_without_a_repository_and_has_its_id_and_title() {
         let closed = ctx(&[], "");
-        for (action, id, title) in [
-            (
-                Action::ThreadsSettings,
-                "threads.settings",
-                "Threads Settings…",
-            ),
-            (
-                Action::ThreadsInstall,
-                "threads.install",
-                "Install Agent Integration…",
-            ),
-        ] {
-            assert_eq!(action.id(), id);
-            assert_eq!(action.spec().title, title);
-            assert_eq!(action.spec().shortcut, None);
-            assert_eq!(action.spec().args, ArgKind::None);
-            assert!(action.opens_dialog());
-            assert_eq!(action.enabled(&Args::None, &closed), Ok(()));
-            assert_eq!(Action::from_id(id), Some(action));
-        }
+        let action = Action::ThreadsSettings;
+        assert_eq!(action.id(), "threads.settings");
+        assert_eq!(action.spec().title, "Threads Settings…");
+        assert_eq!(action.spec().shortcut, None);
+        assert_eq!(action.spec().args, ArgKind::None);
+        assert!(action.opens_dialog());
+        assert_eq!(action.enabled(&Args::None, &closed), Ok(()));
+        assert_eq!(Action::from_id("threads.settings"), Some(action));
         assert_eq!(
-            Action::ThreadsSettings.plan(&Args::None, &closed),
+            action.plan(&Args::None, &closed),
             Ok(Effect::OpenThreadsSettings)
-        );
-        assert_eq!(
-            Action::ThreadsInstall.plan(&Args::None, &closed),
-            Ok(Effect::OpenThreadsInstall)
         );
     }
 

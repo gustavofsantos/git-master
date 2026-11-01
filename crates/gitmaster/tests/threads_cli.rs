@@ -161,16 +161,3 @@ fn harness_list_names_the_claude_code_adapter() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("claude-code"), "{stdout}");
 }
-
-#[test]
-fn harness_install_writes_the_plugin() {
-    let scratch = Scratch::new();
-    let repo = scratch.repo();
-    let home = scratch.path().join("home");
-
-    let install = gitmaster(&["harness", "install", "claude-code"], b"", &repo, &home);
-    assert_eq!(install.status.code(), Some(0), "{install:?}");
-    let hooks = home.join("data/gitmaster/agents/claude-code/marketplace/plugin/hooks/hooks.json");
-    let text = fs::read_to_string(&hooks).expect("hooks.json");
-    assert!(text.contains(BINARY), "{text}");
-}

@@ -1484,9 +1484,7 @@ mod tests {
     use super::*;
     use crate::threads::config::RedactConfig;
     use crate::threads::harness::fake::{self, FakeAdapter};
-    use crate::threads::harness::{
-        Capabilities, InstallContext, Integration, LogChunk, ParseError, SessionLog,
-    };
+    use crate::threads::harness::{Capabilities, LogChunk, ParseError, SessionLog};
     use gm_schema::threads::ThreadDetail;
 
     const NOW: i64 = 1_700_000_000_000;
@@ -1820,9 +1818,6 @@ mod tests {
         }
         fn read_session_log(&self, path: &Path, from: u64) -> Result<LogChunk, ParseError> {
             FakeAdapter.read_session_log(path, from)
-        }
-        fn integration(&self, ctx: &InstallContext) -> Integration {
-            FakeAdapter.integration(ctx)
         }
         fn discover(&self, worktree: &Path) -> Vec<SessionLog> {
             FakeAdapter.discover(worktree)

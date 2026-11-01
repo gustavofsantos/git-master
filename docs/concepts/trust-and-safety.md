@@ -91,7 +91,6 @@ The operation log records each operation that changes a repository, what was ask
 | Git commands panel | Memory only. | Implemented |
 | Operation log | Outside the working tree. | Planned |
 | Threads | `.git/gitmaster/threads.db` in the Git common directory, readable only by you. | |
-| Agent integration plugin | The `agents/` folder of the app data directory. | |
 | Local review comments and their snapshots | Outside the working tree. | Planned |
 | Workflow scripts | The workflows directory in your user config: `~/.config/gitmaster/workflows/` on Linux, and `Library/Application Support/gitmaster/workflows/` in your home directory on macOS. Also any directory listed in `gitmaster.workflowPath`. Never a repository. | Implemented |
 | Workflow review record | `gitmaster.db` in the app data directory, keyed by the hash of each script version. | Implemented |

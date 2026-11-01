@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use gm_schema::threads::{CanonicalEvent, EditPhase, ToolKind};
 use proptest::prelude::*;
@@ -16,7 +16,7 @@ use proptest::test_runner::{Config, TestCaseError, TestRunner};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::{EditPhaseInfo, HarnessAdapter, HookInput, InstallContext, LogChunk};
+use super::{EditPhaseInfo, HarnessAdapter, HookInput, LogChunk};
 
 /// The expected `EditPhaseInfo` of a hook fixture, as stored in `NAME.hook.edit.json`.
 #[derive(Serialize, Deserialize)]
@@ -166,7 +166,7 @@ pub fn run(adapter: &dyn HarnessAdapter, fixtures: &Path) {
     let payloads: Vec<Vec<u8>> = hooks.iter().map(|hook| hook.bytes.clone()).collect();
     check_arbitrary_bytes(adapter, &payloads, scratch.path());
     check_capabilities(adapter, &observed, logs.len());
-    check_integration(adapter, scratch.path());
+    check_discover(adapter, scratch.path());
 }
 
 /// Writes the expected files of every fixture from the adapter's current output. Review the
@@ -507,41 +507,7 @@ fn check_capabilities(adapter: &dyn HarnessAdapter, observed: &Observed, log_fix
     }
 }
 
-fn check_integration(adapter: &dyn HarnessAdapter, dir: &Path) {
-    let id = adapter.id();
-    let ctx = InstallContext {
-        binary: PathBuf::from("/opt/gitmaster/bin/gitmaster"),
-        data_dir: dir.to_path_buf(),
-    };
-    let integration = adapter.integration(&ctx);
-    assert_eq!(
-        integration,
-        adapter.integration(&ctx),
-        "{id}: integration is not deterministic"
-    );
-    for (path, _) in &integration.files {
-        let escapes = path.components().any(|part| {
-            matches!(
-                part,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        });
-        assert!(
-            path.is_relative() && !escapes,
-            "{id}: integration file {} must be relative to the agent's directory",
-            path.display()
-        );
-    }
-    if adapter.capabilities().plugin_install {
-        assert!(
-            !integration.files.is_empty(),
-            "{id}: plugin_install is declared but no file is generated"
-        );
-        assert!(
-            !integration.steps.is_empty(),
-            "{id}: plugin_install is declared but no step is given"
-        );
-    }
+fn check_discover(adapter: &dyn HarnessAdapter, dir: &Path) {
     // Discovery on a worktree with no sessions must answer, not panic.
     adapter.discover(dir);
 }

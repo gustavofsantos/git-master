@@ -1,9 +1,9 @@
 //! `gitmaster [PATH]` opens the window on the repository at PATH, or on the
 //! working directory. `gitmaster --version` prints the version. `gitmaster workflow …` runs one
 //! of the one-shot workflow commands and exits; it opens no window and keeps no process.
-//! `gitmaster mcp` is the MCP server over stdio (D135). `gitmaster thread …` (the hook and the redaction test) and `gitmaster harness …` (the agent
-//! integration) are one-shot too (docs/reference/cli.md). To open a folder named `thread` or
-//! `harness`, write `./thread`, `./harness` or `./mcp`.
+//! `gitmaster mcp` is the MCP server over stdio (D135). `gitmaster thread …` (the hook and the
+//! redaction test) and `gitmaster harness list` are one-shot too (docs/reference/cli.md). To open
+//! a folder named `thread` or `harness`, write `./thread`, `./harness` or `./mcp`.
 
 mod shell_env;
 
@@ -50,12 +50,10 @@ fn main() {
     }
     if first.as_deref() == Some("harness") {
         let words: Vec<String> = args.collect();
-        let env = gm_core::threads::cli::Env::from_process();
         let code = gm_core::threads::cli::harness_command(
             &words,
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
-            &env,
         );
         std::process::exit(code);
     }

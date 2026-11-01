@@ -843,13 +843,11 @@ fn muted_text(text: &str) -> Div {
         .child(text.to_owned())
 }
 
-/// The look of a button: the primary one is filled, a secondary has a border, and a chip is
-/// filled when it is the selected one.
+/// The look of a button: the primary one is filled, a secondary has a border.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ButtonStyle {
     Primary,
     Secondary,
-    Chip { selected: bool },
 }
 
 /// A text button. A disabled one looks faded and does nothing when pressed.
@@ -879,14 +877,6 @@ pub(crate) fn button(
             .border_1()
             .border_color(theme::button_border())
             .text_color(theme::text()),
-        ButtonStyle::Chip { selected: true } => base
-            .bg(theme::selected_row())
-            .text_color(theme::text())
-            .font_weight(FontWeight::MEDIUM),
-        ButtonStyle::Chip { selected: false } => base
-            .border_1()
-            .border_color(theme::button_border())
-            .text_color(theme::muted()),
     };
     if enabled {
         styled.cursor_pointer().on_mouse_down(

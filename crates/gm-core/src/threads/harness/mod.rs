@@ -36,8 +36,6 @@ pub struct Capabilities {
     pub subagents: bool,
     /// A resumed session keeps its harness session id.
     pub resume_same_id: bool,
-    /// `GitMaster` can generate an integration for the harness at all.
-    pub plugin_install: bool,
 }
 
 /// A payload or log line that the adapter cannot read. The message is for the capture log.
@@ -84,24 +82,6 @@ pub struct LogChunk {
     pub unrecognized: Vec<String>,
 }
 
-/// Where `GitMaster` is installed, so an integration can name the binary.
-#[derive(Clone, Debug)]
-pub struct InstallContext {
-    pub binary: PathBuf,
-    pub data_dir: PathBuf,
-}
-
-/// The files an adapter generates and the steps the user runs to add them to the harness.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Integration {
-    /// Paths relative to `data_dir/agents/<id>/`, with their contents.
-    pub files: Vec<(PathBuf, String)>,
-    /// Shell commands the user runs to add the integration.
-    pub steps: Vec<String>,
-    /// Shell commands the user runs to remove it again.
-    pub uninstall_steps: Vec<String>,
-}
-
 /// An existing session transcript found for import.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionLog {
@@ -125,9 +105,6 @@ pub trait HarnessAdapter: Send + Sync {
     /// Complete records of the harness's own session log from byte offset `from`. Reads the
     /// file, bounded to `MAX_LOG_READ` per call; a trailing partial line is left for next time.
     fn read_session_log(&self, path: &Path, from: u64) -> Result<LogChunk, ParseError>;
-
-    /// The plugin or configuration files to generate, and the steps that add them.
-    fn integration(&self, ctx: &InstallContext) -> Integration;
 
     /// Existing sessions for a repository's worktree, for import. May be empty.
     fn discover(&self, worktree: &Path) -> Vec<SessionLog>;

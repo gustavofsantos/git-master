@@ -60,7 +60,6 @@ const LINE_HEIGHT: f32 = 22.;
 const TURN_HEIGHT: f32 = 18.;
 /// The most the details panel shows; a longer one scrolls inside this height.
 const PANEL_HEIGHT: f32 = 132.;
-const INSTALL_HINT_TEXT: &str = threads::INSTALL_HINT;
 
 /// The window's part of the page: the search box and the lists' scroll. Its state is `model.threads`.
 pub(crate) struct ThreadsView {
@@ -505,9 +504,9 @@ impl StatusView {
         });
         let body: AnyElement = match page.mode() {
             Mode::Results if !page.hits_shown() => note("Searching…".to_owned()).into_any_element(),
-            Mode::Results if page.hits().is_empty() => self
-                .empty_view(Empty::Matches, page.diagnosis_hint(), cx)
-                .into_any_element(),
+            Mode::Results if page.hits().is_empty() => {
+                Self::empty_view(Empty::Matches, page.diagnosis_hint()).into_any_element()
+            }
             Mode::Results => {
                 hit_rows(page.hits().len(), self.threads_view.list.clone(), cx).into_any_element()
             }
@@ -515,7 +514,7 @@ impl StatusView {
                 note("Loading threads…".to_owned()).into_any_element()
             }
             Mode::Threads => match page.empty() {
-                Some(empty) => self.empty_view(empty, None, cx).into_any_element(),
+                Some(empty) => Self::empty_view(empty, None).into_any_element(),
                 None => thread_rows(page.threads().len(), self.threads_view.list.clone(), cx)
                     .into_any_element(),
             },
@@ -1410,12 +1409,11 @@ fn note(text: String) -> Div {
         .child(text)
 }
 
-/// What an empty list says, with the install command under the no-integration state.
+/// What an empty list says, with the install commands under the no-integration state.
 impl StatusView {
-    /// The text of an empty list. The missing integration also gets the button that
-    /// installs it, above the command that does the same from a terminal.
-    fn empty_view(&self, empty: Empty, hint: Option<String>, cx: &mut Context<Self>) -> Div {
-        let ctx = self.action_context("");
+    /// The text of an empty list. The missing integration also shows the commands that
+    /// install the plugin.
+    fn empty_view(empty: Empty, hint: Option<String>) -> Div {
         div()
             .flex_1()
             .min_h(px(0.))
@@ -1433,26 +1431,15 @@ impl StatusView {
             )
             .children(hint.map(|text| small_note(&text)))
             .children((empty == Empty::Integration).then(|| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_2()
-                    .child(action_button(
-                        Action::ThreadsInstall,
-                        "threads-install-empty",
-                        "Install Agent Integration…",
-                        &Args::None,
-                        &ctx,
-                        cx,
-                    ))
-                    .child(
+                div().flex().flex_col().items_center().gap_1().children(
+                    threads::INSTALL_HINT.iter().map(|command| {
                         div()
                             .font_family(theme::code_font())
                             .text_xs()
                             .text_color(theme::muted())
-                            .child(INSTALL_HINT_TEXT),
-                    )
+                            .child(*command)
+                    }),
+                )
             }))
     }
 }

@@ -5,7 +5,7 @@
 //! result answers), `error`, `path` and `parent` (the parent call of a sub-agent). A
 //! `tool_call`'s `id` is the call id that its `tool_result` names in `call`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gm_schema::threads::{
     CanonicalEvent, EditChange, EditIntent, EditPhase, EventHeader, SessionOrigin, ToolKind,
@@ -13,8 +13,8 @@ use gm_schema::threads::{
 use serde_json::{Map, Value};
 
 use super::{
-    Capabilities, EditPhaseInfo, HarnessAdapter, HookInput, InstallContext, Integration, LogChunk,
-    MAX_LOG_READ, ParseError, SessionLog, read_complete_lines,
+    Capabilities, EditPhaseInfo, HarnessAdapter, HookInput, LogChunk, MAX_LOG_READ, ParseError,
+    SessionLog, read_complete_lines,
 };
 
 /// The harness id of the fake.
@@ -40,7 +40,6 @@ impl HarnessAdapter for FakeAdapter {
             tool_results: true,
             subagents: true,
             resume_same_id: true,
-            plugin_install: false,
         }
     }
 
@@ -73,18 +72,6 @@ impl HarnessAdapter for FakeAdapter {
             next_offset,
             unrecognized: batch.unrecognized,
         })
-    }
-
-    fn integration(&self, ctx: &InstallContext) -> Integration {
-        let manifest = serde_json::json!({
-            "name": "gitmaster-fake",
-            "command": ctx.binary.display().to_string(),
-        });
-        Integration {
-            files: vec![(PathBuf::from("plugin.json"), manifest.to_string())],
-            steps: vec!["fake install".to_owned()],
-            uninstall_steps: vec!["fake uninstall".to_owned()],
-        }
     }
 
     fn discover(&self, _worktree: &Path) -> Vec<SessionLog> {
@@ -451,14 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_finds_nothing_and_integration_is_one_file() {
+    fn discover_finds_nothing() {
         assert!(FakeAdapter.discover(Path::new("/nowhere")).is_empty());
-        let integration = FakeAdapter.integration(&InstallContext {
-            binary: PathBuf::from("/opt/gitmaster"),
-            data_dir: PathBuf::from("/data"),
-        });
-        assert_eq!(integration.files.len(), 1);
-        assert_eq!(integration.files[0].0, PathBuf::from("plugin.json"));
-        assert_eq!(integration.steps, vec!["fake install".to_owned()]);
     }
 }

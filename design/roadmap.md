@@ -610,7 +610,7 @@ Requested by the author on 2026-10-29. Decisions D119 to D129 and open questions
 3. **T2, store and search.** `threads.db` (WAL, FTS5, `secure_delete`, caps, migrations), `ListThreads`, `SearchThreads`, `ReadThread`, `ReadThreadEdit`, the watcher and `ThreadsChanged`.
 4. **T3a, harness-neutral capture.** The `HarnessAdapter` trait, canonical events, registry and `--harness` argument (D129); `gitmaster thread hook`; the pipeline (redact, cap, idempotent upsert, offset cursor, spool, edit pre and post images); capture gaps; the conformance kit, proven with a fake harness.
    **T3b, Claude Code adapter.** Hook and transcript parsing, tool mapping, sub-agents, resumed sessions, import of existing sessions.
-5. **T4, integration installer.** Each adapter's generated plugin, `gitmaster harness list | install | status | uninstall <harness>`, palette actions, stale-path detection.
+5. **T4, integration installer.** Each adapter's generated plugin, `gitmaster harness list | install | status | uninstall <harness>`, palette actions, stale-path detection. (Superseded by D150: the plugin is source in the repository, installed with `claude plugin`; `harness list` remains.)
 6. **T5, Threads page.** List, filters, search, detail by turn, edit cards with **Open Diff** and **View File**, empty and paused states.
 7. **T6, curate and link.** Rename, note, star, tags, delete, export, manual and observed links, derived edit state, **Show Threads** on a file and a commit.
 8. **T7, redaction settings.** Patterns, path rules, test field, per-repository pause, **Scrub Threads**.
