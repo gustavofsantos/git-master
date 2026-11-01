@@ -24,6 +24,7 @@ mod editor;
 mod editor_theme;
 mod file_discard;
 mod fuzzy;
+mod gate_wait;
 mod history_graph;
 mod history_scope;
 mod hook_run;

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,9 +39,10 @@ use crate::review_session::{self, ReviewSession};
 use crate::review_store::ReviewStore;
 use crate::script::dry;
 use crate::script::inspect::inspect;
-use crate::script::journal::{Journal, RETAINED_RUNS, RunId as ScriptRunId};
+use crate::script::journal::{Journal, RETAINED_RUNS, RunId as ScriptRunId, RunStatus};
 use crate::script::loader;
 use crate::script::luau::LuauEngine;
+use crate::script::phases::{self, Facts, Gate, Timing};
 use crate::script::policy::StartedBy;
 use crate::script::run::ScriptEvent;
 use crate::script::run::{RunSpec, Runtime};
@@ -144,6 +145,36 @@ pub struct Engine {
     lanes: Lanes<ScriptRunId, (OperationId, TriggerEvent)>,
     /// The local branch tips of the open repository at the last check, for `refs.changed`.
     tips: Option<(PathBuf, BTreeMap<String, String>)>,
+    /// The operation waiting for its `before.<op>` gates (`WF3c`, D157), if any. One at a time.
+    gate: Option<GatedOp>,
+    /// The `after.<op>` observer runs in progress, by run: the workflow's name and the operation.
+    observers: BTreeMap<ScriptRunId, (String, &'static str)>,
+}
+
+/// The phases of one operation, as the engine read them when the operation started (`WF3c`).
+struct Phases {
+    /// The operation's name as a phase names it, such as `commit`.
+    op: &'static str,
+    root: PathBuf,
+    /// What the phases read before the operation ran.
+    facts: Facts,
+    /// The `before.<op>` event each gate reads as `input.trigger`.
+    before: TriggerEvent,
+    /// The `before.<op>` scripts, in file-name order: name and hash.
+    gates: Vec<(String, String)>,
+    /// The `after.<op>` scripts: name and hash.
+    observers: Vec<(String, String)>,
+}
+
+/// A gated operation waiting for its gates (`WF3c`, D157). Its command runs once every gate passed.
+struct GatedOp {
+    id: OperationId,
+    command: Command,
+    phases: Phases,
+    /// The gates not passed yet, in order. The first one is the gate `run` belongs to.
+    waiting: VecDeque<(String, String)>,
+    /// The run of the gate in progress.
+    run: Option<ScriptRunId>,
 }
 
 /// The restack conflict being resolved (D154): the plan it came from, and the conflict
@@ -268,6 +299,8 @@ impl Engine {
             triggers: false,
             lanes: Lanes::default(),
             tips: None,
+            gate: None,
+            observers: BTreeMap::new(),
         }
     }
 
@@ -430,7 +463,12 @@ impl Engine {
         let mut started = Vec::new();
         match &event {
             ScriptEvent::Applying { run } => self.lanes.applied(*run),
-            ScriptEvent::Finished { run, .. } => {
+            ScriptEvent::Finished {
+                run,
+                status,
+                reason,
+                ..
+            } => {
                 // The run's script may have a pending trigger, which starts now (WF3a).
                 if let Some((name, (origin, trigger))) = self.lanes.finished(*run) {
                     let root = self.script.as_ref().map(|session| session.root.clone());
@@ -441,6 +479,8 @@ impl Engine {
                         Vec::new()
                     };
                 }
+                // A gate or an observer of a phase moves its operation on (`WF3c`).
+                started.extend(self.phase_finished(*run, *status, reason.as_deref()));
             }
             _ => {}
         }
@@ -655,6 +695,273 @@ impl Engine {
             session.keep_diff(run, file);
         }
         Ok(run)
+    }
+
+    /// Reads the phases of a command that has any (`WF3c`): its facts before it runs, and the
+    /// `before.<op>` and `after.<op>` scripts that apply. `None` when the command has no phases,
+    /// the switch is off, or no script applies. A phase run is not subject to `concurrency`
+    /// (D155): each gate is part of its operation, and the observers of one operation run beside
+    /// each other.
+    fn open_phases(&self, command: &Command) -> Result<Option<Phases>, String> {
+        let Some(op) = phases::operation(&command.kind) else {
+            return Ok(None);
+        };
+        if self.gate.is_some() {
+            return Err(
+                "another operation is waiting for its workflow gates: cancel it first".to_owned(),
+            );
+        }
+        if !self.triggers {
+            return Ok(None);
+        }
+        // An empty message fails at once, as the commit does, without a gate run first.
+        if let CommandKind::Commit { message } = &command.kind
+            && message.trim().is_empty()
+        {
+            return Err("the commit message is empty".to_owned());
+        }
+        let Ok(root) = self.open_root() else {
+            return Ok(None);
+        };
+        let facts = self.phase_facts(&root, &command.kind)?;
+        let loaded = self.load_scripts(&root)?;
+        let (Some(before), Some(after)) = (
+            phases::trigger(&command.kind, &facts, Timing::Before),
+            phases::trigger(&command.kind, &facts, Timing::After),
+        ) else {
+            return Ok(None);
+        };
+        let gates = phases::select(&loaded.entries, &before);
+        let observers = phases::select(&loaded.entries, &after);
+        if gates.is_empty() && observers.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Phases {
+            op,
+            root,
+            facts,
+            before,
+            gates,
+            observers,
+        }))
+    }
+
+    /// What the phases of `kind` read before it runs (`WF3c`): the branch HEAD is on, and for a
+    /// restack the branches its plan moves.
+    fn phase_facts(&self, root: &Path, kind: &CommandKind) -> Result<Facts, String> {
+        let head = self.current(root).ok().and_then(|(branch, _)| branch);
+        let mut facts = Facts {
+            head,
+            ..Facts::default()
+        };
+        if let CommandKind::ApplyRestack { branch, skip, .. } = kind {
+            let plan = restack_session::plan(self.git.as_ref(), root, branch, skip, &|path| {
+                same_folder(root, path)
+            })?;
+            facts.planned = phases::moved_by_plan(&plan);
+        }
+        Ok(facts)
+    }
+
+    /// Starts the first gate still to run (`WF3c`, D157), or runs the command once every gate
+    /// passed. A gate that is not reviewed, or cannot start, vetoes the operation.
+    fn step_gates(&mut self, mut gate: GatedOp, events: &mut Vec<Event>) {
+        let Some((name, hash)) = gate.waiting.front().cloned() else {
+            self.run_gated(gate, events);
+            return;
+        };
+        let reviewed = self
+            .trust_store()
+            .and_then(|trust| trust.is_reviewed(&hash).map_err(|e| e.0));
+        let refused = match reviewed {
+            Ok(true) => None,
+            Ok(false) => Some(phases::unreviewed(&name)),
+            Err(reason) => Some(format!("{name} failed: {reason}")),
+        };
+        if let Some(text) = refused {
+            self.veto(gate, text, events);
+            return;
+        }
+        match self.start_event_run(gate.id, &gate.phases.root, &name, &gate.phases.before) {
+            Ok(run) => {
+                gate.run = Some(run);
+                events.push(Event::GateStarted {
+                    id: gate.id,
+                    workflow: name,
+                });
+                self.gate = Some(gate);
+            }
+            Err(reason) => self.veto(gate, format!("{name} failed: {reason}"), events),
+        }
+    }
+
+    /// The gate in progress ended with `status` (`WF3c`, D157): a clean finish moves to the next
+    /// gate, and any other end vetoes the operation.
+    fn gate_finished(
+        &mut self,
+        mut gate: GatedOp,
+        status: RunStatus,
+        reason: Option<&str>,
+        events: &mut Vec<Event>,
+    ) {
+        gate.run = None;
+        let Some((name, _)) = gate.waiting.front().cloned() else {
+            return;
+        };
+        match phases::gate_answer(&name, gate.phases.op, status, reason) {
+            Gate::Passed => {
+                gate.waiting.pop_front();
+                self.step_gates(gate, events);
+            }
+            Gate::Vetoed(text) => self.veto(gate, text, events),
+        }
+    }
+
+    /// Runs the command of a gated operation, now that its gates passed (`WF3c`).
+    fn run_gated(&mut self, gate: GatedOp, events: &mut Vec<Event>) {
+        let id = gate.id;
+        let command = gate.command;
+        let phases = gate.phases;
+        let mut op = Op {
+            id,
+            command: &command,
+            state: OperationState::Gating,
+        };
+        self.run_op(&mut op, Some(&phases), events);
+    }
+
+    /// Ends a gated operation with a veto and its reason (`WF3c`, D157).
+    fn veto(&mut self, gate: GatedOp, text: String, events: &mut Vec<Event>) {
+        let id = gate.id;
+        let command = gate.command;
+        let mut op = Op {
+            id,
+            command: &command,
+            state: OperationState::Gating,
+        };
+        self.advance_with(&mut op, OperationState::Vetoed, Some(text), events);
+    }
+
+    /// Runs the command of an operation, after its gates if it had any: executes it and, when it
+    /// succeeds, starts its observers. It ends `Done` or `Failed`.
+    fn run_op(&mut self, op: &mut Op, phases: Option<&Phases>, events: &mut Vec<Event>) {
+        self.advance(op, OperationState::Executing, events);
+        match self.execute(op.id, &op.command.actor, &op.command.kind) {
+            Ok(produced) => {
+                let fired = self.fire_after(op.id, &op.command.kind, &produced);
+                let observed = match phases {
+                    Some(found) => self.start_observers(op.id, found, &op.command.kind, &produced),
+                    None => Vec::new(),
+                };
+                events.extend(produced);
+                events.extend(fired);
+                events.extend(observed);
+                self.advance(op, OperationState::Done, events);
+            }
+            Err(message) => {
+                self.advance_with(op, OperationState::Failed, Some(message), events);
+            }
+        }
+    }
+
+    /// Starts the observers of an operation that succeeded (`WF3c`, D157(4)): every `after.<op>`
+    /// script, beside each other, with the result in `input.trigger`. A failure is a warning
+    /// when the observer ends, and the operation is not affected.
+    fn start_observers(
+        &mut self,
+        id: OperationId,
+        phases: &Phases,
+        kind: &CommandKind,
+        produced: &[Event],
+    ) -> Vec<Event> {
+        let mut facts = phases.facts.clone();
+        match kind {
+            CommandKind::Commit { .. } => {
+                facts.oid = produced.iter().find_map(|event| match event {
+                    Event::Committed { oid, .. } => Some(oid.clone()),
+                    _ => None,
+                });
+            }
+            CommandKind::CreateBranch { name, .. }
+            | CommandKind::CreateChildBranch { name, .. } => {
+                facts.oid = self.git.branch_tip(&phases.root, name).ok().flatten();
+            }
+            _ => {}
+        }
+        facts.moved = produced
+            .iter()
+            .find_map(|event| match event {
+                Event::RestackFinished {
+                    record: Some(record),
+                    ..
+                } => Some(phases::moved_by_record(record)),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let Some(after) = phases::trigger(kind, &facts, Timing::After) else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        for (name, _) in &phases.observers {
+            match self.start_event_run(id, &phases.root, name, &after) {
+                Ok(run) => {
+                    self.observers.insert(run, (name.clone(), phases.op));
+                }
+                Err(reason) => events.push(workflow_notice(reason)),
+            }
+        }
+        events
+    }
+
+    /// A phase run ended (`WF3c`): an observer that failed warns, and a gate moves its operation on
+    /// or vetoes it. Runs that belong to no phase return nothing.
+    fn phase_finished(
+        &mut self,
+        run: ScriptRunId,
+        status: RunStatus,
+        reason: Option<&str>,
+    ) -> Vec<Event> {
+        let mut events = Vec::new();
+        if let Some((name, op)) = self.observers.remove(&run)
+            && let Some(text) = phases::observer_failure(&name, op, status, reason)
+        {
+            events.push(workflow_notice(text));
+        }
+        if self.gate.as_ref().is_some_and(|gate| gate.run == Some(run))
+            && let Some(gate) = self.gate.take()
+        {
+            self.gate_finished(gate, status, reason, &mut events);
+        }
+        events
+    }
+
+    /// Cancels an operation that waits for its gates (`WF3c`): the gate's run is stopped, and the
+    /// operation ends `Cancelled` with nothing written. Refused for any other operation.
+    fn cancel_operation(&mut self, actor: &Actor, op: OperationId) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "cancel an operation")?;
+        let gate = match self.gate.take() {
+            Some(gate) if gate.id == op => gate,
+            other => {
+                self.gate = other;
+                return Err(format!(
+                    "operation {} is not waiting for its workflow gates",
+                    op.0
+                ));
+            }
+        };
+        if let (Some(run), Some(runtime)) = (gate.run, self.script_runtime()) {
+            runtime.cancel(run);
+        }
+        let id = gate.id;
+        let command = gate.command;
+        let mut state = Op {
+            id,
+            command: &command,
+            state: OperationState::Gating,
+        };
+        let mut events = Vec::new();
+        self.advance(&mut state, OperationState::Cancelled, &mut events);
+        Ok(events)
     }
 
     /// The watcher saw refs move, after its quiet period (`WF3a`). The local branch tips are compared
@@ -1240,18 +1547,24 @@ impl Engine {
             return events;
         }
         // Gating has nothing to check for the other commands; the states are walked
-        // so that every operation has the same shape in the log.
-        self.advance(&mut op, OperationState::Executing, &mut events);
-        match self.execute(id, &command.actor, &command.kind) {
-            Ok(produced) => {
-                let fired = self.fire_after(id, &command.kind, &produced);
-                events.extend(produced);
-                events.extend(fired);
-                self.advance(&mut op, OperationState::Done, &mut events);
-            }
+        // so that every operation has the same shape in the log. An operation with
+        // phases (`WF3c`) stays in Gating while its gates run.
+        match self.open_phases(command) {
             Err(message) => {
                 self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
             }
+            Ok(Some(found)) if !found.gates.is_empty() => {
+                let waiting = found.gates.iter().cloned().collect();
+                let gate = GatedOp {
+                    id,
+                    command: command.clone(),
+                    phases: found,
+                    waiting,
+                    run: None,
+                };
+                self.step_gates(gate, &mut events);
+            }
+            Ok(found) => self.run_op(&mut op, found.as_ref(), &mut events),
         }
         events
     }
@@ -1343,6 +1656,7 @@ impl Engine {
             }
             CommandKind::CancelHook { run } => self.cancel_hook(*run),
             CommandKind::StageAll => self.stage_all(id),
+            CommandKind::CancelOperation { op } => self.cancel_operation(actor, *op),
             _ if is_conflict_command(kind) => self.conflict_command(id, actor, kind),
             CommandKind::ListWorkflows
             | CommandKind::RunWorkflow { .. }

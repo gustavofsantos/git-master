@@ -16,6 +16,7 @@ use gpui::{
 };
 
 use crate::conflict_resolver::RestackConflicts;
+use crate::gate_wait;
 use crate::theme;
 use crate::view::StatusView;
 
@@ -277,12 +278,13 @@ impl Restacking {
             return;
         };
         self.outcome = match (phase, state) {
-            (Phase::Planning, OperationState::Done) => None,
             (Phase::Applying, OperationState::Done) => {
                 self.applied = true;
                 Some(Outcome::Applied)
             }
             (Phase::Undoing, OperationState::Done) => Some(Outcome::Undone),
+            // A cancelled operation is not a failure: nothing is reported (`WF3c`).
+            (Phase::Planning, OperationState::Done) | (_, OperationState::Cancelled) => None,
             (phase, _) => Some(Outcome::Failed(detail.unwrap_or_else(|| {
                 match phase {
                     Phase::Planning => "The restack could not be planned.",
@@ -785,7 +787,13 @@ impl StatusView {
     fn restack_buttons(&self, busy: bool, cx: &Context<Self>) -> Div {
         let restacking = &self.model.restacking;
         let enabled = can_apply(restacking.plan(), busy, restacking.applied());
-        let label = if matches!(restacking.pending, Some((_, Phase::Applying))) {
+        let waiting = restacking
+            .pending
+            .as_ref()
+            .is_some_and(|(id, _)| self.model.gate_wait.waits(*id));
+        let label = if waiting {
+            gate_wait::WAITING.to_owned()
+        } else if matches!(restacking.pending, Some((_, Phase::Applying))) {
             "Restacking…".to_owned()
         } else {
             apply_label(restacking.plan())
@@ -828,6 +836,9 @@ impl StatusView {
             .items_center()
             .gap_2()
             .when(restacking.record().is_some(), |row| row.child(undo))
+            .when(waiting, |row| {
+                row.child(crate::shell_commit::gate_cancel_link(cx))
+            })
             .child(
                 div()
                     .id("restack-close")

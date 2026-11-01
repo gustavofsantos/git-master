@@ -15,6 +15,7 @@ use crate::code_page::CodePage;
 use crate::commit_threads::CommitThreads;
 use crate::conflict_resolver::ResolverState;
 use crate::file_discard::Discarding;
+use crate::gate_wait::GateWait;
 use crate::history_graph::{GraphLayout, StackMarks};
 use crate::history_scope::ScopeChoice;
 use crate::hook_run::Hooks;
@@ -87,6 +88,10 @@ pub struct Model {
     pub(crate) branch_drag: BranchDrag,
     /// The prepare-commit hooks: what is listed, the run and its suggestion.
     pub hooks: Hooks,
+    /// The gated operation that waits for its workflow gates now, if any (`WF3c`, D157).
+    pub gate_wait: GateWait,
+    /// The working-copy `ResolveConflict` the resolver sent last; its note shows the wait (`WF3c`).
+    pub conflict_sent: Option<OperationId>,
     /// The manual workflows: what is listed and the runs the engine reported.
     pub workflows: Workflows,
     /// The Workflows page: the open file, its buffer, its runs and its saves.
@@ -593,6 +598,27 @@ impl Model {
         }
     }
 
+    /// Whether the commit waits for its workflow gates (`WF3c`): the operation that waits is not one
+    /// that a dialog or the resolver shows.
+    #[must_use]
+    pub fn commit_waits_for_gates(&self) -> bool {
+        let Some(id) = self.gate_wait.current() else {
+            return false;
+        };
+        let shown_elsewhere = self.restacking.owns(id)
+            || self.restacking.awaits_resolution(id)
+            || self.branch_create.owns(id)
+            || self.conflict_sent == Some(id);
+        !shown_elsewhere
+    }
+
+    /// Whether the resolver's last `ResolveConflict` waits for its workflow gates (`WF3c`).
+    #[must_use]
+    pub fn conflict_waits_for_gates(&self) -> bool {
+        self.conflict_sent
+            .is_some_and(|id| self.gate_wait.waits(id))
+    }
+
     /// Folds one engine event into the state. Returns both diffs once the
     /// selected file's two loads have both finished (succeeded or failed).
     #[must_use]
@@ -609,6 +635,12 @@ impl Model {
         {
             self.end_refresh(*id);
             self.stacks.settled(*id);
+        }
+        // A gate of an operation, and the operation's moves on from it (`WF3c`).
+        match &event {
+            Event::GateStarted { id, workflow } => self.gate_wait.started(*id, workflow),
+            Event::OperationChanged { id, state, .. } => self.gate_wait.changed(*id, *state),
+            _ => {}
         }
         match event {
             Event::StatusLoaded { id, status } => {
@@ -1146,6 +1178,10 @@ impl Model {
             } => {
                 self.workflows_page
                     .operation_ended(id, state, detail.as_deref());
+                // A gate that vetoed the operation says why, where the operation's errors show (`WF3c`).
+                if let (OperationState::Vetoed, Some(text)) = (state, &detail) {
+                    self.error = Some(text.clone());
+                }
                 if matches!(
                     state,
                     OperationState::Done | OperationState::Vetoed | OperationState::Cancelled
@@ -1283,6 +1319,8 @@ impl Model {
             | Event::MergedBranchesDeleted { .. }
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
+            // The wait is kept by `gate_wait` above; each surface reads it.
+            | Event::GateStarted { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
             // The label and link answers are read by the Labels page (P4); the rows follow `ThreadsChanged`.
             | Event::ThreadRelationChanged { .. }
@@ -1636,6 +1674,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
     match event {
         Event::StatusLoaded { id, .. }
         | Event::OperationChanged { id, .. }
+        | Event::GateStarted { id, .. }
         | Event::DiffLoaded { id, .. }
         | Event::Committed { id, .. }
         | Event::BranchesLoaded { id, .. }
@@ -2116,6 +2155,75 @@ mod tests {
             worktrees: vec![entry("/a")],
         });
         assert_eq!(model.worktrees, vec![entry("/a")]);
+    }
+
+    #[test]
+    fn a_gate_makes_the_commit_wait_until_it_moves_on() {
+        let mut model = Model::default();
+        let _ = model.apply(Event::GateStarted {
+            id: OperationId(9),
+            workflow: "freeze".into(),
+        });
+        assert!(model.commit_waits_for_gates());
+        let _ = model.apply(Event::OperationChanged {
+            id: OperationId(9),
+            actor: Actor::Human,
+            state: OperationState::Executing,
+            detail: None,
+        });
+        assert!(!model.commit_waits_for_gates());
+    }
+
+    #[test]
+    fn a_gate_of_the_resolvers_note_is_not_the_commits_wait() {
+        let mut model = Model {
+            conflict_sent: Some(OperationId(9)),
+            ..Model::default()
+        };
+        let _ = model.apply(Event::GateStarted {
+            id: OperationId(9),
+            workflow: "resolve".into(),
+        });
+        assert!(!model.commit_waits_for_gates());
+        assert!(model.conflict_waits_for_gates());
+    }
+
+    #[test]
+    fn a_veto_of_an_operation_no_dialog_shows_is_the_status_error() {
+        let mut model = Model::default();
+        let _ = model.apply(Event::GateStarted {
+            id: OperationId(9),
+            workflow: "freeze".into(),
+        });
+        let _ = model.apply(Event::OperationChanged {
+            id: OperationId(9),
+            actor: Actor::Human,
+            state: OperationState::Vetoed,
+            detail: Some("freeze blocked the commit: Commits are frozen".into()),
+        });
+        assert_eq!(
+            model.error.as_deref(),
+            Some("freeze blocked the commit: Commits are frozen")
+        );
+        assert!(!model.commit_waits_for_gates());
+    }
+
+    #[test]
+    fn a_cancelled_gate_ends_the_wait_without_an_error() {
+        let mut model = Model::default();
+        let _ = model.apply(Event::GateStarted {
+            id: OperationId(9),
+            workflow: "hold".into(),
+        });
+        let _ = model.apply(Event::OperationChanged {
+            id: OperationId(9),
+            actor: Actor::Human,
+            state: OperationState::Cancelled,
+            detail: None,
+        });
+        assert!(!model.commit_waits_for_gates());
+        assert_eq!(model.gate_wait.cancel_target(), None);
+        assert_eq!(model.error, None);
     }
 
     #[test]

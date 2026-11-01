@@ -15,6 +15,7 @@ pub mod journal;
 pub mod loader;
 pub mod luau;
 pub mod meta;
+pub mod phases;
 pub mod policy;
 pub mod port;
 pub mod run;

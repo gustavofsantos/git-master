@@ -2,11 +2,13 @@
 //! counter and hint, and the Commit button under it.
 
 use gpui::{
-    Context, Div, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*, px,
+    Context, Div, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Stateful, div,
+    prelude::*, px,
 };
 
 use crate::action_registry::{Action, Args};
 use crate::composer;
+use crate::gate_wait;
 use crate::hook_run::Phase;
 use crate::name_fit::{self, name_label};
 use crate::resize::{self, COMMIT};
@@ -14,6 +16,22 @@ use crate::resize_handle::{self, Edge};
 use crate::theme;
 use crate::view::StatusView;
 use crate::window_chrome;
+
+/// The link that stops the gates a waiting operation runs (`WF3c`). Shared by every surface that
+/// shows the wait.
+pub(crate) fn gate_cancel_link(cx: &Context<StatusView>) -> Stateful<Div> {
+    div()
+        .id("gate-cancel")
+        .flex_none()
+        .text_sm()
+        .text_color(theme::accent())
+        .cursor_pointer()
+        .child(gate_wait::CANCEL)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| this.cancel_gate(cx)),
+        )
+}
 
 /// The subject length a commit should not pass.
 const SUBJECT_LIMIT: usize = 72;
@@ -151,6 +169,7 @@ impl StatusView {
             .children(self.workflow_line())
             .children(self.suggestion_row(cx))
             .children(self.approval_row(cx))
+            .children(self.gate_line(cx))
             .child(button)
             .child(height_strip)
     }
@@ -195,6 +214,34 @@ impl StatusView {
             ));
         }
         row
+    }
+
+    /// The commit waits for its workflow gates (`WF3c`): a line above the button, with the link
+    /// that cancels the wait.
+    fn gate_line(&self, cx: &Context<Self>) -> Option<Div> {
+        self.model.commit_waits_for_gates().then(|| {
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(div().text_color(theme::muted()).child(gate_wait::WAITING))
+                .child(gate_cancel_link(cx))
+        })
+    }
+
+    /// Stops the operation that waits for its gates (`WF3c`): sends `CancelOperation` for it.
+    pub(crate) fn cancel_gate(&mut self, cx: &mut Context<Self>) {
+        if let Some(op) = self.model.gate_wait.cancel_target() {
+            self.engine.dispatch(
+                gm_schema::Actor::Human,
+                gm_schema::CommandKind::CancelOperation { op },
+            );
+        }
+        cx.notify();
     }
 
     /// The newest manual workflow run: its status, and its notice or the reason

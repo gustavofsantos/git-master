@@ -412,6 +412,12 @@ pub enum CommandKind {
     CancelHook {
         run: OperationId,
     },
+    /// Cancels the operation `op` while it waits for its workflow gates (`WF3c`, D157): the gate
+    /// run is stopped and the operation ends `Cancelled`, with nothing written. Refused for any
+    /// other operation. Human only.
+    CancelOperation {
+        op: OperationId,
+    },
     /// Lists the workflow files of the user's directory and of every
     /// `gitmaster.workflowPath`, with what loading each gave. Reads only; never
     /// recorded in the command log (D28).
@@ -1089,6 +1095,12 @@ pub enum Event {
     WorkflowNotice {
         run: i64,
         text: String,
+    },
+    /// A `before.<operation>` gate started for the operation `id`, which waits for it (`WF3c`,
+    /// D157). `workflow` is the gate's name.
+    GateStarted {
+        id: OperationId,
+        workflow: String,
     },
     /// The run waits at the `approve` state `state`; `summary` is what it asks.
     WorkflowApprovalRequested {

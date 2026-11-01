@@ -13,6 +13,7 @@ use gpui::{
 };
 
 use crate::conflict_resolver::{HunkView, ResolverState, RestackConflicts, Side};
+use crate::gate_wait;
 use crate::theme;
 use crate::view::{Screen, StatusView};
 
@@ -116,7 +117,7 @@ impl StatusView {
             && let Some((path, text, origins)) = conflict.apply()
         {
             let site = conflict.site();
-            self.engine.dispatch(
+            let id = self.engine.dispatch(
                 Actor::Human,
                 CommandKind::ResolveConflict {
                     path,
@@ -125,6 +126,7 @@ impl StatusView {
                     site,
                 },
             );
+            self.model.conflict_sent = Some(id);
         }
         cx.notify();
     }
@@ -235,7 +237,11 @@ impl StatusView {
                     .recorded_banner()
                     .map(|text| recorded_banner_row(text, cx)),
             )
-            .children(conflict_note(conflict))
+            .children(conflict_note(
+                conflict,
+                self.model.conflict_waits_for_gates(),
+                cx,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -501,21 +507,32 @@ fn restack_header(
 
 /// The line under the header: what the last Apply or choice said, or that the file
 /// was staged. Nothing when there is nothing to say.
-fn conflict_note(conflict: &ResolverState) -> Option<Div> {
-    let note = conflict.applied_note()?;
-    let colour = if conflict.is_staged() {
+fn conflict_note(conflict: &ResolverState, waiting: bool, cx: &Context<StatusView>) -> Option<Div> {
+    let note = if waiting {
+        gate_wait::WAITING
+    } else {
+        conflict.applied_note()?
+    };
+    let colour = if !waiting && conflict.is_staged() {
         theme::added_fg()
     } else {
         theme::warn_fg()
     };
-    Some(
+    let text = div().text_sm().text_color(colour).child(note.to_owned());
+    Some(if waiting {
         div()
             .px_4()
             .py_1p5()
-            .text_sm()
-            .text_color(colour)
-            .child(note.to_owned()),
-    )
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(text)
+            .child(crate::shell_commit::gate_cancel_link(cx))
+    } else {
+        div().px_4().py_1p5().child(text)
+    })
 }
 
 /// One side's pane: its title and subtitle, then each conflict's text of that side.

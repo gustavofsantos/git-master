@@ -15,6 +15,7 @@ use gpui::{
 };
 
 use crate::FocusNext;
+use crate::gate_wait::{self, GateWait};
 use crate::icon::{self, Icon};
 use crate::text_area::{Newline, TextArea, TextAreaEvent};
 use crate::theme;
@@ -143,6 +144,13 @@ impl BranchCreate {
             .is_some_and(|(pending, _)| *pending == id)
     }
 
+    /// Whether the create waits for its workflow gates (`WF3c`).
+    pub(crate) fn waits_for_gates(&self, wait: &GateWait) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|(pending, _)| wait.waits(*pending))
+    }
+
     /// Ends the create with the operation's terminal `state`. A success gives
     /// the name; anything else gives Git's message, or a plain one.
     pub(crate) fn settle(&mut self, state: OperationState, detail: Option<String>) {
@@ -152,11 +160,14 @@ impl BranchCreate {
         let Some((_, name)) = self.pending.take() else {
             return;
         };
-        self.outcome = Some(if state == OperationState::Done {
-            Ok(name)
-        } else {
-            Err(detail.unwrap_or_else(|| "The branch was not created.".to_owned()))
-        });
+        // A cancelled create is not a failure: nothing is reported (WF3c).
+        self.outcome = match state {
+            OperationState::Done => Some(Ok(name)),
+            OperationState::Cancelled => None,
+            _ => Some(Err(
+                detail.unwrap_or_else(|| "The branch was not created.".to_owned())
+            )),
+        };
     }
 
     pub(crate) fn take(&mut self) -> Option<Result<String, String>> {
@@ -372,6 +383,10 @@ impl StatusView {
 
     fn new_branch_panel(&self, dialog: &NewBranchDialog, left: f32, cx: &Context<Self>) -> Div {
         let pending = self.model.branch_create.is_pending();
+        let waiting = self
+            .model
+            .branch_create
+            .waits_for_gates(&self.model.gate_wait);
         let form = dialog.form(cx);
         let live = name_message(&form.name);
         let allowed = may_create(&form, pending);
@@ -422,7 +437,7 @@ impl StatusView {
                     .text_color(theme::error())
                     .children(error.lines().map(|line| div().child(line.to_owned())))
             }))
-            .child(buttons(pending, allowed, cx))
+            .child(buttons(pending, waiting, allowed, cx))
     }
 }
 
@@ -469,7 +484,7 @@ pub(crate) fn checkbox(
 }
 
 /// Cancel and the create button; the button waits while a create runs.
-fn buttons(pending: bool, allowed: bool, cx: &Context<StatusView>) -> Div {
+fn buttons(pending: bool, waiting: bool, allowed: bool, cx: &Context<StatusView>) -> Div {
     let create: Stateful<Div> = div()
         .id("new-branch-create")
         .px_3()
@@ -482,7 +497,9 @@ fn buttons(pending: bool, allowed: bool, cx: &Context<StatusView>) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .when(!allowed || pending, |this| this.opacity(0.5))
         .when(allowed && !pending, gpui::Styled::cursor_pointer)
-        .child(if pending {
+        .child(if waiting {
+            gate_wait::WAITING
+        } else if pending {
             "Creating…"
         } else {
             "Create branch"
@@ -517,6 +534,9 @@ fn buttons(pending: bool, allowed: bool, cx: &Context<StatusView>) -> Div {
                     }),
                 ),
         )
+        .when(waiting, |row| {
+            row.child(crate::shell_commit::gate_cancel_link(cx))
+        })
         .child(create)
 }
 
