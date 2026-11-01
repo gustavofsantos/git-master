@@ -433,13 +433,16 @@ fn an_unreviewed_transform_does_not_run_and_says_so() {
         Some((Some("typed".to_owned()), false)),
         "the unreviewed transform did not run"
     );
+    // The window asks for the review instead of a notice (`WF3b`); the answer is not retried.
     assert!(
-        notices(&events).contains(
-            &"unreviewed did not run on transform.commit_message: review it first.".to_owned()
-        ),
-        "{:?}",
-        notices(&events)
+        events.iter().any(|e| matches!(
+            e,
+            Event::WorkflowWantsReview { workflow, trigger, .. }
+                if workflow == "unreviewed" && trigger == "transform.commit_message"
+        )),
+        "{events:#?}"
     );
+    assert!(notices(&events).is_empty(), "{:?}", notices(&events));
 }
 
 #[test]

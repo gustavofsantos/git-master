@@ -30,9 +30,10 @@ use crate::view::{Screen, StatusView};
 use crate::workflow_editor;
 use crate::workflow_keys;
 use crate::workflows_page::{
-    Preview, SaveState, StepRecord, Tab, context_blocks, context_key, diagnostic_text,
-    duration_label, expand_key, input_text, output_text, pretty_json, preview, run_duration,
-    status_label, step_duration, step_rows, step_summary,
+    Preview, ReviewLine, RunControls, SaveState, StepRecord, Tab, context_blocks, context_key,
+    diagnostic_text, duration_label, expand_key, input_text, output_text, pretty_json, preview,
+    review_line, review_text, run_controls, run_duration, status_label, step_duration, step_rows,
+    step_summary,
 };
 
 /// The width of the workflow list on the left.
@@ -429,6 +430,7 @@ impl StatusView {
             .flex()
             .flex_col()
             .child(self.workflow_header(name, cx))
+            .children(self.review_band(name, cx))
             .children(self.workflow_banners(cx))
             .child(tab_bar(page.tab(), cx))
             .child(match page.tab() {
@@ -535,6 +537,56 @@ impl StatusView {
                     .text_color(theme::muted())
                     .child(format!("Run is off: {reason}"))
             }))
+    }
+
+    /// The review line of the open workflow and its run controls (`WF3b`): Review, Revoke, Approve,
+    /// Reject and Cancel. Nothing when the file does not load and no run is active.
+    fn review_band(&self, name: &str, cx: &Context<Self>) -> Option<Div> {
+        let info = self.selected_workflow_info();
+        let line = review_line(info);
+        let controls: RunControls = run_controls(
+            self.model.workflows.awaiting_approval_of(name),
+            self.model.workflows.active_of(name),
+        );
+        if line.is_none() && controls == RunControls::default() {
+            return None;
+        }
+        let mut row = div()
+            .px_4()
+            .py_1()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .bg(theme::panel())
+            .border_b_1()
+            .border_color(theme::hairline())
+            .text_sm();
+        if let (Some(line), Some(info)) = (line, info) {
+            row = row.child(review_row(&line, &info.hash, cx));
+        }
+        if let Some((run, summary)) = controls.approve {
+            row = row.child(approval_row(run, &summary, cx));
+        }
+        if let Some(run) = controls.cancel {
+            row = row.child(band_button(
+                "workflow-cancel-run",
+                "Cancel run",
+                cx,
+                move |this, _, cx| {
+                    this.send_human(gm_schema::CommandKind::CancelWorkflowRun { run }, cx);
+                },
+            ));
+        }
+        Some(row)
+    }
+
+    /// Sends a human command from the Workflows page, and redraws.
+    fn send_human(&mut self, kind: gm_schema::CommandKind, cx: &mut Context<Self>) {
+        self.engine.dispatch(Actor::Human, kind);
+        cx.notify();
     }
 
     /// The lines between the header and the tabs: a question the page asks, a
@@ -1299,6 +1351,109 @@ fn action_button(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                 this.run_action(action, &args, window, cx);
+            }),
+        )
+}
+
+/// The review line: what the version is, with Review when it is not reviewed or Revoke when it is.
+fn review_row(line: &ReviewLine, hash: &str, cx: &Context<StatusView>) -> Div {
+    let colour = match line {
+        ReviewLine::Unreviewed => theme::warn_fg(),
+        ReviewLine::Reviewed { .. } => theme::muted(),
+    };
+    let row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(div().text_color(colour).child(review_text(line)));
+    match line {
+        ReviewLine::Unreviewed => row.child(band_button(
+            "workflow-review",
+            "Review",
+            cx,
+            StatusView::open_page_review,
+        )),
+        ReviewLine::Reviewed { .. } => {
+            let hash = hash.to_owned();
+            row.child(band_button(
+                "workflow-revoke",
+                "Revoke",
+                cx,
+                move |this, _, cx| {
+                    this.send_human(
+                        gm_schema::CommandKind::RevokeWorkflowReview { hash: hash.clone() },
+                        cx,
+                    );
+                },
+            ))
+        }
+    }
+}
+
+/// The run that waits for an approval, with what it asks, and Approve and Reject.
+fn approval_row(run: i64, summary: &str, cx: &Context<StatusView>) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .text_color(theme::warn_fg())
+                .child(format!("Waiting for approval: {summary}")),
+        )
+        .child(band_button(
+            "workflow-approve",
+            "Approve",
+            cx,
+            move |this, _, cx| {
+                this.send_human(
+                    gm_schema::CommandKind::ApproveWorkflowStep {
+                        run,
+                        approved: true,
+                    },
+                    cx,
+                );
+            },
+        ))
+        .child(band_button(
+            "workflow-reject",
+            "Reject",
+            cx,
+            move |this, _, cx| {
+                this.send_human(
+                    gm_schema::CommandKind::ApproveWorkflowStep {
+                        run,
+                        approved: false,
+                    },
+                    cx,
+                );
+            },
+        ))
+}
+
+/// A text button of the review band. It runs `run` with the window, when the person clicks it.
+fn band_button(
+    id: &'static str,
+    label: &'static str,
+    cx: &Context<StatusView>,
+    run: impl Fn(&mut StatusView, &mut Window, &mut Context<StatusView>) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px_2()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_color(theme::accent())
+        .child(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                run(this, window, cx);
             }),
         )
 }

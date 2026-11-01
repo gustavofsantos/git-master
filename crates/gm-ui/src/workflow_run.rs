@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use gm_schema::{WorkflowEnd, WorkflowInfo, WorkflowRunStatus};
+use gm_schema::{OperationId, WorkflowEnd, WorkflowInfo, WorkflowRunStatus};
 
 use crate::suggestion::Fill;
 use crate::workflow_keys::KeyPlan;
@@ -54,8 +54,9 @@ impl RunView {
     }
 }
 
-/// A script the engine did not start because this version was never reviewed (D101): the window
-/// shows `source` and asks "Run this version?".
+/// A version of a script the person is asked to review (D101): the window shows `source`, and
+/// confirming marks `hash` as reviewed, with the grant the person chose when the trigger is not
+/// `manual`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewRequest {
     pub name: String,
@@ -63,6 +64,30 @@ pub struct ReviewRequest {
     pub source: String,
     /// The inputs of the run that waits for the review.
     pub inputs: BTreeMap<String, String>,
+    /// The workflow's trigger `on`: `manual`, an event such as `commit.created`, or a phase such
+    /// as `before.commit`.
+    pub on: String,
+    /// Whether confirming runs the script too, as a manual run does. Event and phase workflows
+    /// are only marked reviewed: their runs come from their events (`WF3b`).
+    pub run: bool,
+}
+
+/// An event run that waits for the review of its version (`WF3b`, D155(3)): the window shows a
+/// notice with Review and Dismiss.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WantedRun {
+    pub hash: String,
+    /// The event that asked, such as `commit.created`, or a transform's `transform.commit_message`.
+    pub trigger: String,
+}
+
+/// A gate that is not reviewed vetoed the operation `op` (`WF3b`, D157(2)): the veto's line gets a
+/// Review link for this version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateReview {
+    pub op: OperationId,
+    pub workflow: String,
+    pub hash: String,
 }
 
 /// The workflow state the window keeps.
@@ -70,6 +95,10 @@ pub struct ReviewRequest {
 pub struct Workflows {
     /// The version waiting for the person's review, until they answer.
     pub review: Option<ReviewRequest>,
+    /// The event runs that wait for their version's review, by workflow name (`WF3b`).
+    pub wanted: BTreeMap<String, WantedRun>,
+    /// The gate that vetoed the last operation for want of a review, if any.
+    pub gate_review: Option<GateReview>,
     /// Every workflow the engine listed, or `None` until the first listing.
     pub listed: Option<Vec<WorkflowInfo>>,
     /// Each directory the listing did not read, as `<path>: <reason>`.
@@ -120,7 +149,53 @@ impl Workflows {
             hash,
             source,
             inputs,
+            on: "manual".to_owned(),
+            run: true,
         });
+    }
+
+    /// An event run of `workflow` waits for the review of `hash`. The latest request of a workflow
+    /// is the one kept (`WF3b`).
+    pub fn wants_review(&mut self, workflow: String, hash: String, trigger: String) {
+        self.wanted.insert(workflow, WantedRun { hash, trigger });
+    }
+
+    /// The request of `workflow` ended: reviewed and started, dismissed or stale.
+    pub fn request_dropped(&mut self, workflow: &str) {
+        self.wanted.remove(workflow);
+    }
+
+    /// A gate of `op` is not reviewed: its veto gets the Review link for `workflow` at `hash`.
+    pub fn gate_unreviewed(&mut self, op: OperationId, workflow: String, hash: String) {
+        self.gate_review = Some(GateReview { op, workflow, hash });
+    }
+
+    /// An operation changed. The gate's Review link belongs to its own veto only, so any other
+    /// operation's change drops it.
+    pub fn operation_changed(&mut self, op: OperationId) {
+        if self.gate_review.as_ref().is_some_and(|gate| gate.op != op) {
+            self.gate_review = None;
+        }
+    }
+
+    /// The newest run of `workflow` that waits for an approval, with what it asks.
+    #[must_use]
+    pub fn awaiting_approval_of(&self, workflow: &str) -> Option<(i64, &str)> {
+        self.runs
+            .iter()
+            .rev()
+            .filter(|(_, view)| view.workflow == workflow)
+            .find_map(|(run, view)| view.approval.as_deref().map(|summary| (*run, summary)))
+    }
+
+    /// The newest run of `workflow` that has not ended.
+    #[must_use]
+    pub fn active_of(&self, workflow: &str) -> Option<i64> {
+        self.runs
+            .iter()
+            .rev()
+            .find(|(_, view)| view.workflow == workflow && view.is_active())
+            .map(|(run, _)| *run)
     }
 
     /// The person answered the review (or closed it).
@@ -331,6 +406,8 @@ mod tests {
             error: error.map(str::to_owned),
             warnings: Vec::new(),
             source: String::new(),
+            reviewed: false,
+            auto_approve: false,
         }
     }
 
@@ -620,5 +697,68 @@ mod tests {
             fill_for_message("draft", "feat: x"),
             Fill::Suggest("feat: x".into())
         );
+    }
+
+    #[test]
+    fn the_latest_request_of_a_workflow_is_the_one_kept() {
+        let mut workflows = Workflows::default();
+        workflows.wants_review("w".into(), "h1".into(), "commit.created".into());
+        workflows.wants_review("w".into(), "h2".into(), "commit.created".into());
+        assert_eq!(
+            workflows.wanted.get("w"),
+            Some(&WantedRun {
+                hash: "h2".into(),
+                trigger: "commit.created".into(),
+            })
+        );
+        assert_eq!(workflows.wanted.len(), 1);
+    }
+
+    #[test]
+    fn requests_are_kept_per_workflow() {
+        let mut workflows = Workflows::default();
+        workflows.wants_review("a".into(), "h".into(), "commit.created".into());
+        workflows.wants_review("b".into(), "h".into(), "repo.opened".into());
+        workflows.request_dropped("a");
+        assert_eq!(workflows.wanted.keys().collect::<Vec<_>>(), ["b"]);
+        workflows.request_dropped("missing");
+        assert_eq!(workflows.wanted.len(), 1);
+    }
+
+    #[test]
+    fn a_gate_link_belongs_to_its_own_operation() {
+        let mut workflows = Workflows::default();
+        workflows.gate_unreviewed(OperationId(7), "freeze".into(), "h".into());
+        workflows.operation_changed(OperationId(7));
+        assert!(workflows.gate_review.is_some());
+        workflows.operation_changed(OperationId(8));
+        assert_eq!(workflows.gate_review, None);
+    }
+
+    #[test]
+    fn the_runs_of_one_workflow_are_found_by_name() {
+        let mut workflows = Workflows::default();
+        workflows.run_changed(1, "a".into(), S::Running, None);
+        workflows.run_changed(2, "b".into(), S::Running, None);
+        assert_eq!(workflows.active_of("a"), Some(1));
+        assert_eq!(workflows.active_of("b"), Some(2));
+        assert_eq!(workflows.active_of("c"), None);
+        workflows.approval_requested(1, "ask".into(), "push".into());
+        assert_eq!(workflows.awaiting_approval_of("a"), Some((1, "push")));
+        assert_eq!(workflows.awaiting_approval_of("b"), None);
+    }
+
+    #[test]
+    fn a_run_waiting_for_approval_is_still_active_for_its_workflow() {
+        let mut workflows = Workflows::default();
+        workflows.run_changed(5, "a".into(), S::Running, None);
+        workflows.approval_requested(5, "ask".into(), "create branch x".into());
+        assert_eq!(
+            workflows.awaiting_approval_of("a"),
+            Some((5, "create branch x"))
+        );
+        assert_eq!(workflows.active_of("a"), Some(5));
+        workflows.finished(5, WorkflowEnd::Cancelled, None);
+        assert_eq!(workflows.active_of("a"), None);
     }
 }

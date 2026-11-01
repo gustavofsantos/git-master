@@ -41,6 +41,7 @@ use crate::script::inspect::inspect;
 use crate::script::journal::{Journal, RETAINED_RUNS, RunId as ScriptRunId, RunStatus};
 use crate::script::loader;
 use crate::script::luau::LuauEngine;
+use crate::script::meta::Concurrency;
 use crate::script::phases::{self, Facts, Gate, Timing};
 use crate::script::policy::StartedBy;
 use crate::script::run::ScriptEvent;
@@ -147,6 +148,20 @@ pub struct Engine {
     /// The transform operation whose `transform.<field>` runs are in progress (`WF3d`), if any.
     /// One at a time: a new one supersedes it.
     transform: Option<TransformRun>,
+    /// The event runs that wait for the review of their version, one per workflow: the latest
+    /// trigger wins (`WF3b`, D155(3)). Dropped when the file changes, the person dismisses it or
+    /// the repository is left.
+    wanted: BTreeMap<String, Wanted>,
+}
+
+/// An event run that waits for the review of its version (`WF3b`, D155(3)): what it starts once
+/// the person reviews `hash`.
+struct Wanted {
+    hash: String,
+    origin: OperationId,
+    root: PathBuf,
+    concurrency: Concurrency,
+    trigger: TriggerEvent,
 }
 
 /// The phases of one operation, as the engine read them when the operation started (`WF3c`).
@@ -284,6 +299,7 @@ impl Engine {
             gate: None,
             observers: BTreeMap::new(),
             transform: None,
+            wanted: BTreeMap::new(),
         }
     }
 
@@ -542,13 +558,15 @@ impl Engine {
     }
 
     /// Starts, queues or drops the runs that `event` triggers (`WF3a`). A matched script whose version
-    /// the person has not reviewed does not start: a notice says so.
+    /// the person has not reviewed does not start: it waits for the review, behind a request the
+    /// window shows (`WF3b`, D155(3)).
     fn fire_triggers(&mut self, id: OperationId, root: &Path, event: &TriggerEvent) -> Vec<Event> {
         if !self.triggers {
             return Vec::new();
         }
+        let mut events = self.drop_stale_requests(root);
         let Ok(loaded) = self.load_scripts(root) else {
-            return Vec::new();
+            return events;
         };
         let matched: Vec<&loader::ScriptEntry> = loaded
             .entries
@@ -561,18 +579,18 @@ impl Engine {
             })
             .collect();
         if matched.is_empty() {
-            return Vec::new();
+            return events;
         }
         let trust = match self.trust_store() {
             Ok(trust) => trust,
             Err(reason) => {
-                return vec![workflow_notice(format!(
+                events.push(workflow_notice(format!(
                     "workflows did not run on {}: {reason}",
                     event.on
-                ))];
+                )));
+                return events;
             }
         };
-        let mut events = Vec::new();
         for entry in matched {
             let Ok(meta) = &entry.meta else {
                 continue;
@@ -580,10 +598,15 @@ impl Engine {
             match trust.is_reviewed(&entry.hash) {
                 Ok(true) => {}
                 Ok(false) => {
-                    events.push(workflow_notice(format!(
-                        "{} did not run on {}: review it first.",
-                        entry.name, event.on
-                    )));
+                    let request = self.want_review(
+                        id,
+                        root,
+                        &entry.name,
+                        &entry.hash,
+                        meta.concurrency,
+                        event,
+                    );
+                    events.push(request);
                     continue;
                 }
                 Err(reason) => {
@@ -594,22 +617,151 @@ impl Engine {
                     continue;
                 }
             }
-            match self
-                .lanes
-                .on_trigger(&entry.name, meta.concurrency, (id, event.clone()))
-            {
-                Decision::Start((origin, trigger)) => {
-                    events.extend(self.begin_event_run(origin, root, &entry.name, &trigger));
-                }
-                Decision::Cancel { run } => {
-                    if let Some(runtime) = self.script_runtime() {
-                        runtime.cancel(run);
-                    }
-                }
-                Decision::Queued | Decision::Dropped => {}
-            }
+            events.extend(self.start_on_trigger(
+                id,
+                root,
+                &entry.name,
+                meta.concurrency,
+                event.clone(),
+            ));
         }
         events
+    }
+
+    /// Starts the run of the script `name` for `trigger` when its lane lets it through; a run
+    /// that cannot start frees its lane (`WF3a`).
+    fn start_on_trigger(
+        &mut self,
+        id: OperationId,
+        root: &Path,
+        name: &str,
+        mode: Concurrency,
+        trigger: TriggerEvent,
+    ) -> Vec<Event> {
+        match self.lanes.on_trigger(name, mode, (id, trigger)) {
+            Decision::Start((origin, trigger)) => {
+                self.begin_event_run(origin, root, name, &trigger)
+            }
+            Decision::Cancel { run } => {
+                if let Some(runtime) = self.script_runtime() {
+                    runtime.cancel(run);
+                }
+                Vec::new()
+            }
+            Decision::Queued | Decision::Dropped => Vec::new(),
+        }
+    }
+
+    /// An event for a version the person has not reviewed: the run waits for the review (`WF3b`,
+    /// D155(3)). It replaces the pending request of the workflow, so the latest trigger wins.
+    fn want_review(
+        &mut self,
+        origin: OperationId,
+        root: &Path,
+        name: &str,
+        hash: &str,
+        concurrency: Concurrency,
+        trigger: &TriggerEvent,
+    ) -> Event {
+        self.wanted.insert(
+            name.to_owned(),
+            Wanted {
+                hash: hash.to_owned(),
+                origin,
+                root: root.to_path_buf(),
+                concurrency,
+                trigger: trigger.clone(),
+            },
+        );
+        Event::WorkflowWantsReview {
+            workflow: name.to_owned(),
+            hash: hash.to_owned(),
+            trigger: trigger.on.clone(),
+        }
+    }
+
+    /// Drops the pending requests whose file changed, or was removed, or that belong to another
+    /// repository (`WF3b`). Returns one `WorkflowRequestDropped` for each.
+    fn drop_stale_requests(&mut self, root: &Path) -> Vec<Event> {
+        if self.wanted.is_empty() {
+            return Vec::new();
+        }
+        let Ok(loaded) = self.load_scripts(root) else {
+            return Vec::new();
+        };
+        let stale: Vec<String> = self
+            .wanted
+            .iter()
+            .filter(|(name, wanted)| {
+                wanted.root != root
+                    || !loaded
+                        .entries
+                        .iter()
+                        .any(|entry| entry.name == **name && entry.hash == wanted.hash)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        stale
+            .into_iter()
+            .map(|workflow| {
+                self.wanted.remove(&workflow);
+                Event::WorkflowRequestDropped { workflow }
+            })
+            .collect()
+    }
+
+    /// Starts the pending run of `name` when the person reviewed the version it waits for (`WF3b`,
+    /// D155(3)). Its request is dropped whether or not the run starts.
+    fn start_wanted(&mut self, root: &Path, name: &str, hash: &str) -> Vec<Event> {
+        let waits = self
+            .wanted
+            .get(name)
+            .is_some_and(|wanted| wanted.hash == hash && wanted.root == root);
+        if !waits {
+            return Vec::new();
+        }
+        let Some(wanted) = self.wanted.remove(name) else {
+            return Vec::new();
+        };
+        let mut events = vec![Event::WorkflowRequestDropped {
+            workflow: name.to_owned(),
+        }];
+        events.extend(self.start_on_trigger(
+            wanted.origin,
+            root,
+            name,
+            wanted.concurrency,
+            wanted.trigger,
+        ));
+        events
+    }
+
+    /// Drops the pending request of `workflow`: the run does not start (`WF3b`).
+    fn dismiss_request(&mut self, actor: &Actor, workflow: &str) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "dismiss a workflow request")?;
+        self.wanted.remove(workflow);
+        Ok(vec![Event::WorkflowRequestDropped {
+            workflow: workflow.to_owned(),
+        }])
+    }
+
+    /// The review of `hash` is taken back, with its grant (`WF3b`, D101). Answers the listing, so
+    /// the window shows the version as unreviewed.
+    fn revoke_review(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        hash: &str,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "revoke a review")?;
+        let root = self.open_root()?;
+        self.trust_store()?.revoke(hash).map_err(|e| e.0)?;
+        Ok(vec![self.scripts_listed(id, &root)?])
+    }
+
+    /// Whether the version with `hash` was reviewed, or why that cannot be read.
+    fn reviewed(&mut self, hash: &str) -> Result<bool, String> {
+        self.trust_store()?.is_reviewed(hash).map_err(|e| e.0)
     }
 
     /// Starts the run of the script `name` for `trigger`, which the lanes let through. A run that
@@ -750,15 +902,22 @@ impl Engine {
             self.run_gated(gate, events);
             return;
         };
-        let reviewed = self
-            .trust_store()
-            .and_then(|trust| trust.is_reviewed(&hash).map_err(|e| e.0));
+        let reviewed = self.reviewed(&hash);
+        let unreviewed = matches!(reviewed, Ok(false));
         let refused = match reviewed {
             Ok(true) => None,
             Ok(false) => Some(phases::unreviewed(&name)),
             Err(reason) => Some(format!("{name} failed: {reason}")),
         };
         if let Some(text) = refused {
+            // The window offers Review for this version beside the veto (`WF3b`).
+            if unreviewed {
+                events.push(Event::WorkflowGateUnreviewed {
+                    id: gate.id,
+                    workflow: name,
+                    hash,
+                });
+            }
             self.veto(gate, text, events);
             return;
         }
@@ -882,7 +1041,28 @@ impl Engine {
             return Vec::new();
         };
         let mut events = Vec::new();
-        for (name, _) in &phases.observers {
+        for (name, hash) in &phases.observers {
+            match self.reviewed(hash) {
+                Ok(true) => {}
+                Ok(false) => {
+                    let concurrency = self
+                        .find_script(&phases.root, name)
+                        .ok()
+                        .and_then(|entry| entry.meta.ok().map(|meta| meta.concurrency))
+                        .unwrap_or_default();
+                    let request =
+                        self.want_review(id, &phases.root, name, hash, concurrency, &after);
+                    events.push(request);
+                    continue;
+                }
+                Err(reason) => {
+                    events.push(workflow_notice(format!(
+                        "{name} did not run on {}: {reason}",
+                        after.on
+                    )));
+                    continue;
+                }
+            }
             match self.start_event_run(id, &phases.root, name, &after) {
                 Ok(run) => {
                     self.observers.insert(run, (name.clone(), phases.op));
@@ -1023,18 +1203,24 @@ impl Engine {
     fn next_transform(&mut self, mut run: TransformRun, events: &mut Vec<Event>) {
         while let Some((name, hash)) = run.waiting.pop_front() {
             let on = format!("transform.{}", run.field);
-            let reviewed = self
-                .trust_store()
-                .and_then(|trust| trust.is_reviewed(&hash).map_err(|e| e.0));
-            let skipped = match reviewed {
-                Ok(true) => None,
-                Ok(false) => Some(transforms::unreviewed(&name, &on)),
-                Err(reason) => Some(format!("{name} did not run on {on}: {reason}")),
-            };
-            if let Some(notice) = skipped {
-                run.seq = std::mem::take(&mut run.seq).skipped(notice);
-                flush_notices(&mut run.seq, events);
-                continue;
+            match self.reviewed(&hash) {
+                Ok(true) => {}
+                // A transform is not run retroactively: the person asks again after the review
+                // (`WF3b`), so nothing waits here.
+                Ok(false) => {
+                    events.push(Event::WorkflowWantsReview {
+                        workflow: name,
+                        hash,
+                        trigger: on,
+                    });
+                    continue;
+                }
+                Err(reason) => {
+                    let notice = format!("{name} did not run on {on}: {reason}");
+                    run.seq = std::mem::take(&mut run.seq).skipped(notice);
+                    flush_notices(&mut run.seq, events);
+                    continue;
+                }
             }
             let trigger = transforms::trigger(&run.field, run.branch.clone(), &run.seq.current);
             match self.start_event_run(run.id, &run.root, &name, &trigger) {
@@ -1721,6 +1907,8 @@ impl Engine {
             CommandKind::ListWorkflows
             | CommandKind::RunWorkflow { .. }
             | CommandKind::ReviewWorkflow { .. }
+            | CommandKind::RevokeWorkflowReview { .. }
+            | CommandKind::DismissWorkflowRequest { .. }
             | CommandKind::ApproveWorkflowStep { .. }
             | CommandKind::CancelWorkflowRun { .. }
             | CommandKind::CreateWorkflowFromTemplate { .. }
@@ -3568,7 +3756,11 @@ impl Engine {
                 name,
                 hash,
                 auto_approve,
-            } => self.review_script(actor, name, hash, *auto_approve),
+            } => self.review_script(id, actor, name, hash, *auto_approve),
+            CommandKind::RevokeWorkflowReview { hash } => self.revoke_review(id, actor, hash),
+            CommandKind::DismissWorkflowRequest { workflow } => {
+                self.dismiss_request(actor, workflow)
+            }
             CommandKind::ApproveWorkflowStep { run, approved } => {
                 self.approve_script_step(actor, *run, *approved)
             }
@@ -3730,14 +3922,16 @@ impl Engine {
             None => {}
         }
         workflow_session::write_atomically(&file, source)?;
-        Ok(vec![
+        let mut events = vec![
             Event::WorkflowFileSaved {
                 id,
                 path: path.to_owned(),
                 hash: loader::sha256_hex(source.as_bytes()),
             },
             self.scripts_listed(id, &root)?,
-        ])
+        ];
+        events.extend(self.drop_stale_requests(&root));
+        Ok(events)
     }
 
     /// Moves the workflow file at `path` to the trash folder, when it still hashes
@@ -3763,14 +3957,16 @@ impl Engine {
             .as_deref()
             .ok_or_else(|| "there is no trash folder for workflow files".to_owned())?;
         let trashed_to = workflow_session::trash_file(&file, trash, now_ms())?;
-        Ok(vec![
+        let mut events = vec![
             Event::WorkflowFileDeleted {
                 id,
                 path: path.to_owned(),
                 trashed_to: trashed_to.display().to_string(),
             },
             self.scripts_listed(id, &root)?,
-        ])
+        ];
+        events.extend(self.drop_stale_requests(&root));
+        Ok(events)
     }
 
     /// The review store, opened on first use.
@@ -3816,6 +4012,7 @@ impl Engine {
     /// that is written once per session when its version changed (D102).
     fn list_scripts(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
+        let mut events = self.drop_stale_requests(&root);
         let mut listed = self.scripts_listed(id, &root)?;
         if !self.api_written {
             self.api_written = true;
@@ -3829,18 +4026,30 @@ impl Engine {
                 ));
             }
         }
-        Ok(vec![listed])
+        events.push(listed);
+        Ok(events)
     }
 
     /// The `WorkflowsListed` event of the open repository's scripts.
-    fn scripts_listed(&self, id: OperationId, root: &Path) -> Result<Event, String> {
+    fn scripts_listed(&mut self, id: OperationId, root: &Path) -> Result<Event, String> {
         let loaded = self.load_scripts(root)?;
+        // Each version's review and grant, read once for the listing (`WF3b`). A store that cannot
+        // be read lists every version as unreviewed.
+        let trust = self.trust_store().ok();
         Ok(Event::WorkflowsListed {
             id,
             workflows: loaded
                 .entries
                 .iter()
-                .map(script_session::workflow_info)
+                .map(|entry| {
+                    let mut info = script_session::workflow_info(entry);
+                    let review = trust
+                        .as_ref()
+                        .and_then(|trust| trust.get(&entry.hash).ok().flatten());
+                    info.reviewed = review.is_some();
+                    info.auto_approve = review.is_some_and(|review| review.auto_approve);
+                    info
+                })
                 .collect(),
             ignored: script_session::ignored_lines(&loaded),
             user_dir: self
@@ -3952,6 +4161,7 @@ impl Engine {
     /// since the hash was shown, so a review is always of the text that was read.
     fn review_script(
         &mut self,
+        id: OperationId,
         actor: &Actor,
         name: &str,
         hash: &str,
@@ -3969,7 +4179,10 @@ impl Engine {
         self.trust_store()?
             .review(hash, &entry.name, auto_approve, now_ms())
             .map_err(|e| e.0)?;
-        Ok(Vec::new())
+        // An event run that waited for this version starts now, with the grant just chosen (`WF3b`).
+        let mut events = self.start_wanted(&root, name, hash);
+        events.push(self.scripts_listed(id, &root)?);
+        Ok(events)
     }
 
     /// The person's answer to an approval a run waits for.
@@ -4047,6 +4260,7 @@ impl Engine {
                 | CommandKind::CreateWorkflowFromTemplate { .. }
                 | CommandKind::SaveWorkflowFile { .. }
                 | CommandKind::DeleteWorkflowFile { .. }
+                | CommandKind::DismissWorkflowRequest { .. }
                 | CommandKind::ListReviewComments
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }

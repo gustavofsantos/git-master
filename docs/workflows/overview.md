@@ -64,7 +64,7 @@ These rules apply:
 
 You can start a workflow in four ways:
 
-> **Planned.** Triggers other than `manual`, and runs started by an agent, are not available in the app yet.
+> **Planned.** Runs started by an agent are not available in the app yet.
 
 1. **Command palette.** Press `Ctrl+K` (`⌘K` on macOS), choose **Run Workflow…**, and pick the workflow. If the workflow declares inputs, a dialog asks for their values.
 2. **A trigger.** A workflow can run by itself when an operation starts or ends, a repository opens, or a ref changes. See [Triggers and phases](triggers-and-phases.md).
@@ -74,8 +74,6 @@ You can start a workflow in four ways:
 ### Review a version before its first run
 
 The first time you run a version of a script, GitMaster shows you the script and asks **Run this version?**. Confirming marks that exact text as reviewed. Any edit, made by you or by an agent, makes the version unreviewed again, and GitMaster asks once more.
-
-> **Planned.** Automatic approval for event runs is not available yet, because event triggers are not.
 
 Confirming is also the moment you can allow event-triggered apply actions to run without asking. That choice applies only to the version you reviewed. See [Approvals and security](approvals-and-security.md).
 
@@ -109,13 +107,13 @@ Cancel and approve work from the command palette:
 - **Cancel Workflow Run** stops a run at any time, even while the script waits for you or waits for a program to finish.
 - **Approve Workflow Step** and **Reject Workflow Step** answer a run that waits for your approval.
 
-> **Planned.** The Cancel and Approve buttons are not on the Workflows page yet. Use the palette commands.
+The Workflows page offers the same answers for the open workflow: **Approve** and **Reject** beside a run that waits for your approval, and **Cancel run** while a run is active.
 
 ## Runs
 
 The **Runs** tab shows what a run actually did. GitMaster records each call the script makes to `ctx` as it happens, so the record shows what the run did, not what the script reports about itself.
 
-> **Planned.** Runs started by a trigger or by an agent are not available yet. Every run is started by you.
+> **Planned.** Runs started by an agent are not available yet.
 
 Each run has a header with:
 

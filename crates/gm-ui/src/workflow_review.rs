@@ -1,17 +1,18 @@
-//! The "Run this version?" dialog. A script whose exact text the person has not
-//! reviewed does not start; the engine asks first and the dialog shows the
-//! source (D101). Confirming sends `ReviewWorkflow` for that hash, then the
-//! run again with the same inputs. The text rules are pure and tested here;
-//! the window side is the `impl StatusView` at the bottom.
+//! The review of a workflow version (D101, `WF3b`): the "Run this version?" dialog, the notice of
+//! an event run that waits for its review, and the Review link beside a gate's veto. The dialog
+//! sends `ReviewWorkflow` for the reviewed hash, with the grant the person chose for a trigger that
+//! is not `manual`; a manual run then runs again with the same inputs. The text rules are pure and
+//! tested here; the window side is the `impl StatusView` at the bottom.
 
-use gm_schema::{Actor, CommandKind};
+use gm_schema::{Actor, CommandKind, WorkflowInfo};
 use gpui::{
-    Context, Div, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, Window, div,
-    prelude::*, px,
+    ClickEvent, Context, Div, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
+    Stateful, Window, div, prelude::*, px,
 };
 
 use crate::FocusNext;
 use crate::FocusPrev;
+use crate::icon::{self, Icon};
 use crate::theme;
 use crate::view::StatusView;
 use crate::workflow_run::ReviewRequest;
@@ -27,6 +28,13 @@ const GUTTER: f32 = 44.;
 pub(crate) const SOURCE_LINES: usize = 400;
 
 pub(crate) const TITLE: &str = "Run this version?";
+/// The title of a review that does not run the script.
+pub(crate) const REVIEW_TITLE: &str = "Review this version?";
+pub(crate) const MARK: &str = "Mark Reviewed";
+pub(crate) const RUN: &str = "Run this version";
+/// The checkbox that grants automatic approval for the event runs of the version (D101).
+pub(crate) const GRANT: &str =
+    "Approve applying actions automatically for event runs of this version";
 
 /// The line under the title: what the dialog asks and why.
 #[must_use]
@@ -34,6 +42,53 @@ pub(crate) fn intro(name: &str) -> String {
     format!(
         "{name} has not been run here in this form. Read it before you run it: it can start the programs it names."
     )
+}
+
+/// The line under the title of a review that does not run the script: its trigger, and the risk.
+#[must_use]
+pub(crate) fn review_intro(name: &str, on: &str) -> String {
+    format!(
+        "{name} runs on {on}. Read it before you mark it reviewed: it can start the programs it names."
+    )
+}
+
+/// The title of the dialog for `request`: the question when it runs the script.
+#[must_use]
+pub(crate) fn title(request: &ReviewRequest) -> &'static str {
+    if request.run { TITLE } else { REVIEW_TITLE }
+}
+
+/// The line under the title for `request`.
+#[must_use]
+pub(crate) fn intro_for(request: &ReviewRequest) -> String {
+    if request.run {
+        intro(&request.name)
+    } else {
+        review_intro(&request.name, &request.on)
+    }
+}
+
+/// The confirm button's words: a run confirms and runs, a review only marks the version.
+#[must_use]
+pub(crate) fn confirm_label(request: &ReviewRequest) -> &'static str {
+    if request.run { RUN } else { MARK }
+}
+
+/// Whether the dialog offers the grant. A manual workflow has no event runs, so it never does.
+#[must_use]
+pub(crate) fn grant_offered(request: &ReviewRequest) -> bool {
+    request.on != "manual"
+}
+
+/// The line of a notice for an event run that waits for its review. A transform is not run
+/// retroactively, so its notice asks the person to ask again.
+#[must_use]
+pub(crate) fn wanted_text(name: &str, trigger: &str) -> String {
+    if trigger.starts_with("transform.") {
+        format!("{name} wants to run on {trigger}: review it, then ask again")
+    } else {
+        format!("{name} wants to run on {trigger}")
+    }
 }
 
 /// The first `max` lines of `source`, numbered from 1, with tabs as four spaces
@@ -58,32 +113,50 @@ pub(crate) fn source_lines(source: &str, max: usize) -> (Vec<(usize, String)>, u
     (shown, all.len().saturating_sub(max))
 }
 
-/// The commands that confirm the review: the reviewed hash is recorded as
-/// reviewed (not auto-approved), then the run goes ahead with the same inputs.
-/// The engine handles them in this order.
+/// The commands that confirm the review: the reviewed hash is recorded, with the grant when the
+/// dialog offers it and the person ticked it. A run confirms with `RunWorkflow` after it, with the
+/// same inputs. The engine handles them in this order; an event run that waited for this version
+/// starts inside the review.
 #[must_use]
-pub(crate) fn commands(request: &ReviewRequest) -> Vec<CommandKind> {
-    vec![
-        CommandKind::ReviewWorkflow {
-            name: request.name.clone(),
-            hash: request.hash.clone(),
-            auto_approve: false,
-        },
-        CommandKind::RunWorkflow {
+pub(crate) fn commands(request: &ReviewRequest, auto_approve: bool) -> Vec<CommandKind> {
+    let mut kinds = vec![CommandKind::ReviewWorkflow {
+        name: request.name.clone(),
+        hash: request.hash.clone(),
+        auto_approve: grant_offered(request) && auto_approve,
+    }];
+    if request.run {
+        kinds.push(CommandKind::RunWorkflow {
             name: request.name.clone(),
             inputs: request.inputs.clone(),
-        },
-    ]
+        });
+    }
+    kinds
 }
 
-/// The dialog while it is open: the request it asks about and its focus.
+/// The review request for a loaded workflow the page shows (the Review button of the page).
+/// A manual workflow with declared inputs is only marked reviewed: its run asks for the inputs.
+#[must_use]
+pub(crate) fn request_for_info(info: &WorkflowInfo) -> ReviewRequest {
+    ReviewRequest {
+        name: info.name.clone(),
+        hash: info.hash.clone(),
+        source: info.source.clone(),
+        inputs: std::collections::BTreeMap::new(),
+        on: info.trigger.clone(),
+        run: info.trigger == "manual" && info.inputs.is_empty(),
+    }
+}
+
+/// The dialog while it is open: the request it asks about, the grant ticked, and its focus.
 pub(crate) struct WorkflowReviewDialog {
     pub(crate) request: ReviewRequest,
+    pub(crate) auto_approve: bool,
     pub(crate) focus: FocusHandle,
 }
 
 impl StatusView {
-    /// Opens the dialog for `request`, replacing a dialog about another script.
+    /// Opens the dialog for `request`, replacing a dialog about another script. The grant starts
+    /// unticked.
     pub(crate) fn open_workflow_review_dialog(
         &mut self,
         request: ReviewRequest,
@@ -92,7 +165,11 @@ impl StatusView {
     ) {
         let focus = cx.focus_handle();
         focus.focus(window);
-        self.workflow_review_dialog = Some(WorkflowReviewDialog { request, focus });
+        self.workflow_review_dialog = Some(WorkflowReviewDialog {
+            request,
+            auto_approve: false,
+            focus,
+        });
         cx.notify();
     }
 
@@ -118,6 +195,67 @@ impl StatusView {
         self.open_workflow_review_dialog(request, window, cx);
     }
 
+    /// Opens the review of the version `hash` of the workflow `name`, when the listing has that
+    /// version. Otherwise the listing is read again, and the person asks once more.
+    pub(crate) fn open_review_of(
+        &mut self,
+        name: &str,
+        hash: &str,
+        run: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let info = self
+            .model
+            .workflows
+            .listed
+            .as_deref()
+            .and_then(|listed| {
+                listed
+                    .iter()
+                    .find(|info| info.name == name && info.hash == hash)
+            })
+            .cloned();
+        let Some(info) = info else {
+            self.request_workflow_list();
+            cx.notify();
+            return;
+        };
+        let mut request = request_for_info(&info);
+        request.run = run && request.run;
+        self.open_workflow_review_dialog(request, window, cx);
+    }
+
+    /// The Review button of the Workflows page: the dialog for the open workflow's version.
+    pub(crate) fn open_page_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let info = self.selected_workflow_info().cloned();
+        let Some(info) = info else {
+            return;
+        };
+        self.open_workflow_review_dialog(request_for_info(&info), window, cx);
+    }
+
+    /// The listed workflow the Workflows page has open, when the listing still has it.
+    pub(crate) fn selected_workflow_info(&self) -> Option<&WorkflowInfo> {
+        let path = self.model.workflows_page.path()?;
+        self.model
+            .workflows
+            .listed
+            .as_deref()?
+            .iter()
+            .find(|info| info.path == path)
+    }
+
+    /// Ticks or unticks the grant of the open dialog.
+    pub(crate) fn toggle_review_grant(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.workflow_review_dialog.as_mut()
+            && grant_offered(&dialog.request)
+        {
+            dialog.auto_approve = !dialog.auto_approve;
+        }
+        cx.notify();
+    }
+
     /// Closes the dialog and tells the model the review is answered. Escape,
     /// a click outside and Cancel all come here; nothing is sent.
     pub(crate) fn close_workflow_review_dialog(
@@ -133,12 +271,12 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Enter and the confirm button: sends the review and the run, in order, then closes.
+    /// Enter and the confirm button: sends the review (and the run), in order, then closes.
     pub(crate) fn submit_workflow_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.workflow_review_dialog.as_ref() else {
             return;
         };
-        let kinds = commands(&dialog.request);
+        let kinds = commands(&dialog.request, dialog.auto_approve);
         for kind in kinds {
             self.engine.dispatch(Actor::Human, kind);
         }
@@ -189,6 +327,7 @@ impl StatusView {
                 match event.keystroke.key.as_str() {
                     "escape" => this.close_workflow_review_dialog(window, cx),
                     "enter" => this.submit_workflow_review(window, cx),
+                    "space" => this.toggle_review_grant(cx),
                     _ => {}
                 }
             }))
@@ -196,13 +335,13 @@ impl StatusView {
                 div()
                     .text_color(theme::text())
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(TITLE),
+                    .child(title(request)),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(theme::muted())
-                    .child(intro(&request.name)),
+                    .child(intro_for(request)),
             )
             .child(
                 div()
@@ -241,12 +380,35 @@ impl StatusView {
                     .text_color(theme::muted())
                     .child(format!("… {hidden} more lines not shown"))
             }))
-            .child(buttons(cx))
+            .children(grant_offered(request).then(|| grant_row(dialog.auto_approve, cx)))
+            .child(buttons(request, cx))
     }
 }
 
-/// Cancel, and the confirm button that reviews and runs this version.
-fn buttons(cx: &Context<StatusView>) -> Div {
+/// The checkbox that grants automatic approval for the event runs of this version. Space and a
+/// click tick it.
+fn grant_row(checked: bool, cx: &Context<StatusView>) -> Stateful<Div> {
+    let mark = if checked {
+        icon::filled(Icon::CheckSquare, icon::SMALL, theme::accent())
+    } else {
+        icon::view(Icon::Square, icon::SMALL, theme::muted())
+    };
+    div()
+        .id("workflow-review-grant")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .child(mark)
+        .child(div().text_sm().text_color(theme::text()).child(GRANT))
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.toggle_review_grant(cx);
+        }))
+}
+
+/// Cancel, and the confirm button that reviews (and runs) this version.
+fn buttons(request: &ReviewRequest, cx: &Context<StatusView>) -> Div {
     div()
         .flex()
         .flex_row()
@@ -283,7 +445,7 @@ fn buttons(cx: &Context<StatusView>) -> Div {
                 .text_color(theme::on_accent())
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
-                .child("Run this version")
+                .child(confirm_label(request))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -293,9 +455,130 @@ fn buttons(cx: &Context<StatusView>) -> Div {
         )
 }
 
+/// The non-modal notices of event runs that wait for their review, and the Review link beside a
+/// gate's veto (`WF3b`). Both are drawn by the window; nothing here blocks the work.
+impl StatusView {
+    /// One line per run that waits: its text, Review and Dismiss. `None` when none waits.
+    pub(crate) fn wanted_strip(&self, cx: &Context<Self>) -> Option<Div> {
+        let rows: Vec<Div> = self
+            .model
+            .workflows
+            .wanted
+            .iter()
+            .enumerate()
+            .map(|(index, (name, wanted))| {
+                let review_name = name.clone();
+                let dismiss_name = name.clone();
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_1()
+                    .text_sm()
+                    .text_color(theme::warn_fg())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(wanted_text(name, &wanted.trigger)),
+                    )
+                    .child(
+                        div()
+                            .id(("wanted-review", index))
+                            .flex_none()
+                            .text_color(theme::accent())
+                            .cursor_pointer()
+                            .child("Review")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                    this.open_review_of(
+                                        &review_name,
+                                        &wanted_hash(this, &review_name),
+                                        false,
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(("wanted-dismiss", index))
+                            .flex_none()
+                            .text_color(theme::muted())
+                            .cursor_pointer()
+                            .child("Dismiss")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                    this.engine.dispatch(
+                                        Actor::Human,
+                                        CommandKind::DismissWorkflowRequest {
+                                            workflow: dismiss_name.clone(),
+                                        },
+                                    );
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+            })
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .bg(theme::warn_bg())
+                .border_t_1()
+                .border_color(theme::hairline())
+                .children(rows),
+        )
+    }
+
+    /// The Review link beside a gate's veto, when the operation that failed was vetoed for want of
+    /// a review (`WF3b`).
+    pub(crate) fn gate_review_link(&self, cx: &Context<Self>) -> Option<Stateful<Div>> {
+        self.model.error.as_ref()?;
+        let gate = self.model.workflows.gate_review.clone()?;
+        Some(
+            div()
+                .id("gate-review")
+                .flex_none()
+                .text_color(theme::accent())
+                .cursor_pointer()
+                .child("Review")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.open_review_of(&gate.workflow, &gate.hash, false, window, cx);
+                    }),
+                ),
+        )
+    }
+}
+
+/// The hash the notice of `name` asked about.
+fn wanted_hash(this: &StatusView, name: &str) -> String {
+    this.model
+        .workflows
+        .wanted
+        .get(name)
+        .map(|wanted| wanted.hash.clone())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn numbered(lines: &[&str]) -> Vec<(usize, String)> {
         lines
@@ -305,16 +588,73 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn the_title_is_the_question() {
-        assert_eq!(TITLE, "Run this version?");
+    fn request(on: &str, run: bool) -> ReviewRequest {
+        ReviewRequest {
+            name: "w".into(),
+            hash: "abc123".into(),
+            source: "return 1".into(),
+            inputs: BTreeMap::new(),
+            on: on.into(),
+            run,
+        }
     }
 
     #[test]
-    fn the_intro_names_the_script_and_the_risk() {
+    fn the_title_is_the_question() {
+        assert_eq!(TITLE, "Run this version?");
+        assert_eq!(title(&request("manual", true)), "Run this version?");
+    }
+
+    #[test]
+    fn a_review_that_does_not_run_asks_for_the_review_not_the_run() {
         assert_eq!(
-            intro("branch-from-ticket"),
-            "branch-from-ticket has not been run here in this form. Read it before you run it: it can start the programs it names."
+            title(&request("commit.created", false)),
+            "Review this version?"
+        );
+        assert_eq!(
+            review_intro("on-commit", "commit.created"),
+            "on-commit runs on commit.created. Read it before you mark it reviewed: it can start the programs it names."
+        );
+    }
+
+    #[test]
+    fn a_manual_workflow_confirms_with_a_run_and_an_event_one_only_marks_it() {
+        assert_eq!(confirm_label(&request("manual", true)), "Run this version");
+        assert_eq!(
+            confirm_label(&request("commit.created", false)),
+            "Mark Reviewed"
+        );
+        assert_eq!(
+            confirm_label(&request("before.commit", false)),
+            "Mark Reviewed"
+        );
+    }
+
+    #[test]
+    fn the_grant_is_offered_for_a_trigger_that_is_not_manual_only() {
+        assert!(!grant_offered(&request("manual", true)));
+        assert!(grant_offered(&request("commit.created", false)));
+        assert!(grant_offered(&request("after.commit", false)));
+        assert!(grant_offered(&request("transform.commit_message", false)));
+    }
+
+    #[test]
+    fn the_intro_of_a_run_is_the_old_text() {
+        assert_eq!(
+            intro_for(&request("manual", true)),
+            "w has not been run here in this form. Read it before you run it: it can start the programs it names."
+        );
+    }
+
+    #[test]
+    fn a_waiting_event_run_says_what_it_wants() {
+        assert_eq!(
+            wanted_text("on-commit", "commit.created"),
+            "on-commit wants to run on commit.created"
+        );
+        assert_eq!(
+            wanted_text("llm", "transform.commit_message"),
+            "llm wants to run on transform.commit_message: review it, then ask again"
         );
     }
 
@@ -375,18 +715,18 @@ mod tests {
     }
 
     #[test]
-    fn the_commands_review_the_hash_first_and_then_run_with_the_inputs() {
-        use std::collections::BTreeMap;
-
+    fn a_manual_run_reviews_the_hash_first_and_then_runs_with_the_inputs() {
         let inputs = BTreeMap::from([("ticket".to_owned(), "ENG-42".to_owned())]);
         let req = ReviewRequest {
             name: "w".into(),
             hash: "abc123".into(),
             source: "return 1".into(),
             inputs: inputs.clone(),
+            on: "manual".into(),
+            run: true,
         };
         assert_eq!(
-            commands(&req),
+            commands(&req, true),
             vec![
                 CommandKind::ReviewWorkflow {
                     name: "w".into(),
@@ -399,5 +739,87 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn an_event_review_sends_the_grant_chosen_and_never_runs() {
+        let req = request("commit.created", false);
+        assert_eq!(
+            commands(&req, true),
+            vec![CommandKind::ReviewWorkflow {
+                name: "w".into(),
+                hash: "abc123".into(),
+                auto_approve: true,
+            }]
+        );
+        assert_eq!(
+            commands(&req, false),
+            vec![CommandKind::ReviewWorkflow {
+                name: "w".into(),
+                hash: "abc123".into(),
+                auto_approve: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_manual_review_never_sends_the_grant() {
+        let req = request("manual", true);
+        assert_eq!(
+            commands(&req, true),
+            vec![
+                CommandKind::ReviewWorkflow {
+                    name: "w".into(),
+                    hash: "abc123".into(),
+                    auto_approve: false,
+                },
+                CommandKind::RunWorkflow {
+                    name: "w".into(),
+                    inputs: BTreeMap::new(),
+                },
+            ]
+        );
+    }
+
+    fn info(trigger: &str, inputs: usize) -> WorkflowInfo {
+        WorkflowInfo {
+            name: "w".into(),
+            path: "/w/w.lua".into(),
+            trigger: trigger.into(),
+            key: None,
+            inputs: (0..inputs)
+                .map(|i| gm_schema::WorkflowInput {
+                    name: format!("i{i}"),
+                    prompt: None,
+                })
+                .collect(),
+            hash: "h".into(),
+            error: None,
+            warnings: Vec::new(),
+            source: "src".into(),
+            reviewed: false,
+            auto_approve: false,
+        }
+    }
+
+    #[test]
+    fn the_page_review_of_a_manual_workflow_without_inputs_runs_it() {
+        let req = request_for_info(&info("manual", 0));
+        assert!(req.run);
+        assert_eq!(req.on, "manual");
+        assert_eq!(req.source, "src");
+    }
+
+    #[test]
+    fn the_page_review_of_a_manual_workflow_with_inputs_only_marks_it() {
+        let req = request_for_info(&info("manual", 1));
+        assert!(!req.run);
+    }
+
+    #[test]
+    fn the_page_review_of_an_event_workflow_only_marks_it() {
+        let req = request_for_info(&info("commit.created", 0));
+        assert!(!req.run);
+        assert_eq!(req.on, "commit.created");
     }
 }

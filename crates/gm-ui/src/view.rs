@@ -863,7 +863,10 @@ impl StatusView {
             }
             Event::WorkflowsListed { .. }
             | Event::WorkflowRunChanged { .. }
-            | Event::WorkflowApprovalRequested { .. } => true,
+            | Event::WorkflowApprovalRequested { .. }
+            | Event::WorkflowWantsReview { .. }
+            | Event::WorkflowRequestDropped { .. }
+            | Event::WorkflowGateUnreviewed { .. } => true,
             _ => false,
         }
     }
@@ -1760,7 +1763,8 @@ impl StatusView {
                             .text_ellipsis()
                             .child(message),
                     )
-                    .children(offer),
+                    .children(offer)
+                    .children(self.gate_review_link(cx)),
             )
             .child(self.command_log_button(cx))
     }
@@ -1852,6 +1856,12 @@ impl Render for StatusView {
                 self.welcome
                     .is_none()
                     .then(|| self.main_area(sidebar_width, left_width, commit_height, cx)),
+            )
+            .children(
+                self.welcome
+                    .is_none()
+                    .then(|| self.wanted_strip(cx))
+                    .flatten(),
             )
             .children(self.welcome.is_none().then(|| self.status_bar(window, cx)))
             .children(

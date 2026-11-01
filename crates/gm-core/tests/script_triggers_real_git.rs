@@ -199,6 +199,19 @@ fn notices(events: &[Event]) -> Vec<String> {
         .collect()
 }
 
+/// The workflows that wait for a review, with the trigger that asked (`WF3b`).
+fn wants_review(events: &[Event]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::WorkflowWantsReview {
+                workflow, trigger, ..
+            } => Some((workflow.clone(), trigger.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 fn approvals(events: &[Event]) -> Vec<i64> {
     events
         .iter()
@@ -383,9 +396,10 @@ fn a_script_that_is_not_reviewed_does_not_start_and_a_notice_says_why() {
     let mut h = Harness::new(&repo, &flows, true);
     let (events, _) = h.commit_file("b.txt", "b\n", "feat: b");
     assert_eq!(
-        notices(&events),
-        vec!["on-commit did not run on commit.created: review it first.".to_owned()]
+        wants_review(&events),
+        vec![("on-commit".to_owned(), "commit.created".to_owned())]
     );
+    assert!(notices(&events).is_empty(), "{events:#?}");
     let later = h.settle(Duration::from_millis(200));
     assert!(started_runs(&events).is_empty());
     assert!(started_runs(&later).is_empty());
@@ -522,8 +536,8 @@ fn opening_a_repository_starts_a_repo_opened_workflow() {
     write_script(&flows, "on-open.lua", ON_OPEN);
     let mut h = Harness::new(&repo, &flows, true);
     assert_eq!(
-        notices(&h.opened),
-        vec!["on-open did not run on repo.opened: review it first.".to_owned()]
+        wants_review(&h.opened),
+        vec![("on-open".to_owned(), "repo.opened".to_owned())]
     );
     h.review("on-open", false);
     let events = h.open();

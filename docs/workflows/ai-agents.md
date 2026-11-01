@@ -48,8 +48,6 @@ Effects run only from the app, with you as the actor. The command line never app
 4. Write a fixture file with a canned answer for each call and the sequence of calls the script should make. Run `gitmaster workflow test` until it passes.
 5. Open GitMaster and review the script in the app. Confirm **Run this version?**, then start the run. A manual run applies its changes.
 
-> **Planned.** A run started by an event pauses for your approval before each applying action, unless you granted automatic approval for this version. Event runs are not available yet.
-
 ## Limits for agents
 
 - An agent cannot approve anything for you. Approval dialogs appear in the app.

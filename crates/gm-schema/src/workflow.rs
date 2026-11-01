@@ -25,6 +25,12 @@ pub struct WorkflowInfo {
     pub warnings: Vec<String>,
     /// The file as read, for the editor; empty when it could not be read.
     pub source: String,
+    /// Whether the person reviewed this version of the text (D101).
+    #[serde(default)]
+    pub reviewed: bool,
+    /// Whether event runs of this reviewed version apply without asking (the grant of D101).
+    #[serde(default)]
+    pub auto_approve: bool,
 }
 
 /// One declared input of a workflow.

@@ -250,6 +250,8 @@ pub(crate) fn workflow_info(entry: &ScriptEntry) -> WorkflowInfo {
         error,
         warnings: Vec::new(),
         source: entry.source.clone(),
+        reviewed: false,
+        auto_approve: false,
     }
 }
 

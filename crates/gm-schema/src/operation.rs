@@ -446,6 +446,16 @@ pub enum CommandKind {
         hash: String,
         auto_approve: bool,
     },
+    /// Takes back the review of the version whose text hashes to `hash`, and with it the grant
+    /// (`WF3b`, D101). Answers `WorkflowsListed`. Human only.
+    RevokeWorkflowReview {
+        hash: String,
+    },
+    /// Drops the pending event request of the workflow `workflow`: the notice goes and the run
+    /// does not start (`WF3b`, D155(3)). Answers `WorkflowRequestDropped`. Human only.
+    DismissWorkflowRequest {
+        workflow: String,
+    },
     /// Copies the built-in template `template` into the user's workflows
     /// directory under a file name not taken yet; never into a repository.
     /// Answers `WorkflowCreated`. Human only.
@@ -1063,6 +1073,28 @@ pub enum Event {
         source: String,
         /// The inputs of the run that did not start, so the window can send it again.
         inputs: BTreeMap<String, String>,
+    },
+    /// An event (or an observer of an operation) started for a version of the script `workflow`
+    /// the person has not reviewed (`WF3b`, D155(3)). The run waits for the review: the window shows
+    /// a notice with Review and Dismiss. A later request for the same workflow replaces it.
+    /// `trigger` is the event's `on`, such as `commit.created`.
+    WorkflowWantsReview {
+        workflow: String,
+        hash: String,
+        trigger: String,
+    },
+    /// The pending request of the workflow `workflow` ended: it was reviewed and ran, dismissed, or
+    /// its file changed (`WF3b`).
+    WorkflowRequestDropped {
+        workflow: String,
+    },
+    /// A `before.<op>` gate of the operation `id` is not reviewed, so the operation is vetoed
+    /// (`WF3b`, D157(2)). The window offers Review for this version beside the veto. Sent just
+    /// before the veto.
+    WorkflowGateUnreviewed {
+        id: OperationId,
+        workflow: String,
+        hash: String,
     },
     /// A workflow run moved: its status, and the state it is in when it has one.
     WorkflowRunChanged {

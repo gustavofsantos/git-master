@@ -49,6 +49,62 @@ pub enum SaveState {
     Conflict,
 }
 
+/// The review line of the open workflow (`WF3b`, D101): whether its version is reviewed, and whether
+/// its event runs apply without asking.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReviewLine {
+    Unreviewed,
+    Reviewed { auto_approve: bool },
+}
+
+/// The review line of the workflow `info`. `None` when there is no such workflow, or its file does
+/// not load: there is no version to review then.
+#[must_use]
+pub fn review_line(info: Option<&WorkflowInfo>) -> Option<ReviewLine> {
+    let info = info?;
+    if info.error.is_some() {
+        return None;
+    }
+    Some(if info.reviewed {
+        ReviewLine::Reviewed {
+            auto_approve: info.auto_approve,
+        }
+    } else {
+        ReviewLine::Unreviewed
+    })
+}
+
+/// What the review line says.
+#[must_use]
+pub fn review_text(line: &ReviewLine) -> &'static str {
+    match line {
+        ReviewLine::Unreviewed => "Not reviewed: review this version before its runs.",
+        ReviewLine::Reviewed {
+            auto_approve: false,
+        } => "Reviewed",
+        ReviewLine::Reviewed { auto_approve: true } => "Reviewed: event runs apply without asking",
+    }
+}
+
+/// The run controls the open workflow offers (`WF3b`): Approve and Reject for a run that waits for
+/// an approval, and Cancel for any run that has not ended.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RunControls {
+    /// The run that waits, and what it asks.
+    pub approve: Option<(i64, String)>,
+    /// The run to stop.
+    pub cancel: Option<i64>,
+}
+
+/// The run controls, from the run that waits for an approval and the run that is active.
+#[must_use]
+pub fn run_controls(awaiting: Option<(i64, &str)>, active: Option<i64>) -> RunControls {
+    RunControls {
+        approve: awaiting.map(|(run, summary)| (run, summary.to_owned())),
+        cancel: active,
+    }
+}
+
 /// The engine's words for a save that found the file changed.
 const CONFLICT_TEXT: &str = "changed on disk";
 
@@ -874,6 +930,8 @@ return M
             error: None,
             warnings: Vec::new(),
             source: source.into(),
+            reviewed: false,
+            auto_approve: false,
         }
     }
 
@@ -1489,5 +1547,68 @@ return M
         page.track_dry_run(id(7));
         page.operation_ended(id(7), OperationState::Failed, Some("no"));
         assert!(!page.dry_run_pending());
+    }
+
+    #[test]
+    fn a_workflow_that_does_not_load_has_no_review_line() {
+        assert_eq!(review_line(None), None);
+        let mut broken = info("/w/a.lua", "a", "", "h");
+        broken.error = Some("line 1: bad".into());
+        assert_eq!(review_line(Some(&broken)), None);
+    }
+
+    #[test]
+    fn a_version_is_unreviewed_until_the_listing_says_it_is_reviewed() {
+        let mut loaded = info("/w/a.lua", "a", "", "h");
+        assert_eq!(review_line(Some(&loaded)), Some(ReviewLine::Unreviewed));
+        loaded.reviewed = true;
+        assert_eq!(
+            review_line(Some(&loaded)),
+            Some(ReviewLine::Reviewed {
+                auto_approve: false
+            })
+        );
+        loaded.auto_approve = true;
+        assert_eq!(
+            review_line(Some(&loaded)),
+            Some(ReviewLine::Reviewed { auto_approve: true })
+        );
+    }
+
+    #[test]
+    fn the_review_line_has_its_words() {
+        assert_eq!(
+            review_text(&ReviewLine::Unreviewed),
+            "Not reviewed: review this version before its runs."
+        );
+        assert_eq!(
+            review_text(&ReviewLine::Reviewed {
+                auto_approve: false
+            }),
+            "Reviewed"
+        );
+        assert_eq!(
+            review_text(&ReviewLine::Reviewed { auto_approve: true }),
+            "Reviewed: event runs apply without asking"
+        );
+    }
+
+    #[test]
+    fn approve_and_reject_follow_a_run_that_waits_and_cancel_follows_any_active_run() {
+        assert_eq!(run_controls(None, None), RunControls::default());
+        assert_eq!(
+            run_controls(None, Some(3)),
+            RunControls {
+                approve: None,
+                cancel: Some(3)
+            }
+        );
+        assert_eq!(
+            run_controls(Some((4, "push the branch")), Some(4)),
+            RunControls {
+                approve: Some((4, "push the branch".into())),
+                cancel: Some(4)
+            }
+        );
     }
 }

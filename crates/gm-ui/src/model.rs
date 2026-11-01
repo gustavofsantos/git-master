@@ -1174,6 +1174,7 @@ impl Model {
                 detail,
                 ..
             } => {
+                self.workflows.operation_changed(id);
                 self.workflows_page
                     .operation_ended(id, state, detail.as_deref());
                 // A gate that vetoed the operation says why, where the operation's errors show (`WF3c`).
@@ -1262,6 +1263,26 @@ impl Model {
                 ..
             } => {
                 self.workflows.review_requested(name, hash, source, inputs);
+                None
+            }
+            Event::WorkflowWantsReview {
+                workflow,
+                hash,
+                trigger,
+            } => {
+                self.workflows.wants_review(workflow, hash, trigger);
+                None
+            }
+            Event::WorkflowRequestDropped { workflow } => {
+                self.workflows.request_dropped(&workflow);
+                None
+            }
+            Event::WorkflowGateUnreviewed {
+                id,
+                workflow,
+                hash,
+            } => {
+                self.workflows.gate_unreviewed(id, workflow, hash);
                 None
             }
             Event::WorkflowRunChanged {
@@ -1720,12 +1741,15 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ConflictRead { id, .. }
         | Event::ConflictResolved { id, .. }
         | Event::RecordedResolutionForgotten { id, .. }
-        | Event::TransformFinished { id, .. } => Some(*id),
+        | Event::TransformFinished { id, .. }
+        | Event::WorkflowGateUnreviewed { id, .. } => Some(*id),
         Event::ThreadsChanged
         | Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }
         | Event::WorkflowNotice { .. }
         | Event::WorkflowApprovalRequested { .. }
+        | Event::WorkflowWantsReview { .. }
+        | Event::WorkflowRequestDropped { .. }
         | Event::WorkflowRunFinished { .. } => None,
     }
 }

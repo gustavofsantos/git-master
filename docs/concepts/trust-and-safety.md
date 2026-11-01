@@ -59,7 +59,7 @@ Workflow scripts run in a sandbox, and they act only through the actions the app
 
 ## Approvals for workflows
 
-> **Planned.** Automatic approval, and the approval rules for runs started by an event or by an agent, are not available in the app yet.
+> **Planned.** The approval rules for runs started by an agent are not available in the app yet.
 
 A workflow script runs only after you have reviewed it. Each version of a script is identified by its content. You review a version the first time it runs, and any edit, by you or by an agent, makes it unreviewed again. A run that you start by hand goes ahead, and a run started by an event waits for your approval at each Apply step, unless you have chosen automatic approval for that reviewed version. After a run has executed a program, its later Apply steps ask again, and the dialog shows the exact arguments. A run started by an agent always waits for you. See [Approvals and security](../workflows/approvals-and-security.md).
 

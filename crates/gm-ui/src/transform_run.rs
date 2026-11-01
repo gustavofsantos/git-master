@@ -220,6 +220,8 @@ mod tests {
             error: error.map(str::to_owned),
             warnings: Vec::new(),
             source: String::new(),
+            reviewed: false,
+            auto_approve: false,
         }
     }
 

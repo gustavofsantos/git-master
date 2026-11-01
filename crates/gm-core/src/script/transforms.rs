@@ -50,12 +50,6 @@ pub fn fingerprint(head: Option<&str>, staged_diff: &str) -> Fingerprint {
     }
 }
 
-/// The notice of a transform that is not reviewed: it does not run (the text `WF3a` shows).
-#[must_use]
-pub fn unreviewed(name: &str, on: &str) -> String {
-    format!("{name} did not run on {on}: review it first.")
-}
-
 /// The value of a field while its transforms run in sequence, and what they said.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Sequence {
@@ -231,7 +225,8 @@ mod tests {
 
     #[test]
     fn notices_are_taken_once() {
-        let mut seq = Sequence::new("").skipped(unreviewed("llm", "transform.commit_message"));
+        let mut seq = Sequence::new("")
+            .skipped("llm did not run on transform.commit_message: review it first.".to_owned());
         assert_eq!(
             seq.take_notices(),
             ["llm did not run on transform.commit_message: review it first."]

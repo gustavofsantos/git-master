@@ -11,7 +11,7 @@ Workflows can change your repository, so GitMaster decides what a run may do on 
 
 Each run records who started it. The Runs tab shows the starter for every run.
 
-> **Planned.** Event runs and agent runs are not available yet, because nothing starts them. Every run is started by you.
+> **Planned.** Agent runs are not available yet, because nothing starts them. The other runs are started by you or by an event.
 
 | Starter | Shown as | Started by |
 |---|---|---|
@@ -35,7 +35,7 @@ Every action has one effect level. The level tells you whether the action can ch
 
 ## Rules for applying actions
 
-> **Planned.** The event and agent columns, and the `ctx.push.lease` row, are not available yet.
+> **Planned.** The agent column and the `ctx.push.lease` row are not available yet.
 
 The table shows what happens to an `apply` action, depending on who started the run.
 
@@ -51,7 +51,7 @@ A script can take a value from the output of a program and pass it to a change. 
 
 ## Review by hash
 
-> **Planned.** Automatic approval, and the review rules of event and agent runs, are not available yet.
+> **Planned.** The review rules of agent runs are not available yet.
 
 GitMaster identifies each version of a script by the hash of its text.
 
