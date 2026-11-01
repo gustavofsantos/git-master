@@ -19,7 +19,7 @@ Source: `~/Projects/rvw` (Rust + GPUI review hub by the same author). Read on 20
 
 ## Disk use of the build
 
-A debug build of this workspace is large: before the profile below, `target/debug` was about 5 GB and the debug binary 750 MB, and every worktree has its own `target/`, so a few worktrees fill a disk. What to do, in order of effect:
+A debug build of this workspace is large: before the profile below, `target/debug` held 14 GB after a full `cargo test --workspace` and the debug binary was 750 MB; with it, the same build is 4.3 GB, and every worktree has its own `target/`, so a few worktrees fill a disk. What to do, in order of effect:
 
 - **Slim debug info (in `Cargo.toml`).** `[profile.dev]` uses `debug = "line-tables-only"` and the dependencies use `debug = false`: backtraces and panics still show file and line, a debugger no longer sees local variables. Set `CARGO_PROFILE_DEV_DEBUG=2` for one session when you need them.
 - **Share one target directory across worktrees.** Put `export CARGO_TARGET_DIR=$HOME/.cache/gitmaster-target` in your shell profile. The dependencies (gpui, gpui-component, tree-sitter, Luau, SQLite: most of the build) compile once and every worktree reuses them; only the workspace crates rebuild when you change worktree. Builds in different worktrees take Cargo's lock in turn. `make`, `scripts/ui-smoke.sh` and `make install` honour the variable. Do not set it in the repository: a path in `.cargo/config.toml` binds every contributor and CI.

@@ -55,3 +55,12 @@ pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"   # fallible fns return the crate's one documented error type
 must_use_candidate = "allow"   # noisy on query helpers
 assert_is_empty = "allow"      # assert!(x.is_empty()) reads fine in tests
+
+# Disk use (design/lessons.md "Disk use of the build"): line tables keep file and line in
+# backtraces and panics; full debug info for every dependency is what made `target/debug` large.
+# Set CARGO_PROFILE_DEV_DEBUG=2 for a session that needs a debugger to see local variables.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
