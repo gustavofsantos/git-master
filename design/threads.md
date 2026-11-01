@@ -518,7 +518,7 @@ A working-tree snapshot at `UserPromptSubmit` and at `Stop` through the temporar
 
 ## Graph, provenance and labels (D143 to D146)
 
-Decided by the author on 2026-10-31 as **proposed** (D143 to D146); Q34 is answered (N = 3, see `decisions.md`). The user-facing behavior is in `docs/guide/threads.md` and `docs/reference/mcp-tools.md`, marked `Planned`. This section is the build plan.
+Decided by the author on 2026-10-31 (D143 to D146); Q34 is answered (N = 3, see `decisions.md`). The user-facing behavior is in `docs/guide/threads.md` and `docs/reference/mcp-tools.md`, marked `Planned`. This section is the build plan.
 
 ### Edges
 
