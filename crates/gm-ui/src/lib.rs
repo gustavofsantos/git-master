@@ -28,6 +28,7 @@ mod history_graph;
 mod history_scope;
 mod hook_run;
 mod icon;
+mod label_curate;
 mod labels_page;
 mod local_review;
 mod markdown;

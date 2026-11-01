@@ -19,6 +19,7 @@ use crate::history_graph::{GraphLayout, StackMarks};
 use crate::history_scope::ScopeChoice;
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
+use crate::label_curate::LabelWrites;
 use crate::labels_page::LabelsPage;
 use crate::local_review::LocalReview;
 use crate::merged_branches::Merging;
@@ -123,6 +124,8 @@ pub struct Model {
     pub thread_copy: MarkdownCopy,
     /// The write of a thread's curation in flight, and its outcome (T6).
     pub thread_work: ThreadWork,
+    /// The write of a label in flight, and its outcome (P4).
+    pub label_writes: LabelWrites,
     /// Quick Open: its query, the search in flight and the last answer (N1).
     pub quick_open: QuickOpen,
     /// The Code page: the folder tree and the file viewer (N2).
@@ -720,6 +723,13 @@ impl Model {
                 id, state, detail, ..
             } if self.thread_work.owns(id) => {
                 self.thread_work.settle(state, detail);
+                None
+            }
+            // A label write's outcome belongs to its dialog, or to the status bar (P4).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.label_writes.owns(id) => {
+                self.label_writes.settle(state, detail);
                 None
             }
             // A detached checkout's outcome belongs to its message, not to the status bar (B3).

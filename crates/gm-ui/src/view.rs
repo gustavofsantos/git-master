@@ -19,8 +19,8 @@ use gpui::{
 };
 
 use crate::action_registry::{
-    self, Action, Args, CommentSpot, Context as ActionContext, Effect, HookCtx, Reason, ReviewCtx,
-    ThreadRef, WorkflowCtx,
+    self, Action, Args, CommentSpot, Context as ActionContext, Effect, HookCtx, LabelRef, Reason,
+    ReviewCtx, ThreadRef, WorkflowCtx,
 };
 use crate::app_settings::{self, AppSettings};
 use crate::avatar::Avatars;
@@ -212,6 +212,10 @@ pub struct StatusView {
     pub(crate) thread_field: Option<FieldDialog>,
     /// The confirmation of a thread delete or of a scrub, while it is open (T6).
     pub(crate) thread_confirm: Option<ConfirmDialog>,
+    /// The New Label or Rename Label dialog, while it is open (P4).
+    pub(crate) label_form: Option<crate::shell_labels::LabelForm>,
+    /// The confirmation of a label delete, while it is open (P4).
+    pub(crate) label_confirm: Option<crate::shell_labels::LabelConfirm>,
     /// The Threads settings dialog, while it is open (T7).
     pub(crate) threads_settings: Option<ThreadsSettingsDialog>,
     /// The message shown when a stash apply or pop, or a detached checkout, was not done.
@@ -454,6 +458,8 @@ impl StatusView {
             drop_stash_dialog: None,
             thread_field: None,
             thread_confirm: None,
+            label_form: None,
+            label_confirm: None,
             threads_settings: None,
             message_dialog: None,
             merged_dialog: None,
@@ -702,6 +708,9 @@ impl StatusView {
         }
         if let Some(outcome) = self.model.thread_work.take() {
             self.on_thread_work(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.label_writes.take() {
+            self.on_label_write(outcome, window, cx);
         }
         if let Some(outcome) = self.model.stash_drop.take() {
             self.on_stash_dropped(outcome, window, cx);
@@ -1242,6 +1251,7 @@ impl StatusView {
                 self.open_delete_thread_dialog(&uid, window, cx);
             }
             Ok(Effect::OpenScrubDialog) => self.open_scrub_dialog(window, cx),
+            Ok(Effect::OpenLabelDialog(dialog)) => self.open_label_dialog(dialog, window, cx),
             Ok(Effect::ShowThreadsFor(path)) => self.show_threads_for(&path, window, cx),
             Ok(Effect::OpenThreadsSettings) => self.open_threads_settings(window, cx),
             Ok(Effect::ShowWorkflows) => self.show_workflows(cx),
@@ -1379,6 +1389,11 @@ impl StatusView {
                     uid: &thread.uid,
                     starred: thread.starred,
                 }),
+            selected_label: self.model.labels.selected_label().map(|label| LabelRef {
+                id: label.id,
+                name: &label.name,
+                attachments: label.attachments,
+            }),
             busy: self.busy_reason(),
             remote_running: self.model.remote.in_flight().is_some(),
             entries: self.model.entries(),
@@ -1753,6 +1768,7 @@ impl StatusView {
         layers.extend(self.new_branch_layer(window, cx));
         layers.extend(self.stash_layers(window, cx));
         layers.extend(self.thread_layers(window, cx));
+        layers.extend(self.label_layers(window, cx));
         layers.extend(self.threads_settings_layer(window, cx));
         layers.extend(self.review_composer_layer(window, cx));
         layers.extend(self.workflow_inputs_layer(window, cx));

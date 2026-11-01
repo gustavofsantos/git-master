@@ -50,13 +50,22 @@ pub(crate) enum Target {
         title: String,
         starred: bool,
     },
+    /// A label row of the Labels page, with its name and attachment count (P4).
+    Label {
+        id: i64,
+        name: String,
+        attachments: u32,
+    },
 }
 
 impl Target {
     /// The name the menu's question uses for what it was opened on.
     fn subject(&self) -> String {
         match self {
-            Self::Branch(name) | Self::File(name) | Self::Worktree(name) => name.clone(),
+            Self::Branch(name)
+            | Self::File(name)
+            | Self::Worktree(name)
+            | Self::Label { name, .. } => name.clone(),
             Self::Stash { index, .. } => stashes::label(*index),
             Self::ReflogEntry { index, .. } => reflog::label(*index),
             Self::Thread { title, .. } | Self::ThreadMore { title, .. } => title.clone(),
@@ -202,6 +211,23 @@ pub(crate) fn thread_more_items(uid: &str, starred: bool, ctx: &ActionContext<'_
         item(Action::ThreadCollapseAll, 2),
         item(Action::ThreadDelete, 3),
     ]
+}
+
+/// The menu of a label row: rename, then delete in red. Delete opens its confirmation,
+/// which says how many attachments go with the label.
+pub(crate) fn label_items(
+    id: i64,
+    name: &str,
+    attachments: u32,
+    ctx: &ActionContext<'_>,
+) -> Vec<Item> {
+    let target = Args::Label {
+        id,
+        name: name.to_owned(),
+        attachments,
+    };
+    let item = |action, group| Item::new(action, target.clone(), group, ctx);
+    vec![item(Action::LabelRename, 0), item(Action::LabelDelete, 1)]
 }
 
 /// The menu of a stash row: apply and pop, then drop in its own group. Drop
@@ -387,6 +413,26 @@ impl StatusView {
         );
     }
 
+    /// Opens the menu of the label row `id`, under the pointer (P4).
+    pub(crate) fn open_label_menu(
+        &mut self,
+        id: i64,
+        name: &str,
+        attachments: u32,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_menu(
+            Target::Label {
+                id,
+                name: name.to_owned(),
+                attachments,
+            },
+            position,
+            cx,
+        );
+    }
+
     /// Opens the menu of the Reflog row `index` that names the commit `oid`, under the pointer (B3).
     pub(crate) fn open_reflog_menu(
         &mut self,
@@ -486,6 +532,11 @@ impl StatusView {
             Target::ReflogEntry { oid, .. } => reflog_items(oid, &ctx),
             Target::Thread { uid, starred, .. } => thread_items(uid, *starred, &ctx),
             Target::ThreadMore { uid, starred, .. } => thread_more_items(uid, *starred, &ctx),
+            Target::Label {
+                id,
+                name,
+                attachments,
+            } => label_items(*id, name, *attachments, &ctx),
         }
     }
 
@@ -688,6 +739,7 @@ mod tests {
             repo_open: true,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
@@ -1055,6 +1107,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&[])
@@ -1161,5 +1214,23 @@ mod tests {
         }
         // Copying the hash runs even while the repository is busy.
         assert_eq!(find(&items, Action::CopyCommitHash).state, Ok(()));
+    }
+
+    #[test]
+    fn a_label_row_menu_renames_or_deletes_that_label_and_deletes_in_red() {
+        let items = label_items(5, "flaky", 3, &ctx(&[]));
+        let labels: Vec<&str> = items.iter().map(Item::label).collect();
+        assert_eq!(labels, vec!["Rename Label…", "Delete Label…"]);
+        assert_eq!(
+            items[0].args,
+            Args::Label {
+                id: 5,
+                name: "flaky".into(),
+                attachments: 3,
+            }
+        );
+        assert_eq!(items[0].state, Ok(()));
+        assert!(items[1].destructive());
+        assert_eq!(sections(&items).len(), 2, "delete sits in its own group");
     }
 }

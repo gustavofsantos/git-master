@@ -453,7 +453,7 @@ impl StatusView {
 }
 
 /// The dialog's panel at `left`, before its content.
-fn panel_base(left: f32) -> Div {
+pub(crate) fn panel_base(left: f32) -> Div {
     div()
         .absolute()
         .top(px(TOP))
@@ -472,7 +472,7 @@ fn panel_base(left: f32) -> Div {
 }
 
 /// The area outside a dialog: a click there closes it.
-fn dialog_backdrop(
+pub(crate) fn dialog_backdrop(
     cx: &Context<StatusView>,
     close: fn(&mut StatusView, &mut Window, &mut Context<StatusView>),
 ) -> Div {
@@ -483,13 +483,13 @@ fn dialog_backdrop(
 }
 
 /// The left edge that centres a dialog of `WIDTH` in the window.
-fn dialog_left(window: &Window) -> f32 {
+pub(crate) fn dialog_left(window: &Window) -> f32 {
     let viewport = window.viewport_size();
     ((f32::from(viewport.width) - WIDTH) / 2.).max(0.)
 }
 
 /// The refusal or failure a dialog shows, one line each in error colour.
-fn error_lines(error: Option<&str>) -> Option<Div> {
+pub(crate) fn error_lines(error: Option<&str>) -> Option<Div> {
     error.map(|error| {
         div()
             .flex()
@@ -502,7 +502,7 @@ fn error_lines(error: Option<&str>) -> Option<Div> {
 
 /// Cancel and the confirm button. The confirm button is red for a delete and
 /// waits while a write runs.
-fn buttons(
+pub(crate) fn buttons(
     ids: (&'static str, &'static str),
     label: &'static str,
     danger: bool,

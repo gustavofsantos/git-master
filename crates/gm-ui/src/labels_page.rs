@@ -150,6 +150,21 @@ impl LabelsPage {
         self.selected
     }
 
+    /// The selected label as the loaded list has it, when the list has it.
+    #[must_use]
+    pub fn selected_label(&self) -> Option<&Label> {
+        let id = self.selected?;
+        self.labels.iter().find(|label| label.id == id)
+    }
+
+    /// Drops the selection when it is label `id`: the label is being deleted, so no
+    /// read of it follows the change.
+    pub fn forget(&mut self, id: i64) {
+        if self.selected == Some(id) {
+            self.clear_selection();
+        }
+    }
+
     /// Records that the detail read `id` is in flight.
     pub fn request_detail(&mut self, id: OperationId) {
         self.detail_pending = Some(id);
@@ -712,6 +727,24 @@ mod tests {
         assert!(matches!(rows[1], DetailRow::Attachment(a) if a.reference == "t-1"));
         assert_eq!(rows[2], DetailRow::Heading(AttachKind::Commit));
         assert!(matches!(rows[3], DetailRow::Attachment(a) if a.reference == "abc"));
+    }
+
+    #[test]
+    fn the_selected_label_is_the_listed_one_and_forget_drops_it() {
+        let mut page = LabelsPage::default();
+        page.request_list(OperationId(1));
+        page.listed(OperationId(1), vec![label(5, "flaky"), label(6, "perf")]);
+        assert_eq!(page.selected_label(), None);
+        page.select(6);
+        assert_eq!(page.selected_label().map(|l| l.name.as_str()), Some("perf"));
+        page.forget(5);
+        assert_eq!(page.selected(), Some(6), "another label stays selected");
+        page.request_detail(OperationId(2));
+        assert!(page.detail_read(OperationId(2), detail(6, Vec::new())));
+        page.forget(6);
+        assert_eq!(page.selected(), None);
+        assert!(page.detail().is_none());
+        assert_eq!(page.selected_label(), None);
     }
 
     #[test]

@@ -71,6 +71,8 @@ pub enum ArgKind {
     ReviewComment,
     /// The thread the Threads page has selected, or the thread a row names (T6).
     Thread,
+    /// The label the Labels page has selected, or the label a row names (P4).
+    Label,
 }
 
 /// The target of one run. Its kind must match the action's `ArgKind`.
@@ -107,6 +109,13 @@ pub enum Args {
     Thread {
         uid: String,
         starred: bool,
+    },
+    /// A label, by its id, with its name and attachment count as the list shows them (P4).
+    /// The count is what the delete confirmation says.
+    Label {
+        id: i64,
+        name: String,
+        attachments: u32,
     },
 }
 
@@ -254,6 +263,8 @@ pub enum Effect {
     ShowThreadsFor(String),
     /// Opens the Threads settings dialog (T7).
     OpenThreadsSettings,
+    /// Opens one of the Labels page's dialogs (P4).
+    OpenLabelDialog(LabelDialog),
     /// Writes the open workflow's buffer to its file.
     SaveWorkflow,
     /// Drops the open workflow's unsaved changes.
@@ -378,6 +389,8 @@ pub struct Context<'a> {
     pub selected_file: Option<&'a str>,
     /// The thread selected on the Threads page, which the thread actions take (T6).
     pub selected_thread: Option<ThreadRef<'a>>,
+    /// The label selected on the Labels page, which the label actions take (P4).
+    pub selected_label: Option<LabelRef<'a>>,
     /// The branch stacks and the branch whose parent is being chosen (D138).
     pub stack: StackCtx<'a>,
 }
@@ -399,8 +412,31 @@ pub struct ThreadRef<'a> {
     pub starred: bool,
 }
 
+/// The dialog a label action opens, with what it names (P4). Nothing is sent before its button.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LabelDialog {
+    /// The New Label dialog: a name, a description and a colour.
+    New,
+    /// The Rename Label dialog of label `id`, prefilled with its name.
+    Rename { id: i64, name: String },
+    /// The confirmation that deletes label `id`, which has `attachments` rows.
+    Delete {
+        id: i64,
+        name: String,
+        attachments: u32,
+    },
+}
+
+/// The label the Labels page has selected: its id, its name and its attachment count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LabelRef<'a> {
+    pub id: i64,
+    pub name: &'a str,
+    pub attachments: u32,
+}
+
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 96] = [
+const SPECS: [Spec; 99] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1067,6 +1103,27 @@ const SPECS: [Spec; 96] = [
         ArgKind::None,
         Category::Repository,
     ),
+    spec(
+        "labels.new",
+        "New Label…",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "labels.rename",
+        "Rename Label…",
+        None,
+        ArgKind::Label,
+        Category::Repository,
+    ),
+    spec(
+        "labels.delete",
+        "Delete Label…",
+        None,
+        ArgKind::Label,
+        Category::Repository,
+    ),
 ];
 
 const fn spec(
@@ -1185,6 +1242,9 @@ pub enum Action {
     ThreadScrub,
     ShowThreadsForFile,
     ThreadsSettings,
+    LabelNew,
+    LabelRename,
+    LabelDelete,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1249,6 +1309,59 @@ fn resolve_conflict_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
 
 /// The reason of a thread action when no thread is selected.
 pub(crate) const SELECT_THREAD: Reason = "Select a thread first.";
+/// The reason of a label action when no label is selected.
+pub(crate) const SELECT_LABEL: Reason = "Select a label first.";
+
+/// The target of a label action: the label the Labels page has selected, or the one a row names.
+#[must_use]
+pub(crate) fn label_args(label: LabelRef<'_>) -> Args {
+    Args::Label {
+        id: label.id,
+        name: label.name.to_owned(),
+        attachments: label.attachments,
+    }
+}
+
+/// The rule of New Label: a repository is open. The dialog takes no target.
+fn label_new_rule(ctx: &Context<'_>) -> Result<(), Reason> {
+    repository_open(ctx)
+}
+
+/// The rule of Rename and Delete Label: a repository is open and a label is named.
+fn label_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    repository_open(ctx)?;
+    match args {
+        Args::Label { .. } => Ok(()),
+        _ => Err(SELECT_LABEL),
+    }
+}
+
+/// What the label actions do with their target: each opens its dialog, which asks before
+/// anything is sent. Nothing is sent from the registry.
+fn label_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
+    Ok(match (action, args) {
+        (Action::LabelNew, _) => Effect::OpenLabelDialog(LabelDialog::New),
+        (Action::LabelRename, Args::Label { id, name, .. }) => {
+            Effect::OpenLabelDialog(LabelDialog::Rename {
+                id: *id,
+                name: name.clone(),
+            })
+        }
+        (
+            Action::LabelDelete,
+            Args::Label {
+                id,
+                name,
+                attachments,
+            },
+        ) => Effect::OpenLabelDialog(LabelDialog::Delete {
+            id: *id,
+            name: name.clone(),
+            attachments: *attachments,
+        }),
+        _ => return Err(NOT_AVAILABLE),
+    })
+}
 
 /// The target of a thread action: the thread the page has selected, or the one a row names.
 #[must_use]
@@ -1400,7 +1513,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 96] = [
+    pub const ALL: [Action; 99] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1497,6 +1610,9 @@ impl Action {
         Action::ThreadScrub,
         Action::ShowThreadsForFile,
         Action::ThreadsSettings,
+        Action::LabelNew,
+        Action::LabelRename,
+        Action::LabelDelete,
     ];
 
     #[must_use]
@@ -1563,6 +1679,7 @@ impl Action {
                 | Action::StashDrop
                 | Action::DeleteReviewComment
                 | Action::ThreadDelete
+                | Action::LabelDelete
         )
     }
 
@@ -1639,6 +1756,14 @@ impl Action {
         )
     }
 
+    /// Whether the action is one of the Labels page's write actions (P4), which `label_effect` plans.
+    fn is_label_action(self) -> bool {
+        matches!(
+            self,
+            Action::LabelNew | Action::LabelRename | Action::LabelDelete
+        )
+    }
+
     /// Whether the action is one of the Threads page's curation actions (T6), which `thread_effect` plans.
     fn is_thread_action(self) -> bool {
         matches!(
@@ -1689,6 +1814,9 @@ impl Action {
                 | Action::ThreadDelete
                 | Action::ThreadScrub
                 | Action::ThreadsSettings
+                | Action::LabelNew
+                | Action::LabelRename
+                | Action::LabelDelete
         )
     }
 
@@ -1703,6 +1831,10 @@ impl Action {
         // A thread action run with no thread (the palette, with none selected) says so.
         if self.spec().args == ArgKind::Thread && matches!(args, Args::None) {
             return Err(SELECT_THREAD);
+        }
+        // A label action run with no label (the palette, with none selected) says so.
+        if self.spec().args == ArgKind::Label && matches!(args, Args::None) {
+            return Err(SELECT_LABEL);
         }
         if !self.takes(args) {
             return Err("No target for this action");
@@ -1731,6 +1863,8 @@ impl Action {
             | Action::ShowThreads
             | Action::ShowLabels
             | Action::ShowLocalReview => repository_open(ctx),
+            Action::LabelNew => label_new_rule(ctx),
+            Action::LabelRename | Action::LabelDelete => label_rule(args, ctx),
             Action::CheckoutBranch => {
                 idle(ctx)?;
                 match args {
@@ -1896,6 +2030,7 @@ impl Action {
             ) => hook_effect(self, ctx)?,
             (action, _) if action.is_workflow_rule() => workflow_effect(action, args, ctx)?,
             (action, _) if action.is_thread_action() => thread_effect(action, args)?,
+            (action, _) if action.is_label_action() => label_effect(action, args)?,
             // Only reached when `enabled` said Ok, which no placeholder does.
             _ => return Err(NOT_AVAILABLE),
         })
@@ -1926,6 +2061,7 @@ impl Action {
                 | (ArgKind::Stash, Args::Stash { .. })
                 | (ArgKind::ReviewComment, Args::ReviewComment(_))
                 | (ArgKind::Thread, Args::Thread { .. })
+                | (ArgKind::Label, Args::Label { .. })
         )
     }
 }
@@ -2736,6 +2872,7 @@ mod tests {
             repo_open: true,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
@@ -2899,6 +3036,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&entries, "")
         };
@@ -2974,6 +3112,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3031,6 +3170,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3205,6 +3345,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3276,6 +3417,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&entries, "")
@@ -3309,6 +3451,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&entries, "")
@@ -3334,6 +3477,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&[], "")
@@ -3377,6 +3521,7 @@ mod tests {
                 Action::StashDrop,
                 Action::DeleteReviewComment,
                 Action::ThreadDelete,
+                Action::LabelDelete,
             ]
         );
     }
@@ -3399,6 +3544,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3588,6 +3734,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3721,6 +3868,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
         };
@@ -3785,6 +3933,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3805,6 +3954,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3829,6 +3979,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3865,6 +4016,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3895,6 +4047,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3910,6 +4063,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3933,6 +4087,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3956,6 +4111,126 @@ mod tests {
             "the palette lists it"
         );
         assert_eq!(Action::from_id("labels.show"), Some(Action::ShowLabels));
+    }
+
+    fn label_ctx(selected: Option<LabelRef<'_>>) -> Context<'_> {
+        Context {
+            selected_label: selected,
+            ..ctx(&[], "")
+        }
+    }
+
+    #[test]
+    fn the_label_actions_have_their_ids_titles_targets_and_no_keys() {
+        let expected = [
+            (Action::LabelNew, "labels.new", "New Label…", ArgKind::None),
+            (
+                Action::LabelRename,
+                "labels.rename",
+                "Rename Label…",
+                ArgKind::Label,
+            ),
+            (
+                Action::LabelDelete,
+                "labels.delete",
+                "Delete Label…",
+                ArgKind::Label,
+            ),
+        ];
+        for (action, id, title, args) in expected {
+            assert_eq!(action.id(), id);
+            assert_eq!(action.spec().title, title);
+            assert_eq!(action.spec().args, args, "{action:?}");
+            assert_eq!(action.spec().category, Category::Repository);
+            assert_eq!(action.spec().shortcut, None, "{action:?}");
+            assert!(action.available());
+            assert!(action.listed_in_palette());
+            assert!(Action::ALL.contains(&action));
+            assert_eq!(Action::from_id(id), Some(action));
+        }
+        assert!(Action::LabelNew.opens_dialog());
+        assert!(Action::LabelRename.opens_dialog());
+        assert!(Action::LabelDelete.opens_dialog());
+        assert!(Action::LabelDelete.destructive());
+        assert!(!Action::LabelRename.destructive());
+    }
+
+    #[test]
+    fn new_label_needs_an_open_repository_and_opens_its_dialog() {
+        assert_eq!(
+            Action::LabelNew.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::OpenLabelDialog(LabelDialog::New))
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::LabelNew.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn rename_and_delete_act_on_the_selected_label_or_say_none_is_selected() {
+        let none = label_ctx(None);
+        assert_eq!(
+            Action::LabelRename.enabled(&Args::None, &none),
+            Err("Select a label first.")
+        );
+        assert_eq!(
+            Action::LabelDelete.plan(&Args::None, &none),
+            Err("Select a label first.")
+        );
+        let selected = label_ctx(Some(LabelRef {
+            id: 5,
+            name: "flaky",
+            attachments: 3,
+        }));
+        let target = label_args(LabelRef {
+            id: 5,
+            name: "flaky",
+            attachments: 3,
+        });
+        assert_eq!(
+            Action::LabelRename.plan(&target, &selected),
+            Ok(Effect::OpenLabelDialog(LabelDialog::Rename {
+                id: 5,
+                name: "flaky".into(),
+            }))
+        );
+        assert_eq!(
+            Action::LabelDelete.plan(&target, &selected),
+            Ok(Effect::OpenLabelDialog(LabelDialog::Delete {
+                id: 5,
+                name: "flaky".into(),
+                attachments: 3,
+            }))
+        );
+        let closed = Context {
+            repo_open: false,
+            ..label_ctx(None)
+        };
+        assert_eq!(
+            Action::LabelDelete.enabled(&target, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn the_label_actions_take_only_a_label_target() {
+        let target = Args::Label {
+            id: 1,
+            name: "a".into(),
+            attachments: 0,
+        };
+        assert!(Action::LabelRename.takes(&target));
+        assert!(!Action::LabelRename.takes(&Args::File("a".into())));
+        assert!(!Action::LabelNew.takes(&target));
+        assert_eq!(
+            Action::LabelRename.enabled(&Args::File("a".into()), &label_ctx(None)),
+            Err("No target for this action")
+        );
     }
 
     #[test]
@@ -4006,6 +4281,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
         };
@@ -4127,6 +4403,7 @@ mod tests {
                 repo_open: false,
                 selected_file: None,
                 selected_thread: None,
+                selected_label: None,
                 stack: crate::action_registry::StackCtx::default(),
                 root: None,
                 ..with_stashes(&stashes)
@@ -4230,6 +4507,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4517,6 +4795,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
         };
@@ -4669,6 +4948,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
         };
@@ -4809,6 +5089,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(lines("a.txt", Some((1, 1))), None)
         };
@@ -4918,6 +5199,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(CommentSpot::Nothing, Some(&listed))
         };
@@ -4969,6 +5251,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -5036,6 +5319,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             ..open_ctx(&entries, Some(&current))
         };

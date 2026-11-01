@@ -10,19 +10,26 @@ use std::time::Duration;
 use gm_schema::threads::{AttachKind, Label, LabelAttachment};
 use gm_schema::{Actor, CommandKind, Event};
 use gpui::{
-    AnyElement, Context, Div, Entity, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
-    Stateful, Subscription, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    AnyElement, App, Context, Div, Entity, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
+    MouseDownEvent, Stateful, Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
+    uniform_list,
 };
 
+use crate::action_registry::{Action, Args, LabelDialog, LabelRef, label_args};
 use crate::icon::{self, Icon};
+use crate::label_curate::{self, Outcome, Write};
 use crate::labels_page::{self, DetailRow, Empty};
 use crate::shell_history::now_secs;
 use crate::shell_threads::chip;
-use crate::text_area::TextArea;
+use crate::text_area::{Newline, TextArea, TextAreaEvent};
 use crate::text_search::DEBOUNCE_MS;
 use crate::theme;
+use crate::thread_dialogs::{buttons, dialog_backdrop, dialog_left, error_lines, panel_base};
 use crate::threads;
 use crate::view::{Screen, StatusView};
+use crate::window_chrome;
+use crate::worktree_create::field_row;
+use crate::{FocusNext, FocusPrev};
 
 /// The left column's width: the filter box and the labels. Fixed, so the detail keeps the rest.
 const LIST_WIDTH: f32 = 280.;
@@ -174,9 +181,29 @@ impl StatusView {
             .child(div().font_weight(FontWeight::MEDIUM).child("Labels"))
             .child(
                 div()
-                    .text_xs()
-                    .text_color(theme::muted())
-                    .child(labels_page::count_label(page.labels().len())),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .child(labels_page::count_label(page.labels().len())),
+                    )
+                    .child(self.label_action_button("labels-new", Action::LabelNew, Args::None, cx))
+                    .child(self.label_action_button(
+                        "labels-rename",
+                        Action::LabelRename,
+                        self.selected_label_args(),
+                        cx,
+                    ))
+                    .child(self.label_action_button(
+                        "labels-delete",
+                        Action::LabelDelete,
+                        self.selected_label_args(),
+                        cx,
+                    )),
             );
         let body = div()
             .flex_1()
@@ -337,6 +364,459 @@ impl StatusView {
     }
 }
 
+/// The New Label or Rename Label dialog while it is open: its fields and the error the
+/// last try got. A rename shows only the name; a new label also takes a description and a colour.
+pub(crate) struct LabelForm {
+    /// The label being renamed; `None` for a new label.
+    pub(crate) editing: Option<i64>,
+    pub(crate) name: Entity<TextArea>,
+    pub(crate) description: Entity<TextArea>,
+    pub(crate) colour: Entity<TextArea>,
+    pub(crate) error: Option<String>,
+    /// The text the dialog last saw. The fields notify on every caret blink, so an error is
+    /// cleared only when a field really changed.
+    seen: String,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl LabelForm {
+    /// The fields Tab moves between, in order: the name alone for a rename.
+    fn visible_fields(&self) -> Vec<Entity<TextArea>> {
+        if self.editing.is_some() {
+            vec![self.name.clone()]
+        } else {
+            vec![
+                self.name.clone(),
+                self.description.clone(),
+                self.colour.clone(),
+            ]
+        }
+    }
+
+    fn text(&self, cx: &App) -> String {
+        [&self.name, &self.description, &self.colour]
+            .map(|field| field.read(cx).text().to_owned())
+            .join("\n")
+    }
+}
+
+/// The confirmation of a label delete while it is open: its question and lines, and the
+/// error the last try got.
+pub(crate) struct LabelConfirm {
+    pub(crate) id: i64,
+    pub(crate) title: String,
+    pub(crate) lines: Vec<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) focus: FocusHandle,
+}
+
+impl StatusView {
+    /// The page's header buttons and the label rows' menus: each runs its action on the
+    /// label it names. A button that cannot run now stays dimmed, and its hint gives the reason.
+    fn label_action_button(
+        &self,
+        id: &'static str,
+        action: Action,
+        args: Args,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let state = action.enabled(&args, &self.action_context(""));
+        let button = div()
+            .id(id)
+            .h(px(26.))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(theme::button_border())
+            .text_xs()
+            .child(action.spec().title);
+        match state {
+            Ok(()) => button.cursor_pointer().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    this.run_action(action, &args, window, cx);
+                }),
+            ),
+            Err(reason) => button
+                .text_color(theme::muted())
+                .tooltip(window_chrome::hint(reason)),
+        }
+    }
+
+    /// The label the page has selected, as the actions take it; `Args::None` when none is selected.
+    fn selected_label_args(&self) -> Args {
+        self.model
+            .labels
+            .selected_label()
+            .map_or(Args::None, |label| {
+                label_args(LabelRef {
+                    id: label.id,
+                    name: &label.name,
+                    attachments: label.attachments,
+                })
+            })
+    }
+
+    /// Opens the dialog a label action names. Nothing is sent here.
+    pub(crate) fn open_label_dialog(
+        &mut self,
+        dialog: LabelDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match dialog {
+            LabelDialog::New => self.open_label_form(None, "", window, cx),
+            LabelDialog::Rename { id, name } => {
+                self.open_label_form(Some(id), &name, window, cx);
+            }
+            LabelDialog::Delete {
+                id,
+                name,
+                attachments,
+            } => self.open_label_confirm(id, &name, attachments, window, cx),
+        }
+    }
+
+    /// Opens the New Label dialog (`editing` is `None`) or the Rename Label dialog of
+    /// label `editing`, with its name in the field.
+    fn open_label_form(
+        &mut self,
+        editing: Option<i64>,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name_field = cx.new(|cx| TextArea::new("Label name", cx).with_lines(1, 1));
+        let description =
+            cx.new(|cx| TextArea::new("What the label means (optional)", cx).with_lines(1, 1));
+        let colour = cx.new(|cx| TextArea::new("#rrggbb (optional)", cx).with_lines(1, 1));
+        name_field.update(cx, |area, cx| area.set_text(name, cx));
+        let mut subscriptions = Vec::new();
+        for field in [&name_field, &description, &colour] {
+            subscriptions.push(cx.observe(field, |this, _, cx| this.on_label_form_edited(cx)));
+            subscriptions.push(cx.subscribe_in(
+                field,
+                window,
+                |this, _, event: &TextAreaEvent, window, cx| {
+                    if *event == TextAreaEvent::Cancel {
+                        this.close_label_form(window, cx);
+                    }
+                },
+            ));
+        }
+        let mut form = LabelForm {
+            editing,
+            name: name_field.clone(),
+            description,
+            colour,
+            error: None,
+            seen: String::new(),
+            _subscriptions: subscriptions,
+        };
+        form.seen = form.text(cx);
+        self.label_form = Some(form);
+        name_field.update(cx, |area, cx| area.focus(window, cx));
+        cx.notify();
+    }
+
+    /// The text changed: the error of the last try goes, since it may be about the old text.
+    fn on_label_form_edited(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.label_form.as_ref() else {
+            return;
+        };
+        let text = form.text(cx);
+        if form.seen == text {
+            return;
+        }
+        if let Some(form) = self.label_form.as_mut() {
+            form.seen = text;
+            form.error = None;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn close_label_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.label_form.take().is_some() {
+            self.return_label_focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Puts the cursor back where a dialog was opened from: the filter on the Labels page.
+    fn return_label_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen == Screen::Labels {
+            self.labels_view
+                .query
+                .update(cx, |area, cx| area.focus(window, cx));
+        } else {
+            self.list_focus.focus(window);
+        }
+    }
+
+    /// Tab and Shift+Tab: the next or previous field of the dialog, wrapping around.
+    fn move_label_field(&self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = self.label_form.as_ref() else {
+            return;
+        };
+        let fields = form.visible_fields();
+        let current = fields
+            .iter()
+            .position(|area| area.read(cx).is_focused(window))
+            .unwrap_or(fields.len() - 1);
+        let next = if forward {
+            (current + 1) % fields.len()
+        } else {
+            (current + fields.len() - 1) % fields.len()
+        };
+        let target = fields[next].clone();
+        target.update(cx, |area, cx| area.focus(window, cx));
+    }
+
+    /// The button of the form: checks the fields with the rules of `label_curate`, then sends
+    /// the create or the rename with `Actor::Human`. A refusal stays in the dialog.
+    pub(crate) fn submit_label_form(&mut self, cx: &mut Context<Self>) {
+        if self.model.label_writes.is_pending() {
+            return;
+        }
+        let Some(form) = self.label_form.as_ref() else {
+            return;
+        };
+        let editing = form.editing;
+        let name = form.name.read(cx).text().to_owned();
+        let description = form.description.read(cx).text().to_owned();
+        let colour = form.colour.read(cx).text().to_owned();
+        let labels = self.model.labels.labels();
+        let planned = match editing {
+            Some(id) => label_curate::rename_label_command(id, &name, labels)
+                .map(|kind| (kind, Write::Rename)),
+            None => label_curate::new_label_command(&name, &description, &colour, labels)
+                .map(|kind| (kind, Write::Create)),
+        };
+        match planned {
+            Ok((kind, write)) => {
+                if let Some(form) = self.label_form.as_mut() {
+                    form.error = None;
+                }
+                self.send_label_write(kind, write, cx);
+            }
+            Err(reason) => {
+                if let Some(form) = self.label_form.as_mut() {
+                    form.error = Some(reason.to_owned());
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// Opens the confirmation that deletes label `id`. Nothing is sent until its button is pressed.
+    fn open_label_confirm(
+        &mut self,
+        id: i64,
+        name: &str,
+        attachments: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus = cx.focus_handle();
+        focus.focus(window);
+        self.label_confirm = Some(LabelConfirm {
+            id,
+            title: label_curate::delete_title(name),
+            lines: label_curate::delete_lines(attachments),
+            error: None,
+            focus,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn close_label_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.label_confirm.take().is_some() {
+            self.return_label_focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The delete button and Enter. The deleted label leaves the selection first, so no
+    /// read of it follows the change.
+    pub(crate) fn submit_label_confirm(&mut self, cx: &mut Context<Self>) {
+        if self.model.label_writes.is_pending() {
+            return;
+        }
+        let Some(confirm) = self.label_confirm.as_mut() else {
+            return;
+        };
+        confirm.error = None;
+        let id = confirm.id;
+        self.model.labels.forget(id);
+        self.send_label_write(label_curate::delete_command(id), Write::Delete, cx);
+    }
+
+    /// The Remove button of an attachment row: detaches it from `label`. A detach asks
+    /// nothing, since attaching it again restores it.
+    pub(crate) fn detach_label(
+        &mut self,
+        attachment: &LabelAttachment,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.label_writes.is_pending() {
+            self.notify_user("Wait for the last label change to finish.", cx);
+            return;
+        }
+        let kind = label_curate::detach_command(label, attachment);
+        self.send_label_write(kind, Write::Detach, cx);
+    }
+
+    /// Sends a label write with `Actor::Human` and tracks it until the engine settles it.
+    fn send_label_write(&mut self, kind: CommandKind, write: Write, cx: &mut Context<Self>) {
+        let id = self.engine.dispatch(Actor::Human, kind);
+        self.model.label_writes.start(id, write);
+        cx.notify();
+    }
+
+    /// Runs when the engine settles a label write. A success closes its dialog and says so;
+    /// a refusal stays in the open dialog, or else goes to the status bar.
+    pub(crate) fn on_label_write(
+        &mut self,
+        outcome: Outcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match outcome {
+            Outcome::Done(write) => {
+                let closed = match write {
+                    Write::Create | Write::Rename => self.label_form.take().is_some(),
+                    Write::Delete => self.label_confirm.take().is_some(),
+                    Write::Detach => false,
+                };
+                if closed {
+                    self.return_label_focus(window, cx);
+                }
+                self.notify_user(label_curate::done_notice(write), cx);
+            }
+            Outcome::Failed(message) => {
+                if let Some(form) = self.label_form.as_mut() {
+                    form.error = Some(message);
+                } else if let Some(confirm) = self.label_confirm.as_mut() {
+                    confirm.error = Some(message);
+                } else {
+                    self.notify_user(&message, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// The layers of the two label dialogs, or none while both are closed.
+    pub(crate) fn label_layers(&self, window: &Window, cx: &Context<Self>) -> Vec<Div> {
+        self.label_form_layer(window, cx)
+            .into_iter()
+            .chain(self.label_confirm_layer(window, cx))
+            .collect()
+    }
+
+    fn label_form_layer(&self, window: &Window, cx: &Context<Self>) -> Option<Div> {
+        let form = self.label_form.as_ref()?;
+        let outside = dialog_backdrop(cx, StatusView::close_label_form);
+        let left = dialog_left(window);
+        let editing = form.editing.is_some();
+        let pending = self.model.label_writes.is_pending();
+        let saving = self.model.label_writes.is_working(if editing {
+            Write::Rename
+        } else {
+            Write::Create
+        });
+        let title = if editing { "Rename Label" } else { "New Label" };
+        let confirm = match (saving, editing) {
+            (true, _) => "Saving…",
+            (false, true) => "Rename",
+            (false, false) => "Create",
+        };
+        let enter = cx.entity().downgrade();
+        let forward = enter.clone();
+        let backward = enter.clone();
+        let panel = panel_base(left)
+            .child(
+                div()
+                    .text_color(theme::text())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .child(field_row("NAME", form.name.clone()))
+            .children((!editing).then(|| field_row("DESCRIPTION", form.description.clone())))
+            .children((!editing).then(|| field_row("COLOUR", form.colour.clone())))
+            .children(error_lines(form.error.as_deref()))
+            .child(buttons(
+                ("label-form-cancel", "label-form-confirm"),
+                confirm,
+                false,
+                pending,
+                StatusView::close_label_form,
+                StatusView::submit_label_form,
+                cx,
+            ))
+            .capture_action(move |_: &FocusNext, window, cx| {
+                let _ = forward.update(cx, |this, cx| this.move_label_field(true, window, cx));
+                cx.stop_propagation();
+            })
+            .capture_action(move |_: &FocusPrev, window, cx| {
+                let _ = backward.update(cx, |this, cx| this.move_label_field(false, window, cx));
+                cx.stop_propagation();
+            })
+            // Enter sends: each field is one line.
+            .capture_action(move |_: &Newline, _, cx| {
+                let _ = enter.update(cx, StatusView::submit_label_form);
+                cx.stop_propagation();
+            });
+        Some(div().absolute().inset_0().child(outside).child(panel))
+    }
+
+    fn label_confirm_layer(&self, window: &Window, cx: &Context<Self>) -> Option<Div> {
+        let confirm = self.label_confirm.as_ref()?;
+        let outside = dialog_backdrop(cx, StatusView::close_label_confirm);
+        let left = dialog_left(window);
+        let pending = self.model.label_writes.is_pending();
+        let saving = self.model.label_writes.is_working(Write::Delete);
+        let label = if saving { "Working…" } else { "Delete label" };
+        let panel = panel_base(left)
+            .track_focus(&confirm.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "escape" => this.close_label_confirm(window, cx),
+                    "enter" => this.submit_label_confirm(cx),
+                    _ => {}
+                }
+            }))
+            .capture_action(|_: &FocusNext, _, cx| cx.stop_propagation())
+            .capture_action(|_: &FocusPrev, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .text_color(theme::text())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(confirm.title.clone()),
+            )
+            .children(confirm.lines.iter().map(|line| {
+                div()
+                    .text_sm()
+                    .text_color(theme::text())
+                    .child(line.clone())
+            }))
+            .children(error_lines(confirm.error.as_deref()))
+            .child(buttons(
+                ("label-confirm-cancel", "label-confirm-go"),
+                label,
+                true,
+                pending,
+                StatusView::close_label_confirm,
+                StatusView::submit_label_confirm,
+                cx,
+            ));
+        Some(div().absolute().inset_0().child(outside).child(panel))
+    }
+}
+
 /// The labels, read from the list as they are drawn. Each row selects its label.
 fn label_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<StatusView>) -> Div {
     div().flex_1().min_h(px(0.)).flex().flex_col().child(
@@ -377,6 +857,8 @@ fn label_row(
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
     let id = label.id;
+    let menu_name = label.name.clone();
+    let menu_attachments = label.attachments;
     let (origin, agent) = labels_page::origin_text(&label.origin);
     let mut row = div()
         .id(("label-row", index))
@@ -391,6 +873,12 @@ fn label_row(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| this.choose_label(id, cx)),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.open_label_menu(id, &menu_name, menu_attachments, event.position, cx);
+            }),
         );
     if selected {
         row = row.bg(theme::selected_row());
@@ -430,6 +918,12 @@ fn detail_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Sta
                       _window: &mut Window,
                       cx: &mut Context<StatusView>| {
                     let now = now_secs();
+                    let label = this
+                        .model
+                        .labels
+                        .detail()
+                        .map(|detail| detail.label.name.clone())
+                        .unwrap_or_default();
                     let rows = this.model.labels.detail_rows();
                     rows.get(range.clone())
                         .unwrap_or_default()
@@ -438,7 +932,8 @@ fn detail_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Sta
                         .map(|(row, index)| match row {
                             DetailRow::Heading(kind) => heading_row(*kind).into_any_element(),
                             DetailRow::Attachment(attachment) => {
-                                attachment_row(attachment, index, now, cx).into_any_element()
+                                attachment_row(attachment, index, now, &label, cx)
+                                    .into_any_element()
                             }
                         })
                         .collect::<Vec<_>>()
@@ -472,15 +967,20 @@ fn heading_row(kind: AttachKind) -> Div {
 }
 
 /// One attachment: its title, then who made it, when, and what is worth knowing about
-/// it (a commit's state, a file's old path). A thread row opens that thread.
+/// it (a commit's state, a file's old path). A thread row opens that thread. Its Remove
+/// button detaches it from `label`; an agent's attachment keeps the button in view, the
+/// others show it on hover.
 fn attachment_row(
     attachment: &LabelAttachment,
     index: usize,
     now: i64,
+    label: &str,
     cx: &mut Context<StatusView>,
 ) -> Stateful<Div> {
+    let group = format!("label-attachment-{index}");
     let mut row = div()
         .id(("label-attachment", index))
+        .group(group.clone())
         .h(px(DETAIL_ROW_HEIGHT))
         .px_4()
         .flex()
@@ -527,14 +1027,50 @@ fn attachment_row(
         .children((!agent).then(|| div().child(origin.clone())))
         .child(threads::relative(now, attachment.at))
         .children(extra);
+    let detached = attachment.clone();
+    let label = label.to_owned();
+    let remove = div()
+        .id(("label-attachment-remove", index))
+        .flex_none()
+        .w(px(20.))
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .tooltip(window_chrome::hint("Remove from label"))
+        .child(icon::view(Icon::Close, icon::SMALL, theme::muted()));
+    let remove = if agent {
+        remove
+    } else {
+        remove.invisible().group_hover(group, gpui::Styled::visible)
+    };
+    let remove = remove.on_mouse_down(
+        MouseButton::Left,
+        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+            // The row under the button opens its thread; a Remove must not.
+            cx.stop_propagation();
+            this.detach_label(&detached, &label, cx);
+        }),
+    );
+    let title = div()
+        .flex_1()
+        .min_w(px(0.))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_sm()
+        .child(labels_page::attachment_title(attachment));
     row.child(
         div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
             .min_w(px(0.))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .text_sm()
-            .child(labels_page::attachment_title(attachment)),
+            .child(title)
+            .child(remove),
     )
     .child(meta)
 }

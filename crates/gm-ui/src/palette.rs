@@ -12,7 +12,7 @@ use gm_schema::{BranchEntry, WorktreeEntry};
 
 use crate::action_registry::{
     Action, ArgKind, Args, Category, Context as ActionContext, NOT_AVAILABLE, OPEN_STASHES, Reason,
-    stash_args, thread_args,
+    label_args, stash_args, thread_args,
 };
 use crate::fuzzy;
 use crate::stashes;
@@ -411,6 +411,12 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
             let state = action.enabled(&args, ctx);
             (Choice::Run { action, args }, state)
         }
+        // A label is the one the Labels page has selected; with none, the action says so.
+        ArgKind::Label => {
+            let args = ctx.selected_label.map_or(Args::None, label_args);
+            let state = action.enabled(&args, ctx);
+            (Choice::Run { action, args }, state)
+        }
     };
     // A placeholder says it is not available, whatever its target would be.
     let state = if action.available() {
@@ -582,6 +588,7 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
         | ArgKind::Chunk
         | ArgKind::Commit
         | ArgKind::Thread
+        | ArgKind::Label
         | ArgKind::ReviewComment => Vec::new(),
     }
 }
@@ -655,6 +662,7 @@ mod tests {
             repo_open: true,
             selected_file: None,
             selected_thread: None,
+            selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
@@ -1405,6 +1413,34 @@ mod tests {
         assert_eq!(find(&picks, "ui").state, Ok(()));
         assert_eq!(find(&picks, "main").state, Err(SAME_WORKTREE));
     }
+    #[test]
+    fn a_label_action_runs_on_the_selected_label_or_says_none_is_selected() {
+        let open = ctx_with(&[], "");
+        let none = action_row(Action::LabelRename, &open, &[]);
+        assert_eq!(none.state, Err("Select a label first."));
+        let selected = ActionContext {
+            selected_label: Some(crate::action_registry::LabelRef {
+                id: 5,
+                name: "flaky",
+                attachments: 2,
+            }),
+            ..open
+        };
+        let candidate = action_row(Action::LabelRename, &selected, &[]);
+        assert_eq!(candidate.state, Ok(()));
+        assert_eq!(
+            candidate.choice,
+            Choice::Run {
+                action: Action::LabelRename,
+                args: Args::Label {
+                    id: 5,
+                    name: "flaky".into(),
+                    attachments: 2,
+                },
+            }
+        );
+    }
+
     #[test]
     fn a_thread_action_runs_on_the_selected_thread_or_says_none_is_selected() {
         let open = ctx_with(&[], "");
