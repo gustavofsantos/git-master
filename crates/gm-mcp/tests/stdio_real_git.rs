@@ -536,6 +536,40 @@ fn hits_of(reply: &Value) -> Vec<Value> {
     result(reply)["hits"].as_array().unwrap().clone()
 }
 
+#[test]
+fn related_to_narrows_a_search_to_the_linked_threads() {
+    let dir = repo();
+    let (a, b) = store_search_threads(dir.path());
+    ThreadStore::open(&dir.path().join(".git"))
+        .unwrap()
+        .link_threads(
+            &a,
+            &b,
+            gm_schema::threads::ThreadRelKind::Continues,
+            "human",
+            3,
+        )
+        .unwrap();
+    let replies = searches(
+        dir.path(),
+        &[
+            json!({ "related_to": a }),
+            json!({ "related_to": b, "related_kind": "continues" }),
+            json!({ "related_to": a, "related_kind": "supersedes" }),
+            json!({ "related_kind": "continues" }),
+            json!({ "label": ["auth", "missing"] }),
+        ],
+    );
+    assert_eq!(thread_ids(&replies[0]), [b.clone()], "either direction");
+    assert_eq!(thread_ids(&replies[1]), [a.clone()]);
+    assert!(thread_ids(&replies[2]).is_empty());
+    refused_with(&replies[3], "related_kind needs related_to");
+    assert!(
+        thread_ids(&replies[4]).is_empty(),
+        "every label is required"
+    );
+}
+
 fn thread_ids(reply: &Value) -> Vec<String> {
     hits_of(reply)
         .iter()
@@ -718,7 +752,7 @@ fn the_search_orders_counts_and_lists_threads() {
     );
 
     let answer = result(&replies[5]);
-    assert_eq!(answer["filters"]["label"], "auth");
+    assert_eq!(answer["filters"]["label"], json!(["auth"]));
     assert_eq!(answer["filters"]["edited_only"], true);
     assert_eq!(answer["filters"]["since"], 1000);
     assert!(

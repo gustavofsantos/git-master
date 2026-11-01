@@ -91,7 +91,9 @@ pub fn tools() -> Vec<ToolDefinition> {
                     "path": { "type": "string", "description": "Only threads that edited this path. A value with *, ? or [ is a glob, where * also matches /." },
                     "harness": { "type": "string", "description": "Only threads of this agent, such as claude-code." },
                     "model": { "type": "string", "description": "Only threads that ran this model, exactly." },
-                    "label": { "type": "string", "description": "Only threads with this label." },
+                    "label": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Only threads with this label, or with every label in the list." },
+                    "related_to": { "type": "string", "description": "Only threads linked to this thread, in either direction, by its id." },
+                    "related_kind": { "type": "string", "enum": ["continues", "relates", "supersedes"], "description": "With related_to, count only this kind of link." },
                     "starred": { "type": "boolean", "description": "true for starred threads only, false for unstarred ones only." },
                     "edited_only": { "type": "boolean", "description": "true for threads that edited at least one file." },
                     "group": { "type": "string", "enum": ["thread", "entry"], "default": "thread", "description": "thread: one best entry per thread. entry: every matching entry." },
@@ -386,6 +388,21 @@ fn search_filter(args: &Value, now: i64) -> Result<ThreadFilter, String> {
         Some("assistant") => Some(EntryRole::Assistant),
         _ => None,
     };
+    let related_kind = match choice(
+        args,
+        "related_kind",
+        &["continues", "relates", "supersedes"],
+    )?
+    .as_deref()
+    {
+        Some("continues") => Some(ThreadRelKind::Continues),
+        Some("relates") => Some(ThreadRelKind::Relates),
+        Some("supersedes") => Some(ThreadRelKind::Supersedes),
+        _ => None,
+    };
+    if related_kind.is_some() && args.get("related_to").is_none_or(Value::is_null) {
+        return Err("related_kind needs related_to; name the thread it is relative to".to_owned());
+    }
     Ok(ThreadFilter {
         harness: optional_text(args, "harness")?,
         branch: optional_text(args, "branch")?,
@@ -397,15 +414,15 @@ fn search_filter(args: &Value, now: i64) -> Result<ThreadFilter, String> {
             .then_some(true),
         path: optional_text(args, "path")?,
         commit: optional_text(args, "commit")?,
-        tag: optional_text(args, "label")?,
+        tag: None,
         role,
         thread: optional_text(args, "thread")?,
         turn_from,
         turn_to,
         model: optional_text(args, "model")?,
-        label: None,
-        related_to: None,
-        related_kind: None,
+        label: label_names(args)?,
+        related_to: optional_text(args, "related_to")?,
+        related_kind,
     })
 }
 
@@ -467,10 +484,8 @@ fn applied_filters(filter: &ThreadFilter) -> Value {
         return json!({});
     };
     object.retain(|_, field| !field.is_null());
-    for (from, to) in [("tag", "label"), ("has_edits", "edited_only")] {
-        if let Some(field) = object.remove(from) {
-            object.insert(to.to_owned(), field);
-        }
+    if let Some(field) = object.remove("has_edits") {
+        object.insert("edited_only".to_owned(), field);
     }
     value
 }
@@ -1097,6 +1112,25 @@ fn optional_text(args: &Value, key: &str) -> Result<Option<String>, String> {
             "{key} must not be empty; leave it out to not filter"
         )),
         Some(text) => Ok(Some(text.to_owned())),
+    }
+}
+
+/// The `label` argument: one name or a list of names; the thread must carry all of them.
+fn label_names(args: &Value) -> Result<Option<Vec<String>>, String> {
+    match args.get("label") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(name)) if !name.trim().is_empty() => Ok(Some(vec![name.clone()])),
+        Some(Value::Array(names)) => names
+            .iter()
+            .map(|name| match name.as_str() {
+                Some(text) if !text.trim().is_empty() => Ok(text.to_owned()),
+                _ => Err("label must list non-empty names".to_owned()),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => {
+            Err("label must be a name or a list of names; leave it out to not filter".to_owned())
+        }
     }
 }
 

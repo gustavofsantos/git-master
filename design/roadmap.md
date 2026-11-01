@@ -650,7 +650,7 @@ Decided by the author on 2026-10-31 as proposed decisions D143 to D146, with Q34
 
 **Done when:** the whole of P1 to P4 meets the docs, `make docs-status` shows no `Planned` marker left on the pages of this slice, and D143 to D146 are accepted or superseded by the author.
 
-**Status (2026-10-31).** Planned. Nothing built. Q34 is open until P1 measures it.
+**Status (2026-10-31).** S0, P1, P2 and P3 built (P3 in two parts: store and commands; rewrite resolution and the MCP tools). P4 (UI) not started. Q34 is open. Nothing was seen in a window.
 
 ## Slice 7: MCP
 
