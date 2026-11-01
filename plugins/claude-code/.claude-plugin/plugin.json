@@ -1,0 +1,5 @@
+{
+  "name": "gitmaster",
+  "version": "0.0.0",
+  "description": "Captures agent sessions as GitMaster threads and offers its review and thread tools"
+}

@@ -17,3 +17,6 @@ gm-core.workspace = true
 gm-schema.workspace = true
 gm-ui.workspace = true
 gm-mcp.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

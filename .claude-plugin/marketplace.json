@@ -1,0 +1,13 @@
+{
+  "name": "gitmaster",
+  "owner": {
+    "name": "GitMaster"
+  },
+  "plugins": [
+    {
+      "name": "gitmaster",
+      "source": "./plugins/claude-code",
+      "description": "Captures agent sessions as GitMaster threads"
+    }
+  ]
+}
