@@ -650,7 +650,7 @@ Decided by the author on 2026-10-31 as proposed decisions D143 to D146, with Q34
 
 **Done when:** the whole of P1 to P4 meets the docs, `make docs-status` shows no `Planned` marker left on the pages of this slice, and D143 to D146 are accepted or superseded by the author.
 
-**Status (2026-10-31).** S0, P1, P2 and P3 built (P3 in two parts: store and commands; rewrite resolution and the MCP tools). P4 (UI) not started. Q34 is open. Nothing was seen in a window.
+**Status (2026-10-31).** S0, P1, P2, P3 and P4 built. P4 gaps are listed in `design/threads.md` (P4: UI) and `design/screens.md`: no attach of a file, commit or label from the app, rewrite states missing in the thread's Commits panel, the narrowest width unchecked, and the viewer menu's reason text overflows. Q34 is open. The Labels page, the New Label dialog and the provenance panel were seen in a window on 2026-11-01.
 
 ## Slice 7: MCP
 

@@ -111,7 +111,7 @@ GitMaster never guesses that a thread produced a commit because the contents loo
 
 ### After a rewrite
 
-> **Planned.** Commit links do not follow a rewrite yet, and the **gone** and **ambiguous** states are not shown.
+> **Planned.** The thread's **Commits** panel does not show the **gone** and **ambiguous** states yet. The Labels page shows them on a commit attached to a label.
 
 A rewrite gives commits new ids: a rebase, an amend or a squash makes new commits from the old ones. A commit link follows the rewrite as follows:
 
@@ -121,8 +121,6 @@ A rewrite gives commits new ids: a rebase, an amend or a squash makes new commit
 A link that cannot be matched shows **gone**, with the subject, author and date that GitMaster saved when it made the link, so you still see what it pointed to. A commit is gone when no branch, tag or other reference reaches it any more. When two commits in the rewritten range have the same patch, the link shows **ambiguous** and GitMaster does not pick one.
 
 ## Link threads
-
-> **Planned.** Links between threads are not available in the app yet.
 
 Link one thread to another to record how their work connects. A link has one of three kinds:
 
@@ -136,7 +134,7 @@ Link threads from the **⋯** menu of a thread's header, as you link a commit. E
 
 ## Understand why code is the way it is
 
-> **Planned.** Provenance is not available in the app yet, and the labels and linked threads of a thread are not shown in its result.
+Select lines in a text file on the **Code** page and choose **Show Why This Code Is Here…** from the viewer's right-click menu or the command palette. The panel beside the viewer shows the result.
 
 Ask GitMaster why a file, or a range of lines in it, is the way it is. GitMaster works back from the code to the agent sessions that wrote it:
 
@@ -165,7 +163,7 @@ Other rules:
 
 ## Labels
 
-> **Planned.** Labels are not available in the app yet.
+> **Planned.** The app cannot yet attach a file, a commit or another label to a label; an agent can, through MCP, and the Labels page shows and removes those attachments.
 
 A label is a name for things that belong together, such as `auth-refactor` or `needs-review`. A label belongs to the repository. It has a name, an optional description and an optional color, and it shows as a chip wherever it is attached.
 
@@ -198,8 +196,6 @@ A delete is final. GitMaster overwrites the deleted text in the database file, a
 Rename, Add Note, Labels, Link to Commit, Export and Delete are in the **⋯** menu of the header; Star and Copy as Markdown are buttons beside the title. The thread's right-click menu in the list has the same actions.
 
 Only you can delete a thread or an entry, and rename or delete a label. An agent connected through MCP can read threads, and it can create labels and attach labels and links. Each row an agent makes shows the agent's name, and you can remove it.
-
-> **Planned.** The app does not show the agent's name on a row yet.
 
 ## Secrets
 

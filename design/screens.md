@@ -101,6 +101,16 @@ Planned for slice 9 (premium finish), the settings screen is a modal that gather
 
 For the field-level details of each section, see docs/reference/configuration.md.
 
+## Labels page and provenance panel (D144, D145; P4, checked in a window on 2026-11-01)
+
+Sidebar entry **Labels** under Threads (palette: Show Labels, New Label, Rename Label, Delete Label). Left column 280 px: a filter box and a list of labels, each with a colour dot, name, the agent's name as a tag when an agent made it, and the attachment count. Right pane: name, description, "Created by", then attachments grouped as Files, Commits, Threads and Labels (a group with none is left out). Each row shows its title, who attached it (You or the agent's name) and when; a commit shows **gone**, **ambiguous** or **rewritten** when its state says so; a file renamed since shows its current path. **Remove** (×) shows on hover, and always on a row an agent attached. **New Label…** has name, description and `#rrggbb`; Rename and Delete are in the header and the row's right-click menu; Delete says how many attachments go.
+
+**Why This Code Is Here:** select lines on the Code page, right-click, and a 360 px panel opens beside the viewer: the range, the commits that own the lines (short id, subject, author, date, lines) and, under each, its threads with the evidence in the order of the docs, `ambiguous`, `unverifiable` edits, the entries around each edit, labels and linked threads, and a cut notice. An edit opens its thread at that entry. With no linked thread it says "No thread is linked to these lines".
+
+Thread rows and headers show label chips (click to filter the list; a **Label: x** chip clears it). **Link to Thread…** is in the header's ⋯ menu; relations show under the header with direction, the agent's name and **Remove**.
+
+Checked in a window (light and dark, Xvfb, 1280×800): the list, the detail pane, the New Label dialog, the viewer menu and the provenance panel with a commit and no thread. Not checked: the narrowest width (the app has no minimum, and below about 840 px the detail pane is squeezed), a result with threads and edits, label chips on the Threads page and the Link to Thread dialog. Known defect: the viewer menu's disabled reason ("Select lines of the file first.") runs past the menu's right edge.
+
 ## Threads page (D119, D125; planned)
 
 Sidebar entry **Threads** under Workspace, with a count of threads. History's pattern: a virtualized list on the left, the detail on the right, a search box and filters in the header (agent, branch, date, starred, has edits, touched file).

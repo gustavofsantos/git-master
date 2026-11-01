@@ -5,7 +5,7 @@ status: partial
 order: 10
 ---
 
-> **Planned.** The tools that propose or apply a change to the repository, and the agent policy, are not available yet. The provenance tool does not return labels yet.
+> **Planned.** The tools that propose or apply a change to the repository, and the agent policy, are not available yet.
 
 `gitmaster mcp` is an MCP server that your agent starts as a separate process and talks to over its standard input and output. It offers the tools that only GitMaster can offer: the review comments you wrote on a diff, the threads GitMaster captured from earlier agent sessions, the labels and links that connect those threads, and the reasons behind a range of lines, which GitMaster works out from those threads. It does not repeat what the agent already has. Reading files, searching text and running `git` stay with the agent's own tools.
 
@@ -47,8 +47,6 @@ The server offers two kinds of tool:
 A record tool takes effect on GitMaster's record, and a person still decides what it means. When an agent marks a comment as `handled`, the comment waits for you. Only you make it `resolved`. A label or a link an agent records carries the agent's name as its origin.
 
 There is no tool that commits, pushes, restacks, edits a file or deletes anything. An agent that changes your code does it with its own tools, as it does without GitMaster, and the [thread](../guide/threads.md) records what it did. The record tools never write thread text, and they never delete or rename anything.
-
-> **Planned.** The app does not show the agent's name on a label or a link yet, and it does not yet offer to remove one.
 
 > **Planned.** Tools that propose a change, such as a restack plan, and that apply it. See [Approval](#approval).
 

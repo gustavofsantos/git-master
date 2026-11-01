@@ -649,6 +649,8 @@ Decisions taken in part A (the docs do not cover them; they are the rules until 
 
 ### P4: UI
 
+**Built (2026-11-01).** The Labels page and its dialogs (`labels_page.rs`, `label_curate.rs`, `shell_labels.rs`), label chips and a label filter on the Threads page, **Link to Thread** and relations in `ThreadDetail` with direction and origin (`relations`, Remove, the agent's name), and the provenance panel on the Code page (`provenance_view.rs`, `shell_provenance.rs`; `ProvenanceEdit.entry_id` opens a thread at the edit). Checked in a window: the Labels page, the New Label dialog and the provenance panel, found and fixed one defect there (the panel dropped its answer because the engine sends `Done` first). Not done: attaching a file, commit or label from the app, the gone and ambiguous states in the thread's Commits panel, an agent's name on a label chip, a window check of the rest, the narrowest width, and the viewer menu's overflowing reason text.
+
 The **Labels** page, chips on rows and headers, label dialogs, the provenance view for a range on the Code page, **Link to Thread** in the header's **⋯** menu, and the actor shown on each agent row. Done when a range can be asked about and its evidence read in a window, the layout is checked at its smallest width, and the screens are recorded in `design/screens.md`.
 
 ## To confirm with the author
