@@ -26,6 +26,7 @@ use crate::merged_branches::Merging;
 use crate::move_file::MoveFile;
 use crate::new_branch::BranchCreate;
 use crate::new_stash::StashCreate;
+use crate::provenance_view::ProvenancePanel;
 use crate::quick_open::QuickOpen;
 use crate::reflog::{DetachedCheckout, ReflogList};
 use crate::remote_op::{Outcome, RemoteOp};
@@ -122,6 +123,8 @@ pub struct Model {
     pub link_picker: LinkPicker,
     /// The Labels page: the labels, the filter and the selected label's attachments (P4).
     pub labels: LabelsPage,
+    /// The provenance panel of the Code page: the question, the read in flight and its answer (P4, D144).
+    pub provenance: ProvenancePanel,
     /// The copy of a thread as Markdown in flight, and its outcome for the window (T6).
     pub thread_copy: MarkdownCopy,
     /// The write of a thread's curation in flight, and its outcome (T6).
@@ -779,6 +782,13 @@ impl Model {
                 self.threads.ended(id, state, detail);
                 None
             }
+            // A provenance read that failed shows its reason in the panel; any other end is quiet (P4).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.provenance.owns(id) && state.is_terminal() => {
+                self.provenance.ended(id, state, detail.as_deref());
+                None
+            }
             // A commit's threads that could not be read are simply not shown (H3).
             Event::OperationChanged { id, state, .. }
                 if self.commit_threads.owns(id) && state.is_terminal() =>
@@ -1006,7 +1016,11 @@ impl Model {
                 self.threads.read(id, detail);
                 None
             }
-            // The provenance view is not built yet (P4), so nothing takes the answer.
+            // The provenance panel keeps the answer to its read in flight; any other is dropped (P4).
+            Event::ThreadProvenance { id, provenance } => {
+                self.provenance.answered(id, provenance);
+                None
+            }
             Event::ThreadEditRead { id, edit, state } => {
                 self.threads.edit_read(id, edit.id, state);
                 None
@@ -1236,7 +1250,6 @@ impl Model {
             // A suggested message is the composer's to place; the window does that.
             | Event::WorkflowMessageSuggested { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
-            | Event::ThreadProvenance { .. }
             // The label and link answers are read by the Labels page (P4); the rows follow `ThreadsChanged`.
             | Event::ThreadRelationChanged { .. }
             | Event::ThreadsChanged => None,
@@ -1367,6 +1380,7 @@ impl Model {
         self.commit_threads = CommitThreads::default();
         self.link_picker = LinkPicker::default();
         self.labels = LabelsPage::default();
+        self.provenance = ProvenancePanel::default();
         self.thread_copy = MarkdownCopy::default();
         self.quick_open = QuickOpen::default();
         self.code.reset();
@@ -3387,5 +3401,53 @@ mod thread_copy_tests {
             model.error, None,
             "the label read's failure is not a notice"
         );
+    }
+
+    #[test]
+    fn a_provenance_answer_goes_to_the_panel_and_a_failed_read_is_shown_there() {
+        use crate::provenance_view::{NO_THREAD, Row};
+        let mut model = Model::default();
+        model.provenance.request("src/a.rs", 3, 5, OperationId(20));
+        let answer = gm_schema::threads::ProvenanceResult {
+            path: "src/a.rs".to_owned(),
+            from_line: 3,
+            to_line: 5,
+            commits: Vec::new(),
+            cuts: Vec::new(),
+        };
+        let _ = model.apply(Event::ThreadProvenance {
+            id: OperationId(19),
+            provenance: answer.clone(),
+        });
+        assert!(
+            model.provenance.is_pending(),
+            "an answer to another read is dropped"
+        );
+        let _ = model.apply(Event::ThreadProvenance {
+            id: OperationId(20),
+            provenance: answer,
+        });
+        assert_eq!(
+            model.provenance.rows(),
+            vec![Row::Note(NO_THREAD.to_owned())]
+        );
+        model.provenance.request("src/a.rs", 3, 5, OperationId(21));
+        let _ = model.apply(changed(21, OperationState::Failed, Some("git blame died")));
+        assert_eq!(
+            model.provenance.rows(),
+            vec![Row::Failure("git blame died".to_owned())]
+        );
+        assert_eq!(
+            model.error, None,
+            "the panel shows the failure, not the status bar"
+        );
+    }
+
+    #[test]
+    fn a_repository_change_closes_the_provenance_panel() {
+        let mut model = Model::default();
+        model.provenance.request("src/a.rs", 3, 5, OperationId(30));
+        model.reset_for_repo();
+        assert!(!model.provenance.is_open());
     }
 }

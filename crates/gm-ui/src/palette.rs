@@ -662,6 +662,7 @@ mod tests {
             repo_open: true,
             selected_file: None,
             selected_thread: None,
+            code: crate::action_registry::CodeCtx::default(),
             selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             busy: None,

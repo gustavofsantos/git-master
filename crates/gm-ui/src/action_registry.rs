@@ -202,6 +202,8 @@ pub enum Effect {
         path: String,
         line: Option<u32>,
     },
+    /// Opens the provenance panel of the Code page for the lines picked in the viewer (P4, D144).
+    ShowProvenance(crate::provenance_view::Asked),
     /// Opens the Workflows page and asks the engine for the workflow files.
     ShowWorkflows,
     /// Opens the Stashes page and asks the engine for the stashes (B2).
@@ -394,6 +396,17 @@ pub struct Context<'a> {
     pub selected_label: Option<LabelRef<'a>>,
     /// The branch stacks and the branch whose parent is being chosen (D138).
     pub stack: StackCtx<'a>,
+    /// The text file open in the Code viewer, and the lines picked in it (P4).
+    pub code: CodeCtx<'a>,
+}
+
+/// What the Code viewer shows, for the rules: the text file on screen and the lines picked in it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CodeCtx<'a> {
+    /// The repository-relative path of the text file on screen; `None` for any other kind.
+    pub file: Option<&'a str>,
+    /// The first and last picked line, 1-based, both ends inclusive.
+    pub lines: Option<(u32, u32)>,
 }
 
 /// What the stack actions read: the last stack snapshot, and the branch Set
@@ -437,7 +450,7 @@ pub struct LabelRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 100] = [
+const SPECS: [Spec; 101] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1132,6 +1145,13 @@ const SPECS: [Spec; 100] = [
         ArgKind::Label,
         Category::Repository,
     ),
+    spec(
+        "code.provenance",
+        "Show Why This Code Is Here…",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
 ];
 
 const fn spec(
@@ -1254,6 +1274,8 @@ pub enum Action {
     LabelNew,
     LabelRename,
     LabelDelete,
+    /// Opens the provenance panel for the lines picked in the Code viewer (P4, D144).
+    CodeProvenance,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1523,7 +1545,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 100] = [
+    pub const ALL: [Action; 101] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1624,6 +1646,7 @@ impl Action {
         Action::LabelNew,
         Action::LabelRename,
         Action::LabelDelete,
+        Action::CodeProvenance,
     ];
 
     #[must_use]
@@ -1916,6 +1939,7 @@ impl Action {
                 stash_entry_rule(args, ctx)
             }
             _ if self.is_stash_rule() => stash_rule(self, ctx),
+            Action::CodeProvenance => provenance_rule(ctx).map(|_| ()),
             Action::CommentOnSelection => comment_rule(ctx),
             Action::ResolveReviewComment
             | Action::ReopenReviewComment
@@ -1982,21 +2006,15 @@ impl Action {
             (Action::RemoveWorktree, Args::Worktree(path)) => {
                 Effect::OpenRemoveDialog(path.clone())
             }
-            // The menu does not ask for a lock reason yet, so Git gets none.
-            (Action::LockWorktree, Args::Worktree(path)) => {
-                Effect::Send(vec![CommandKind::LockWorktree {
-                    path: path.clone(),
-                    reason: String::new(),
-                }])
-            }
-            (Action::UnlockWorktree, Args::Worktree(path)) => {
-                Effect::Send(vec![CommandKind::UnlockWorktree { path: path.clone() }])
+            (Action::LockWorktree | Action::UnlockWorktree, Args::Worktree(path)) => {
+                worktree_lock_effect(self, path)
             }
             (Action::PruneWorktrees, _) => Effect::OpenPruneDialog,
             (Action::NewStash, _) => Effect::OpenNewStashDialog,
             (Action::StashApply | Action::StashPop | Action::StashDrop, _) => {
                 stash_effect(self, args)?
             }
+            (Action::CodeProvenance, _) => provenance_effect(ctx)?,
             (Action::CommentOnSelection, _) => comment_effect(ctx)?,
             (
                 Action::EditReviewComment
@@ -2672,6 +2690,44 @@ pub(crate) fn stash_args(entry: &StashEntry) -> Args {
     }
 }
 
+/// The rule of Show Why This Code Is Here…: a text file open in the Code viewer, with lines
+/// picked in it. Returns the file and the lines.
+fn provenance_rule<'a>(ctx: &Context<'a>) -> Result<(&'a str, u32, u32), Reason> {
+    repository_open(ctx)?;
+    let Some(path) = ctx.code.file else {
+        return Err("Open a text file in the Code viewer first.");
+    };
+    let Some((from, to)) = ctx.code.lines else {
+        return Err("Select lines of the file first.");
+    };
+    Ok((path, from, to))
+}
+
+/// What Show Why This Code Is Here… opens: the provenance panel for the picked lines.
+fn provenance_effect(ctx: &Context<'_>) -> Result<Effect, Reason> {
+    let (path, from, to) = provenance_rule(ctx)?;
+    Ok(Effect::ShowProvenance(crate::provenance_view::Asked {
+        path: path.to_owned(),
+        from,
+        to,
+    }))
+}
+
+/// What locking or unlocking the worktree at `path` sends. The menu does not ask for a lock
+/// reason yet, so Git gets none.
+fn worktree_lock_effect(action: Action, path: &str) -> Effect {
+    if action == Action::LockWorktree {
+        Effect::Send(vec![CommandKind::LockWorktree {
+            path: path.to_owned(),
+            reason: String::new(),
+        }])
+    } else {
+        Effect::Send(vec![CommandKind::UnlockWorktree {
+            path: path.to_owned(),
+        }])
+    }
+}
+
 /// The rule of Comment on Selection: an idle repository and picked lines the
 /// working tree has, or whose text the engine can look for in the file.
 fn comment_rule(ctx: &Context<'_>) -> Result<(), Reason> {
@@ -2901,6 +2957,7 @@ mod tests {
             remote_running: false,
             stashes: None,
             review: ReviewCtx::default(),
+            code: CodeCtx::default(),
         }
     }
 
@@ -4125,6 +4182,58 @@ mod tests {
             "the palette lists it"
         );
         assert_eq!(Action::from_id("labels.show"), Some(Action::ShowLabels));
+    }
+
+    #[test]
+    fn show_why_needs_a_text_file_and_picked_lines_in_the_code_viewer() {
+        let mut picked = ctx(&[], "");
+        picked.code = CodeCtx {
+            file: Some("src/a.rs"),
+            lines: Some((3, 5)),
+        };
+        assert_eq!(Action::CodeProvenance.enabled(&Args::None, &picked), Ok(()));
+        assert_eq!(
+            Action::CodeProvenance.plan(&Args::None, &picked),
+            Ok(Effect::ShowProvenance(crate::provenance_view::Asked {
+                path: "src/a.rs".into(),
+                from: 3,
+                to: 5,
+            }))
+        );
+        let mut no_pick = ctx(&[], "");
+        no_pick.code.file = Some("src/a.rs");
+        assert_eq!(
+            Action::CodeProvenance.enabled(&Args::None, &no_pick),
+            Err("Select lines of the file first.")
+        );
+        assert_eq!(
+            Action::CodeProvenance.enabled(&Args::None, &ctx(&[], "")),
+            Err("Open a text file in the Code viewer first.")
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::CodeProvenance.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(Action::CodeProvenance.id(), "code.provenance");
+        assert_eq!(
+            Action::CodeProvenance.spec().title,
+            "Show Why This Code Is Here…"
+        );
+        assert_eq!(Action::CodeProvenance.spec().category, Category::Repository);
+        assert_eq!(Action::CodeProvenance.spec().shortcut, None);
+        assert!(!Action::CodeProvenance.opens_dialog());
+        assert!(
+            Action::ALL.contains(&Action::CodeProvenance),
+            "the palette lists it"
+        );
+        assert_eq!(
+            Action::from_id("code.provenance"),
+            Some(Action::CodeProvenance)
+        );
     }
 
     fn label_ctx(selected: Option<LabelRef<'_>>) -> Context<'_> {

@@ -33,6 +33,8 @@ const SCROLL_STEP: usize = 4;
 pub(crate) struct CodeView {
     pub(crate) tree_scroll: UniformListScrollHandle,
     pub(crate) lines_scroll: UniformListScrollHandle,
+    /// The rows of the provenance panel (P4).
+    pub(crate) provenance_scroll: UniformListScrollHandle,
     /// How many columns the text is scrolled to the right.
     pub(crate) columns: usize,
     /// The line brought into view by `file:line`, marked until another file opens.
@@ -52,6 +54,7 @@ impl CodeView {
         Self {
             tree_scroll: UniformListScrollHandle::new(),
             lines_scroll: UniformListScrollHandle::new(),
+            provenance_scroll: UniformListScrollHandle::new(),
             columns: 0,
             marked: None,
             reveal_scroll: false,
@@ -95,6 +98,7 @@ impl StatusView {
         }
         self.code_view.reveal_scroll = true;
         self.scroll_tree_to_selection();
+        self.provenance_follows_pick();
         cx.notify();
     }
 
@@ -132,6 +136,7 @@ impl StatusView {
         self.code_view
             .lines_scroll
             .scroll_to_item(0, ScrollStrategy::Top);
+        self.provenance_follows_pick();
         cx.notify();
     }
 
@@ -214,6 +219,7 @@ impl StatusView {
             .bg(theme::editor())
             .child(self.code_tree(cx))
             .child(self.code_viewer(cx))
+            .children(self.provenance_panel(cx))
     }
 
     fn code_tree(&self, cx: &mut Context<Self>) -> Div {
@@ -363,6 +369,12 @@ impl StatusView {
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, _| this.code_view.picking = false),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.open_code_menu(event.position, cx);
+                }),
+            )
     }
 
     /// The body of a file on screen: its lines, or one line saying why there are none.
@@ -430,7 +442,7 @@ impl StatusView {
 }
 
 /// The 1-based lines of the file a pick covers, lowest first.
-fn picked_lines((from, to): (usize, usize)) -> (u32, u32) {
+pub(crate) fn picked_lines((from, to): (usize, usize)) -> (u32, u32) {
     let line = |index: usize| u32::try_from(index + 1).unwrap_or(u32::MAX);
     (line(from.min(to)), line(from.max(to)))
 }
@@ -470,6 +482,7 @@ impl StatusView {
             _ => Some((index, index)),
         };
         self.code_view.picking = true;
+        self.provenance_follows_pick();
         cx.notify();
     }
 
@@ -482,6 +495,7 @@ impl StatusView {
             && to != index
         {
             self.code_view.picked = Some((from, index));
+            self.provenance_follows_pick();
             cx.notify();
         }
     }

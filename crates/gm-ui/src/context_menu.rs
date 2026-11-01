@@ -9,7 +9,7 @@ use gpui::{
     div, prelude::*, px,
 };
 
-use crate::action_registry::{Action, Args, Context as ActionContext, Reason};
+use crate::action_registry::{Action, Args, CodeCtx, Context as ActionContext, Reason};
 use crate::reflog;
 use crate::stashes;
 use crate::theme;
@@ -56,6 +56,11 @@ pub(crate) enum Target {
         name: String,
         attachments: u32,
     },
+    /// The Code viewer, with the text file on screen and the lines picked in it, 1-based (P4).
+    CodeViewer {
+        path: String,
+        lines: Option<(u32, u32)>,
+    },
 }
 
 impl Target {
@@ -69,6 +74,7 @@ impl Target {
             Self::Stash { index, .. } => stashes::label(*index),
             Self::ReflogEntry { index, .. } => reflog::label(*index),
             Self::Thread { title, .. } | Self::ThreadMore { title, .. } => title.clone(),
+            Self::CodeViewer { path, .. } => path.clone(),
         }
     }
 }
@@ -230,6 +236,11 @@ pub(crate) fn label_items(
     };
     let item = |action, group| Item::new(action, target.clone(), group, ctx);
     vec![item(Action::LabelRename, 0), item(Action::LabelDelete, 1)]
+}
+
+/// The menu of the Code viewer: the provenance question on the picked lines.
+pub(crate) fn code_items(ctx: &ActionContext<'_>) -> Vec<Item> {
+    vec![Item::new(Action::CodeProvenance, Args::None, 0, ctx)]
 }
 
 /// The menu of a stash row: apply and pop, then drop in its own group. Drop
@@ -416,6 +427,21 @@ impl StatusView {
     }
 
     /// Opens the menu of the label row `id`, under the pointer (P4).
+    /// The right-click menu of the Code viewer, on the text file on screen. The lines picked
+    /// are read when the menu opens, and the item says why it cannot run without them.
+    pub(crate) fn open_code_menu(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let target = {
+            let code = self.code_ctx();
+            code.file.map(|path| Target::CodeViewer {
+                path: path.to_owned(),
+                lines: code.lines,
+            })
+        };
+        if let Some(target) = target {
+            self.open_menu(target, position, cx);
+        }
+    }
+
     pub(crate) fn open_label_menu(
         &mut self,
         id: i64,
@@ -525,7 +551,13 @@ impl StatusView {
 
     /// The items of the open menu, read from the registry now.
     fn menu_items(&self, target: &Target) -> Vec<Item> {
-        let ctx = self.action_context("");
+        let mut ctx = self.action_context("");
+        if let Target::CodeViewer { path, lines } = target {
+            ctx.code = CodeCtx {
+                file: Some(path),
+                lines: *lines,
+            };
+        }
         match target {
             Target::Branch(name) => branch_items(name, &ctx),
             Target::File(path) => file_items(path, &ctx),
@@ -539,6 +571,7 @@ impl StatusView {
                 name,
                 attachments,
             } => label_items(*id, name, *attachments, &ctx),
+            Target::CodeViewer { .. } => code_items(&ctx),
         }
     }
 
@@ -741,6 +774,7 @@ mod tests {
             repo_open: true,
             selected_file: None,
             selected_thread: None,
+            code: crate::action_registry::CodeCtx::default(),
             selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
@@ -1110,6 +1144,7 @@ mod tests {
             repo_open: false,
             selected_file: None,
             selected_thread: None,
+            code: crate::action_registry::CodeCtx::default(),
             selected_label: None,
             stack: crate::action_registry::StackCtx::default(),
             root: None,

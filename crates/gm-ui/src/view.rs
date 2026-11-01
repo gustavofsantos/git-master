@@ -1252,9 +1252,7 @@ impl StatusView {
             Ok(Effect::OpenThreadField { field, uid }) => {
                 self.open_thread_field(field, &uid, window, cx);
             }
-            Ok(Effect::OpenLinkThread(uid)) => {
-                self.open_link_thread(&uid, window, cx);
-            }
+            Ok(Effect::OpenLinkThread(uid)) => self.open_link_thread(&uid, window, cx),
             Ok(Effect::OpenDeleteThreadDialog(uid)) => {
                 self.open_delete_thread_dialog(&uid, window, cx);
             }
@@ -1267,6 +1265,7 @@ impl StatusView {
             Ok(Effect::ShowCode) => self.show_code(cx),
             Ok(Effect::ShowSearch) => self.show_search(window, cx),
             Ok(Effect::ViewFile { path, line }) => self.view_file(&path, line, cx),
+            Ok(Effect::ShowProvenance(ask)) => self.show_provenance(&ask, cx),
             Ok(Effect::SaveWorkflow) => self.save_workflow(false, cx),
             Ok(Effect::RevertWorkflow) => self.revert_workflow(cx),
             Ok(Effect::OpenDeleteWorkflow) => self.ask_delete_workflow(cx),
@@ -1402,6 +1401,7 @@ impl StatusView {
                 name: &label.name,
                 attachments: label.attachments,
             }),
+            code: self.code_ctx(),
             busy: self.busy_reason(),
             remote_running: self.model.remote.in_flight().is_some(),
             entries: self.model.entries(),
