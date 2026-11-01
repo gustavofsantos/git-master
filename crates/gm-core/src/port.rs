@@ -43,6 +43,26 @@ pub struct CommitSnapshot {
     pub committed_at: i64,
 }
 
+/// Whether a commit is reachable from a ref or from HEAD (D145). `Missing` is a commit
+/// object the repository does not have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitPresence {
+    Reachable,
+    Unreachable,
+    Missing,
+}
+
+/// What `GitPort::rewritten_to` found for an unreachable commit (D145).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Rewrite {
+    /// Exactly one commit of the new range has the commit's patch id.
+    Unique(String),
+    /// More than one commit of the new range has the patch id; none is picked.
+    Ambiguous,
+    /// No commit of the new range has the patch id, or no old tip holds the commit.
+    NoMatch,
+}
+
 /// One ref of `GitPort::update_refs`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefMove {
@@ -713,6 +733,50 @@ pub trait GitPort: Send {
         _commit: &str,
     ) -> Result<Replayed, GitError> {
         Err(GitError("restack is not supported by this adapter".into()))
+    }
+
+    /// Whether `oid` is reachable from a ref or from HEAD, or is missing (D145). Never records
+    /// anything (D28).
+    fn commit_presence(&self, _root: &Path, _oid: &str) -> Result<CommitPresence, GitError> {
+        Err(GitError(
+            "commit presence is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The old tips a rewrite of `branch` (HEAD when `None`) may have left: `ORIG_HEAD` first, then
+    /// the newest entries of the branch's reflog, at most 20, each id once (D145). Never records
+    /// anything (D28).
+    fn rewrite_candidates(
+        &self,
+        _root: &Path,
+        _branch: Option<&str>,
+    ) -> Result<Vec<String>, GitError> {
+        Err(GitError(
+            "rewrite candidates are not supported by this adapter".into(),
+        ))
+    }
+
+    /// Looks for the rewrite of `commit` (D145): the first of `candidates` that has `commit` in its
+    /// history is the old tip, the range from the merge base of the old tip and `new_tip` is
+    /// compared by `git patch-id --stable`, and a commit of the new range with the same patch id
+    /// is the match when it is the only one. An error when a range is too long to compare, or
+    /// the commit has no patch (a merge). Never records anything (D28).
+    fn rewritten_to(
+        &self,
+        _root: &Path,
+        _commit: &str,
+        _candidates: &[String],
+        _new_tip: &str,
+    ) -> Result<Rewrite, GitError> {
+        Err(GitError(
+            "rewrite matching is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The renames of the history that reaches HEAD, oldest first, as `(old, new)` paths, from at
+    /// most 5000 commits (D145). Never records anything (D28).
+    fn renames_to_head(&self, _root: &Path) -> Result<Vec<(String, String)>, GitError> {
+        Err(GitError("renames are not supported by this adapter".into()))
     }
 
     /// Writes the stack link of `branch` as `(parent, base)` with `git config`,

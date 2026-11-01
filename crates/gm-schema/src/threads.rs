@@ -308,6 +308,17 @@ pub struct ThreadFilter {
     /// Exact match on the thread's model.
     #[serde(default)]
     pub model: Option<String>,
+    /// Threads carrying every label named here (D145, search and listing). Each name is
+    /// matched exactly, and an empty list restricts nothing.
+    #[serde(default)]
+    pub label: Option<Vec<String>>,
+    /// Threads linked to the thread with this uid, in either direction (D143). Narrowed to
+    /// `related_kind` when that is set.
+    #[serde(default)]
+    pub related_to: Option<String>,
+    /// The kind of link that `related_to` counts; `None` counts every kind.
+    #[serde(default)]
+    pub related_kind: Option<ThreadRelKind>,
 }
 
 /// How a search hit matched (D131). `Exact` is the strict word-start search; the two
@@ -361,6 +372,9 @@ pub struct SearchFacets {
     pub harness: Vec<(String, u32)>,
     /// Counted over the edits of the matching threads.
     pub path: Vec<(String, u32)>,
+    /// The labels of the matching threads, by name (D145).
+    #[serde(default)]
+    pub label: Vec<(String, u32)>,
 }
 
 /// One search result: the best-matching entry of a thread, with the thread's metadata
@@ -418,6 +432,26 @@ pub enum LinkOrigin {
     Human,
 }
 
+/// Where a commit link points now (D145). The stored id is never changed; this says what the
+/// id resolves to when it is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitState {
+    /// The stored commit is reachable from a ref (or HEAD).
+    Current,
+    /// The stored commit is not reachable; `resolved` names its replacement, found by a restack
+    /// (D142) or by an exact unique `git patch-id --stable` match.
+    Remapped,
+    /// The stored commit is not reachable and more than one commit in the rewritten range has
+    /// its patch, so none is picked.
+    Ambiguous,
+    /// The stored commit is not reachable and no commit in the rewritten range has its patch,
+    /// or the commit object is missing.
+    Gone,
+    /// The check did not run: its per-read budget was used up, or Git failed. Nothing is cached.
+    Unchecked,
+}
+
 /// A link from a thread to Git (D126): a commit id, a branch name or a path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -426,6 +460,12 @@ pub struct ThreadLink {
     /// Commit id, branch name or repository-relative path.
     pub reference: String,
     pub origin: LinkOrigin,
+    /// For a commit link: the commit the stored id resolves to now, when it is not that id (D145).
+    #[serde(default)]
+    pub resolved: Option<String>,
+    /// For a commit link: how the stored id resolves now (D145). `None` for other kinds.
+    #[serde(default)]
+    pub state: Option<CommitState>,
 }
 
 /// A thread with its entries, edits and links, as `ReadThread` returns it.
@@ -514,6 +554,12 @@ pub struct ProvenanceThread {
     /// Other edits also match these lines, so no edit is picked (D144).
     pub ambiguous: bool,
     pub edits: Vec<ProvenanceEdit>,
+    /// The labels on the thread, at most 10; a cut says so (D144, second edge).
+    #[serde(default)]
+    pub labels: Vec<ProvenanceLabel>,
+    /// The threads linked to it, at most 10; a cut says so (D144, second edge).
+    #[serde(default)]
+    pub links: Vec<ProvenanceLink>,
 }
 
 /// One commit that last changed some lines of the queried file, under the path Git reports for them.
@@ -543,6 +589,42 @@ pub enum CutBound {
     Threads,
     /// More edits touch the path than the commit compares; the rest are not compared.
     Candidates,
+    /// More labels are attached to a thread than the result shows (D144, second edge).
+    Labels,
+    /// More threads are linked to a thread than the result shows (D144, second edge).
+    Links,
+}
+
+/// Which way a thread-to-thread link points, from the thread a provenance result shows (D143).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationDirection {
+    /// The shown thread is the `from` end.
+    Out,
+    /// The shown thread is the `to` end.
+    In,
+}
+
+/// A label on a thread that a provenance result shows (D144, second edge).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ProvenanceLabel {
+    pub name: String,
+    /// How the attachment was made: `human` or `agent:<client>`.
+    pub origin: String,
+}
+
+/// A thread linked to a thread that a provenance result shows (D144, second edge). The
+/// linked thread is named, not walked further.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ProvenanceLink {
+    pub uid: String,
+    pub title: String,
+    pub kind: ThreadRelKind,
+    pub direction: RelationDirection,
+    /// How the link was made: `human` or `agent:<client>`.
+    pub origin: String,
 }
 
 /// Something a provenance result left out, and the bound that did it.
@@ -620,6 +702,13 @@ pub struct LabelAttachment {
     pub committed_at: Option<i64>,
     /// The commit id a rewrite resolved to, when it is not `ref` (D145).
     pub resolved: Option<String>,
+    /// For a commit attachment: how `ref` resolves now (D145). `None` for other kinds.
+    #[serde(default)]
+    pub state: Option<CommitState>,
+    /// For a file attachment: the path the file has now, followed through renames (D145).
+    /// `None` for other kinds, and for a file past the per-read bound.
+    #[serde(default)]
+    pub current_path: Option<String>,
 }
 
 /// A label with what is attached to it, as `ReadLabel` returns it.

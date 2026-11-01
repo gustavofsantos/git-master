@@ -199,7 +199,7 @@ Rename, Add Note, Labels, Link to Commit, Export and Delete are in the **⋯** m
 
 Only you can delete a thread or an entry, and rename or delete a label. An agent connected through MCP can read threads, and it can create labels and attach labels and links. Each row an agent makes shows the agent's name, and you can remove it.
 
-> **Planned.** Agents cannot create labels or links yet, and the agent's name is not shown on a row yet.
+> **Planned.** The app does not show the agent's name on a row yet.
 
 ## Secrets
 
@@ -260,6 +260,17 @@ Threads are stored in `.git/gitmaster/threads.db`, in the Git common directory o
 Once the MCP server is on, an agent searches the same threads with the same words as the search box. It can also list threads without a query, for example every thread that edited a path in the last week. The agent filters by role, turn range, thread, agent, model, branch, commit, path, label, star and edits, and by time. Each thread appears once with its best entry unless the agent asks for every match, and the results come in pages. An agent that finds no hit is told which filter removed the most hits.
 
 The agent reads the text of a thread marked as untrusted, because it came from earlier prompts and tool output. See [MCP tools](../reference/mcp-tools.md) for every argument.
+
+## Label from an agent
+
+An agent can mark a thread for you. It creates a label with `label_create`, attaches the label to a thread, a file, a commit or another label with `label_attach`, and links one thread to another with `thread_link`. Each of these records the agent's name as its origin, so you can tell what an agent wrote:
+
+- A label name is created once. Creating a name that exists returns that label as it is, and does not change its description or color.
+- Attaching the same thing twice changes nothing. The attachment keeps the origin that made it, so a label you attached yourself stays yours.
+- A label an agent creates is listed by `labels_list`, and `threads_search` finds the threads it is attached to with its label filter.
+- A link says that a thread continues, relates to or supersedes another, with the kinds described under [Link threads](#link-threads).
+
+An agent cannot rename or delete a label, detach one, remove a link, or delete a thread or an entry. The record tools are listed in [MCP tools](../reference/mcp-tools.md#record).
 
 ## See also
 

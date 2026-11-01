@@ -13,10 +13,15 @@ use crate::blame::BlameLine;
 use crate::file_index::FileIndex;
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryPage, HistoryStream};
-use crate::port::{BlameRead, DetailRead, FileListRead, GrepRead, HistoryRevs, StackRead};
+use crate::port::{
+    BlameRead, CommitPresence, DetailRead, FileListRead, GrepRead, HistoryRevs, Rewrite, StackRead,
+};
 use crate::stack::{EdgeFacts, StackLink};
 use crate::{GitError, GitPort};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// What `renames_to_head` answers with: old and new paths, or the failure.
+type RenameAnswer = Result<Vec<(String, String)>, GitError>;
 
 /// Answers `resolve_root` with its own root, and `status`, `branches`,
 /// `user_email`, `worktrees` and `checkout` with shared, replaceable results, so a test can
@@ -56,6 +61,12 @@ pub struct FakeGit {
     blame: Arc<Mutex<Result<Vec<BlameLine>, GitError>>>,
     /// The blob `blob_at_commit` answers with.
     blob: Arc<Mutex<Result<Option<String>, GitError>>>,
+    /// The presence `commit_presence` answers with, by commit. A commit not set is reachable.
+    presence: Arc<Mutex<HashMap<String, CommitPresence>>>,
+    /// The answer of `rewritten_to`.
+    rewrite: Arc<Mutex<Result<Rewrite, GitError>>>,
+    /// The answer of `renames_to_head`.
+    renames: Arc<Mutex<RenameAnswer>>,
 }
 
 impl FakeGit {
@@ -85,6 +96,9 @@ impl FakeGit {
             tips: Arc::new(Mutex::new(HashMap::new())),
             blame: Arc::new(Mutex::new(Ok(Vec::new()))),
             blob: Arc::new(Mutex::new(Ok(None))),
+            presence: Arc::new(Mutex::new(HashMap::new())),
+            rewrite: Arc::new(Mutex::new(Ok(Rewrite::NoMatch))),
+            renames: Arc::new(Mutex::new(Ok(Vec::new()))),
         }
     }
 
@@ -186,6 +200,36 @@ impl FakeGit {
     /// If another thread panicked while holding the blob lock.
     pub fn set_blob(&self, blob: Result<Option<String>, GitError>) {
         *self.blob.lock().unwrap() = blob;
+    }
+
+    /// Sets the presence `commit_presence` answers with for `commit`.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the presence lock.
+    pub fn set_presence(&self, commit: &str, presence: CommitPresence) {
+        self.presence
+            .lock()
+            .unwrap()
+            .insert(commit.to_owned(), presence);
+    }
+
+    /// Sets the answer `rewritten_to` gives.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the rewrite lock.
+    pub fn set_rewrite(&self, rewrite: Result<Rewrite, GitError>) {
+        *self.rewrite.lock().unwrap() = rewrite;
+    }
+
+    /// Sets the renames `renames_to_head` answers with.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the renames lock.
+    pub fn set_renames(&self, renames: Result<Vec<(String, String)>, GitError>) {
+        *self.renames.lock().unwrap() = renames;
     }
 
     /// The text searches git was asked for, in order.
@@ -499,6 +543,30 @@ impl GitPort for FakeGit {
         _path: &str,
     ) -> Result<Option<String>, GitError> {
         self.blob.lock().unwrap().clone()
+    }
+
+    fn commit_presence(&self, _root: &Path, oid: &str) -> Result<CommitPresence, GitError> {
+        Ok(self
+            .presence
+            .lock()
+            .unwrap()
+            .get(oid)
+            .copied()
+            .unwrap_or(CommitPresence::Reachable))
+    }
+
+    fn rewritten_to(
+        &self,
+        _root: &Path,
+        _commit: &str,
+        _candidates: &[String],
+        _new_tip: &str,
+    ) -> Result<Rewrite, GitError> {
+        self.rewrite.lock().unwrap().clone()
+    }
+
+    fn renames_to_head(&self, _root: &Path) -> Result<Vec<(String, String)>, GitError> {
+        self.renames.lock().unwrap().clone()
     }
 
     fn grep_text(&self, _root: &Path, request: &GrepRequest) -> Result<GrepRead, GitError> {

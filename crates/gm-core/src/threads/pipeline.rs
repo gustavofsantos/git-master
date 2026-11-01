@@ -533,6 +533,8 @@ fn observe(
             kind,
             reference: reference.to_owned(),
             origin: LinkOrigin::Observed,
+            resolved: None,
+            state: None,
         },
     )
 }

@@ -9,7 +9,10 @@ use gm_core::Engine;
 use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
 use gm_core::threads::store::{Batch, NewEdit, NewEntry, ThreadStore};
-use gm_schema::threads::{ProvenanceCommit, ProvenanceResult, ProvenanceThread};
+use gm_schema::threads::{
+    AttachKind, ProvenanceCommit, ProvenanceResult, ProvenanceThread, RelationDirection,
+    ThreadRelKind,
+};
 use gm_schema::{
     Actor, Command, CommandKind, CutBound, EditChange, EntryKind, Event, Evidence, LineRun,
     LinkKind, LinkOrigin, OperationId, OperationState, ThreadLink, Unverifiable,
@@ -684,6 +687,8 @@ fn at_most_five_threads_are_shown_for_a_commit_and_the_cut_is_said() {
                     kind: LinkKind::Commit,
                     reference: commit.clone(),
                     origin: LinkOrigin::Observed,
+                    resolved: None,
+                    state: None,
                 },
             )
             .unwrap();
@@ -724,6 +729,8 @@ fn a_manual_link_is_shown_as_linked_by_you() {
                 kind: LinkKind::Commit,
                 reference: commit.clone(),
                 origin: LinkOrigin::Human,
+                resolved: None,
+                state: None,
             },
         )
         .unwrap();
@@ -833,4 +840,125 @@ fn leaving_the_repository_cancels_the_blame_in_flight() {
 
     assert!(is_state(&reopened, 3, OperationState::Cancelled));
     assert!(engine.provenance_report(job.run()).is_empty());
+}
+
+#[test]
+fn a_thread_shows_its_labels_and_linked_threads_at_most_ten_each_and_says_the_cut() {
+    let repo = repo();
+    let commit = commit_file(&repo.root, "src/lib.rs", &body(&BODY), FIRST, "add compute");
+    let mut store = store_of(&repo.root);
+    let hub = thread(
+        &mut store,
+        &repo.root,
+        "hub",
+        entry("u1", EntryKind::User, "unrelated", EDITED_AT),
+    );
+    store
+        .link(
+            &hub,
+            &ThreadLink {
+                kind: LinkKind::Commit,
+                reference: commit.clone(),
+                origin: LinkOrigin::Human,
+                resolved: None,
+                state: None,
+            },
+        )
+        .unwrap();
+    // Twelve labels and twelve threads linked out of the hub: each list shows ten.
+    for index in 0..12 {
+        let name = format!("label-{index:02}");
+        store
+            .attach_label(&name, AttachKind::Thread, &hub, None, "human", EDITED_AT)
+            .unwrap();
+        let spoke = thread(
+            &mut store,
+            &repo.root,
+            &format!("spoke-{index:02}"),
+            entry(&format!("s{index}"), EntryKind::User, "spoke", EDITED_AT),
+        );
+        store
+            .link_threads(
+                &hub,
+                &spoke,
+                ThreadRelKind::Relates,
+                "agent:claude-code",
+                EDITED_AT,
+            )
+            .unwrap();
+    }
+    drop(store);
+
+    let mut engine = engine_on(&repo.root);
+    let result = explain(&mut engine, "src/lib.rs", 1, 5);
+    let shown = thread_of(commit_of(&result, &commit), &hub);
+    assert_eq!(shown.labels.len(), 10);
+    assert_eq!(shown.labels[0].name, "label-00");
+    assert_eq!(shown.labels[0].origin, "human");
+    assert_eq!(shown.links.len(), 10);
+    assert!(shown.links.iter().all(|link| {
+        link.direction == RelationDirection::Out
+            && link.kind == ThreadRelKind::Relates
+            && link.origin == "agent:claude-code"
+            && link.title == "change the compute function"
+    }));
+    for bound in [CutBound::Labels, CutBound::Links] {
+        assert!(
+            result.cuts.iter().any(|cut| cut.bound == bound
+                && cut.limit == 10
+                && cut.commit.as_deref() == Some(commit.as_str())),
+            "no {bound:?} cut in {:?}",
+            result.cuts
+        );
+    }
+}
+
+#[test]
+fn a_thread_inside_the_bound_has_no_cut_and_shows_inbound_links_as_in() {
+    let repo = repo();
+    let commit = commit_file(&repo.root, "src/lib.rs", &body(&BODY), FIRST, "add compute");
+    let mut store = store_of(&repo.root);
+    let hub = thread(
+        &mut store,
+        &repo.root,
+        "quiet",
+        entry("u1", EntryKind::User, "unrelated", EDITED_AT),
+    );
+    let older = thread(
+        &mut store,
+        &repo.root,
+        "older",
+        entry("o1", EntryKind::User, "older", EDITED_AT),
+    );
+    store
+        .link(
+            &hub,
+            &ThreadLink {
+                kind: LinkKind::Commit,
+                reference: commit.clone(),
+                origin: LinkOrigin::Human,
+                resolved: None,
+                state: None,
+            },
+        )
+        .unwrap();
+    store
+        .link_threads(&older, &hub, ThreadRelKind::Continues, "human", EDITED_AT)
+        .unwrap();
+    drop(store);
+
+    let mut engine = engine_on(&repo.root);
+    let result = explain(&mut engine, "src/lib.rs", 1, 5);
+    let shown = thread_of(commit_of(&result, &commit), &hub);
+    assert!(shown.labels.is_empty());
+    assert_eq!(shown.links.len(), 1);
+    assert_eq!(shown.links[0].uid, older);
+    assert_eq!(shown.links[0].direction, RelationDirection::In);
+    assert_eq!(shown.links[0].kind, ThreadRelKind::Continues);
+    assert!(
+        result
+            .cuts
+            .iter()
+            .all(|cut| cut.bound != CutBound::Labels && cut.bound != CutBound::Links)
+    );
 }

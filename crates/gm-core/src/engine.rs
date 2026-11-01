@@ -1630,7 +1630,7 @@ impl Engine {
     /// commit, read the reflog (B3) and the stashes (B2). Human only where a command
     /// writes.
     fn branch_command(
-        &self,
+        &mut self,
         id: OperationId,
         actor: &Actor,
         kind: &CommandKind,
@@ -1759,7 +1759,7 @@ impl Engine {
     /// Applies a plan, or undoes the last restack (D142). Human only. The status,
     /// the branches and the stacks follow.
     fn restack_command(
-        &self,
+        &mut self,
         id: OperationId,
         actor: &Actor,
         kind: &CommandKind,
@@ -1772,14 +1772,15 @@ impl Engine {
                 branch,
                 plan_id,
                 skip,
-            } => Some(restack_session::apply(
-                git,
-                &root,
-                branch,
-                plan_id,
-                skip,
-                &|path| same_folder(&root, path),
-            )?),
+            } => {
+                let (record, remaps) =
+                    restack_session::apply(git, &root, branch, plan_id, skip, &|path| {
+                        same_folder(&root, path)
+                    })?;
+                // Commit links to the replaced commits resolve from now on (D145).
+                threads_session::remap(&mut self.threads, git, &root, &remaps);
+                Some(record)
+            }
             CommandKind::UndoRestack => {
                 restack_session::undo(git, &root)?;
                 None
@@ -2041,7 +2042,7 @@ impl Engine {
     /// The worktree commands after the listing: inspect, remove, lock, unlock,
     /// and the prune pair. Any other kind is passed on to `branch_command`.
     fn manage_worktree(
-        &self,
+        &mut self,
         id: OperationId,
         actor: &Actor,
         kind: &CommandKind,

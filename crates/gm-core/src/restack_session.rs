@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use gm_schema::{RestackMove, RestackPhase, RestackPlan, RestackRecord};
+use gm_schema::{ReplayStep, RestackMove, RestackPhase, RestackPlan, RestackRecord};
 
 use crate::GitPort;
 use crate::port::RefMove;
@@ -96,7 +96,7 @@ pub(crate) fn apply(
     plan_id: &str,
     skip: &[String],
     same_folder: &dyn Fn(&str) -> bool,
-) -> Result<RestackRecord, String> {
+) -> Result<(RestackRecord, Vec<(String, String)>), String> {
     let plan = plan(git, root, branch, skip, same_folder)?;
     if plan.plan_id != plan_id {
         return Err("The stacks changed since the plan was made. Plan again.".to_owned());
@@ -123,6 +123,18 @@ pub(crate) fn apply(
     if moves.is_empty() {
         return Err("Nothing in the plan can run.".to_owned());
     }
+    // The replays of the branches that move: each old commit now has its new one (D145). A
+    // branch that is blocked moves nothing, so its replays are not recorded.
+    let remaps: Vec<(String, String)> = plan
+        .branches
+        .iter()
+        .filter(|entry| entry.block.is_none() && entry.new_tip.is_some())
+        .flat_map(|entry| entry.commits.iter())
+        .filter_map(|commit| match &commit.step {
+            ReplayStep::Clean { new } => Some((commit.oid.clone(), new.clone())),
+            _ => None,
+        })
+        .collect();
     let record = RestackRecord {
         plan_id: plan.plan_id,
         from: branch.to_owned(),
@@ -132,7 +144,7 @@ pub(crate) fn apply(
     let path = store_path(git, root)?;
     save(&path, &record)?;
     transact(git, root, &record, false)?;
-    finish(git, root, record, &path)
+    Ok((finish(git, root, record, &path)?, remaps))
 }
 
 /// Writes the bases and marks the record applied.

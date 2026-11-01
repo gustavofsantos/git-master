@@ -19,6 +19,7 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 
 use super::harness;
+use super::labels::rel_kind_text;
 use super::provenance::EditRow;
 use super::query::{
     MIN_FUZZY_CHARS, TrigramQuery, build_fts_query, build_trigram_queries, dice, is_word_char,
@@ -388,7 +389,14 @@ const FILTER_SQL: &str = " AND (:harness IS NULL OR t.harness = :harness)
             AND substr(lower(:commit), 1, length(k.ref)) = lower(k.ref))
         OR (length(:commit) >= 7 AND substr(lower(k.ref), 1, length(:commit)) = lower(:commit)))))
     AND (:tag IS NULL OR EXISTS (SELECT 1 FROM label_attach a JOIN label l ON l.id = a.label_id
-        WHERE a.kind = 'thread' AND a.ref = t.uid AND l.name = :tag))";
+        WHERE a.kind = 'thread' AND a.ref = t.uid AND l.name = :tag))
+    AND (:label IS NULL OR (SELECT COUNT(DISTINCT j.value) FROM json_each(:label) j
+        JOIN label l ON l.name = j.value
+        JOIN label_attach a ON a.label_id = l.id AND a.kind = 'thread' AND a.ref = t.uid)
+        = (SELECT COUNT(DISTINCT j.value) FROM json_each(:label) j))
+    AND (:related_to IS NULL OR EXISTS (SELECT 1 FROM thread_rel r JOIN thread o ON o.uid = :related_to
+        WHERE ((r.from_thread = t.id AND r.to_thread = o.id) OR (r.to_thread = t.id AND r.from_thread = o.id))
+        AND (:related_kind IS NULL OR r.kind = :related_kind)))";
 
 /// The entry filters as SQL (D147), for the statements of a search only: `e` is the entry the
 /// hit comes from. They are bound with the thread filter by `query_candidates`.
@@ -700,7 +708,8 @@ impl ThreadStore {
              AND (:before_at IS NULL OR (t.last_event_at, t.uid) < (:before_at, :before_uid))
              ORDER BY t.last_event_at DESC, t.uid DESC LIMIT :limit"
         );
-        let mut bindings = thread_bindings(filter);
+        let values = FilterValues::of(filter);
+        let mut bindings = thread_bindings(filter, &values);
         bindings.push((":before_at", &before_at));
         bindings.push((":before_uid", &before_uid));
         bindings.push((":limit", &limit));
@@ -976,17 +985,33 @@ impl ThreadStore {
                 *path.entry(edited).or_default() += 1;
             }
         }
+        let mut label: BTreeMap<String, u32> = BTreeMap::new();
+        let mut statement = self.conn.prepare(
+            "SELECT a.ref, l.name FROM label_attach a JOIN label l ON l.id = a.label_id
+             WHERE a.kind = 'thread'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (uid, name) = row?;
+            if uids.contains(&uid) {
+                *label.entry(name).or_default() += 1;
+            }
+        }
         Ok(SearchFacets {
             branch: top_counts(branch),
             harness: top_counts(harness),
             path: top_counts(path),
+            label: top_counts(label),
         })
     }
 
     /// The uids of the threads the filter matches, with no query.
     fn matching_uids(&self, filter: &ThreadFilter) -> Result<HashSet<String>, StoreError> {
         let sql = format!("SELECT t.uid FROM thread t WHERE 1 = 1{FILTER_SQL}");
-        let bindings = thread_bindings(filter);
+        let values = FilterValues::of(filter);
+        let bindings = thread_bindings(filter, &values);
         let mut statement = self.conn.prepare(&sql)?;
         let uids = statement
             .query_map(bindings.as_slice(), |row| row.get::<_, String>(0))?
@@ -1140,7 +1165,8 @@ impl ThreadStore {
         let role = filter.role.map(entry_role_text);
         let turn_from = filter.turn_from.map(i64::from);
         let turn_to = filter.turn_to.map(i64::from);
-        let mut bindings = thread_bindings(filter);
+        let values = FilterValues::of(filter);
+        let mut bindings = thread_bindings(filter, &values);
         bindings.push((":role", &role));
         bindings.push((":turn_from", &turn_from));
         bindings.push((":turn_to", &turn_to));
@@ -1756,9 +1782,31 @@ fn tags_of(conn: &Connection, thread: i64) -> Result<Vec<String>, StoreError> {
     Ok(tags)
 }
 
+/// The filter values that are not plain columns: the label names as a JSON array, and the kind
+/// of relation as its stored text. They own their text, so the bindings can borrow them.
+struct FilterValues {
+    label: Option<String>,
+    related_kind: Option<&'static str>,
+}
+
+impl FilterValues {
+    fn of(filter: &ThreadFilter) -> Self {
+        Self {
+            label: filter
+                .label
+                .as_ref()
+                .map(|names| serde_json::to_string(names).unwrap_or_else(|_| "[]".to_owned())),
+            related_kind: filter.related_kind.map(rel_kind_text),
+        }
+    }
+}
+
 /// The filter's parameters, in the names `FILTER_SQL` uses.
-fn thread_bindings(filter: &ThreadFilter) -> Vec<(&'static str, &dyn ToSql)> {
-    let mut bindings: Vec<(&'static str, &dyn ToSql)> = Vec::with_capacity(12);
+fn thread_bindings<'a>(
+    filter: &'a ThreadFilter,
+    values: &'a FilterValues,
+) -> Vec<(&'static str, &'a dyn ToSql)> {
+    let mut bindings: Vec<(&'static str, &'a dyn ToSql)> = Vec::with_capacity(15);
     bindings.push((":harness", &filter.harness));
     bindings.push((":branch", &filter.branch));
     bindings.push((":since", &filter.since));
@@ -1770,6 +1818,9 @@ fn thread_bindings(filter: &ThreadFilter) -> Vec<(&'static str, &dyn ToSql)> {
     bindings.push((":model", &filter.model));
     bindings.push((":commit", &filter.commit));
     bindings.push((":tag", &filter.tag));
+    bindings.push((":label", &values.label));
+    bindings.push((":related_to", &filter.related_to));
+    bindings.push((":related_kind", &values.related_kind));
     bindings
 }
 
@@ -1847,7 +1898,7 @@ fn group_hits(entries: &[ThreadHit], group: SearchGroup) -> Vec<ThreadHit> {
 /// the filter that has it cleared (D147).
 fn set_filters(filter: &ThreadFilter) -> Vec<(&'static str, ThreadFilter)> {
     type Check = (&'static str, bool, fn(&mut ThreadFilter));
-    let checks: [Check; 13] = [
+    let checks: [Check; 15] = [
         ("branch", filter.branch.is_some(), |f| f.branch = None),
         ("harness", filter.harness.is_some(), |f| f.harness = None),
         ("model", filter.model.is_some(), |f| f.model = None),
@@ -1860,6 +1911,11 @@ fn set_filters(filter: &ThreadFilter) -> Vec<(&'static str, ThreadFilter)> {
         ("path", filter.path.is_some(), |f| f.path = None),
         ("commit", filter.commit.is_some(), |f| f.commit = None),
         ("tag", filter.tag.is_some(), |f| f.tag = None),
+        ("label", filter.label.is_some(), |f| f.label = None),
+        ("related_to", filter.related_to.is_some(), |f| {
+            f.related_to = None;
+            f.related_kind = None;
+        }),
         ("role", filter.role.is_some(), |f| f.role = None),
         ("thread", filter.thread.is_some(), |f| f.thread = None),
         (
@@ -2314,6 +2370,9 @@ fn link_row(row: &Row<'_>) -> rusqlite::Result<ThreadLink> {
         kind: parse_link_kind(&kind).ok_or_else(|| bad_value(0, &kind))?,
         reference: row.get(1)?,
         origin: parse_origin(&origin).ok_or_else(|| bad_value(2, &origin))?,
+        // The resolution is made on read by the engine (D145), not stored here.
+        resolved: None,
+        state: None,
     })
 }
 
@@ -3357,6 +3416,8 @@ mod tests {
             kind,
             reference: reference.to_owned(),
             origin: LinkOrigin::Human,
+            resolved: None,
+            state: None,
         };
         store.link(&uid(session), &link).expect("link");
     }
@@ -3461,6 +3522,8 @@ mod tests {
             kind: LinkKind::Commit,
             reference: OID.to_owned(),
             origin: LinkOrigin::Human,
+            resolved: None,
+            state: None,
         };
         store.link(&other_uid, &link).expect("link");
         let in_other = ThreadFilter {
@@ -3919,6 +3982,8 @@ mod tests {
             kind: LinkKind::Commit,
             reference: "abc123".to_owned(),
             origin,
+            resolved: None,
+            state: None,
         };
         store
             .link(&uid("s"), &link(LinkOrigin::Observed))
@@ -3941,7 +4006,9 @@ mod tests {
                 &ThreadLink {
                     kind: LinkKind::File,
                     reference: " ".to_owned(),
-                    origin: LinkOrigin::Human
+                    origin: LinkOrigin::Human,
+                    resolved: None,
+                    state: None,
                 }
             ),
             Err(StoreError::Invalid(_))

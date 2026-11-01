@@ -9,6 +9,7 @@ pub mod pipeline;
 pub mod provenance;
 pub mod query;
 pub mod redact;
+pub mod resolve;
 pub mod store;
 pub mod time;
 pub mod when;

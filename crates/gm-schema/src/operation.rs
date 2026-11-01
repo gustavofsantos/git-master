@@ -1403,6 +1403,8 @@ mod tests {
                 kind: LinkKind::Commit,
                 reference: "a".repeat(40),
                 origin: LinkOrigin::Human,
+                resolved: None,
+                state: None,
             },
         })
         .unwrap();

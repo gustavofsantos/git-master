@@ -127,7 +127,12 @@ fn the_handshake_lists_only_the_tools_the_agent_does_not_have() {
             "threads_search",
             "thread_get",
             "thread_read",
-            "provenance"
+            "provenance",
+            "labels_list",
+            "label_get",
+            "label_create",
+            "label_attach",
+            "thread_link"
         ]
     );
 }
@@ -501,6 +506,8 @@ fn store_search_threads(dir: &Path) -> (String, String) {
                 kind: LinkKind::Commit,
                 reference: COMMIT.to_owned(),
                 origin: LinkOrigin::Human,
+                resolved: None,
+                state: None,
             },
         )
         .unwrap();
@@ -1227,6 +1234,8 @@ fn a_cut_answer_says_which_bound_cut_it() {
                     kind: LinkKind::Commit,
                     reference: head.clone(),
                     origin: LinkOrigin::Human,
+                    resolved: None,
+                    state: None,
                 },
             )
             .unwrap();
@@ -1352,4 +1361,407 @@ fn the_provenance_schema_is_read_only_and_names_its_arguments() {
     let description = tool["description"].as_str().unwrap();
     assert!(description.contains("complete"), "a partial answer says so");
     assert!(description.contains("blob_match"));
+}
+
+/// The label named `name` as the store holds it, read the way the app reads it.
+fn stored_label(dir: &Path, name: &str) -> gm_schema::threads::LabelDetail {
+    let store = ThreadStore::open(&dir.join(".git")).unwrap();
+    let label = store
+        .list_labels(name, 10)
+        .unwrap()
+        .into_iter()
+        .find(|label| label.name == name)
+        .expect("the label is stored");
+    store.read_label(label.id).unwrap()
+}
+
+/// The reply's text must say `words`, so the agent knows what to change.
+fn refused_with(reply: &Value, words: &str) {
+    let text = refusal(reply);
+    assert!(text.contains(words), "{text}");
+}
+
+#[test]
+fn an_agent_creates_a_label_attaches_it_and_links_threads_and_the_store_keeps_its_origin() {
+    let dir = repo();
+    let (uid_a, uid_b) = store_search_threads(dir.path());
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "label_create",
+                &json!({ "name": "needs-review", "description": "A second look", "color": "#3B82F6" }),
+            ),
+            call(
+                3,
+                "label_attach",
+                &json!({ "label": "needs-review", "kind": "thread", "ref": uid_a }),
+            ),
+            call(
+                4,
+                "thread_link",
+                &json!({ "from": uid_b, "to": uid_a, "kind": "continues" }),
+            ),
+        ],
+    );
+    let created = result(&replies[1]);
+    assert_eq!(created["created"], true);
+    assert_eq!(created["label"]["name"], "needs-review");
+    assert_eq!(
+        created["label"]["color"], "#3b82f6",
+        "the colour is stored in lower case"
+    );
+    assert_eq!(created["origin"], "agent:test-client");
+    let attached = result(&replies[2]);
+    assert_eq!(attached["attachment"]["kind"], "thread");
+    assert_eq!(attached["attachment"]["ref"], uid_a);
+    assert_eq!(attached["attachment"]["origin"], "agent:test-client");
+    let link = result(&replies[3]);
+    assert_eq!(link["from"], uid_b);
+    assert_eq!(link["to"], uid_a);
+    assert_eq!(link["kind"], "continues");
+    assert_eq!(link["origin"], "agent:test-client");
+    let stored = stored_label(dir.path(), "needs-review");
+    assert_eq!(stored.label.origin, "agent:test-client");
+    assert_eq!(stored.label.description, "A second look");
+    assert_eq!(stored.attachments.len(), 1);
+    assert_eq!(stored.attachments[0].origin, "agent:test-client");
+}
+
+#[test]
+fn a_label_an_agent_created_is_listed_and_found_by_the_threads_search_label_filter() {
+    let dir = repo();
+    let (_, uid_b) = store_search_threads(dir.path());
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(2, "label_create", &json!({ "name": "agent-tag" })),
+            call(
+                3,
+                "label_attach",
+                &json!({ "label": "agent-tag", "kind": "thread", "ref": uid_b }),
+            ),
+            call(4, "labels_list", &json!({})),
+            call(5, "threads_search", &json!({ "label": "agent-tag" })),
+        ],
+    );
+    let listing = result(&replies[3]);
+    let tag = listing["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|label| label["name"] == "agent-tag")
+        .expect("the label is listed");
+    assert_eq!(tag["attachment_count"], 1);
+    assert_eq!(tag["origin"], "agent:test-client");
+    assert_eq!(
+        tag["untrusted"], true,
+        "a label name is text an agent wrote"
+    );
+    assert_eq!(listing["has_more"], false);
+    assert_eq!(thread_ids(&replies[4]), vec![uid_b.clone()]);
+    let labels = hits_of(&replies[4])[0]["labels"].clone();
+    assert!(
+        labels
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|label| label.as_str() == Some("agent-tag")),
+        "{labels}"
+    );
+}
+
+#[test]
+fn attaching_a_pair_again_returns_the_same_attachment_and_keeps_the_first_origin() {
+    let dir = repo();
+    let (uid_a, _) = store_search_threads(dir.path());
+    // The person attached `auth` to thread a before (store_search_threads).
+    let auth = stored_label(dir.path(), "auth").label.id;
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "label_attach",
+                &json!({ "label": "auth", "kind": "thread", "ref": uid_a }),
+            ),
+            call(
+                3,
+                "label_attach",
+                &json!({ "label": "reviewed", "kind": "file", "ref": "f.txt" }),
+            ),
+            call(
+                4,
+                "label_attach",
+                &json!({ "label": "reviewed", "kind": "file", "ref": "f.txt" }),
+            ),
+            call(
+                5,
+                "label_attach",
+                &json!({ "label": "reviewed", "kind": "label", "ref": "auth" }),
+            ),
+        ],
+    );
+    let first = result(&replies[1]);
+    assert_eq!(
+        first["attachment"]["origin"], "human",
+        "the person's origin stays"
+    );
+    assert_eq!(first["label"]["attachment_count"], 1);
+    let (once, again) = (result(&replies[2]), result(&replies[3]));
+    assert_eq!(once["attachment"]["at"], again["attachment"]["at"]);
+    assert_eq!(again["label"]["attachment_count"], 1);
+    assert_eq!(again["origin"], "agent:test-client");
+    let stored = stored_label(dir.path(), "reviewed");
+    assert_eq!(
+        stored.attachments.len(),
+        2,
+        "the file and the label attachment"
+    );
+    let onto_label = result(&replies[4]);
+    assert_eq!(onto_label["attachment"]["kind"], "label");
+    assert_eq!(onto_label["attachment"]["ref"], auth.to_string());
+}
+
+#[test]
+fn a_commit_is_attached_by_a_short_id_and_stored_with_its_snapshot() {
+    let dir = repo();
+    let head = rev(dir.path(), "HEAD");
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "label_attach",
+                &json!({ "label": "baseline", "kind": "commit", "ref": &head[..7] }),
+            ),
+        ],
+    );
+    let attachment = &result(&replies[1])["attachment"];
+    assert_eq!(attachment["kind"], "commit");
+    assert_eq!(attachment["ref"], head, "stored by its full id");
+    assert_eq!(attachment["subject"], "init");
+    assert_eq!(attachment["origin"], "agent:test-client");
+}
+
+#[test]
+fn labels_list_and_label_get_read_the_labels_with_what_is_attached() {
+    let dir = repo();
+    let (uid_a, _) = store_search_threads(dir.path());
+    let auth = stored_label(dir.path(), "auth").label.id;
+    ThreadStore::open(&dir.path().join(".git"))
+        .unwrap()
+        .create_label("docs", "", None, "human", 2)
+        .unwrap();
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(2, "labels_list", &json!({ "query": "AU" })),
+            call(3, "label_get", &json!({ "label": "auth" })),
+            call(4, "label_get", &json!({ "label": auth })),
+            call(5, "label_get", &json!({ "label": "missing" })),
+            call(6, "labels_list", &json!({ "limit": 0 })),
+            call(7, "labels_list", &json!({ "limit": 1 })),
+        ],
+    );
+    let names: Vec<&str> = result(&replies[1])["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|label| label["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["auth"], "the query matches in any case");
+    for reply in [&replies[2], &replies[3]] {
+        let detail = result(reply);
+        assert_eq!(detail["label"]["name"], "auth");
+        assert_eq!(detail["label"]["origin"], "human");
+        let attachment = &detail["attachments"][0];
+        assert_eq!(attachment["kind"], "thread");
+        assert_eq!(attachment["ref"], uid_a);
+        assert_eq!(attachment["origin"], "human");
+        assert_eq!(attachment["untrusted"], true);
+    }
+    refused_with(&replies[4], "no label named \"missing\"");
+    refused_with(&replies[5], "between 1 and 50");
+    let listing = result(&replies[6]);
+    assert_eq!(listing["labels"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listing["has_more"], true,
+        "a row past the page says more follow"
+    );
+}
+
+#[test]
+fn invalid_label_and_link_arguments_are_refused_with_what_to_change() {
+    let dir = repo();
+    let (uid_a, _) = store_search_threads(dir.path());
+    let long_name = "n".repeat(65);
+    let long_description = "d".repeat(501);
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(2, "label_create", &json!({ "name": long_name })),
+            call(3, "label_create", &json!({ "name": "   " })),
+            call(
+                4,
+                "label_create",
+                &json!({ "name": "x", "description": long_description }),
+            ),
+            call(5, "label_create", &json!({ "name": "x", "color": "red" })),
+            call(
+                6,
+                "label_attach",
+                &json!({ "label": "x", "kind": "folder", "ref": "f.txt" }),
+            ),
+            call(
+                7,
+                "label_attach",
+                &json!({ "label": "x", "kind": "file", "ref": "/etc/passwd" }),
+            ),
+            call(
+                8,
+                "label_attach",
+                &json!({ "label": "x", "kind": "file", "ref": "../outside.txt" }),
+            ),
+            call(
+                9,
+                "label_attach",
+                &json!({ "label": "x", "kind": "commit", "ref": "HEAD" }),
+            ),
+            call(
+                10,
+                "label_attach",
+                &json!({ "label": "x", "kind": "thread", "ref": "0123456789abcdef" }),
+            ),
+            call(
+                11,
+                "label_attach",
+                &json!({ "label": "x", "kind": "label", "ref": "no-such-label" }),
+            ),
+            call(
+                12,
+                "thread_link",
+                &json!({ "from": uid_a, "to": uid_a, "kind": "relates" }),
+            ),
+            call(
+                13,
+                "thread_link",
+                &json!({ "from": uid_a, "to": "0123456789abcdef", "kind": "relates" }),
+            ),
+            call(
+                14,
+                "thread_link",
+                &json!({ "from": uid_a, "to": uid_a, "kind": "duplicates" }),
+            ),
+            call(15, "label_get", &json!({})),
+            call(16, "label_get", &json!({ "label": 42 })),
+            call(17, "label_get", &json!({ "label": true })),
+        ],
+    );
+    refused_with(&replies[1], "at most 64 characters");
+    refused_with(&replies[2], "name is required");
+    refused_with(&replies[3], "at most 500 characters");
+    refused_with(&replies[4], "#rrggbb");
+    refused_with(&replies[5], "thread, file, commit, label");
+    refused_with(&replies[6], "relative");
+    refused_with(&replies[7], "remove the `..`");
+    refused_with(&replies[8], "7 to 40 hex digits");
+    refused_with(&replies[9], "threads_search");
+    refused_with(&replies[10], "no label named \"no-such-label\"");
+    refused_with(&replies[11], "cannot be linked to itself");
+    refused_with(&replies[12], "threads_search");
+    refused_with(&replies[13], "continues, relates, supersedes");
+    refused_with(&replies[14], "label is required");
+    refused_with(&replies[15], "no label 42");
+    refused_with(&replies[16], "must be a label's name or its integer id");
+    assert!(
+        !stored_label_names(dir.path()).contains(&"x".to_owned()),
+        "a refused label is not stored"
+    );
+}
+
+/// The names of every label in the store.
+fn stored_label_names(dir: &Path) -> Vec<String> {
+    let store = ThreadStore::open(&dir.join(".git")).unwrap();
+    store
+        .list_labels("", 100)
+        .unwrap()
+        .into_iter()
+        .map(|label| label.name)
+        .collect()
+}
+
+#[test]
+fn the_record_tools_are_not_read_only_and_the_reads_are() {
+    let dir = repo();
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        ],
+    );
+    let tools = replies[1]["result"]["tools"].as_array().unwrap();
+    let tool = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))
+            .clone()
+    };
+    for name in ["labels_list", "label_get"] {
+        assert_eq!(tool(name)["annotations"]["readOnlyHint"], true, "{name}");
+    }
+    for name in ["label_create", "label_attach", "thread_link"] {
+        let listed = tool(name);
+        assert_eq!(listed["annotations"]["readOnlyHint"], false, "{name}");
+        assert_eq!(listed["annotations"]["destructiveHint"], false, "{name}");
+        assert!(listed.get("requiresUserInteraction").is_none(), "{name}");
+        assert_eq!(
+            listed["inputSchema"]["additionalProperties"], false,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        tool("label_attach")["inputSchema"]["required"],
+        json!(["label", "kind", "ref"])
+    );
+    assert_eq!(
+        tool("label_attach")["inputSchema"]["properties"]["kind"]["enum"],
+        json!(["thread", "file", "commit", "label"])
+    );
+    assert_eq!(
+        tool("thread_link")["inputSchema"]["properties"]["kind"]["enum"],
+        json!(["continues", "relates", "supersedes"])
+    );
+    assert_eq!(
+        tool("label_create")["inputSchema"]["properties"]["name"]["maxLength"],
+        64
+    );
+    assert_eq!(
+        tool("label_create")["inputSchema"]["properties"]["description"]["maxLength"],
+        500
+    );
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    for human_only in [
+        "label_rename",
+        "label_delete",
+        "label_detach",
+        "thread_delete",
+    ] {
+        assert!(
+            !names.contains(&human_only),
+            "{human_only} is for the person"
+        );
+    }
 }

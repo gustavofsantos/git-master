@@ -24,6 +24,18 @@ pub const EDIT_LIMIT: usize = 200;
 pub const RANGE_LIMIT: u32 = 1000;
 /// Entries shown before and after an edit's entry.
 pub const CONTEXT: u32 = 2;
+/// Labels one thread of a provenance result shows: the second edge out (D144, D145).
+pub const LABEL_LIMIT: usize = 10;
+/// Linked threads one thread of a provenance result shows: the second edge out (D144, D143).
+pub const LINK_LIMIT: usize = 10;
+
+/// Keeps the first `limit` of `items` and says whether any were cut (D144). The caller fetches
+/// one more than the limit, so the cut is known without a count.
+pub fn cut<T>(items: &mut Vec<T>, limit: usize) -> bool {
+    let cut = items.len() > limit;
+    items.truncate(limit);
+    cut
+}
 
 /// Characters that make a line brace-only, with the blank lines (D144): they do not count
 /// toward a run.
@@ -382,6 +394,20 @@ mod tests {
             .enumerate()
             .map(|(index, text)| blame(u32::try_from(index + 1).unwrap(), "c1", "a.rs", text))
             .collect()
+    }
+
+    #[test]
+    fn cut_keeps_the_first_items_and_says_when_it_cut() {
+        let mut short = vec![1, 2];
+        assert!(!cut(&mut short, 2));
+        assert_eq!(short, vec![1, 2]);
+
+        let mut long = vec![1, 2, 3];
+        assert!(cut(&mut long, 2));
+        assert_eq!(long, vec![1, 2]);
+
+        let mut none: Vec<u8> = Vec::new();
+        assert!(!cut(&mut none, 0));
     }
 
     const BODY: [&str; 3] = ["let a = 1;", "let b = 2;", "let c = 3;"];

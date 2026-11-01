@@ -9,7 +9,10 @@ use gm_core::Engine;
 use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
 use gm_core::threads::store::{Batch, ThreadStore};
-use gm_schema::threads::{AttachKind, Label, LabelDetail, ThreadRelKind};
+use gm_schema::threads::{
+    AttachKind, Label, LabelDetail, SearchFacets, SearchGroup, SearchOrder, ThreadFilter,
+    ThreadHit, ThreadRelKind,
+};
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId, OperationState};
 
 /// 2020-01-01: the committer date of the commits below, in milliseconds.
@@ -525,6 +528,8 @@ fn a_commit_link_without_a_snapshot_gets_one_when_the_store_opens() {
                     kind: gm_schema::threads::LinkKind::Commit,
                     reference: head.clone(),
                     origin: gm_schema::threads::LinkOrigin::Observed,
+                    resolved: None,
+                    state: None,
                 },
             )
             .unwrap();
@@ -647,4 +652,188 @@ fn a_thread_cannot_be_linked_to_itself() {
         },
     );
     assert_eq!(state_of(&events), OperationState::Failed);
+}
+
+#[test]
+fn a_file_attachment_shows_the_path_the_file_has_now() {
+    let repo = repo();
+    std::fs::write(repo.root.join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(&repo.root, &["add", "--", "keep.rs"]);
+    git(&repo.root, &["commit", "-q", "-m", "keep"]);
+    let mut engine = engine_on(&repo.root);
+    let attached = send(
+        &mut engine,
+        &Actor::Human,
+        CommandKind::AttachLabel {
+            label: "parsing".into(),
+            kind: AttachKind::File,
+            reference: "parser.rs".into(),
+        },
+    );
+    assert_eq!(state_of(&attached), OperationState::Done, "{attached:?}");
+    let label = label_of(&attached).expect("the label");
+    let kept = send(
+        &mut engine,
+        &Actor::Human,
+        CommandKind::AttachLabel {
+            label: "parsing".into(),
+            kind: AttachKind::File,
+            reference: "keep.rs".into(),
+        },
+    );
+    assert_eq!(state_of(&kept), OperationState::Done, "{kept:?}");
+
+    std::fs::create_dir(repo.root.join("src")).unwrap();
+    git(&repo.root, &["mv", "parser.rs", "src/parser.rs"]);
+    git(&repo.root, &["commit", "-q", "-m", "move the parser"]);
+
+    let read = send(
+        &mut engine,
+        &Actor::Human,
+        CommandKind::ReadLabel { id: label.id },
+    );
+    let detail = detail_of(&read);
+    let file = |path: &str| {
+        detail
+            .attachments
+            .iter()
+            .find(|attachment| attachment.reference == path)
+            .unwrap_or_else(|| panic!("no attachment of {path}"))
+    };
+    // The stored path is kept; the path now comes beside it.
+    assert_eq!(
+        file("parser.rs").current_path.as_deref(),
+        Some("src/parser.rs")
+    );
+    assert_eq!(file("keep.rs").current_path.as_deref(), Some("keep.rs"));
+}
+
+/// The hits, facets and diagnosis of one search.
+type Searched = (
+    Vec<ThreadHit>,
+    Option<SearchFacets>,
+    Option<Vec<(String, u32)>>,
+);
+
+fn search(engine: &mut Engine, filter: ThreadFilter, facets: bool) -> Searched {
+    let events = send(
+        engine,
+        &Actor::Human,
+        CommandKind::SearchThreads {
+            query: String::new(),
+            filter,
+            limit: 50,
+            cursor: None,
+            group: SearchGroup::Thread,
+            order: SearchOrder::Relevance,
+            context: 0,
+            facets,
+        },
+    );
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::ThreadSearchResults {
+                hits,
+                facets,
+                diagnosis,
+                ..
+            } => Some((hits.clone(), facets.clone(), diagnosis.clone())),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no search answer: {events:?}"))
+}
+
+fn uids_of(hits: &[ThreadHit]) -> Vec<String> {
+    let mut uids: Vec<String> = hits.iter().map(|hit| hit.thread_uid.clone()).collect();
+    uids.sort();
+    uids
+}
+
+fn with(edit: impl FnOnce(&mut ThreadFilter)) -> ThreadFilter {
+    let mut filter = ThreadFilter::default();
+    edit(&mut filter);
+    filter
+}
+
+#[test]
+fn search_filters_by_labels_and_related_threads_and_names_the_filter_that_emptied_it() {
+    let repo = repo();
+    let one = thread(&repo.root, "one");
+    let two = thread(&repo.root, "two");
+    let three = thread(&repo.root, "three");
+    let mut engine = engine_on(&repo.root);
+    for (name, uid) in [("bug", &one), ("bug", &two), ("urgent", &two)] {
+        let events = send(
+            &mut engine,
+            &Actor::Human,
+            CommandKind::AttachLabel {
+                label: name.into(),
+                kind: AttachKind::Thread,
+                reference: uid.clone(),
+            },
+        );
+        assert_eq!(state_of(&events), OperationState::Done, "{events:?}");
+    }
+    for (from, to, kind) in [
+        (&one, &three, ThreadRelKind::Relates),
+        (&two, &one, ThreadRelKind::Continues),
+    ] {
+        let events = send(
+            &mut engine,
+            &Actor::Human,
+            CommandKind::LinkThreads {
+                from: from.clone(),
+                to: to.clone(),
+                kind,
+            },
+        );
+        assert_eq!(state_of(&events), OperationState::Done, "{events:?}");
+    }
+
+    // Every label named must be on the thread.
+    let both = with(|f| f.label = Some(vec!["bug".into(), "urgent".into()]));
+    assert_eq!(
+        uids_of(&search(&mut engine, both, false).0),
+        vec![two.clone()]
+    );
+    let bugs = with(|f| f.label = Some(vec!["bug".into()]));
+    let mut expected = vec![one.clone(), two.clone()];
+    expected.sort();
+    assert_eq!(uids_of(&search(&mut engine, bugs, false).0), expected);
+    // A label name is exact, not a prefix.
+    let prefix = with(|f| f.label = Some(vec!["bu".into()]));
+    assert!(search(&mut engine, prefix, false).0.is_empty());
+
+    // Linked in either direction, any kind, or only the kind asked for.
+    let related = with(|f| f.related_to = Some(one.clone()));
+    let mut expected = vec![two.clone(), three.clone()];
+    expected.sort();
+    assert_eq!(uids_of(&search(&mut engine, related, false).0), expected);
+    let continues = with(|f| {
+        f.related_to = Some(one.clone());
+        f.related_kind = Some(ThreadRelKind::Continues);
+    });
+    assert_eq!(
+        uids_of(&search(&mut engine, continues, false).0),
+        vec![two.clone()]
+    );
+
+    // Nothing is supersedes-linked to `one`, so the search finds nothing, and the diagnosis
+    // names the filter that, removed alone, gives threads back.
+    let none = with(|f| {
+        f.related_to = Some(one.clone());
+        f.related_kind = Some(ThreadRelKind::Supersedes);
+    });
+    let (hits, _, diagnosis) = search(&mut engine, none, false);
+    assert!(hits.is_empty());
+    assert_eq!(diagnosis, Some(vec![("related_to".to_owned(), 3)]));
+
+    let (_, facets, _) = search(&mut engine, ThreadFilter::default(), true);
+    let facets = facets.expect("facets");
+    assert!(facets.label.contains(&("bug".to_owned(), 2)), "{facets:?}");
+    assert!(
+        facets.label.contains(&("urgent".to_owned(), 1)),
+        "{facets:?}"
+    );
 }

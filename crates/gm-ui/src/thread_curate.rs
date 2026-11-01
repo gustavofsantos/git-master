@@ -243,6 +243,8 @@ pub(crate) fn field_command(
                 kind: LinkKind::Commit,
                 reference: link_of(text)?,
                 origin: LinkOrigin::Human,
+                resolved: None,
+                state: None,
             },
         }],
         ThreadField::Export => vec![CommandKind::ExportThread {
@@ -629,6 +631,8 @@ mod tests {
                     kind: LinkKind::Commit,
                     reference: "a1b2c3d".into(),
                     origin: LinkOrigin::Human,
+                    resolved: None,
+                    state: None,
                 },
             }])
         );
@@ -728,6 +732,8 @@ mod tests {
             kind: LinkKind::Commit,
             reference: "a1b2".into(),
             origin: LinkOrigin::Human,
+            resolved: None,
+            state: None,
         };
         assert_eq!(
             unlink_command("u1", &link),

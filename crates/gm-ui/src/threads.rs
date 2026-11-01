@@ -2997,16 +2997,22 @@ mod tests {
                 kind: LinkKind::File,
                 reference: "docs/manual.md".to_owned(),
                 origin: LinkOrigin::Human,
+                resolved: None,
+                state: None,
             },
             ThreadLink {
                 kind: LinkKind::File,
                 reference: "src/b.rs".to_owned(),
                 origin: LinkOrigin::Human,
+                resolved: None,
+                state: None,
             },
             ThreadLink {
                 kind: LinkKind::File,
                 reference: "src/a.rs".to_owned(),
                 origin: LinkOrigin::Observed,
+                resolved: None,
+                state: None,
             },
         ];
         let lines = file_lines(&detail);
@@ -3056,16 +3062,22 @@ mod tests {
                 kind: LinkKind::Commit,
                 reference: "abc".to_owned(),
                 origin: LinkOrigin::Observed,
+                resolved: None,
+                state: None,
             },
             ThreadLink {
                 kind: LinkKind::Commit,
                 reference: "def".to_owned(),
                 origin: LinkOrigin::Human,
+                resolved: None,
+                state: None,
             },
             ThreadLink {
                 kind: LinkKind::Branch,
                 reference: "main".to_owned(),
                 origin: LinkOrigin::Observed,
+                resolved: None,
+                state: None,
             },
         ];
         assert_eq!(header_counts(&detail).commits, 2);

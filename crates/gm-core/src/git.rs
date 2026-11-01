@@ -31,8 +31,8 @@ use crate::grep::{Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
 use crate::port::{
-    BlameRead, CommitSnapshot, DetailRead, FileListRead, GrepRead, HistoryRevs, RemoteRun,
-    StackRead,
+    BlameRead, CommitPresence, CommitSnapshot, DetailRead, FileListRead, GrepRead, HistoryRevs,
+    RemoteRun, Rewrite, StackRead,
 };
 use crate::port::{DiscardOutcome, FileMerge, RefMove, ReviewSide, TreeMerge};
 use crate::reflog;
@@ -1253,6 +1253,176 @@ impl GitPort for SubprocessGit {
             let raw = git.run_stoppable(&root, &args, stop)?;
             blame::parse_line_porcelain(&raw).map_err(GitError)
         }))
+    }
+
+    fn commit_presence(&self, root: &Path, oid: &str) -> Result<CommitPresence, GitError> {
+        let id = object_id_arg(oid)?;
+        let mut exists = self.git(root);
+        exists.args(["cat-file", "-e", &format!("{id}^{{commit}}")]);
+        if !succeeds(exists) {
+            return Ok(CommitPresence::Missing);
+        }
+        let mut contains = self.git(root);
+        contains.args([
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            "--contains",
+            id.as_str(),
+        ]);
+        if !Self::run(contains)?.is_empty() {
+            return Ok(CommitPresence::Reachable);
+        }
+        // HEAD is not a ref that `for-each-ref` lists, so a detached HEAD is checked on its own.
+        let mut head = self.git(root);
+        head.args(["merge-base", "--is-ancestor", id.as_str(), "HEAD"]);
+        Ok(if succeeds(head) {
+            CommitPresence::Reachable
+        } else {
+            CommitPresence::Unreachable
+        })
+    }
+
+    fn rewrite_candidates(
+        &self,
+        root: &Path,
+        branch: Option<&str>,
+    ) -> Result<Vec<String>, GitError> {
+        let mut found: Vec<String> = Vec::new();
+        let mut orig = self.git(root);
+        orig.args(["rev-parse", "--verify", "-q", "ORIG_HEAD^{commit}"]);
+        if let Ok(out) = Self::run_allowing(orig, &[0, 1]) {
+            let text = String::from_utf8_lossy(&out).trim().to_owned();
+            if !text.is_empty() {
+                found.push(text);
+            }
+        }
+        let reference = match branch {
+            Some(name) if name.starts_with('-') => {
+                return Err(GitError(format!("not a branch: {name:?}")));
+            }
+            Some(name) => format!("refs/heads/{name}"),
+            None => "HEAD".to_owned(),
+        };
+        let mut reflog = self.git(root);
+        reflog.args([
+            "log",
+            "-g",
+            "--format=%H",
+            "-n",
+            "20",
+            "--no-show-signature",
+            reference.as_str(),
+            "--",
+        ]);
+        // A branch with no reflog (or none yet) only adds nothing.
+        let entries = Self::run(reflog).unwrap_or_default();
+        for line in String::from_utf8_lossy(&entries).lines() {
+            let id = line.trim();
+            if !id.is_empty() && !found.iter().any(|known| known == id) {
+                found.push(id.to_owned());
+            }
+        }
+        Ok(found)
+    }
+
+    fn rewritten_to(
+        &self,
+        root: &Path,
+        commit: &str,
+        candidates: &[String],
+        new_tip: &str,
+    ) -> Result<Rewrite, GitError> {
+        let id = object_id_arg(commit)?;
+        let new_id = object_id_arg(new_tip)?;
+        // The old tip is the first candidate that has the commit in its history. A candidate Git
+        // no longer has (pruned) cannot hold it, so it is skipped.
+        let mut old = None;
+        for candidate in candidates {
+            let Ok(candidate) = object_id_arg(candidate) else {
+                continue;
+            };
+            let mut ancestor = self.git(root);
+            ancestor.args([
+                "merge-base",
+                "--is-ancestor",
+                id.as_str(),
+                candidate.as_str(),
+            ]);
+            if succeeds(ancestor) {
+                old = Some(candidate);
+                break;
+            }
+        }
+        let Some(old) = old else {
+            return Ok(Rewrite::NoMatch);
+        };
+        let mut shared = self.git(root);
+        shared.args(["merge-base", old.as_str(), new_id.as_str()]);
+        let Ok(base_out) = Self::run(shared) else {
+            // No shared history: nothing in the new tip can be the commit's patch.
+            return Ok(Rewrite::NoMatch);
+        };
+        let base = String::from_utf8_lossy(&base_out).trim().to_owned();
+        if base.is_empty() {
+            return Ok(Rewrite::NoMatch);
+        }
+        let old_patches = patch_ids(self, root, &base, &old)?;
+        let Some(patch) = old_patches
+            .iter()
+            .find(|(_, found)| *found == id)
+            .map(|(patch, _)| patch.clone())
+        else {
+            return Err(GitError(format!(
+                "{id} has no patch to compare (a merge commit?)"
+            )));
+        };
+        let new_patches = patch_ids(self, root, &base, &new_id)?;
+        let matches: Vec<&String> = new_patches
+            .iter()
+            .filter(|(found, _)| *found == patch)
+            .map(|(_, commit)| commit)
+            .collect();
+        Ok(match matches.as_slice() {
+            [] => Rewrite::NoMatch,
+            [only] => Rewrite::Unique((*only).clone()),
+            _ => Rewrite::Ambiguous,
+        })
+    }
+
+    fn renames_to_head(&self, root: &Path) -> Result<Vec<(String, String)>, GitError> {
+        let mut log = self.git(root);
+        log.args([
+            "-c",
+            "core.quotePath=false",
+            "log",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-show-signature",
+            "-M",
+            "--diff-filter=R",
+            "--name-status",
+            "--format=",
+            "--reverse",
+            "--max-count=5000",
+            "HEAD",
+            "--",
+        ]);
+        let out = Self::run(log)?;
+        let mut renames = Vec::new();
+        for line in String::from_utf8_lossy(&out).lines() {
+            let mut fields = line.split('\t');
+            let (Some(status), Some(old), Some(new)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            if status.starts_with('R') {
+                renames.push((old.to_owned(), new.to_owned()));
+            }
+        }
+        Ok(renames)
     }
 
     fn common_dir(&self, root: &Path) -> Result<PathBuf, GitError> {
@@ -2538,6 +2708,91 @@ impl SubprocessGit {
 /// The first seven characters of a commit id, or the whole of a shorter one.
 /// The snapshot of a commit object's text, as `cat-file` gives it: the author's name, the
 /// committer's date in milliseconds and the subject. `None` when a header is missing.
+/// The most commits a rewrite is compared over (D145). A longer range is refused, not cut.
+const PATCH_RANGE_LIMIT: usize = 1000;
+
+/// A commit id taken as a command argument: hex digits only, so no name reads as an option.
+fn object_id_arg(oid: &str) -> Result<String, GitError> {
+    if oid.len() < 4 || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GitError(format!("not an object id: {oid:?}")));
+    }
+    Ok(oid.to_ascii_lowercase())
+}
+
+/// Whether the command exits 0. A check such as `merge-base --is-ancestor` exits 1 for "no", and
+/// a missing object or an unborn HEAD exits 128: each is an answer here, not an error.
+fn succeeds(mut command: Command) -> bool {
+    command.output().is_ok_and(|output| output.status.success())
+}
+
+/// The patch id (`git patch-id --stable`) of each non-merge commit of `base..tip`, as
+/// `(patch id, commit)` pairs (D145). The range is refused when it has more than
+/// `PATCH_RANGE_LIMIT` commits.
+fn patch_ids(
+    git: &SubprocessGit,
+    root: &Path,
+    base: &str,
+    tip: &str,
+) -> Result<Vec<(String, String)>, GitError> {
+    let range = format!("{base}..{tip}");
+    let mut count = git.git(root);
+    count.args(["rev-list", "--count", "--no-merges", range.as_str(), "--"]);
+    let text = String::from_utf8_lossy(&SubprocessGit::run(count)?)
+        .trim()
+        .to_owned();
+    let counted: usize = text
+        .parse()
+        .map_err(|_| GitError(format!("no commit count for {range}")))?;
+    if counted > PATCH_RANGE_LIMIT {
+        return Err(GitError(format!(
+            "the range has {counted} commits, more than {PATCH_RANGE_LIMIT}"
+        )));
+    }
+    let mut log = git.git(root);
+    log.args([
+        "log",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-show-signature",
+        "--no-merges",
+        "-p",
+        range.as_str(),
+        "--",
+    ]);
+    let input = SubprocessGit::run(log)?;
+    let mut patch = git.git(root);
+    patch
+        .args(["patch-id", "--stable"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = patch
+        .spawn()
+        .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+    let Some(mut stdin) = child.stdin.take() else {
+        return Err(GitError("git patch-id has no input".into()));
+    };
+    // The input is written on its own thread, so a full output pipe cannot stall the write.
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let output = child
+        .wait_with_output()
+        .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+    let written = writer
+        .join()
+        .map_err(|_| GitError("the patch-id input thread failed".into()))?;
+    let stdout = SubprocessGit::checked(output, &[0])?;
+    written.map_err(|e| GitError(format!("cannot write to git patch-id: {e}")))?;
+    let mut pairs = Vec::new();
+    for line in String::from_utf8_lossy(&stdout).lines() {
+        let mut fields = line.split_whitespace();
+        if let (Some(patch), Some(commit)) = (fields.next(), fields.next()) {
+            pairs.push((patch.to_owned(), commit.to_owned()));
+        }
+    }
+    Ok(pairs)
+}
+
 fn parse_commit_snapshot(oid: &str, body: &[u8]) -> Option<CommitSnapshot> {
     let text = String::from_utf8_lossy(body);
     let (headers, message) = text.split_once("\n\n").unwrap_or((text.as_ref(), ""));

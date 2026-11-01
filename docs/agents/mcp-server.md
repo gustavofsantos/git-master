@@ -5,9 +5,9 @@ status: partial
 order: 10
 ---
 
-> **Planned.** The label tools, the tools that record labels and links, the tools that propose or apply a change to the repository, and the agent policy are not available yet. The provenance tool does not return labels yet.
+> **Planned.** The tools that propose or apply a change to the repository, and the agent policy, are not available yet. The provenance tool does not return labels yet.
 
-`gitmaster mcp` is an MCP server that your agent starts as a separate process and talks to over its standard input and output. It offers the tools that only GitMaster can offer: the review comments you wrote on a diff, the threads GitMaster captured from earlier agent sessions, and the reasons behind a range of lines, which GitMaster works out from those threads. It does not repeat what the agent already has. Reading files, searching text and running `git` stay with the agent's own tools.
+`gitmaster mcp` is an MCP server that your agent starts as a separate process and talks to over its standard input and output. It offers the tools that only GitMaster can offer: the review comments you wrote on a diff, the threads GitMaster captured from earlier agent sessions, the labels and links that connect those threads, and the reasons behind a range of lines, which GitMaster works out from those threads. It does not repeat what the agent already has. Reading files, searching text and running `git` stay with the agent's own tools.
 
 ## How the server runs
 
@@ -41,14 +41,14 @@ The server offers two kinds of tool:
 
 | Kind | What it does | Approval |
 |---|---|---|
-| Read | Reads review comments, threads and the provenance of lines. Changes nothing. | Not required |
-| Record | Writes to GitMaster's own store only: it marks a review comment as handled, with a summary. It never changes your files, your branches or your index. | Not required. You confirm the result in the app. |
+| Read | Reads review comments, threads, labels and the provenance of lines. Changes nothing. | Not required |
+| Record | Writes to GitMaster's own store only: it marks a review comment as handled, with a summary, creates labels, attaches them and links threads. It never changes your files, your branches or your index. | Not required from GitMaster. Your agent may ask until you allow the tool, see [Claude Code permissions](#claude-code-permissions). |
 
-A record tool takes effect on GitMaster's record, and a person still decides what it means. When an agent marks a comment as `handled`, the comment waits for you. Only you make it `resolved`.
+A record tool takes effect on GitMaster's record, and a person still decides what it means. When an agent marks a comment as `handled`, the comment waits for you. Only you make it `resolved`. A label or a link an agent records carries the agent's name as its origin.
 
-There is no tool that commits, pushes, restacks, edits a file or deletes anything. An agent that changes your code does it with its own tools, as it does without GitMaster, and the [thread](../guide/threads.md) records what it did.
+There is no tool that commits, pushes, restacks, edits a file or deletes anything. An agent that changes your code does it with its own tools, as it does without GitMaster, and the [thread](../guide/threads.md) records what it did. The record tools never write thread text, and they never delete or rename anything.
 
-> **Planned.** Record tools also create labels, attach them to threads, files, commits and other labels, and link threads to each other. They write labels and links only, never thread text, and they never delete or rename anything. Each row an agent writes is marked with the agent's name, and you can remove it in the app.
+> **Planned.** The app does not show the agent's name on a label or a link yet, and it does not yet offer to remove one.
 
 > **Planned.** Tools that propose a change, such as a restack plan, and that apply it. See [Approval](#approval).
 
@@ -82,7 +82,9 @@ Claude Code asks before it uses an MCP tool you have not allowed. The read tools
       "mcp__plugin_gitmaster_gitmaster__threads_search",
       "mcp__plugin_gitmaster_gitmaster__thread_get",
       "mcp__plugin_gitmaster_gitmaster__thread_read",
-      "mcp__plugin_gitmaster_gitmaster__provenance"
+      "mcp__plugin_gitmaster_gitmaster__provenance",
+      "mcp__plugin_gitmaster_gitmaster__labels_list",
+      "mcp__plugin_gitmaster_gitmaster__label_get"
     ]
   }
 }
@@ -90,7 +92,21 @@ Claude Code asks before it uses an MCP tool you have not allowed. The read tools
 
 Do not allow the whole server with `mcp__plugin_gitmaster_gitmaster__*` once the apply tools exist. The apply tools ask anyway, but a narrow list keeps the intent clear. The plugin adds no allow rules of its own.
 
-> **Planned.** The three record tools that write labels and links, `mcp__plugin_gitmaster_gitmaster__label_create`, `mcp__plugin_gitmaster_gitmaster__label_attach` and `mcp__plugin_gitmaster_gitmaster__thread_link`, ask before each call until you allow them. Add them to `allow` to let the agent record labels and links without asking, or to `deny` to forbid it.
+The three record tools that write labels and links, `label_create`, `label_attach` and `thread_link`, are not in that list, so Claude Code asks before each call until you allow them. To let the agent record labels and links without asking, add them to `allow`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_gitmaster_gitmaster__label_create",
+      "mcp__plugin_gitmaster_gitmaster__label_attach",
+      "mcp__plugin_gitmaster_gitmaster__thread_link"
+    ]
+  }
+}
+```
+
+To forbid them, list the same names under `deny` instead.
 
 ## Untrusted content
 
@@ -131,6 +147,16 @@ provenance(path="src/ledger.rs", from_line=41, to_line=42)
 ```
 
 When a bound cuts the answer, `complete` is false and `cuts` names the bound, so the agent treats the answer as partial.
+
+An agent that finds a thread worth a second look marks it for you, and you find it again by the label:
+
+```text
+label_create(name="needs-review", description="Retry logic changed without a test", color="#d97706")
+    -> { created: true, origin: "agent:<client>", label: { name: "needs-review", attachment_count: 0, untrusted: true } }
+label_attach(label="needs-review", kind="thread", ref="01J9Z...")
+    -> { attachment: { kind: "thread", ref: "01J9Z...", origin: "agent:<client>", at: ... }, untrusted: true }
+labels_list(query="review") -> { labels: [{ name: "needs-review", attachment_count: 1, untrusted: true }], has_more: false }
+```
 
 ## See also
 

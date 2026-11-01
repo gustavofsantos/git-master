@@ -258,6 +258,136 @@ impl ThreadStore {
     }
 }
 
+impl ThreadStore {
+    /// Records the restack's replays (D142, D145): each `(old, new)` pair makes every commit link
+    /// and label attachment that names `old`, or resolves to it, resolve to `new`. The stored
+    /// ids are not changed. Each pair is a cache entry, so a failed remap costs only the read's
+    /// own check.
+    pub fn remap_commits(&mut self, pairs: &[(String, String)]) -> Result<(), StoreError> {
+        let tx = begin(&mut self.conn)?;
+        for (old, new) in pairs {
+            tx.execute(
+                "UPDATE thread_link SET resolved = ?2
+                 WHERE kind = 'commit' AND (ref = ?1 OR resolved = ?1)",
+                params![old, new],
+            )?;
+            tx.execute(
+                "UPDATE label_attach SET resolved = ?2
+                 WHERE kind = 'commit' AND (ref = ?1 OR resolved = ?1)",
+                params![old, new],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The commit links of thread `uid` with their cached resolution (D145), by commit id. A cache
+    /// is a commit id, `ambiguous` or `gone`; `None` when nothing is cached yet.
+    pub fn commit_link_cache(
+        &self,
+        uid: &str,
+    ) -> Result<Vec<(String, Option<String>)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT l.ref, l.resolved FROM thread_link l JOIN thread t ON t.id = l.thread_id
+             WHERE t.uid = ?1 AND l.kind = 'commit' ORDER BY l.ref",
+        )?;
+        let rows = statement
+            .query_map(params![uid], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Stores the resolution of commit link `reference` of thread `uid` (D145): a commit id,
+    /// `ambiguous` or `gone`. The stored id is not changed.
+    pub fn set_link_cache(
+        &mut self,
+        uid: &str,
+        reference: &str,
+        value: &str,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE thread_link SET resolved = ?3
+             WHERE kind = 'commit' AND ref = ?2
+               AND thread_id = (SELECT id FROM thread WHERE uid = ?1)",
+            params![uid, reference, value],
+        )?;
+        Ok(())
+    }
+
+    /// Stores the resolution of commit attachment `reference` of label `label` (D145), the same
+    /// values as `set_link_cache`.
+    pub fn set_attach_cache(
+        &mut self,
+        label: i64,
+        reference: &str,
+        value: &str,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE label_attach SET resolved = ?3 WHERE kind = 'commit' AND label_id = ?1 AND ref = ?2",
+            params![label, reference, value],
+        )?;
+        Ok(())
+    }
+
+    /// The labels of thread `uid` as `(name, origin)`, by name, at most `limit` (D144, second edge).
+    pub fn thread_labels(
+        &self,
+        uid: &str,
+        limit: u32,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT l.name, a.origin FROM label_attach a JOIN label l ON l.id = a.label_id
+             WHERE a.kind = 'thread' AND a.ref = ?1 ORDER BY l.name LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(params![uid, i64::from(limit)], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The threads linked to thread `uid` in either direction, as `(uid, kind, outgoing, origin)`
+    /// where `outgoing` says the thread is the `from` end, at most `limit` (D144, second edge).
+    pub fn thread_relations(
+        &self,
+        uid: &str,
+        limit: u32,
+    ) -> Result<Vec<(String, ThreadRelKind, bool, String)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT o.uid, r.kind, r.from_thread = t.id, r.origin
+             FROM thread_rel r
+             JOIN thread t ON t.uid = ?1
+             JOIN thread o ON o.id = CASE WHEN r.from_thread = t.id THEN r.to_thread ELSE r.from_thread END
+             WHERE r.from_thread = t.id OR r.to_thread = t.id
+             ORDER BY o.uid, r.kind LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(params![uid, i64::from(limit)], |row| {
+                let kind: String = row.get(1)?;
+                let parsed = parse_rel_kind(&kind).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        format!("unknown relation kind {kind:?}").into(),
+                    )
+                })?;
+                Ok((row.get(0)?, parsed, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+}
+
+fn parse_rel_kind(text: &str) -> Option<ThreadRelKind> {
+    match text {
+        "continues" => Some(ThreadRelKind::Continues),
+        "relates" => Some(ThreadRelKind::Relates),
+        "supersedes" => Some(ThreadRelKind::Supersedes),
+        _ => None,
+    }
+}
+
 /// A label name as stored: trimmed, not empty, at most `NAME_CHARS` characters, no control
 /// characters.
 pub fn check_name(name: &str) -> Result<String, StoreError> {
@@ -440,7 +570,11 @@ fn attachment_row(row: &Row<'_>) -> rusqlite::Result<Result<LabelAttachment, Sto
         subject: row.get(4)?,
         author: row.get(5)?,
         committed_at: row.get(6)?,
+        // The stored cache until the read resolves it (D145); the read sets `state` and
+        // `current_path` (threads_session).
         resolved: row.get(7)?,
+        state: None,
+        current_path: None,
     }))
 }
 
@@ -463,7 +597,7 @@ fn parse_attach_kind(text: &str) -> Option<AttachKind> {
     }
 }
 
-fn rel_kind_text(kind: ThreadRelKind) -> &'static str {
+pub(super) fn rel_kind_text(kind: ThreadRelKind) -> &'static str {
     match kind {
         ThreadRelKind::Continues => "continues",
         ThreadRelKind::Relates => "relates",
@@ -834,6 +968,8 @@ mod tests {
                     kind: LinkKind::Commit,
                     reference: OID.to_owned(),
                     origin: LinkOrigin::Observed,
+                    resolved: None,
+                    state: None,
                 },
             )
             .expect("link");

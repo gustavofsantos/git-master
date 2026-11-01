@@ -9,18 +9,20 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use gm_schema::threads::{
-    AttachKind, CutBound, EditChange, EditState, EntryKind, Evidence, LinkOrigin, ProvenanceCommit,
-    ProvenanceCut, ProvenanceEdit, ProvenanceResult, ProvenanceThread, ThreadDetail, ThreadEdit,
-    ThreadFilter,
+    AttachKind, CutBound, EditChange, EditState, EntryKind, Evidence, LabelDetail, LinkKind,
+    LinkOrigin, ProvenanceCommit, ProvenanceCut, ProvenanceEdit, ProvenanceLabel, ProvenanceLink,
+    ProvenanceResult, ProvenanceThread, RelationDirection, ThreadDetail, ThreadEdit, ThreadFilter,
 };
 use gm_schema::{Actor, CommandKind, Event, OperationId};
 
 use crate::blame::BlameLine;
 use crate::threads::config::ThreadsConfig;
 use crate::threads::provenance::{
-    self, COMMIT_LIMIT, CONTEXT, EDIT_LIMIT, EditFact, Owner, THREAD_LIMIT, Verdict,
+    self, COMMIT_LIMIT, CONTEXT, EDIT_LIMIT, EditFact, LABEL_LIMIT, LINK_LIMIT, Owner,
+    THREAD_LIMIT, Verdict,
 };
 use crate::threads::redact::Redactor;
+use crate::threads::resolve::{self, FOLLOW_LIMIT, RESOLVE_LIMIT};
 use crate::threads::store::{MetaUpdate, SearchRequest, StoreError, ThreadStore};
 use crate::{BlameRead, GitPort};
 
@@ -224,9 +226,10 @@ pub(crate) fn run(
             from_seq,
             limit,
         } => {
-            let detail = store
+            let mut detail = store
                 .read_thread(uid, *from_seq, page(*limit)?)
                 .map_err(|e| named(e, THREAD_MISSING))?;
+            resolve_thread(store, ctx, &mut detail)?;
             Ok(vec![Event::ThreadRead { id, detail }])
         }
         CommandKind::ReadThreadEdit { id: edit_id } => {
@@ -272,9 +275,10 @@ fn labels_command(
             Ok(vec![Event::LabelsListed { id, labels }])
         }
         CommandKind::ReadLabel { id: label } => {
-            let detail = store
+            let mut detail = store
                 .read_label(*label)
                 .map_err(|e| named(e, LABEL_MISSING))?;
+            resolve_label(store, ctx, &mut detail)?;
             Ok(vec![Event::LabelRead { id, detail }])
         }
         CommandKind::CreateLabel {
@@ -368,6 +372,184 @@ fn labels_command(
 /// thread rows, which show their labels.
 fn label_written(id: OperationId, label: Option<gm_schema::threads::Label>) -> Vec<Event> {
     vec![Event::LabelsChanged { id, label }, Event::ThreadsChanged]
+}
+
+/// Records the replays of a restack in the threads store (D142, D145), when the repository has
+/// one. A failure keeps the store as it was: a read then matches the commit by its patch id.
+pub(crate) fn remap(
+    slot: &mut Option<ThreadsSession>,
+    git: &dyn GitPort,
+    root: &Path,
+    pairs: &[(String, String)],
+) {
+    if pairs.is_empty() {
+        return;
+    }
+    let Ok(common) = git.common_dir(root) else {
+        return;
+    };
+    // Only a repository that already has a store is written: a restack does not create one.
+    if !common.join("gitmaster").join("threads.db").exists() {
+        return;
+    }
+    if let Ok(store) = store(slot, git, root) {
+        let _ = store.remap_commits(pairs);
+    }
+}
+
+/// Shows what the commit links of a thread resolve to now (D145). The stored ids are not changed;
+/// each answer that is cached is written, so the next read does not search again.
+fn resolve_thread(
+    store: &mut ThreadStore,
+    ctx: &Context<'_>,
+    detail: &mut ThreadDetail,
+) -> Result<(), String> {
+    let uid = detail.summary.uid.clone();
+    let cache = store.commit_link_cache(&uid).map_err(|e| e.to_string())?;
+    let mut budget = RESOLVE_LIMIT;
+    for link in detail
+        .links
+        .iter_mut()
+        .filter(|link| link.kind == LinkKind::Commit)
+    {
+        let cached = cache
+            .iter()
+            .find(|(reference, _)| *reference == link.reference)
+            .and_then(|(_, value)| value.clone());
+        let answer = resolve::commit(
+            ctx.git,
+            ctx.root,
+            &link.reference,
+            detail.summary.branch.as_deref(),
+            cached.as_deref(),
+            &mut budget,
+        );
+        link.resolved = answer.resolved;
+        link.state = Some(answer.state);
+        if let Some(value) = answer.cache {
+            store
+                .set_link_cache(&uid, &link.reference, &value)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Shows what the commit attachments of a label resolve to, and where its file attachments are now
+/// (D145). The label's file paths are followed through renames, at most `FOLLOW_LIMIT` of them.
+fn resolve_label(
+    store: &mut ThreadStore,
+    ctx: &Context<'_>,
+    detail: &mut LabelDetail,
+) -> Result<(), String> {
+    let label = detail.label.id;
+    let mut budget = RESOLVE_LIMIT;
+    let mut follows = FOLLOW_LIMIT;
+    let mut renames: Option<Vec<(String, String)>> = None;
+    for attachment in &mut detail.attachments {
+        match attachment.kind {
+            AttachKind::Commit => {
+                let cached = attachment.resolved.take();
+                let answer = resolve::commit(
+                    ctx.git,
+                    ctx.root,
+                    &attachment.reference,
+                    None,
+                    cached.as_deref(),
+                    &mut budget,
+                );
+                attachment.resolved = answer.resolved;
+                attachment.state = Some(answer.state);
+                if let Some(value) = answer.cache {
+                    store
+                        .set_attach_cache(label, &attachment.reference, &value)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            AttachKind::File => {
+                if follows == 0 {
+                    continue;
+                }
+                follows -= 1;
+                attachment.current_path =
+                    Some(follow_file(ctx, &mut renames, &attachment.reference));
+            }
+            AttachKind::Thread | AttachKind::Label => {}
+        }
+    }
+    Ok(())
+}
+
+/// The path a file has now (D145). A path that exists at HEAD is its own; any other is followed
+/// through the renames of the history, which are read once per read.
+fn follow_file(
+    ctx: &Context<'_>,
+    renames: &mut Option<Vec<(String, String)>>,
+    path: &str,
+) -> String {
+    if ctx
+        .git
+        .blob_at_commit(ctx.root, "HEAD", path)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return path.to_owned();
+    }
+    let list = renames.get_or_insert_with(|| ctx.git.renames_to_head(ctx.root).unwrap_or_default());
+    resolve::follow(list, path)
+}
+
+/// Fills the second edge of a provenance thread (D144): its labels and the threads linked to it,
+/// each at most its limit, and a cut says so. The linked threads are named, not walked further.
+fn second_edge(
+    store: &ThreadStore,
+    commit: &str,
+    thread: &mut ProvenanceThread,
+    cuts: &mut Vec<ProvenanceCut>,
+) -> Result<(), String> {
+    let mut labels = store
+        .thread_labels(&thread.uid, bound(LABEL_LIMIT + 1))
+        .map_err(|e| e.to_string())?;
+    if provenance::cut(&mut labels, LABEL_LIMIT) {
+        cuts.push(ProvenanceCut {
+            bound: CutBound::Labels,
+            limit: bound(LABEL_LIMIT),
+            commit: Some(commit.to_owned()),
+        });
+    }
+    thread.labels = labels
+        .into_iter()
+        .map(|(name, origin)| ProvenanceLabel { name, origin })
+        .collect();
+
+    let mut relations = store
+        .thread_relations(&thread.uid, bound(LINK_LIMIT + 1))
+        .map_err(|e| e.to_string())?;
+    if provenance::cut(&mut relations, LINK_LIMIT) {
+        cuts.push(ProvenanceCut {
+            bound: CutBound::Links,
+            limit: bound(LINK_LIMIT),
+            commit: Some(commit.to_owned()),
+        });
+    }
+    let mut links = Vec::with_capacity(relations.len());
+    for (uid, kind, outgoing, origin) in relations {
+        let title = store.thread_summary(&uid).map_err(|e| e.to_string())?.title;
+        links.push(ProvenanceLink {
+            uid,
+            title,
+            kind,
+            direction: if outgoing {
+                RelationDirection::Out
+            } else {
+                RelationDirection::In
+            },
+            origin,
+        });
+    }
+    thread.links = links;
+    Ok(())
 }
 
 /// Checks a provenance request before anything is read (D144).
@@ -511,6 +693,8 @@ fn commit_provenance(
             evidence: draft.evidence,
             ambiguous: draft.ambiguous,
             edits: draft.edits,
+            labels: Vec::new(),
+            links: Vec::new(),
         };
         threads.push((thread, summary.last_event_at));
     }
@@ -526,6 +710,9 @@ fn commit_provenance(
             commit: Some(owner.commit.clone()),
         });
         threads.truncate(THREAD_LIMIT);
+    }
+    for (thread, _) in &mut threads {
+        second_edge(store, &owner.commit, thread, cuts)?;
     }
 
     Ok(ProvenanceCommit {
@@ -1449,6 +1636,8 @@ mod tests {
                         kind: LinkKind::Branch,
                         reference: "main".into(),
                         origin: LinkOrigin::Human,
+                        resolved: None,
+                        state: None,
                     },
                 },
                 "only a human can link a thread",
@@ -1525,6 +1714,8 @@ mod tests {
             kind: LinkKind::Commit,
             reference: "abc123".into(),
             origin: LinkOrigin::Human,
+            resolved: None,
+            state: None,
         };
         let linked = send(
             &mut engine,
@@ -1535,7 +1726,11 @@ mod tests {
             },
         );
         assert!(has_changed(&linked));
-        assert_eq!(read(&mut engine, &a).links, vec![link.clone()]);
+        // A read derives the state of a commit link; this id is not in the fake's history.
+        let read_back = read(&mut engine, &a).links;
+        assert_eq!(read_back.len(), 1);
+        assert_eq!(read_back[0].reference, link.reference);
+        assert_eq!(read_back[0].origin, link.origin);
         let unlinked = send(
             &mut engine,
             &human,
