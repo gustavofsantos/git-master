@@ -1,9 +1,12 @@
-# Pinned here and in .github/workflows/ci.yml. Installed under target/, so it
+# Pinned here and in .github/workflows/ci.yml. Installed under the target directory, so it
 # never touches ~/.cargo/bin.
 CARGO_AUDIT_VERSION := 0.22.2
-CARGO_AUDIT := target/tools/bin/cargo-audit
+# Cargo's build output: ./target, or the directory CARGO_TARGET_DIR names (shared by worktrees,
+# see design/lessons.md "Disk use").
+TARGET_DIR := $(or $(CARGO_TARGET_DIR),target)
+CARGO_AUDIT := $(TARGET_DIR)/tools/bin/cargo-audit
 
-.PHONY: build run install uninstall test lint fmt audit docs docs-status docs-site docs-test check hooks clean
+.PHONY: build run install uninstall test lint fmt audit docs docs-status docs-site docs-test check hooks clean sizes prune
 
 build:
 	cargo build --release -p gitmaster
@@ -21,7 +24,7 @@ DATADIR ?= $(or $(XDG_DATA_HOME),$(HOME)/.local/share)
 APPDIR ?= $(HOME)/Applications
 ROOT := $(or $(PREFIX),$(CARGO_INSTALL_ROOT),$(HOME)/.cargo)
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0)
-STAGE := target/stage
+STAGE := $(TARGET_DIR)/stage
 
 install:
 	cargo install --path crates/gitmaster --locked --force --root '$(ROOT)'
@@ -57,7 +60,7 @@ fmt:
 	cargo fmt --all
 
 $(CARGO_AUDIT):
-	cargo install cargo-audit --locked --version $(CARGO_AUDIT_VERSION) --root target/tools
+	cargo install cargo-audit --locked --version $(CARGO_AUDIT_VERSION) --root $(TARGET_DIR)/tools
 
 audit: $(CARGO_AUDIT)
 	$(CARGO_AUDIT) audit
@@ -85,6 +88,13 @@ check: lint audit docs docs-test test
 
 hooks:
 	git config core.hooksPath .githooks
+
+# Build output of every worktree, and the cheap part of it to drop: the incremental caches.
+sizes:
+	scripts/prune-target.sh --worktrees
+
+prune:
+	scripts/prune-target.sh --incremental --worktrees
 
 clean:
 	cargo clean

@@ -17,6 +17,15 @@ Source: `~/Projects/rvw` (Rust + GPUI review hub by the same author). Read on 20
 - `make check` = lint + audit (`cargo-audit` pinned, installed under `target/tools`) + tests. `.githooks/pre-push` runs it (`make hooks` sets `core.hooksPath`). CI: lint, audit, test, and an MSRV job.
 - Edition 2024, `rust-version` pinned in the workspace and checked in CI for the non-GUI crates.
 
+## Disk use of the build
+
+A debug build of this workspace is large: before the profile below, `target/debug` was about 5 GB and the debug binary 750 MB, and every worktree has its own `target/`, so a few worktrees fill a disk. What to do, in order of effect:
+
+- **Slim debug info (in `Cargo.toml`).** `[profile.dev]` uses `debug = "line-tables-only"` and the dependencies use `debug = false`: backtraces and panics still show file and line, a debugger no longer sees local variables. Set `CARGO_PROFILE_DEV_DEBUG=2` for one session when you need them.
+- **Share one target directory across worktrees.** Put `export CARGO_TARGET_DIR=$HOME/.cache/gitmaster-target` in your shell profile. The dependencies (gpui, gpui-component, tree-sitter, Luau, SQLite: most of the build) compile once and every worktree reuses them; only the workspace crates rebuild when you change worktree. Builds in different worktrees take Cargo's lock in turn. `make`, `scripts/ui-smoke.sh` and `make install` honour the variable. Do not set it in the repository: a path in `.cargo/config.toml` binds every contributor and CI.
+- **Drop the cheap part.** `make sizes` lists each worktree's build output; `make prune` drops the incremental caches of every worktree (they are the part that grows with each edit and rebuilds fastest); `scripts/prune-target.sh --debug|--all --worktrees` drops more. Run `make prune` after a long session, and remove a worktree's `target/` with its worktree.
+- **Do not run the release build by habit.** `cargo build --release` is only for the UI smoke and for measuring; `cargo check` and `cargo clippy` need no object code. A parallel agent run should set `CARGO_INCREMENTAL=0`, which keeps incremental caches from piling up for builds that are not repeated.
+
 ## GPUI practice
 
 - Keep a pure crate (rvw-view) separate from the GPUI crate (rvw-gui): model + `update(event) -> effects`, tested without a window. Same spirit as `gm-core` here. Golden/pure tests carry the logic because nobody can look at a window in CI.
