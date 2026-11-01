@@ -42,7 +42,7 @@ GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It 
 |---|---|
 | `name` | The name of the workflow. |
 | `description` | One line that says what the workflow does. |
-| `trigger` | What starts a run. `on` names the trigger. `match` narrows an event trigger with the pattern syntax of hooks, such as `branch:feat/*`. `key` gives a manual trigger an optional keyboard shortcut. The valid trigger names are listed in [Triggers and phases](../workflows/triggers-and-phases.md). |
+| `trigger` | What starts a run. `on` names the trigger. `match` narrows an event trigger to branches with a glob, such as `branch:feat/*`; see [Triggers and phases](../workflows/triggers-and-phases.md). `key` gives a manual trigger an optional keyboard shortcut. The valid trigger names are listed in [Triggers and phases](../workflows/triggers-and-phases.md). |
 | `concurrency` | What happens when a trigger fires while a run is active. `queue` (the default) keeps at most one pending run, and new triggers merge into it. `replace` cancels the active run if it has not reached an applying action; otherwise the new trigger waits in the queue. `skip` discards the new trigger. |
 | `inputs` | Named values that you type before a manual run. Each input has a `type`, such as `"string"`, and a `prompt` that the dialog shows. |
 

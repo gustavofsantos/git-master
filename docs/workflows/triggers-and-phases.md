@@ -44,7 +44,7 @@ No trigger runs on a clock or after a delay. The `timeout` of `ctx.wait` ends th
 
 > **Planned.** The `match` filter is not available yet.
 
-Use `match` to narrow a trigger to branches. The syntax is `branch:` followed by a pattern, the same syntax that hook filters use. `branch:feat/*` matches the branches whose names start with `feat/`. A trigger without `match` is not filtered.
+Use `match` to narrow a trigger to branches. The syntax is `branch:` followed by a glob pattern, where `*` matches any run of characters, `/` included. `branch:feat/*` matches the branches whose names start with `feat/`. A trigger without `match` is not filtered.
 
 ### Events from a run do not trigger workflows
 

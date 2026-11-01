@@ -24,7 +24,6 @@ GitMaster keeps its files in three places: your user config directory, your user
 | Path | What it holds | Status |
 |---|---|---|
 | `~/.local/share/gitmaster/recent.json` (Linux), `~/Library/Application Support/gitmaster/recent.json` (macOS) | The recently opened repositories, newest first, up to 10. |  |
-| `~/.local/share/gitmaster/hook-approvals.json` (Linux), `~/Library/Application Support/gitmaster/hook-approvals.json` (macOS) | Your approvals of repository hooks. Each approval covers one repository and one hash of the hook command. |  |
 | `~/.local/share/gitmaster/gitmaster.db` (Linux), `~/Library/Application Support/gitmaster/gitmaster.db` (macOS) | Which versions of a workflow script you reviewed, and your automatic approvals. Each is tied to the hash of the script text. | |
 | `~/.local/share/gitmaster/workflow-trash/` (Linux), `~/Library/Application Support/gitmaster/workflow-trash/` (macOS) | Workflow files you delete. They are moved here instead of being removed. | |
 
@@ -135,7 +134,7 @@ A window opened from a desktop launcher, the Finder or the Dock starts with a mi
 
 1. GitMaster runs the shell named by `SHELL` as a login, interactive shell that prints its environment.
 2. It waits up to 10 seconds. A shell that takes longer is stopped.
-3. If the shell prints a PATH, Git and the other programs GitMaster starts after that point run with it. These are the file watcher and the steps of hooks.
+3. If the shell prints a PATH, Git and the other programs GitMaster starts after that point run with it. These are the file watcher and the programs that workflows start with `ctx.exec`.
 
 Programs started before the PATH is read use the PATH the app started with. If `SHELL` is not set, the shell does not answer in time, or it prints no PATH, GitMaster keeps the PATH it started with. GitMaster does not change its own environment variables to do this.
 
@@ -149,7 +148,7 @@ Changes apply as you make them, and there is no **Save** button. A value is save
 
 - Git options go to Git's configuration. The scope selector sets where they go: **Global** writes to `~/.gitconfig`, and **This Repository** writes to `.git/config`.
 - App preferences go to `settings.json`.
-- Approvals of hooks and workflows go to your user data directory.
+- Workflow reviews and automatic approvals go to your user data directory.
 - Nothing is written to the working tree.
 
 ### General
