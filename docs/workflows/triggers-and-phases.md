@@ -87,6 +87,9 @@ A `before.<operation>` workflow is a gate. The operation stays pending while the
 - Call `ctx.block(reason)` to veto the operation. The reason is the message you see.
 - An error, or a call to `ctx.fail`, also vetoes the operation. A gate fails closed: if it does not finish cleanly, the operation does not run.
 - If no gate blocks, the operation continues.
+- When several gates apply to an operation, they run one after another, ordered by file name. The first one that blocks stops the operation, and the rest do not run.
+- A gate you have not reviewed does not run, and it stops the operation: the message names the workflow and asks you to review it. A gate fails closed.
+- You can cancel the operation while its gates run. The gates are cancelled with it.
 
 This gate blocks a restack when its root branch is `main` or `release`:
 
@@ -132,7 +135,7 @@ If all three answers are empty, the script returns nothing, and no suggestion is
 
 ### After: observers
 
-An `after.<operation>` workflow runs after the operation finishes. It returns nothing. If it fails, GitMaster shows a warning, and the operation is not affected.
+An `after.<operation>` workflow runs after the operation finishes. It returns nothing. If it fails, GitMaster shows a warning, and the operation is not affected. After workflows run in parallel, and the payload of `input.trigger` carries what the operation produced, such as the new commit.
 
 ## Operations and fields
 
