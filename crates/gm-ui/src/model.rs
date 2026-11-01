@@ -19,6 +19,7 @@ use crate::history_graph::{GraphLayout, StackMarks};
 use crate::history_scope::ScopeChoice;
 use crate::hook_run::Hooks;
 use crate::icon::Icon;
+use crate::labels_page::LabelsPage;
 use crate::local_review::LocalReview;
 use crate::merged_branches::Merging;
 use crate::move_file::MoveFile;
@@ -116,6 +117,8 @@ pub struct Model {
     pub threads: ThreadsPage,
     /// The threads linked to the commit the history page shows (H3).
     pub commit_threads: CommitThreads,
+    /// The Labels page: the labels, the filter and the selected label's attachments (P4).
+    pub labels: LabelsPage,
     /// The copy of a thread as Markdown in flight, and its outcome for the window (T6).
     pub thread_copy: MarkdownCopy,
     /// The write of a thread's curation in flight, and its outcome (T6).
@@ -771,6 +774,18 @@ impl Model {
                 self.commit_threads.ended(id);
                 None
             }
+            // A label read that failed is shown on the Labels page; a cancelled one simply ends (P4).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.labels.owns(id) && state.is_terminal() => {
+                match detail {
+                    Some(message) if state == OperationState::Failed => {
+                        self.labels.failed(id, message);
+                    }
+                    _ => self.labels.ended(id),
+                }
+                None
+            }
             // A copy of a thread as Markdown that failed says why, in the notice (T6).
             Event::OperationChanged {
                 id, state, detail, ..
@@ -925,6 +940,20 @@ impl Model {
                 } else {
                     self.commit_stack.received(id, diffs);
                 }
+                None
+            }
+            // The label answers are kept by the Labels page; a change re-reads what it shows (P4).
+            Event::LabelsListed { id, labels } => {
+                self.labels.listed(id, labels);
+                None
+            }
+            Event::LabelRead { id, detail } => {
+                self.labels.detail_read(id, detail);
+                None
+            }
+            Event::LabelsChanged { .. } => {
+                // The reads the page needs after a change are sent by its view.
+                let _ = self.labels.changed();
                 None
             }
             Event::ThreadsListed { id, threads, total } => {
@@ -1188,9 +1217,6 @@ impl Model {
             // The list is read again by the view on a change, so the status bar has nothing to say.
             | Event::ThreadProvenance { .. }
             // The label and link answers are read by the Labels page (P4); the rows follow `ThreadsChanged`.
-            | Event::LabelsListed { .. }
-            | Event::LabelRead { .. }
-            | Event::LabelsChanged { .. }
             | Event::ThreadRelationChanged { .. }
             | Event::ThreadsChanged => None,
             // The read opens the resolver; the staged note is the resolver's own.
@@ -1318,6 +1344,7 @@ impl Model {
         self.reflog_stack = OpenStack::default();
         self.threads = ThreadsPage::default();
         self.commit_threads = CommitThreads::default();
+        self.labels = LabelsPage::default();
         self.thread_copy = MarkdownCopy::default();
         self.quick_open = QuickOpen::default();
         self.code.reset();
@@ -3312,5 +3339,31 @@ mod thread_copy_tests {
         });
         assert_eq!(model.commit_threads.threads_of("abc").len(), 1);
         assert_eq!(model.threads.total(), None, "the page's list is untouched");
+    }
+
+    #[test]
+    fn a_label_answer_goes_to_the_labels_page_and_a_failed_read_is_shown_there() {
+        let mut model = Model::default();
+        model.labels.request_list(OperationId(8));
+        let _ = model.apply(Event::LabelsListed {
+            id: OperationId(8),
+            labels: vec![gm_schema::threads::Label {
+                id: 1,
+                name: "flaky".to_owned(),
+                description: String::new(),
+                color: None,
+                origin: "human".to_owned(),
+                created_at: 0,
+                attachments: 0,
+            }],
+        });
+        assert_eq!(model.labels.labels().len(), 1);
+        model.labels.request_list(OperationId(9));
+        let _ = model.apply(changed(9, OperationState::Failed, Some("git died")));
+        assert_eq!(model.labels.failure(), Some("git died"));
+        assert_eq!(
+            model.error, None,
+            "the label read's failure is not a notice"
+        );
     }
 }
