@@ -9,11 +9,11 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use gm_schema::threads::{
-    CutBound, EditChange, EditState, EntryKind, Evidence, LinkOrigin, ProvenanceCommit,
+    AttachKind, CutBound, EditChange, EditState, EntryKind, Evidence, LinkOrigin, ProvenanceCommit,
     ProvenanceCut, ProvenanceEdit, ProvenanceResult, ProvenanceThread, ThreadDetail, ThreadEdit,
     ThreadFilter,
 };
-use gm_schema::{CommandKind, Event, OperationId};
+use gm_schema::{Actor, CommandKind, Event, OperationId};
 
 use crate::blame::BlameLine;
 use crate::threads::config::ThreadsConfig;
@@ -23,6 +23,10 @@ use crate::threads::provenance::{
 use crate::threads::redact::Redactor;
 use crate::threads::store::{MetaUpdate, SearchRequest, StoreError, ThreadStore};
 use crate::{BlameRead, GitPort};
+
+/// Commit names one Git process reads when a store opens (D145).
+const SNAPSHOT_BATCH: usize = 500;
+const LABEL_MISSING: &str = "Label not found.";
 
 /// The most rows one read returns; a larger `limit` is cut to this.
 pub(crate) const MAX_PAGE: u32 = 500;
@@ -45,7 +49,8 @@ pub(crate) fn store<'a>(
 ) -> Result<&'a mut ThreadStore, String> {
     if slot.as_ref().is_none_or(|session| session.root != root) {
         let common = git.common_dir(root).map_err(|e| e.0)?;
-        let store = ThreadStore::open(&common).map_err(|e| e.to_string())?;
+        let mut store = ThreadStore::open(&common).map_err(|e| e.to_string())?;
+        fill_snapshots(&mut store, git, root);
         *slot = Some(ThreadsSession {
             root: root.to_path_buf(),
             store,
@@ -55,6 +60,41 @@ pub(crate) fn store<'a>(
         Some(session) => Ok(&mut session.store),
         None => Err("the threads store is not open".to_owned()),
     }
+}
+
+/// Takes the snapshot of each commit link that has none, while the commits still exist (D145).
+/// The store cannot ask Git, so this runs when the repository's store opens, in one Git process
+/// per `SNAPSHOT_BATCH` names. A commit Git no longer knows keeps none, and the link shows its id;
+/// failures are ignored.
+fn fill_snapshots(store: &mut ThreadStore, git: &dyn GitPort, root: &Path) {
+    let Ok(refs) = store.commit_refs_without_snapshot() else {
+        return;
+    };
+    for batch in refs.chunks(SNAPSHOT_BATCH) {
+        let Ok(found) = git.commit_snapshots(root, batch) else {
+            continue;
+        };
+        for (reference, snapshot) in found {
+            let _ = store.set_commit_snapshot(&reference, &snapshot);
+        }
+    }
+}
+
+/// The origin a row written by `actor` records (D143): `human`, or `agent:<client>`.
+pub(crate) fn origin_of(actor: &Actor) -> String {
+    match actor {
+        Actor::Human => "human".to_owned(),
+        Actor::Agent { name } => format!("agent:{name}"),
+    }
+}
+
+/// Milliseconds since the Unix epoch, the time of a label or relation row.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// What a command reads besides the store: the repository, and the settings file
@@ -67,7 +107,8 @@ pub(crate) struct Context<'a> {
 }
 
 /// What a thread command needs a human for, or `None` when an agent may run it.
-/// The reads are open to an agent (design/threads.md, "Engine surface").
+/// The reads are open to an agent, and so are the record commands (D146), which write only the
+/// store and are logged with their actor (design/threads.md, "Engine surface").
 pub(crate) fn human_only(kind: &CommandKind) -> Option<&'static str> {
     Some(match kind {
         CommandKind::ExportThread { .. } => "export a thread",
@@ -76,6 +117,10 @@ pub(crate) fn human_only(kind: &CommandKind) -> Option<&'static str> {
         CommandKind::UnlinkThread { .. } => "unlink a thread",
         CommandKind::DeleteThread { .. } => "delete a thread",
         CommandKind::DeleteThreadEntry { .. } => "delete a thread entry",
+        CommandKind::RenameLabel { .. } => "rename a label",
+        CommandKind::DeleteLabel { .. } => "delete a label",
+        CommandKind::DetachLabel { .. } => "detach a label",
+        CommandKind::RemoveThreadRelation { .. } => "remove a thread link",
         CommandKind::ScrubThreads => "scrub the threads",
         _ => return None,
     })
@@ -97,19 +142,40 @@ pub(crate) fn is_threads_command(kind: &CommandKind) -> bool {
             | CommandKind::UnlinkThread { .. }
             | CommandKind::DeleteThread { .. }
             | CommandKind::DeleteThreadEntry { .. }
+            | CommandKind::ListLabels { .. }
+            | CommandKind::ReadLabel { .. }
+            | CommandKind::CreateLabel { .. }
+            | CommandKind::AttachLabel { .. }
+            | CommandKind::LinkThreads { .. }
+            | CommandKind::RenameLabel { .. }
+            | CommandKind::DeleteLabel { .. }
+            | CommandKind::DetachLabel { .. }
+            | CommandKind::RemoveThreadRelation { .. }
             | CommandKind::ScrubThreads
     )
 }
 
 /// Runs one thread command against `store`. Writes return `ThreadsChanged` after
-/// their own answer; the caller has checked the actor.
+/// their own answer; the caller has checked the actor, and `actor` is the origin of the rows
+/// a record command writes.
 pub(crate) fn run(
     id: OperationId,
     store: &mut ThreadStore,
     ctx: &Context<'_>,
+    actor: &Actor,
     kind: &CommandKind,
 ) -> Result<Vec<Event>, String> {
+    let origin = origin_of(actor);
     match kind {
+        CommandKind::ListLabels { .. }
+        | CommandKind::ReadLabel { .. }
+        | CommandKind::CreateLabel { .. }
+        | CommandKind::AttachLabel { .. }
+        | CommandKind::LinkThreads { .. }
+        | CommandKind::RenameLabel { .. }
+        | CommandKind::DeleteLabel { .. }
+        | CommandKind::DetachLabel { .. }
+        | CommandKind::RemoveThreadRelation { .. } => labels_command(id, store, ctx, &origin, kind),
         CommandKind::ListThreads {
             filter,
             before_at,
@@ -187,6 +253,121 @@ pub(crate) fn run(
         | CommandKind::ScrubThreads => write(id, store, ctx, kind),
         _ => Err("not a thread command".to_owned()),
     }
+}
+
+/// The label and relation commands (D143, D145). The reads answer their lists; a write names the
+/// rows it makes with `origin`, the actor's, and answers the row as it now is.
+fn labels_command(
+    id: OperationId,
+    store: &mut ThreadStore,
+    ctx: &Context<'_>,
+    origin: &str,
+    kind: &CommandKind,
+) -> Result<Vec<Event>, String> {
+    match kind {
+        CommandKind::ListLabels { query, limit } => {
+            let labels = store
+                .list_labels(query, page(*limit)?)
+                .map_err(|e| e.to_string())?;
+            Ok(vec![Event::LabelsListed { id, labels }])
+        }
+        CommandKind::ReadLabel { id: label } => {
+            let detail = store
+                .read_label(*label)
+                .map_err(|e| named(e, LABEL_MISSING))?;
+            Ok(vec![Event::LabelRead { id, detail }])
+        }
+        CommandKind::CreateLabel {
+            name,
+            description,
+            color,
+        } => {
+            let label = store
+                .create_label(name, description, color.as_deref(), origin, now_ms())
+                .map_err(|e| e.to_string())?;
+            Ok(label_written(id, Some(label)))
+        }
+        CommandKind::AttachLabel {
+            label,
+            kind: attach,
+            reference,
+        } => {
+            let snapshot = match attach {
+                AttachKind::Commit => Some(
+                    ctx.git
+                        .commit_snapshot(ctx.root, reference)
+                        .map_err(|e| e.0)?,
+                ),
+                _ => None,
+            };
+            let (label, _) = store
+                .attach_label(
+                    label,
+                    *attach,
+                    reference,
+                    snapshot.as_ref(),
+                    origin,
+                    now_ms(),
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(label_written(id, Some(label)))
+        }
+        CommandKind::LinkThreads { from, to, kind } => {
+            let relation = store
+                .link_threads(from, to, *kind, origin, now_ms())
+                .map_err(|e| e.to_string())?;
+            Ok(vec![
+                Event::ThreadRelationChanged {
+                    id,
+                    relation,
+                    removed: false,
+                },
+                Event::ThreadsChanged,
+            ])
+        }
+        CommandKind::RenameLabel { id: label, name } => {
+            let label = store
+                .rename_label(*label, name)
+                .map_err(|e| named(e, LABEL_MISSING))?;
+            Ok(label_written(id, Some(label)))
+        }
+        CommandKind::DeleteLabel { id: label } => {
+            store
+                .delete_label(*label)
+                .map_err(|e| named(e, LABEL_MISSING))?;
+            Ok(label_written(id, None))
+        }
+        CommandKind::DetachLabel {
+            label,
+            kind: attach,
+            reference,
+        } => {
+            store
+                .detach_label(label, *attach, reference)
+                .map_err(|e| named(e, "No such label on that item."))?;
+            Ok(label_written(id, None))
+        }
+        CommandKind::RemoveThreadRelation { from, to, kind } => {
+            let relation = store
+                .remove_thread_relation(from, to, *kind)
+                .map_err(|e| named(e, "No such link between those threads."))?;
+            Ok(vec![
+                Event::ThreadRelationChanged {
+                    id,
+                    relation,
+                    removed: true,
+                },
+                Event::ThreadsChanged,
+            ])
+        }
+        _ => Err("not a label command".to_owned()),
+    }
+}
+
+/// The events of a label write: the label as it now is, or none when it is gone, then the
+/// thread rows, which show their labels.
+fn label_written(id: OperationId, label: Option<gm_schema::threads::Label>) -> Vec<Event> {
+    vec![Event::LabelsChanged { id, label }, Event::ThreadsChanged]
 }
 
 /// Checks a provenance request before anything is read (D144).
@@ -296,7 +477,7 @@ fn commit_provenance(
     {
         let evidence = match origin {
             LinkOrigin::Observed => Evidence::ObservedCommit,
-            LinkOrigin::Manual => Evidence::Manual,
+            LinkOrigin::Human => Evidence::Manual,
         };
         drafts.entry(uid).or_default().evidence.push(evidence);
     }
@@ -411,13 +592,11 @@ fn write(
             title,
             note,
             starred,
-            tags,
         } => {
             let meta = MetaUpdate {
                 title: title.clone(),
                 note: note.clone(),
                 starred: *starred,
-                tags: tags.clone(),
             };
             store
                 .update_meta(uid, &meta)
@@ -428,6 +607,11 @@ fn write(
             store
                 .link(uid, link)
                 .map_err(|e| named(e, THREAD_MISSING))?;
+            if link.kind == gm_schema::threads::LinkKind::Commit
+                && let Ok(snapshot) = ctx.git.commit_snapshot(ctx.root, &link.reference)
+            {
+                let _ = store.set_commit_snapshot(&link.reference, &snapshot);
+            }
             Ok(vec![Event::ThreadsChanged])
         }
         CommandKind::UnlinkThread {
@@ -1255,7 +1439,6 @@ mod tests {
                     title: Some("x".into()),
                     note: None,
                     starred: None,
-                    tags: None,
                 },
                 "only a human can change a thread",
             ),
@@ -1265,7 +1448,7 @@ mod tests {
                     link: ThreadLink {
                         kind: LinkKind::Branch,
                         reference: "main".into(),
-                        origin: LinkOrigin::Manual,
+                        origin: LinkOrigin::Human,
                     },
                 },
                 "only a human can link a thread",
@@ -1314,11 +1497,21 @@ mod tests {
                 title: Some("Backoff".into()),
                 note: Some("keep".into()),
                 starred: Some(true),
-                tags: Some(vec!["flaky".into()]),
             },
         );
         assert_eq!(state_of(&update), OperationState::Done);
         assert!(has_changed(&update));
+        let attached = send(
+            &mut engine,
+            &human,
+            CommandKind::AttachLabel {
+                label: "flaky".into(),
+                kind: AttachKind::Thread,
+                reference: a.clone(),
+            },
+        );
+        assert_eq!(state_of(&attached), OperationState::Done);
+        assert!(has_changed(&attached));
         let row = list(&mut engine, ThreadFilter::default())
             .into_iter()
             .find(|t| t.uid == a)
@@ -1331,7 +1524,7 @@ mod tests {
         let link = ThreadLink {
             kind: LinkKind::Commit,
             reference: "abc123".into(),
-            origin: LinkOrigin::Manual,
+            origin: LinkOrigin::Human,
         };
         let linked = send(
             &mut engine,
@@ -1455,7 +1648,6 @@ mod tests {
                 title: None,
                 note: Some("n".into()),
                 starred: None,
-                tags: None,
             },
         );
         assert!(
@@ -1492,6 +1684,7 @@ mod tests {
             OperationId(4),
             &mut store,
             &ctx,
+            &human(),
             &CommandKind::ReadThreadMarkdown { uid: a.clone() },
         )
         .expect("read markdown");
@@ -1511,6 +1704,7 @@ mod tests {
             OperationId(5),
             &mut store,
             &ctx,
+            &human(),
             &CommandKind::ExportThread {
                 uid: a,
                 path: target.to_string_lossy().into_owned(),
@@ -1533,6 +1727,7 @@ mod tests {
             OperationId(6),
             &mut store,
             &ctx,
+            &human(),
             &CommandKind::ReadThreadMarkdown {
                 uid: "ffffffffffffffff".into(),
             },
@@ -1552,6 +1747,7 @@ mod tests {
             OperationId(7),
             &mut store,
             &broken_ctx,
+            &human(),
             &CommandKind::ReadThreadMarkdown { uid: a.clone() },
         )
         .expect("read markdown with invalid patterns");
@@ -1564,6 +1760,7 @@ mod tests {
             OperationId(8),
             &mut store,
             &broken_ctx,
+            &human(),
             &CommandKind::ExportThread {
                 uid: a,
                 path: target.to_string_lossy().into_owned(),
@@ -1628,7 +1825,7 @@ mod tests {
             uid: a,
             path: target.to_string_lossy().into_owned(),
         };
-        let events = run(OperationId(2), &mut store, &ctx, &kind).expect("export");
+        let events = run(OperationId(2), &mut store, &ctx, &human(), &kind).expect("export");
         assert!(
             matches!(&events[0], Event::ThreadExported { path, .. } if path.ends_with("thread.md"))
         );
@@ -1654,13 +1851,21 @@ mod tests {
         let fake = FakeGit::new(&root, RepoStatus::default());
         let mut store = ThreadStore::open(&root.join(".git")).expect("open");
         let ctx = context(&fake, &root, &settings);
-        run(OperationId(1), &mut store, &ctx, &CommandKind::ScrubThreads).expect("scrub");
+        run(
+            OperationId(1),
+            &mut store,
+            &ctx,
+            &human(),
+            &CommandKind::ScrubThreads,
+        )
+        .expect("scrub");
 
         let target = out.path().join("scrubbed.md");
         run(
             OperationId(2),
             &mut store,
             &ctx,
+            &human(),
             &CommandKind::ExportThread {
                 uid: a,
                 path: target.to_string_lossy().into_owned(),
@@ -1685,6 +1890,7 @@ mod tests {
                 OperationId(3),
                 store,
                 &ctx,
+                &human(),
                 &CommandKind::ExportThread {
                     uid: a.clone(),
                     path: path.to_string_lossy().into_owned(),
@@ -1739,12 +1945,27 @@ mod tests {
         )
         .expect("write settings");
         let ctx = context(&fake, &root, &broken);
-        assert!(run(OperationId(4), &mut store, &ctx, &CommandKind::ScrubThreads).is_err());
+        assert!(
+            run(
+                OperationId(4),
+                &mut store,
+                &ctx,
+                &human(),
+                &CommandKind::ScrubThreads
+            )
+            .is_err()
+        );
         assert!(read_back(&mut store, &a).contains("TICKET-42"));
 
         let ctx = context(&fake, &root, &settings);
-        let events =
-            run(OperationId(4), &mut store, &ctx, &CommandKind::ScrubThreads).expect("scrub");
+        let events = run(
+            OperationId(4),
+            &mut store,
+            &ctx,
+            &human(),
+            &CommandKind::ScrubThreads,
+        )
+        .expect("scrub");
         let Event::ThreadsScrubbed { changed, .. } = &events[0] else {
             panic!("expected the scrub answer, got {events:?}");
         };

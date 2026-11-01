@@ -152,15 +152,30 @@ impl StatusView {
         };
         let text = dialog.text(cx);
         let field = dialog.field;
-        match curate::field_command(field, &dialog.uid, &text) {
+        // The tags the thread has now, so a tag edit sends only what changed (D145).
+        let current = self
+            .model
+            .threads
+            .summary(&dialog.uid)
+            .map(|summary| summary.tags.clone())
+            .unwrap_or_default();
+        match curate::field_command(field, &dialog.uid, &text, &current) {
             Err(reason) => {
                 dialog.error = Some(reason.to_owned());
                 cx.notify();
             }
-            Ok(kind) => {
+            Ok(kinds) => {
                 dialog.error = None;
-                let id = self.engine.dispatch(Actor::Human, kind);
-                self.model.thread_work.start(id, Work::Field(field));
+                // The engine answers the commands in order, so the last one settles the write.
+                let mut last = None;
+                for kind in kinds {
+                    last = Some(self.engine.dispatch(Actor::Human, kind));
+                }
+                match last {
+                    Some(id) => self.model.thread_work.start(id, Work::Field(field)),
+                    // Nothing changed: the dialog stays open and says so, and Cancel leaves it.
+                    None => dialog.error = Some("The tags are already these.".to_owned()),
+                }
                 cx.notify();
             }
         }

@@ -182,6 +182,8 @@ pub struct ThreadSummary {
     pub title: String,
     pub note: String,
     pub starred: bool,
+    /// The names of the labels attached to the thread, by name (D145). The field keeps its
+    /// name from the tags it replaced, so the consumers did not change.
     pub tags: Vec<String>,
     pub started_at: i64,
     pub last_event_at: i64,
@@ -388,6 +390,7 @@ pub struct ThreadHit {
     pub started_at: i64,
     #[serde(default)]
     pub edit_count: u32,
+    /// The names of the thread's labels (D145), as `ThreadSummary::tags`.
     #[serde(default)]
     pub tags: Vec<String>,
     /// The user and assistant entries before and after the hit in its thread, when the
@@ -405,12 +408,14 @@ pub enum LinkKind {
     File,
 }
 
-/// How a link was made: observed from Git and the events, or set by the user.
+/// How a link was made: observed from Git and the events, or set by a human (D143; the
+/// schema v5 migration renames `manual` to `human`). An agent's rows carry their origin
+/// on the label or relation tables, not here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkOrigin {
     Observed,
-    Manual,
+    Human,
 }
 
 /// A link from a thread to Git (D126): a commit id, a branch name or a path.
@@ -560,6 +565,80 @@ pub struct ProvenanceResult {
     pub to_line: u32,
     pub commits: Vec<ProvenanceCommit>,
     pub cuts: Vec<ProvenanceCut>,
+}
+
+/// What a label attaches to (`label_attach.kind`, D145). A label can also attach to
+/// another label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachKind {
+    Thread,
+    File,
+    Commit,
+    Label,
+}
+
+/// The kind of a link between two threads (`thread_rel`, D143).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadRelKind {
+    Continues,
+    Relates,
+    Supersedes,
+}
+
+/// A label: a named, repository-scoped node with an optional colour (D145). `origin` is
+/// `human` or `agent:<client>`; a label is never `observed`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct Label {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    /// `#rrggbb`, when the label has a colour.
+    pub color: Option<String>,
+    pub origin: String,
+    pub created_at: i64,
+    /// How many rows are attached to the label, of every kind.
+    pub attachments: u32,
+}
+
+/// One attachment of a label (`label_attach`). For a commit, the snapshot keeps the
+/// subject, author and committer date, so a collected commit still shows (D145).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct LabelAttachment {
+    pub kind: AttachKind,
+    /// Thread uid, repository-relative path, commit id or label id, by `kind`.
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub origin: String,
+    pub at: i64,
+    pub subject: Option<String>,
+    pub author: Option<String>,
+    /// Committer date of the commit, in milliseconds.
+    pub committed_at: Option<i64>,
+    /// The commit id a rewrite resolved to, when it is not `ref` (D145).
+    pub resolved: Option<String>,
+}
+
+/// A label with what is attached to it, as `ReadLabel` returns it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct LabelDetail {
+    pub label: Label,
+    pub attachments: Vec<LabelAttachment>,
+}
+
+/// A link from one thread to another (`thread_rel`, D143), by uid.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ThreadRelation {
+    pub from: String,
+    pub to: String,
+    pub kind: ThreadRelKind,
+    pub origin: String,
+    pub at: i64,
 }
 
 /// Events dropped for a reason the user can see (the `capture_gap` table).

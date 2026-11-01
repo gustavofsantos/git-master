@@ -10,8 +10,8 @@
 use std::path::Path;
 
 use gm_schema::{
-    CommandKind, EntryKind, LinkKind, LinkOrigin, OperationId, OperationState, ThreadLink,
-    ThreadSummary,
+    AttachKind, CommandKind, EntryKind, LinkKind, LinkOrigin, OperationId, OperationState,
+    ThreadLink, ThreadSummary,
 };
 
 use crate::action_registry::Reason;
@@ -23,6 +23,10 @@ const SLUG_CHARS: usize = 60;
 const SNIPPET_CHARS: usize = 80;
 const TITLE_EMPTY: Reason = "A thread needs a title.";
 const LINK_EMPTY: Reason = "Enter a commit id or a ref.";
+/// The longest tag, in characters: the store's limit on a label name (D145).
+const TAG_CHARS: usize = 64;
+const TAG_LONG: Reason = "A tag is at most 64 characters.";
+const TAG_CONTROL: Reason = "A tag cannot contain control characters.";
 const LINK_INVALID: Reason = "Use 4 to 64 hex digits for a commit id, or a ref without spaces.";
 const PATH_EMPTY: Reason = "Enter the path of the file to write.";
 /// The line every delete says: the text is gone for good.
@@ -199,48 +203,78 @@ pub(crate) fn prefill(field: ThreadField, summary: &ThreadSummary, export_path: 
     }
 }
 
-/// The command a dialog sends for `field` on thread `uid`, or the reason the text is refused.
+/// The commands a dialog sends for `field` on thread `uid`, or the reason the text is refused.
+/// Tags are the one field that takes several commands: `current` is the tags the thread has now
+/// (see `tag_commands`).
 pub(crate) fn field_command(
     field: ThreadField,
     uid: &str,
     text: &str,
-) -> Result<CommandKind, Reason> {
+    current: &[String],
+) -> Result<Vec<CommandKind>, Reason> {
     let uid = uid.to_owned();
     Ok(match field {
-        ThreadField::Rename => CommandKind::UpdateThread {
+        ThreadField::Rename => vec![CommandKind::UpdateThread {
             uid,
             title: Some(title_of(text)?),
             note: None,
             starred: None,
-            tags: None,
-        },
-        ThreadField::Note => CommandKind::UpdateThread {
+        }],
+        ThreadField::Note => vec![CommandKind::UpdateThread {
             uid,
             title: None,
             note: Some(note_of(text)),
             starred: None,
-            tags: None,
-        },
-        ThreadField::Tags => CommandKind::UpdateThread {
-            uid,
-            title: None,
-            note: None,
-            starred: None,
-            tags: Some(tags_of(text)),
-        },
-        ThreadField::LinkCommit => CommandKind::LinkThread {
+        }],
+        ThreadField::Tags => {
+            // Each tag is checked before any command is sent, so a refused tag sends nothing.
+            let tags = tags_of(text);
+            if tags.iter().any(|tag| tag.chars().count() > TAG_CHARS) {
+                return Err(TAG_LONG);
+            }
+            if tags.iter().any(|tag| tag.chars().any(char::is_control)) {
+                return Err(TAG_CONTROL);
+            }
+            tag_commands(&uid, current, text)
+        }
+        ThreadField::LinkCommit => vec![CommandKind::LinkThread {
             uid,
             link: ThreadLink {
                 kind: LinkKind::Commit,
                 reference: link_of(text)?,
-                origin: LinkOrigin::Manual,
+                origin: LinkOrigin::Human,
             },
-        },
-        ThreadField::Export => CommandKind::ExportThread {
+        }],
+        ThreadField::Export => vec![CommandKind::ExportThread {
             uid,
             path: export_path_of(text)?,
-        },
+        }],
     })
+}
+
+/// The label commands that move a thread from the tags `current` to the tags `text` names (D145):
+/// each tag no longer named is detached, then each new tag is attached. Attaching creates a label
+/// that does not exist yet, so no create is sent. Nothing when the two are the same.
+#[must_use]
+pub(crate) fn tag_commands(uid: &str, current: &[String], text: &str) -> Vec<CommandKind> {
+    let wanted = tags_of(text);
+    let detach = current
+        .iter()
+        .filter(|tag| !wanted.contains(tag))
+        .map(|tag| CommandKind::DetachLabel {
+            label: tag.clone(),
+            kind: AttachKind::Thread,
+            reference: uid.to_owned(),
+        });
+    let attach = wanted
+        .iter()
+        .filter(|tag| !current.contains(tag))
+        .map(|tag| CommandKind::AttachLabel {
+            label: tag.clone(),
+            kind: AttachKind::Thread,
+            reference: uid.to_owned(),
+        });
+    detach.chain(attach).collect()
 }
 
 /// The command that sets the star to the opposite of `starred`.
@@ -251,7 +285,6 @@ pub(crate) fn star_command(uid: &str, starred: bool) -> CommandKind {
         title: None,
         note: None,
         starred: Some(!starred),
-        tags: None,
     }
 }
 
@@ -571,63 +604,100 @@ mod tests {
     #[test]
     fn each_field_sends_its_own_engine_command() {
         assert_eq!(
-            field_command(ThreadField::Rename, "u1", " New "),
-            Ok(CommandKind::UpdateThread {
+            field_command(ThreadField::Rename, "u1", " New ", &[]),
+            Ok(vec![CommandKind::UpdateThread {
                 uid: "u1".into(),
                 title: Some("New".into()),
                 note: None,
                 starred: None,
-                tags: None,
-            })
+            }])
         );
         assert_eq!(
-            field_command(ThreadField::Note, "u1", ""),
-            Ok(CommandKind::UpdateThread {
+            field_command(ThreadField::Note, "u1", "", &[]),
+            Ok(vec![CommandKind::UpdateThread {
                 uid: "u1".into(),
                 title: None,
                 note: Some(String::new()),
                 starred: None,
-                tags: None,
-            })
+            }])
         );
         assert_eq!(
-            field_command(ThreadField::Tags, "u1", "a, b"),
-            Ok(CommandKind::UpdateThread {
-                uid: "u1".into(),
-                title: None,
-                note: None,
-                starred: None,
-                tags: Some(vec!["a".into(), "b".into()]),
-            })
-        );
-        assert_eq!(
-            field_command(ThreadField::LinkCommit, "u1", "a1b2c3d"),
-            Ok(CommandKind::LinkThread {
+            field_command(ThreadField::LinkCommit, "u1", "a1b2c3d", &[]),
+            Ok(vec![CommandKind::LinkThread {
                 uid: "u1".into(),
                 link: ThreadLink {
                     kind: LinkKind::Commit,
                     reference: "a1b2c3d".into(),
-                    origin: LinkOrigin::Manual,
+                    origin: LinkOrigin::Human,
                 },
-            })
+            }])
         );
         assert_eq!(
-            field_command(ThreadField::Export, "u1", " /tmp/t.md "),
-            Ok(CommandKind::ExportThread {
+            field_command(ThreadField::Export, "u1", " /tmp/t.md ", &[]),
+            Ok(vec![CommandKind::ExportThread {
                 uid: "u1".into(),
                 path: "/tmp/t.md".into(),
-            })
+            }])
+        );
+    }
+
+    #[test]
+    fn tags_send_labels_for_what_changed_only() {
+        let current = vec!["bug".to_owned(), "api".to_owned()];
+        assert_eq!(
+            tag_commands("u1", &[], "a, b"),
+            vec![
+                CommandKind::AttachLabel {
+                    label: "a".into(),
+                    kind: AttachKind::Thread,
+                    reference: "u1".into(),
+                },
+                CommandKind::AttachLabel {
+                    label: "b".into(),
+                    kind: AttachKind::Thread,
+                    reference: "u1".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            tag_commands("u1", &current, "api, ui"),
+            vec![
+                CommandKind::DetachLabel {
+                    label: "bug".into(),
+                    kind: AttachKind::Thread,
+                    reference: "u1".into(),
+                },
+                CommandKind::AttachLabel {
+                    label: "ui".into(),
+                    kind: AttachKind::Thread,
+                    reference: "u1".into(),
+                },
+            ]
+        );
+        assert!(tag_commands("u1", &current, "bug,api").is_empty());
+    }
+
+    #[test]
+    fn a_tag_the_store_would_refuse_sends_nothing() {
+        let long = "t".repeat(65);
+        assert_eq!(
+            field_command(ThreadField::Tags, "u1", &long, &[]),
+            Err("A tag is at most 64 characters.")
+        );
+        assert_eq!(
+            field_command(ThreadField::Tags, "u1", "a\tb", &[]),
+            Err("A tag cannot contain control characters.")
         );
     }
 
     #[test]
     fn a_refused_text_sends_no_command() {
         assert_eq!(
-            field_command(ThreadField::Rename, "u1", " "),
+            field_command(ThreadField::Rename, "u1", " ", &[]),
             Err("A thread needs a title.")
         );
         assert_eq!(
-            field_command(ThreadField::LinkCommit, "u1", ""),
+            field_command(ThreadField::LinkCommit, "u1", "", &[]),
             Err("Enter a commit id or a ref.")
         );
     }
@@ -641,7 +711,6 @@ mod tests {
                 title: None,
                 note: None,
                 starred: Some(true),
-                tags: None,
             }
         );
         assert!(matches!(
@@ -658,7 +727,7 @@ mod tests {
         let link = ThreadLink {
             kind: LinkKind::Commit,
             reference: "a1b2".into(),
-            origin: LinkOrigin::Manual,
+            origin: LinkOrigin::Human,
         };
         assert_eq!(
             unlink_command("u1", &link),

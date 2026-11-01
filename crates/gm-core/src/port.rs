@@ -33,6 +33,16 @@ impl std::error::Error for GitError {}
 /// it ends early and its answer is not wanted.
 pub type DetailRead = Box<dyn FnOnce(&AtomicBool) -> Result<CommitDetail, GitError> + Send>;
 
+/// A commit as Git describes it now: what a commit attachment keeps as its snapshot (D145).
+/// `committed_at` is the committer date in milliseconds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitSnapshot {
+    pub id: String,
+    pub subject: String,
+    pub author: String,
+    pub committed_at: i64,
+}
+
 /// One ref of `GitPort::update_refs`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefMove {
@@ -523,6 +533,26 @@ pub trait GitPort: Send {
     fn resolve_commit(&self, _root: &Path, _rev: &str) -> Result<String, GitError> {
         Err(GitError(
             "resolve commit is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The snapshot of the commit `rev` names (D145): full id, subject, author and committer
+    /// date. An error when `rev` names no commit. Never records anything.
+    fn commit_snapshot(&self, _root: &Path, _rev: &str) -> Result<CommitSnapshot, GitError> {
+        Err(GitError(
+            "commit snapshots are not supported by this adapter".into(),
+        ))
+    }
+
+    /// The snapshots of the commits the names in `revs` name, read in one Git process. Each
+    /// answer carries the name it was asked by; a name that names no commit is left out.
+    fn commit_snapshots(
+        &self,
+        _root: &Path,
+        _revs: &[String],
+    ) -> Result<Vec<(String, CommitSnapshot)>, GitError> {
+        Err(GitError(
+            "commit snapshots are not supported by this adapter".into(),
         ))
     }
 

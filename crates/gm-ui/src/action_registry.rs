@@ -5418,7 +5418,6 @@ mod tests {
                 title: None,
                 note: None,
                 starred: Some(true),
-                tags: None,
             }]))
         );
         assert!(matches!(

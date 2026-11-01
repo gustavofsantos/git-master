@@ -26,7 +26,7 @@ use super::query::{
 };
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
 /// The index in `MIGRATIONS` of the schema that repairs stored entries with the cleaner (D133).
 const REPAIR_MIGRATION: usize = 3;
 
@@ -291,6 +291,59 @@ CREATE TRIGGER entry_tri_au AFTER UPDATE OF text, kind ON entry BEGIN
 END;
 ";
 
+/// Schema 5 (D143, D145): labels, their attachments, thread-to-thread links and the repository
+/// path of each edit. `thread_tag` becomes labels with origin `human`, attached to their thread,
+/// and is dropped; `thread_link`'s `manual` origin becomes `human`. The commit snapshot of
+/// existing links is not here: it needs Git, so the engine fills it on its next open. Labels and
+/// relations are stored as the user's own data, so an edit is never run by this migration.
+const SCHEMA_V5: &str = "
+CREATE TABLE label (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    color TEXT,
+    origin TEXT NOT NULL,
+    created_at INTEGER NOT NULL);
+CREATE TABLE label_attach (
+    label_id INTEGER NOT NULL REFERENCES label(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    subject TEXT, author TEXT, committed_at INTEGER,
+    resolved TEXT,
+    PRIMARY KEY(label_id, kind, ref));
+CREATE TABLE thread_rel (
+    from_thread INTEGER NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+    to_thread INTEGER NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('continues', 'relates', 'supersedes')),
+    origin TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY(from_thread, to_thread, kind));
+ALTER TABLE thread_link ADD COLUMN subject TEXT;
+ALTER TABLE thread_link ADD COLUMN author TEXT;
+ALTER TABLE thread_link ADD COLUMN committed_at INTEGER;
+ALTER TABLE thread_link ADD COLUMN resolved TEXT;
+UPDATE thread_link SET origin = 'human' WHERE origin = 'manual';
+ALTER TABLE edit ADD COLUMN rel_path TEXT;
+UPDATE edit SET rel_path = (SELECT CASE
+        WHEN substr(edit.path, 1, length(t.worktree) + 1) = t.worktree || '/'
+        THEN substr(edit.path, length(t.worktree) + 2)
+        ELSE edit.path END
+    FROM thread t WHERE t.id = edit.thread_id);
+CREATE INDEX edit_rel_path ON edit (rel_path);
+INSERT INTO label (name, description, color, origin, created_at)
+    SELECT DISTINCT tag, '', NULL, 'human', CAST(strftime('%s', 'now') AS INTEGER) * 1000
+    FROM thread_tag;
+INSERT INTO label_attach (label_id, kind, ref, origin, at)
+    SELECT l.id, 'thread', t.uid, 'human', CAST(strftime('%s', 'now') AS INTEGER) * 1000
+    FROM thread_tag g
+    JOIN thread t ON t.id = g.thread_id
+    JOIN label l ON l.name = g.tag;
+DROP INDEX thread_tag_tag;
+DROP TABLE thread_tag;
+";
+
 const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
 /// Opening a file another process is initializing is retried this many times, this far apart.
 const OPEN_ATTEMPTS: u32 = 200;
@@ -334,7 +387,8 @@ const FILTER_SQL: &str = " AND (:harness IS NULL OR t.harness = :harness)
         OR (length(k.ref) >= 7 AND k.ref NOT GLOB '*[^0-9a-fA-F]*'
             AND substr(lower(:commit), 1, length(k.ref)) = lower(k.ref))
         OR (length(:commit) >= 7 AND substr(lower(k.ref), 1, length(:commit)) = lower(:commit)))))
-    AND (:tag IS NULL OR EXISTS (SELECT 1 FROM thread_tag g WHERE g.thread_id = t.id AND g.tag = :tag))";
+    AND (:tag IS NULL OR EXISTS (SELECT 1 FROM label_attach a JOIN label l ON l.id = a.label_id
+        WHERE a.kind = 'thread' AND a.ref = t.uid AND l.name = :tag))";
 
 /// The entry filters as SQL (D147), for the statements of a search only: `e` is the entry the
 /// hit comes from. They are bound with the thread filter by `query_candidates`.
@@ -471,8 +525,6 @@ pub struct MetaUpdate {
     pub title: Option<String>,
     pub note: Option<String>,
     pub starred: Option<bool>,
-    /// The complete new tag set.
-    pub tags: Option<Vec<String>>,
 }
 
 /// What the hook process gets from `ThreadStore::open_for_hook` (D132).
@@ -503,7 +555,7 @@ fn open_for_hook_below(git_common_dir: &Path, limit: i64) -> Result<HookStore, S
 }
 
 pub struct ThreadStore {
-    conn: Connection,
+    pub(super) conn: Connection,
     /// Entries kept per thread; tests lower it.
     entry_limit: u32,
     /// Hits below which search runs its next stage; tests lower it.
@@ -1186,8 +1238,8 @@ impl ThreadStore {
 
     /// The edits of `path` that could explain a line (D144), newest first, with their patches. An
     /// edit counts when it was made by `before` (the commit's author date) or when its blob is
-    /// `blob`, the file's blob in the commit, which needs no date. A path is compared as the
-    /// repository path, or as the worktree joined to it for an absolute path the edit recorded.
+    /// `blob`, the file's blob in the commit, which needs no date. A path is the repository path
+    /// the edit's `rel_path` holds (D143, schema v5).
     /// The caller passes `limit` plus one to learn whether the list was cut.
     pub fn path_edits(
         &self,
@@ -1201,7 +1253,7 @@ impl ThreadStore {
              FROM edit ed
              JOIN thread t ON t.id = ed.thread_id
              JOIN entry e ON e.id = ed.entry_id
-             WHERE (ed.path = ?1 OR ed.path = t.worktree || '/' || ?1)
+             WHERE ed.rel_path = ?1
                AND (ed.at <= ?2 OR COALESCE(ed.post_oid = ?3, 0))
              ORDER BY COALESCE(ed.post_oid = ?3, 0) DESC, ed.at DESC, ed.id DESC
              LIMIT ?4",
@@ -1305,22 +1357,6 @@ impl ThreadStore {
                 params![thread, starred],
             )?;
         }
-        if let Some(tags) = &meta.tags {
-            tx.execute(
-                "DELETE FROM thread_tag WHERE thread_id = ?1",
-                params![thread],
-            )?;
-            for tag in tags {
-                let tag = tag.trim();
-                if tag.is_empty() {
-                    return Err(invalid("a tag cannot be empty"));
-                }
-                tx.execute(
-                    "INSERT OR IGNORE INTO thread_tag (thread_id, tag) VALUES (?1, ?2)",
-                    params![thread, tag],
-                )?;
-            }
-        }
         tx.commit()?;
         Ok(())
     }
@@ -1361,11 +1397,16 @@ impl ThreadStore {
         Ok(())
     }
 
-    /// Deletes a thread with its entries, edits, links, tags and gaps. The text is removed
-    /// from the search index too, so `checkpoint` then leaves it out of the file.
+    /// Deletes a thread with its entries, edits, links, relations, label attachments and gaps.
+    /// The text is removed from the search index too, so `checkpoint` then leaves it out of the
+    /// file.
     pub fn delete_thread(&mut self, uid: &str) -> Result<(), StoreError> {
         let tx = begin(&mut self.conn)?;
         let thread = thread_id(&tx, uid)?;
+        tx.execute(
+            "DELETE FROM label_attach WHERE kind = 'thread' AND ref = ?1",
+            params![uid],
+        )?;
         tx.execute("DELETE FROM thread WHERE id = ?1", params![thread])?;
         purge_search_index(&tx)?;
         tx.commit()?;
@@ -1672,11 +1713,11 @@ fn create_private(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn begin(conn: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
+pub(super) fn begin(conn: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
 }
 
-fn invalid(message: &str) -> StoreError {
+pub(super) fn invalid(message: &str) -> StoreError {
     StoreError::Invalid(message.to_owned())
 }
 
@@ -1685,7 +1726,7 @@ fn to_i64(value: u64) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_| invalid("a number is too large to store"))
 }
 
-fn thread_id(conn: &Connection, uid: &str) -> Result<i64, StoreError> {
+pub(super) fn thread_id(conn: &Connection, uid: &str) -> Result<i64, StoreError> {
     conn.query_row(
         "SELECT id FROM thread WHERE uid = ?1",
         params![uid],
@@ -1702,9 +1743,13 @@ fn summary_of(conn: &Connection, thread: i64) -> Result<ThreadSummary, StoreErro
     Ok(summary)
 }
 
+/// The names of the labels attached to thread `thread` (D145), by name.
 fn tags_of(conn: &Connection, thread: i64) -> Result<Vec<String>, StoreError> {
-    let mut statement =
-        conn.prepare_cached("SELECT tag FROM thread_tag WHERE thread_id = ?1 ORDER BY tag")?;
+    let mut statement = conn.prepare_cached(
+        "SELECT l.name FROM label_attach a JOIN label l ON l.id = a.label_id
+         WHERE a.kind = 'thread' AND a.ref = (SELECT uid FROM thread WHERE id = ?1)
+         ORDER BY l.name",
+    )?;
     let tags = statement
         .query_map(params![thread], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<String>>>()?;
@@ -2340,14 +2385,14 @@ fn parse_link_kind(text: &str) -> Option<LinkKind> {
 fn origin_text(origin: LinkOrigin) -> &'static str {
     match origin {
         LinkOrigin::Observed => "observed",
-        LinkOrigin::Manual => "manual",
+        LinkOrigin::Human => "human",
     }
 }
 
 fn parse_origin(text: &str) -> Option<LinkOrigin> {
     match text {
         "observed" => Some(LinkOrigin::Observed),
-        "manual" => Some(LinkOrigin::Manual),
+        "human" => Some(LinkOrigin::Human),
         _ => None,
     }
 }
@@ -2520,10 +2565,15 @@ fn insert_edit(
     at: i64,
     edit: &NewEdit,
 ) -> Result<(), StoreError> {
+    let worktree: String = conn.query_row(
+        "SELECT worktree FROM thread WHERE id = ?1",
+        params![thread],
+        |row| row.get(0),
+    )?;
     conn.execute(
         "INSERT INTO edit (thread_id, entry_id, path, old_path, change, patch, added, removed,
-            pre_oid, post_oid, from_input, at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            pre_oid, post_oid, from_input, at, rel_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             thread,
             entry_id,
@@ -2536,10 +2586,21 @@ fn insert_edit(
             edit.pre_oid,
             edit.post_oid,
             edit.from_input,
-            at
+            at,
+            repo_path(&edit.path, &worktree)
         ],
     )?;
     add_redactions(conn, thread, &edit.hits)
+}
+
+/// The repository path of an edit (D144): the path as recorded, with the worktree and its `/`
+/// taken off when the edit recorded an absolute path under the worktree. The same rule as the
+/// migration's `UPDATE`, so a new edit and a migrated one agree.
+pub(super) fn repo_path(path: &str, worktree: &str) -> String {
+    match path.strip_prefix(&format!("{worktree}/")) {
+        Some(rest) => rest.to_owned(),
+        None => path.to_owned(),
+    }
 }
 
 /// Records the entry-limit gap once per thread.
@@ -2807,7 +2868,7 @@ fn repair_entries(tx: &Transaction<'_>, clean: TextCleaner) -> Result<(), StoreE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_schema::threads::EditChange;
+    use gm_schema::threads::{AttachKind, EditChange};
     use proptest::prelude::*;
     use std::thread;
 
@@ -2908,7 +2969,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         assert_eq!(store.total_threads().expect("count"), 1);
     }
 
@@ -3191,13 +3252,7 @@ mod tests {
             )
             .expect("star");
         store
-            .update_meta(
-                &uid("a"),
-                &MetaUpdate {
-                    tags: Some(vec!["bug".to_owned()]),
-                    ..MetaUpdate::default()
-                },
-            )
+            .attach_label("bug", AttachKind::Thread, &uid("a"), None, "human", 1)
             .expect("tag");
         let list = |filter: ThreadFilter| sorted_titles(&store, &filter);
         let none = ThreadFilter::default();
@@ -3301,7 +3356,7 @@ mod tests {
         let link = ThreadLink {
             kind,
             reference: reference.to_owned(),
-            origin: LinkOrigin::Manual,
+            origin: LinkOrigin::Human,
         };
         store.link(&uid(session), &link).expect("link");
     }
@@ -3405,7 +3460,7 @@ mod tests {
         let link = ThreadLink {
             kind: LinkKind::Commit,
             reference: OID.to_owned(),
-            origin: LinkOrigin::Manual,
+            origin: LinkOrigin::Human,
         };
         store.link(&other_uid, &link).expect("link");
         let in_other = ThreadFilter {
@@ -3869,10 +3924,10 @@ mod tests {
             .link(&uid("s"), &link(LinkOrigin::Observed))
             .expect("link");
         store
-            .link(&uid("s"), &link(LinkOrigin::Manual))
+            .link(&uid("s"), &link(LinkOrigin::Human))
             .expect("relink");
         let links = store.read_thread(&uid("s"), 0, 1).expect("read").links;
-        assert_eq!(links, vec![link(LinkOrigin::Manual)]);
+        assert_eq!(links, vec![link(LinkOrigin::Human)]);
         store
             .unlink(&uid("s"), LinkKind::Commit, "abc123")
             .expect("unlink");
@@ -3886,7 +3941,7 @@ mod tests {
                 &ThreadLink {
                     kind: LinkKind::File,
                     reference: " ".to_owned(),
-                    origin: LinkOrigin::Manual
+                    origin: LinkOrigin::Human
                 }
             ),
             Err(StoreError::Invalid(_))
@@ -4299,7 +4354,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         let hits = store
             .search("ndex", &ThreadFilter::default(), 10)
             .expect("search");
@@ -4909,7 +4964,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             legacy_database(dir.path(), versions, EVERY_KIND_ROWS);
             let store = ThreadStore::open(dir.path()).expect("migrate");
-            assert_eq!(version_of(dir.path()), 4, "from version {versions}");
+            assert_eq!(version_of(dir.path()), 5, "from version {versions}");
             assert_eq!(index_rows(&store), (2, 2), "from version {versions}");
             assert_eq!(stage_hits(&store, "backoff", "ckof", "bakcoff"), [1, 1, 1]);
             assert_eq!(
@@ -4994,7 +5049,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 3, MARKER_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 4);
+        assert_eq!(version_of(dir.path()), 5);
 
         // Slash command as typed, output and bash as notices and a bash prompt, reminders
         // gone, the interruption as a notice; the marker-only prompt is deleted.
@@ -5096,10 +5151,13 @@ mod tests {
         match open_for_hook_below(dir.path(), 5).expect("hook") {
             HookStore::Deferred(reader) => {
                 assert_eq!(reader.total_threads().expect("count"), 1);
+                // The hook reads the cursor of a session, not filtered searches: those need the
+                // label tables that schema 5 adds.
                 assert!(
                     reader
-                        .search("backoff", &ThreadFilter::default(), 10)
-                        .is_ok()
+                        .cursor("claude-code", "s1")
+                        .expect("cursor")
+                        .is_some()
                 );
             }
             HookStore::Ready(_) => panic!("a large database must not migrate in the hook"),
@@ -5111,7 +5169,7 @@ mod tests {
             open_for_hook_below(dir.path(), 6).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(dir.path()), 4);
+        assert_eq!(version_of(dir.path()), 5);
 
         // An up-to-date database is opened whatever its size.
         assert!(matches!(
@@ -5124,7 +5182,7 @@ mod tests {
             open_for_hook_below(fresh.path(), 1).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(fresh.path()), 4);
+        assert_eq!(version_of(fresh.path()), 5);
     }
 
     /// A deterministic generator for the benchmark: no randomness crate, same text every run.
@@ -5890,5 +5948,159 @@ mod tests {
         assert!(empty.hits.is_empty());
         assert!(!empty.has_more);
         assert_eq!(empty.diagnosis, Some(vec![("branch".to_owned(), 5)]));
+    }
+
+    /// Rows of a version 4 database: two threads, a manual and an observed commit link, tags on
+    /// both threads, and edits whose paths are absolute under the worktree, repository-relative,
+    /// or outside the worktree.
+    const VERSION_FOUR_ROWS: &str = "
+        INSERT INTO thread (uid, harness, session_id, worktree, title, started_at, last_event_at)
+        VALUES ('t1uid', 'claude-code', 's1', '/repo', 'one', 1, 1),
+               ('t2uid', 'claude-code', 's2', '/repo', 'two', 2, 2);
+        INSERT INTO entry (thread_id, seq, turn, kind, source_id, text, at) VALUES
+            (1, 0, 1, 'user', 'u1', 'hello', 1),
+            (1, 1, 1, 'tool_call', 't1', 'edit', 2),
+            (2, 0, 1, 'user', 'u2', 'hi', 3);
+        INSERT INTO edit (thread_id, entry_id, path, change, patch, added, removed, at) VALUES
+            (1, 2, '/repo/src/a.rs', 'modify', '', 0, 0, 2),
+            (1, 2, 'src/b.rs', 'modify', '', 0, 0, 2),
+            (2, 3, '/elsewhere/c.rs', 'modify', '', 0, 0, 3);
+        INSERT INTO thread_link (thread_id, kind, ref, origin) VALUES
+            (1, 'commit', 'abc1234', 'manual'),
+            (2, 'commit', 'deadbeef', 'observed');
+        INSERT INTO thread_tag (thread_id, tag) VALUES (1, 'bug'), (1, 'api'), (2, 'bug');";
+
+    fn raw_connection(dir: &Path) -> Connection {
+        Connection::open(dir.join("gitmaster").join("threads.db")).expect("raw")
+    }
+
+    #[test]
+    fn a_version_four_database_keeps_every_tag_as_a_human_label() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        legacy_database(dir.path(), 4, VERSION_FOUR_ROWS);
+        let store = ThreadStore::open(dir.path()).expect("migrate");
+        assert_eq!(version_of(dir.path()), 5);
+        assert_eq!(
+            store.thread_summary("t1uid").expect("t1").tags,
+            ["api", "bug"]
+        );
+        assert_eq!(store.thread_summary("t2uid").expect("t2").tags, ["bug"]);
+        let raw = raw_connection(dir.path());
+        let labels: Vec<(String, String)> = raw
+            .prepare("SELECT name, origin FROM label ORDER BY name")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(
+            labels,
+            [
+                ("api".to_owned(), "human".to_owned()),
+                ("bug".to_owned(), "human".to_owned())
+            ]
+        );
+        let attached: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM label_attach
+                 WHERE kind = 'thread' AND origin = 'human' AND ref IN ('t1uid', 't2uid')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("attachments");
+        assert_eq!(attached, 3);
+        let kept: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'thread_tag'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("master");
+        assert_eq!(kept, 0, "thread_tag is dropped");
+    }
+
+    #[test]
+    fn the_migration_fills_rel_path_and_renames_manual_links() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        legacy_database(dir.path(), 4, VERSION_FOUR_ROWS);
+        let store = ThreadStore::open(dir.path()).expect("migrate");
+        let raw = raw_connection(dir.path());
+        let paths: Vec<(String, String)> = raw
+            .prepare("SELECT path, rel_path FROM edit ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(
+            paths,
+            [
+                ("/repo/src/a.rs".to_owned(), "src/a.rs".to_owned()),
+                ("src/b.rs".to_owned(), "src/b.rs".to_owned()),
+                ("/elsewhere/c.rs".to_owned(), "/elsewhere/c.rs".to_owned()),
+            ]
+        );
+        let index: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'edit_rel_path'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("index");
+        assert_eq!(index, 1);
+        let links: Vec<(String, String)> = raw
+            .prepare("SELECT ref, origin FROM thread_link ORDER BY ref")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(
+            links,
+            [
+                ("abc1234".to_owned(), "human".to_owned()),
+                ("deadbeef".to_owned(), "observed".to_owned()),
+            ]
+        );
+        // The provenance lookup finds the edit recorded under the worktree by its repository path.
+        let found = store
+            .path_edits("src/a.rs", i64::MAX, None, 10)
+            .expect("path edits");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].thread_uid, "t1uid");
+        // A thread's tag filter reads the labels.
+        let tagged = store
+            .list_threads(
+                &ThreadFilter {
+                    tag: Some("bug".to_owned()),
+                    ..ThreadFilter::default()
+                },
+                None,
+                10,
+            )
+            .expect("list");
+        assert_eq!(tagged.len(), 2);
+    }
+
+    #[test]
+    fn a_new_edit_fills_rel_path_from_its_worktree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = ThreadStore::open(dir.path()).expect("open");
+        let absolute = with_edit(
+            new_entry("u", EntryKind::ToolCall, "Edit", 5),
+            "/repo/src/x.rs",
+        );
+        let relative = with_edit(new_entry("v", EntryKind::ToolCall, "Edit", 6), "src/y.rs");
+        store
+            .apply(&batch("s", 5, vec![absolute, relative]))
+            .expect("apply");
+        let rel: Vec<String> = raw_connection(dir.path())
+            .prepare("SELECT rel_path FROM edit ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(rel, ["src/x.rs", "src/y.rs"]);
     }
 }

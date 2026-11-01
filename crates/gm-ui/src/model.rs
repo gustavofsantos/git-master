@@ -1187,6 +1187,11 @@ impl Model {
             | Event::WorkflowMessageSuggested { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
             | Event::ThreadProvenance { .. }
+            // The label and link answers are read by the Labels page (P4); the rows follow `ThreadsChanged`.
+            | Event::LabelsListed { .. }
+            | Event::LabelRead { .. }
+            | Event::LabelsChanged { .. }
+            | Event::ThreadRelationChanged { .. }
             | Event::ThreadsChanged => None,
             // The read opens the resolver; the staged note is the resolver's own.
             Event::ConflictRead { id, read } => {
@@ -1570,6 +1575,10 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ThreadMarkdown { id, .. }
         | Event::ThreadExported { id, .. }
         | Event::ThreadsScrubbed { id, .. }
+        | Event::LabelsListed { id, .. }
+        | Event::LabelRead { id, .. }
+        | Event::LabelsChanged { id, .. }
+        | Event::ThreadRelationChanged { id, .. }
         | Event::ConflictRead { id, .. }
         | Event::ConflictResolved { id, .. }
         | Event::RecordedResolutionForgotten { id, .. } => Some(*id),

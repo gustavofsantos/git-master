@@ -50,8 +50,8 @@ pub use files::{
 };
 pub use history::{HistoryJob, HistoryOutcome, HistoryPage, HistoryReport, HistoryStream};
 pub use port::{
-    BlameRead, DetailRead, DiscardOutcome, FileListRead, FileMerge, GitError, GitPort, GrepRead,
-    HistoryRevs, RefMove, RemoteRun, ReviewSide, TreeMerge,
+    BlameRead, CommitSnapshot, DetailRead, DiscardOutcome, FileListRead, FileMerge, GitError,
+    GitPort, GrepRead, HistoryRevs, RefMove, RemoteRun, ReviewSide, TreeMerge,
 };
 pub use runner::{EngineHandle, spawn, spawn_with};
 pub use script_session::{EffectRequest, ScriptLink};

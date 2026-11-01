@@ -21,8 +21,9 @@ use crate::status::{
 };
 use crate::syntax::HighlightSpan;
 use crate::threads::{
-    EditState, LinkKind, ProvenanceResult, SearchFacets, SearchGroup, SearchOrder, ThreadDetail,
-    ThreadEdit, ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
+    AttachKind, EditState, Label, LabelDetail, LinkKind, ProvenanceResult, SearchFacets,
+    SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink,
+    ThreadRelKind, ThreadRelation, ThreadSummary,
 };
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
@@ -621,13 +622,13 @@ pub enum CommandKind {
         uid: String,
         path: String,
     },
-    /// Edits the metadata of thread `uid`; never its entries. Human only.
+    /// Edits the metadata of thread `uid`; never its entries. Its labels are edited
+    /// by the label commands. Human only.
     UpdateThread {
         uid: String,
         title: Option<String>,
         note: Option<String>,
         starred: Option<bool>,
-        tags: Option<Vec<String>>,
     },
     /// Adds a link from thread `uid` to a commit, branch or path. Human only.
     LinkThread {
@@ -639,6 +640,66 @@ pub enum CommandKind {
         uid: String,
         kind: LinkKind,
         reference: String,
+    },
+    /// Lists the labels whose name contains `query` (empty for all), by name, with how many rows
+    /// each has attached (D145). Answers `LabelsListed`. A read: never recorded (D28).
+    ListLabels {
+        query: String,
+        limit: u32,
+    },
+    /// Reads label `id` and what is attached to it. Answers `LabelRead`. A read: never recorded
+    /// (D28).
+    ReadLabel {
+        id: i64,
+    },
+    /// Creates the label `name`, or returns the label of that name when there is one (the name
+    /// is unique and the other fields are then not changed). `color` is `#rrggbb` or none. Level
+    /// record (D28, D146): writes only the app's own store, needs no approval, and is logged
+    /// with its actor. Answers `LabelsChanged`.
+    CreateLabel {
+        name: String,
+        description: String,
+        color: Option<String>,
+    },
+    /// Attaches the label `label` (by name, created with the actor's origin when missing) to
+    /// `kind` `ref`: a thread uid, a repository-relative path, a commit id (a snapshot is taken
+    /// from Git now) or the id of another label. Attaching a pair already attached returns it
+    /// unchanged. Level record (D146). Answers `LabelsChanged`.
+    AttachLabel {
+        label: String,
+        kind: AttachKind,
+        #[serde(rename = "ref")]
+        reference: String,
+    },
+    /// Links thread `from` to thread `to` with `kind` (D143). Level record (D146). Answers
+    /// `ThreadRelationChanged`.
+    LinkThreads {
+        from: String,
+        to: String,
+        kind: ThreadRelKind,
+    },
+    /// Renames label `id` to `name`. Human only.
+    RenameLabel {
+        id: i64,
+        name: String,
+    },
+    /// Deletes label `id` with its attachments. Human only.
+    DeleteLabel {
+        id: i64,
+    },
+    /// Removes one attachment of the label `label` (by name). Human only.
+    DetachLabel {
+        label: String,
+        kind: AttachKind,
+        #[serde(rename = "ref")]
+        reference: String,
+    },
+    /// Removes the link from thread `from` to thread `to` of `kind`. Named apart from
+    /// `UnlinkThread`, which removes a commit link. Human only. Answers `ThreadRelationChanged`.
+    RemoveThreadRelation {
+        from: String,
+        to: String,
+        kind: ThreadRelKind,
     },
     /// Deletes thread `uid` with its entries, edits and links, securely. Human only.
     DeleteThread {
@@ -1099,12 +1160,35 @@ pub enum Event {
     /// The thread database changed, by a write of this engine or by new data the
     /// watcher saw. Carries no operation id: no command asked for it.
     ThreadsChanged,
+    /// Answers `ListLabels`, by name.
+    LabelsListed {
+        id: OperationId,
+        labels: Vec<Label>,
+    },
+    /// Answers `ReadLabel`.
+    LabelRead {
+        id: OperationId,
+        detail: LabelDetail,
+    },
+    /// Answers `CreateLabel` and `AttachLabel` with the label as it now is (`label`), and
+    /// `DeleteLabel` and `DetachLabel` with none. Every label write also sends
+    /// `ThreadsChanged`, since thread rows show their labels.
+    LabelsChanged {
+        id: OperationId,
+        label: Option<Label>,
+    },
+    /// Answers `LinkThreads` (`removed` false) and `RemoveThreadRelation` (`removed` true).
+    ThreadRelationChanged {
+        id: OperationId,
+        relation: ThreadRelation,
+        removed: bool,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threads::{EditChange, LinkOrigin};
+    use crate::threads::{AttachKind, EditChange, LinkOrigin, ThreadRelKind};
     use proptest::prelude::*;
 
     #[test]
@@ -1318,13 +1402,13 @@ mod tests {
             link: ThreadLink {
                 kind: LinkKind::Commit,
                 reference: "a".repeat(40),
-                origin: LinkOrigin::Manual,
+                origin: LinkOrigin::Human,
             },
         })
         .unwrap();
         assert_eq!(link["type"], "link_thread");
         assert_eq!(link["link"]["kind"], "commit");
-        assert_eq!(link["link"]["origin"], "manual");
+        assert_eq!(link["link"]["origin"], "human");
         let unlink = serde_json::to_value(CommandKind::UnlinkThread {
             uid: "u".into(),
             kind: LinkKind::File,
@@ -1343,6 +1427,49 @@ mod tests {
         assert_eq!(markdown["uid"], "0123456789abcdef");
         let back: CommandKind = serde_json::from_value(markdown).unwrap();
         assert!(matches!(back, CommandKind::ReadThreadMarkdown { .. }));
+    }
+
+    #[test]
+    fn label_commands_wire_format_is_tagged() {
+        let attach = serde_json::to_value(CommandKind::AttachLabel {
+            label: "flaky".into(),
+            kind: AttachKind::Commit,
+            reference: "a".repeat(40),
+        })
+        .unwrap();
+        assert_eq!(attach["type"], "attach_label");
+        assert_eq!(attach["kind"], "commit");
+        assert_eq!(attach["ref"], "a".repeat(40));
+        let back: CommandKind = serde_json::from_value(attach).unwrap();
+        assert!(matches!(
+            back,
+            CommandKind::AttachLabel {
+                kind: AttachKind::Commit,
+                ..
+            }
+        ));
+        let link = serde_json::to_value(CommandKind::LinkThreads {
+            from: "a".into(),
+            to: "b".into(),
+            kind: ThreadRelKind::Continues,
+        })
+        .unwrap();
+        assert_eq!(link["type"], "link_threads");
+        assert_eq!(link["kind"], "continues");
+        let list = serde_json::to_value(CommandKind::ListLabels {
+            query: String::new(),
+            limit: 20,
+        })
+        .unwrap();
+        assert_eq!(list["type"], "list_labels");
+        let detach = serde_json::to_value(CommandKind::DetachLabel {
+            label: "flaky".into(),
+            kind: AttachKind::Thread,
+            reference: "u".into(),
+        })
+        .unwrap();
+        assert_eq!(detach["type"], "detach_label");
+        assert_eq!(detach["ref"], "u");
     }
 
     #[test]

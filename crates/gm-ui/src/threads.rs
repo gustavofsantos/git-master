@@ -1315,7 +1315,7 @@ pub fn file_lines(detail: &ThreadDetail) -> Vec<FileLine> {
         }
     }
     for link in &detail.links {
-        if link.kind != LinkKind::File || link.origin != LinkOrigin::Manual {
+        if link.kind != LinkKind::File || link.origin != LinkOrigin::Human {
             continue;
         }
         match lines.iter_mut().find(|line| line.path == link.reference) {
@@ -2996,12 +2996,12 @@ mod tests {
             ThreadLink {
                 kind: LinkKind::File,
                 reference: "docs/manual.md".to_owned(),
-                origin: LinkOrigin::Manual,
+                origin: LinkOrigin::Human,
             },
             ThreadLink {
                 kind: LinkKind::File,
                 reference: "src/b.rs".to_owned(),
-                origin: LinkOrigin::Manual,
+                origin: LinkOrigin::Human,
             },
             ThreadLink {
                 kind: LinkKind::File,
@@ -3060,7 +3060,7 @@ mod tests {
             ThreadLink {
                 kind: LinkKind::Commit,
                 reference: "def".to_owned(),
-                origin: LinkOrigin::Manual,
+                origin: LinkOrigin::Human,
             },
             ThreadLink {
                 kind: LinkKind::Branch,

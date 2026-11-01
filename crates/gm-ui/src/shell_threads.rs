@@ -1844,7 +1844,7 @@ fn commit_rows(links: &[ThreadLink], uid: &str, cx: &Context<StatusView>) -> Div
                 let hash: String = link.reference.chars().take(COMMIT_CHARS).collect();
                 let who = match link.origin {
                     LinkOrigin::Observed => "created during this thread",
-                    LinkOrigin::Manual => "linked by you",
+                    LinkOrigin::Human => "linked by you",
                 };
                 let row = div()
                     .flex()
@@ -1862,7 +1862,7 @@ fn commit_rows(links: &[ThreadLink], uid: &str, cx: &Context<StatusView>) -> Div
                     );
                 match link.origin {
                     LinkOrigin::Observed => row,
-                    LinkOrigin::Manual => row.child(unlink_button(
+                    LinkOrigin::Human => row.child(unlink_button(
                         ("thread-unlink-commit", index),
                         uid,
                         link,

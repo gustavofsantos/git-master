@@ -723,7 +723,7 @@ fn a_manual_link_is_shown_as_linked_by_you() {
             &ThreadLink {
                 kind: LinkKind::Commit,
                 reference: commit.clone(),
-                origin: LinkOrigin::Manual,
+                origin: LinkOrigin::Human,
             },
         )
         .unwrap();

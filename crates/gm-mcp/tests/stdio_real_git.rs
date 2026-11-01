@@ -480,9 +480,18 @@ fn store_search_threads(dir: &Path) -> (String, String) {
             &uid_a,
             &MetaUpdate {
                 starred: Some(true),
-                tags: Some(vec!["auth".to_owned()]),
                 ..MetaUpdate::default()
             },
+        )
+        .unwrap();
+    store
+        .attach_label(
+            "auth",
+            gm_schema::threads::AttachKind::Thread,
+            &uid_a,
+            None,
+            "human",
+            1,
         )
         .unwrap();
     store
@@ -491,7 +500,7 @@ fn store_search_threads(dir: &Path) -> (String, String) {
             &ThreadLink {
                 kind: LinkKind::Commit,
                 reference: COMMIT.to_owned(),
-                origin: LinkOrigin::Manual,
+                origin: LinkOrigin::Human,
             },
         )
         .unwrap();
@@ -1217,7 +1226,7 @@ fn a_cut_answer_says_which_bound_cut_it() {
                 &ThreadLink {
                     kind: LinkKind::Commit,
                     reference: head.clone(),
-                    origin: LinkOrigin::Manual,
+                    origin: LinkOrigin::Human,
                 },
             )
             .unwrap();

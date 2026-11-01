@@ -2452,7 +2452,7 @@ impl Engine {
             root: &root,
             settings: settings.as_deref(),
         };
-        threads_session::run(id, store, &ctx, kind)
+        threads_session::run(id, store, &ctx, actor, kind)
     }
 
     /// The review comment commands (B4, D96). The writes are human only; the list
@@ -3299,6 +3299,8 @@ impl Engine {
                 | CommandKind::ReadThreadEdit { .. }
                 | CommandKind::ReadThreadMarkdown { .. }
                 | CommandKind::ExportThread { .. }
+                | CommandKind::ListLabels { .. }
+                | CommandKind::ReadLabel { .. }
         ) {
             self.log.push(LogEntry {
                 id: op.id,

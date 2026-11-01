@@ -31,7 +31,8 @@ use crate::grep::{Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::hook::ConfigValue;
 use crate::port::{
-    BlameRead, DetailRead, FileListRead, GrepRead, HistoryRevs, RemoteRun, StackRead,
+    BlameRead, CommitSnapshot, DetailRead, FileListRead, GrepRead, HistoryRevs, RemoteRun,
+    StackRead,
 };
 use crate::port::{DiscardOutcome, FileMerge, RefMove, ReviewSide, TreeMerge};
 use crate::reflog;
@@ -1087,6 +1088,91 @@ impl GitPort for SubprocessGit {
 
     fn resolve_commit(&self, root: &Path, rev: &str) -> Result<String, GitError> {
         self.commit_of(root, rev)
+    }
+
+    fn commit_snapshot(&self, root: &Path, rev: &str) -> Result<CommitSnapshot, GitError> {
+        let id = self.commit_of(root, rev)?;
+        let mut log = self.git(root);
+        log.args([
+            "log",
+            "-1",
+            "--no-show-signature",
+            "--format=%s%x00%an%x00%ct",
+            id.as_str(),
+            "--",
+        ]);
+        let out = Self::run(log)?;
+        let text = String::from_utf8_lossy(&out);
+        let mut fields = text.trim_end_matches('\n').split('\0');
+        let (Some(subject), Some(author), Some(seconds)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(GitError(format!("no commit {id}")));
+        };
+        let seconds: i64 = seconds
+            .trim()
+            .parse()
+            .map_err(|_| GitError(format!("no commit date for {id}")))?;
+        Ok(CommitSnapshot {
+            id,
+            subject: subject.to_owned(),
+            author: author.to_owned(),
+            committed_at: seconds.saturating_mul(1000),
+        })
+    }
+
+    fn commit_snapshots(
+        &self,
+        root: &Path,
+        revs: &[String],
+    ) -> Result<Vec<(String, CommitSnapshot)>, GitError> {
+        // Names that could read as options, or hold a line break, never reach Git.
+        let asked: Vec<&String> = revs
+            .iter()
+            .filter(|rev| !rev.starts_with('-') && !rev.contains(char::is_whitespace))
+            .collect();
+        if asked.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut input = Vec::new();
+        for rev in &asked {
+            input.extend_from_slice(rev.as_bytes());
+            input.push(b'\n');
+        }
+        let mut cat = self.git(root);
+        cat.args(["cat-file", "--batch"]);
+        let output = Self::execute(&mut cat, Some(&input))
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        let out = Self::checked(output, &[0])?;
+        // One answer per name, in order: `<oid> <type> <size>` and the object, or `<name> missing`.
+        let mut found = Vec::new();
+        let mut at = 0;
+        for rev in asked {
+            let Some(end) = out[at..].iter().position(|byte| *byte == b'\n') else {
+                break;
+            };
+            let header = String::from_utf8_lossy(&out[at..at + end]).into_owned();
+            at += end + 1;
+            // A missing or ambiguous name has two fields and no object after it.
+            let mut fields = header.split(' ');
+            let (Some(oid), Some(kind), Some(size)) = (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let Ok(size) = size.parse::<usize>() else {
+                break;
+            };
+            let Some(body) = out.get(at..at + size) else {
+                break;
+            };
+            at += size + 1;
+            if kind == "commit"
+                && let Some(snapshot) = parse_commit_snapshot(oid, body)
+            {
+                found.push((rev.clone(), snapshot));
+            }
+        }
+        Ok(found)
     }
 
     fn file_at_commit(
@@ -2450,6 +2536,30 @@ impl SubprocessGit {
 }
 
 /// The first seven characters of a commit id, or the whole of a shorter one.
+/// The snapshot of a commit object's text, as `cat-file` gives it: the author's name, the
+/// committer's date in milliseconds and the subject. `None` when a header is missing.
+fn parse_commit_snapshot(oid: &str, body: &[u8]) -> Option<CommitSnapshot> {
+    let text = String::from_utf8_lossy(body);
+    let (headers, message) = text.split_once("\n\n").unwrap_or((text.as_ref(), ""));
+    let mut author = None;
+    let mut committed_at = None;
+    for line in headers.lines() {
+        if let Some(rest) = line.strip_prefix("author ") {
+            author = rest.rsplit_once(" <").map(|(name, _)| name.to_owned());
+        } else if let Some(rest) = line.strip_prefix("committer ") {
+            let tail = rest.rsplit_once('>').map(|(_, tail)| tail)?;
+            let seconds: i64 = tail.split_whitespace().next()?.parse().ok()?;
+            committed_at = Some(seconds.saturating_mul(1000));
+        }
+    }
+    Some(CommitSnapshot {
+        id: oid.to_owned(),
+        subject: message.lines().next().unwrap_or("").to_owned(),
+        author: author?,
+        committed_at: committed_at?,
+    })
+}
+
 fn short_id(oid: &str) -> String {
     oid.chars().take(7).collect()
 }
