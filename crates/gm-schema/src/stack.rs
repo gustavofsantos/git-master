@@ -56,6 +56,14 @@ pub struct StackBranch {
     /// `OWN_COMMITS_LIMIT` (D139). Empty for a root and when the parent is gone.
     #[serde(default)]
     pub commits: Vec<String>,
+    /// The recorded base (`stackParentBase`); `None` for a root, when the parent is gone and
+    /// when the key is missing. The `stack.parent_moved` payload carries it (`WF3f`).
+    #[serde(default)]
+    pub base: Option<String>,
+    /// The full id of the parent's tip; `None` for a root and when the parent is gone. The
+    /// `stack.parent_moved` payload carries it (`WF3f`).
+    #[serde(default)]
+    pub parent_tip: Option<String>,
 }
 
 /// The most commits `StackBranch::commits` lists for one branch.

@@ -158,10 +158,12 @@ pub struct RuntimeConfig {
 /// An answer to a blocked call.
 enum Signal {
     Approve(bool),
-    /// An event a wait may be listening for, with how it ended (`resumed` or `aborted`).
+    /// An event a wait may be listening for, with how it ended (`resumed` or `aborted`) and the
+    /// fields the wait returns beside `outcome`.
     Event {
         event: String,
         outcome: String,
+        payload: Value,
     },
     Cancel,
 }
@@ -327,6 +329,12 @@ impl Runtime {
     /// An event a wait may be listening for, such as `restack.resumed`, and how it ended
     /// (`resumed` or `aborted`). Wakes every run waiting on `event`; returns how many.
     pub fn deliver(&self, event: &str, outcome: &str) -> usize {
+        self.deliver_with(event, outcome, &Value::Null)
+    }
+
+    /// As `deliver`, and the waits return the fields of `payload` (an object) beside `outcome`,
+    /// as `ctx.wait` returns `{ outcome = ..., branch = ..., commit = ... }` (`WF3f`, D162(1)).
+    pub fn deliver_with(&self, event: &str, outcome: &str, payload: &Value) -> usize {
         let Ok(controls) = self.inner.controls.lock() else {
             return 0;
         };
@@ -338,6 +346,7 @@ impl Runtime {
                     .send(Signal::Event {
                         event: event.to_owned(),
                         outcome: outcome.to_owned(),
+                        payload: payload.clone(),
                     })
                     .is_ok()
             })
@@ -704,22 +713,28 @@ impl RunHost<'_> {
         self.set_status(RunStatus::Waiting, Pending::Wait(event.clone()));
         let outcome = loop {
             match self.block(deadline) {
-                Blocked::Timeout => break Some("timeout".to_owned()),
+                Blocked::Timeout => break Some(("timeout".to_owned(), Value::Null)),
                 Blocked::Signal(Signal::Cancel) => break None,
                 Blocked::Signal(Signal::Event {
                     event: got,
                     outcome,
+                    payload,
                 }) if got == event => {
-                    break Some(outcome);
+                    break Some((outcome, payload));
                 }
                 Blocked::Signal(_) => {}
             }
         };
         match outcome {
-            Some(outcome) => {
+            Some((outcome, payload)) => {
                 self.set_status(RunStatus::Running, Pending::Nothing);
-                let value = json!({ "outcome": outcome });
-                Done::value_with(value, &outcome)
+                // The outcome is the table's own field, whatever the payload holds.
+                let mut value = match payload {
+                    Value::Object(fields) => fields,
+                    _ => serde_json::Map::new(),
+                };
+                value.insert("outcome".to_owned(), json!(outcome));
+                Done::value_with(Value::Object(value), &outcome)
             }
             None => Done::end(HostEnd::Cancelled, "cancelled", "cancelled"),
         }

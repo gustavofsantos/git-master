@@ -18,8 +18,6 @@ M.meta = {
 }
 ```
 
-> **Planned.** Only `manual` is available in the app. The other triggers in the table below, and the `match` filter in the example, are not available yet.
-
 | Trigger | Fires when |
 |---|---|
 | `manual` | You choose the workflow in the command palette, or press its key if it declares one. |
@@ -44,13 +42,9 @@ No trigger runs on a clock or after a delay. The `timeout` of `ctx.wait` ends th
 
 ### The match filter
 
-> **Planned.** The `match` filter is not available yet.
-
 Use `match` to narrow a trigger to branches. The syntax is `branch:` followed by a glob pattern, where `*` matches any run of characters, `/` included. `branch:feat/*` matches the branches whose names start with `feat/`. A trigger without `match` is not filtered.
 
 ### Events from a run do not trigger workflows
-
-> **Planned.** Event triggers are not available yet, so this rule has no effect yet.
 
 Events that a run produces carry the ID of that run and never trigger a workflow. A commit that a workflow creates does not start a `commit.created` workflow, so a workflow cannot start another one through the events it causes. There are no cascades. For the same reason, an operation a run performs runs no phase: a commit made with `ctx.commit.create` is not gated by `before.commit` workflows, and runs no `transform` or `after` workflow. The run's own applying actions follow the rules in [Approvals and security](approvals-and-security.md).
 
@@ -58,13 +52,9 @@ Workflows run only in the app. The MCP server, `gitmaster mcp`, fires no trigger
 
 ### Debounce
 
-> **Planned.** Debounce is not available yet, because the file watcher triggers are not.
-
 Triggers that come from the file watcher, such as `refs.changed`, are debounced. A run starts once the changes stop arriving, not once for each file change.
 
 ## Concurrency
-
-> **Planned.** Concurrency is not available yet. Every manual run starts when you start it.
 
 Set `concurrency` in `M.meta`. The default is `queue`.
 
@@ -78,7 +68,7 @@ An applying action is an action at the `apply` level. See [Approvals and securit
 
 ## Phases
 
-> **Planned.** The before, transform and after phases are not available yet. Only `manual` runs.
+> **Planned.** The `transform.conflict_hunk` phase is not available yet.
 
 The phases apply to the operations listed in the table of operations and fields, further down this page. Each phase is a workflow whose trigger is the phase name, such as `before.restack`.
 
@@ -141,7 +131,7 @@ An `after.<operation>` workflow runs after the operation finishes. It returns no
 
 ## Operations and fields
 
-> **Planned.** The phases of these operations are not available yet.
+> **Planned.** `transform.conflict_hunk` is not available yet; the other phases in this table are.
 
 | Operation | Phases | Field for `transform` |
 |---|---|---|

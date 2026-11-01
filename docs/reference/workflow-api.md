@@ -36,8 +36,6 @@ return M
 
 GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It uses the table to list the workflow and its triggers. No script logic runs at that point.
 
-> **Planned.** Only the `manual` trigger runs. The `match` filter and `concurrency` are not available yet.
-
 | Field | Meaning |
 |---|---|
 | `name` | The name of the workflow. |
@@ -47,8 +45,6 @@ GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It 
 | `inputs` | Named values that you type before a manual run. Each input has a `type`, such as `"string"`, and a `prompt` that the dialog shows. |
 
 ### `input`
-
-> **Planned.** `input.trigger` carries a payload only for the triggers other than `manual`, which are not available yet.
 
 | Field | Holds |
 |---|---|
@@ -60,7 +56,7 @@ GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It 
 
 Every call has an effect level. The level tells you what the call can change.
 
-> **Planned.** The event and agent rules of the apply level are not available yet.
+> **Planned.** The agent rules of the apply level are not available yet.
 
 | Level | Meaning |
 |---|---|
@@ -80,15 +76,13 @@ Outcomes are the values a call can end with, as listed in the action catalog. A 
 
 ### Interaction
 
-> **Planned.** No event resumes a wait yet. A `ctx.wait` ends only at its timeout or when the run is cancelled.
-
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
 | `ctx.notify(text)` | `text`: the line the notification shows. | — | read | `done`, `failed` |
 | `ctx.approve(summary)` | `summary` (optional): what you are asked to approve. | `true` when you approve, `false` when you reject. | pauses for a human | `approved`, `rejected`, `failed` |
 | `ctx.wait(event, opts)` | `event`: the event to wait for. `opts.timeout`: a duration such as `"24h"`; without it the wait lasts until the event or until you cancel. | A table whose `outcome` field is `resumed`, `aborted` or `timeout`. The call never raises an error, whatever the outcome. | pauses until an event | `resumed`, `aborted`, `timeout` |
 
-The catalog declares one wait event: `restack.resumed`. It is used after a restack conflict, so that the run can continue once the conflict is resolved. The wait ends with `resumed` when you choose **Continue restack** after resolving the conflict, and with `aborted` when you cancel that resolution. Waits exist only while the app is open.
+The catalog declares one wait event: `restack.resumed`. It is used after a restack conflict, so that the run can continue once the conflict is resolved. The wait ends with `resumed` when you choose **Continue restack** after resolving the conflict, and with `aborted` when you cancel that resolution. Both carry `branch`, the branch that conflicted, and `commit`, the commit that was replayed. Waits exist only while the app is open.
 
 ### Process
 
@@ -179,7 +173,7 @@ These calls do not act on the repository, so they have no effect level or outcom
 
 ## Outcomes and errors
 
-> **Planned.** The example below uses the restack calls and `ctx.wait`, which are not available yet.
+> **Planned.** The example below uses the restack calls, which are not available yet.
 
 - A call that ends with an outcome other than `done` raises an error. The run stops there. An outcome such as `conflict` or `stale` never passes silently.
 - `ctx.try(fn)` returns the outcome instead of raising. Use it when the script handles the outcome itself:
@@ -200,8 +194,6 @@ end
 - Every call is written to the run journal, with its sequence number, function, resolved arguments, result, outcome and duration. Approval decisions belong to GitMaster. The script does not decide them.
 
 ## Return value by phase
-
-> **Planned.** Only manual runs are available in the app, so the other phases are not yet.
 
 What `M.execute` returns depends on the trigger.
 

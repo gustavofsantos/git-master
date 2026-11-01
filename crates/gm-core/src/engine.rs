@@ -10,8 +10,8 @@ use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictSite, DirListing,
     Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED, MergedBranch,
     OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackResolution, ReviewChange,
-    ReviewComment, ReviewStatus, STASH_LIST_CHANGED, WorkflowDiagnostic, WorktreeEntry,
-    WorktreeInspection,
+    ReviewComment, ReviewStatus, STASH_LIST_CHANGED, StackSnapshot, WorkflowDiagnostic,
+    WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -141,6 +141,8 @@ pub struct Engine {
     lanes: Lanes<ScriptRunId, (OperationId, TriggerEvent)>,
     /// The local branch tips of the open repository at the last check, for `refs.changed`.
     tips: Option<(PathBuf, BTreeMap<String, String>)>,
+    /// The stacks of the open repository at the last check, for `stack.*` (`WF3f`, D162(2)).
+    stack_seen: Option<(PathBuf, StackSnapshot)>,
     /// The operation waiting for its `before.<op>` gates (`WF3c`, D157), if any. One at a time.
     gate: Option<GatedOp>,
     /// The `after.<op>` observer runs in progress, by run: the workflow's name and the operation.
@@ -214,6 +216,8 @@ struct TransformRun {
 struct ResolutionSession {
     from: String,
     skip: Vec<String>,
+    /// The branch whose commit conflicts: the `branch` of `restack.resumed` (D162(1)).
+    conflicted: String,
     parent: String,
     commit: String,
     onto: String,
@@ -296,6 +300,7 @@ impl Engine {
             triggers: false,
             lanes: Lanes::default(),
             tips: None,
+            stack_seen: None,
             gate: None,
             observers: BTreeMap::new(),
             transform: None,
@@ -439,6 +444,8 @@ impl Engine {
         // cascades, WF3a).
         if wrote && self.triggers {
             self.snapshot_tips(&root);
+            // The same for the stacks: a run's commit on a parent fires no `stack.*` (D162(2)).
+            self.refresh_stacks(origin, &root, false);
         }
         self.workflow_events(origin, &root, Vec::new(), wrote)
     }
@@ -507,6 +514,9 @@ impl Engine {
         };
         if matches!(kind, CommandKind::OpenRepo { .. }) {
             self.snapshot_tips(&root);
+            // The stacks the repository opens with are the baseline and fire nothing (D162(2)).
+            self.stack_seen = None;
+            self.refresh_stacks(id, &root, false);
         }
         match self.trigger_of(&root, kind, produced) {
             Some(event) => self.fire_triggers(id, &root, &event),
@@ -1330,14 +1340,69 @@ impl Engine {
         };
         let now: BTreeMap<String, String> = tips.into_iter().collect();
         let previous = self.tips.replace((root.clone(), now.clone()));
-        let Some((_, before)) = previous.filter(|(previous_root, _)| *previous_root == root) else {
+        let mut events = Vec::new();
+        if let Some((_, before)) = previous.filter(|(previous_root, _)| *previous_root == root) {
+            for change in triggers::ref_changes(&before, &now) {
+                events.extend(self.fire_triggers(id, &root, &triggers::refs_changed(&change)));
+            }
+        }
+        // The stacks are read after the refs moved, so a parent that moved fires `stack.*` (WF3f).
+        events.extend(self.refresh_stacks(id, &root, true));
+        events
+    }
+
+    /// Takes `stacks` as the newest snapshot the engine saw (`WF3f`, D162(2)). A snapshot of another
+    /// repository, or the first one, is the baseline and fires nothing. Otherwise, when `fire` is
+    /// set, each transition fires its `stack.*` event.
+    fn stacks_seen(
+        &mut self,
+        id: OperationId,
+        root: &Path,
+        stacks: &StackSnapshot,
+        fire: bool,
+    ) -> Vec<Event> {
+        if !self.triggers {
+            return Vec::new();
+        }
+        let previous = self
+            .stack_seen
+            .replace((root.to_path_buf(), stacks.clone()));
+        let Some((_, before)) = previous.filter(|(previous_root, _)| previous_root == root) else {
             return Vec::new();
         };
+        if !fire {
+            return Vec::new();
+        }
         let mut events = Vec::new();
-        for change in triggers::ref_changes(&before, &now) {
-            events.extend(self.fire_triggers(id, &root, &triggers::refs_changed(&change)));
+        for event in triggers::stack_transitions(&before, stacks) {
+            events.extend(self.fire_triggers(id, root, &event));
         }
         events
+    }
+
+    /// Reads the stacks of `root` and takes them as the newest snapshot (`WF3f`). They are read only
+    /// while a loaded workflow listens to a `stack.*` event; otherwise the last snapshot is dropped,
+    /// so the next one that is read is a baseline.
+    fn refresh_stacks(&mut self, id: OperationId, root: &Path, fire: bool) -> Vec<Event> {
+        if !self.triggers {
+            return Vec::new();
+        }
+        let listened = self.load_scripts(root).is_ok_and(|loaded| {
+            loaded.entries.iter().any(|entry| {
+                entry
+                    .meta
+                    .as_ref()
+                    .is_ok_and(|meta| meta.trigger.on.starts_with("stack."))
+            })
+        });
+        if !listened {
+            self.stack_seen = None;
+            return Vec::new();
+        }
+        match stack_session::snapshot(self.git.as_ref(), root) {
+            Ok(stacks) => self.stacks_seen(id, root, &stacks, fire),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Reads the branch tips of `root` as the baseline of `refs.changed`. A failed read keeps the
@@ -1396,6 +1461,7 @@ impl Engine {
                     &active.root,
                     &triggers::fetch_done("all"),
                 ));
+                events.extend(self.refresh_stacks(report.id, &active.root, true));
             }
         }
         // The end comes last: a status clears the error line, and a failure must stay on it.
@@ -2494,7 +2560,7 @@ impl Engine {
     /// the stack metadata, which are human only. A write answers with a fresh
     /// `StacksLoaded`; a new child also brings the status and the branch list.
     fn stack_command(
-        &self,
+        &mut self,
         id: OperationId,
         actor: &Actor,
         kind: &CommandKind,
@@ -2535,6 +2601,7 @@ impl Engine {
             _ => return Err("not a stack command".to_owned()),
         }
         let stacks = stack_session::snapshot(git, &root)?;
+        events.extend(self.stacks_seen(id, &root, &stacks, true));
         events.push(Event::StacksLoaded { id, stacks });
         Ok(events)
     }
@@ -2594,10 +2661,9 @@ impl Engine {
         };
         let mut events = self.branches_changed(id, &root)?;
         events.push(Event::RestackFinished { id, record });
-        events.push(Event::StacksLoaded {
-            id,
-            stacks: stack_session::snapshot(git, &root)?,
-        });
+        let stacks = stack_session::snapshot(git, &root)?;
+        events.extend(self.stacks_seen(id, &root, &stacks, true));
+        events.push(Event::StacksLoaded { id, stacks });
         Ok(events)
     }
 
@@ -2676,6 +2742,7 @@ impl Engine {
         self.restack_resolution = Some(ResolutionSession {
             from: branch.to_owned(),
             skip: skip.to_vec(),
+            conflicted: conflicted.to_owned(),
             parent,
             commit: commit.clone(),
             onto: onto.clone(),
@@ -2700,10 +2767,16 @@ impl Engine {
         };
         let from = session.from.clone();
         let skip = session.skip.clone();
+        let wake = Self::resumed_payload(session);
         let git = self.git.as_ref();
         restack_resolutions::add(git, &root, resolution)?;
         self.git.restack_resolution_close(&root).map_err(|e| e.0)?;
         self.restack_resolution = None;
+        // The resolution is recorded, so the runs waiting on `restack.resumed` go on (WF3f,
+        // D162(1)), whether or not the plan that follows can be made.
+        if let Some(runtime) = self.script_runtime() {
+            runtime.deliver_with("restack.resumed", "resumed", &wake);
+        }
         let plan =
             restack_session::plan(git, &root, &from, &skip, &|path| same_folder(&root, path))?;
         Ok(vec![
@@ -2717,8 +2790,21 @@ impl Engine {
     fn cancel_restack_resolution(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
         self.git.restack_resolution_close(&root).map_err(|e| e.0)?;
-        self.restack_resolution = None;
+        let wake = self
+            .restack_resolution
+            .take()
+            .map_or_else(|| json!({}), |session| Self::resumed_payload(&session));
+        // The runs waiting on `restack.resumed` end with `aborted` (WF3f, D162(1)).
+        if let Some(runtime) = self.script_runtime() {
+            runtime.deliver_with("restack.resumed", "aborted", &wake);
+        }
         Ok(vec![Event::RestackResolutionCancelled { id }])
+    }
+
+    /// The fields `restack.resumed` carries: the branch whose commit conflicted and the commit the
+    /// resolution replays (D162(1)).
+    fn resumed_payload(session: &ResolutionSession) -> serde_json::Value {
+        json!({ "branch": session.conflicted, "commit": session.commit })
     }
 
     /// The open restack conflict, or the refusal when none is being resolved.

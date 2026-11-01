@@ -23,11 +23,9 @@ A script has no shell, no file access and no network access of its own. Every ac
 
 Workflows replace GitMaster's own hooks: the points where a script runs inside an operation are phases of a workflow. Git's own hooks, such as `pre-commit`, still belong to Git.
 
-> **Planned.** Phases are not available yet. Only manual workflows run.
-
 ## What workflows are for
 
-> **Planned.** The gates and the stack policies need triggers and phases, which are not available yet, and the commit message suggestion is not automatic yet, so you run it by hand. A branch name from a ticket works with a manual run.
+> **Planned.** The stack policies need the restack calls, which are not available yet.
 
 - **Commit message suggestions.** A command-line LLM that you already use writes a message from the staged diff, and the commit composer shows it as a suggestion. You decide whether to use it.
 - **Branch names from a ticket.** You enter a ticket key, a program builds the branch name, you confirm it, and GitMaster creates and checks out the branch.
@@ -136,7 +134,7 @@ GitMaster keeps the last 200 runs of each workflow in each repository. Large out
 
 Runs live only while the app is open. Closing GitMaster ends any run in progress. The next time you open the app, a run that did not finish shows as **interrupted**, and GitMaster does not continue it. An action that had started but has no recorded result also shows as interrupted, and it never runs again. To run the workflow again, start it again.
 
-> **Planned.** Waits for an event, and their timeouts, are not available yet. When they are, they also exist only while the app is open.
+Waits for an event, and their timeouts, also exist only while the app is open.
 
 ## Related pages
 

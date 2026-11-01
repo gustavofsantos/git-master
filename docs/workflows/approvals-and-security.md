@@ -96,7 +96,7 @@ Closing GitMaster ends the runs in progress. When GitMaster starts again:
 - A run that did not finish is shown as `interrupted`.
 - An applying action that started but has no recorded result is shown as `interrupted`. It never runs again.
 
-> **Planned.** Waits and their timeouts are not available yet. When they are, they are kept in memory, so they do not survive a restart.
+Waits and their timeouts are kept in memory, so they do not survive a restart.
 
 ## Run journal
 

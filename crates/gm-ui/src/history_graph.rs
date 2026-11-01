@@ -1173,6 +1173,8 @@ mod tests {
             behind,
             restack: 0,
             commits: commits.iter().map(|c| (*c).to_owned()).collect(),
+            base: None,
+            parent_tip: None,
         };
         let commits = vec![
             labelled(commit("t1", &["b1"]), "top"),

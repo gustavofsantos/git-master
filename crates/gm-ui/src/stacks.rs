@@ -164,6 +164,8 @@ mod tests {
             behind: 0,
             restack: 0,
             commits: Vec::new(),
+            base: None,
+            parent_tip: None,
         }
     }
 

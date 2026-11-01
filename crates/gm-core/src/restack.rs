@@ -353,6 +353,8 @@ mod tests {
             behind: 0,
             restack: 0,
             commits: commits.iter().map(|c| (*c).to_owned()).collect(),
+            base: None,
+            parent_tip: None,
         }
     }
 

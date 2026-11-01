@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use gm_schema::{StackBranch, StackSnapshot, StackState};
 use serde_json::{Map, Value, json};
 
 use super::meta::{Concurrency, Meta};
@@ -94,6 +95,57 @@ pub fn refs_changed(change: &RefChange) -> TriggerEvent {
             "old": change.old,
             "new": change.new,
         }),
+    }
+}
+
+/// The stack events of a change from the snapshot `old` to `new` (`WF3f`, D162(2)).
+/// `stack.parent_moved` fires for a branch that became `Stale`, and `stack.parent_merged` for one
+/// whose parent became `ParentGone` or `ParentMerged`. A branch that `old` does not have counts as
+/// having no state before, so it fires when it is already in that state. Each transition fires
+/// once: a branch that stays in the state fires nothing.
+#[must_use]
+pub fn stack_transitions(old: &StackSnapshot, new: &StackSnapshot) -> Vec<TriggerEvent> {
+    let mut events = Vec::new();
+    for stack in &new.stacks {
+        for branch in &stack.branches {
+            let Some(parent) = branch.parent.as_deref() else {
+                continue;
+            };
+            let before = old.branch(&branch.name).map(|entry| entry.state);
+            if branch.state == StackState::Stale && before != Some(StackState::Stale) {
+                events.push(parent_moved(branch, parent));
+            }
+            if parent_left(branch.state) && !before.is_some_and(parent_left) {
+                events.push(parent_merged(&branch.name, parent));
+            }
+        }
+    }
+    events
+}
+
+/// The states of a branch whose parent is gone or merged.
+fn parent_left(state: StackState) -> bool {
+    matches!(state, StackState::ParentGone | StackState::ParentMerged)
+}
+
+fn parent_moved(branch: &StackBranch, parent: &str) -> TriggerEvent {
+    TriggerEvent {
+        on: "stack.parent_moved".to_owned(),
+        branch: Some(branch.name.clone()),
+        payload: json!({
+            "branch": branch.name,
+            "parent": parent,
+            "base": branch.base,
+            "parent_tip": branch.parent_tip,
+        }),
+    }
+}
+
+fn parent_merged(branch: &str, parent: &str) -> TriggerEvent {
+    TriggerEvent {
+        on: "stack.parent_merged".to_owned(),
+        branch: Some(branch.to_owned()),
+        payload: json!({ "branch": branch, "parent": parent }),
     }
 }
 
@@ -322,6 +374,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 mod tests {
     use super::*;
     use crate::script::meta::{Trigger, parse};
+    use gm_schema::Stack;
 
     fn meta(on: &str, filter: Option<&str>, concurrency: Concurrency) -> Meta {
         Meta {
@@ -623,5 +676,151 @@ mod tests {
         assert!(glob_match("*", ""));
         assert!(glob_match("*fix*", "hotfix-12"));
         assert!(!glob_match("", "x"));
+    }
+
+    fn stack_snap(branches: &[(&str, Option<&str>, StackState)]) -> StackSnapshot {
+        StackSnapshot {
+            stacks: vec![Stack {
+                branches: branches
+                    .iter()
+                    .map(|(name, parent, state)| StackBranch {
+                        name: (*name).to_owned(),
+                        parent: parent.map(str::to_owned),
+                        depth: 1,
+                        state: *state,
+                        ahead: 0,
+                        behind: 0,
+                        restack: 0,
+                        commits: Vec::new(),
+                        base: Some("base-1".to_owned()),
+                        parent_tip: Some("tip-2".to_owned()),
+                    })
+                    .collect(),
+            }],
+            looped: Vec::new(),
+        }
+    }
+
+    fn names(events: &[TriggerEvent]) -> Vec<(String, Option<String>)> {
+        events
+            .iter()
+            .map(|event| (event.on.clone(), event.branch.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_branch_that_became_stale_fires_parent_moved_with_its_payload() {
+        let old = stack_snap(&[
+            ("main", None, StackState::Root),
+            ("feat", Some("main"), StackState::Current),
+        ]);
+        let new = stack_snap(&[
+            ("main", None, StackState::Root),
+            ("feat", Some("main"), StackState::Stale),
+        ]);
+        let events = stack_transitions(&old, &new);
+        assert_eq!(
+            names(&events),
+            [("stack.parent_moved".to_owned(), Some("feat".to_owned()))]
+        );
+        assert_eq!(
+            events[0].trigger_value(),
+            json!({
+                "on": "stack.parent_moved",
+                "branch": "feat",
+                "parent": "main",
+                "base": "base-1",
+                "parent_tip": "tip-2"
+            })
+        );
+    }
+
+    #[test]
+    fn a_branch_that_stays_stale_fires_nothing() {
+        let old = stack_snap(&[("feat", Some("main"), StackState::Stale)]);
+        let new = stack_snap(&[("feat", Some("main"), StackState::Stale)]);
+        assert!(stack_transitions(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn stale_then_current_then_stale_again_fires_again() {
+        let stale = stack_snap(&[("feat", Some("main"), StackState::Stale)]);
+        let current = stack_snap(&[("feat", Some("main"), StackState::Current)]);
+        assert_eq!(stack_transitions(&stale, &current), []);
+        assert_eq!(stack_transitions(&current, &stale).len(), 1);
+        assert!(stack_transitions(&stale, &stale).is_empty());
+    }
+
+    #[test]
+    fn a_branch_that_became_merged_fires_parent_merged() {
+        let old = stack_snap(&[("feat", Some("main"), StackState::Current)]);
+        let new = stack_snap(&[("feat", Some("main"), StackState::ParentMerged)]);
+        let events = stack_transitions(&old, &new);
+        assert_eq!(
+            names(&events),
+            [("stack.parent_merged".to_owned(), Some("feat".to_owned()))]
+        );
+        assert_eq!(
+            events[0].trigger_value(),
+            json!({ "on": "stack.parent_merged", "branch": "feat", "parent": "main" })
+        );
+    }
+
+    #[test]
+    fn a_branch_whose_parent_is_gone_fires_parent_merged_once() {
+        let old = stack_snap(&[("feat", Some("main"), StackState::Current)]);
+        let gone = stack_snap(&[("feat", Some("main"), StackState::ParentGone)]);
+        assert_eq!(stack_transitions(&old, &gone).len(), 1);
+        assert!(stack_transitions(&gone, &gone).is_empty());
+    }
+
+    #[test]
+    fn a_stale_branch_whose_parent_disappears_fires_only_parent_merged() {
+        let old = stack_snap(&[("feat", Some("main"), StackState::Stale)]);
+        let new = stack_snap(&[("feat", Some("main"), StackState::ParentGone)]);
+        assert_eq!(
+            names(&stack_transitions(&old, &new)),
+            [("stack.parent_merged".to_owned(), Some("feat".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn a_new_branch_that_is_already_stale_fires() {
+        let old = stack_snap(&[("main", None, StackState::Root)]);
+        let new = stack_snap(&[
+            ("main", None, StackState::Root),
+            ("feat", Some("main"), StackState::Stale),
+        ]);
+        assert_eq!(stack_transitions(&old, &new).len(), 1);
+    }
+
+    #[test]
+    fn an_unchanged_snapshot_and_a_root_fire_nothing() {
+        let same = stack_snap(&[
+            ("main", None, StackState::Root),
+            ("feat", Some("main"), StackState::Current),
+        ]);
+        assert!(stack_transitions(&same, &same).is_empty());
+        assert!(stack_transitions(&StackSnapshot::default(), &same).is_empty());
+    }
+
+    #[test]
+    fn match_reads_the_branch_of_a_stack_event() {
+        let m = meta(
+            "stack.parent_moved",
+            Some("branch:other/*"),
+            Concurrency::Queue,
+        );
+        let feat = TriggerEvent {
+            on: "stack.parent_moved".to_owned(),
+            branch: Some("feat".to_owned()),
+            payload: json!({}),
+        };
+        assert!(!matches(&m, &feat));
+        let other = TriggerEvent {
+            branch: Some("other/x".to_owned()),
+            ..feat
+        };
+        assert!(matches(&m, &other));
     }
 }

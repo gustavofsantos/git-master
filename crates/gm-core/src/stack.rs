@@ -186,15 +186,16 @@ impl Forest {
                 .iter()
                 .map(|(name, depth)| {
                     let link = self.links.get(*name);
-                    let (state, ahead, behind, commits) = match link {
-                        None => (StackState::Root, 0, 0, Vec::new()),
+                    let (state, ahead, behind, commits, parent_tip) = match link {
+                        None => (StackState::Root, 0, 0, Vec::new(), None),
                         Some(link) if !self.locals.contains(&link.parent) => {
-                            (StackState::ParentGone, 0, 0, Vec::new())
+                            (StackState::ParentGone, 0, 0, Vec::new(), None)
                         }
                         Some(link) => {
                             let edge = facts.get(*name).cloned().unwrap_or_default();
                             let state = edge_state(link, &edge, merged.contains(&link.parent));
-                            (state, edge.ahead, edge.behind, edge.own)
+                            let parent_tip = Some(edge.parent_tip).filter(|tip| !tip.is_empty());
+                            (state, edge.ahead, edge.behind, edge.own, parent_tip)
                         }
                     };
                     StackBranch {
@@ -206,6 +207,8 @@ impl Forest {
                         behind,
                         restack: 0,
                         commits,
+                        base: link.and_then(|link| link.base.clone()),
+                        parent_tip,
                     }
                 })
                 .collect();

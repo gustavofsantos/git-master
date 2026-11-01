@@ -56,8 +56,6 @@ Git's own hooks run during the commit, such as `pre-commit`. If a hook stops the
 
 ### Commit message suggestions
 
-> **Planned.** A suggestion that appears on its own, as the composer opens, is not available in the app yet.
-
 A workflow on the `transform.commit_message` phase can suggest a message in the composer. It runs when you choose **Suggest Message**, and on its own when the message box is empty, gets focus, and something is staged. It does not run each time you stage a change, because a workflow may call a paid tool. A suggestion never overwrites the text you typed. It appears as a suggestion, with **Replace** to take it and **Discard** to keep your text. See the [workflows overview](../workflows/overview.md).
 
 ## Automatic refresh
