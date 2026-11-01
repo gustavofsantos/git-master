@@ -31,6 +31,7 @@ mod icon;
 mod label_curate;
 mod labels_page;
 mod local_review;
+mod lua_language;
 mod markdown;
 mod merged_branches;
 mod message_dialog;
@@ -54,6 +55,8 @@ mod resize_handle;
 mod restack_dialog;
 mod review;
 mod review_composer;
+#[cfg(test)]
+mod script_completion;
 mod shell_code;
 mod shell_commit;
 mod shell_conflicts;
@@ -168,6 +171,8 @@ pub fn run(
             theme::set_mode(mode);
             // The component's theme follows the palette in use. The OS appearance is not
             // known yet, so `StatusView` applies it again once the window reports it.
+            // The Lua grammar of the script editor (D151) is known before the first window.
+            lua_language::register();
             editor_theme::apply(cx);
             bind_keys(cx);
             quit_with_the_window(cx);

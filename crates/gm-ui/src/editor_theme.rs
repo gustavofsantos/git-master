@@ -184,58 +184,60 @@ fn syntax(palette: &Palette) -> SyntaxColors {
     }
 }
 
+/// The highlight names of gpui-component 0.5.1, copied from `HIGHLIGHT_NAMES` in its
+/// `src/highlighter/registry.rs`. That array is `pub(super)`, so it cannot be read from here.
+/// The crate is pinned to `=0.5.1` (D149); a bump must update this list. The tests of this module
+/// and of `lua_language` check their queries against it.
+#[cfg(test)]
+pub(crate) const COMPONENT_NAMES: [&str; 40] = [
+    "attribute",
+    "boolean",
+    "comment",
+    "comment.doc",
+    "constant",
+    "constructor",
+    "embedded",
+    "emphasis",
+    "emphasis.strong",
+    "enum",
+    "function",
+    "hint",
+    "keyword",
+    "label",
+    "link_text",
+    "link_uri",
+    "number",
+    "operator",
+    "predictive",
+    "preproc",
+    "primary",
+    "property",
+    "punctuation",
+    "punctuation.bracket",
+    "punctuation.delimiter",
+    "punctuation.list_marker",
+    "punctuation.special",
+    "string",
+    "string.escape",
+    "string.regex",
+    "string.special",
+    "string.special.symbol",
+    "tag",
+    "tag.doctype",
+    "text.literal",
+    "title",
+    "type",
+    "variable",
+    "variable.special",
+    "variant",
+];
+
 #[cfg(test)]
 mod tests {
     use gpui::{HighlightStyle, Hsla};
 
     use super::*;
     use crate::theme::{DARK, LIGHT};
-
-    /// The highlight names of gpui-component 0.5.1, copied from `HIGHLIGHT_NAMES` in its
-    /// `src/highlighter/registry.rs`. That array is `pub(super)`, so it cannot be read from here.
-    /// The crate is pinned to `=0.5.1` (D149); a bump must update this list.
-    const CRATE_NAMES: [&str; 40] = [
-        "attribute",
-        "boolean",
-        "comment",
-        "comment.doc",
-        "constant",
-        "constructor",
-        "embedded",
-        "emphasis",
-        "emphasis.strong",
-        "enum",
-        "function",
-        "hint",
-        "keyword",
-        "label",
-        "link_text",
-        "link_uri",
-        "number",
-        "operator",
-        "predictive",
-        "preproc",
-        "primary",
-        "property",
-        "punctuation",
-        "punctuation.bracket",
-        "punctuation.delimiter",
-        "punctuation.list_marker",
-        "punctuation.special",
-        "string",
-        "string.escape",
-        "string.regex",
-        "string.special",
-        "string.special.symbol",
-        "tag",
-        "tag.doctype",
-        "text.literal",
-        "title",
-        "type",
-        "variable",
-        "variable.special",
-        "variant",
-    ];
 
     /// The names that paint no color, so they stay plain text. Each is a decision: a name not
     /// in D111's table, or a bare variable, which the viewer also leaves plain.
@@ -302,7 +304,7 @@ mod tests {
     fn every_name_the_component_defines_is_mapped_or_plain() {
         for (palette, dark) in modes() {
             let theme = highlight(palette, dark);
-            for name in CRATE_NAMES {
+            for name in COMPONENT_NAMES {
                 let role = role_of(name);
                 assert_eq!(
                     role.is_none(),
@@ -326,7 +328,7 @@ mod tests {
     fn the_listed_plain_names_are_all_names_of_the_component() {
         for name in PLAIN {
             assert!(
-                CRATE_NAMES.contains(&name),
+                COMPONENT_NAMES.contains(&name),
                 "{name} is not a component name"
             );
         }

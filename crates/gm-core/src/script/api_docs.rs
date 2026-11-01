@@ -493,6 +493,43 @@ fn calls_section(out: &mut String, surface: &CtxSurface) {
     }
 }
 
+/// What the reference says about one `ctx` function, as plain Markdown without a heading: the
+/// effect level, the outcomes, the arguments and the result. Editors show it beside a completion,
+/// so the editor and `.api/API.md` cannot disagree.
+#[must_use]
+pub fn function_summary(f: &CtxFn) -> String {
+    let outcomes: Vec<String> = f.outcomes.iter().map(|o| format!("`{o}`")).collect();
+    let mut text = format!(
+        "Effect level: {}.\n\nOutcomes: {}.",
+        level_words(f),
+        outcomes.join(", ")
+    );
+    let rows = argument_rows(f);
+    if rows.is_empty() {
+        text.push_str("\n\nNo arguments.");
+    } else {
+        text.push_str("\n\nArguments:");
+        for row in rows {
+            let _ = write!(
+                text,
+                "\n- {} ({}, required: {}): {}",
+                row[0], row[1], row[2], row[3]
+            );
+        }
+    }
+    let _ = write!(text, "\n\nResult: {}", result_words(f.path));
+    text
+}
+
+/// The call and the documentation of a helper (`now`, `random`, `block`, `fail`, `try`), from the
+/// same table as the reference. `None` for a name that is not a helper.
+#[must_use]
+pub fn helper_summary(name: &str) -> Option<(String, String)> {
+    let row = helper_row(name)?;
+    let call = row[0].trim_matches('`').to_owned();
+    Some((call, format!("Arguments: {}\n\nResult: {}", row[1], row[2])))
+}
+
 fn function_entry(out: &mut String, f: &CtxFn) {
     heading(out, 4, &format!("`{}`", f.signature()));
     let outcomes: Vec<String> = f.outcomes.iter().map(|o| format!("`{o}`")).collect();
@@ -981,7 +1018,9 @@ fn result_words(path: &str) -> &'static str {
     }
 }
 
-fn type_words(kind: FieldKind) -> String {
+/// The type of one argument, in words, such as `text`, `true or false` or one of some values.
+#[must_use]
+pub fn type_words(kind: FieldKind) -> String {
     match kind {
         FieldKind::Text => "text".to_owned(),
         FieldKind::TextList => "list of text".to_owned(),
@@ -1327,5 +1366,31 @@ mod tests {
         let blocked = dir.path().join("a-file");
         fs::write(&blocked, "not a folder").unwrap();
         assert!(write_if_stale(&blocked, "1.0.0").is_err());
+    }
+
+    #[test]
+    fn a_summary_states_the_outcomes_and_the_arguments_of_the_reference() {
+        let surface = CtxSurface::from_catalog();
+        let exec = surface.get("exec").unwrap();
+        let text = function_summary(exec);
+        assert!(text.starts_with("Effect level: "), "{text}");
+        for outcome in exec.outcomes {
+            assert!(
+                text.contains(&format!("`{outcome}`")),
+                "{outcome} in {text}"
+            );
+        }
+        assert!(text.contains("\n- `argv` ("), "{text}");
+        assert!(text.contains("\n\nResult: "), "{text}");
+    }
+
+    #[test]
+    fn every_helper_has_a_call_and_a_text_and_no_other_name_does() {
+        for name in HELPERS {
+            let (call, text) = helper_summary(name).unwrap_or_else(|| panic!("{name}"));
+            assert!(call.starts_with("ctx."), "{call}");
+            assert!(text.starts_with("Arguments: "), "{text}");
+        }
+        assert_eq!(helper_summary("branch"), None);
     }
 }
