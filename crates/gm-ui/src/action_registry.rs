@@ -201,6 +201,8 @@ pub enum Effect {
     ShowReflog,
     /// Opens the Threads page and asks the engine for the first page of threads (T5).
     ShowThreads,
+    /// Opens the Labels page and asks the engine for the labels of the repository (P4).
+    ShowLabels,
     /// Opens the Local review page and asks the engine for the review comments (B4d).
     ShowLocalReview,
     /// Opens the Working Copy on the unstaged side of `path`, with the cursor on
@@ -398,7 +400,7 @@ pub struct ThreadRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 95] = [
+const SPECS: [Spec; 96] = [
     spec(
         "file.stage",
         "Stage File",
@@ -898,6 +900,13 @@ const SPECS: [Spec; 95] = [
         Category::Repository,
     ),
     spec(
+        "labels.show",
+        "Show Labels",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
         "commit.checkout",
         "Check Out Commit (Detached)",
         None,
@@ -1152,6 +1161,7 @@ pub enum Action {
     StashDrop,
     ShowReflog,
     ShowThreads,
+    ShowLabels,
     CheckoutCommit,
     NewBranchFromCommit,
     CommentOnSelection,
@@ -1218,6 +1228,7 @@ fn navigation_effect(action: Action, args: &Args) -> Effect {
         (Action::ShowStashes, _) => Effect::ShowStashes,
         (Action::ShowReflog, _) => Effect::ShowReflog,
         (Action::ShowThreads, _) => Effect::ShowThreads,
+        (Action::ShowLabels, _) => Effect::ShowLabels,
         (Action::ShowLocalReview, _) => Effect::ShowLocalReview,
         _ => Effect::ShowHistory,
     }
@@ -1389,7 +1400,7 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
 impl Action {
-    pub const ALL: [Action; 95] = [
+    pub const ALL: [Action; 96] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1462,6 +1473,7 @@ impl Action {
         Action::StashDrop,
         Action::ShowReflog,
         Action::ShowThreads,
+        Action::ShowLabels,
         Action::CheckoutCommit,
         Action::NewBranchFromCommit,
         Action::CommentOnSelection,
@@ -1567,6 +1579,7 @@ impl Action {
                 | Action::ShowStashes
                 | Action::ShowReflog
                 | Action::ShowThreads
+                | Action::ShowLabels
                 | Action::ShowLocalReview
         )
     }
@@ -1716,6 +1729,7 @@ impl Action {
             | Action::ShowWorkflows
             | Action::ShowReflog
             | Action::ShowThreads
+            | Action::ShowLabels
             | Action::ShowLocalReview => repository_open(ctx),
             Action::CheckoutBranch => {
                 idle(ctx)?;
@@ -3911,6 +3925,37 @@ mod tests {
         assert_eq!(Action::ShowThreads.spec().title, "Show Threads");
         assert_eq!(Action::ShowThreads.spec().shortcut, None);
         assert!(!Action::ShowThreads.opens_dialog());
+    }
+
+    #[test]
+    fn show_labels_needs_an_open_repository_and_has_no_key() {
+        let closed = Context {
+            repo_open: false,
+            selected_file: None,
+            selected_thread: None,
+            stack: crate::action_registry::StackCtx::default(),
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowLabels.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::ShowLabels.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::ShowLabels)
+        );
+        assert_eq!(Action::ShowLabels.id(), "labels.show");
+        assert_eq!(Action::ShowLabels.spec().title, "Show Labels");
+        assert_eq!(Action::ShowLabels.spec().category, Category::Repository);
+        assert_eq!(Action::ShowLabels.spec().shortcut, None);
+        assert!(!Action::ShowLabels.opens_dialog());
+        assert!(Action::ShowLabels.available());
+        assert!(Action::ShowLabels.listed_in_palette());
+        assert!(
+            Action::ALL.contains(&Action::ShowLabels),
+            "the palette lists it"
+        );
+        assert_eq!(Action::from_id("labels.show"), Some(Action::ShowLabels));
     }
 
     #[test]

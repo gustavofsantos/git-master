@@ -53,6 +53,7 @@ use crate::restack_dialog::RestackDialog;
 use crate::review_composer::ReviewDialog;
 use crate::shell_code::CodeView;
 use crate::shell_history::CommitTexts;
+use crate::shell_labels::{self, LabelsView};
 use crate::shell_search::{self, SearchView};
 use crate::shell_sidebar;
 use crate::shell_threads::{self, ThreadsView};
@@ -112,6 +113,8 @@ pub(crate) enum Screen {
     Reflog,
     /// The threads of the agent sessions, with the selected thread's turns (T5).
     Threads,
+    /// The labels of the repository, with the selected label's attachments (P4).
+    Labels,
     /// The review comments of the repository, with one comment's Before and After (B4d).
     LocalReview,
     /// The conflict resolver of one conflicted file: the two sides, the result and Apply (C3b).
@@ -172,6 +175,7 @@ pub struct StatusView {
     pub(crate) search_view: SearchView,
     /// The Threads page's search box and list scroll; its state is `model.threads`.
     pub(crate) threads_view: ThreadsView,
+    pub(crate) labels_view: LabelsView,
     /// The create-worktree dialog, while it is open.
     pub(crate) worktree_dialog: Option<WorktreeDialog>,
     /// The remove-worktree dialog, while it is open.
@@ -288,6 +292,7 @@ impl StatusView {
             TextArea::new("Files to search: src crates/ui !docs  (empty: all)", cx).with_lines(1, 1)
         });
         let threads_query = cx.new(|cx| TextArea::new("Search the threads", cx).with_lines(1, 1));
+        let labels_query = cx.new(|cx| TextArea::new("Filter the labels", cx).with_lines(1, 1));
         let sidebar_input = cx.new(|cx| TextArea::new("Find a branch", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
@@ -393,6 +398,7 @@ impl StatusView {
             cx,
         ));
         subscriptions.extend(shell_threads::subscriptions(&threads_query, cx));
+        subscriptions.extend(shell_labels::subscriptions(&labels_query, cx));
         subscriptions.extend(shell_sidebar::subscriptions(&sidebar_input, window, cx));
         let mut model = Model::default();
         model.request_open(open);
@@ -429,6 +435,7 @@ impl StatusView {
             code_view: CodeView::new(),
             search_view: SearchView::new(search_query, search_paths),
             threads_view: ThreadsView::new(threads_query),
+            labels_view: LabelsView::new(labels_query),
             worktree_dialog: None,
             removal_dialog: None,
             prune_dialog: None,
@@ -526,6 +533,7 @@ impl StatusView {
         let listed = matches!(event, Event::BranchesLoaded { .. });
         let stashes_listed = matches!(event, Event::StashesListed { .. });
         let threads_flags = shell_threads::follow_flags(&event);
+        let labels_changed = shell_labels::follows_change(&event);
         let review_listed = matches!(event, Event::ReviewCommentsListed { .. });
         let stash_stale = stashes::is_stale_refusal(&event);
         let committed = matches!(event, Event::Committed { .. });
@@ -556,26 +564,14 @@ impl StatusView {
             self.request_stash_list();
         }
         self.follow_threads(threads_flags, reload, cx);
+        self.follow_labels(labels_changed);
         if detail_loaded {
             self.show_commit_texts(cx);
         }
         if file_event {
             self.after_file_event(cx);
         }
-        for page in [CommitPage::History, CommitPage::Stashes, CommitPage::Reflog] {
-            if let Some(fresh) = self.model.commit_stack_mut(page).take_fresh() {
-                self.commit_diff_pane.update(cx, |pane, cx| {
-                    pane.show_stack(
-                        fresh.files,
-                        fresh.more,
-                        fresh.diffs,
-                        fresh.focus,
-                        window,
-                        cx,
-                    );
-                });
-            }
-        }
+        self.show_fresh_commit_stacks(window, cx);
         self.settle_dialogs(window, cx);
         // A finished hook run fills the composer only while it still holds what the run was
         // started from; otherwise the answer waits as a suggestion (see hook_run).
@@ -646,6 +642,24 @@ impl StatusView {
         }
         if reload {
             self.request_review_list();
+        }
+    }
+
+    /// Shows the commit stack each page's read has just filled, in the commit diff pane.
+    fn show_fresh_commit_stacks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for page in [CommitPage::History, CommitPage::Stashes, CommitPage::Reflog] {
+            if let Some(fresh) = self.model.commit_stack_mut(page).take_fresh() {
+                self.commit_diff_pane.update(cx, |pane, cx| {
+                    pane.show_stack(
+                        fresh.files,
+                        fresh.more,
+                        fresh.diffs,
+                        fresh.focus,
+                        window,
+                        cx,
+                    );
+                });
+            }
         }
     }
 
@@ -729,6 +743,7 @@ impl StatusView {
             .children((self.screen == Screen::Stashes).then(|| self.stashes_page(cx)))
             .children((self.screen == Screen::Reflog).then(|| self.reflog_page(cx)))
             .children((self.screen == Screen::Threads).then(|| self.threads_page(cx)))
+            .children((self.screen == Screen::Labels).then(|| self.labels_page(cx)))
             .children((self.screen == Screen::LocalReview).then(|| self.local_review_page(cx)))
             .children((self.screen == Screen::Conflicts).then(|| self.conflicts_page(cx)))
     }
@@ -1211,6 +1226,7 @@ impl StatusView {
             Ok(Effect::ShowStashes) => self.show_stashes(cx),
             Ok(Effect::ShowReflog) => self.show_reflog(cx),
             Ok(Effect::ShowThreads) => self.show_threads(window, cx),
+            Ok(Effect::ShowLabels) => self.show_labels(window, cx),
             Ok(Effect::ShowLocalReview) => self.show_local_review(cx),
             Ok(Effect::ShowReviewInDiff { path, line }) => {
                 self.show_review_in_diff(&path, line, cx);

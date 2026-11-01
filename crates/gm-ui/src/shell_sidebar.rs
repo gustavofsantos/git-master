@@ -273,6 +273,14 @@ impl StatusView {
             )
             .child(self.threads_item(cx))
             .child(
+                item_row("Labels", self.screen == Screen::Labels).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        this.run_action(Action::ShowLabels, &Args::None, window, cx);
+                    }),
+                ),
+            )
+            .child(
                 item_row("Local review", self.screen == Screen::LocalReview)
                     .on_mouse_down(
                         MouseButton::Left,

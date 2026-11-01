@@ -3,14 +3,10 @@
 //! engine for reads and keeps only the answer to the read in flight, so a label
 //! selected after another never shows the other's attachments. Reads are not
 //! recorded (D28).
-//!
-//! Until the Labels view lands, only the model and the tests call most of these
-//! functions, so the dead-code lint is off outside tests (as in `diff_pane`).
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::cmp::Reverse;
 
-use gm_schema::threads::{AttachKind, Label, LabelAttachment, LabelDetail};
+use gm_schema::threads::{AttachKind, CommitState, Label, LabelAttachment, LabelDetail};
 use gm_schema::{CommandKind, OperationId};
 
 /// The most labels one list read asks for.
@@ -69,6 +65,12 @@ impl LabelsPage {
     /// Records that the list read `id` is in flight.
     pub fn request_list(&mut self, id: OperationId) {
         self.list_pending = Some(id);
+    }
+
+    /// Whether a list read is in flight, so the page says it loads and not that there are none.
+    #[must_use]
+    pub fn is_loading(&self) -> bool {
+        self.list_pending.is_some()
     }
 
     /// Keeps the answer when it is the list read in flight, sorted by name, and
@@ -195,6 +197,17 @@ impl LabelsPage {
             .collect()
     }
 
+    /// The attachment list as one flat sequence: each group's heading, then its rows.
+    #[must_use]
+    pub fn detail_rows(&self) -> Vec<DetailRow<'_>> {
+        let mut rows = Vec::new();
+        for (kind, attachments) in self.groups() {
+            rows.push(DetailRow::Heading(kind));
+            rows.extend(attachments.into_iter().map(DetailRow::Attachment));
+        }
+        rows
+    }
+
     /// The reads to send after `LabelsChanged`: the list again and, when a label is
     /// selected, the label again.
     #[must_use]
@@ -247,6 +260,46 @@ impl LabelsPage {
         self.selected = None;
         self.detail = None;
         self.detail_pending = None;
+    }
+}
+
+/// One row of the attachment list: the heading of a group, or one attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetailRow<'a> {
+    Heading(AttachKind),
+    Attachment(&'a LabelAttachment),
+}
+
+/// The count the page header shows: "1 label", "3 labels".
+#[must_use]
+pub fn count_label(count: usize) -> String {
+    if count == 1 {
+        "1 label".to_owned()
+    } else {
+        format!("{count} labels")
+    }
+}
+
+/// The colour of a label as `0xRRGGBB`, from its `#rrggbb` text. `None` for any other text.
+#[must_use]
+pub fn hex_colour(text: &str) -> Option<u32> {
+    let digits = text.strip_prefix('#')?;
+    if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(digits, 16).ok()
+}
+
+/// The word a commit row shows for how its commit resolves now. A current commit
+/// shows none, and so does a row without a state (a kind other than commit).
+#[must_use]
+pub fn commit_state_text(state: Option<CommitState>) -> Option<&'static str> {
+    match state? {
+        CommitState::Current => None,
+        CommitState::Remapped => Some("rewritten"),
+        CommitState::Ambiguous => Some("ambiguous"),
+        CommitState::Gone => Some("gone"),
+        CommitState::Unchecked => Some("not checked"),
     }
 }
 
@@ -625,6 +678,75 @@ mod tests {
             page.selected(),
             Some(5),
             "a cancelled read keeps the selection"
+        );
+    }
+
+    #[test]
+    fn the_page_is_loading_while_the_list_read_is_in_flight() {
+        let mut page = LabelsPage::default();
+        assert!(!page.is_loading());
+        page.request_list(OperationId(1));
+        assert!(page.is_loading());
+        page.listed(OperationId(1), Vec::new());
+        assert!(!page.is_loading());
+    }
+
+    #[test]
+    fn the_detail_rows_put_each_heading_before_its_group() {
+        let mut page = LabelsPage::default();
+        page.select(5);
+        page.request_detail(OperationId(1));
+        page.detail_read(
+            OperationId(1),
+            detail(
+                5,
+                vec![
+                    attachment(AttachKind::Commit, "abc", 1),
+                    attachment(AttachKind::Thread, "t-1", 2),
+                ],
+            ),
+        );
+        let rows = page.detail_rows();
+        assert_eq!(rows.len(), 4, "two headings and two rows");
+        assert_eq!(rows[0], DetailRow::Heading(AttachKind::Thread));
+        assert!(matches!(rows[1], DetailRow::Attachment(a) if a.reference == "t-1"));
+        assert_eq!(rows[2], DetailRow::Heading(AttachKind::Commit));
+        assert!(matches!(rows[3], DetailRow::Attachment(a) if a.reference == "abc"));
+    }
+
+    #[test]
+    fn the_header_count_says_one_label_or_more() {
+        assert_eq!(count_label(0), "0 labels");
+        assert_eq!(count_label(1), "1 label");
+        assert_eq!(count_label(7), "7 labels");
+    }
+
+    #[test]
+    fn a_label_colour_is_read_only_from_six_hex_digits_after_a_hash() {
+        assert_eq!(hex_colour("#ff8800"), Some(0x00ff_8800));
+        assert_eq!(hex_colour("#FF8800"), Some(0x00ff_8800));
+        assert_eq!(hex_colour("ff8800"), None, "no hash");
+        assert_eq!(hex_colour("#fff"), None, "short form");
+        assert_eq!(hex_colour("#+f8800"), None, "a sign is not a digit");
+        assert_eq!(hex_colour("#gg8800"), None);
+    }
+
+    #[test]
+    fn only_a_commit_that_no_longer_resolves_names_its_state() {
+        assert_eq!(commit_state_text(None), None);
+        assert_eq!(commit_state_text(Some(CommitState::Current)), None);
+        assert_eq!(
+            commit_state_text(Some(CommitState::Remapped)),
+            Some("rewritten")
+        );
+        assert_eq!(
+            commit_state_text(Some(CommitState::Ambiguous)),
+            Some("ambiguous")
+        );
+        assert_eq!(commit_state_text(Some(CommitState::Gone)), Some("gone"));
+        assert_eq!(
+            commit_state_text(Some(CommitState::Unchecked)),
+            Some("not checked")
         );
     }
 }

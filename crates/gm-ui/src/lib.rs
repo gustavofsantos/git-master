@@ -56,6 +56,7 @@ mod shell_code;
 mod shell_commit;
 mod shell_conflicts;
 mod shell_history;
+mod shell_labels;
 mod shell_list;
 mod shell_markdown;
 mod shell_reflog;
