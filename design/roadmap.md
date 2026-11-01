@@ -2,7 +2,7 @@
 
 The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `make docs-status` lists what the docs still mark as planned.
 
-Last updated: 2026-10-29 (slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
+Last updated: 2026-11-01 (next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
 
 ## Order criteria
 
@@ -218,7 +218,7 @@ Known gaps:
 
 ## Slice 3: history and branches (by-name view) (in progress: H1 to H5 done, with H4b-A, H4b-B and H4c)
 
-**Next step (author's decision, 2026-10-21; updated at the end of the 2026-10-22 session):** Slice 3c (code navigation, see the Slice 3c section) comes now. Spikes S-A, S-B and S-C and sub-slices N1 to N4 are done. **N5 (symbols and the single box)** is next. H6, H7 and H8 are postponed. The replacement of workflows with scripts is done (S-D, WS0 to WS2); WF3 has not started. H5 is done. See "How to continue" below.
+**Next step (author's decision, 2026-11-01):** the order is (1) **resolving a restack conflict** (slice 5, sub-slice 5f, which closes the "Done when" of slices 5 and 6), (2) **WF3** (slice 3w), (3) **N5** (slice 3c), after the author confirms D45, D50 and D92 and agrees its "Done when". H6 is done in slice 4c; H7 and H8 stay postponed. The "How to continue" note below is from 2026-10-25 and describes N5 as it was then.
 
 ### How to continue (end of the 2026-10-25 session)
 
@@ -575,6 +575,10 @@ Sub-slices (agreed with the author on 2026-10-31; D14 decided, execution in D142
   - `crates/gm-ui/src/restack_dialog.rs`: Restack This Stack (branch menu, palette) and the top-bar Restack open a dialog for the stack of the branch, planned from its root. It lists each branch with what its replay gives (commits replayed, dropped, the conflicting commit and files, why a branch waits or is refused), a banner for a stopped plan, **Skip branch and children** / **Include** per branch (the plan is made again), **Restack N branches**, then **Undo restack**. `ResumeRestack` is sent once when the stacks first load, so the Undo of a restack from an earlier session is offered.
   - Checked: 9 unit tests of the dialog's state and wording and a registry test; `make check` for the code and docs; seen in a window (release build, virtual display, light and dark): the plan, Skip and Include, apply (the sidebar's `restack 2` and amber dot went away, the branches sat on `main`, the bases were written), and Undo (the original commits and bases came back, the record was removed).
   - Known gaps: the shortcut ⇧⌘R is not bound; there is no progress view while it runs (the apply is one transaction); the done view still words the rows as "Replays"; a failed plan or apply shows only its reason; the dialog is not reachable by keyboard apart from Enter and Esc; no smoke scenario in `scripts/ui-smoke.sh`; Push with lease and delivering a conflict are not built.
+- **5f, resolve a restack conflict (to do; D154, decided by the author on 2026-11-01 as "temporary worktree", details proposed).** Closes the "Done when" of this slice and of slice 6. Sub-slices, each with `make check`:
+  - **5f-1, engine: resolution worktree and store.** `GitPort` opens the resolution worktree at `onto` with the conflicting commit cherry-picked (rerere on), builds the resolved commit with `commit-tree` (metadata as D142), and removes the worktree; the store `.git/gitmaster/restack-resolutions.json` with its `refs/gitmaster/restack/resolved/<oid>` refs; worktrees under `<git common dir>/gitmaster/` hidden from `worktrees()`. Done when real-Git tests show the stages match the plan's conflict paths, the main checkout (even dirty) is untouched, the resolved commit keeps the metadata, and a removed worktree leaves nothing in `git worktree list`.
+  - **5f-2, engine: commands and plan integration.** `StartRestackResolution`, `FinishRestackResolution`, `CancelRestackResolution`; `site` on the three conflict commands; `RestackBlock::Conflict` carries `onto`; `ReplayStep::Resolved`; the replay consults the store; apply clears the entries it used; a leftover worktree is removed on `ResumeRestack`. Done when a real-Git test resolves a conflict end to end through the engine (start, resolve with `site: restack`, finish, plan shows `resolved` and the children plan, apply moves every ref), a moved parent ignores a stale resolution, a second conflict in the same branch is resolved the same way, cancel leaves no worktree, and an agent is refused.
+  - **5f-3, UI.** **Resolve conflict** on a conflict row of the restack dialog; the resolver in restack mode (header with branch and commit, the list of conflicted files, **Continue restack**, **Cancel**); a **Resolved** step in the plan; the `Planned` markers in `docs/guide/stacks.md` and `docs/guide/conflicts.md` removed. Done when the pure state tests pass and the flow is seen in a window under Xvfb, in both themes.
 - Out of this slice for now: `before.restack` and `after.restack`, push with lease, MCP.
 
 ## Slice 6: conflict resolution

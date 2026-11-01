@@ -45,7 +45,7 @@ In the Working Copy, right-click a conflicted file and choose **Resolve Conflict
 
 > **Planned.** A restack that pauses on a conflict does not offer **Resolve conflict** yet. See [Stacks and restack](stacks.md).
 
-When a restack pauses on a conflict, choose **Resolve conflict** to open the resolver for that branch.
+When a restack holds a branch back on a conflict, choose **Resolve conflict** in the restack dialog. The resolver opens on the commit being replayed, in a private worktree, so your working copy is not touched. The sides are labeled **new parent**, the branch the commit is replayed onto, and **commit being replayed**. The header names the branch and the commit, and lists each conflicted file: resolve and **Apply** each one. Then choose **Continue restack** to go back to the plan, where the commit shows as **Resolved**. **Cancel** goes back to the plan without the resolution. See [Stacks and restack](stacks.md).
 
 ## Recorded resolutions
 
