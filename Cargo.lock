@@ -2271,10 +2271,12 @@ dependencies = [
 name = "gm-ui"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "gm-core",
  "gm-schema",
  "gpui",
  "gpui-component",
+ "lsp-types",
  "proptest",
  "pulldown-cmark",
  "serde_json",

@@ -68,6 +68,7 @@ use crate::threads_settings::ThreadsSettingsDialog;
 use crate::title_bar;
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
+use crate::workflow_editor;
 use crate::workflow_inputs::WorkflowInputsDialog;
 use crate::workflow_review::WorkflowReviewDialog;
 use crate::workflow_run::fill_for_message;
@@ -79,6 +80,7 @@ use crate::{
     CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, OpenQuickOpen, OpenSearch,
     RunWorkflowKey, StartPath,
 };
+use gpui_component::input::InputState;
 
 /// The key context of the change list. Its keys work only while the list has
 /// focus, so typing into the message is never taken as a key.
@@ -197,7 +199,12 @@ pub struct StatusView {
     /// The "Run this version?" dialog, while the engine waits for a review of a script.
     pub(crate) workflow_review_dialog: Option<WorkflowReviewDialog>,
     /// The editor of the Workflows page's Script tab; its text is the page's buffer.
-    pub(crate) workflow_source: Entity<TextArea>,
+    pub(crate) workflow_source: Entity<InputState>,
+    /// The subscription to `workflow_source`'s changes; replaced with the editor.
+    pub(crate) workflow_source_sub: Subscription,
+    /// Set when the page's buffer is another document than the editor's: the editor is then
+    /// rebuilt on the next frame, so its undo history starts with the new file.
+    pub(crate) workflow_editor_stale: bool,
     /// The Result pane of the conflict resolver; its text is the resolver's result (C3b).
     pub(crate) conflict_result: Entity<TextArea>,
     /// The delete-branch dialog, while it is open.
@@ -303,14 +310,8 @@ impl StatusView {
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
         let commit_diff_pane = cx.new(DiffPane::read_only);
-        let workflow_source = cx.new(|cx| {
-            TextArea::new("Workflow file", cx)
-                .with_lines(24, usize::MAX)
-                .with_style(TextStyle {
-                    mono: true,
-                    ..TextStyle::default()
-                })
-        });
+        let workflow_source = workflow_editor::new_editor("", window, cx);
+        let workflow_source_sub = workflow_editor::subscribe(&workflow_source, window, cx);
         let conflict_result = cx.new(|cx| {
             TextArea::new("Result", cx)
                 .with_lines(24, usize::MAX)
@@ -341,9 +342,6 @@ impl StatusView {
         let mut subscriptions = vec![
             cx.observe(&branch_filter, |this, filter, cx| {
                 this.on_branch_filter_changed(&filter, cx);
-            }),
-            cx.observe(&workflow_source, |this, _, cx| {
-                this.on_workflow_source_changed(cx);
             }),
             cx.observe(&conflict_result, |this, _, cx| {
                 this.on_conflict_result_changed(cx);
@@ -453,6 +451,8 @@ impl StatusView {
             workflow_inputs_dialog: None,
             workflow_review_dialog: None,
             workflow_source,
+            workflow_source_sub,
+            workflow_editor_stale: true,
             conflict_result,
             delete_dialog: None,
             discard_dialog: None,
@@ -1667,6 +1667,7 @@ impl Render for StatusView {
         self.sync_thread_rows();
         let (sidebar_width, left_width, commit_height) = self.fitted_sizes(window);
         window_chrome::sync_client_inset(window);
+        self.refresh_workflow_editor(window, cx);
         let app = div()
             .size_full()
             .relative()

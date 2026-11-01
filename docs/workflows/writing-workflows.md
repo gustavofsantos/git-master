@@ -283,19 +283,13 @@ The app also writes generated reference files into a `.api` folder inside your w
 
 The Script tab of the Workflows page edits the workflow file. Type in the text, then **Save** writes the file. **Dry Run** walks the text in the editor, so you can test a change before you save it.
 
-> **Planned.** The Script tab still uses a plain text box instead of a code editor with line numbers.
-
 ### Highlighting
 
 Keywords, strings, numbers and comments have their own colors, and `ctx` is shown as the context object. `continue` and `export` are coloured as keywords, as in Luau. `type` is not, because it is also a function of Lua.
 
-> **Planned.** The Script tab does not color its text yet.
-
 ### Completion
 
 After `ctx.`, the editor offers every function of `ctx`, with its signature and what the reference says about it. After `ctx.branch.`, it offers the calls of that group. Inside the argument table of a call, after `{` or `,`, it offers the keys of that table with their types, and it marks the required ones. Nothing is offered inside a string or a comment. The list comes from the same catalog as the sandbox, so it matches the reference in the `.api` folder.
-
-> **Planned.** The Script tab does not complete `ctx` yet.
 
 ### Problems
 

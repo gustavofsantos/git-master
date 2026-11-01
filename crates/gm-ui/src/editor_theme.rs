@@ -50,7 +50,11 @@ pub fn colors(palette: &Palette, dark: bool) -> ThemeColor {
     };
     let c = theme::color;
     ThemeColor {
-        background: c(palette.editor),
+        // `Root` paints this behind the window's content, square, where the app's frame is
+        // rounded; it and `window_border` (`Root`'s own 1px border) stay transparent. The code
+        // editor paints its surface from the highlight theme, not from here.
+        background: gpui::transparent_black(),
+        window_border: gpui::transparent_black(),
         foreground: c(palette.text),
         border: c(palette.hairline),
         input: c(palette.hairline_strong),
@@ -349,7 +353,10 @@ mod tests {
             assert_eq!(highlight.appearance.is_dark(), dark);
 
             let colors = colors(palette, dark);
-            assert_eq!(colors.background, theme::color(palette.editor));
+            // The component's background is Root's, not the editor's: the editor paints its own
+            // surface from the highlight theme, and Root's stays transparent (D153).
+            assert_eq!(colors.background, gpui::transparent_black());
+            assert_eq!(colors.window_border, gpui::transparent_black());
             assert_eq!(colors.foreground, theme::color(palette.text));
             assert_eq!(colors.caret, theme::color(palette.caret));
             assert_eq!(colors.selection, theme::color(palette.selection));

@@ -8,7 +8,7 @@
 //! offer a call the engine does not have.
 
 use gm_core::script::api_docs;
-use gm_core::script::surface::{ArgShape, CtxFn, CtxSurface, HELPERS};
+use gm_core::script::surface::{ArgShape, CtxFn, CtxSurface};
 
 /// What an item is, for the editor's icon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,6 +375,7 @@ mod tests {
 
     #[test]
     fn after_ctx_dot_every_top_level_name_is_offered_once() {
+        use gm_core::script::surface::HELPERS;
         let items = at_end("local x = ctx.");
         let names = labels(&items);
         for name in surface().names_under("") {

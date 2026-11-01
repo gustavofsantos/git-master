@@ -18,6 +18,8 @@ gpui = "0.2"
 gpui-component.workspace = true
 tree-sitter.workspace = true
 tree-sitter-lua.workspace = true
+anyhow = "1"
+lsp-types = "0.97"
 ureq = "3"
 sha2 = "0.10"
 

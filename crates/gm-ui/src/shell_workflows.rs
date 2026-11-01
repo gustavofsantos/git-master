@@ -17,6 +17,8 @@ use gpui::{
     SharedString, Stateful, Window, div, prelude::*, px,
 };
 
+use gpui_component::input::{Input, Position};
+
 use crate::SaveWorkflow;
 use crate::action_registry::{Action, Args};
 use crate::icon::{self, Icon};
@@ -25,6 +27,7 @@ use crate::resize_handle::{self, Edge};
 use crate::shell_history::{now_secs, relative_time};
 use crate::theme;
 use crate::view::{Screen, StatusView};
+use crate::workflow_editor;
 use crate::workflow_keys;
 use crate::workflows_page::{
     Preview, SaveState, StepRecord, Tab, context_blocks, context_key, diagnostic_text,
@@ -239,29 +242,42 @@ impl StatusView {
         self.model.workflows.keys = plan;
     }
 
-    /// Moves the editor's caret to a diagnostic's line.
+    /// Moves the editor's caret to a diagnostic's line (1-based; 0 means the first line).
     fn go_to_workflow_line(&mut self, line: u32, window: &mut Window, cx: &mut Context<Self>) {
-        let line = usize::try_from(line).unwrap_or(1).max(1);
-        self.workflow_source
-            .update(cx, |area, cx| area.go_to_line(line, window, cx));
+        let position = Position::new(line.max(1) - 1, 0);
+        self.workflow_source.update(cx, |state, cx| {
+            state.set_cursor_position(position, window, cx);
+        });
     }
 
-    /// Puts the page's buffer in the editor, when they differ, and checks the buffer when its
-    /// text changed since the last check.
+    /// Marks the editor for a rebuild when the page's buffer is another text than the editor
+    /// holds (a file opened, reverted, reloaded or created), and checks the buffer when its text
+    /// changed since the last check.
     pub(crate) fn sync_workflow_source(&mut self, cx: &mut Context<Self>) {
-        let text = self.model.workflows_page.text().to_owned();
-        self.workflow_source.update(cx, |area, cx| {
-            if area.text() != text {
-                area.set_text(&text, cx);
-            }
-        });
+        let text = self.model.workflows_page.text();
+        if self.workflow_source.read(cx).value().as_ref() != text {
+            self.workflow_editor_stale = true;
+            cx.notify();
+        }
         self.check_workflow(cx);
+    }
+
+    /// Rebuilds the editor for the page's buffer, once `sync_workflow_source` flagged it. A new
+    /// editor per document keeps the undo history to the file that is open. Runs in the frame,
+    /// where the window is.
+    pub(crate) fn refresh_workflow_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.workflow_editor_stale) {
+            return;
+        }
+        let text = self.model.workflows_page.text().to_owned();
+        self.workflow_source = workflow_editor::new_editor(&text, window, cx);
+        self.workflow_source_sub = workflow_editor::subscribe(&self.workflow_source, window, cx);
     }
 
     /// The editor changed: its text becomes the page's buffer, and the buffer is checked once
     /// the typing pauses.
     pub(crate) fn on_workflow_source_changed(&mut self, cx: &mut Context<Self>) {
-        let text = self.workflow_source.read(cx).text().to_owned();
+        let text = self.workflow_source.read(cx).value().to_string();
         let before = self.model.workflows_page.check_generation();
         self.model.workflows_page.edit(&text);
         if self.model.workflows_page.check_generation() != before {
@@ -283,12 +299,13 @@ impl StatusView {
             .child(self.workflow_detail(cx))
     }
 
-    /// The strip on the list's right edge that resizes it.
-    fn list_width_strip(cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+    /// The strip on the list's right edge that resizes it. It takes the width from the caller:
+    /// the view is being rendered, so the view cannot be read from its own entity here.
+    fn list_width_strip(width: f32, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         resize_handle::handle(
             "workflow-list-resize",
             Edge::Right,
-            cx.entity().read(cx).workflow_list_width,
+            width,
             resize::PANE,
             |this: &mut StatusView, width, _| this.workflow_list_width = width,
             |this: &mut StatusView, _| this.workflow_list_width = resize::WORKFLOW_LIST_DEFAULT,
@@ -298,7 +315,7 @@ impl StatusView {
 
     fn workflow_list(&self, cx: &mut Context<Self>) -> Div {
         let width = self.workflow_list_width;
-        let width_strip = Self::list_width_strip(cx);
+        let width_strip = Self::list_width_strip(width, cx);
         let listed = self.model.workflows.listed.as_deref();
         let selected = self.model.workflows_page.path();
         let dirty = self.model.workflows_page.dirty();
@@ -604,9 +621,8 @@ impl StatusView {
                     .id("workflow-script")
                     .flex_1()
                     .min_h(px(0.))
-                    .overflow_y_scroll()
                     .p_2()
-                    .child(self.workflow_source.clone()),
+                    .child(Input::new(&self.workflow_source).h_full()),
             )
             .child(
                 div()
