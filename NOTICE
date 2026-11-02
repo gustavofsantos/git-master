@@ -1,0 +1,6 @@
+GitMaster
+Copyright 2026 Gustavo Santos
+
+Third-party components
+
+The Phosphor icons in crates/gm-ui/assets/icons are licensed under the MIT License; see crates/gm-ui/assets/icons/LICENSE-phosphor. Source files ported from rvw, another project by the same author, are under the MIT License and keep their notice where it appears. The syntax highlight queries in crates/gm-core/queries are derived from tree-sitter grammar crates under the MIT License, with copyright notices listed in crates/gm-core/queries/README.md. The Rust dependencies listed in Cargo.lock carry their own licenses.

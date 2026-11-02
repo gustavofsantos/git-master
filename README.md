@@ -73,4 +73,10 @@ Start a new Claude Code session in any repository and it shows up in GitMaster's
 - [Agent integration](docs/agents/agent-integration.md): update, check and remove the plugin.
 - [Principles](docs/concepts/principles.md): why GitMaster works the way it does.
 
-Contributors: see [`AGENTS.md`](AGENTS.md). GitMaster is currently unlicensed; see [`LICENSE`](LICENSE).
+## License
+
+GitMaster is licensed under the [Apache License 2.0](LICENSE). See [`NOTICE`](NOTICE) for third-party components.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) to build, test and send changes. Coding rules for contributors and agents are in [`AGENTS.md`](AGENTS.md).

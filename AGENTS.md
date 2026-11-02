@@ -1,6 +1,6 @@
 # GitMaster
 
-Native desktop app in Rust + GPUI, to be open sourced at go-live and sold as a premium product. Until the author chooses a license it is unlicensed: no license is granted (`LICENSE`, D103). This file tells an agent what the product is, how the repository is organised, where each kind of decision lives and how to work here. It holds no roadmap, no design detail and no status: the product is specified in `docs/` and the engineering records live in `design/`.
+Native desktop app in Rust + GPUI, to be open sourced at go-live and sold as a premium product. It is licensed under Apache-2.0 (`LICENSE`, D170). This file tells an agent what the product is, how the repository is organised, where each kind of decision lives and how to work here. It holds no roadmap, no design detail and no status: the product is specified in `docs/` and the engineering records live in `design/`.
 
 ## What it is
 
