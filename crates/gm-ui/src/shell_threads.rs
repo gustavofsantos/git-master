@@ -2033,25 +2033,36 @@ fn text_block(text: &str, max_lines: usize) -> Div {
         }))
 }
 
-/// One line of text. A redaction is a muted `[REDACTED:name]` chip, never a blank.
+/// One line of text. A line with no redaction is ordinary wrapping text in the column's
+/// width; a redaction is a muted `[REDACTED:name]` chip inline in a flex row, never a blank.
 fn spans_line(line: &str) -> Div {
     if line.is_empty() {
         return div().h(px(8.));
     }
-    div().flex().flex_row().flex_wrap().min_w(px(0.)).children(
-        threads::spans(line).into_iter().map(|span| match span {
-            Span::Text(text) => div().min_w(px(0.)).child(text),
-            Span::Redacted(name) => div()
-                .flex_none()
-                .px_1()
-                .rounded_sm()
-                .font_family(theme::code_font())
-                .text_xs()
-                .bg(theme::selected_row())
-                .text_color(theme::muted())
-                .child(format!("[REDACTED:{name}]")),
-        }),
-    )
+    let spans = match <[Span; 1]>::try_from(threads::spans(line)) {
+        Ok([Span::Text(text)]) => return div().min_w(px(0.)).child(text),
+        Ok(one) => Vec::from(one),
+        Err(spans) => spans,
+    };
+    div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .min_w(px(0.))
+        .children(spans.into_iter().map(|span| {
+            match span {
+                Span::Text(text) => div().min_w(px(0.)).child(text),
+                Span::Redacted(name) => div()
+                    .flex_none()
+                    .px_1()
+                    .rounded_sm()
+                    .font_family(theme::code_font())
+                    .text_xs()
+                    .bg(theme::selected_row())
+                    .text_color(theme::muted())
+                    .child(format!("[REDACTED:{name}]")),
+            }
+        }))
 }
 
 /// The patch of an edit, coloured as the diff view colours it.
