@@ -84,6 +84,14 @@ You can select and copy the text of the subject, body, hash, author, date and pa
 2. The diff of the commit opens, with the file you clicked at the top. The diffs of the other files of the commit follow it, in the same order as the list.
 3. Each file has a header with its status letter, its path and the count of added and removed lines. The header above the diff shows the number of files, and the **Unified | Split** selector chooses the layout.
 
+### Example: see what a commit changed
+
+1. Open **History** and click a commit, such as the one with the subject you want to check.
+2. Read the **Files** list. Each row shows a status letter, the path and the line counts, such as `+4 −1`, or `bin` for a binary file.
+3. Click a file in the list. Its diff opens at the top.
+4. Press `Ctrl+Shift+N` (`⇧⌘N` on macOS) to go to the next file of the commit.
+5. Press `Esc` to return to the commit details.
+
 The diff is read-only. It has no stage, unstage or discard controls. Lines show their numbers. The layout you choose is saved and shared with the diff of the Working Copy. For how a diff is read, see [Diff and staging](diff-and-staging.md).
 
 | Key | Action |
@@ -126,15 +134,19 @@ The scope pill in the history header chooses which commits the list shows. Click
 | Scope | The list shows |
 |---|---|
 | **Current branch** | The commits of HEAD. |
-| **Current stack** | The commits of every branch in the stack of HEAD, plus the default branch. |
+| **Current stack** | The commits of every branch in the stack of HEAD, plus the default branch. Preview, see the note below. |
 | **All refs** | The commits of every local branch, remote branch and tag, plus HEAD. |
 | **One ref** | The commits of one branch. On the History page, click a branch in the sidebar to show only that branch. |
 
-When the checked-out branch is in a stack, the list opens on **Current stack**, shown by the chip **Scope: current stack**. Otherwise it opens on **Current branch**, and **Current stack** is disabled with the reason. The choice lasts while the window is open. A left click on a branch in the sidebar shows its history and does not check it out: double-click it, or use its menu, to check it out.
+> **Note.** **Current stack**, its chip and the stack marks in the graph are part of the Stacks preview feature. They are hidden in the release build. Start GitMaster with `GITMASTER_PREVIEW=stacks` to turn them on. See [Stacks and restack](stacks.md).
+
+When the checked-out branch is in a stack, the list opens on **Current stack**, shown by the chip **Scope: current stack**. Otherwise it opens on **Current branch**, and **Current stack** is disabled with the reason. The choice lasts while the window is open. A left click on a branch in the sidebar shows that branch's commits, and does not check it out. To check the branch out, use its menu and choose **Checkout Branch**. See [Branches](branches.md#switch-to-another-branch).
 
 The default branch is the branch of `origin/HEAD`, else the first of `main`, `master`, `trunk` and `develop` that exists.
 
 ## Stacks in the graph
+
+> **Note.** Stacks in the graph are part of the Stacks preview feature. Start GitMaster with `GITMASTER_PREVIEW=stacks` to see them. See [Stacks and restack](stacks.md).
 
 The graph reads the stack metadata, never the branch names, to draw stacks:
 
@@ -142,9 +154,11 @@ The graph reads the stack metadata, never the branch names, to draw stacks:
 - When a branch is behind its parent, because the parent has commits the branch does not have, the edge from the branch's first commit is dashed and amber down to the commit it was based on, or down to where it meets the line of its parent, which is drawn solid from there. The tip of the branch shows the badge **N commits behind parent**. A branch with no commits of its own shows only the badge.
 - The dashed edge and the badge carry the state, so color is never the only signal.
 
+## Commits and Stacks modes
+
 > **Planned.** The **Commits | Stacks** switch is not available yet.
 
-A **Commits | Stacks** switch changes the graph: **Commits** shows the commits, and **Stacks** shows one node per branch, with its commits folded under it. For stacks, see [Stacks](stacks.md).
+The **Commits | Stacks** switch changes the graph: **Commits** shows the commits, and **Stacks** shows one node per branch, with its commits folded under it.
 
 ## Search by content
 

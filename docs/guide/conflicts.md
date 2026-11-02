@@ -8,6 +8,8 @@ preview: conflict-resolver
 
 When Git stops on a conflict, the resolver shows both sides next to the result. You choose what goes into each part of the file, and GitMaster records how each part was resolved.
 
+The conflict resolver is a preview feature, hidden in the release build. Start GitMaster with `GITMASTER_PREVIEW=conflict-resolver` to turn it on.
+
 ## Layout
 
 > **Planned.** The resolver does not count the changes Git applied on its own, and it has no unified or stacked layout for small windows yet.
@@ -42,9 +44,20 @@ In the Working Copy, right-click a conflicted file and choose **Resolve Conflict
 6. Watch the counter **N of M conflicts resolved**.
 7. Choose **Apply**. If conflicts remain, Apply answers with a message that tells you what is still unresolved. It does not sit disabled. When every conflict is resolved, GitMaster writes the file and stages it, and the resolver shows **Resolved and staged.** Choose **Back** to return to the Working Copy.
 
+### Example: keep one side of each conflict
+
+1. In the Working Copy, right-click `src/config.rs` and choose **Resolve Conflict**. The resolver opens on that file.
+2. The header shows the count, such as **0 of 3 conflicts resolved**. Click **Next unresolved** to go to the first conflict.
+3. Click **Left** to keep the text of the left side for this conflict.
+4. Click **Right** on the next conflict, and **Both** on the third one.
+5. The header reads **3 of 3 conflicts resolved**. Click **Apply**.
+6. The resolver shows **Resolved and staged.** Click **Back**. The file is staged in the Working Copy.
+
+Each conflict has its own choices. You can mix them, and you can edit the Result pane directly for any conflict that needs different text.
+
 ## Resolve in a restack
 
-When a restack holds a branch back on a conflict, choose **Resolve conflict** in the restack dialog. The resolver opens on the commit being replayed, in a private worktree, so your working copy is not touched. The sides are labeled **new parent**, the branch the commit is replayed onto, and **commit being replayed**. The header names the branch and the commit, and lists each conflicted file: resolve and **Apply** each one. Then choose **Continue restack** to go back to the plan, where the commit shows as **Resolved**. **Cancel** goes back to the plan without the resolution. See [Stacks and restack](stacks.md).
+When a restack holds a branch back on a conflict, choose **Resolve conflict** in the restack dialog. Restack is part of the Stacks preview feature, which you turn on with `GITMASTER_PREVIEW=stacks`. The resolver opens on the commit being replayed, in a private worktree, so your working copy is not touched. The sides are labeled **new parent**, the branch the commit is replayed onto, and **commit being replayed**. The header names the branch and the commit, and lists each conflicted file: resolve and **Apply** each one. Then choose **Continue restack** to go back to the plan, where the commit shows as **Resolved**. **Cancel** goes back to the plan without the resolution. See [Stacks and restack](stacks.md).
 
 ## Recorded resolutions
 

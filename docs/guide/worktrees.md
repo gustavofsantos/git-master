@@ -29,13 +29,21 @@ The **+** button in the section header starts a new worktree. On a linked worktr
 
 1. Choose **Create Worktree** in the menu of a branch. The dialog opens with that branch chosen. Or choose **New Worktree…** from the **+** button or the command palette. The dialog opens empty.
 2. Choose how the worktree starts. The dialog has three modes:
-   - An existing branch.
-   - A new branch, created from a commit.
-   - A detached HEAD, at a commit with no branch.
-3. Check the folder. GitMaster suggests `../<repo>-<branch>`, a sibling of the repository. The suggestion follows the branch name until you type a different folder.
-4. Create the worktree. The command appears in the **Git commands** panel.
+   - **Existing branch**: a branch that has no worktree yet.
+   - **New branch**: a new branch, created from a commit.
+   - **Detached HEAD**: a commit, with no branch.
+3. Check the folder. GitMaster suggests a folder next to the repository, named `<repo>-<branch>`. A `/` in the branch name becomes `-`. The suggestion follows the branch name until you type a different folder.
+4. Click **Create worktree**. The command appears in the **Git commands** panel.
 
 The branch field suggests local branches as you type.
+
+### Example: a second worktree for a review
+
+1. Right-click a branch that is not checked out, such as `feature/login`, and choose **Create Worktree**.
+2. Choose **Existing branch**. The branch field shows the branch you picked.
+3. Leave the folder as suggested: `../myproject-feature-login`, next to the repository.
+4. Click **Create worktree**. The row appears in the **Worktrees** section.
+5. Double-click the new row. It opens in its own window.
 
 ### The folder
 
@@ -68,7 +76,7 @@ Drag a changed file from the Working Copy and drop it on a worktree row. The cha
 1. Right-click the row and choose **Remove Worktree**. Or point at a linked worktree row and choose **×**. In the command palette, choose **Remove Worktree** and pick the worktree with **Tab**.
 2. Read the dialog. It checks the worktree and lists what would stop the removal.
 3. If a blocker can be overridden, tick the confirmation checkbox. The checkbox names what will be discarded. The remove button stays disabled until you tick it.
-4. Remove the worktree.
+4. Click **Remove worktree**.
 
 GitMaster checks the worktree again when you remove it, so the dialog never acts on an old answer.
 
@@ -83,8 +91,6 @@ GitMaster checks the worktree again when you remove it, so the dialog never acts
 
 GitMaster removes the folder with `git worktree remove`. It never deletes the folder by hand. Files that Git ignores inside the folder are removed with it.
 
-### Delete the branch too
-
 > **Planned.** Deleting the branch together with its worktree is not available yet.
 
 ## Lock and unlock
@@ -98,27 +104,23 @@ A locked worktree is blocked from removal until you unlock it or tick the confir
 Pruning clears the records of worktrees whose folders are gone.
 
 1. On the row of a **missing** worktree, choose **Prune Worktrees**. You can also choose it in the command palette.
-2. The dialog lists each stale record with the reason Git gives. Nothing has changed yet.
-3. Confirm to remove the records.
+2. The dialog, titled **Prune worktrees?**, lists each stale record with the reason Git gives. Nothing has changed yet.
+3. Click **Prune** to remove the records.
 
 Pruning removes Git's records only. It never touches a folder. A locked worktree is left out of the list. If the list changed after the dialog showed it, the prune is refused. Open the dialog again to see the current list.
 
 ## Branch menu for a worktree branch
 
-When a branch is checked out in a linked worktree, its branch menu offers worktree actions in place of the usual ones:
+When a branch is checked out in a linked worktree, its branch menu offers worktree actions instead of the usual ones. In order, the menu has:
 
 - **Open Worktree**
 - **Reveal Worktree in File Manager**
 - **Copy Worktree Path**
-- **New Child Branch**
-- **Restack This Stack**
+- **New Branch…**
+- **New Child Branch**, **Set Parent…**, **Remove From Stack**, **Reparent to Grandparent** and **Restack This Stack**, in the Stacks preview feature (see [Stacks and restack](stacks.md))
 - **Remove Worktree**, in red
 
-**Checkout Branch**, **Rename Branch**, **Delete Branch** and **Create Worktree** are not in this menu, because the branch already has a worktree. The main checkout keeps the normal branch menu.
-
-### Stack actions
-
-> **Planned.** **Restack This Stack** is not available yet.
+**Checkout Branch**, **Rename Branch**, **Delete Branch**, **Push With Lease** and **Create Worktree** are not in this menu, because the branch already has a worktree. The main checkout keeps the normal branch menu.
 
 ## Open in a terminal
 

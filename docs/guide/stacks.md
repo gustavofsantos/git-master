@@ -6,7 +6,7 @@ order: 80
 preview: stacks
 ---
 
-A stack is a chain of branches in which each branch builds on its parent. A typical stack has a base branch, an API branch and a UI branch on top of the base, and an end-to-end branch on top of the UI branch. When the base changes, restack replays each branch on the new tip of its parent, so the whole stack stays current. If you never give a branch a parent, GitMaster works as a normal Git client and the stack views stay out of your way.
+A stack is a chain of branches in which each branch builds on its parent. A typical stack has a base branch, an API branch and a UI branch on top of the base, and an end-to-end branch on top of the UI branch. When the base changes, restack replays each branch on the new tip of its parent, so the whole stack stays current. If you never give a branch a parent, GitMaster works as a normal Git client and the stack views stay out of your way. Stacks and restack are a preview feature, hidden in the release build: start GitMaster with `GITMASTER_PREVIEW=stacks` to turn them on.
 
 ## How a stack is shaped
 
@@ -63,7 +63,7 @@ GitMaster compares the stored values with the repository and derives the state o
 
 When a branch is in more than one state, the tag shows the first that applies in this order: parent gone, parent merged, diverged base, stale.
 
-**Reparent to Grandparent** makes the parent of the old parent the new parent. When the old parent is gone and its values went with it, the new parent is the default branch: the branch of `origin/HEAD`, else the first of `main`, `master`, `trunk` and `develop` that exists. You confirm before anything changes, and the branch's commits do not move until you restack.
+**Reparent to Grandparent** makes the parent of the old parent the new parent. When the old parent is gone and its values went with it, the new parent is the default branch: the branch of `origin/HEAD`, else the first of `main`, `master`, `trunk` and `develop` that exists. From the branch menu, you confirm before anything changes. The branch's commits do not move until you restack.
 
 GitMaster compares patch IDs against the most recent 2,000 commits of the root that the parent's branch does not have. A parent merged further back than that is not detected.
 
@@ -129,13 +129,8 @@ Restack brings a stack up to date. It walks the tree from the top down, so paren
 - **Undo is atomic.** Before a restack starts, GitMaster records the commit of every branch it touches. **Undo restack** restores all of them in one step. Each restack is recorded in the operation log.
 - **The state survives.** GitMaster saves the state of a restack as it runs. Closing the app or a crash does not lose it.
 - **A conflict holds back only its subtree.** The branch with the conflict and its children stay where they are. Independent sibling branches are restacked.
-> **Planned.** Recorded resolutions are not reused yet.
-
-- **Recorded resolutions are reused.** GitMaster enables Git's rerere. The same conflict reappears on each restack, and its recorded resolution is reapplied in the same way. See [Resolving conflicts](conflicts.md).
 - **A dirty working copy can block the restack.** If your working copy has uncommitted changes and the current branch is part of the plan, the restack does not start. A banner explains the block. Commit your changes, then start the restack again.
-> **Planned.** Push with lease is not offered from the restack yet.
-
-- **Push is a separate step.** GitMaster never pushes restacked branches on its own. **Push with lease** pushes with `--force-with-lease`, so it fails when the remote branch has changed since your last fetch.
+- **Push is a separate step.** GitMaster never pushes restacked branches on its own. The restack dialog has no push button. To push a restacked branch, check it out and use **Push With Lease** from its menu. That push uses `--force-with-lease`, so it fails when the remote branch has changed since your last fetch. See [Branches](branches.md#fetch-pull-and-push-with-lease).
 
 ### The four steps
 
@@ -146,7 +141,16 @@ Restack brings a stack up to date. It walks the tree from the top down, so paren
    **Resolve conflict** opens the resolver on the commit that conflicts. GitMaster replays that commit in a private worktree of its own, so your working copy, your staged changes and your checked-out branch stay as they are, even when the conflicting branch is the one you have checked out. That worktree is not listed under **Worktrees**. When every file is resolved, **Continue restack** turns your resolution into the replayed commit and plans the restack again: the step shows as **Resolved**, the rest of the branch replays, and the branches under it plan as usual. A later commit can conflict too, and you resolve it the same way. **Cancel** drops the resolution in progress. Nothing moves until you choose **Restack N branches**, so a resolution is undone like any other restack. A finished resolution is kept when you close the app, and it is used only while the parent stays where it was: if the parent moves, the commit is replayed again and the conflict comes back, with your recorded resolution offered. See [Resolving conflicts](conflicts.md).
 4. **Done.** Choose **Undo restack** to restore every branch the restack moved. The undo is also offered after you reopen the app.
 
-   > **Planned.** **Push with lease** from this step.
+### Recorded resolutions
+
+GitMaster uses Git's rerere when the resolver runs, so a resolution you record there is offered again when the same conflict comes back. The plan itself does not use rerere yet, so a conflict that has a recorded resolution is still reported as a conflict in the plan. Open **Resolve conflict** to see the recorded resolution. See [Resolving conflicts](conflicts.md).
+
+> **Planned.** The plan does not reuse recorded resolutions yet. The resolver offers them when it opens.
+
+### Push from the restack
+
+> **Planned.** Push with lease is not offered from the restack yet. The restack dialog has no push button.
+
 
 ## Automate stack updates
 

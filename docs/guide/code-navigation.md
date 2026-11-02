@@ -180,6 +180,14 @@ The search starts 250 ms after you stop typing. Press Enter to start it at once.
 | **.\*** | Regular expression: the text is read as a pattern. |
 | **new** | Include new files: files Git does not track yet, unless `.gitignore` hides them. Searches include them by default. |
 
+### Example: find every use of a name
+
+1. Press `Ctrl+Shift+F` (`⇧⌘F` on macOS) to open the **Search** page.
+2. Type `parse_config` in the search box.
+3. Turn on **ab**, so that `parse_config_file` is not matched.
+4. Wait for the summary to show the number of matches, or press Enter to start at once.
+5. Click a line in the results. The file opens in the **Code** page at that line.
+
 ### Limit the files
 
 The files box takes words separated by spaces. Each word is a Git pathspec, so `src` matches everything under the `src` folder. A word that starts with `!` excludes those files. For example, `src crates/ui !docs` searches `src` and `crates/ui` and skips `docs`. Leave the box empty to search every file.
@@ -221,10 +229,10 @@ From the diff or the detail of a commit, choose **View file** to see that file a
 ## What it does not do
 
 - It does not edit files. The viewer is read-only, and nothing is written into the worktree.
-- It does not index symbols: there is no symbol search, file outline, go to definition or find usages. Use the **Search** page, with **Whole word** for a name.
+- It does not index symbols: there is no symbol search, file outline, go to definition or find usages. Use the **Search** page, with the **ab** switch (whole word) for a name.
 - It does not provide language-server features, such as semantic references or renaming.
 - It does not search inside submodules or Git LFS content.
 
 ## Comment on a range of lines
 
-Select lines in the viewer by dragging over their numbers, or by clicking one and Shift-clicking another, then press **Ctrl+Shift+M**. The comment goes to the local review loop, anchored to that text; see [Local review](../agents/local-review.md#comment-on-code).
+Select lines in the viewer by clicking a line number, then Shift-clicking another line number. Then press **Ctrl+Shift+M**. The comment goes to the local review loop, anchored to that text; see [Local review](../agents/local-review.md#comment-on-code).

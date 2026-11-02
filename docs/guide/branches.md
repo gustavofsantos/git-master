@@ -5,7 +5,7 @@ status: partial
 order: 40
 ---
 
-The sidebar lists the local and remote branches of the repository. Use it to check out a branch, search the list, and see which branch HEAD points at. Create and delete branches from the branch menu, the command palette or the sidebar. The top bar holds the remote commands: **Fetch**, **Pull** and **Push with lease**.
+The sidebar lists the local and remote branches of the repository. Use it to see which branch HEAD points at, to search the list, and to open a branch's menu. Check out, create and delete branches from the branch menu, the branch picker in the top bar or the command palette. The top bar holds the remote commands: **Fetch**, **Pull** and **Push with lease**.
 
 ## The branch sidebar
 
@@ -19,13 +19,12 @@ The worktrees of the repository are listed in their own section below the branch
 
 1. Drag the edge of the sidebar to change its width.
 2. The sidebar stays between 200 px and 40% of the window width. The main area keeps at least 320 px.
-3. Double-click the edge to return the sidebar to 240 px.
 
-The width is not kept between runs.
+The sidebar starts at 240 px. Its width is not kept between runs.
 
 ## Fold the sections
 
-The sidebar has three sections: **Workspace**, **Branches** and **Worktrees**. Click a section's header to fold it, and click it again to open it. The arrow before the title shows the state: `▾` when the section is open and `▸` when it is folded. A folded section shows its header only, so the sections you do not need leave room for the others. The **+** at the end of the Branches and Worktrees headers still works while the section is folded.
+The sidebar has three sections: **Workspace**, **Branches** and **Worktrees**. Click a section's header to fold it, and click it again to open it. A caret before the title shows the state: it points down when the section is open and to the right when it is folded. A folded section shows its header only, so the sections you do not need leave room for the others. The **+** at the end of the Branches and Worktrees headers still works while the section is folded.
 
 All sections are open when the window starts. Which ones are folded is not kept between runs.
 
@@ -35,7 +34,7 @@ The list shows every local and remote branch of the repository. The search box a
 
 The search matches the letters of the full branch name in order, so `flg` finds `feature/login`. The search text is not saved between runs.
 
-When nothing matches, the sidebar says **No branches match** and offers a link that clears the search.
+When nothing matches, the sidebar says **No branches match** and offers a link, **Clear the search**.
 
 The branch picker in the top bar and the command palette always list every branch, whatever the search.
 
@@ -44,8 +43,10 @@ The branch picker in the top bar and the command palette always list every branc
 Use any of these ways:
 
 1. Open the branch picker in the top bar, type to filter, and choose a branch.
-2. Click a branch in the **By name** view of the sidebar.
+2. Right-click a branch in the sidebar and choose **Checkout Branch**.
 3. Run **Checkout Branch** from the command palette (`Ctrl+K`, `⌘K` on macOS), then press `Tab` and choose the branch.
+
+A left click on a branch in the sidebar does not check it out. On the History page, the same click shows that branch's commits instead. See [Scope of the list](history.md#scope-of-the-list).
 
 Choosing a remote branch that has no local copy creates a local branch that tracks the remote one.
 
@@ -55,16 +56,23 @@ GitMaster does not stash or carry your uncommitted changes across a checkout. If
 
 ## Create a branch
 
-1. Run **New Branch…** from the command palette, from the branch menu, or with the New Branch button in the sidebar.
+1. Run **New Branch…** from the command palette, from the branch menu, or with the **+** button in the Branches header.
 2. Type the **New branch name**. The form shows the reason when the name is not valid. A branch name follows Git's rules: it cannot contain spaces or `..`, and no part of it can end with `.lock`.
 3. Optionally, type the **Branch, tag or commit** to start from. When it is empty, the new branch starts from HEAD. The branch menu fills this field with the branch you chose.
 4. Tick **Check out the new branch** to switch to the new branch as well. The dialog shows the Git command it will run: `git branch` with the name and the start point, or `git checkout -b` when the box is ticked.
 5. Click **Create branch**. If Git refuses, its message stays in the dialog.
 
+### Example: a branch for a fix
+
+1. Right-click `main` in the sidebar and choose **New Branch…**. The dialog opens with `main` in **Branch, tag or commit**.
+2. Type `fix/login-timeout` in **New branch name**.
+3. Tick **Check out the new branch**.
+4. Click **Create branch**. The HEAD badge moves to `fix/login-timeout`.
+
 ## Delete a branch
 
-1. Run **Delete Branch** from the branch menu. The item is red, because it asks for confirmation.
-2. The dialog asks **Delete branch** followed by the name of the branch, with a question mark. It says that Git deletes the branch only when its commits are merged into HEAD or its upstream.
+1. Right-click the branch and choose **Delete Branch**. The item is red, because it asks for confirmation.
+2. The dialog is titled **Delete branch** followed by the name of the branch, with a question mark. It says that Git deletes the branch only when its commits are merged into HEAD or its upstream.
 3. Click **Delete branch**. GitMaster runs `git branch -d`.
 
 When Git refuses because the branch has commits that are not merged, the dialog shows Git's message and a checkbox, **Discard commits that exist only on this branch**. The delete button stays off until you tick the checkbox. Then GitMaster deletes the branch with `-D`, which discards those commits.
@@ -110,7 +118,7 @@ The three buttons in the top bar run the remote commands. Each command appears i
 | --- | --- | --- |
 | **Fetch** | `git fetch --all --prune` | Fetches every remote. It removes the remote-tracking branches that no longer exist on their remote. |
 | **Pull** | `git pull --ff-only` | Only moves the branch forward. It never creates a merge commit and never rebases. Refuses when HEAD is detached, and when the branch has no upstream. If the branch cannot move forward, Git's message is shown as it is. |
-| **Push with lease** | Pushes the checked-out branch | Only the checked-out branch can be pushed. Git refuses the push when the remote branch has changed since your last fetch. The push does not follow tags. |
+| **Push with lease** | `git push --no-follow-tags --force-with-lease` | Pushes the checked-out branch only. Git refuses the push when the remote branch has changed since your last fetch. The push does not follow tags. |
 
 For **Push with lease**, the upstream decides where the branch goes:
 
@@ -120,34 +128,50 @@ For **Push with lease**, the upstream decides where the branch goes:
 
 ## The branch menu
 
-Right-click a branch in the sidebar to open its menu.
+Right-click a branch in the sidebar to open its menu. The items appear in this order, split into groups by separators.
 
 | Item | What it does |
 | --- | --- |
 | **Checkout Branch** | Checks out the branch. |
 | **New Branch…** | Opens the New Branch dialog, with this branch as the start point. |
-| **Create Worktree** | Opens the Create Worktree dialog with this branch. |
+| **Create Worktree** | Opens the Create Worktree dialog with this branch. See [Worktrees](worktrees.md). |
+| **New Child Branch**, **Set Parent…**, **Remove From Stack**, **Reparent to Grandparent**, **Restack This Stack** | Stack actions, described in [Stack actions](#stack-actions). |
 | **Push With Lease** | Pushes the branch with lease. It works for the checked-out branch only. |
 | **Copy Branch Name** | Copies the name of the branch. |
+| **Rename Branch** | Listed, disabled. See [Rename a branch](#rename-a-branch). |
 | **Delete Branch** | Deletes the branch, after confirmation. The item is red. |
 
 A disabled item shows its reason in place of its shortcut. Items that delete work are red and ask for confirmation first. For the shortcuts of each item, see [Keyboard shortcuts](../reference/keyboard-shortcuts.md).
 
-A branch that is checked out in a linked worktree has a different menu, for working with that worktree. See [Worktrees](worktrees.md).
+A branch that is checked out in a linked worktree has a different menu, for working with that worktree. See [Worktrees](worktrees.md#branch-menu-for-a-worktree-branch).
 
 ## Stack actions
 
-> **Planned.** Restack This Stack and Rename Branch are not available yet.
+Stacks are a preview feature. They are hidden in the release build. Start GitMaster with `GITMASTER_PREVIEW=stacks` to turn them on. See [Stacks and restack](stacks.md).
 
-The branch menu shows **New Child Branch**, **Set Parent…**, **Remove From Stack**, **Reparent to Grandparent**, **Restack This Stack** and **Rename Branch**. New Child Branch creates a branch whose parent is this branch. Set Parent… picks another local branch as the parent, and Remove From Stack removes the parent. Reparent to Grandparent is enabled when the parent is gone or merged. Restack This Stack brings the branches of the stack that contains this branch up to date with their parents. Rename Branch changes the name of the branch. For stacks, see [Stacks](stacks.md).
+The branch menu has these stack actions:
+
+- **New Child Branch** creates a branch whose parent is this branch.
+- **Set Parent…** picks another local branch as the parent.
+- **Remove From Stack** removes the parent of this branch.
+- **Reparent to Grandparent** is enabled when the parent is gone or merged.
+- **Restack This Stack** brings the branches of the stack up to date with their parents.
+
+## Rename a branch
+
+> **Planned.** Rename Branch is not available yet. Its item is listed in the branch menu, disabled.
 
 ## By stack view
 
-The **By stack** view shows the local branches as a tree of parents, under a **Stacks** section and a **No stack** section. Remote branches are listed in the **By name** view only. A branch whose parent has moved shows an amber dot. A branch with commits beyond its parent shows their number, such as `↑3`. A parent that has branches to restack shows the action with their number, such as `restack 3`. For stacks, see [Stacks](stacks.md).
+> **Note.** The **By stack** view is part of the Stacks preview feature. Without it, the sidebar shows only **By name**.
+
+The **By stack** view shows the local branches as a tree of parents, under a **Stacks** section and a **No stack** section. Remote branches are listed in the **By name** view only. A branch whose parent has moved shows an amber dot. A branch with commits beyond its parent shows their number, such as `↑3`. A parent that has branches to restack shows the number of branches, such as `restack 3`. For stacks, see [Stacks and restack](stacks.md).
 
 ## Set a parent by dragging
 
-In the **By stack** view, drag a branch onto another branch. The branch you drop it on becomes the parent of the dragged branch. A row that cannot be the parent is dimmed while you drag, and the status bar says why. For how a parent is set and what it changes, see [Stacks](stacks.md).
+> **Note.** Dragging to set a parent is part of the Stacks preview feature.
+
+In the **By stack** view, drag a branch onto another branch. The branch you drop it on becomes the parent of the dragged branch. A row that cannot be the parent is dimmed while you drag, and the status bar says why. For how a parent is set and what it changes, see [Stacks and restack](stacks.md).
 
 ## Move a file to a branch
 
