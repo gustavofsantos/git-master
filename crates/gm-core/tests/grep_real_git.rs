@@ -381,15 +381,33 @@ fn searching_writes_nothing_into_the_repository() {
 #[cfg(unix)]
 mod with_a_script_for_git {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
+
+    /// Writes an executable script from a child process. Writing it here and running it at once
+    /// races with other test threads' forks, which inherit the open file and make the exec fail
+    /// with "Text file busy" (ETXTBSY).
+    fn write_script(path: &Path, text: &str) {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(text.as_bytes())
+            .expect("write");
+        assert!(child.wait().expect("wait").success());
+    }
 
     /// A directory with a `git` script first on the path.
     fn fake_git(script: &str) -> (tempfile::TempDir, SubprocessGit) {
         let bin = tempfile::tempdir().unwrap();
         let path = bin.path().join("git");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(&path, &format!("#!/bin/sh\n{script}\n"));
         let git = SubprocessGit::default();
         git.login_path
             .set(format!("{}:/usr/bin:/bin", bin.path().display()))

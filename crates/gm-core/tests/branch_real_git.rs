@@ -207,18 +207,36 @@ fn listing_records_nothing_and_checkout_is_logged_as_switch() {
     assert!(entries[0].succeeded());
 }
 
+/// Writes an executable script from a child process. Writing it here and running it at once
+/// races with other test threads' forks, which inherit the open file and make the exec fail
+/// with "Text file busy" (ETXTBSY).
+#[cfg(unix)]
+fn write_script(path: &Path, text: &str) {
+    use std::io::Write;
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("sh");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(text.as_bytes())
+        .expect("write");
+    assert!(child.wait().expect("wait").success());
+}
+
 #[cfg(unix)]
 #[test]
 fn checkout_runs_the_post_checkout_hook() {
-    use std::os::unix::fs::PermissionsExt;
     let (_base, clone) = fixture();
     let hook = clone.join(".git/hooks/post-checkout");
-    std::fs::write(
+    write_script(
         &hook,
         "#!/bin/sh\ntouch \"$(git rev-parse --git-dir)/hook-ran\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     SubprocessGit::default().checkout(&clone, "wip").unwrap();
 

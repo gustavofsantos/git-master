@@ -491,13 +491,32 @@ fn refuses_to_commit_an_empty_index_on_an_unborn_branch() {
     assert_eq!(error.0, "nothing staged to commit");
 }
 
+/// Writes an executable script from a child process. Writing it here and running it at once
+/// races with other test threads' forks, which inherit the open file and make the exec fail
+/// with "Text file busy" (ETXTBSY).
+#[cfg(unix)]
+fn write_script(path: &Path, text: &str) {
+    use std::io::Write;
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("sh");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(text.as_bytes())
+        .expect("write");
+    assert!(child.wait().expect("wait").success());
+}
+
 #[cfg(unix)]
 fn install_hook(dir: &Path, name: &str, script: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(".git/hooks").join(name);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_script(&path, script);
 }
 
 #[cfg(unix)]

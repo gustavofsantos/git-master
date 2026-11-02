@@ -18,6 +18,27 @@ use gm_schema::{
     Actor, Command, CommandKind, Event, OperationId, OperationState, WorkflowEnd, WorkflowInfo,
 };
 
+/// Writes an executable script from a child process. Writing it here and running it at once
+/// races with other test threads' forks, which inherit the open file and make the exec fail
+/// with "Text file busy" (ETXTBSY).
+#[cfg(unix)]
+fn write_script(path: &Path, text: &str) {
+    use std::io::Write;
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("sh");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(text.as_bytes())
+        .expect("write");
+    assert!(child.wait().expect("wait").success());
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let output = Process::new("git")
         .args([
@@ -929,7 +950,6 @@ struct SlowRemote {
 
 #[cfg(unix)]
 fn slow_remote() -> SlowRemote {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let origin = dir.path().join("origin.git");
     let repo = dir.path().join("repo");
@@ -967,15 +987,13 @@ fn slow_remote() -> SlowRemote {
     git(&other, &["push", "-q", "origin", "main"]);
     let tip = rev(&other, "main");
     let wrapper = dir.path().join("slow-upload-pack");
-    std::fs::write(
+    write_script(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\ntouch '{}'\nsleep 2\nexec git upload-pack \"$@\"\n",
             started.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     git(
         &repo,
         &[

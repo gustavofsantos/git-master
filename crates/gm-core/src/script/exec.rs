@@ -299,6 +299,27 @@ mod tests {
 
     use super::*;
 
+    /// Writes an executable script from a child process. Writing it here and running it at once
+    /// races with other test threads' forks, which inherit the open file and make the exec fail
+    /// with "Text file busy" (ETXTBSY).
+    #[cfg(unix)]
+    fn write_script(path: &Path, text: &str) {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(text.as_bytes())
+            .expect("write");
+        assert!(child.wait().expect("wait").success());
+    }
+
     fn exec(argv: &[&str], stdin: Option<&str>, timeout: Duration, json: bool) -> ExecSpec {
         ExecSpec {
             argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
@@ -522,9 +543,7 @@ mod tests {
         // A script of our own, so the test does not depend on how the system builds
         // `echo` (a multicall binary changes its behaviour with the name it is linked as).
         let probe = dir.path().join("gm-probe-echo");
-        std::fs::write(&probe, "#!/bin/sh\necho \"$@\"\n").expect("write");
-        std::fs::set_permissions(&probe, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .expect("chmod");
+        write_script(&probe, "#!/bin/sh\necho \"$@\"\n");
         let mut spec = exec(
             &["gm-probe-echo", "hi"],
             None,
