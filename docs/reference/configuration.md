@@ -39,7 +39,6 @@ GitMaster keeps per-repository state in `.git/gitmaster/`, inside the Git common
 | `.git/gitmaster/` (local review data) | Comments and snapshots of the local review. | Planned |
 | `.git/gitmaster/threads.db` | The [threads](../guide/threads.md) captured from agent sessions in this repository: conversation, tool calls and edits, with a search index. Readable only by you. | |
 | `.git/gitmaster/threads-spool/`, `threads-tmp/`, `threads.log` | Events waiting to be written when the database was busy, temporary copies of files the agent is about to edit, and the capture log. The log keeps at most 256 KiB. | |
-| `.git/gitmaster/symbols.db` | The symbol index used by code navigation. | Planned |
 | Private refs inside `.git` | Snapshots taken before a restack, which an undo restores. | Planned |
 
 The Git command log, the list of Git commands with side effects that the **Git commands** panel shows, is kept in memory only. It keeps the last 1000 commands and is lost when the app closes.

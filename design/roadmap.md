@@ -2,7 +2,7 @@
 
 The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `make docs-status` lists what the docs still mark as planned.
 
-Last updated: 2026-11-01 (next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
+Last updated: 2026-11-02 (N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
 
 ## Order criteria
 
@@ -218,13 +218,13 @@ Known gaps:
 
 ## Slice 3: history and branches (by-name view) (in progress: H1 to H5 done, with H4b-A, H4b-B and H4c)
 
-**Next step (author's decision, 2026-11-01):** the order is (1) **resolving a restack conflict** (slice 5, sub-slice 5f; done), (2) **WF3** (slice 3w, sub-slices in D155; done), (3) **N5** (slice 3c), after the author confirms D45, D50 and D92 and agrees its "Done when". H6 is done in slice 4c; H7 and H8 stay postponed. The "How to continue" note below is from 2026-10-25 and describes N5 as it was then.
+**Next step (author's decision, 2026-11-01):** the order is (1) **resolving a restack conflict** (slice 5, sub-slice 5f; done), (2) **WF3** (slice 3w, sub-slices in D155; done), (3) ~~N5~~, removed by the author on 2026-11-02 (D163). H6 is done in slice 4c; H7 and H8 stay postponed. The "How to continue" note below is from 2026-10-25 and describes N5 as it was then.
 
 ### How to continue (end of the 2026-10-25 session)
 
 **Where the code is.** Everything is on the working branch of the session. Before this session: H5 (lane graph), spikes S-A to S-C, N1 to N3. This session added N4 (syntax highlighting, D111). The agent did not see any of it in a window, because the container has no display. `make lint`, `make docs` and `cargo test --workspace` are the checks; there are no new smoke scenarios (D88).
 
-**Next work: N5, symbols and the single box.** It reuses the tree-sitter of N4 and the proposals of D92: definitions by tree walk where the language allows it (Rust, Python, Go) and by query for TypeScript and JavaScript, an index in `.git/gitmaster/symbols.db` keyed by blob, language and query version, and the single search box of D50. D45 stays Proposed for the symbol index: confirm it with the author, and agree the "Done when" of N5 in `design/code-navigation.md`, before writing code.
+**Next work (superseded: N5 was removed by D163 on 2026-11-02): N5, symbols and the single box.** It reuses the tree-sitter of N4 and the proposals of D92: definitions by tree walk where the language allows it (Rust, Python, Go) and by query for TypeScript and JavaScript, an index in `.git/gitmaster/symbols.db` keyed by blob, language and query version, and the single search box of D50. D45 stays Proposed for the symbol index: confirm it with the author, and agree the "Done when" of N5 in `design/code-navigation.md`, before writing code.
 
 **Owed after N4:**
 
@@ -476,7 +476,7 @@ Proposal of 2026-10-19, detailed in the TOML workflow specification (available i
 - **WF4, stack actions and templates (with slices 4 and 5).** `ctx.stack.*`, `ctx.restack.*`, `ctx.reparent.*`, `ctx.push.lease`, the events `stack.parent_moved` and `stack.parent_merged`, and three built-in templates, in Lua. Done when: turning on "Restack children when parent moves" restacks the subtree after a commit on the parent, with a plan, undo and a pause on conflict, and with no code specific to this policy.
 - **WF5, MCP (with slice 7).** `workflow_list` and `workflow_run`. There is no tool to create or edit scripts (D102). Done when: an agent lists the workflows and fires one; the `apply` steps of the run wait for the human's approval in the UI (D64(c)).
 
-## Slice 3c: code navigation (in progress: S-A, S-B, S-C, N1, N2, N3 and N4 done; N5 next)
+## Slice 3c: code navigation (in progress: S-A, S-B, S-C, N1, N2, N3 and N4 done; N5 removed by D163; N6 to do)
 
 Details, engines and risks are in `design/code-navigation.md`. Decisions D43 to D51 are in `design/decisions.md`: D43 is decided; D44 to D51 are proposed, with D44 and D46 supported by the spikes (D89). The slice adds a Code page with Quick Open for files, grep and symbols, on top of a read-only viewer. Each sub-slice has its "Done when" in `design/code-navigation.md`.
 
@@ -523,17 +523,17 @@ Details, engines and risks are in `design/code-navigation.md`. Decisions D43 to 
     - a file name with a line break splits the record, and that line disappears;
     - the results list has no keyboard support and no text selection;
     - `--threads` must be measured on the Mac;
-    - the Code page's search field and Quick Open are still separate boxes (the single box is N5, D50).
+    - the Code page's search field and Quick Open are separate boxes (by design since D163).
 - **N4, syntax highlighting** (done on 2026-10-25, D111; no smoke scenario, per D88; nothing seen in a window).
   - The viewer colors Rust, Python, Go, TypeScript with TSX, and JavaScript (widened on the same day by D112 to Java, C, C++, C#, Ruby, Bash, JSON, TOML, YAML, HTML and CSS, and by D113 to Clojure), in twelve roles with palette tokens in both themes (design/visual-identity.md). The text shows first and the colors follow in a `FileHighlighted` event; a file in another language, a binary and a missing file stay plain.
   - D112 samples: one test per added language checks its roles, a test checks every compiled-in query compiles and names only known captures, and one checks the path-to-language table. Not done: the timing and binary size of the added grammars, Markdown, SCSS and PHP.
   - Built: pure module `gm-core/src/syntax.rs` (language by extension, capture name to role, `highlight(language, text, stop)` with a 2 s budget checked by the parser and the query cursor, long lines left plain), the product's queries in `gm-core/queries/`, one Cargo feature per grammar, `HighlightJob` on its own thread stopped by a newer read, `SyntaxRole` and `HighlightSpan` in `gm-schema`, `Shown.spans` and `styled()` in `gm-ui/src/code_page.rs`, and the painter in `shell_code.rs`.
   - Checked: 20 unit and property tests of the module (samples per language, span order and character boundaries, determinism, stop, budget, long lines, multibyte, syntax errors, every capture of every query has a role), 4 engine tests (text before colors, no job for plain files, a newer read stops and drops the colors), 8 model tests for the pieces of a line (scroll, tabs, spans from earlier lines, the colors of a file no longer on screen are dropped), and 3 theme tests (4.5:1 on four backgrounds in both themes, distinct colors, one per role). Release build on Linux: 2 MiB of Rust (58,000 lines) in 0.9 s, first-use query compile 37 ms (`cargo test --release -p gm-core --lib syntax::tests::timing -- --ignored --nocapture`).
   - Known gaps: nothing was seen in a window, so the actual look of the colors and the legibility on a real screen are unchecked; the binary growth (about 5 MB) and the macOS and Windows builds were not measured; the whole file is parsed on every read (no incremental parsing, the viewer is read-only); there is no text selection, so the `selection` background is checked in theme tests only; the queries are the crates' seeds with a few corrections, not yet tuned on real code (for example Rust `self` and attribute items, Python decorators, TypeScript generics), and an unlisted capture name is silent (a test lists them); `.d.ts` files go through the TypeScript grammar, and no extensionless file (a shebang script) gets a language; highlighting in the diff is separate (D42); injections (code in markdown) are out; Markdown, SCSS and PHP have no grammar yet.
-- **N5, symbols and single box**: index by blob, single search box (D50), outline, go to definition.
-- **N6, revisions, MCP Read tools and performance gate.**
+- **N5, symbols and single box: removed by the author on 2026-11-02 (D163).** Nothing was built.
+- **N6, revisions and performance gate** (the MCP Read tools were dropped by D135).
 
-Done when: opening a file by name, finding text and jumping to a definition takes seconds in a 100 thousand file repository, without freezing the UI.
+Done when: opening a file by name and finding text take seconds in a 100 thousand file repository, without freezing the UI.
 
 ## Slice 4: stacks (model and visualization) (in progress: 4a, 4b and 4c done, with gaps; 4c2 and 4d to do)
 

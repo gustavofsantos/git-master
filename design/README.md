@@ -11,7 +11,7 @@ The product is specified in [`docs/`](../docs/README.md): the official documenta
 | [`architecture.md`](architecture.md) | Hexagonal architecture, engine rules, persistence, crates, risks. |
 | [`screens.md`](screens.md) | Screen-level design decisions behind the user guide. |
 | [`stacks-restack.md`](stacks-restack.md) | Stack model and the restack algorithm. |
-| [`code-navigation.md`](code-navigation.md) | Engineering design for Quick Open, search and symbols: engines, ranking, indexes, risks. |
+| [`code-navigation.md`](code-navigation.md) | Engineering design for Quick Open, the viewer and text search: engines, ranking, risks (symbols removed, D163). |
 | [`workflow-scripts.md`](workflow-scripts.md) | Engineering design for script workflows: sandbox, budgets, journal, approvals, tooling. |
 | [`hooks-transitional.md`](hooks-transitional.md) | The `prepare-commit` hook that workflows replace. |
 | [`visual-identity.md`](visual-identity.md) | Palette, icon, files in `assets/icons/`. |

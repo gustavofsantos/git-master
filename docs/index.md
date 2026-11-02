@@ -19,8 +19,6 @@ GitMaster covers the work you do every day in a repository. The **Working Copy**
 
 You can move around a repository without leaving the app. **Quick Open** (`Ctrl+P`, `⌘P` on macOS) finds a file by name in the active worktree. The **Code** page shows the folder tree and a read-only file viewer. The **Search** page runs a text search with case, whole word and regular expression options, and groups the matches by file.
 
-> **Planned.** Symbol search, the file outline, go to definition and find usages are not available in the app yet.
-
 ### Agents under human accountability
 
 An agent can read your review comments and earlier threads through GitMaster, and record that it handled a comment. GitMaster gives it no way to change the repository, and what you see as handled stays open to you until you resolve it. What the agent did is measured from the repository, not taken from its own account. Workflows are Lua scripts that run in a sandbox and act only through GitMaster's own actions. You run them from the command palette or with a keyboard shortcut. The agent integration is exposed through an MCP server, a local review loop, and branch stacks with restack.

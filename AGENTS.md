@@ -9,7 +9,7 @@ GitMaster is a powerful Git client joined to the tools an engineer needs to work
 It is **not a clone of any existing client**. Mature Git clients and IDE tooling are references: where they made a choice that works (branch sidebar, per-line staging, three-pane conflict resolution), we adopt the idea and do it well; then we go beyond. Do not copy another product's name, branding, artwork or wording. Naming open source projects and libraries is fine; do not reference paid or proprietary products (competing clients, IDEs, hosted services) in code, docs, UI or commits. The product rests on three pillars:
 
 1. **A Git client that is complete and fast.** Working Copy, history, branches, worktrees, conflicts, command palette. This is the base and has to be excellent on its own.
-2. **A workspace for working with code, not only commits.** Navigating the repository where you stand: file search, text search, symbol search, a read-only viewer. Local, so it should feel instant.
+2. **A workspace for working with code, not only commits.** Navigating the repository where you stand: file search, text search, a read-only viewer with syntax highlighting (no symbol index: D163). Local, so it should feel instant.
 3. **Agents under human accountability.** The agent proposes, the human approves, and what the agent did is observed, not self-reported. Exposed through MCP, workflows written as Lua scripts that run in a sandbox (they replace the hooks configured in `.gitconfig`, D75, D98), a local review loop. Branch stacking with restack is first class.
 
 Every feature should serve at least one pillar. If it serves none, question it before building it.

@@ -9,7 +9,7 @@ GitMaster lets you find a file, read it and search the text of the project witho
 
 ## Why navigate in GitMaster
 
-When you review a change, you often need the code around it: the file a change touches, the other places a name is used, the module a function comes from. Hosted code services answer these questions in a browser. GitMaster answers them in the same window as your changes, from the repository on your disk, so you keep your place in the review.
+When you review a change, you often need the code around it: the file a change touches, the other places a name appears, the module a function comes from. Hosted code services answer these questions in a browser. GitMaster answers them in the same window as your changes, from the repository on your disk, so you keep your place in the review.
 
 ## The active worktree
 
@@ -203,50 +203,6 @@ The files box takes words separated by spaces. Each word is a Git pathspec, so `
 
 With **.\*** on, the text is read as a regular expression in Git's extended syntax. Perl shorthand such as `\d` is not available. Write `[0-9]` instead.
 
-## Symbol search
-
-> **Planned.** Symbol search is not available in the app yet.
-
-Symbol search finds named definitions such as functions, types and classes. Each result shows its kind, for example `fn`, `struct`, `class` or `trait`, with its file and line.
-
-- Press `Ctrl+Shift+O` (`⇧⌘O` on macOS) to see the outline of the current file.
-- Type `#` in Quick Open to search symbols in the whole repository.
-- Symbols are found for Rust, TypeScript, JavaScript, Python and Go. Files in other languages are still found by name and by text, but have no symbols.
-- The index is built in the background and is kept in `.git/gitmaster/`. While it is still being built, results say that they are partial. Deleting it costs only a rebuild, and it never sits in your working tree.
-
-## Go to definition
-
-> **Planned.** Go to definition is not available in the app yet.
-
-Go to definition moves from an identifier to the place where that name is defined.
-
-- Click an identifier in the viewer, or search for the name in symbol search.
-- When one definition matches, it opens directly. When several match, all of them are listed, and you choose one. GitMaster never guesses.
-- The search matches names. It does not resolve scope or types, so it cannot tell which definition the code actually uses.
-
-## Find usages
-
-> **Planned.** Find usages is not available in the app yet.
-
-Find usages lists every place a name appears as a whole word. It uses the same text search as the **Search** page.
-
-The results are text matches, not references. The list says so. A name used for two different things appears under both.
-
-## One search box
-
-> **Planned.** The single search box is not available in the app yet.
-
-One search box decides from the text you type which searches to run, so you do not need any syntax. Results appear in sections, in a fixed order.
-
-| You type | Sections, in order |
-|---|---|
-| A name, such as `diff_pane` or `DiffPane` | Files, Definitions, Usages |
-| A file, such as `diff_pane.rs` or `diff_pane.rs:120` | Files |
-| A call, such as `open(` | Definitions, Calls |
-| Several words, punctuation or quotes, such as `"not available yet"` | Text |
-
-Within a section, results are ordered by how well they match, then by path and line. Each new keystroke cancels the searches that are still running.
-
 ## Browsing revisions
 
 > **Planned.** Browsing files at a revision is not available in the app yet.
@@ -262,17 +218,11 @@ Browsing lets you read the files of any branch, tag or commit, in the same read-
 
 From the diff or the detail of a commit, choose **View file** to see that file as it was in the commit.
 
-## MCP read tools
-
-> **Planned.** The read tools for code are not available in the MCP server yet.
-
-Agents can search files, search text and symbols, and read a range of lines of a file through the MCP server, with the tools `files_search`, `code_grep`, `symbols_search` and `file_read`. They only read, so they need no approval. See the [MCP server](../agents/mcp-server.md) and the [MCP tools](../reference/mcp-tools.md) reference.
-
 ## What it does not do
 
 - It does not edit files. The viewer is read-only, and nothing is written into the worktree.
-- It does not provide language-server features, such as semantic references that find every use of a symbol by its meaning.
-- It does not rename symbols.
+- It does not index symbols: there is no symbol search, file outline, go to definition or find usages. Use the **Search** page, with **Whole word** for a name.
+- It does not provide language-server features, such as semantic references or renaming.
 - It does not search inside submodules or Git LFS content.
 
 ## Comment on a range of lines

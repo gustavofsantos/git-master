@@ -1,5 +1,7 @@
 # Code navigation: engineering design
 
+> **D163 (author, 2026-11-02):** symbols, the outline, go to definition, find usages and the single box are removed from the product. The sections **Single box (D50)** and **Symbols** below are kept as history only; the highlighting findings of spike S-B still hold (D111, D112).
+
 The user-facing behavior is specified in `docs/guide/code-navigation.md`; this file keeps the engineering rationale.
 
 Last updated: 2026-10-25. Status: scope decided (D43). S-A, S-B, S-C, N1, N2, N3 and N4 are done (`design/roadmap.md`, D89 to D92). D44 and D46 were backed by the spikes and by N3. D45 has the spike (D92); the author confirmed it for highlighting (D111) and it stays **proposed** for the symbol index until N5. The rest (N5 and N6, D47 to D51) stays **proposed** in `design/decisions.md`.
