@@ -650,3 +650,99 @@ fn copy_to_edit_writes_an_unreviewed_copy_under_a_new_name() {
         Event::WorkflowCopied { name, .. } if name == "restack-children-on-parent-move-custom-2"
     )));
 }
+
+const ON_PARENT_MOVED: &str = r#"
+local M = {}
+M.meta = { name = "on-parent-moved", trigger = { on = "stack.parent_moved" } }
+function M.execute(ctx, input)
+  ctx.notify("moved " .. input.trigger.branch)
+end
+return M
+"#;
+
+#[test]
+fn a_branch_already_stale_when_the_restack_is_switched_on_is_restacked_by_the_next_parent_commit() {
+    let (_dir, repo, flows) = setup();
+    let base = stacked_repo(&repo);
+    // main moves before the repository opens, so feat is stale from the start.
+    std::fs::write(repo.join("elsewhere.txt"), "x\n").unwrap();
+    git(&repo, &["add", "elsewhere.txt"]);
+    git(&repo, &["commit", "-q", "-m", "main moves"]);
+    let mut h = Harness::new(&repo, &flows);
+    h.switch_on_with_grant(RESTACK_CHILDREN);
+    let settled = h.settle(Duration::from_millis(300));
+    assert!(
+        h.runs(RESTACK_CHILDREN).is_empty() && started_runs(&settled).is_empty(),
+        "switching on fires nothing: {settled:#?}"
+    );
+
+    // Another commit on main moves its tip again: feat is still stale, and its parent moved.
+    let mut events = h.commit_file("elsewhere2.txt", "y\n", "main moves again");
+    events.extend(h.refs_seen());
+    let events = h.pump_until(events, finished);
+    assert!(
+        approvals(&events).is_empty(),
+        "the grant applies: {events:#?}"
+    );
+    assert_eq!(ends(&events).len(), 1, "{events:#?}");
+    assert_eq!(ends(&events)[0].1, WorkflowEnd::Done, "{events:#?}");
+    assert_eq!(
+        notices(&events),
+        vec!["Restacked 1 branches on main".to_owned()]
+    );
+    let new_main = git(&repo, &["rev-parse", "main"]);
+    assert_ne!(new_main, base);
+    git(&repo, &["merge-base", "--is-ancestor", "main", "feat"]);
+    assert_eq!(
+        git(&repo, &["config", "branch.feat.stackParentBase"]),
+        new_main
+    );
+    let runs = h.runs(RESTACK_CHILDREN);
+    assert_eq!(runs.len(), 1, "{runs:#?}");
+    assert_eq!(runs[0].status, WorkflowRunStatus::Done);
+    assert_eq!(runs[0].started_by, "event:stack.parent_moved");
+
+    // A refresh with nothing moved fires nothing.
+    let mut events = h.refs_seen();
+    events.extend(h.settle(Duration::from_millis(300)));
+    assert!(started_runs(&events).is_empty(), "{events:#?}");
+    assert_eq!(h.runs(RESTACK_CHILDREN).len(), 1);
+}
+
+#[test]
+fn a_stale_branch_fires_parent_moved_once_per_parent_move_and_not_on_a_refresh() {
+    let (_dir, repo, flows) = setup();
+    stacked_repo(&repo);
+    // main moves before the repository opens: feat is stale from the start.
+    std::fs::write(repo.join("elsewhere.txt"), "x\n").unwrap();
+    git(&repo, &["add", "elsewhere.txt"]);
+    git(&repo, &["commit", "-q", "-m", "main moves"]);
+    write_script(&flows, "on-parent-moved.lua", ON_PARENT_MOVED);
+    let mut h = Harness::new(&repo, &flows);
+    h.review("on-parent-moved", false);
+
+    // The opening snapshot is the baseline, and a refresh with no move fires nothing.
+    let mut events = h.refs_seen();
+    events.extend(h.settle(Duration::from_millis(300)));
+    assert!(started_runs(&events).is_empty(), "{events:#?}");
+    assert!(h.runs("on-parent-moved").is_empty());
+
+    // The parent moves again: feat is still stale and its parent tip differs, so it fires once.
+    let mut events = h.commit_file("elsewhere2.txt", "y\n", "main moves again");
+    events.extend(h.refs_seen());
+    let events = h.pump_until(events, finished);
+    assert_eq!(
+        notices(&events),
+        vec!["moved feat".to_owned()],
+        "{events:#?}"
+    );
+    let events = h.settle(Duration::from_millis(300));
+    assert!(started_runs(&events).is_empty(), "{events:#?}");
+    assert_eq!(h.runs("on-parent-moved").len(), 1);
+
+    // feat stays stale and nothing moves: a refresh fires nothing.
+    let mut events = h.refs_seen();
+    events.extend(h.settle(Duration::from_millis(300)));
+    assert!(started_runs(&events).is_empty(), "{events:#?}");
+    assert_eq!(h.runs("on-parent-moved").len(), 1);
+}

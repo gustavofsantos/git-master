@@ -99,10 +99,11 @@ pub fn refs_changed(change: &RefChange) -> TriggerEvent {
 }
 
 /// The stack events of a change from the snapshot `old` to `new` (`WF3f`, D162(2)).
-/// `stack.parent_moved` fires for a branch that became `Stale`, and `stack.parent_merged` for one
-/// whose parent became `ParentGone` or `ParentMerged`. A branch that `old` does not have counts as
-/// having no state before, so it fires when it is already in that state. Each transition fires
-/// once: a branch that stays in the state fires nothing.
+/// `stack.parent_moved` fires for a branch that is `Stale` now and either was not `Stale` before or
+/// has a different `parent_tip`, so every move of the parent fires while the branch stays stale, and
+/// a stale branch whose parent did not move fires nothing. A branch that `old` does not have counts
+/// as not stale before. `stack.parent_merged` fires for a branch whose parent became `ParentGone` or
+/// `ParentMerged`, once per transition.
 #[must_use]
 pub fn stack_transitions(old: &StackSnapshot, new: &StackSnapshot) -> Vec<TriggerEvent> {
     let mut events = Vec::new();
@@ -111,16 +112,25 @@ pub fn stack_transitions(old: &StackSnapshot, new: &StackSnapshot) -> Vec<Trigge
             let Some(parent) = branch.parent.as_deref() else {
                 continue;
             };
-            let before = old.branch(&branch.name).map(|entry| entry.state);
-            if branch.state == StackState::Stale && before != Some(StackState::Stale) {
+            let before = old.branch(&branch.name);
+            if branch.state == StackState::Stale && parent_moved_since(before, branch) {
                 events.push(parent_moved(branch, parent));
             }
-            if parent_left(branch.state) && !before.is_some_and(parent_left) {
+            if parent_left(branch.state) && !before.is_some_and(|b| parent_left(b.state)) {
                 events.push(parent_merged(&branch.name, parent));
             }
         }
     }
     events
+}
+
+/// Whether a branch that is `Stale` now moved its parent since `before`: it was not `Stale`, or
+/// its `parent_tip` differs. A branch that `before` does not have counts as not stale.
+fn parent_moved_since(before: Option<&StackBranch>, now: &StackBranch) -> bool {
+    match before {
+        None => true,
+        Some(before) => before.state != StackState::Stale || before.parent_tip != now.parent_tip,
+    }
 }
 
 /// The states of a branch whose parent is gone or merged.
@@ -679,6 +689,11 @@ mod tests {
     }
 
     fn stack_snap(branches: &[(&str, Option<&str>, StackState)]) -> StackSnapshot {
+        stack_snap_at(branches, "tip-2")
+    }
+
+    /// A snapshot whose every branch has the parent tip `tip`.
+    fn stack_snap_at(branches: &[(&str, Option<&str>, StackState)], tip: &str) -> StackSnapshot {
         StackSnapshot {
             stacks: vec![Stack {
                 branches: branches
@@ -693,7 +708,7 @@ mod tests {
                         restack: 0,
                         commits: Vec::new(),
                         base: Some("base-1".to_owned()),
-                        parent_tip: Some("tip-2".to_owned()),
+                        parent_tip: Some(tip.to_owned()),
                     })
                     .collect(),
             }],
@@ -736,10 +751,22 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_that_stays_stale_fires_nothing() {
-        let old = stack_snap(&[("feat", Some("main"), StackState::Stale)]);
-        let new = stack_snap(&[("feat", Some("main"), StackState::Stale)]);
+    fn a_branch_that_stays_stale_with_the_same_parent_tip_fires_nothing() {
+        let old = stack_snap_at(&[("feat", Some("main"), StackState::Stale)], "tip-1");
+        let new = stack_snap_at(&[("feat", Some("main"), StackState::Stale)], "tip-1");
         assert!(stack_transitions(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn an_already_stale_branch_fires_when_its_parent_tip_moves() {
+        let old = stack_snap_at(&[("feat", Some("main"), StackState::Stale)], "tip-1");
+        let new = stack_snap_at(&[("feat", Some("main"), StackState::Stale)], "tip-2");
+        let events = stack_transitions(&old, &new);
+        assert_eq!(
+            names(&events),
+            [("stack.parent_moved".to_owned(), Some("feat".to_owned()))]
+        );
+        assert_eq!(events[0].trigger_value()["parent_tip"], "tip-2");
     }
 
     #[test]
