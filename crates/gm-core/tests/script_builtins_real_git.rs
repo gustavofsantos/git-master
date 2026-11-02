@@ -930,3 +930,42 @@ fn a_workflow_restack_reports_its_record_and_undo_puts_the_branches_back() {
     assert_eq!(restack_records(&events), vec![None]);
     assert_eq!(git(&repo, &["rev-parse", "feat"]), feat_before);
 }
+
+#[test]
+fn undo_of_a_restack_is_a_baseline_and_the_next_parent_move_restacks_again() {
+    let (_dir, repo, flows) = setup();
+    stacked_repo(&repo);
+    let feat_before = git(&repo, &["rev-parse", "feat"]);
+    let mut h = Harness::new(&repo, &flows);
+    h.switch_on_with_grant(RESTACK_CHILDREN);
+
+    // main moves: the run restacks feat.
+    let mut events = h.commit_file("elsewhere.txt", "x\n", "main moves");
+    events.extend(h.refs_seen());
+    let mut events = h.pump_until(events, finished);
+    assert_eq!(ends(&events)[0].1, WorkflowEnd::Done, "{events:#?}");
+    assert_ne!(git(&repo, &["rev-parse", "feat"]), feat_before);
+    events.extend(h.settle(Duration::from_millis(300)));
+    assert_eq!(h.runs(RESTACK_CHILDREN).len(), 1);
+
+    // Undo from the window: feat is back where it was, and the undo starts no run.
+    let mut events = h.send(CommandKind::UndoRestack);
+    assert!(failure(&events).is_none(), "undo refused: {events:#?}");
+    events.extend(h.refs_seen());
+    events.extend(h.settle(Duration::from_millis(500)));
+    assert_eq!(git(&repo, &["rev-parse", "feat"]), feat_before);
+    assert!(started_runs(&events).is_empty(), "{events:#?}");
+    assert_eq!(h.runs(RESTACK_CHILDREN).len(), 1, "no new run after undo");
+
+    // The next move of main fires as usual and restacks feat again.
+    let mut events = h.commit_file("elsewhere2.txt", "y\n", "main moves again");
+    events.extend(h.refs_seen());
+    let events = h.pump_until(events, finished);
+    assert_eq!(ends(&events)[0].1, WorkflowEnd::Done, "{events:#?}");
+    git(&repo, &["merge-base", "--is-ancestor", "main", "feat"]);
+    assert_eq!(
+        git(&repo, &["config", "branch.feat.stackParentBase"]),
+        git(&repo, &["rev-parse", "main"])
+    );
+    assert_eq!(h.runs(RESTACK_CHILDREN).len(), 2);
+}

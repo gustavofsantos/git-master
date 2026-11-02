@@ -218,7 +218,7 @@ Known gaps:
 
 ## Slice 3: history and branches (by-name view) (in progress: H1 to H5 done, with H4b-A, H4b-B and H4c)
 
-**Next step (author's decision, 2026-11-01):** the order is (1) **resolving a restack conflict** (slice 5, sub-slice 5f; done), (2) **WF3** (slice 3w, sub-slices in D155; done), (3) ~~N5~~, removed by the author on 2026-11-02 (D163); then (4) **WF4** (author, 2026-11-02; sub-slices in D164; WF4a next). H6 is done in slice 4c; H7 and H8 stay postponed. The "How to continue" note below is from 2026-10-25 and describes N5 as it was then.
+**Next step (author's decision, 2026-11-01):** the order is (1) **resolving a restack conflict** (slice 5, sub-slice 5f; done), (2) **WF3** (slice 3w, sub-slices in D155; done), (3) ~~N5~~, removed by the author on 2026-11-02 (D163); then (4) **WF4** (author, 2026-11-02; sub-slices in D164; done), then (5) **`transform.conflict_hunk`** (author, 2026-11-02; D168). H6 is done in slice 4c; H7 and H8 stay postponed. The "How to continue" note below is from 2026-10-25 and describes N5 as it was then.
 
 ### How to continue (end of the 2026-10-25 session)
 
@@ -484,7 +484,7 @@ Proposal of 2026-10-19, detailed in the TOML workflow specification (available i
     - Known gaps: the built-in's notice reads "Restacked 1 branches" (no singular); the Workflows settings fields wait for the settings dialog (slice 9); the dark theme was not seen.
   - **WF4c, workflow restack in the window (done on 2026-11-02, with known gaps; D167).** The approval of `restack.apply` shows the plan; a conflict in a run notifies and opens Resolve conflict; the run resumes on `restack.resumed`; Undo is offered at once.
     - Checked: 12 UI unit tests; 3 new real-Git tests (the approval carries the plan, a conflict in a run is resolved from its notice and the run re-plans and applies, a workflow restack reports its record and Undo restores it), the file stable over three runs. Seen in a window (release build, Xvfb, light): the approval band listing the held-back branch and its conflict, the notice with Resolve conflict, the dialog and the resolver with the restack labels, Continue restack, the run's apply, the dialog re-planning to "up to date" with Undo restack, Undo.
-    - Known gaps: after **Undo restack**, `stack.parent_moved` fired at once and an automatic workflow restacked straight back: the author chose that an undo is a quiet baseline (D162), fix to do; reparent approvals use the same path but have no test and were not seen; the stale retry of the built-ins has no direct test; the dark theme was not seen.
+    - Known gaps: after **Undo restack**, `stack.parent_moved` fired at once and an automatic workflow restacked straight back: fixed (an undo is a quiet baseline, D162; a real-Git test fails without the fix), not re-seen in a window; reparent approvals use the same path but have no test and were not seen; the stale retry of the built-ins has no direct test; the dark theme was not seen.
 - **WF5, MCP (with slice 7).** `workflow_list` and `workflow_run`. There is no tool to create or edit scripts (D102). Done when: an agent lists the workflows and fires one; the `apply` steps of the run wait for the human's approval in the UI (D64(c)).
 
 ## Slice 3c: code navigation (in progress: S-A, S-B, S-C, N1, N2, N3 and N4 done; N5 removed by D163; N6 to do)

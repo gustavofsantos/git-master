@@ -2810,6 +2810,9 @@ impl Engine {
         only_a_human(actor, "restack")?;
         let root = self.open_root()?;
         let git = self.git.as_ref();
+        // An undo is a baseline for the stack events: the branches it puts back fire nothing, so an
+        // automatic restack does not undo the undo (D162(2)).
+        let fire = !matches!(kind, CommandKind::UndoRestack);
         let record = match kind {
             CommandKind::ApplyRestack {
                 branch,
@@ -2840,7 +2843,7 @@ impl Engine {
         let mut events = self.branches_changed(id, &root)?;
         events.push(Event::RestackFinished { id, record });
         let stacks = stack_session::snapshot(git, &root)?;
-        events.extend(self.stacks_seen(id, &root, &stacks, true));
+        events.extend(self.stacks_seen(id, &root, &stacks, fire));
         events.push(Event::StacksLoaded { id, stacks });
         Ok(events)
     }
