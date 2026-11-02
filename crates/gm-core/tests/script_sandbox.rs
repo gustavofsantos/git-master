@@ -15,11 +15,13 @@ use gm_core::script::port::{
 use gm_core::script::surface::CtxSurface;
 use serde_json::{Value, json};
 
-/// Small budgets, so each budget test ends in milliseconds.
+/// Small step and memory budgets, so each budget test ends in milliseconds. The wall-clock budget
+/// is generous: a debug build on a loaded machine must not let the time budget end a test that is
+/// about steps, memory or completion. The tests about the time budget set a short one themselves.
 fn small() -> Budgets {
     Budgets {
         steps: 200_000,
-        script_time: Duration::from_millis(300),
+        script_time: Duration::from_secs(60),
         memory: 8 << 20,
         string_bytes: 1 << 20,
         ctx_calls: 1000,

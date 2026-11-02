@@ -363,7 +363,9 @@ mod tests {
             &AtomicBool::new(false),
         );
         assert_eq!(result.outcome, "timeout");
-        assert!(started.elapsed() < Duration::from_secs(2));
+        // The process sleeps 5 s and times out at 1 s: the bound only has to show that it was not
+        // waited for, and it leaves room for a loaded debug build.
+        assert!(started.elapsed() < Duration::from_secs(4));
     }
 
     #[test]

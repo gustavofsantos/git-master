@@ -953,6 +953,44 @@ fn handling_a_comment_takes_an_after_snapshot_under_its_own_ref() {
     assert_eq!(only(&mut engine).after_snapshot, Some(after));
 }
 
+/// Git's racy-index case: a file rewritten with the same size in the same timestamp tick as the
+/// index entry that recorded it still matches that entry's stat data. Git's racy rule (an entry
+/// at or after the index file's own time is checked by content) is what catches it, and the
+/// snapshot's copy of the index must keep that time. `core.checkStat=minimal` drops the
+/// sub-second part of ctime, so a rewrite in the same second keeps the stat data Git compares.
+#[test]
+fn a_snapshot_sees_a_same_size_rewrite_in_the_same_timestamp_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.name", "t"]);
+    git(dir.path(), &["config", "user.email", "t@t"]);
+    git(dir.path(), &["config", "core.checkStat", "minimal"]);
+    write(dir.path(), "f.txt", "a\nb\nc\nd\ne\n");
+    git(dir.path(), &["add", "f.txt"]);
+    let tick = std::fs::metadata(dir.path().join("f.txt"))
+        .and_then(|meta| meta.modified())
+        .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(dir.path().join(".git").join("index"))
+        .unwrap()
+        .set_modified(tick)
+        .unwrap();
+    write(dir.path(), "f.txt", "a\nB\nc\nd\ne\n");
+    std::fs::File::options()
+        .write(true)
+        .open(dir.path().join("f.txt"))
+        .unwrap()
+        .set_modified(tick)
+        .unwrap();
+
+    let oid = port().snapshot_worktree(dir.path()).expect("snapshot");
+    assert_eq!(
+        git(dir.path(), &["show", &format!("{oid}:f.txt")]),
+        "a\nB\nc\nd\ne\n"
+    );
+}
+
 #[test]
 fn an_edit_inside_the_region_shows_as_a_change() {
     let dir = repo();

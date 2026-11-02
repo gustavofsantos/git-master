@@ -775,9 +775,17 @@ mod tests {
     }
 
     #[test]
-    fn a_large_file_is_colored_in_the_budget() {
+    fn a_large_file_is_colored_to_the_end() {
+        // The product budget is checked by the release timing test below. Here the file must be
+        // colored in full, so the clock gets a test-only limit that a loaded debug build cannot hit.
         let text = "fn f(a: u32) -> u32 { a + 1 } // c\n".repeat(3_000);
-        let spans = run(Language::Rust, &text);
+        let spans = highlight_within(
+            Language::Rust,
+            &text,
+            &AtomicBool::new(false),
+            Duration::from_secs(600),
+        )
+        .expect("colored within the test limit");
         assert_eq!(texts(&text, &spans, SyntaxRole::Comment).len(), 3_000);
     }
 

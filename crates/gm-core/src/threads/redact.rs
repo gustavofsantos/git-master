@@ -968,24 +968,39 @@ mod tests {
         );
     }
 
-    #[test]
-    fn redaction_of_one_mebibyte_is_fast() {
-        let redactor = default_redactor();
+    /// One mebibyte of prose with secrets in it, as the redactor reads it.
+    fn one_mebibyte() -> (String, String) {
         let token = format!("ghp_{}", "a".repeat(36));
         let line = format!("prose line {token} password=hunter2hunter2 token_count = 12345678\n");
         let mut text = String::new();
         while text.len() < 1 << 20 {
             text.push_str(&line);
         }
+        (text, token)
+    }
+
+    #[test]
+    fn redaction_of_one_mebibyte_removes_the_secrets() {
+        let (text, token) = one_mebibyte();
+        let redacted = default_redactor().redact(&text);
+        assert!(!redacted.text.contains(&token));
+        assert!(redacted.text.contains("token_count = 12345678"));
+    }
+
+    /// The cost of redacting one mebibyte, for a release build:
+    /// `cargo test --release -p gm-core --lib redaction_of_one_mebibyte_is_fast -- --ignored`.
+    /// Debug builds are several times slower and do not run it.
+    #[test]
+    #[ignore = "a measurement for release builds"]
+    fn redaction_of_one_mebibyte_is_fast() {
+        let (text, _) = one_mebibyte();
         let start = Instant::now();
-        let redacted = redactor.redact(&text);
+        let _ = default_redactor().redact(&text);
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_secs(10),
             "redaction took {elapsed:?}"
         );
-        assert!(!redacted.text.contains(&token));
-        assert!(redacted.text.contains("token_count = 12345678"));
     }
 
     /// Fragments that mix prose, markers and secret-like text.

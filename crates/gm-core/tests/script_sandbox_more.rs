@@ -14,10 +14,12 @@ use gm_core::script::port::{Budgets, Failure, RunEnd, RunRequest, ScriptEngine};
 use gm_core::script::surface::CtxSurface;
 use serde_json::json;
 
+/// The wall-clock budget is generous, so the budget that ends each case is the one it is about
+/// (steps, memory, string size) and not the clock on a loaded machine.
 fn small() -> Budgets {
     Budgets {
         steps: 2_000_000,
-        script_time: Duration::from_millis(500),
+        script_time: Duration::from_secs(60),
         memory: 16 << 20,
         string_bytes: 1 << 20,
         ctx_calls: 1000,

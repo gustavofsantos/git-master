@@ -4307,6 +4307,10 @@ mod tests {
 
     #[test]
     fn two_writers_on_one_directory_both_succeed() {
+        // A busy database is an expected outcome (threads.md: the batch waits in the spool and a
+        // later run stores it). So a writer that finds the database busy keeps its batch and
+        // tries again, in order, as the spool drain does. Every batch must end up stored.
+        const ATTEMPTS: u32 = 60_000;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
         let writers: Vec<_> = ["a", "b"]
@@ -4315,9 +4319,25 @@ mod tests {
                 let path = path.clone();
                 thread::spawn(move || {
                     let mut store = ThreadStore::open(&path).expect("open");
-                    for n in 0..200_i64 {
-                        let entry = new_entry(&format!("e{n}"), EntryKind::Assistant, "text", n);
-                        store.apply(&batch(session, n, vec![entry])).expect("apply");
+                    let mut pending: std::collections::VecDeque<Batch> = (0..200_i64)
+                        .map(|n| {
+                            let entry =
+                                new_entry(&format!("e{n}"), EntryKind::Assistant, "text", n);
+                            batch(session, n, vec![entry])
+                        })
+                        .collect();
+                    let mut attempts = 0_u32;
+                    while let Some(next) = pending.pop_front() {
+                        attempts += 1;
+                        assert!(attempts <= ATTEMPTS, "the database stayed busy");
+                        match store.apply(&next) {
+                            Ok(_) => {}
+                            Err(error) if error.is_busy() => {
+                                pending.push_front(next);
+                                thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(error) => panic!("apply: {error:?}"),
+                        }
                     }
                 })
             })
