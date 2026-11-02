@@ -148,11 +148,13 @@ Each run has limits on:
 
 A run that exceeds a limit ends as failed, with the reason. Cancel always works, even when the script is in a loop or waiting.
 
-The sandbox removes these from the environment: `io`, `os`, `debug`, `package`, `require`, `load`, `loadstring`, `dofile` and `string.dump`. The clocks and random numbers are not available either. Use `ctx.now()` and `ctx.random()` instead. Both calls are recorded in the run.
+The sandbox removes these from the environment: the libraries `io`, `os`, `debug` and `package`; the functions `require`, `load`, `loadstring`, `loadfile`, `dofile`, `print`, `warn`, `collectgarbage`, `getfenv`, `setfenv` and `newproxy`; and `string.dump`. The random numbers are not available either: `math.random` and `math.randomseed` are removed. Use `ctx.now()` and `ctx.random()` instead. Both calls are recorded in the run.
 
 The global environment is read-only, and each run starts with a fresh one, so nothing one run sets affects the next run.
 
 ## Worked examples
+
+> **Note.** The restack examples use stacks, a preview feature. Turn it on with `GITMASTER_PREVIEW=stacks`. The other examples work without it.
 
 ### Branch from a ticket
 

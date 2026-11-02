@@ -19,7 +19,7 @@ gitmaster --version       # print the version and exit
 
 - With no argument, the app opens the repository that contains the current directory. Outside a repository, it opens the most recent repository that still exists.
 - With a path, the app opens the repository at that path. A relative path is resolved from the current directory.
-- `--version` prints `gitmaster` followed by the version number, then exits.
+- `--version` prints `gitmaster` followed by the version number, then exits. When a preview feature is on, it also prints a `preview features:` line. See [Preview features](configuration.md#preview-features).
 - Any other single argument is taken as a path, so `--help` is not a help option. The word `workflow` is the subcommand below; to open a folder with that name, write `./workflow`.
 - Two or more arguments print `usage: gitmaster [PATH]` to the standard error and exit with status `2`.
 
@@ -49,7 +49,7 @@ The exit status is `0` when the file has no problem, `1` when it has one, and `2
 
 ## Dry run a workflow
 
-> **Planned.** The stack reads, `ctx.stack.tree` and `ctx.stack.stale`, are simulated until the stack calls are available.
+> **Planned.** In a dry run, `ctx.stack.tree` and `ctx.stack.stale` return an empty list instead of the real stacks.
 
 ```sh
 gitmaster workflow dry-run <file> [--input k=v] [--repo <path>]

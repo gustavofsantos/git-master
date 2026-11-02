@@ -31,6 +31,8 @@ Every action has one effect level. The level tells you whether the action can ch
 
 `ctx.approve(summary)` pauses the run and shows you the summary. It returns `true` or `false`. It pauses in every mode.
 
+> **Note.** The restack calls, such as `ctx.restack.apply`, belong to stacks, a preview feature. See [Preview features](../reference/configuration.md#preview-features).
+
 ## Rules for applying actions
 
 > **Planned.** The agent column is not available yet.
@@ -73,9 +75,9 @@ A script runs in a Lua virtual machine embedded in GitMaster. It receives two va
 
 These are not available to a script:
 
-- The libraries `io`, `os`, `debug`, `package` and `require`.
-- The functions `load`, `loadstring`, `dofile` and `string.dump`.
-- The sources of nondeterminism `os.time`, `os.clock` and `math.random`. Use `ctx.now()` and `ctx.random()` instead. Their results are recorded in the run journal, so a run can be read back exactly.
+- The libraries `io`, `os`, `debug` and `package`.
+- The functions `require`, `load`, `loadstring`, `loadfile`, `dofile`, `print`, `warn`, `collectgarbage`, `getfenv`, `setfenv` and `newproxy`, and `string.dump`.
+- The sources of nondeterminism `math.random` and `math.randomseed`, and the clock of `os`. Use `ctx.now()` and `ctx.random()` instead. Their results are recorded in the run journal, so a run can be read back exactly.
 
 The global environment is read-only and is created new for each run, so one run cannot change what the next run sees.
 

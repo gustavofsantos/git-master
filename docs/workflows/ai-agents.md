@@ -9,7 +9,7 @@ An AI coding agent with access to your files can write a workflow script. GitMas
 
 ## Where the agent writes
 
-- Put the file in your workflows directory: `~/.config/gitmaster/workflows/` on Linux, or `Library/Application Support/gitmaster/workflows/` in your home folder on macOS. Folders listed in `gitmaster.workflowPath` are read too. See [Writing workflows](writing-workflows.md).
+- Put the file in your workflows directory: `~/.config/gitmaster/workflows/` on Linux, or `~/Library/Application Support/gitmaster/workflows/` on macOS. Folders listed in `gitmaster.workflowPath` are read too. See [Writing workflows](writing-workflows.md).
 - One workflow is one `.lua` file that returns a module with `meta` and `execute`.
 - A `.toml` file in the workflows directory is ignored, and GitMaster shows a warning for it.
 - A folder whose name starts with a dot is not read as a workflow source.
@@ -35,7 +35,7 @@ The agent tests a script with three one-shot commands. None of them starts a res
 | Command | Use |
 |---|---|
 | `gitmaster workflow check <file>` | Compiles the script, checks `M.meta`, the trigger and the inputs. Each problem is printed as `file:line: message`. A non-zero exit code means an error. |
-| `gitmaster workflow dry-run <file> [--input k=v] [--repo <path>]` | Runs the script against the repository. Reads are real. Calls that propose, apply or run a program are recorded, and each returns a result of the same shape, so the script keeps going. Programs never run. The command prints the list of calls. Anything that follows a stubbed result is an estimate, and it is marked. |
+| `gitmaster workflow dry-run <file> [--input k=v] [--repo <path>]` | Runs the script against the repository. Reads are real, except the stack reads, which return an empty list. Calls that propose, apply or run a program are recorded, and each returns a result of the same shape, so the script keeps going. Programs never run. The command prints the list of calls. Anything that follows a stubbed result is an estimate, and it is marked. |
 | `gitmaster workflow test <file> [fixture]` | Runs the script against canned answers from a fixture file, and checks the sequence of calls and the value the script returns. |
 
 Effects run only from the app, with you as the actor. The command line never applies a change.

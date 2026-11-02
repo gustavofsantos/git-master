@@ -129,6 +129,8 @@ local r = ctx.exec({ "llm-cli", "-p", "Write a conventional commit message for t
 
 ### Stacks
 
+> **Note.** The stack and restack calls belong to stacks, a preview feature. Turn them on with `GITMASTER_PREVIEW=stacks`. See [Preview features](configuration.md#preview-features).
+
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
 | `ctx.stack.tree()` | — | `branches`: a list of tables with `name`, `parent` and `stale`. | read | `done`, `failed` |
@@ -200,8 +202,8 @@ What `M.execute` returns depends on the trigger.
 
 The script runs in a Lua virtual machine that is part of the app.
 
-- These libraries and functions are removed: `io`, `os`, `debug`, `package`, `require`, `load`, `loadstring`, `dofile` and `string.dump`.
-- The sources of nondeterminism are removed as well: `os.time`, `os.clock` and `math.random`. Use `ctx.now()` and `ctx.random()` instead. Both are recorded in the journal.
+- These libraries are removed: `io`, `os`, `debug` and `package`. These functions are removed: `require`, `load`, `loadstring`, `loadfile`, `dofile`, `print`, `warn`, `collectgarbage`, `getfenv`, `setfenv` and `newproxy`. So is `string.dump`.
+- The sources of nondeterminism are removed as well: `math.random` and `math.randomseed`, and the clock of `os`. Use `ctx.now()` and `ctx.random()` instead. Both are recorded in the journal.
 - The global environment is read-only and is created new for each run. One run cannot change what the next run sees.
 - The script has no authority of its own. Everything it does passes through `ctx`.
 - The sandbox protects GitMaster and your repository from the logic of the script. It does not protect you from a program that the script launches. `ctx.exec` runs programs that you choose, and the approval rules apply to the calls that follow it. See [Approvals and security](../workflows/approvals-and-security.md).

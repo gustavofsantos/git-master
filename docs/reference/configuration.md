@@ -36,10 +36,11 @@ GitMaster keeps per-repository state in `.git/gitmaster/`, inside the Git common
 | Path | What it holds | Status |
 |---|---|---|
 | `.git/gitmaster/state.db` | Workflow run history: every run and every call it made. | |
-| `.git/gitmaster/` (local review data) | Comments and snapshots of the local review. | Planned |
+| `.git/gitmaster/review.db` | The comments of the [local review](../agents/local-review.md) and their states. Their snapshots are kept in `refs/gitmaster/review/`. | |
 | `.git/gitmaster/threads.db` | The [threads](../guide/threads.md) captured from agent sessions in this repository: conversation, tool calls and edits, with a search index. Readable only by you. | |
 | `.git/gitmaster/threads-spool/`, `threads-tmp/`, `threads.log` | Events waiting to be written when the database was busy, temporary copies of files the agent is about to edit, and the capture log. The log keeps at most 256 KiB. | |
-| Private refs inside `.git` | Snapshots taken before a restack, which an undo restores. | Planned |
+| `.git/gitmaster/restack.json` | The record of the last restack, which **Undo restack** reads to put the branches back. | |
+| `refs/gitmaster/` (private refs in `.git`) | Snapshots of the local review and of file moves, and the conflict resolutions of restacks. These refs are not branches, so `git branch` does not list them. | |
 
 The Git command log, the list of Git commands with side effects that the **Git commands** panel shows, is kept in memory only. It keeps the last 1000 commands and is lost when the app closes.
 
@@ -114,8 +115,10 @@ GitMaster reads Git's own configuration through `git`, so Git's scope rules appl
 | `merge.conflictStyle` | Any | `zdiff3` | The style of the conflict markers the conflict resolver shows. | Planned |
 | `gitmaster.workflowPath` | Any, can be set more than once | Not set | Extra folders to read workflow files from, after your workflows directory. A folder inside the repository's working tree is ignored, with a warning. | |
 | `gitmaster.worktree.root` | Any | `../<repo>-<branch>` | The base folder for new worktrees. See [Worktrees](../guide/worktrees.md). | Planned |
-| `branch.<name>.stackParent` | Repository | Not set | The parent branch of a branch in a stack. See [Stacks](../guide/stacks.md). | Planned |
-| `branch.<name>.stackParentBase` | Repository | Not set | The commit the parent branch pointed to when this branch was last created or re-anchored. | Planned |
+| `branch.<name>.stackParent` | Repository | Not set | The parent branch of a branch in a stack. See [Stacks](../guide/stacks.md). | |
+| `branch.<name>.stackParentBase` | Repository | Not set | The commit the parent branch pointed to when this branch was last created or re-anchored. | |
+
+The `branch.<name>.` keys belong to stacks, which is a preview feature. See [Preview features](#preview-features).
 
 ## Environment variables
 
@@ -126,6 +129,7 @@ GitMaster reads Git's own configuration through `git`, so Git's scope rules appl
 | `XDG_CONFIG_HOME` | Absolute path | The base of the user config directory on Linux. Defaults to `~/.config`. A relative or empty value is ignored. |
 | `XDG_DATA_HOME` | Absolute path | The base of the user data directory on Linux. Defaults to `~/.local/share`. A relative or empty value is ignored. |
 | `HOME` | Absolute path | The base of the default folders when the XDG variables are not set. On macOS, the folders are always under `Library/Application Support` in your home directory. |
+| `GITMASTER_PREVIEW` | `all`, `none` or a list of feature ids | Turns preview features on or off. See [Preview features](#preview-features). |
 
 ### Login-shell PATH
 
@@ -136,6 +140,33 @@ A window opened from a desktop launcher, the Finder or the Dock starts with a mi
 3. If the shell prints a PATH, Git and the other programs GitMaster starts after that point run with it. These are the file watcher and the programs that workflows start with `ctx.exec`.
 
 Programs started before the PATH is read use the PATH the app started with. If `SHELL` is not set, the shell does not answer in time, or it prints no PATH, GitMaster keeps the PATH it started with. GitMaster does not change its own environment variables to do this.
+
+## Preview features
+
+Some areas are finished in the code but not yet part of the release. A preview feature is hidden in the release build and shown in a build made from source. Each one has an id:
+
+| Id | Feature |
+|---|---|
+| `stacks` | Stacks and restack. See [Stacks](../guide/stacks.md). |
+| `conflict-resolver` | The conflict resolver. See [Conflicts](../guide/conflicts.md). |
+
+Set the `GITMASTER_PREVIEW` variable to choose which features are on:
+
+| Value | Effect |
+|---|---|
+| Unset, or empty | The default of the build. A release build has no preview feature on. A build made with `make` has all of them on. |
+| `all`, `1`, `on` | Every preview feature is on. |
+| `none`, `0`, `off` | No preview feature is on. |
+| A comma-separated list of ids | Only the listed features are on. |
+
+The value is not case sensitive, and spaces around an id are ignored. An id that GitMaster does not know prints a warning that lists the known ids. The other ids in the list still apply.
+
+```sh
+GITMASTER_PREVIEW=stacks gitmaster ~/src/project
+GITMASTER_PREVIEW=stacks,conflict-resolver gitmaster ~/src/project
+```
+
+When one or more preview features are on, `gitmaster --version` also prints a `preview features:` line. See [Command line](cli.md#open-a-repository).
 
 ## Settings dialog
 

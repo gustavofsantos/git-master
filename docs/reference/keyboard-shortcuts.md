@@ -43,6 +43,7 @@ Actions without a shortcut on this page can be run from the [command palette](..
 | Stage the selected lines | `Ctrl+Shift+S` | `⇧⌘S` | Implemented |
 | Unstage the selected lines | `Ctrl+Shift+I` | `⇧⌘I` | Implemented |
 | Clear the selection | `Esc` | `Esc` | Implemented |
+| Comment on the selected lines | `Ctrl+Shift+M` | `⇧⌘M` | Implemented |
 
 ## Commit diff (stacked)
 
@@ -52,6 +53,7 @@ Actions without a shortcut on this page can be run from the [command palette](..
 | Scroll one page up or down | `PageUp`, `PageDown` | `PageUp`, `PageDown` | Implemented |
 | Move to the next file | `Ctrl+Shift+N` | `⇧⌘N` | Implemented |
 | Move to the previous file | `Ctrl+Shift+P` | `⇧⌘P` | Implemented |
+| Comment on the selected lines | `Ctrl+Shift+M` | `⇧⌘M` | Implemented |
 | Go back to the commit | `Esc` | `Esc` | Implemented |
 
 Next file and previous file wrap around at the first and the last file.
@@ -71,7 +73,7 @@ Next file and previous file wrap around at the first and the last file.
 | Rename Branch | `F2` | `F2` | Planned |
 | Delete Branch | `Backspace` | `⌫` | Planned |
 
-In the stacked commit diff, `Ctrl+Shift+P` moves to the previous file. The branch menu in the sidebar cannot be opened from the keyboard yet, so its **Checkout Branch** item has no key there.
+**Restack This Stack** and the other stack actions belong to stacks, a preview feature. In the stacked commit diff, `Ctrl+Shift+P` moves to the previous file. The branch menu in the sidebar cannot be opened from the keyboard yet, so its **Checkout Branch** item has no key there.
 
 ## Search and Quick Open
 

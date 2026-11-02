@@ -1,7 +1,7 @@
 ---
 title: Triggers and phases
 description: Which events start a workflow, how the match filter narrows them, and what the before, transform and after phases do.
-status: partial
+status: implemented
 order: 30
 ---
 
@@ -12,10 +12,18 @@ A workflow runs when one of its triggers fires. A trigger is either an event in 
 You set a trigger in the `trigger` table of `M.meta`:
 
 ```lua
+local M = {}
+
 M.meta = {
   name = "notify-on-feature-change",
   trigger = { on = "refs.changed", match = "branch:feat/*" },
 }
+
+function M.execute(ctx, input)
+  ctx.notify("A feature branch moved: " .. input.repo.branch)
+end
+
+return M
 ```
 
 | Trigger | Fires when |
@@ -33,6 +41,8 @@ M.meta = {
 | `stack.parent_moved` | The tip of a branch's parent no longer matches the point the branch was based on. It fires each time the parent's tip moves while the branch is stale, including the move that makes it stale, with `branch`, `parent`, `base` and `parent_tip` in the payload. |
 | `stack.parent_merged` | The parent branch is gone, or it is already merged into `main`. It fires once when that becomes true, with `branch` and `parent` in the payload, and `grandparent` when there is one: the parent the branch would get from **Reparent to Grandparent**. |
 | `composer.opened` | The empty message box of the commit composer gets focus while something is staged. |
+
+> **Note.** The stack events and the restack phases belong to stacks, a preview feature. Turn them on with `GITMASTER_PREVIEW=stacks`. See [Stacks](../guide/stacks.md).
 
 The stack events compare the stacks with what GitMaster saw last. The state a repository has when it opens is the starting point, so opening a repository with a stale branch does not fire `stack.parent_moved`. **Undo restack** is a starting point too: the branches it puts back are stale again, but no stack event fires for them until the parent moves again, so an automatic restack does not undo your undo.
 
@@ -125,7 +135,7 @@ If all three answers are empty, the script returns nothing, and no suggestion is
 
 ### After: observers
 
-An `after.<operation>` workflow runs after the operation finishes. It returns nothing. If it fails, GitMaster shows a warning, and the operation is not affected. After workflows run in parallel, and the payload of `input.trigger` carries what the operation produced, such as the new commit.
+An `after.<operation>` workflow runs after the operation finishes. It returns nothing. If it fails, GitMaster shows a warning, and the operation is not affected. The payload of `input.trigger` carries what the operation produced.
 
 ## Operations and fields
 
@@ -139,8 +149,6 @@ An `after.<operation>` workflow runs after the operation finishes. It returns no
 See also [Branches](../guide/branches.md), [Stacks](../guide/stacks.md) and [Conflicts](../guide/conflicts.md).
 
 ## Reconciliation of effects
-
-> **Planned.** The `stale` outcome is returned by the restack calls, which are not available yet.
 
 An applying action checks its target before it acts. The target is the set of references, the index, or the commit message that the script used to compute the action. If the target changed after the inputs were computed, the action ends with the outcome `stale`.
 

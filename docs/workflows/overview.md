@@ -30,6 +30,8 @@ Workflows replace GitMaster's own hooks: the points where a script runs inside a
 - **Gates before an operation.** A workflow runs before an operation, such as a restack, and can block it with a reason. For example, a restack on `main` can be forbidden.
 - **Automatic stack policies.** A workflow reacts to a stack event, such as a parent branch receiving new commits, and restacks the branches above it.
 
+> **Note.** Stacks, restack and their workflow phases are a preview feature. Turn them on with `GITMASTER_PREVIEW=stacks`. See [Stacks](../guide/stacks.md) and [Preview features](../reference/configuration.md#preview-features).
+
 ## Where workflow files live
 
 GitMaster reads workflow files from these places:
@@ -59,14 +61,13 @@ These rules apply:
 
 ## Running a workflow
 
-You can start a workflow in four ways:
-
-> **Planned.** Runs started by an agent are not available in the app yet.
+You can start a workflow in three ways:
 
 1. **Command palette.** Press `Ctrl+K` (`⌘K` on macOS), choose **Run Workflow…**, and pick the workflow. If the workflow declares inputs, a dialog asks for their values.
 2. **A trigger.** A workflow can run by itself when an operation starts or ends, a repository opens, or a ref changes. See [Triggers and phases](triggers-and-phases.md).
 3. **A key binding.** A manual workflow can declare a keyboard shortcut with `key` in its `trigger` table. If the key clashes with a built-in shortcut, the Script tab warns you.
-4. **An agent.** An agent connected through MCP can list workflows and run them. The apply actions of an agent's run always wait for your approval. See [AI agents](ai-agents.md).
+
+> **Planned.** Runs started by an agent are not available in the app yet. An agent connected through MCP will be able to list workflows and run them, and the apply actions of such a run will always wait for your approval. See [AI agents](ai-agents.md).
 
 ### Review a version before its first run
 
@@ -78,7 +79,7 @@ A workflow that runs on a trigger or in a phase never passes through **Run**, so
 
 ### Dry run
 
-A dry run executes a script against your real repository without changing it. Reads run for real. Actions that propose, apply or run `exec` are recorded with the values they would receive, but they do not run, and `exec` never runs in a dry run. The dry run lists the calls in order. A value that comes after a simulated value is an estimate, and GitMaster marks it as one.
+A dry run executes a script against your real repository without changing it. Reads run for real, except the stack reads, `ctx.stack.tree` and `ctx.stack.stale`, which return an empty list. Actions that propose, apply or run `exec` are recorded with the values they would receive, but they do not run, and `exec` never runs in a dry run. The dry run lists the calls in order. A value that comes after a simulated value is an estimate, and GitMaster marks it as one.
 
 In the **Script** tab, a dry run uses the text open in the editor. From the command line, `gitmaster workflow dry-run <file>` does the same for a saved file. See [CLI](../reference/cli.md).
 
