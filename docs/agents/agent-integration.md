@@ -1,7 +1,7 @@
 ---
 title: Agent integration
 description: Install the GitMaster plugin into Claude Code from the repository, so that its sessions are captured as threads, check that it works, update it and remove it.
-status: implemented
+status: partial
 order: 5
 ---
 
@@ -13,13 +13,23 @@ The agent integration connects your coding agent to GitMaster. It is a plugin th
 |---|---|
 | Claude Code | `claude-code` |
 
-Run `gitmaster harness list` to see the names this version knows. GitMaster never changes the agent's settings files by itself: the agent's own `claude plugin` commands add and remove the plugin.
+Run `gitmaster harness list` to see the names this version knows:
+
+```sh
+gitmaster harness list
+```
+
+```text
+claude-code  Claude Code
+```
+
+GitMaster never changes the agent's settings files by itself: the agent's own `claude plugin` commands add and remove the plugin.
 
 ## What the plugin contains
 
 | Part | What it does |
 |---|---|
-| Hooks | Run `gitmaster thread hook` when a session starts and ends, when you send a prompt, before and after each tool call, and when the agent stops. |
+| Hooks | Run `gitmaster thread hook` when a session starts, when you send a prompt, before an edit tool runs (`Edit`, `MultiEdit`, `Write` and `NotebookEdit`), after each tool call, when the agent or a sub-agent stops, and when the session ends. |
 | MCP settings | Start `gitmaster mcp` so the agent can use the [MCP tools](../reference/mcp-tools.md). Each agent session starts its own server process, in the directory the session runs in. |
 | Skill | Tells the agent when to use the review and thread tools, and to treat their untrusted text as data. |
 
@@ -58,15 +68,15 @@ Run this after you upgrade GitMaster, so that the plugin matches the new version
 ## What the hooks do and do not do
 
 - **They never block the agent.** A hook always ends without an error, whatever happens inside it. If GitMaster fails, the agent carries on and the event may be missing from the thread.
-- **They are quick.** A hook writes one record and exits, with no resident process.
+- **They are quick.** A hook writes one record and exits, with no resident process. Each hook has a five-second limit set by the plugin.
 - **They redact first.** Secrets are replaced before anything is stored. See [Secrets](../guide/threads.md#secrets).
 - **They read only.** A hook looks at the repository to find where it is and which branch it is on. It does not change the repository, and it runs no text that came from the session.
 - **They need the repository.** A session that ran outside a Git repository is not captured.
-- **They can catch up.** GitMaster also reads the agent's own session file, so a step that a hook missed, for example before you installed the plugin, is filled in from the file.
+- **They can catch up.** GitMaster also reads the agent's own session file, so a step that a hook missed, for example while GitMaster was not running, is filled in from the file the next time a hook runs.
 
 ## Import sessions you already have
 
-Choose **Import Existing Sessions** on the Threads page to read the agent's session files for the open repository and add them as threads. The same redaction applies. A session that is already a thread is not duplicated.
+> **Planned.** Importing the agent's existing session files as threads, with an **Import Existing Sessions** action, is not available in the app yet. Until then, a session is captured when its hooks run after the plugin is installed.
 
 ## Remove the plugin
 

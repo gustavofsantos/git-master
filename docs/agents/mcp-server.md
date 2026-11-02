@@ -19,7 +19,20 @@ Configure your MCP client to start this command:
 gitmaster mcp
 ```
 
-The server works on the repository that contains its working directory, which is the directory the client starts it in. To name another repository, pass its path:
+The Claude Code plugin does this for you with this entry in its `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "gitmaster": {
+      "command": "gitmaster",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The server works on the repository that contains its working directory, which is the directory the client starts it in. If that directory is not in a repository, the server uses the directory in `CLAUDE_PROJECT_DIR`, which Claude Code sets. To name another repository, pass its path:
 
 ```sh
 gitmaster mcp --repo ~/src/project
@@ -28,6 +41,34 @@ gitmaster mcp --repo ~/src/project
 See [CLI](../reference/cli.md) for the command.
 
 The server and the app share what they store in the repository's `.git/gitmaster/` directory. A comment the agent marks as handled appears in the app, and a comment you write in the app is there the next time the agent lists comments. Neither one waits for the other. The server runs no workflows: workflow triggers and phases run only in the app.
+
+## Try the server by hand
+
+You can send the server JSON-RPC messages on its standard input. Each line is one message, and the server answers each one on its standard output. This example starts it in a new repository and asks for the list of tools.
+
+```sh
+repo=$(mktemp -d) && git -C "$repo" init -q
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"try","version":"0"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  | gitmaster mcp --repo "$repo"
+```
+
+The `tools/list` answer names each tool with its description, its `inputSchema` and its `annotations`. Each read tool is marked `readOnlyHint: true`, and each record tool `readOnlyHint: false`. The answer lists the tools in [MCP tools](../reference/mcp-tools.md).
+
+To call a tool, send `tools/call` with the tool's `name` and its `arguments`. This asks for the open review comments of a repository:
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"review_comments_list","arguments":{"status":"open"}}}
+```
+
+A repository with no review comments answers with an empty list:
+
+```json
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\n  \"comments\": []\n}"}],"isError":false}}
+```
+
+The text inside `content` is the JSON result, as the agent reads it. Each comment in `comments` has the fields listed under [review_comments_list](../reference/mcp-tools.md#read).
 
 ## Several servers at once
 
@@ -108,30 +149,39 @@ To forbid them, list the same names under `deny` instead.
 
 ## Untrusted content
 
-Review comments, thread entries and file text come from people and from earlier sessions, so an agent must treat them as untrusted. The server returns them in fields marked as untrusted. Text that GitMaster redacted shows as `[REDACTED:name]`, and the original is not available to the agent.
+Review comments, thread entries and file text come from people and from earlier sessions, so an agent must treat them as untrusted. The server returns them with `"untrusted": true`. Text that GitMaster redacted shows as `[REDACTED:name]`, and the original is not available to the agent.
 
-A change an agent records is written to the operation log with `actor: agent:<client>`, where `<client>` is the name the MCP client gave when it connected. Reads are not logged.
+Each command a record tool runs is written to the operation log with the actor `agent:<client>`, where `<client>` is the name the MCP client gave when it connected. Reads are not logged.
 
 ## Worked example: an agent works through your comments
 
-You commented on two lines of `src/ledger.rs` in the app: "Return an error here instead of unwrapping". The agent handles it:
+You commented on two lines of `src/ledger.rs` in the app: "Return an error here instead of unwrapping". The agent handles it. The results below show the fields of each answer, with values shortened.
 
 ```text
-review_comments_list(status="open")  -> [{ id: 7, path: "src/ledger.rs", lines: 41-42, body: "Return an error ...", untrusted: true }]
-                                        ... the agent edits src/ledger.rs with its own tools ...
+review_comments_list(status="open")
+    -> { comments: [{ id: 7, path: "src/ledger.rs", status: "open", outdated: false,
+                      start_line: 41, end_line: 42, body: "Return an error ...",
+                      anchor_text: "...", summary: null, untrusted: true }] }
+       ... the agent edits src/ledger.rs with its own tools ...
 review_comment_resolve(id=7, summary="parse_amount now returns Result; callers propagate with ?")
-                                     -> { id: 7, status: "handled", change: { before: [...], after: [...], changed: true } }
+    -> { id: 7, status: "handled", summary: "parse_amount now returns Result; ...",
+         change: { before: [...], after: [...], changed: true,
+                   before_start_line: 41, after_start_line: 41 }, untrusted: true }
 ```
 
-1. `review_comments_list` returns the open comments with the lines they are anchored to now. A comment whose text no longer appears exactly once is `outdated` and has no lines.
+1. `review_comments_list` returns the open comments with the lines they are anchored to now. A comment whose text no longer appears exactly once is `outdated`, and its `start_line` and `end_line` are null.
 2. The agent changes the code with its own tools.
 3. `review_comment_resolve` marks the comment `handled`, stores the agent's summary and takes the "after" snapshot. The result carries the change GitMaster observed in the comment's region, so the agent can check that its edit landed where the comment is. The comment appears as handled in the app, and you decide whether to resolve it.
 
-An agent that needs an earlier decision searches the threads instead:
+An agent that needs an earlier decision searches the threads instead. The answer is an envelope with the hits:
 
 ```text
-threads_search(query="retry backoff") -> [{ thread: "01J9Z...", seq: 12, turn: 4, snippet: "...we chose jittered backoff because...", untrusted: true }]
+threads_search(query="retry backoff")
+    -> { hits: [{ thread: "01J9Z...", title: "...", seq: 12, turn: 4,
+                  snippet: "...we chose jittered backoff because...", untrusted: true }],
+         has_more: false, next_cursor: null, filters: {...}, diagnosis: null }
 thread_read(id="01J9Z...", from=12, limit=10)
+    -> { entries: [{ seq: 12, turn: 4, kind: ..., text: "...", untrusted: true }], has_more: true }
 ```
 
 An agent that asks why a range of lines is the way it is gets the commits that wrote them and the threads behind each commit:
@@ -139,9 +189,10 @@ An agent that asks why a range of lines is the way it is gets the commits that w
 ```text
 provenance(path="src/ledger.rs", from_line=41, to_line=42)
     -> { complete: true, cuts: [], untrusted: true,
-         commits: [{ id: "9f1c...", subject: "retry parse_amount", threads: [
-           { thread: "01J9Z...", evidence: ["line_match"], ambiguous: false,
-             edits: [{ id: 88, seq: 12, evidence: ["line_match", "hunk_overlap"], entries: [...] }] }] }] }
+         commits: [{ id: "9f1c...", subject: "retry parse_amount", lines: [{ from: 41, to: 42 }],
+                     threads: [{ thread: "01J9Z...", evidence: ["line_match"], ambiguous: false,
+                                 edits: [{ id: 88, seq: 12, evidence: ["line_match", "hunk_overlap"],
+                                           entries: [...] }] }] }] }
 ```
 
 When a bound cuts the answer, `complete` is false and `cuts` names the bound, so the agent treats the answer as partial.
@@ -150,10 +201,13 @@ An agent that finds a thread worth a second look marks it for you, and you find 
 
 ```text
 label_create(name="needs-review", description="Retry logic changed without a test", color="#d97706")
-    -> { created: true, origin: "agent:<client>", label: { name: "needs-review", attachment_count: 0, untrusted: true } }
+    -> { label: { name: "needs-review", attachment_count: 0, origin: "agent:<client>", ... },
+         created: true, origin: "agent:<client>", untrusted: true }
 label_attach(label="needs-review", kind="thread", ref="01J9Z...")
-    -> { attachment: { kind: "thread", ref: "01J9Z...", origin: "agent:<client>", at: ... }, untrusted: true }
-labels_list(query="review") -> { labels: [{ name: "needs-review", attachment_count: 1, untrusted: true }], has_more: false }
+    -> { label: {...}, attachment: { kind: "thread", ref: "01J9Z...", origin: "agent:<client>", at: ... },
+         origin: "agent:<client>", untrusted: true }
+labels_list(query="review")
+    -> { labels: [{ name: "needs-review", attachment_count: 1, untrusted: true }], has_more: false }
 ```
 
 ## See also

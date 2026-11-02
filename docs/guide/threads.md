@@ -15,7 +15,7 @@ Threads are captured by the agent integration. Install it first: see [Agent inte
 |---|---|
 | Prompts | What you typed to the agent, in order. |
 | Replies | What the agent wrote back. |
-| Tool calls | Each tool the agent used, with its arguments and result. A long result is cut at 64 KiB, and the entry says it was cut and how large it was. |
+| Tool calls | Each tool the agent used, with its arguments and result. A result longer than 64 KiB is cut, and the entry says it was cut and how large it was. |
 | Edits | Each change an agent tool made to a file, as a patch, with the number of added and removed lines. |
 | Context | The agent, the model, the branch and the commit at the start, and the start and end time. |
 
@@ -31,23 +31,29 @@ Choose **Threads** in the sidebar, or run **Show Threads** from the command pale
 
 Each row of the list shows the title, the agent, the branch, how long ago the last event was, and how many edits the thread made. A dot marks a session that is still open. A **redacted** mark shows when GitMaster removed a secret from the thread.
 
-The title comes from your first prompt, as plain text: the Markdown markers, emphasis and links are removed, and a long title is cut at 120 characters. You can rename it.
+The title comes from your first prompt, as plain text: the first non-empty line, with the Markdown markers, emphasis and links removed. A title is cut at 80 characters. You can rename it.
 
 ### Read a thread
 
-The header of the thread takes two lines. The first has the title, then the star (★ or ☆), **Copy as Markdown** and **⋯**. The **⋯** button opens the less used actions: Rename, Add Note, Labels, Link to Commit, Export, Expand all tool calls, Collapse all tool calls and Delete. The second line has the agent, the branch, when the thread started and whether it is still open, then the chips: **N commits**, **N files**, **N edits** and, when the thread has one, **Note**.
+The header of the thread takes two lines. The first has the title, then the star button, **Copy as Markdown** and **⋯**. The star is filled when the thread is starred. The **⋯** button opens the less used actions, listed under [Keep and clean up](#keep-and-clean-up). The second line has the agent, the branch, when the thread started and whether it is still open, then the chips: **N commits**, **N files**, **N edits** and, when the thread has one, **Note**.
 
 A commit chip, a file chip or the **Note** chip opens a details panel under the header. Only one panel is open at a time, and a click on its chip closes it. The commits panel lists each commit with whether it was created during this thread or linked by you; a link you made has **Unlink**. The files panel lists each edited file once, with the lines its edits added and removed. A path inside the worktree is shown relative to it, a path inside your home folder starts with `~`, and a long path is cut at its start so the file name stays visible. The **Note** panel shows the note in full. A panel is at most six rows high and scrolls past that.
 
 The thread is grouped by turn. A turn is one prompt of yours and everything the agent did until it stopped. Each turn starts with a thin divider that says `Turn n`; the first turn has no divider.
 
-- Your prompt is marked `You` in the left column and has a thin accent bar. The agent's text shows in full, as Markdown: headings, bold, italic and strikethrough, lists and task lists, quotes, tables, code blocks and links, and it is marked `Agent` in the left column. A run of replies with no prompt between them names the agent once, on the first. A code block in a language GitMaster knows is coloured, and a link shows its text without being followed. Tool arguments and results stay plain text. A prompt appears when the agent's next event arrives, such as its first tool call or the end of its turn, because GitMaster reads prompts from the agent's session file.
-- Each tool call is one line with the tool, a short summary of its arguments, whether it worked and how long it took. Select the line to expand the arguments and the result. A **Delete Entry** control appears at the line's right end while the pointer is over it.
+- Your prompt is marked `You` in the left column and has a thin accent bar. The agent's text shows in full, as Markdown: headings, bold, italic and strikethrough, lists and task lists, quotes, tables, code blocks and links, and it is marked `Agent` in the left column. A run of replies with no prompt between them names the agent once, on the first. A code block in a language GitMaster knows is coloured, and a link shows its text without being followed. Tool arguments and results stay plain text.
+- Each tool call is one line with the tool, a short summary of its arguments, whether it worked and how long it took. Select the line to expand the arguments and the result. A **Delete entry** control appears at the line's right end while the pointer is over it.
 - Each edit is one line with the path, `+n −m`, its state, **Open Diff** and **View File**. **Open Diff** expands the patch under the line, and **View File** opens the file in the [Code page](code-navigation.md).
 
 The thread loads as you scroll. The first entries appear at once, and the next page is read when you come near the end of what is shown. A search result opens at its entry, and the entries before it are read when you scroll to the top. A line at the end says **Loading…** while a page is read and **End of thread** when there is nothing more.
 
-Tool calls that follow each other in a turn form a group. Its header says how many calls there are and which tools ran, for example `▸ 7 tool calls: Read ×3, Edit ×2, Bash ×2`. A group shows its edits and any failed call even while it is closed. Select the header to open the group, and select a call inside it to see its arguments and result. **Expand all** and **Collapse all** above the thread open or close every group at once. A group is closed when you open a thread, except the one that holds a search result. The **⋯** menu's **Expand all tool calls** and **Collapse all tool calls** open or close every group of the thread at once.
+Tool calls that follow each other in a turn form a group. Its header says how many calls there are and which tools ran, most used first:
+
+```text
+▸ 5 tool calls: Edit ×2, Read ×2, Bash ×1 · 2 edits
+```
+
+A group shows its edits and any failed call even while it is closed. Select the header to open the group, and select a call inside it to see its arguments and result. The **Expand all** and **Collapse all** buttons above the thread open or close every group at once. A group is closed when you open a thread, except the one that holds a search result.
 
 An edit has one of these states, worked out each time you open the thread from the files themselves:
 
@@ -82,7 +88,9 @@ When these matches are few (fewer than eight), GitMaster also looks further, aft
 
 Words shorter than three characters are matched at the start of a word only, so `in` does not find `join`. In quotes, the text is matched exactly, inside words too, and a phrase is never matched by misspelling.
 
-Each thread appears once, with its best match: a snippet around the match, the agent, the branch, when the thread started and how many edits it made. The results load a page at a time as you scroll. When a search with a filter finds nothing, GitMaster says which filter, removed, would bring matches back. Select a result to open the thread at that entry. Narrow the list with the **Starred** and **Has edits** filters, and with a file: choose **Show Threads for File** on a file to list the threads that edited it. A removable chip shows the file.
+Each thread appears once, with its best match: a snippet around the match, the agent, the branch, when the thread started and how many edits it made. The results load a page at a time as you scroll. When a search with a filter finds nothing, GitMaster says which filter, removed, would bring matches back. Select a result to open the thread at that entry.
+
+Narrow the list with the **Starred** and **Has edits** chips. To list the threads that edited one file, choose **Show Threads for File** on that file in the Working Copy. A removable chip shows the file.
 
 > **Planned.** Filters for the agent, the branch and the dates are not available in the app yet.
 
@@ -94,7 +102,7 @@ Search runs on your machine over the prompts, replies and edited file names stor
 
 Choose **Show Threads for File** in the menu of a file in the Working Copy to list the threads that edited that file.
 
-Select a commit in [History](history.md) and its panel lists the threads linked to it, under **Threads**. Each row shows the title, the agent and how long ago the thread was active. Select a row to open that thread on this page, even when a filter would leave it out. The section lists the newest ten threads.
+Select a commit in [History](history.md) and its panel lists the threads linked to it, under **THREADS**. Each row shows the title, the agent and how long ago the thread was active. Select a row to open that thread on this page, even when a filter would leave it out. The section lists the newest ten threads, and says so when more follow.
 
 > **Planned.** The section does not yet mark the threads that were created during the thread, and it does not say how many threads follow the first ten.
 
@@ -103,7 +111,7 @@ Select a commit in [History](history.md) and its panel lists the threads linked 
 GitMaster links a thread to a commit in two ways only:
 
 - **Created during this thread.** The commit appeared on the thread's branch between two events of the thread. This says when the commit was made, not who made it: a commit you made yourself in the same period also counts.
-- **Linked by you.** Choose **Link to Commit** in the **⋯** menu of the thread's header and pick the commit. The thread's **Commits** panel shows the link as linked by you, with **Unlink** beside it. Unlinking removes the link only; the commit is untouched.
+- **Linked by you.** Choose **Link Thread to Commit…** in the **⋯** menu of the thread's header and pick the commit. The thread's **Commits** panel shows the link as linked by you, with **Unlink** beside it. Unlinking removes the link only; the commit is untouched.
 
 The **Commits** chip of the header counts both kinds. The **Files** panel lists the files the thread edited, and a file you linked by hand, with its own **Unlink**.
 
@@ -118,6 +126,8 @@ A rewrite gives commits new ids: a rebase, an amend or a squash makes new commit
 - **A restack in GitMaster** keeps every link. GitMaster records which commit replaced each old one and moves the links with it.
 - **A rewrite made elsewhere**, with another tool or in a terminal, reattaches a link only when exactly one commit in the rewritten range has the same patch as the old commit. GitMaster does not match commits by how alike their text looks.
 
+> **Note.** Restack is a preview feature. The release build hides it; start GitMaster with `GITMASTER_ENABLE_STACKS=1` to turn it on. See [Stacks](stacks.md).
+
 A link that cannot be matched shows **gone**, with the subject, author and date that GitMaster saved when it made the link, so you still see what it pointed to. A commit is gone when no branch, tag or other reference reaches it any more. When two commits in the rewritten range have the same patch, the link shows **ambiguous** and GitMaster does not pick one.
 
 ## Link threads
@@ -126,11 +136,11 @@ Link one thread to another to record how their work connects. A link has one of 
 
 | Kind | Meaning |
 |---|---|
-| **continues** | This thread carries on the work of the other thread. |
-| **relates** | The two threads touch the same work, and neither follows from the other. |
-| **supersedes** | This thread replaces the work of the other thread, which stays in the list. |
+| **Continues** | This thread carries on the work of the other thread. |
+| **Relates** | The two threads touch the same work, and neither follows from the other. |
+| **Supersedes** | This thread replaces the work of the other thread, which stays in the list. |
 
-Link threads from the **⋯** menu of a thread's header, as you link a commit. Each link is a row that shows who made it, you or an agent. GitMaster never infers a link from what two threads say.
+Choose **Link to Thread…** in the **⋯** menu of a thread's header, or in its right-click menu, and pick the kind and the other thread. Each link is a row that shows who made it, you or an agent. GitMaster never infers a link from what two threads say.
 
 ## Understand why code is the way it is
 
@@ -158,7 +168,7 @@ Other rules:
 - An edit that GitMaster cannot compare shows as **unverifiable**, not as "no match". That covers an edit whose text was redacted, an edit cut at the size limit, and an edit known only from the agent's input (**From tool input**).
 - A formatter run after the edit changes the lines, so the match stops. Whitespace is compared exactly.
 - The match is by content, not by commit id, so the result holds after a rebase, a squash or a reorder.
-- A result shows at most 10 commits, 5 threads for each commit, and two steps out from each. When a result is cut, it says so.
+- A result shows at most 10 commits, 5 threads for each commit and 200 edits of the file for each commit. When a result is cut, it says so.
 - Asking changes nothing in the repository or in any thread.
 
 ## Labels
@@ -169,31 +179,34 @@ A label is a name for things that belong together, such as `auth-refactor` or `n
 
 You can attach a label to:
 
-- a thread;
+- a thread, with **Tags…** in the **⋯** menu of the thread's header. Enter the names separated by commas, such as `bug, auth`;
 - a file, which keeps the label when the file is renamed;
 - a commit, which keeps the label through a rewrite as a commit link does (see [After a rewrite](#after-a-rewrite));
 - another label.
 
-Open the **Labels** page to see every label. Choose one to list everything attached to it: threads, files, commits and other labels.
+Open the **Labels** entry in the sidebar to see every label. Choose one to list everything attached to it: threads, files, commits and other labels. Use **Rename Label…** and **Delete** in a label's menu. Deleting a label removes its attachments too.
 
 You create labels, attach them and remove attachments. Only you can rename or delete a label. An agent connected through MCP can create a label and attach it; the label and each attachment it made show the agent's name, and you can remove them.
 
 ## Keep and clean up
 
+These actions are in the **⋯** menu of the thread header, in the thread's right-click menu in the list, or in the command palette. The header's **Copy as Markdown** and star are buttons beside the title.
+
 | Action | What it does |
 |---|---|
-| **Rename** | Changes the title. |
-| **Add Note** | Attaches a note of your own to the thread. The note is shown with the thread and is not searched. |
-| **Star** | Marks the thread so you can filter for it. |
-| **Labels** | Attaches labels to the thread. See [Labels](#labels). |
-| **Export** | Writes the thread as a Markdown file at a path you choose. The file holds the stored text, which was redacted when it was captured. |
+| **Rename Thread…** | Changes the title. |
+| **Add Note…** | Attaches a note of your own to the thread. The note is shown with the thread and is not searched. An agent connected through MCP can read it with `thread_get`. |
+| **Star Thread** | Marks the thread so you can filter for it. |
+| **Tags…** | Attaches labels to the thread. See [Labels](#labels). |
+| **Link Thread to Commit…** | Links the thread to a commit. See [How a commit gets linked](#how-a-commit-gets-linked). |
+| **Link to Thread…** | Links the thread to another thread. See [Link threads](#link-threads). |
+| **Export Thread…** | Writes the thread as a Markdown file at a path you choose. The file holds the stored text, which was redacted when it was captured. |
 | **Copy as Markdown** | Puts the thread on the clipboard as the Markdown that Export writes: the stored text, already redacted. |
-| **Delete** | Removes the thread from the database. The confirmation says what is removed. |
-| **Delete Entry** | Removes one message or tool call from a thread. |
+| **Expand All Tool Calls**, **Collapse All Tool Calls** | Open or close every tool-call group of the thread. |
+| **Delete Thread…** | Removes the thread from the database. The confirmation says what is removed. |
+| **Delete entry** | Removes one message or tool call from a thread. |
 
 A delete is final. GitMaster overwrites the deleted text in the database file, and it does not keep a copy. It does not touch the agent's own session files; see [What is not removed](#what-is-not-removed).
-
-Rename, Add Note, Labels, Link to Commit, Export and Delete are in the **⋯** menu of the header; Star and Copy as Markdown are buttons beside the title. The thread's right-click menu in the list has the same actions.
 
 Only you can delete a thread or an entry, and rename or delete a label. An agent connected through MCP can read threads, and it can create labels and attach labels and links. Each row an agent makes shows the agent's name, and you can remove it.
 
@@ -209,7 +222,7 @@ GitMaster ships patterns for private key blocks, cloud and API keys and tokens f
 
 ### Add your own patterns
 
-Add patterns for secrets that are specific to you, such as an internal token format or a private host name, in **Threads Settings…** from the command palette or the Threads page, or in `settings.json`. See [Configuration](../reference/configuration.md) for the keys.
+Add patterns for secrets that are specific to you, such as an internal token format or a private host name, in **Threads Settings…** from the command palette, or with the **Settings…** button on the Threads page. You can also edit `settings.json`. See [Configuration](../reference/configuration.md) for the keys.
 
 ```json
 {
@@ -230,9 +243,9 @@ A pattern that is not a valid regular expression **pauses capture** in every rep
 
 ### Apply a new pattern to old threads
 
-A pattern you add applies to what is captured from then on. To apply it to threads you already have, run **Scrub Threads** from the command palette. GitMaster runs the current patterns over every stored thread and tells you how many entries changed. Scrub can only remove more text, never restore any.
+A pattern you add applies to what is captured from then on. To apply it to threads you already have, run **Scrub Threads…** from the command palette. GitMaster runs the current patterns over every stored thread and tells you how many entries changed. Scrub can only remove more text, never restore any.
 
-Export and Copy as Markdown do not apply the patterns again. They write the stored text as it is, so a thread you export has the same redactions as the thread in GitMaster. To make an export follow a new pattern, run Scrub Threads first.
+Export and Copy as Markdown do not apply the patterns again. They write the stored text as it is, so a thread you export has the same redactions as the thread in GitMaster. To make an export follow a new pattern, run **Scrub Threads…** first.
 
 ### What is not removed
 
@@ -245,15 +258,16 @@ Export and Copy as Markdown do not apply the patterns again. They write the stor
 - Turn off **Capture Threads** in **Threads Settings…** to stop capturing everywhere. Threads already stored stay.
 
 > **Planned.** **Pause Capture in This Repository**, which stops capturing in one repository only, is not available in the app yet.
+
 - Remove the plugin to stop the agent from reporting at all. See [Agent integration](../agents/agent-integration.md#remove-the-plugin).
 
 ## Where threads are stored
 
-Threads are stored in `.git/gitmaster/threads.db`, in the Git common directory of the repository, readable only by you. Nothing is written to the working tree, so no `.gitignore` entry is needed. Deleting the repository deletes its threads. See [Configuration](../reference/configuration.md).
+Threads are stored in `.git/gitmaster/threads.db`, in the Git common directory of the repository. The file is readable only by you. Nothing is written to the working tree, so no `.gitignore` entry is needed. Deleting the repository deletes its threads. See [Configuration](../reference/configuration.md).
 
 ## Search from an agent
 
-Once the MCP server is on, an agent searches the same threads with the same words as the search box. It can also list threads without a query, for example every thread that edited a path in the last week. The agent filters by role, turn range, thread, agent, model, branch, commit, path, label, star and edits, and by time. Each thread appears once with its best entry unless the agent asks for every match, and the results come in pages. An agent that finds no hit is told which filter removed the most hits.
+Once the MCP server is on, an agent searches the same threads with the same words as the search box. It can also list threads without a query, for example every thread that edited a path in the last week. The agent filters by role, turn range, thread, agent, model, branch, commit, path, label, star, edits and time. Each thread appears once with its best entry unless the agent asks for every match, and the results come in pages. An agent that finds no hit is told which filter removed the most hits.
 
 The agent reads the text of a thread marked as untrusted, because it came from earlier prompts and tool output. See [MCP tools](../reference/mcp-tools.md) for every argument.
 
@@ -263,7 +277,7 @@ An agent can mark a thread for you. It creates a label with `label_create`, atta
 
 - A label name is created once. Creating a name that exists returns that label as it is, and does not change its description or color.
 - Attaching the same thing twice changes nothing. The attachment keeps the origin that made it, so a label you attached yourself stays yours.
-- A label an agent creates is listed by `labels_list`, and `threads_search` finds the threads it is attached to with its label filter.
+- A label an agent creates is listed by `labels_list`, and `threads_search` finds the threads it is attached to with its `label` filter.
 - A link says that a thread continues, relates to or supersedes another, with the kinds described under [Link threads](#link-threads).
 
 An agent cannot rename or delete a label, detach one, remove a link, or delete a thread or an entry. The record tools are listed in [MCP tools](../reference/mcp-tools.md#record).
