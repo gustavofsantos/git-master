@@ -44,11 +44,15 @@ This is what sets GitMaster apart.
 
 ## Try it
 
-**Install** (macOS and Linux):
+**Install** (Linux, x86_64 and arm64):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/gustavofsantos/git-master/main/install.sh | sh
+curl -fsSL https://gitmaster.dev/install.sh | sh
 ```
+
+On macOS, build from source by following [the installation guide](docs/getting-started/installation.md).
+
+The documentation is published at [gitmaster.dev](https://gitmaster.dev).
 
 **Open a repository:**
 

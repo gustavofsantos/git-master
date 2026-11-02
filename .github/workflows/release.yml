@@ -18,20 +18,26 @@ jobs:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, name: linux_amd64 }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, name: linux_arm64 }
-          - { os: macos-15-intel, target: x86_64-apple-darwin, name: darwin_amd64 }
-          - { os: macos-14, target: aarch64-apple-darwin, name: darwin_arm64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - name: Install the build libraries
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig-dev
-      - run: cargo build --release --locked -p gitmaster --target ${{ matrix.target }}
+      # The public build uses no cargo features. Never pass --features preview here.
+      - name: Build
+        env:
+          GITMASTER_VERSION: ${{ github.ref_name }}
+        run: cargo build --release --locked -p gitmaster --target ${{ matrix.target }}
+      - name: Check the version
+        run: target/${{ matrix.target }}/release/gitmaster --version | grep -F "gitmaster ${GITHUB_REF_NAME#v}"
       # No version in the archive name, so releases/latest/download/<name>
       # always resolves. install.sh depends on this.
       - run: |
@@ -53,15 +59,62 @@ jobs:
           path: dist
           merge-multiple: true
       - run: cd dist && sha256sum gitmaster_*.tar.gz > checksums.txt
+      # A tag with a hyphen, such as v0.1.0-beta.1, is a prerelease.
       # A block scalar: in a plain one, the colon after "upgrade" starts a
       # mapping and GitHub rejects the whole file.
       - run: |
-          notes='Install or upgrade:
+          case "$GITHUB_REF_NAME" in
+          *-*) flags=--prerelease ;;
+          *) flags= ;;
+          esac
+          notes='Install or upgrade on Linux (x86_64 and arm64):
 
           ```sh
-          curl -fsSL https://raw.githubusercontent.com/gustavofsantos/git-master/main/install.sh | sh
-          ```'
+          curl -fsSL https://gitmaster.dev/install.sh | sh
+          ```
+
+          Prebuilt binaries are for Linux only. On macOS, build from source by following the [installation guide](https://github.com/'"$GITHUB_REPOSITORY"'/blob/main/docs/getting-started/installation.md).'
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
-            --generate-notes --notes "$notes"
+            --generate-notes --notes "$notes" $flags
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docs:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/docsite
+      # The site is served from the root of gitmaster.dev, so the base URL is
+      # that root: canonical links and the sitemap are absolute on it.
+      - name: Build the documentation site
+        run: >-
+          cargo run --quiet --release --manifest-path tools/docsite/Cargo.toml --
+          build --version "${GITHUB_REF_NAME}" --base-url https://gitmaster.dev
+      # GitHub Pages reads CNAME to serve the custom domain. install.sh is
+      # served at the same domain, so the curl | sh install command works.
+      - name: Add the custom domain and the installer
+        run: |
+          echo gitmaster.dev > build/site/CNAME
+          cp install.sh build/site/install.sh
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/site
+
+  pages:
+    needs: [docs, release]
+    # Prereleases do not replace the published documentation.
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment

@@ -1,28 +1,24 @@
 #!/bin/sh
-# Installs GitMaster from its GitHub releases.
+# Installs GitMaster from its GitHub releases. The prebuilt binaries are for Linux only.
 #
-#   curl -fsSL https://raw.githubusercontent.com/gustavofsantos/git-master/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/gustavofsantos/git-master/main/install.sh | sh -s -- --version v0.1.0 --dir /usr/local/bin
+#   curl -fsSL https://gitmaster.dev/install.sh | sh
+#   curl -fsSL https://gitmaster.dev/install.sh | sh -s -- --version v0.1.0 --dir /usr/local/bin
 #
-# Downloads the archive for this OS and CPU, checks it against the release's
-# checksums.txt, and puts the gitmaster binary in --dir (default: ~/.local/bin).
-# On Linux it also installs the icons and a desktop entry under ~/.local/share;
-# on macOS, GitMaster.app under ~/Applications (--app-dir).
-# Run it again to upgrade.
+# Downloads the archive for this CPU, checks it against the release's checksums.txt, and puts
+# the gitmaster binary in --dir (default: ~/.local/bin). It also installs the icons and a desktop
+# entry under ~/.local/share. Run it again to upgrade. On macOS, build from source instead.
 set -eu
 
 repo=gustavofsantos/git-master
 version=latest
 dir="${HOME}/.local/bin"
-app_dir="${HOME}/Applications"
 
 usage() {
 	cat <<'EOF2'
-Usage: install.sh [--version TAG] [--dir DIR] [--app-dir DIR]
+Usage: install.sh [--version TAG] [--dir DIR]
 
   --version TAG  release to install, such as v0.1.0 (default: the latest)
   --dir DIR      where to put the gitmaster binary (default: ~/.local/bin)
-  --app-dir DIR  macOS only: where to put GitMaster.app (default: ~/Applications)
 EOF2
 }
 
@@ -43,11 +39,6 @@ while [ $# -gt 0 ]; do
 		dir=$2
 		shift 2
 		;;
-	--app-dir)
-		[ $# -ge 2 ] || fail "--app-dir needs a directory"
-		app_dir=$2
-		shift 2
-		;;
 	-h | --help)
 		usage
 		exit 0
@@ -61,7 +52,9 @@ done
 
 case "$(uname -s)" in
 Linux) os=linux ;;
-Darwin) os=darwin ;;
+Darwin)
+	fail "there is no prebuilt macOS binary; build from source with: git clone https://github.com/$repo && cd git-master && make install (see https://github.com/$repo/blob/main/docs/getting-started/installation.md)"
+	;;
 *) fail "no prebuilt binary for $(uname -s); download one from https://github.com/$repo/releases or run: cargo install --git https://github.com/$repo gitmaster" ;;
 esac
 
@@ -114,22 +107,14 @@ mv -f "$dir/.gitmaster.new" "$dir/gitmaster"
 
 echo "Installed $("$dir/gitmaster" --version) to $dir/gitmaster" >&2
 
-if [ "$os" = linux ]; then
-	# The desktop entry's Exec is the absolute path, since a desktop session's
-	# PATH rarely includes ~/.local/bin.
-	data="${XDG_DATA_HOME:-$HOME/.local/share}"
-	mkdir -p "$data/applications" "$data/icons"
-	cp -R "$tmp/stage/share/icons/hicolor" "$data/icons/"
-	sed "s|^Exec=.*|Exec=$dir/gitmaster|" "$tmp/stage/share/applications/gitmaster.desktop" >"$data/applications/gitmaster.desktop"
-	echo "Installed the icons and desktop entry under $data" >&2
-else
-	mkdir -p "$app_dir" || fail "cannot create $app_dir; pick another with --app-dir"
-	rm -rf "$app_dir/GitMaster.app"
-	cp -R "$tmp/stage/GitMaster.app" "$app_dir/GitMaster.app"
-	# A download carries the quarantine flag, and the app is only ad-hoc signed.
-	xattr -dr com.apple.quarantine "$app_dir/GitMaster.app" 2>/dev/null || true
-	echo "Installed $app_dir/GitMaster.app" >&2
-fi
+# The desktop entry's Exec is the absolute path, since a desktop session's
+# PATH rarely includes ~/.local/bin.
+data="${XDG_DATA_HOME:-$HOME/.local/share}"
+mkdir -p "$data/applications" "$data/icons"
+cp -R "$tmp/stage/share/icons/hicolor" "$data/icons/"
+sed "s|^Exec=.*|Exec=$dir/gitmaster|" "$tmp/stage/share/applications/gitmaster.desktop" >"$data/applications/gitmaster.desktop"
+echo "Installed the icons and desktop entry under $data" >&2
+
 case ":$PATH:" in
 *":$dir:"*) ;;
 *) echo "Note: $dir is not on your PATH. Add it, for example: export PATH=\"$dir:\$PATH\"" >&2 ;;
