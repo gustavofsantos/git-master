@@ -149,15 +149,13 @@ Restack brings a stack up to date. It walks the tree from the top down, so paren
 
 ## Automate stack updates
 
-> **Planned.** A conflict in a workflow run does not notify you or open Resolve conflict yet, and the approval of its restack does not show the plan yet.
-
 Automation is built with workflows, not with a restack setting. Three built-in workflows ship with GitMaster. They are listed on the Workflows page under **Built-in**, and each one is off in every repository until you switch it on there. Switching one on asks whether its applying actions may run without asking, as reviewing a version does. They ship with the app, so they need no review. **Copy to Edit** writes a copy into your workflows folder, which you then review and change like your own.
 
 - **Restack children when parent moves** runs on the `stack.parent_moved` event.
 - **Restack stale stacks after fetch** runs after a fetch.
 - **Reparent to grandparent when parent is merged** runs on the `stack.parent_merged` event.
 
-A workflow that restacks shows the same four steps as the manual restack. On a conflict, the run pauses only that run and its subtree, notifies you, and waits. It never resolves a conflict by itself. A push in a workflow always asks for your approval. The restack apply step follows the approval rules of the workflow, as described in [Approvals and security](../workflows/approvals-and-security.md).
+A workflow that restacks shows the same four steps as the manual restack. When an event run asks to apply its restack, the approval lists each branch the plan moves, with its commits and the parent it moves onto, and each branch it holds back, with the reason. On a conflict, the run pauses only that run and its subtree, shows a notice that names the workflow and the branch, and waits. **Resolve conflict** in the notice opens the restack dialog on the plan, and the resolution goes on as above. **Continue restack** lets the run plan and apply the rest again on its own. After a workflow restack, **Undo restack** is offered in the restack dialog, which the Restack command opens. The run never resolves a conflict by itself. A push in a workflow always asks for your approval. The restack apply step follows the approval rules of the workflow, as described in [Approvals and security](../workflows/approvals-and-security.md).
 
 To write your own stack workflows, see the [Workflows overview](../workflows/overview.md) and [Triggers and phases](../workflows/triggers-and-phases.md).
 

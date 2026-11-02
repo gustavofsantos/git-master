@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use gm_schema::{OperationId, WorkflowEnd, WorkflowInfo, WorkflowRunStatus};
+use gm_schema::{
+    OperationId, RestackBlock, RestackPlan, WorkflowEnd, WorkflowInfo, WorkflowRunStatus,
+};
 
 use crate::suggestion::Fill;
 use crate::workflow_keys::KeyPlan;
@@ -24,6 +26,8 @@ pub struct RunView {
     pub notice: Option<String>,
     /// What the run waits to be approved, while it waits.
     pub approval: Option<String>,
+    /// The restack the approval would move, when it is an apply of a restack (`WF4c`).
+    pub approval_plan: Option<RestackPlan>,
     /// How the run ended, with the reason when there is one.
     pub finished: Option<(WorkflowEnd, Option<String>)>,
 }
@@ -36,6 +40,7 @@ impl RunView {
             state: None,
             notice: None,
             approval: None,
+            approval_plan: None,
             finished: None,
         }
     }
@@ -86,6 +91,38 @@ pub struct WantedRun {
     pub trigger: String,
 }
 
+/// A run stopped on a restack conflict (`WF4c`): the window shows a notice with **Resolve conflict**
+/// until the run ends. `plan` is the restack after the apply, with the blocked branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestackConflictNotice {
+    pub run: i64,
+    pub workflow: String,
+    pub plan: RestackPlan,
+}
+
+impl RestackConflictNotice {
+    /// The branch the notice names: the first one the plan blocks on a conflict.
+    #[must_use]
+    pub fn branch(&self) -> Option<&str> {
+        conflict_branch(&self.plan)
+    }
+}
+
+/// The first branch of `plan` that is blocked on a conflict. Pure.
+#[must_use]
+pub fn conflict_branch(plan: &RestackPlan) -> Option<&str> {
+    plan.branches
+        .iter()
+        .find(|branch| matches!(branch.block, Some(RestackBlock::Conflict { .. })))
+        .map(|branch| branch.name.as_str())
+}
+
+/// The line of the notice: the workflow's name and the branch it stopped on. Pure.
+#[must_use]
+pub fn restack_conflict_text(workflow: &str, branch: &str) -> String {
+    format!("{workflow} stopped on a restack conflict in {branch}")
+}
+
 /// A gate that is not reviewed vetoed the operation `op` (`WF3b`, D157(2)): the veto's line gets a
 /// Review link for this version.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,6 +157,8 @@ pub struct Workflows {
     pub keys: KeyPlan,
     /// The last runs, keyed by run id. Ids grow, so the last key is the newest.
     pub runs: BTreeMap<i64, RunView>,
+    /// The run that stopped on a restack conflict, until the run ends (`WF4c`).
+    pub restack_conflict: Option<RestackConflictNotice>,
 }
 
 impl Workflows {
@@ -216,6 +255,16 @@ impl Workflows {
         self.created = Some(path);
     }
 
+    /// The name the window shows for `workflow`: a built-in's title, else its name (`WF4c`).
+    #[must_use]
+    pub fn display_name(&self, workflow: &str) -> String {
+        self.listed
+            .as_deref()
+            .and_then(|listed| listed.iter().find(|info| info.name == workflow))
+            .and_then(|info| info.title.clone())
+            .unwrap_or_else(|| workflow.to_owned())
+    }
+
     /// Why the shortcut of the workflow `name` is not bound, when it is not.
     #[must_use]
     pub fn key_warning(&self, name: &str) -> Option<&str> {
@@ -240,15 +289,44 @@ impl Workflows {
         view.state = state;
         if status != WorkflowRunStatus::AwaitingApproval {
             view.approval = None;
+            view.approval_plan = None;
         }
     }
 
-    /// The run waits at an `approve` state; `summary` is what it asks.
-    pub fn approval_requested(&mut self, run: i64, state: String, summary: String) {
+    /// The run waits at an `approve` state; `summary` is what it asks, and `plan` is the restack
+    /// the apply would move, when it is one (`WF4c`).
+    pub fn approval_requested(
+        &mut self,
+        run: i64,
+        state: String,
+        summary: String,
+        plan: Option<RestackPlan>,
+    ) {
         let view = self.entry(run, String::new());
         view.status = WorkflowRunStatus::AwaitingApproval;
         view.state = Some(state);
         view.approval = Some(summary);
+        view.approval_plan = plan;
+    }
+
+    /// The plan of the approval `run` waits for, when that approval is a restack's.
+    #[must_use]
+    pub fn approval_plan(&self, run: i64) -> Option<&RestackPlan> {
+        self.runs.get(&run)?.approval_plan.as_ref()
+    }
+
+    /// A run of a workflow stopped on a restack conflict: the notice names it until the run ends.
+    pub fn restack_conflicted(&mut self, run: i64, workflow: String, plan: RestackPlan) {
+        self.restack_conflict = Some(RestackConflictNotice {
+            run,
+            workflow,
+            plan,
+        });
+    }
+
+    /// The person dismissed the notice.
+    pub fn dismiss_restack_conflict(&mut self) {
+        self.restack_conflict = None;
     }
 
     /// A `notify` step gave a line for the user.
@@ -256,8 +334,15 @@ impl Workflows {
         self.entry(run, String::new()).notice = Some(text);
     }
 
-    /// The run ended. Its approval, if it waited for one, is gone.
+    /// The run ended. Its approval, if it waited for one, is gone, and so is its restack notice.
     pub fn finished(&mut self, run: i64, end: WorkflowEnd, reason: Option<String>) {
+        if self
+            .restack_conflict
+            .as_ref()
+            .is_some_and(|notice| notice.run == run)
+        {
+            self.restack_conflict = None;
+        }
         let view = self.entry(run, String::new());
         view.status = match end {
             WorkflowEnd::Done => WorkflowRunStatus::Done,
@@ -266,6 +351,7 @@ impl Workflows {
             WorkflowEnd::Cancelled => WorkflowRunStatus::Cancelled,
         };
         view.approval = None;
+        view.approval_plan = None;
         view.finished = Some((end, reason));
     }
 
@@ -368,6 +454,13 @@ fn status_text(view: &RunView) -> String {
             None => format!("{name}: {verb}"),
         };
     }
+    // A restack's approval says what it moves; the Workflows page lists the branches (`WF4c`).
+    if let Some(plan) = &view.approval_plan {
+        return format!(
+            "{name}: waiting for approval: {}",
+            crate::restack_dialog::approval_headline(plan)
+        );
+    }
     if let Some(summary) = &view.approval {
         return format!("{name}: waiting for approval: {summary}");
     }
@@ -400,7 +493,7 @@ pub fn fill_for_message(typed: &str, message: &str) -> Fill {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_schema::WorkflowRunStatus as S;
+    use gm_schema::{PlannedBranch, WorkflowRunStatus as S};
 
     fn info(name: &str, trigger: &str, error: Option<&str>) -> WorkflowInfo {
         WorkflowInfo {
@@ -568,6 +661,22 @@ mod tests {
     }
 
     #[test]
+    fn a_restack_approval_says_what_the_plan_moves_or_holds_back() {
+        let mut workflows = Workflows::default();
+        started(&mut workflows, 4, "w");
+        workflows.approval_requested(
+            4,
+            "restack.apply".into(),
+            "Allow ctx.restack.apply?".into(),
+            Some(conflict_plan("main", "feat", "other")),
+        );
+        assert_eq!(
+            workflows.status_line().as_deref(),
+            Some("w: waiting for approval: Moves 1 branch; holds back 1.")
+        );
+    }
+
+    #[test]
     fn a_running_step_shows_its_state_and_a_finished_run_says_done() {
         let mut workflows = Workflows::default();
         started(&mut workflows, 1, "suggest-commit-message");
@@ -601,7 +710,7 @@ mod tests {
     fn an_approval_request_is_shown_and_is_the_awaiting_one() {
         let mut workflows = Workflows::default();
         started(&mut workflows, 3, "branch-from-ticket");
-        workflows.approval_requested(3, "confirm".into(), "Create branch x?".into());
+        workflows.approval_requested(3, "confirm".into(), "Create branch x?".into(), None);
         assert_eq!(workflows.awaiting_approval(), Some((3, "Create branch x?")));
         assert_eq!(
             workflows.status_line().as_deref(),
@@ -613,7 +722,7 @@ mod tests {
     fn leaving_the_approval_state_clears_the_approval() {
         let mut workflows = Workflows::default();
         started(&mut workflows, 3, "w");
-        workflows.approval_requested(3, "confirm".into(), "Ok?".into());
+        workflows.approval_requested(3, "confirm".into(), "Ok?".into(), None);
         workflows.run_changed(3, "w".into(), S::Running, Some("next".into()));
         assert_eq!(workflows.awaiting_approval(), None);
         assert_eq!(workflows.status_line().as_deref(), Some("w: running next"));
@@ -624,8 +733,8 @@ mod tests {
         let mut workflows = Workflows::default();
         started(&mut workflows, 1, "a");
         started(&mut workflows, 2, "b");
-        workflows.approval_requested(1, "s".into(), "first?".into());
-        workflows.approval_requested(2, "s".into(), "second?".into());
+        workflows.approval_requested(1, "s".into(), "first?".into(), None);
+        workflows.approval_requested(2, "s".into(), "second?".into(), None);
         assert_eq!(workflows.awaiting_approval(), Some((2, "second?")));
     }
 
@@ -752,7 +861,7 @@ mod tests {
         assert_eq!(workflows.active_of("a"), Some(1));
         assert_eq!(workflows.active_of("b"), Some(2));
         assert_eq!(workflows.active_of("c"), None);
-        workflows.approval_requested(1, "ask".into(), "push".into());
+        workflows.approval_requested(1, "ask".into(), "push".into(), None);
         assert_eq!(workflows.awaiting_approval_of("a"), Some((1, "push")));
         assert_eq!(workflows.awaiting_approval_of("b"), None);
     }
@@ -761,7 +870,7 @@ mod tests {
     fn a_run_waiting_for_approval_is_still_active_for_its_workflow() {
         let mut workflows = Workflows::default();
         workflows.run_changed(5, "a".into(), S::Running, None);
-        workflows.approval_requested(5, "ask".into(), "create branch x".into());
+        workflows.approval_requested(5, "ask".into(), "create branch x".into(), None);
         assert_eq!(
             workflows.awaiting_approval_of("a"),
             Some((5, "create branch x"))
@@ -769,5 +878,115 @@ mod tests {
         assert_eq!(workflows.active_of("a"), Some(5));
         workflows.finished(5, WorkflowEnd::Cancelled, None);
         assert_eq!(workflows.active_of("a"), None);
+    }
+
+    /// A plan of `root` in which `branch` stops on a conflict and `done` moves.
+    fn conflict_plan(root: &str, branch: &str, done: &str) -> RestackPlan {
+        let moved = PlannedBranch {
+            name: done.into(),
+            parent: root.into(),
+            old_tip: "old".into(),
+            old_base: None,
+            onto: "onto".into(),
+            commits: Vec::new(),
+            new_tip: Some("new".into()),
+            block: None,
+        };
+        let blocked = PlannedBranch {
+            name: branch.into(),
+            parent: root.into(),
+            old_tip: "old".into(),
+            old_base: None,
+            onto: "onto".into(),
+            commits: Vec::new(),
+            new_tip: None,
+            block: Some(RestackBlock::Conflict {
+                commit: "c".into(),
+                onto: "onto".into(),
+            }),
+        };
+        RestackPlan {
+            plan_id: "p".into(),
+            from: root.into(),
+            branches: vec![moved, blocked],
+            stopped: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_conflict_notice_names_the_workflow_and_the_blocked_branch_and_opens_on_the_root() {
+        let mut workflows = Workflows::default();
+        let plan = conflict_plan("main", "feat", "other");
+        assert_eq!(conflict_branch(&plan), Some("feat"));
+        workflows.restack_conflicted(4, "restack-children-on-parent-move".into(), plan);
+        let notice = workflows.restack_conflict.as_ref().expect("a notice");
+        assert_eq!(notice.branch(), Some("feat"));
+        // Resolve conflict opens the restack dialog on the plan's root (D154).
+        assert_eq!(notice.plan.from, "main");
+        assert_eq!(
+            restack_conflict_text(
+                &workflows.display_name(&notice.workflow),
+                notice.branch().unwrap_or_default()
+            ),
+            "restack-children-on-parent-move stopped on a restack conflict in feat"
+        );
+    }
+
+    #[test]
+    fn a_built_in_is_named_by_its_title_and_others_by_their_name() {
+        let mut workflows = Workflows::default();
+        let mut built_in = info(
+            "restack-children-on-parent-move",
+            "stack.parent_moved",
+            None,
+        );
+        built_in.title = Some("Restack children when parent moves".into());
+        workflows.listed(vec![built_in], Vec::new(), None, Vec::new());
+        assert_eq!(
+            workflows.display_name("restack-children-on-parent-move"),
+            "Restack children when parent moves"
+        );
+        assert_eq!(workflows.display_name("own-flow"), "own-flow");
+    }
+
+    #[test]
+    fn the_conflict_notice_is_dropped_when_its_run_ends_and_kept_for_another_run() {
+        let mut workflows = Workflows::default();
+        workflows.restack_conflicted(4, "w".into(), conflict_plan("main", "feat", "x"));
+        workflows.finished(5, WorkflowEnd::Done, None);
+        assert!(workflows.restack_conflict.is_some(), "another run ended");
+        workflows.finished(4, WorkflowEnd::Done, None);
+        assert_eq!(workflows.restack_conflict, None, "its run ended");
+    }
+
+    #[test]
+    fn the_conflict_notice_can_be_dismissed() {
+        let mut workflows = Workflows::default();
+        workflows.restack_conflicted(4, "w".into(), conflict_plan("main", "feat", "x"));
+        workflows.dismiss_restack_conflict();
+        assert_eq!(workflows.restack_conflict, None);
+    }
+
+    #[test]
+    fn a_plan_is_kept_while_its_approval_waits_and_leaves_with_it() {
+        let mut workflows = Workflows::default();
+        let plan = conflict_plan("main", "feat", "x");
+        workflows.approval_requested(7, "apply".into(), "Allow".into(), Some(plan.clone()));
+        assert_eq!(workflows.approval_plan(7), Some(&plan));
+        workflows.run_changed(7, "w".into(), S::Running, None);
+        assert_eq!(workflows.approval_plan(7), None, "the approval is answered");
+        workflows.approval_requested(8, "apply".into(), "Allow".into(), None);
+        assert_eq!(workflows.approval_plan(8), None, "an approval with no plan");
+    }
+
+    #[test]
+    fn a_branch_is_blocked_on_a_conflict_only_for_a_conflict() {
+        let plan = RestackPlan {
+            plan_id: "p".into(),
+            from: "main".into(),
+            branches: Vec::new(),
+            stopped: Vec::new(),
+        };
+        assert_eq!(conflict_branch(&plan), None);
     }
 }

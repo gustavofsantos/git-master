@@ -259,6 +259,19 @@ impl Restacking {
         self.record = record;
     }
 
+    /// Whether the plan on screen may be out of date because a restack that is not this dialog's
+    /// moved branches (a workflow's run, `WF4c`), and the dialog should plan again. Not while its
+    /// own apply or undo runs, nor during a resolution, which settles the plan itself.
+    #[must_use]
+    pub(crate) fn outdated_by(&self, id: OperationId) -> bool {
+        !self.owns(id)
+            && !self.awaits_resolution(id)
+            && !self.applied
+            && self.resolving.is_none()
+            && self.resolution_pending.is_none()
+            && !matches!(self.pending, Some((_, Phase::Applying | Phase::Undoing)))
+    }
+
     /// Leaves the branch out of the plan, or puts it back.
     pub(crate) fn toggle_skip(&mut self, name: &str) {
         match self.skip.iter().position(|skipped| skipped == name) {
@@ -308,15 +321,73 @@ pub(crate) fn can_apply(plan: Option<&RestackPlan>, busy: bool, applied: bool) -
     !busy && !applied && plan.is_some_and(RestackPlan::can_apply)
 }
 
+/// The branches a plan moves: unblocked, with a new tip. Pure.
+#[must_use]
+pub(crate) fn moving_count(plan: &RestackPlan) -> usize {
+    plan.branches
+        .iter()
+        .filter(|branch| branch.block.is_none() && branch.new_tip.is_some())
+        .count()
+}
+
 #[must_use]
 pub(crate) fn apply_label(plan: Option<&RestackPlan>) -> String {
-    let moving = plan.map_or(0, |plan| {
-        plan.branches
-            .iter()
-            .filter(|branch| branch.block.is_none() && branch.new_tip.is_some())
-            .count()
-    });
+    let moving = plan.map_or(0, moving_count);
     format!("Restack {moving} {}", plural(moving, "branch", "branches"))
+}
+
+/// One line of what an approval shows: a branch the plan moves or holds back, and what it does
+/// (`WF4c`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OutlineLine {
+    pub(crate) name: String,
+    pub(crate) text: String,
+    /// The plan holds the branch back: it conflicts, is refused, or waits for its parent.
+    pub(crate) held: bool,
+}
+
+/// The branches an approval of `plan` lists: each one it moves, then each one it holds back, in
+/// the plan's order (parents first), worded as the dialog words them. A branch with nothing to
+/// replay is left out. Pure.
+#[must_use]
+pub(crate) fn outline(plan: &RestackPlan) -> Vec<OutlineLine> {
+    plan.branches
+        .iter()
+        .filter_map(|branch| {
+            let held = branch.block.is_some();
+            if !held && branch.new_tip.is_none() {
+                return None;
+            }
+            Some(OutlineLine {
+                name: branch.name.clone(),
+                text: summary(branch),
+                held,
+            })
+        })
+        .collect()
+}
+
+/// The sentence an approval opens with: how many branches the plan moves and holds back. Pure.
+#[must_use]
+pub(crate) fn approval_headline(plan: &RestackPlan) -> String {
+    let moving = moving_count(plan);
+    let held = plan
+        .branches
+        .iter()
+        .filter(|branch| branch.block.is_some())
+        .count();
+    match (moving, held) {
+        (0, 0) => "Nothing to restack.".to_owned(),
+        (moving, 0) => format!("Moves {moving} {}.", plural(moving, "branch", "branches")),
+        (0, held) => format!(
+            "Holds back {held} {}; no branch moves.",
+            plural(held, "branch", "branches")
+        ),
+        (moving, held) => format!(
+            "Moves {moving} {}; holds back {held}.",
+            plural(moving, "branch", "branches")
+        ),
+    }
 }
 
 fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
@@ -426,10 +497,6 @@ impl StatusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.model.restacking.resolving().is_some() || self.model.restacking.resolution_busy() {
-            self.notify_user("Finish or cancel the restack conflict first.", cx);
-            return;
-        }
         let root = self
             .model
             .stacks
@@ -442,10 +509,31 @@ impl StatusView {
                     .map(|stack| stack.root().to_owned())
             })
             .unwrap_or_else(|| branch.to_owned());
+        self.open_restack_dialog_on(&root, window, cx);
+    }
+
+    /// Opens the dialog on the restack that starts at `root`, and plans it. A workflow's conflict
+    /// notice opens it on the plan's own root (`WF4c`).
+    pub(crate) fn open_restack_dialog_on(
+        &mut self,
+        root: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.restacking.resolving().is_some() || self.model.restacking.resolution_busy() {
+            self.notify_user("Finish or cancel the restack conflict first.", cx);
+            return;
+        }
         let focus = cx.focus_handle();
         focus.focus(window);
         self.restack_dialog = Some(RestackDialog { focus, error: None });
-        self.model.restacking.begin(&root);
+        self.model.restacking.begin(root);
+        self.request_restack_plan(cx);
+    }
+
+    /// The restack of a workflow moved branches while the dialog is open: its plan is out of date,
+    /// so the dialog plans again and shows what is left (`WF4c`).
+    pub(crate) fn replan_after_workflow_restack(&mut self, cx: &mut Context<Self>) {
         self.request_restack_plan(cx);
     }
 
@@ -1225,5 +1313,108 @@ mod tests {
             !Restacking::default().may_finish(),
             "nothing is being resolved"
         );
+    }
+
+    #[test]
+    fn the_outline_of_an_approval_lists_the_moved_branches_then_the_held_ones_in_plan_order() {
+        let conflict = planned(
+            "conflicted",
+            Some(RestackBlock::Conflict {
+                commit: "c0".into(),
+                onto: "o".into(),
+            }),
+            &[ReplayStep::Conflict {
+                paths: vec!["a.txt".into()],
+            }],
+        );
+        let mut nothing = planned("unchanged", None, &[]);
+        nothing.new_tip = None;
+        let plan = plan(vec![
+            planned("moved", None, &[ReplayStep::Clean { new: "n".into() }]),
+            nothing,
+            conflict,
+            planned(
+                "refused",
+                Some(RestackBlock::Refused {
+                    reason: "checked out in another worktree".into(),
+                }),
+                &[],
+            ),
+        ]);
+        let lines = outline(&plan);
+        assert_eq!(
+            lines,
+            vec![
+                OutlineLine {
+                    name: "moved".into(),
+                    text: "Replays 1 commit onto main.".into(),
+                    held: false,
+                },
+                OutlineLine {
+                    name: "conflicted".into(),
+                    text: "Conflict in “subject 0”: a.txt. It stays where it is.".into(),
+                    held: true,
+                },
+                OutlineLine {
+                    name: "refused".into(),
+                    text: "checked out in another worktree".into(),
+                    held: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_headline_of_an_approval_counts_the_moved_and_the_held_branches() {
+        let moved = || planned("m", None, &[ReplayStep::Clean { new: "n".into() }]);
+        let held = || {
+            planned(
+                "h",
+                Some(RestackBlock::Refused {
+                    reason: "no".into(),
+                }),
+                &[],
+            )
+        };
+        assert_eq!(approval_headline(&plan(vec![moved()])), "Moves 1 branch.");
+        assert_eq!(
+            approval_headline(&plan(vec![moved(), moved()])),
+            "Moves 2 branches."
+        );
+        assert_eq!(
+            approval_headline(&plan(vec![moved(), held()])),
+            "Moves 1 branch; holds back 1."
+        );
+        assert_eq!(
+            approval_headline(&plan(vec![held()])),
+            "Holds back 1 branch; no branch moves."
+        );
+        assert_eq!(approval_headline(&plan(Vec::new())), "Nothing to restack.");
+    }
+
+    #[test]
+    fn a_workflows_restack_makes_the_plan_on_an_open_dialog_out_of_date() {
+        let mut restacking = Restacking::default();
+        restacking.begin("main");
+        restacking.planned(plan(Vec::new()));
+        assert!(
+            restacking.outdated_by(OperationId(9)),
+            "a run moved branches while the dialog shows a plan"
+        );
+        // The dialog's own operations do not make it out of date.
+        restacking.begin_apply(OperationId(3));
+        assert!(!restacking.outdated_by(OperationId(3)));
+        assert!(!restacking.outdated_by(OperationId(9)), "its apply runs");
+        restacking.settle(OperationState::Done, None);
+        assert!(!restacking.outdated_by(OperationId(9)), "its apply ran");
+    }
+
+    #[test]
+    fn a_resolution_in_progress_keeps_the_plan_of_the_dialog() {
+        let mut restacking = Restacking::default();
+        restacking.begin("main");
+        restacking.planned(plan(Vec::new()));
+        restacking.begin_resolution(OperationId(4), ResolutionStep::Start);
+        assert!(!restacking.outdated_by(OperationId(9)));
     }
 }

@@ -15,7 +15,7 @@ use crate::FocusPrev;
 use crate::icon::{self, Icon};
 use crate::theme;
 use crate::view::StatusView;
-use crate::workflow_run::ReviewRequest;
+use crate::workflow_run::{ReviewRequest, restack_conflict_text};
 
 const WIDTH: f32 = 680.;
 /// The dialog hangs this far below the top of the window.
@@ -545,6 +545,82 @@ fn buttons(request: &ReviewRequest, cx: &Context<StatusView>) -> Div {
 /// The non-modal notices of event runs that wait for their review, and the Review link beside a
 /// gate's veto (`WF3b`). Both are drawn by the window; nothing here blocks the work.
 impl StatusView {
+    /// The non-modal notices above the status bar: the event runs that wait for their review, and
+    /// the runs that stopped on a restack conflict (`WF4c`). `None` when there is none.
+    pub(crate) fn notices_strip(&self, cx: &Context<Self>) -> Option<Div> {
+        let wanted = self.wanted_strip(cx);
+        let conflict = self.restack_conflict_strip(cx);
+        if wanted.is_none() && conflict.is_none() {
+            return None;
+        }
+        Some(div().flex().flex_col().children(wanted).children(conflict))
+    }
+
+    /// The notice of a run that stopped on a restack conflict: its line, Resolve conflict, which
+    /// opens the restack dialog on the plan's root (D154), and Dismiss. `None` when no run stopped
+    /// (`WF4c`).
+    pub(crate) fn restack_conflict_strip(&self, cx: &Context<Self>) -> Option<Div> {
+        let notice = self.model.workflows.restack_conflict.as_ref()?;
+        let branch = notice.branch()?.to_owned();
+        let root = notice.plan.from.clone();
+        let text = restack_conflict_text(
+            &self.model.workflows.display_name(&notice.workflow),
+            &branch,
+        );
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .px_4()
+                .py_1()
+                .text_sm()
+                .bg(theme::warn_bg())
+                .border_t_1()
+                .border_color(theme::hairline())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(theme::warn_fg())
+                        .child(text),
+                )
+                .child(
+                    div()
+                        .id("restack-conflict-resolve")
+                        .flex_none()
+                        .text_color(theme::accent())
+                        .cursor_pointer()
+                        .child("Resolve conflict")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                this.open_restack_dialog_on(&root, window, cx);
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("restack-conflict-dismiss")
+                        .flex_none()
+                        .text_color(theme::muted())
+                        .cursor_pointer()
+                        .child("Dismiss")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                this.model.workflows.dismiss_restack_conflict();
+                                cx.notify();
+                            }),
+                        ),
+                ),
+        )
+    }
+
     /// One line per run that waits: its text, Review and Dismiss. `None` when none waits.
     pub(crate) fn wanted_strip(&self, cx: &Context<Self>) -> Option<Div> {
         let rows: Vec<Div> = self

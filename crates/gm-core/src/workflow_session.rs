@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gm_schema::{Actor, CommandKind, OperationId};
+use gm_schema::{Actor, CommandKind, OperationId, RestackPlan};
 
 use crate::branch;
 use crate::script::loader::sha256_hex;
@@ -36,16 +36,22 @@ pub(crate) struct Actions<'a> {
     origin: OperationId,
     wrote: bool,
     refs: bool,
+    restack: bool,
     remaps: Vec<(String, String)>,
+    conflict: Option<RestackPlan>,
 }
 
 /// What a call of a run changed, for the engine: whether Git was written, whether branch refs
-/// moved (so the branches and the stacks are read again), and the replays of moved commits (D145).
+/// moved (so the branches and the stacks are read again), whether a restack moved them (so the
+/// window can undo it, `WF4c`), the replays of moved commits (D145), and the restack a call
+/// stopped on (`WF4c`).
 #[derive(Default)]
 pub(crate) struct Effected {
     pub(crate) wrote: bool,
     pub(crate) refs: bool,
+    pub(crate) restack: bool,
     pub(crate) remaps: Vec<(String, String)>,
+    pub(crate) conflict: Option<RestackPlan>,
 }
 
 impl<'a> Actions<'a> {
@@ -62,7 +68,9 @@ impl<'a> Actions<'a> {
             origin,
             wrote: false,
             refs: false,
+            restack: false,
             remaps: Vec::new(),
+            conflict: None,
         }
     }
 
@@ -71,7 +79,9 @@ impl<'a> Actions<'a> {
         Effected {
             wrote: self.wrote,
             refs: self.refs,
+            restack: self.restack,
             remaps: self.remaps,
+            conflict: self.conflict,
         }
     }
 
@@ -83,9 +93,16 @@ impl<'a> Actions<'a> {
         self.root
     }
 
-    /// Notes that branch refs moved in this call.
-    pub(crate) fn moved_refs(&mut self) {
+    /// Notes that a restack or a reparent (or its undo) moved the branch refs: the window gets the
+    /// record it can undo (`WF4c`).
+    pub(crate) fn moved_by_restack(&mut self) {
         self.refs = true;
+        self.restack = true;
+    }
+
+    /// Notes the restack this call stopped on: the plan after it, with the blocked branch (`WF4c`).
+    pub(crate) fn stopped_on_conflict(&mut self, plan: RestackPlan) {
+        self.conflict = Some(plan);
     }
 
     /// Keeps the replays of moved commits, so the thread links resolve to them (D145).

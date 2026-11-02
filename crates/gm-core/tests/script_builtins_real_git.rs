@@ -17,8 +17,8 @@ use gm_core::script::run::ScriptEvent;
 use gm_core::script::trust::TrustStore;
 use gm_core::{EffectRequest, Engine, ScriptLink};
 use gm_schema::{
-    Actor, Command, CommandKind, ConflictSite, Event, OperationId, OperationState, RestackPlan,
-    WorkflowEnd, WorkflowInfo, WorkflowRunStatus, WorkflowRunSummary,
+    Actor, Command, CommandKind, ConflictSite, Event, OperationId, OperationState, RestackBlock,
+    RestackPlan, RestackRecord, WorkflowEnd, WorkflowInfo, WorkflowRunStatus, WorkflowRunSummary,
 };
 
 const RESTACK_CHILDREN: &str = "restack-children-on-parent-move";
@@ -449,7 +449,7 @@ fn a_commit_on_the_parent_restacks_the_child_with_the_grant_and_no_approval() {
     assert_eq!(ends(&events)[0].1, WorkflowEnd::Done, "{events:#?}");
     assert_eq!(
         notices(&events),
-        vec!["Restacked 1 branches on main".to_owned()]
+        vec!["Restacked 1 branch onto main".to_owned()]
     );
 
     // The child now sits on the new tip of main, and its base is that tip.
@@ -534,7 +534,7 @@ fn a_restack_conflict_waits_for_the_resolution_and_then_restacks_the_rest() {
     assert_eq!(ends(&events)[0].1, WorkflowEnd::Done, "{events:#?}");
     assert_eq!(
         notices(&events),
-        vec!["Restacked 2 branches on main".to_owned()],
+        vec!["Restacked 2 branches onto main".to_owned()],
         "the run re-planned after the resume: feat and sub moved"
     );
 
@@ -570,7 +570,7 @@ fn restack_stale_after_fetch_restacks_a_stale_stack_from_a_local_remote() {
     assert_eq!(ends(&events)[0].1, WorkflowEnd::Done, "{events:#?}");
     assert_eq!(
         notices(&events),
-        vec!["Restacked 1 branches after the fetch".to_owned()]
+        vec!["Restacked 1 branch after the fetch".to_owned()]
     );
     assert_ne!(
         git(&repo, &["config", "branch.feat.stackParentBase"]),
@@ -688,7 +688,7 @@ fn a_branch_already_stale_when_the_restack_is_switched_on_is_restacked_by_the_ne
     assert_eq!(ends(&events)[0].1, WorkflowEnd::Done, "{events:#?}");
     assert_eq!(
         notices(&events),
-        vec!["Restacked 1 branches on main".to_owned()]
+        vec!["Restacked 1 branch onto main".to_owned()]
     );
     let new_main = git(&repo, &["rev-parse", "main"]);
     assert_ne!(new_main, base);
@@ -745,4 +745,188 @@ fn a_stale_branch_fires_parent_moved_once_per_parent_move_and_not_on_a_refresh()
     events.extend(h.settle(Duration::from_millis(300)));
     assert!(started_runs(&events).is_empty(), "{events:#?}");
     assert_eq!(h.runs("on-parent-moved").len(), 1);
+}
+
+/// The plan an approval asked for, when the approval is an apply of a restack (`WF4c`).
+fn approval_plan(events: &[Event]) -> Option<RestackPlan> {
+    events.iter().find_map(|e| match e {
+        Event::WorkflowApprovalRequested { plan, .. } => plan.clone(),
+        _ => None,
+    })
+}
+
+/// The restack conflicts the window was told about: the run, its workflow and the branch the
+/// plan after the apply blocks on a conflict (`WF4c`).
+fn conflicts(events: &[Event]) -> Vec<(i64, String, String)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::WorkflowRestackConflict {
+                run,
+                workflow,
+                plan,
+            } => {
+                let branch = plan
+                    .branches
+                    .iter()
+                    .find(|b| matches!(b.block, Some(RestackBlock::Conflict { .. })))
+                    .map_or_else(String::new, |b| b.name.clone());
+                Some((*run, workflow.clone(), branch))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The record each restack that ran reported; `None` for an undo (`WF4c`).
+fn restack_records(events: &[Event]) -> Vec<Option<RestackRecord>> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::RestackFinished { record, .. } => Some(record.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_approval_of_a_restack_apply_carries_the_plan_that_moves_the_branches() {
+    let (_dir, repo, flows) = setup();
+    let base = stacked_repo(&repo);
+    let mut h = Harness::new(&repo, &flows);
+    h.switch(RESTACK_CHILDREN, true);
+    let events = h.commit_file("elsewhere.txt", "x\n", "main moves");
+    assert!(approvals(&events).is_empty());
+    let events = h.refs_seen();
+    let events = h.pump_until(events, |e| !approvals(e).is_empty());
+    let plan = approval_plan(&events).expect("the approval carries the plan");
+    // The plan moves feat onto main, replaying its one commit, and holds nothing back.
+    assert_eq!(plan.from, "feat", "{plan:#?}");
+    assert_eq!(plan.branches.len(), 1, "{plan:#?}");
+    let feat = &plan.branches[0];
+    assert_eq!((feat.name.as_str(), feat.parent.as_str()), ("feat", "main"));
+    assert_eq!(feat.commits.len(), 1);
+    assert_eq!(feat.block, None);
+    assert!(feat.new_tip.is_some());
+    // Nothing moved yet: the approval holds the apply.
+    assert_eq!(git(&repo, &["config", "branch.feat.stackParentBase"]), base);
+
+    let run = approvals(&events)[0];
+    let events = h.send(CommandKind::ApproveWorkflowStep {
+        run,
+        approved: true,
+    });
+    assert!(failure(&events).is_none(), "{events:#?}");
+    let events = h.pump_until(events, finished);
+    assert_eq!(ends(&events)[0].1, WorkflowEnd::Done, "{events:#?}");
+    git(&repo, &["merge-base", "--is-ancestor", "main", "feat"]);
+}
+
+#[test]
+fn a_restack_conflict_in_a_run_notifies_with_the_branch_and_resolves_from_its_plan() {
+    let (_dir, repo, flows) = setup();
+    conflicting_stack(&repo);
+    let mut h = Harness::new(&repo, &flows);
+    h.switch_on_with_grant(RESTACK_CHILDREN);
+
+    let events = h.commit_file("a.txt", "from main\n", "main moves");
+    assert!(conflicts(&events).is_empty());
+    let events = h.refs_seen();
+    let events = h.pump_until(events, |e| !conflicts(e).is_empty());
+    let found = conflicts(&events);
+    assert_eq!(found.len(), 1, "{events:#?}");
+    let (run, workflow, branch) = found[0].clone();
+    assert_eq!(workflow, RESTACK_CHILDREN);
+    assert_eq!(branch, "feat");
+    // The run reaches its wait a moment after the apply reported the conflict.
+    let until = Instant::now() + Duration::from_secs(10);
+    while h.runs(RESTACK_CHILDREN)[0].status != WorkflowRunStatus::Waiting {
+        assert!(
+            Instant::now() < until,
+            "the run never waited for the resolution"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!finished(&events), "the run did not end: {events:#?}");
+
+    // The notice opens the restack dialog on the plan's root; Resolve conflict starts from that
+    // plan, by its id (D154).
+    let plan = events
+        .iter()
+        .find_map(|e| match e {
+            Event::WorkflowRestackConflict { plan, .. } => Some(plan.clone()),
+            _ => None,
+        })
+        .expect("the conflict plan");
+    assert_eq!(
+        plan.from, "feat",
+        "the run's restack starts at its trigger branch"
+    );
+    let events = h.send(CommandKind::StartRestackResolution {
+        branch: plan.from.clone(),
+        plan_id: plan.plan_id.clone(),
+        skip: Vec::new(),
+        conflicted: branch.clone(),
+    });
+    assert!(failure(&events).is_none(), "start refused: {events:#?}");
+    let events = h.send(CommandKind::ResolveConflict {
+        path: "a.txt".into(),
+        text: "resolved\n".into(),
+        origins: Vec::new(),
+        site: ConflictSite::Restack,
+    });
+    assert!(failure(&events).is_none(), "resolve refused: {events:#?}");
+    let events = h.send(CommandKind::FinishRestackResolution);
+    assert!(failure(&events).is_none(), "finish refused: {events:#?}");
+    let events = h.pump_until(events, finished);
+    assert_eq!(ends(&events)[0].0, run);
+    assert_eq!(ends(&events)[0].1, WorkflowEnd::Done, "{events:#?}");
+    assert_eq!(
+        notices(&events),
+        vec!["Restacked 1 branch onto main".to_owned()],
+        "the run re-planned after the resume"
+    );
+    assert!(
+        approvals(&events).is_empty(),
+        "the grant covers the re-planned apply"
+    );
+    // The apply after the resume moved feat, so the window can undo it (WF4c).
+    let records = restack_records(&events);
+    assert!(
+        records.iter().any(|r| r
+            .as_ref()
+            .is_some_and(|r| r.moves.iter().any(|m| m.name == "feat"))),
+        "{records:#?}"
+    );
+    git(&repo, &["merge-base", "--is-ancestor", "main", "feat"]);
+    assert_eq!(git(&repo, &["show", "feat:a.txt"]), "resolved");
+}
+
+#[test]
+fn a_workflow_restack_reports_its_record_and_undo_puts_the_branches_back() {
+    let (_dir, repo, flows) = setup();
+    stacked_repo(&repo);
+    let feat_before = git(&repo, &["rev-parse", "feat"]);
+    let mut h = Harness::new(&repo, &flows);
+    h.switch_on_with_grant(RESTACK_CHILDREN);
+    h.commit_file("elsewhere.txt", "x\n", "main moves");
+    let events = h.refs_seen();
+    let events = h.pump_until(events, finished);
+    assert_eq!(ends(&events)[0].1, WorkflowEnd::Done, "{events:#?}");
+    let records = restack_records(&events);
+    let record = records
+        .iter()
+        .flatten()
+        .next()
+        .unwrap_or_else(|| panic!("the run reported no record: {events:#?}"));
+    assert_eq!(record.from, "feat");
+    assert_eq!(record.moves.len(), 1, "{record:#?}");
+    assert_eq!(record.moves[0].name, "feat");
+    assert_ne!(git(&repo, &["rev-parse", "feat"]), feat_before);
+
+    // Undo, as the window's restack dialog does: the record goes, and feat is where it was.
+    let events = h.send(CommandKind::UndoRestack);
+    assert!(failure(&events).is_none(), "undo refused: {events:#?}");
+    assert_eq!(restack_records(&events), vec![None]);
+    assert_eq!(git(&repo, &["rev-parse", "feat"]), feat_before);
 }

@@ -15,20 +15,26 @@ local MAX_RESUMES = 3
 -- One plan of the subtree at `root`, then its apply. Returns the outcome and the branches planned.
 -- The apply runs even when the plan moves nothing: a branch that conflicts is blocked, so it moves
 -- zero branches and the apply is what ends `conflict`.
-local function restack(ctx, root)
+local function restack_once(ctx, root)
   local plan = ctx.restack.plan({ root = root })
   local r = ctx.try(function() return ctx.restack.apply({ plan_id = plan.plan_id }) end)
   return r.outcome, plan.branch_count
+end
+
+-- The same, planned again once when the stacks changed between the plan and the apply (a person
+-- may have restacked the subtree meanwhile).
+local function restack(ctx, root)
+  local outcome, count = restack_once(ctx, root)
+  if outcome == "stale" then
+    outcome, count = restack_once(ctx, root)
+  end
+  return outcome, count
 end
 
 function M.execute(ctx, input)
   -- The child that became stale: its subtree is what moved.
   local root = input.trigger.branch
   local outcome, count = restack(ctx, root)
-  if outcome == "stale" then
-    -- The stacks changed between the plan and the apply: plan and apply once more.
-    outcome, count = restack(ctx, root)
-  end
   local resumes = 0
   while outcome == "conflict" do
     resumes = resumes + 1
@@ -43,7 +49,8 @@ function M.execute(ctx, input)
   if outcome ~= "done" then return ctx.fail("restack " .. outcome) end
   -- Done with nothing planned: the children were already on the parent.
   if count == 0 then return end
-  ctx.notify("Restacked " .. count .. " branches on " .. input.trigger.parent)
+  local word = count == 1 and "branch" or "branches"
+  ctx.notify("Restacked " .. count .. " " .. word .. " onto " .. input.trigger.parent)
 end
 
 return M

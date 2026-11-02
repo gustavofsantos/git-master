@@ -1298,8 +1298,17 @@ impl Model {
                 run,
                 state,
                 summary,
+                plan,
             } => {
-                self.workflows.approval_requested(run, state, summary);
+                self.workflows.approval_requested(run, state, summary, plan);
+                None
+            }
+            Event::WorkflowRestackConflict {
+                run,
+                workflow,
+                plan,
+            } => {
+                self.workflows.restack_conflicted(run, workflow, plan);
                 None
             }
             Event::WorkflowNotice { run, text } => {
@@ -1749,6 +1758,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkflowMessageSuggested { .. }
         | Event::WorkflowNotice { .. }
         | Event::WorkflowApprovalRequested { .. }
+        | Event::WorkflowRestackConflict { .. }
         | Event::WorkflowWantsReview { .. }
         | Event::WorkflowRequestDropped { .. }
         | Event::WorkflowRunFinished { .. } => None,
@@ -3629,5 +3639,54 @@ mod thread_copy_tests {
         model.provenance.request("src/a.rs", 3, 5, OperationId(30));
         model.reset_for_repo();
         assert!(!model.provenance.is_open());
+    }
+
+    /// A restack plan that blocks `feat` on a conflict, for the workflow events.
+    fn blocked_plan() -> gm_schema::RestackPlan {
+        use gm_schema::{PlannedBranch, RestackBlock};
+        gm_schema::RestackPlan {
+            plan_id: "p".into(),
+            from: "main".into(),
+            branches: vec![PlannedBranch {
+                name: "feat".into(),
+                parent: "main".into(),
+                old_tip: "old".into(),
+                old_base: None,
+                onto: "onto".into(),
+                commits: Vec::new(),
+                new_tip: None,
+                block: Some(RestackBlock::Conflict {
+                    commit: "c".into(),
+                    onto: "onto".into(),
+                }),
+            }],
+            stopped: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_workflows_restack_conflict_and_its_approval_plan_reach_the_workflow_state() {
+        let mut model = Model::default();
+        let _ = model.apply(Event::WorkflowApprovalRequested {
+            run: 3,
+            state: "restack.apply".into(),
+            summary: "Allow ctx.restack.apply?".into(),
+            plan: Some(blocked_plan()),
+        });
+        assert_eq!(model.workflows.approval_plan(3), Some(&blocked_plan()));
+        let _ = model.apply(Event::WorkflowRestackConflict {
+            run: 3,
+            workflow: "restack-children-on-parent-move".into(),
+            plan: blocked_plan(),
+        });
+        let notice = model.workflows.restack_conflict.clone().expect("a notice");
+        assert_eq!(notice.run, 3);
+        assert_eq!(notice.branch(), Some("feat"));
+        let _ = model.apply(Event::WorkflowRunFinished {
+            run: 3,
+            end: gm_schema::WorkflowEnd::Done,
+            reason: None,
+        });
+        assert_eq!(model.workflows.restack_conflict, None, "the run ended");
     }
 }

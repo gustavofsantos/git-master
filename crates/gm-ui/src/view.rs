@@ -547,9 +547,20 @@ impl StatusView {
         .detach();
     }
 
+    /// Whether `event` is a restack a workflow made while the restack dialog shows a plan, which
+    /// the plan may now be out of date for (`WF4c`). Read before the event is applied.
+    fn workflow_moved_under_dialog(&self, event: &Event) -> bool {
+        matches!(
+            event,
+            Event::RestackFinished { id, .. }
+                if self.model.restacking.outdated_by(*id) && self.restack_dialog.is_some()
+        )
+    }
+
     fn on_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         let reload = matches!(event, Event::StatusLoaded { .. });
         let stacks_loaded = matches!(event, Event::StacksLoaded { .. });
+        let moved_by_workflow = self.workflow_moved_under_dialog(&event);
         let listed = matches!(event, Event::BranchesLoaded { .. });
         let stashes_listed = matches!(event, Event::StashesListed { .. });
         let threads_flags = shell_threads::follow_flags(&event);
@@ -573,6 +584,9 @@ impl StatusView {
         let failed_start = self.take_settled_startup(&event);
         let converted = convert_answer(&event);
         let shown = self.model.apply(event);
+        if moved_by_workflow {
+            self.replan_after_workflow_restack(cx);
+        }
         if let Some(text) = converted {
             self.open_message(CONVERT_TITLE.to_owned(), text, window, cx);
         }
@@ -1865,7 +1879,7 @@ impl Render for StatusView {
             .children(
                 self.welcome
                     .is_none()
-                    .then(|| self.wanted_strip(cx))
+                    .then(|| self.notices_strip(cx))
                     .flatten(),
             )
             .children(self.welcome.is_none().then(|| self.status_bar(window, cx)))

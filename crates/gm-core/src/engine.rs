@@ -9,9 +9,9 @@ use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictSite, DirListing,
     Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED, MergedBranch,
-    OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackResolution, ReviewChange,
-    ReviewComment, ReviewStatus, STASH_LIST_CHANGED, StackSnapshot, WorkflowDiagnostic,
-    WorktreeEntry, WorktreeInspection,
+    OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackPlan, RestackResolution,
+    ReviewChange, ReviewComment, ReviewStatus, STASH_LIST_CHANGED, StackSnapshot,
+    WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -441,8 +441,10 @@ impl Engine {
             .script
             .as_mut()
             .ok_or_else(|| "the script session is not open".to_owned())?;
+        let workflow = spec.workflow.clone();
         let run = session.runtime.start(spec)?;
         session.note_origin(run, id);
+        session.note_workflow(run, workflow);
         Ok(run)
     }
 
@@ -461,9 +463,16 @@ impl Engine {
             return Vec::new();
         };
         let root = session.root.clone();
-        let origin = session.origin(request.call.run);
+        let run = request.call.run;
+        let origin = session.origin(run);
         match session.execute(self.git.as_ref(), &mut self.log, request) {
-            Carried::Answered(effected) => self.script_answered(origin, &root, &effected),
+            Carried::Answered(effected) => {
+                let mut events = self.script_answered(origin, &root, &effected);
+                if let Some(plan) = effected.conflict {
+                    events.extend(self.restack_conflict(run, plan));
+                }
+                events
+            }
             Carried::Waiting(waiting) => {
                 let Waiting {
                     run,
@@ -488,6 +497,22 @@ impl Engine {
                 Vec::new()
             }
         }
+    }
+
+    /// A run's restack stopped on a conflict: the event names the run, its workflow and the plan
+    /// after the apply, so the window can open Resolve conflict (`WF4c`).
+    fn restack_conflict(&self, run: ScriptRunId, plan: RestackPlan) -> Vec<Event> {
+        let workflow = self
+            .script
+            .as_ref()
+            .and_then(|session| session.workflow(run))
+            .unwrap_or_default()
+            .to_owned();
+        vec![Event::WorkflowRestackConflict {
+            run,
+            workflow,
+            plan,
+        }]
     }
 
     /// Takes the Git commands script runs wait for, to start them on threads of their own.
@@ -516,7 +541,7 @@ impl Engine {
         let effected = Effected {
             wrote: true,
             refs,
-            remaps: Vec::new(),
+            ..Effected::default()
         };
         self.script_answered(waiting.origin, &waiting.root, &effected)
     }
@@ -561,6 +586,13 @@ impl Engine {
             if let Ok(stacks) = stack_session::snapshot(self.git.as_ref(), root) {
                 events.push(Event::StacksLoaded { id: origin, stacks });
             }
+        }
+        // A restack a run made is undoable like one the window made, without a reopen (WF4c).
+        if effected.restack {
+            let record = restack_session::last(self.git.as_ref(), root)
+                .ok()
+                .flatten();
+            events.push(Event::RestackFinished { id: origin, record });
         }
         events
     }

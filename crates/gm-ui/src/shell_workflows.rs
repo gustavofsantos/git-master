@@ -24,6 +24,7 @@ use crate::action_registry::{Action, Args};
 use crate::icon::{self, Icon};
 use crate::resize::{self};
 use crate::resize_handle::{self, Edge};
+use crate::restack_dialog;
 use crate::shell_history::{now_secs, relative_time};
 use crate::theme;
 use crate::view::{Screen, StatusView};
@@ -602,7 +603,18 @@ impl StatusView {
             row = row.child(review_row(&line, &info.hash, cx));
         }
         if let Some((run, summary)) = controls.approve {
-            row = row.child(approval_row(run, &summary, cx));
+            // A restack's approval lists the plan under its line; the line names the call only
+            // (its summary's first two lines), since the plan says what moves.
+            let plan = self.model.workflows.approval_plan(run);
+            let line = if plan.is_some() {
+                summary.lines().take(2).collect::<Vec<_>>().join(" ")
+            } else {
+                summary
+            };
+            row = row.child(approval_row(run, &line, cx));
+            if let Some(plan) = plan {
+                row = row.child(approval_plan_block(plan));
+            }
         }
         if let Some(run) = controls.cancel {
             row = row.child(band_button(
@@ -1487,6 +1499,52 @@ fn switch_row(info: &WorkflowInfo, cx: &Context<StatusView>) -> Div {
                 ),
         )
         .child(div().text_xs().text_color(theme::muted()).child(text))
+}
+
+/// What a restack's approval would move and hold back (`WF4c`): the headline, then each branch
+/// with what the plan does to it, the held ones in the warning colour, and what stops the plan.
+fn approval_plan_block(plan: &gm_schema::RestackPlan) -> Div {
+    let lines = restack_dialog::outline(plan).into_iter().map(|line| {
+        div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap_2()
+            .child(
+                div()
+                    .font_family(theme::code_font())
+                    .text_color(theme::text())
+                    .child(line.name),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .text_color(if line.held {
+                        theme::warn_fg()
+                    } else {
+                        theme::muted()
+                    })
+                    .child(line.text),
+            )
+    });
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .text_sm()
+        .child(
+            div()
+                .text_color(theme::muted())
+                .child(restack_dialog::approval_headline(plan)),
+        )
+        .children(lines)
+        .children(
+            plan.stopped
+                .iter()
+                .map(|reason| div().text_color(theme::warn_fg()).child(reason.clone())),
+        )
 }
 
 /// The run that waits for an approval, with what it asks, and Approve and Reject.

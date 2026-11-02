@@ -1158,11 +1158,23 @@ pub enum Event {
         id: OperationId,
         workflow: String,
     },
-    /// The run waits at the `approve` state `state`; `summary` is what it asks.
+    /// The run waits at the `approve` state `state`; `summary` is what it asks. For the approval of
+    /// `ctx.restack.apply` and `ctx.reparent.apply`, `plan` is the plan the call would move, so the
+    /// window shows what is approved (`WF4c`).
     WorkflowApprovalRequested {
         run: i64,
         state: String,
         summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<RestackPlan>,
+    },
+    /// The run's `ctx.restack.apply` ended `conflict` (`WF4c`): the run stopped on a restack
+    /// conflict and waits for **Continue restack**. `plan` is the restack after the apply, with the
+    /// blocked branch.
+    WorkflowRestackConflict {
+        run: i64,
+        workflow: String,
+        plan: RestackPlan,
     },
     /// The run ended. `reason` says why when it failed, was cancelled or was blocked.
     WorkflowRunFinished {

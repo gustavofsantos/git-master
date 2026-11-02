@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+use gm_schema::RestackPlan;
 use serde_json::{Value, json};
 
 use super::journal::{Journal, NewCall, NewRun, RunId, RunStatus};
@@ -45,7 +46,8 @@ pub enum ScriptEvent {
     /// longer cancel it. Not shown to the person.
     Applying { run: RunId },
     /// The run waits for `Runtime::approve`. `summary` is what the person reads; `args` are the
-    /// resolved arguments of the call (D101).
+    /// resolved arguments of the call (D101). `plan` is the restack an apply of a restack or a
+    /// reparent would move, so the person sees what they approve (`WF4c`).
     AwaitingApproval {
         run: RunId,
         seq: u32,
@@ -53,6 +55,7 @@ pub enum ScriptEvent {
         summary: String,
         args: Value,
         reason: Option<AskReason>,
+        plan: Option<RestackPlan>,
     },
     Finished {
         run: RunId,
@@ -586,6 +589,7 @@ impl RunHost<'_> {
         summary: String,
         args: &Value,
         reason: Option<AskReason>,
+        plan: Option<RestackPlan>,
     ) -> Option<bool> {
         self.set_status(RunStatus::AwaitingApproval, Pending::Approval);
         self.inner.emit(ScriptEvent::AwaitingApproval {
@@ -595,6 +599,7 @@ impl RunHost<'_> {
             summary,
             args: args.clone(),
             reason,
+            plan,
         });
         let answer = loop {
             match self.block(None) {
@@ -655,7 +660,7 @@ impl RunHost<'_> {
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Approve this step?")
                     .to_owned();
-                match self.ask("approve", summary, args, None) {
+                match self.ask("approve", summary, args, None, None) {
                     Some(true) => Done::value_with(json!(true), "approved"),
                     Some(false) => Done::value_with(json!(false), "rejected"),
                     None => Done::end(HostEnd::Cancelled, "cancelled", "cancelled"),
@@ -740,13 +745,31 @@ impl RunHost<'_> {
         }
     }
 
+    /// The plan an apply of a restack or a reparent would move, read from the engine before the
+    /// person is asked (`WF4c`). Reads only: nothing is logged and nothing moves. `None` for the
+    /// other calls, and when the engine cannot make the plan.
+    fn restack_plan_of(&self, f: &CtxFn, args: &Value) -> Option<RestackPlan> {
+        if !matches!(f.path, "restack.apply" | "reparent.apply") {
+            return None;
+        }
+        let call = EffectCall {
+            run: self.run,
+            func: "restack.preview".to_owned(),
+            args: args.clone(),
+            level: Level::Read,
+        };
+        let result = self.inner.effects.effect(&call);
+        serde_json::from_value(result.value).ok()
+    }
+
     fn effect(&mut self, f: &CtxFn, args: &Value) -> Done {
         if f.level == Level::Apply {
             self.inner.emit(ScriptEvent::Applying { run: self.run });
             let gate = gate_apply(f.path, &self.started_by, self.auto_approve, self.exec_seen);
             if let Gate::Ask(reason) = gate {
                 let summary = format!("{}\n{}", approval_title(f), reason.text());
-                match self.ask(f.path, summary, args, Some(reason)) {
+                let plan = self.restack_plan_of(f, args);
+                match self.ask(f.path, summary, args, Some(reason), plan) {
                     Some(true) => {}
                     Some(false) => {
                         return Done::outcome(

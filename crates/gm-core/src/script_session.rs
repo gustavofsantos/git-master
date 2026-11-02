@@ -124,6 +124,8 @@ pub(crate) struct ScriptSession {
     diffs: BTreeMap<RunId, tempfile::NamedTempFile>,
     /// The stack plans the runs made, by id (`WF4a`).
     plans: PlanBook,
+    /// The workflow each run runs, by run id (`WF4c`): a restack conflict names it.
+    workflows: BTreeMap<RunId, String>,
 }
 
 impl ScriptSession {
@@ -159,11 +161,21 @@ impl ScriptSession {
             events: Arc::clone(&link.events),
             diffs: BTreeMap::new(),
             plans: PlanBook::default(),
+            workflows: BTreeMap::new(),
         })
     }
 
     pub(crate) fn note_origin(&mut self, run: RunId, origin: OperationId) {
         self.origins.insert(run, origin);
+    }
+
+    pub(crate) fn note_workflow(&mut self, run: RunId, workflow: String) {
+        self.workflows.insert(run, workflow);
+    }
+
+    /// The name of the workflow `run` runs, when the run is known to this session.
+    pub(crate) fn workflow(&self, run: RunId) -> Option<&str> {
+        self.workflows.get(&run).map(String::as_str)
     }
 
     /// Keeps the file with the whole staged diff alive while the run lasts.
@@ -279,6 +291,12 @@ fn effect(
             text_arg(call, "branch"),
             text_arg(call, "parent"),
         )),
+        "restack.preview" => script_stacks::preview(
+            actions.git(),
+            actions.root(),
+            plans,
+            text_arg(call, "plan_id"),
+        ),
         "restack.apply" => script_stacks::apply_restack(actions, plans, text_arg(call, "plan_id")),
         "reparent.apply" => {
             script_stacks::apply_reparent(actions, plans, text_arg(call, "plan_id"))
@@ -405,6 +423,7 @@ pub(crate) fn to_events(event: ScriptEvent) -> Vec<Event> {
             func,
             summary,
             args,
+            plan,
             ..
         } => {
             // The person approves the concrete call, so the dialog carries its arguments (D101).
@@ -418,6 +437,7 @@ pub(crate) fn to_events(event: ScriptEvent) -> Vec<Event> {
                 run,
                 state: func,
                 summary: shown,
+                plan,
             }]
         }
         ScriptEvent::Finished {

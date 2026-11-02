@@ -227,6 +227,35 @@ pub(crate) fn plan_reparent(
     Ok(plan_value(&plan))
 }
 
+/// `restack.preview({ plan_id })`: the plan an apply of `plan_id` would move, made again for its
+/// root now, so the approval of the apply can show it (`WF4c`). It reads only: nothing is logged
+/// and nothing moves. An id the run did not make ends `failed`.
+pub(crate) fn preview(
+    git: &dyn GitPort,
+    root: &Path,
+    book: &PlanBook,
+    plan_id: &str,
+) -> EffectResult {
+    let made = match book.get(plan_id) {
+        None => return ended("failed", "The plan is not known to this run."),
+        Some(Planned::Restack { root: from }) => {
+            restack_session::plan_with(git, root, from, &[], None, &same_folder(root))
+        }
+        Some(Planned::Reparent { branch, parent }) => restack_session::plan_with(
+            git,
+            root,
+            branch,
+            &[],
+            Some((branch.as_str(), parent.as_str())),
+            &same_folder(root),
+        ),
+    };
+    match made {
+        Ok(plan) => EffectResult::done(json!(plan)),
+        Err(message) => EffectResult::failed(message),
+    }
+}
+
 /// `ctx.restack.apply({ plan_id })`. The plan is made again for its root and must have the same
 /// id, else `stale`. Its unblocked branches move in one transaction; a conflict ends `conflict`
 /// after they moved; a plan that moves nothing and was refused ends `failed` with the reasons.
@@ -270,13 +299,18 @@ pub(crate) fn apply_restack(
         };
         match actions.record(kind, restack_session::apply_plan(git, root, &plan)) {
             Ok((_, remaps)) => {
-                actions.moved_refs();
+                actions.moved_by_restack();
                 actions.remap(remaps);
             }
             Err(message) => return ended("failed", message),
         }
     }
     if !found.conflicts.is_empty() {
+        // The plan after the moves, with the blocked branch, for the window (WF4c). The plan
+        // made before them stands in when the stacks cannot be read again.
+        let after = restack_session::plan_with(git, root, &from, &[], None, &same_folder(root))
+            .unwrap_or_else(|_| plan.clone());
+        actions.stopped_on_conflict(after);
         return ended("conflict", found.conflicts.join(" "));
     }
     if branch_count(&plan) == 0 && !found.refusals.is_empty() {
@@ -343,7 +377,7 @@ pub(crate) fn apply_reparent(
         };
         match actions.record(kind, restack_session::apply_plan(git, root, &plan)) {
             Ok((_, remaps)) => {
-                actions.moved_refs();
+                actions.moved_by_restack();
                 actions.remap(remaps);
             }
             Err(message) => return ended("failed", message),
@@ -371,7 +405,7 @@ pub(crate) fn undo(actions: &mut Actions<'_>, plan_id: &str) -> EffectResult {
         Some(_) => match actions.record(CommandKind::UndoRestack, restack_session::undo(git, root))
         {
             Ok(()) => {
-                actions.moved_refs();
+                actions.moved_by_restack();
                 done()
             }
             Err(message) => ended("failed", message),
