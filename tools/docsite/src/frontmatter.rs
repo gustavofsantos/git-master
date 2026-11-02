@@ -1,6 +1,6 @@
 //! The front matter of a page: a small, strict subset of YAML (`key: value` lines).
 
-use crate::model::Status;
+use crate::model::{PREVIEW_FEATURES, Status};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct FrontMatter {
@@ -8,6 +8,7 @@ pub struct FrontMatter {
     pub description: String,
     pub status: Status,
     pub order: i64,
+    pub preview: Option<String>,
 }
 
 /// A problem in the front matter, with the 1-based line of the file it is on.
@@ -83,12 +84,14 @@ fn build(
     let mut description = None;
     let mut status = None;
     let mut order = None;
+    let mut preview = None;
     for (line, key, value) in fields {
         let slot = match *key {
             "title" => &mut title,
             "description" => &mut description,
             "status" => &mut status,
             "order" => &mut order,
+            "preview" => &mut preview,
             other => return fail(*line, format!("unknown front matter field `{other}`")),
         };
         if slot.replace((*line, value.clone())).is_some() {
@@ -113,11 +116,25 @@ fn build(
     let Ok(order) = order.parse::<i64>() else {
         return fail(order_line, format!("`order` is `{order}`; use an integer"));
     };
+    let preview = match preview {
+        Some((_, feature)) if PREVIEW_FEATURES.contains(&feature.as_str()) => Some(feature),
+        Some((line, feature)) => {
+            return fail(
+                line,
+                format!(
+                    "`preview` is `{feature}`; use one of {}",
+                    PREVIEW_FEATURES.join(", ")
+                ),
+            );
+        }
+        None => None,
+    };
     Ok(FrontMatter {
         title,
         description,
         status,
         order,
+        preview,
     })
 }
 
@@ -136,6 +153,23 @@ mod tests {
         assert_eq!(front.order, 40);
         assert_eq!(body, "\nBody.\n");
         assert_eq!(line, 7);
+    }
+
+    #[test]
+    fn reads_the_preview_feature() {
+        let page = PAGE.replace("order: 40\n", "order: 40\npreview: stacks\n");
+        let (front, _, _) = split(&page).unwrap();
+        assert_eq!(front.preview.as_deref(), Some("stacks"));
+        let (plain, _, _) = split(PAGE).unwrap();
+        assert_eq!(plain.preview, None);
+    }
+
+    #[test]
+    fn rejects_an_unknown_preview_feature() {
+        let page = PAGE.replace("order: 40\n", "order: 40\npreview: bogus\n");
+        let message = split(&page).unwrap_err().message;
+        assert!(message.contains("`preview` is `bogus`"), "{message}");
+        assert!(message.contains("stacks, conflict-resolver"), "{message}");
     }
 
     #[test]

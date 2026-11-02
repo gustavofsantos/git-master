@@ -3,6 +3,7 @@ title: Resolving conflicts
 description: The three-pane conflict resolver, role-labeled sides, per-hunk actions, recorded resolutions, script suggestions and the record of who resolved each hunk.
 status: partial
 order: 90
+preview: conflict-resolver
 ---
 
 When Git stops on a conflict, the resolver shows both sides next to the result. You choose what goes into each part of the file, and GitMaster records how each part was resolved.

@@ -45,6 +45,7 @@ pub fn load(docs_root: &Path, diags: &mut Diagnostics) -> Result<Docs, String> {
                 description: front.description,
                 status: front.status,
                 order: front.order,
+                preview: front.preview,
                 body: body.to_owned(),
                 body_start_line,
             }),

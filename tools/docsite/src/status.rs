@@ -36,9 +36,13 @@ pub fn report(docs: &Docs, analyses: &[Analysis]) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{:<12} {:>7}  PAGE", "STATUS", "PLANNED");
     for (page, analysis) in docs.pages.iter().zip(analyses) {
+        let preview = page
+            .preview
+            .as_deref()
+            .map_or(String::new(), |feature| format!("  preview: {feature}"));
         let _ = writeln!(
             out,
-            "{:<12} {:>7}  docs/{}",
+            "{:<12} {:>7}  docs/{}{preview}",
             page.status.as_str(),
             analysis.planned.len(),
             page.rel

@@ -3,6 +3,7 @@ title: Stacks and restack
 description: Branch stacks, the By stack sidebar view and history graph, and restack with conflict handling, undo, push and automation.
 status: partial
 order: 80
+preview: stacks
 ---
 
 A stack is a chain of branches in which each branch builds on its parent. A typical stack has a base branch, an API branch and a UI branch on top of the base, and an end-to-end branch on top of the UI branch. When the base changes, restack replays each branch on the new tip of its parent, so the whole stack stays current. If you never give a branch a parent, GitMaster works as a normal Git client and the stack views stay out of your way.

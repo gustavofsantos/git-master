@@ -40,6 +40,10 @@ impl Status {
     }
 }
 
+/// The ids a page may name in `preview:`. This mirrors `gm_schema::features::Feature::id`:
+/// docsite cannot depend on the app crates, so a new preview feature is added to both lists.
+pub const PREVIEW_FEATURES: &[&str] = &["stacks", "conflict-resolver"];
+
 /// One directory of `docs/`, as listed in `sections.toml`.
 #[derive(Clone, Debug)]
 pub struct Section {
@@ -57,6 +61,8 @@ pub struct Page {
     pub description: String,
     pub status: Status,
     pub order: i64,
+    /// The preview feature the page describes, one of `PREVIEW_FEATURES`.
+    pub preview: Option<String>,
     /// The Markdown after the front matter.
     pub body: String,
     /// Line of the file where `body` starts (1-based), for diagnostics.

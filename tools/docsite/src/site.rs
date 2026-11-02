@@ -41,6 +41,7 @@ struct SitePage {
     description: String,
     section: String,
     status: Option<Status>,
+    preview: Option<String>,
     html: String,
     toc: Vec<TocItem>,
     text: String,
@@ -63,6 +64,7 @@ pub fn build(docs: &Docs, analyses: &[Analysis], options: &Options) -> Result<()
                 .map(|s| s.title.clone())
                 .unwrap_or_default(),
             status: Some(page.status),
+            preview: page.preview.clone(),
             html: rendered.html,
             toc: rendered.toc,
             text: analysis.text.clone(),
@@ -92,6 +94,7 @@ pub fn build(docs: &Docs, analyses: &[Analysis], options: &Options) -> Result<()
         description: "This page does not exist.".to_owned(),
         section: String::new(),
         status: None,
+        preview: None,
         html: "<p>The page you asked for does not exist. Check the address, search the docs, or start from the <a href=\"index.html\">home page</a>.</p>\n".to_owned(),
         toc: Vec::new(),
         text: String::new(),
@@ -214,7 +217,7 @@ fn layout(
     } else {
         format!("      <p class=\"crumbs\">{}</p>\n", escape(&page.section))
     };
-    let badge = match page.status.filter(|_| page.path != "index.html") {
+    let mut badge = match page.status.filter(|_| page.path != "index.html") {
         Some(Status::Partial) => badge_html(
             Status::Partial,
             "Part of this page is not available in the app yet",
@@ -222,6 +225,12 @@ fn layout(
         Some(Status::Planned) => badge_html(Status::Planned, "Not available in the app yet"),
         _ => String::new(),
     };
+    let preview = page.preview.as_deref().map(preview_note);
+    if preview.is_some() {
+        badge.push_str(
+            " <span class=\"badge preview\" title=\"Preview feature, hidden in the release build\">Preview</span>",
+        );
+    }
     fill(
         TEMPLATE,
         &[
@@ -233,6 +242,7 @@ fn layout(
             ("crumbs", &crumbs),
             ("title", &escape(&page.title)),
             ("badge", &badge),
+            ("preview", preview.as_deref().unwrap_or_default()),
             ("content", &page.html),
             ("pager", &pager_html(&root, prev, next)),
             ("toc", &toc_html(&page.toc)),
@@ -247,6 +257,14 @@ fn badge_html(status: Status, title: &str) -> String {
         status.as_str(),
         escape(title),
         status.label()
+    )
+}
+
+/// The note under the title of a preview page: how to turn the feature on.
+fn preview_note(feature: &str) -> String {
+    format!(
+        "<p class=\"preview-note\">This is a preview feature. It is hidden in the release build; start GitMaster with <code>GITMASTER_PREVIEW={}</code> to turn it on.</p>\n",
+        escape(feature)
     )
 }
 
@@ -297,6 +315,7 @@ struct NavItem {
     path: String,
     title: String,
     status: Option<Status>,
+    preview: bool,
 }
 
 struct NavGroup {
@@ -315,6 +334,7 @@ impl Nav {
             path: page.path.clone(),
             title: page.title.clone(),
             status: page.status,
+            preview: page.preview.is_some(),
         };
         let mut groups = vec![NavGroup {
             title: String::new(),
@@ -363,7 +383,7 @@ impl Nav {
                 } else {
                     ""
                 };
-                let marker = match item.status {
+                let mut marker = match item.status {
                     Some(status @ (Status::Partial | Status::Planned)) => format!(
                         "<span class=\"dot dot-{}\" aria-hidden=\"true\"></span><span class=\"sr-only\">({})</span>",
                         status.as_str(),
@@ -371,6 +391,11 @@ impl Nav {
                     ),
                     _ => String::new(),
                 };
+                if item.preview {
+                    marker.push_str(
+                        "<span class=\"dot dot-preview\" aria-hidden=\"true\"></span><span class=\"sr-only\">(Preview)</span>",
+                    );
+                }
                 let _ = writeln!(
                     out,
                     "      <li><a class=\"nav-link\" href=\"{root}{}\"{aria}><span>{}</span>{marker}</a></li>",
@@ -439,12 +464,38 @@ fn availability_page(docs: &Docs, analyses: &[Analysis]) -> SitePage {
         }
         html.push_str("</tbody></table></div>\n");
     }
+    let previews: Vec<&Page> = docs.pages.iter().filter(|p| p.preview.is_some()).collect();
+    if !previews.is_empty() {
+        let id = slugger.slug("Preview features");
+        let _ = writeln!(html, "<h2 id=\"{id}\">Preview features</h2>");
+        html.push_str("<p>Preview features are hidden in the release build. Start GitMaster with the variable shown to turn one on.</p>\n<ul>\n");
+        for page in previews {
+            let feature = page.preview.as_deref().unwrap_or_default();
+            let _ = writeln!(
+                html,
+                "  <li><a href=\"{}\">{}</a>: <code>GITMASTER_PREVIEW={}</code></li>",
+                page.html_path(),
+                escape(&page.title),
+                escape(feature)
+            );
+            text.push_str(&page.title);
+            text.push(' ');
+        }
+        html.push_str("</ul>\n");
+        toc.push(TocItem {
+            level: 2,
+            id: id.clone(),
+            text: "Preview features".to_owned(),
+        });
+        headings.push((id, "Preview features".to_owned()));
+    }
     SitePage {
         path: AVAILABILITY.to_owned(),
         title: "Availability".to_owned(),
         description: "Which parts of the documented product work in the app today, and which are still planned.".to_owned(),
         section: String::new(),
         status: None,
+        preview: None,
         html,
         toc,
         text,

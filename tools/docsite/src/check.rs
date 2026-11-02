@@ -211,6 +211,7 @@ mod tests {
             description: "d".to_owned(),
             status,
             order: 1,
+            preview: None,
             body: body.to_owned(),
             body_start_line: 7,
         }

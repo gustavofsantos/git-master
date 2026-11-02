@@ -110,3 +110,62 @@ fn build_refuses_a_directory_it_did_not_write() {
     );
     assert!(out.path().join("precious.txt").is_file());
 }
+
+#[test]
+fn a_preview_page_shows_the_badge_and_how_to_turn_it_on() {
+    let docs = docs();
+    let out = tempfile::tempdir().unwrap();
+    let site = out.path().join("site");
+    let args = [
+        "build",
+        "--docs",
+        docs.to_str().unwrap(),
+        "--out",
+        site.to_str().unwrap(),
+    ];
+    let output = docsite(&args);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+
+    let page = std::fs::read_to_string(site.join("guide/stacks.html")).unwrap();
+    assert!(page.contains("badge preview"), "Preview badge missing");
+    assert!(
+        page.contains("GITMASTER_PREVIEW=stacks"),
+        "turn-on note missing"
+    );
+    let plain = std::fs::read_to_string(site.join("guide/history.html")).unwrap();
+    assert!(
+        !plain.contains("badge preview"),
+        "only preview pages get the badge"
+    );
+
+    let availability = std::fs::read_to_string(site.join("availability.html")).unwrap();
+    assert!(availability.contains("Preview features"));
+    assert!(availability.contains("GITMASTER_PREVIEW=conflict-resolver"));
+
+    let status = docsite(&["status", "--docs", docs.to_str().unwrap()]);
+    assert!(text(&status.stdout).contains("preview: stacks"));
+}
+
+#[test]
+fn check_rejects_an_unknown_preview_feature() {
+    let out = tempfile::tempdir().unwrap();
+    let root = out.path();
+    std::fs::write(
+        root.join("sections.toml"),
+        "[[section]]\ndir = \"guide\"\ntitle = \"Guide\"\norder = 10\n",
+    )
+    .unwrap();
+    std::fs::create_dir(root.join("guide")).unwrap();
+    std::fs::write(
+        root.join("guide/a.md"),
+        "---\ntitle: A\ndescription: A page.\nstatus: implemented\norder: 10\npreview: bogus\n---\n\nBody.\n",
+    )
+    .unwrap();
+    let output = docsite(&["check", "--docs", root.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(
+        text(&output.stderr).contains("`preview` is `bogus`"),
+        "{}",
+        text(&output.stderr)
+    );
+}

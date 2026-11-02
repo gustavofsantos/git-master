@@ -46,6 +46,7 @@ order: 10
 | `description` | One sentence, used for search and link previews. |
 | `status` | `implemented`, `partial` or `planned` (see below). |
 | `order` | Integer. Pages in a directory sort by `order`, then by title. |
+| `preview` | Optional. The id of the preview feature the page describes (`stacks`, `conflict-resolver`). The site marks the page Preview and says how to turn the feature on. |
 
 Body rules:
 
@@ -59,6 +60,10 @@ Body rules:
 - American English. No emoji. No marketing language.
 - Never name proprietary products (other Git clients, IDEs, hosted services) in the docs. Open source projects and libraries may be named.
 - Everything the docs promise must be something the project intends to ship. Do not describe behavior that is not decided.
+
+## Preview features
+
+Some areas are still being finished. The release build hides them. The `make` targets build them in, and the `GITMASTER_PREVIEW` variable turns them on or off when the app starts (`all`, `none`, or a comma list of ids). A preview area is marked on its pages with `preview: <id>` in the front matter. The site adds a **Preview** badge and a note under the title that names the variable that turns the feature on, `GITMASTER_PREVIEW=<id>`, and the Availability page lists the preview pages in their own section. The status of the page still says what works, as for any other page. The ids are the ones the app lists; `docsite check` rejects any other value.
 
 ## Status markers
 

@@ -172,6 +172,7 @@ a:hover { text-decoration-thickness: 2px; }
 .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--faint); }
 .dot-partial { border-color: var(--yellow); background: linear-gradient(90deg, var(--yellow) 50%, transparent 50%); }
 .dot-planned { border-color: var(--faint); background: transparent; }
+.dot-preview { border-color: var(--violet); background: var(--violet); }
 
 .content { min-width: 0; padding: 32px 40px 64px; outline: none; }
 .doc { max-width: 46rem; }
@@ -262,6 +263,12 @@ blockquote { padding: 0.1em 1em; border-left: 3px solid var(--border); color: va
 .badge-partial, .badge-planned { color: var(--yellow); }
 .badge-planned { color: var(--muted); }
 .badge-implemented { color: var(--green); }
+.badge.preview { color: var(--violet); }
+.preview-note {
+  margin: 0 0 1.5em; padding: 10px 14px; border-left: 3px solid var(--violet); border-radius: 6px;
+  background: color-mix(in srgb, var(--violet) 9%, var(--bg)); color: var(--fg); font-size: 0.92rem;
+}
+.preview-note code { color: var(--strong); }
 
 .pager { display: flex; justify-content: space-between; gap: 16px; max-width: 46rem; margin-top: 48px; }
 .pager a {
