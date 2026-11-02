@@ -11,9 +11,9 @@ GitMaster is a Git client joined to the tools an engineer needs to work with cod
 
 ### A complete and fast Git client
 
-GitMaster covers the work you do every day in a repository. The **Working Copy** shows your changes, with staging per file, per chunk and per line, and a commit composer. History shows the commit graph with the files and diff of each commit. Branches and worktrees are managed from the sidebar, and the remote operations **Fetch**, **Pull** and **Push** are available too. Every action can be reached from the command palette (`Ctrl+K`, `⌘K` on macOS), the menus and the keyboard.
+GitMaster covers the work you do every day in a repository. The **Working Copy** shows your changes, with staging per file, per chunk and per line, and a commit composer. **History** shows the commit graph with the files and diff of each commit. Branches and worktrees are managed from the sidebar, and the remote operations **Fetch**, **Pull** and **Push with lease** are available in the top bar. Every action can be reached from the command palette (`Ctrl+K`, `⌘K` on macOS), the menus and the keyboard.
 
-> **Planned.** Conflict resolution is not available in the app yet.
+Resolving conflicts by hand is a preview feature. See [Resolving conflicts](guide/conflicts.md).
 
 ### A workspace for working with code
 
@@ -21,11 +21,13 @@ You can move around a repository without leaving the app. **Quick Open** (`Ctrl+
 
 ### Agents under human accountability
 
-An agent can read your review comments and earlier threads through GitMaster, and record that it handled a comment. GitMaster gives it no way to change the repository, and what you see as handled stays open to you until you resolve it. What the agent did is measured from the repository, not taken from its own account. Workflows are Lua scripts that run in a sandbox and act only through GitMaster's own actions. You run them from the command palette or with a keyboard shortcut. The agent integration is exposed through an MCP server, a local review loop, and branch stacks with restack.
+An agent can read your review comments and earlier threads through GitMaster, and record that it handled a comment. It can also attach labels to threads and link related threads. These records are kept in GitMaster's own store, never in the repository. GitMaster gives the agent no way to change the repository, and a comment the agent marks as handled stays open to you until you resolve it. What the agent did is measured from the repository, not taken from its own account.
+
+Workflows are Lua scripts that run in a sandbox and act only through GitMaster's own actions. You run them from the command palette or with a keyboard shortcut. The agent integration is exposed through an MCP server and a local review loop. Branch stacks with restack are a preview feature. See [Stacks](guide/stacks.md).
 
 A session with an agent is kept as a **thread**: what you asked, what the agent answered, the tools it ran and the files it edited. Secrets are removed before anything is stored, and you can search, read and delete threads in the app.
 
-> **Planned.** Tools that propose and apply a change through the MCP server, branch stacks, and workflow triggers and agent runs are not available in the app yet.
+> **Planned.** Tools that propose and apply a change through the MCP server, and workflow runs that an agent starts, are not available in the app yet.
 
 ## Who it is for
 
@@ -35,7 +37,7 @@ GitMaster is for engineers who work in large repositories with many contributors
 
 GitMaster needs one external program: `git`. The app does not require anything else to be installed.
 
-GitMaster runs on macOS and Linux, with builds for amd64 and arm64. To install it, see [Installation](getting-started/installation.md).
+GitMaster runs on Linux and macOS. Each release has prebuilt Linux binaries for amd64 and arm64; on macOS you build it from source. To install it, see [Installation](getting-started/installation.md).
 
 ### Windows
 
@@ -50,8 +52,11 @@ GitMaster runs on macOS and Linux, with builds for amd64 and arm64. To install i
 | Concepts | [Principles](concepts/principles.md) | The rules every feature follows. |
 | Concepts | [Trust and safety](concepts/trust-and-safety.md) | Who may change a repository, and what the app records. |
 | Guide | [Working Copy](guide/working-copy.md) | Changes, staging and commits. |
+| Guide | [Diff and staging](guide/diff-and-staging.md) | Reading diffs, and staging chunks and lines. |
 | Guide | [History](guide/history.md) | The commit graph and commit details. |
 | Guide | [Branches](guide/branches.md) | Switching, creating and deleting branches. |
+| Guide | [Stacks](guide/stacks.md) | Branch stacks and restack. Preview feature. |
+| Guide | [Resolving conflicts](guide/conflicts.md) | Resolving a file's conflicts by hand. Preview feature. |
 | Guide | [Command palette](guide/command-palette.md) | Finding and running any action. |
 | Guide | [Threads](guide/threads.md) | Reading and searching your agent sessions. |
 | Workflows | [Overview](workflows/overview.md) | Automating GitMaster with workflow scripts. |

@@ -21,11 +21,11 @@ Every action in GitMaster has one of three effect levels.
 
 ### Human actor
 
-You act through the window, the menus, the command palette and the keyboard. Each action runs when you start it. Destructive items in menus and the palette are shown in red and ask for confirmation first. Force-deleting a branch needs an explicit confirmation checkbox.
+You act through the window, the menus, the command palette and the keyboard. Each action runs when you start it. Destructive items in menus are shown in red. Those that discard work or delete something ask for confirmation first. Force-deleting a branch needs an explicit confirmation checkbox, labelled **Discard commits that exist only on this branch**.
 
 ### Agent actor
 
-An agent that connects through the [MCP server](../agents/mcp-server.md) can read review comments and threads, and record that it handled a review comment. It cannot change the repository through GitMaster: the server has no tool that edits, commits, pushes or deletes. What an agent records is yours to confirm in the app, so a comment it marks `handled` stays open to you until you resolve it.
+An agent that connects through the [MCP server](../agents/mcp-server.md) can read review comments and threads. It can record that it handled a review comment, attach labels, and link threads to each other. These writes go to GitMaster's own store. The server has no tool that edits, commits, pushes or deletes anything in the repository. What an agent records is yours to confirm in the app: a comment it marks `handled` stays open to you until you resolve it.
 
 > **Planned.** Tools that propose and apply a change to the repository. Your agent asks you before each apply call, and apply accepts only a plan, never free-form arguments, so what you approve is exactly what runs. The agent enforces this approval, not GitMaster, so it holds only as long as the agent's own permission settings do. See [Approval](../agents/mcp-server.md#approval).
 
@@ -38,6 +38,7 @@ Some text in a repository is written by people or programs you do not control. G
 - file contents
 - the output of commands
 - the text of threads: your earlier prompts, the agent's replies and the output of its tools
+- the text of labels and review comments, which you or an agent wrote
 
 The app displays this text, searches it and compares it. It never runs it.
 
@@ -71,7 +72,7 @@ Open the **Git commands** panel from the status bar. It lists every Git command 
 
 ### Threads
 
-With the [agent integration](../agents/agent-integration.md) installed, GitMaster records each agent session in the repository as a [thread](../guide/threads.md): your prompts, the agent's replies, its tool calls and results, and every file edit. The record is made from the agent's own hooks and session file, not from a summary the agent writes. Secrets are removed before anything is stored. An agent can read threads through MCP and can never change or delete one.
+With the [agent integration](../agents/agent-integration.md) installed, GitMaster records each agent session in the repository as a [thread](../guide/threads.md): your prompts, the agent's replies, its tool calls and results, and every file edit. Secrets are removed before anything is stored. An agent can read threads through MCP. It can label and link them, but it can never change the text of a thread or delete one.
 
 A thread is an observed record, not a tamper-proof one. An agent that runs as you can write to the same files as any other process.
 
@@ -86,12 +87,13 @@ The operation log records each operation that changes a repository, what was ask
 | Data | Where it is kept | Status |
 |---|---|---|
 | Working tree | Never receives GitMaster's own files. Changes come only from Git operations you start or approve. | Implemented |
-| Recent repositories | The app data directory. Entries for folders that no longer exist are dropped. | Implemented |
-| Settings, such as the diff layout and the branch filter | The user config directory, in `settings.json`. | Implemented |
+| Recent repositories | The app data directory. Repositories whose folder no longer exists are not offered. | Implemented |
+| Settings, such as the diff layout and whether author pictures show | The user config directory, in `settings.json`. | Implemented |
 | Git commands panel | Memory only. | Implemented |
 | Operation log | Outside the working tree. | Planned |
-| Threads | `.git/gitmaster/threads.db` in the Git common directory, readable only by you. | |
-| Local review comments and their snapshots | Outside the working tree. | Planned |
+| Threads | `.git/gitmaster/threads.db` in the Git common directory, readable only by you. | Implemented |
+| Local review comments and their snapshots | `.git/gitmaster/review.db` in the Git common directory. The snapshots are Git refs under `refs/gitmaster/`, not files in the working tree. | Implemented |
+| Labels and thread links | `.git/gitmaster/threads.db`, with the threads. | Implemented |
 | Workflow scripts | The workflows directory in your user config: `~/.config/gitmaster/workflows/` on Linux, and `Library/Application Support/gitmaster/workflows/` in your home directory on macOS. Also any directory listed in `gitmaster.workflowPath`. Never a repository. | Implemented |
 | Workflow review record | `gitmaster.db` in the app data directory, keyed by the hash of each script version. | Implemented |
 | Workflow run history | `.git/gitmaster/state.db`, in the Git common directory of the repository. | Implemented |

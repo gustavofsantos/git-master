@@ -21,6 +21,8 @@ An agent can read the repository and propose changes. An operation that an agent
 
 GitMaster shows what Git says, and it does not keep a separate copy of the repository state that it trusts over Git. Git changes outside the app all the time: from a terminal, from another tool, or from an agent that runs the `git` command line. GitMaster watches `HEAD`, the index, the refs and the working tree, and refreshes what you see when they change. Stale state is refreshed, not trusted.
 
+For example, if you run `git commit` in a terminal while GitMaster is open, the Working Copy and History update without any action from you.
+
 ## The UI never blocks
 
 Work that takes time, such as reading a long history, runs in the background. The window stays responsive while it runs, and long work can be cancelled.
@@ -31,13 +33,13 @@ GitMaster keeps its configuration and state outside the repository: in your user
 
 ## Observed beats reported
 
-> **Planned.** Recording what an agent did is not available in the app yet.
+> **Planned.** An operation log of every action an agent takes is not available in the app yet. Review comments are the only record that is measured today.
 
-What an agent did is measured from the repository, by comparing its state before and after the work. The agent's own description of its work is shown as narrative only. You can rely on the measured record more than on the agent's account.
+What an agent did is measured from the repository, by comparing its state before and after the work. When an agent marks a review comment as handled, the app measures the change to the lines of that comment from its own snapshots. The measurement is returned to the agent with the result, and the Local review page shows it for a handled comment. The agent's own description of its work is shown as narrative only. You can rely on the measured record more than on the agent's account.
 
 ## Local-first
 
-GitMaster is for one engineer on one machine. It has no account, and it has no headless, server or CI mode. The one process without a window is `gitmaster mcp`, which your agent starts and stops: it opens no port and no socket, and it ends with the agent's session.
+GitMaster is for one engineer on one machine. It has no account, and it has no headless, server or CI mode. The processes that run without a window are its command-line subcommands: `gitmaster mcp`, `gitmaster workflow`, `gitmaster thread` and `gitmaster harness`. They are started by you or by your agent, for the length of one command or one session. `gitmaster mcp` talks over standard input and output and opens no port and no socket.
 
 ## Self-contained
 

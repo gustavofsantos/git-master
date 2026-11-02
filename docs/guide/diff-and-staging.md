@@ -20,7 +20,7 @@ The header shows the file path and the change count, such as `+5 −1`. Below it
 
 A chunk is a block of changed lines. Each chunk starts with a `@@` header line, and its buttons sit on that line:
 
-- **Discard Chunk** discards the chunk's changes. GitMaster asks you to confirm first. On the Staged side, the app refuses to discard.
+- **Discard Chunk** throws away the chunk's changes. Click it, and the header asks **Discard this chunk?** with **Discard** and **Cancel** buttons. Only the Unstaged side can discard. On the Staged side the button is dimmed and does nothing.
 - **Stage Chunk** stages the chunk. On the Staged side, the button reads **Unstage Chunk** and unstages it.
 
 To stage a chunk:
@@ -39,6 +39,10 @@ Stage part of a chunk by choosing lines:
 
 On the Staged side, press `Ctrl+Shift+I` (`⇧⌘I` on macOS) to unstage the selected lines.
 
+### Half-staged pairs
+
+A removed line and the added line that replaces it form a pair. If you stage only one side of a pair, the index can end up without the old line and without the new one, and the file may not compile. When your selection splits a pair, the view shows the warning **Half-staged −/+ pair: the index would lose both the old and the new line, and may not compile.** Select the other side too, or stage the whole chunk.
+
 ## Staging uses the exact diff
 
 Staging always works on the exact diff that Git computes for the file. The lines you stage and the lines you leave out always add up to the whole change: the staged part plus the unstaged part equals the full change.
@@ -48,10 +52,6 @@ Staging always works on the exact diff that Git computes for the file. The lines
 > **Planned.** Ignoring whitespace in the view is not available in the app yet.
 
 Ignoring whitespace only filters what the diff shows. It never changes what gets staged, because staging still uses the exact diff.
-
-## Half pairs
-
-A removed line and the added line that replaces it form a pair. If you stage only one side of a pair, the index can end up without the old line and without the new one, and the file may not compile. GitMaster shows a warning when this happens.
 
 ## Diff algorithm
 
@@ -64,13 +64,13 @@ Use the **Unified | Split** selector in the diff header to switch layouts. **Uni
 - **Unified** shows removed and added lines one after another, in one column.
 - **Split** shows the old side on the left and the new side on the right. The two sides are paired one row at a time: each row holds one line of the old side and one line of the new side. Where a side has no line for a row, that side stays empty, with no line number and no marker. Each side's gutter marks only its own line.
 
-Each line shows its line number. In both layouts, long lines are not wrapped. Both layouts scroll sideways (in Split, both sides together): use a horizontal wheel or a trackpad gesture.
+Each line shows its line number. Both layouts scroll sideways (in Split, both sides together): use a horizontal wheel or a trackpad gesture.
 
 The layout you choose is saved for your user account in `settings.json`, in your configuration folder: `~/.config/gitmaster/` on Linux and `~/Library/Application Support/gitmaster/` on macOS. The Working Copy diff and the commit diff share the choice, so changing it in one changes both. If the file is missing or invalid, Unified is used.
 
 ## Binary files
 
-A binary file shows the notice **Binary file** instead of lines.
+A binary file shows the notice **Binary file (n/a)** in the Working Copy diff, instead of lines. In the stacked diff of a commit, the notice is **Binary file: its contents are not shown.**
 
 ## Stacked diff of a commit
 
@@ -115,7 +115,7 @@ The diff views have no single-letter shortcuts. Every letter shortcut uses `Ctrl
 | --- | --- |
 | Up, Down | Move the cursor to the previous and next changed line. |
 | `Ctrl+Shift+N`, `Ctrl+Shift+B` (`⇧⌘N`, `⇧⌘B` on macOS) | Next and previous hunk. |
-| `Space` | Mark or unmark the line at the cursor. |
+| `Space` | Select or clear the line at the cursor. |
 | `Ctrl+Shift+V` (`⇧⌘V` on macOS) | Start a visual selection at the cursor. |
 | `Ctrl+Shift+A` (`⇧⌘A` on macOS) | Stage or unstage the chunk at the cursor. |
 | `Ctrl+Shift+S` (`⇧⌘S` on macOS) | Stage the selected lines. |
@@ -126,7 +126,7 @@ The diff views have no single-letter shortcuts. Every letter shortcut uses `Ctrl
 
 | Shortcut | Action |
 | --- | --- |
-| Up, Down | Scroll one line. |
+| Up, Down | Scroll one row. |
 | PageUp, PageDown | Scroll one page. |
 | `Ctrl+Shift+N`, `Ctrl+Shift+P` (`⇧⌘N`, `⇧⌘P` on macOS) | Next and previous file. Both wrap around at the first and last file. |
 | `Esc` | Return to the commit. |

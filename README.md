@@ -30,9 +30,9 @@ Move around the repository where you stand, without opening another tool.
 This is what sets GitMaster apart.
 
 - **Review loop.** Comment on a diff in the app; your agent reads the comments, fixes the code, and marks them handled. You resolve them.
-- **Agent sessions you can search.** Every Claude Code session is recorded as a thread: what was asked, what changed, which files were edited. Weeks later, you or your agent can find the reason behind a decision.
-- **Observed, not self-reported.** The app records what the agent did itself, instead of trusting the agent's own summary.
-- **Stacked branches.** Break a large change into a stack of small, reviewable branches, and restack them automatically when the base moves.
+- **Agent sessions you can search.** With the agent integration installed, each Claude Code session is recorded as a thread: what was asked, what changed, which files were edited. Weeks later, you or your agent can find the reason behind a decision.
+- **Observed, not self-reported.** For review comments, the app measures the change to the code itself, instead of trusting the agent's own summary.
+- **Stacked branches** (preview feature). Break a large change into a stack of small, reviewable branches, and restack them when the base moves.
 - **Workflows you control.** Automate your own rules as sandboxed scripts that run at the moments you choose.
 
 ## Built to be trusted

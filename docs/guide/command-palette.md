@@ -13,7 +13,13 @@ The command palette runs any action by name. Open it with `Ctrl+K` (`⌘K` on ma
 2. Type part of a name. Matching is fuzzy, and the matched part of each result is highlighted.
 3. Press the arrow keys to move through the results, and **Enter** to run the highlighted row.
 
-The palette shows how many results match your text.
+The palette shows how many results match your text, such as `3 results`.
+
+For example, to fetch from the remote:
+
+1. Press `Ctrl+K`.
+2. Type `fetch`. The palette lists **Fetch** under **Actions**.
+3. Press **Enter**.
 
 ## Sections
 
@@ -31,8 +37,14 @@ A section appears only when it has results.
 
 Some actions need a target: a branch, a file or a worktree. To pick it from the palette:
 
-1. Find the action, and press **Tab**. The palette lists the targets of that kind.
+1. Find the action, and press **Tab**. The prompt names the action and the kind of target it needs, such as **Move File to Branch…: choose a branch**, and the palette lists the targets of that kind.
 2. Find the target you want, and press **Enter**.
+
+For example, to move a file to another branch:
+
+1. Select the file in the [Working Copy](working-copy.md).
+2. Press `Ctrl+K`, type `move file to branch`, and press **Tab**.
+3. Type part of the branch name, and press **Enter**. The move popover opens, as it does when you drag the file.
 
 Press **Esc** to leave the target step. Press **Esc** again to close the palette.
 
@@ -49,7 +61,7 @@ A context menu lists the actions for the thing you point at. Open one in one of 
 - Right-click a branch in the sidebar.
 - Right-click a file in the Working Copy list.
 - Right-click a worktree row in the Worktrees section.
-- Press `Shift+F10` to open the menu of the selected file. Press **Esc** to close it.
+- Select a file in the Working Copy list and press `Shift+F10`. Press **Esc** to close the menu.
 
 The rules are the same for every menu:
 
@@ -60,27 +72,32 @@ The rules are the same for every menu:
 
 ### Branch menu
 
-> **Planned.** The branch menu cannot be opened from the keyboard yet, and **Restack This Stack** and **Rename Branch** are not available yet.
+> **Planned.** The branch menu cannot be opened from the keyboard yet, and **Rename Branch** is not available yet.
 
-The branch menu has **Checkout Branch**, **New Child Branch**, **Set Parent…**, **Remove From Stack**, **Reparent to Grandparent**, **Create Worktree**, **Restack This Stack**, **Push With Lease**, **Copy Branch Name**, **Rename Branch** and **Delete Branch**. **Delete Branch** is in red.
+The branch menu lists, in groups: **Checkout Branch**; **New Branch…** and **New Child Branch**, then **Create Worktree**; **Set Parent…**, **Remove From Stack** and **Reparent to Grandparent**; **Restack This Stack**; **Push With Lease**; **Copy Branch Name**; then **Rename Branch** and **Delete Branch**. **Delete Branch** is in red.
 
-For a branch that is checked out in a linked worktree, the menu shows the worktree actions instead. See [Worktrees](worktrees.md).
+> **Note.** The stack items, **Set Parent…**, **Remove From Stack**, **Reparent to Grandparent** and **Restack This Stack**, are a preview feature. See [Stacks](stacks.md).
+
+For a branch that is checked out in a linked worktree, the menu shows the worktree actions instead: **Open Worktree**, **Reveal Worktree in File Manager**, **Copy Worktree Path**, the branch actions for stacks, and **Remove Worktree** in red. See [Worktrees](worktrees.md).
 
 ### File menu
 
-The file menu has **Stage File** or **Unstage File**, whichever applies, **Copy File Path**, **Reveal in File Manager** and **View File**.
+The file menu lists, in groups:
 
-#### Move a file
+1. **Stage File** or **Unstage File**, whichever applies.
+2. **Discard Changes** and **Discard All Changes**, both in red. Each asks first. See [Discard changes](working-copy.md#discard-changes).
+3. **View File**, **Move File to Branch…**, **Move File to Worktree…** and **Show Threads for File**.
+4. **Copy File Path** and **Reveal in File Manager**.
 
-The file menu also has **Move File to Branch…** and **Move File to Worktree…**. Both are in the command palette too, where you press **Tab** to pick the target. They have no default shortcut. Dragging the file onto the sidebar does the same. See [Working Copy](working-copy.md#move-a-file-to-a-branch-or-a-worktree).
+For a conflicted file, **Resolve Conflict** comes first.
 
-#### Discard changes
+> **Note.** **Resolve Conflict** is a preview feature. See [Resolving conflicts](conflicts.md).
 
-> **Planned.** **Discard Changes** in the file menu is not available yet.
+Moving a file is also possible by dragging the file onto the sidebar. See [Working Copy](working-copy.md#move-a-file-to-a-branch-or-a-worktree).
 
 ### Worktree menu
 
-The worktree menu has **Open Worktree**, **Reveal Worktree in File Manager**, **Copy Worktree Path**, **Lock Worktree** or **Unlock Worktree**, and **Remove Worktree** in red. On the row of a missing worktree, it has **Prune Worktrees**.
+The worktree menu lists **Open Worktree**, **Reveal Worktree in File Manager**, **Copy Worktree Path**, **Lock Worktree** or **Unlock Worktree**, and **Remove Worktree** in red. On the row of a worktree whose folder is missing, it also lists **Prune Worktrees**.
 
 ### Commit menus
 

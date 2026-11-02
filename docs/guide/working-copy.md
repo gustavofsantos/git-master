@@ -1,6 +1,6 @@
 ---
 title: Working Copy
-description: The changed-files list, staging files, the commit composer, automatic refresh and the Git commands panel.
+description: The changed-files list, staging files, discarding changes, moving a file to another branch or worktree, the commit composer, automatic refresh and the Git commands panel.
 status: partial
 order: 10
 ---
@@ -29,18 +29,22 @@ Staged changes go into the next commit. Stage a whole file when all of its chang
 1. Select the file in the list.
 2. Press `Space` to stage it. On a staged file, `Space` unstages it.
 
-You can also right-click the file, or select it and press `Shift+F10`, and choose from the file menu:
+You can also right-click the file, or select it and press `Shift+F10`, and choose from the file menu. The menu lists:
 
 | Item | What it does |
 | --- | --- |
-| **Stage file** | Stages the file. |
-| **Unstage file** | Unstages the file. |
-| **Copy file path** | Copies the path of the file. |
-| **Reveal in file manager** | Shows the file in your file manager. |
+| **Stage File** or **Unstage File** | Stages the file, or unstages it. Only the one that applies is enabled. |
+| **Discard Changes** | Throws away the unstaged changes of the file. See [Discard changes](#discard-changes). |
+| **Discard All Changes** | Throws away the staged and the unstaged changes of the file. |
 | **View File** | Opens the file in the read-only viewer of the [Code navigation](code-navigation.md) page. |
 | **Move File to Branch…** and **Move File to Worktree…** | Move the file's changes to another branch or worktree. See [Move a file to a branch or a worktree](#move-a-file-to-a-branch-or-a-worktree). |
+| **Show Threads for File** | Lists the agent threads that edited the file. |
+| **Copy File Path** | Copies the path of the file. |
+| **Reveal in File Manager** | Shows the file in your file manager. |
 
-**Stage file** and **Unstage file** are disabled when there is nothing to do. A disabled item shows the reason in place of its shortcut.
+For a conflicted file, **Resolve Conflict** is the first item. It is a preview feature; see [Resolving conflicts](conflicts.md).
+
+A disabled item shows the reason in place of its shortcut. **Stage File** and **Unstage File** are disabled when there is nothing to do.
 
 To stage part of a file, see [Diff and staging](diff-and-staging.md).
 
@@ -50,13 +54,15 @@ The composer sits at the bottom of the Working Copy. It holds the commit message
 
 1. Stage the changes you want in the commit. Only staged changes are committed.
 2. Type the commit message in the composer.
-3. Click **Commit on <branch>**.
+3. Click **Commit on <branch>**, for example **Commit on main**.
 
 Git's own hooks run during the commit, such as `pre-commit`. If a hook stops the commit, its output appears as the error of the commit. The same output is recorded in the Git commands panel, described below.
 
 ### Commit message suggestions
 
-A workflow on the `transform.commit_message` phase can suggest a message in the composer. It runs when you choose **Suggest Message**, and on its own when the message box is empty, gets focus, and something is staged. It does not run each time you stage a change, because a workflow may call a paid tool. A suggestion never overwrites the text you typed. It appears as a suggestion, with **Replace** to take it and **Discard** to keep your text. See the [workflows overview](../workflows/overview.md).
+If a workflow on the `transform.commit_message` phase is loaded, the composer shows a **Suggest message** button. The workflow runs when you click it. It also runs by itself when the message box is empty, has focus, and something is staged. Staging a change alone does not start it, because a workflow may call a paid tool.
+
+A suggestion never overwrites the text you typed. It appears above the message box, with **Replace** to take it and **Discard** to keep your text. See the [workflows overview](../workflows/overview.md).
 
 ## Automatic refresh
 
@@ -66,11 +72,32 @@ The list never goes stale, so you do not need to refresh it. GitMaster updates t
 - Git's state changes in `.git`, such as `HEAD`, the index or the branch references.
 - A file in the working tree changes. Files that `.gitignore` ignores, such as `target/` or `node_modules/`, do not count.
 
-Changes made outside GitMaster, for example in a terminal or an editor, appear here without any action. The **Refresh** action, bound to `r`, is still available if you want to force an update.
+Changes made outside GitMaster, for example in a terminal or an editor, appear here without any action. The **Refresh** action, bound to `r` while the list has focus, is still available if you want to force an update.
 
 Reading the status runs in the background, so the window stays responsive. A small indicator appears only when the read takes longer than about 300 ms.
 
-If the operating system stops GitMaster from watching more folders, or the working tree is too large to watch, the list refreshes only when the window gets focus. The status bar says so once.
+If the operating system stops GitMaster from watching more folders, or the working tree is too large to watch, the list refreshes only when the window gets focus. The status bar shows **Watching is limited; refreshing when the window gains focus.**
+
+## Discard changes
+
+Discarding throws changes away for good, so GitMaster always asks first. Three actions discard changes:
+
+| Action | Where | What it discards |
+| --- | --- | --- |
+| **Discard Changes** | File menu, command palette | The unstaged changes of one file. Its staged changes stay. |
+| **Discard All Changes** | File menu, command palette | The staged and the unstaged changes of one file. |
+| **Discard Chunk** | Diff view, on a chunk's header line | The changes of one chunk. See [Diff and staging](diff-and-staging.md#stage-and-unstage-chunks). |
+
+To discard the unstaged changes of a file:
+
+1. Right-click the file in the Working Copy, or select it and press `Shift+F10`.
+2. Choose **Discard Changes**.
+3. Read the dialog. Its title names the file, such as **Discard changes to src/lib.rs?**, and its lines say what will be lost.
+4. Click **Discard changes** to confirm, or press `Esc` to keep the file as it is.
+
+The last line of every discard dialog is **This cannot be undone.**
+
+A discard is refused, and its menu item is disabled, when there is nothing to throw away. **Discard Changes** says **Nothing unstaged to discard** for a file with only staged changes. **Discard All Changes** says **Nothing to discard** for a clean file. A conflicted file must be resolved first.
 
 ## Large repositories
 
@@ -78,24 +105,13 @@ If the operating system stops GitMaster from watching more folders, or the worki
 
 On a very large repository, the status is read as a stream, and the list shows a scanning state until the read finishes. The list draws only the rows you can see, so long lists stay smooth. GitMaster does not turn on `core.fsmonitor` or `core.untrackedCache` without your consent. Sparse checkout is supported.
 
-## Discard changes
-
-> **Planned.** Discarding all changes in a file is not available in the app yet.
-
-To discard part of a file, use **Discard Chunk** in [Diff and staging](diff-and-staging.md).
-
 ## Move a file to a branch or a worktree
 
 You can move the changes of one file out of the Working Copy and into another branch or another worktree, without switching to it. The file leaves the Working Copy, with its staged, unstaged and untracked state together, and the change is recorded where you drop it.
 
 To move a file, drag its row from the changed-files list and drop it on a row of the sidebar. The file name follows the pointer while you drag. You move one file at a time.
 
-Each row of the sidebar answers while you drag over it:
-
-| Row | Answer |
-| --- | --- |
-| It accepts the file | The row is highlighted, and the hint says what will happen: **Commit to `<branch>`** or **Move to `<worktree>`**. |
-| It cannot accept the file | The row is dimmed, the pointer shows that dropping is not allowed, and the hint gives the reason. |
+Each row of the sidebar answers while you drag over it. A row that accepts the file is highlighted. A row that cannot accept it is dimmed, and the pointer shows that dropping is not allowed. The status bar says what a drop will do, for example **Commit to `<branch>`** or **Move to `<worktree>`**, or why it will be refused.
 
 The branch you are on and the worktree marked **here** never accept a file.
 
@@ -109,7 +125,7 @@ In the target worktree the change arrives unstaged. A new file arrives untracked
 
 The target worktree may have changes of its own. GitMaster merges your change into the file as it is on disk in that worktree, the way Git merges two sets of changes to one file. The move is refused when:
 
-- The merge has conflicts. The hint says `Conflicts with changes in <worktree>`, and nothing is written.
+- The merge has conflicts. The hint says the change conflicts, and nothing is written.
 - The file is binary and differs from the version your change started from.
 - A new file would land on a file that already exists there with other content.
 - The path is a symbolic link, or leaves the worktree.
@@ -148,7 +164,7 @@ The move is recorded in the [Git commands panel](#git-commands-panel).
 
 ### Requirements
 
-Moving a file needs Git 2.38 or newer. With an older Git, the actions are disabled and the reason names the version found, for example `Requires Git 2.38 or newer (found 2.34)`. The rest of the app does not need 2.38.
+Moving a file needs Git 2.38 or newer. With an older Git, the drop is refused and the reason reads **Requires Git 2.38 or newer**. The rest of the app does not need 2.38.
 
 ## Reviewed marker
 
@@ -170,4 +186,4 @@ Generated files and lockfiles are collapsed in the list. GitMaster reads the rul
 
 Open the **Git commands** panel from the status bar. The panel is read-only. It lists each Git command that changed something: stage, unstage, commit, checkout, fetch, pull, push, and worktree and branch operations. Reads, such as status, diffs and history, are not listed.
 
-Each entry shows the program, its arguments, the exit code, the duration, the standard output and the standard error. Failed commands are highlighted, and the output expands when you open it. The list is kept in memory and holds the last 1000 entries.
+Each entry shows the program, its arguments, the exit code, the duration, the standard output and the standard error. The output expands when you open it. The status bar button turns red while the newest command failed. The list is kept in memory and holds the last 1000 entries.
