@@ -330,8 +330,6 @@ pub fn framed(window: &Window, app: Div) -> Div {
         // frame is drawn at the window's edge as before.
         div()
             .absolute()
-            .inset_0()
-            .relative()
             .top(-overhang[0])
             .right(-overhang[1])
             .bottom(-overhang[2])
