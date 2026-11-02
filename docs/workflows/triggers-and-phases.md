@@ -138,7 +138,7 @@ An `after.<operation>` workflow runs after the operation finishes. It returns no
 | `commit` | `before.commit`, `after.commit` | `transform.commit_message`: the message in the composer |
 | `restack` | `before.restack`, `after.restack` | None |
 | `branch_create` | `before.branch_create`, `after.branch_create` | `transform.branch_name`: the name of the new branch |
-| `conflict_resolve` | `before.conflict_resolve`, `after.conflict_resolve` | `transform.conflict_hunk`: a resolution suggestion for one conflict hunk |
+| `conflict_resolve` | `before.conflict_resolve`, `after.conflict_resolve` | `transform.conflict_hunk`: a resolution suggestion for one conflict hunk. `input.trigger` has `path`, `index` (the hunk, from 0), `left`, `right`, `base` (the texts of the hunk), `left_label`, `right_label` and `current` (the previous workflow's suggestion, or empty). Return the suggested text of the hunk, or `nil`. |
 
 See also [Branches](../guide/branches.md), [Stacks](../guide/stacks.md) and [Conflicts](../guide/conflicts.md).
 

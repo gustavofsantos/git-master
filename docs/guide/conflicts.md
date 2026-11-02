@@ -60,6 +60,12 @@ When Git has a recorded resolution for the file, the resolver shows the banner *
 
 A workflow using the `transform.conflict_hunk` trigger can suggest a resolution for a hunk. The suggestion appears as a third option, labeled **Script suggestion**, next to **Left**, **Right** and **Both**. GitMaster never applies a script suggestion by itself. You choose it, or you choose another option.
 
+- The workflows run when the resolver opens a file, once for each conflict, in the background. A suggestion appears on its hunk card when it is ready, so you can start resolving at once.
+- The card names the workflow that made the suggestion. The text came from a script, which may have asked a program such as an LLM, so read it before you choose it.
+- When several workflows apply, they run in sequence by file name, and each one sees the suggestion of the one before, as other transforms do.
+- A workflow you have not reviewed does not run. A notice asks you to review it, then reopen the file.
+- Editing the result pane does not discard a suggestion: it stays on the card until you choose another option or close the file.
+
 An agent can propose a resolution in the same way, through MCP. See the [MCP server](../agents/mcp-server.md) page. For how workflows run their triggers, see [Triggers and phases](../workflows/triggers-and-phases.md).
 
 ## Who resolved each hunk
