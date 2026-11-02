@@ -272,6 +272,15 @@ pub enum CommandKind {
     ReparentToGrandparent {
         branch: String,
     },
+    /// Moves `branch` and the branches under it onto `parent` as the plan `plan_id` of
+    /// `reparent.plan` says, and records `parent` as its stack parent (`WF4a`). Written by a
+    /// workflow run only: the engine refuses it from any other source, and the log records it under
+    /// the run's operation (D81).
+    ApplyReparent {
+        branch: String,
+        parent: String,
+        plan_id: String,
+    },
     /// Detaches HEAD at commit `oid` (`git checkout --detach`), as a reflog entry
     /// is checked out (B3, D95). The id is 7 to 64 hex characters; Git's text is
     /// the error, such as local changes that would be overwritten. Human only.

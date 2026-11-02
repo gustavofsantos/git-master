@@ -130,6 +130,13 @@ pub enum HistoryRevs {
 /// runs on a thread of its own, and its error is Git's own text.
 pub type RemoteRun = Box<dyn FnOnce() -> Result<(), GitError> + Send>;
 
+/// A remote command a script run waits for (`WF4a`). `run` waits for Git on a thread of its own;
+/// `stop` kills Git, so a cancelled run does not wait for the network.
+pub struct ScriptRemote {
+    pub run: RemoteRun,
+    pub stop: Box<dyn Fn() + Send + Sync>,
+}
+
 /// The result of merging two trees without a worktree (`merge_trees`): the
 /// merged tree when everything merged, or the paths that conflict.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -916,6 +923,28 @@ pub trait GitPort: Send {
     /// returns the run. Refuses a detached HEAD, and a branch with no upstream
     /// when there is no remote or more than one.
     fn push_with_lease(&self, _root: &Path) -> Result<RemoteRun, GitError> {
+        Err(GitError(
+            "push with lease is not supported by this adapter".into(),
+        ))
+    }
+
+    /// `git fetch <remote> --prune`, as a command a workflow's `ctx.fetch` waits for (`WF4a`). It
+    /// runs off the engine thread and can be stopped. Git never prompts. Fires no trigger; the
+    /// engine checks the remote name.
+    fn fetch_remote(&self, _root: &Path, _remote: &str) -> Result<ScriptRemote, GitError> {
+        Err(GitError("fetch is not supported by this adapter".into()))
+    }
+
+    /// `git push --force-with-lease --no-follow-tags <remote> refs/heads/<branch>:refs/heads/<branch>`,
+    /// as a command a workflow's `ctx.push.lease` waits for (`WF4a`), off the engine thread and
+    /// stoppable. The lease is the remote-tracking branch, so a remote that moved since the last
+    /// fetch refuses it. The engine checks the names.
+    fn push_branch_with_lease(
+        &self,
+        _root: &Path,
+        _branch: &str,
+        _remote: &str,
+    ) -> Result<ScriptRemote, GitError> {
         Err(GitError(
             "push with lease is not supported by this adapter".into(),
         ))

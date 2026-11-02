@@ -122,16 +122,12 @@ local r = ctx.exec({ "llm-cli", "-p", "Write a conventional commit message for t
 
 ### Remote
 
-> **Planned.** `ctx.fetch` and `ctx.push.lease` are not available in the app yet.
-
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
 | `ctx.fetch({ remote })` | `remote`: the remote to fetch, text. Optional, default `origin`. | — | apply | `done`, `failed`, `interrupted` |
 | `ctx.push.lease({ branch, remote })` | `branch`: the branch to push, text. Required. `remote`: the remote to push to, text. Optional, default `origin`. | — | apply, always asks for your approval | `done`, `failed`, `interrupted` |
 
 ### Stacks
-
-> **Planned.** `ctx.stack.tree` and `ctx.stack.stale` are not available in the app yet.
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
@@ -140,24 +136,22 @@ local r = ctx.exec({ "llm-cli", "-p", "Write a conventional commit message for t
 
 ### Restack
 
-> **Planned.** The restack calls are not available in the app yet.
-
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
 | `ctx.restack.plan({ root })` | `root`: the branch at the top of the subtree to restack, text. Required. | `plan_id` and `branch_count`. | propose | `done`, `failed` |
 | `ctx.restack.apply({ plan_id })` | `plan_id`: the id returned by `ctx.restack.plan`, text. Required. | — The outcome is available through `ctx.try`. | apply | `done`, `conflict`, `stale`, `failed` |
 | `ctx.restack.undo({ plan_id })` | `plan_id`: the id of the restack to undo, text. Required. | — | apply | `done`, `failed`, `interrupted` |
 
-A plan's `plan_id` is tied to the commits of the branches when the plan was made. If a branch has moved since then, `ctx.restack.apply` ends with `stale`. A restack conflict ends `ctx.restack.apply` with `conflict`. `ctx.restack.apply` has no `interrupted` outcome, because restack has its own recovery steps.
+A plan's `plan_id` is tied to the commits of the branches when the plan was made. If a branch has moved since then, `ctx.restack.apply` ends with `stale`. A restack conflict ends `ctx.restack.apply` with `conflict`. The branches that do not conflict are moved first, as in the window: only the conflicting branch and the branches under it wait. A plan that moves some branches and refuses others ends with `done`; the refused branches stay where they are, with their reasons in the plan. `ctx.restack.apply` has no `interrupted` outcome, because restack has its own recovery steps.
 
 ### Reparent
-
-> **Planned.** The reparent calls are not available in the app yet.
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
 | `ctx.reparent.plan({ branch, parent })` | `branch`: the branch to move, text. Required. `parent`: the branch that becomes its parent, text. Required. | `plan_id` and `branch_count`. | propose | `done`, `failed` |
 | `ctx.reparent.apply({ plan_id })` | `plan_id`: the id returned by `ctx.reparent.plan`, text. Required. | — | apply | `done`, `failed`, `interrupted` |
+
+A reparent moves everything or nothing. If any branch of the plan conflicts or is refused, `ctx.reparent.apply` ends with `failed` and no branch moves. If a branch has moved since the plan, it also ends with `failed`. Undoing it with **Undo restack** also puts the old parent back.
 
 ### Helpers
 
@@ -172,8 +166,6 @@ These calls do not act on the repository, so they have no effect level or outcom
 | `ctx.random()` | None. | A number from 0 up to, but not including, 1. A run draws from a sequence seeded for that run, and each value is recorded in the run journal. |
 
 ## Outcomes and errors
-
-> **Planned.** The example below uses the restack calls, which are not available yet.
 
 - A call that ends with an outcome other than `done` raises an error. The run stops there. An outcome such as `conflict` or `stale` never passes silently.
 - `ctx.try(fn)` returns the outcome instead of raising. Use it when the script handles the outcome itself:

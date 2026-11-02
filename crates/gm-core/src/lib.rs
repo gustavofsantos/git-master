@@ -33,6 +33,7 @@ pub mod review_store;
 mod runner;
 pub mod script;
 mod script_session;
+mod script_stacks;
 pub mod stack;
 mod stack_session;
 pub mod stage_math;
@@ -55,5 +56,5 @@ pub use port::{
     GitPort, GrepRead, HistoryRevs, RefMove, RemoteRun, ReviewSide, TreeMerge,
 };
 pub use runner::{EngineHandle, spawn, spawn_app, spawn_with};
-pub use script_session::{EffectRequest, ScriptLink};
+pub use script_session::{EffectRequest, ScriptJob, ScriptLink, ScriptReport};
 pub use threads_session::{ProvenanceJob, ProvenanceReport};

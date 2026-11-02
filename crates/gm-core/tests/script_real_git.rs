@@ -398,7 +398,7 @@ return M
 }
 
 #[test]
-fn stack_actions_are_declared_but_not_available_yet() {
+fn a_stack_plan_of_a_branch_in_no_stack_fails_the_run() {
     let repo = tempfile::tempdir().unwrap();
     init_repo(repo.path());
     let script = r#"
@@ -412,7 +412,7 @@ return M
     let (_, _, (status, reason, _)) =
         run_script(repo.path(), script, StartedBy::Human, Answer::Approve);
     assert_eq!(status, RunStatus::Failed);
-    assert!(reason.unwrap().contains("not available"));
+    assert!(reason.unwrap().contains("is in no stack"));
 }
 
 #[test]

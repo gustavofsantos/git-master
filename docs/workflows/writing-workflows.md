@@ -226,8 +226,6 @@ The staged diff goes to the command-line LLM on standard input. The script retur
 
 ### Restack children when the parent moves
 
-> **Planned.** The restack calls are not available yet, so this workflow does not run.
-
 This event runs when the parent branch of a stack gets new commits. It uses `concurrency = "replace"`, so a newer event replaces this run if the run has not reached its apply step yet.
 
 ```lua

@@ -15,6 +15,7 @@ use gm_schema::{
 };
 use serde_json::{Value, json};
 
+use crate::port::{RemoteRun, ScriptRemote};
 use crate::script::dry::{self, DryRun};
 use crate::script::journal::{CallRow, Journal, RunId, RunRow, RunStatus};
 use crate::script::loader::{Loaded, ScriptEntry};
@@ -23,8 +24,48 @@ use crate::script::port::{Budgets, ScriptDiagnostic, ScriptEngine};
 use crate::script::run::{
     Clock, EffectCall, EffectResult, Effects, EventSink, Runtime, RuntimeConfig, ScriptEvent,
 };
-use crate::workflow_session::{Actions, GitActions};
-use crate::{GitPort, LogEntry};
+use crate::script_stacks::{self, PlanBook, Started};
+use crate::workflow_session::{Actions, Effected, GitActions};
+use crate::{GitError, GitPort, LogEntry};
+use gm_schema::CommandKind;
+
+/// A Git command a run waits for (`WF4a`), to run on a thread of its own. The runner calls `run`
+/// and passes the report to `Engine::script_remote_report`.
+pub struct ScriptJob {
+    pub(crate) run: RunId,
+    pub(crate) command: RemoteRun,
+}
+
+impl ScriptJob {
+    /// Runs the command to its end.
+    #[must_use]
+    pub fn run(self) -> ScriptReport {
+        ScriptReport {
+            run: self.run,
+            outcome: (self.command)().map_err(|GitError(message)| message),
+        }
+    }
+}
+
+/// The end of a `ScriptJob`.
+pub struct ScriptReport {
+    pub(crate) run: RunId,
+    pub(crate) outcome: Result<(), String>,
+}
+
+/// A call that waits for its Git command, and the way to answer its run (`WF4a`).
+pub(crate) struct Waiting {
+    pub(crate) run: RunId,
+    pub(crate) kind: CommandKind,
+    pub(crate) remote: ScriptRemote,
+    pub(crate) reply: mpsc::Sender<EffectResult>,
+}
+
+/// What `ScriptSession::execute` did with a request: answered, or left for its Git command.
+pub(crate) enum Carried {
+    Answered(Effected),
+    Waiting(Box<Waiting>),
+}
 
 /// An effect posted by a run thread, with the way back.
 pub struct EffectRequest {
@@ -80,6 +121,8 @@ pub(crate) struct ScriptSession {
     events: EventSink,
     /// The temporary file that holds the whole staged diff of a run, until the run ends.
     diffs: BTreeMap<RunId, tempfile::NamedTempFile>,
+    /// The stack plans the runs made, by id (`WF4a`).
+    plans: PlanBook,
 }
 
 impl ScriptSession {
@@ -114,6 +157,7 @@ impl ScriptSession {
             default_origin: opened_by,
             events: Arc::clone(&link.events),
             diffs: BTreeMap::new(),
+            plans: PlanBook::default(),
         })
     }
 
@@ -138,26 +182,56 @@ impl ScriptSession {
             .unwrap_or(self.default_origin)
     }
 
-    /// Carries out one effect on the engine thread. Returns the answer and whether Git was
-    /// written, so the caller reads the status again.
+    /// Carries out one effect, or starts the Git command it waits for (`WF4a`). An effect that
+    /// runs on the engine thread is answered here, and returns what it changed, so the caller reads
+    /// the status (and the branches and stacks, if refs moved) again.
     pub(crate) fn execute(
-        &self,
+        &mut self,
         git: &dyn GitPort,
         log: &mut Vec<LogEntry>,
         request: EffectRequest,
-    ) -> bool {
+    ) -> Carried {
         let EffectRequest { call, reply } = request;
         // A run cancelled while its effect waited for the engine writes nothing (WF3a).
         if self.runtime.is_cancelling(call.run) {
             let _ = reply.send(EffectResult::cancelled());
-            return false;
+            return Carried::Answered(Effected::default());
         }
-        let mut actions = Actions::new(git, &self.root, log, self.origin(call.run));
-        let result = effect(&mut actions, &call, &self.events);
-        let wrote = actions.wrote();
+        let origin = self.origin(call.run);
+        let started = match call.func.as_str() {
+            "fetch" => Some(script_stacks::fetch(git, &self.root, remote_arg(&call))),
+            "push.lease" => Some(script_stacks::push_lease(
+                git,
+                &self.root,
+                text_arg(&call, "branch"),
+                remote_arg(&call),
+            )),
+            _ => None,
+        };
+        if let Some(started) = started {
+            return match started {
+                Started::Ended(result) => {
+                    let _ = reply.send(result);
+                    Carried::Answered(Effected::default())
+                }
+                Started::Waiting { remote } => Carried::Waiting(Box::new(Waiting {
+                    run: call.run,
+                    kind: if call.func == "fetch" {
+                        CommandKind::Fetch
+                    } else {
+                        CommandKind::PushWithLease
+                    },
+                    remote,
+                    reply,
+                })),
+            };
+        }
+        let mut actions = Actions::new(git, &self.root, log, origin);
+        let result = effect(&mut actions, &mut self.plans, &call, &self.events);
+        let effected = actions.finish();
         // The run may be gone (cancelled while it waited for the engine); nobody needs the answer.
         let _ = reply.send(result);
-        wrote
+        Carried::Answered(effected)
     }
 }
 
@@ -168,14 +242,47 @@ fn text_arg<'a>(call: &'a EffectCall, key: &str) -> &'a str {
         .unwrap_or_default()
 }
 
+/// The remote of a call, `origin` when it names none.
+fn remote_arg(call: &EffectCall) -> &str {
+    call.args
+        .get("remote")
+        .and_then(Value::as_str)
+        .unwrap_or("origin")
+}
+
 /// The effect of one `ctx` call. Arguments were checked against the catalog before the call got
 /// here.
-fn effect(actions: &mut Actions<'_>, call: &EffectCall, events: &EventSink) -> EffectResult {
+fn effect(
+    actions: &mut Actions<'_>,
+    plans: &mut PlanBook,
+    call: &EffectCall,
+    events: &EventSink,
+) -> EffectResult {
     let into = |result: Result<Value, String>| match result {
         Ok(value) => EffectResult::done(value),
         Err(message) => EffectResult::failed(message),
     };
     match call.func.as_str() {
+        "stack.tree" => into(script_stacks::tree(actions.git(), actions.root())),
+        "stack.stale" => into(script_stacks::stale(actions.git(), actions.root())),
+        "restack.plan" => into(script_stacks::plan_restack(
+            actions.git(),
+            actions.root(),
+            plans,
+            text_arg(call, "root"),
+        )),
+        "reparent.plan" => into(script_stacks::plan_reparent(
+            actions.git(),
+            actions.root(),
+            plans,
+            text_arg(call, "branch"),
+            text_arg(call, "parent"),
+        )),
+        "restack.apply" => script_stacks::apply_restack(actions, plans, text_arg(call, "plan_id")),
+        "reparent.apply" => {
+            script_stacks::apply_reparent(actions, plans, text_arg(call, "plan_id"))
+        }
+        "restack.undo" => script_stacks::undo(actions, text_arg(call, "plan_id")),
         "stage.all" => into(actions.stage_all().map(|()| Value::Null)),
         "commit.create" => into(
             actions

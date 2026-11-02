@@ -9,7 +9,7 @@ use gm_schema::{Actor, CommandKind, OperationId};
 
 use crate::branch;
 use crate::script::loader::sha256_hex;
-use crate::{GitError, GitPort, LogEntry};
+use crate::{GitPort, LogEntry};
 
 /// The `gitmaster.workflowPath` key: extra directories of workflow files (D61).
 const WORKFLOW_PATH_KEY: &str = "gitmaster.workflowPath";
@@ -35,6 +35,17 @@ pub(crate) struct Actions<'a> {
     log: &'a mut Vec<LogEntry>,
     origin: OperationId,
     wrote: bool,
+    refs: bool,
+    remaps: Vec<(String, String)>,
+}
+
+/// What a call of a run changed, for the engine: whether Git was written, whether branch refs
+/// moved (so the branches and the stacks are read again), and the replays of moved commits (D145).
+#[derive(Default)]
+pub(crate) struct Effected {
+    pub(crate) wrote: bool,
+    pub(crate) refs: bool,
+    pub(crate) remaps: Vec<(String, String)>,
 }
 
 impl<'a> Actions<'a> {
@@ -50,15 +61,44 @@ impl<'a> Actions<'a> {
             log,
             origin,
             wrote: false,
+            refs: false,
+            remaps: Vec::new(),
         }
     }
 
-    /// Whether a Git write was attempted, so the status is read again.
-    pub(crate) fn wrote(&self) -> bool {
-        self.wrote
+    /// The end of the call: what it changed.
+    pub(crate) fn finish(self) -> Effected {
+        Effected {
+            wrote: self.wrote,
+            refs: self.refs,
+            remaps: self.remaps,
+        }
     }
 
-    fn record<T>(&mut self, kind: CommandKind, result: Result<T, GitError>) -> Result<T, String> {
+    pub(crate) fn git(&self) -> &'a dyn GitPort {
+        self.git
+    }
+
+    pub(crate) fn root(&self) -> &'a Path {
+        self.root
+    }
+
+    /// Notes that branch refs moved in this call.
+    pub(crate) fn moved_refs(&mut self) {
+        self.refs = true;
+    }
+
+    /// Keeps the replays of moved commits, so the thread links resolve to them (D145).
+    pub(crate) fn remap(&mut self, pairs: Vec<(String, String)>) {
+        self.remaps.extend(pairs);
+    }
+
+    /// Logs one Git write under the run's operation, and passes its result on as text on failure.
+    pub(crate) fn record<T>(
+        &mut self,
+        kind: CommandKind,
+        result: Result<T, String>,
+    ) -> Result<T, String> {
         let state = if result.is_ok() {
             gm_schema::OperationState::Done
         } else {
@@ -71,18 +111,18 @@ impl<'a> Actions<'a> {
             state,
         });
         self.wrote = true;
-        result.map_err(|e| e.0)
+        result
     }
 }
 
 impl GitActions for Actions<'_> {
     fn stage_all(&mut self) -> Result<(), String> {
-        let result = self.git.stage_all(self.root);
+        let result = self.git.stage_all(self.root).map_err(|e| e.0);
         self.record(CommandKind::StageAll, result)
     }
 
     fn commit(&mut self, message: &str) -> Result<String, String> {
-        let result = self.git.commit(self.root, message);
+        let result = self.git.commit(self.root, message).map_err(|e| e.0);
         self.record(
             CommandKind::Commit {
                 message: message.to_owned(),
@@ -95,7 +135,10 @@ impl GitActions for Actions<'_> {
         if let Some(problem) = branch::name_problem(name) {
             return Err(problem.to_owned());
         }
-        let result = self.git.create_branch(self.root, name, None, checkout);
+        let result = self
+            .git
+            .create_branch(self.root, name, None, checkout)
+            .map_err(|e| e.0);
         self.record(
             CommandKind::CreateBranch {
                 name: name.to_owned(),
@@ -107,7 +150,7 @@ impl GitActions for Actions<'_> {
     }
 
     fn checkout(&mut self, branch: &str) -> Result<(), String> {
-        let result = self.git.checkout(self.root, branch);
+        let result = self.git.checkout(self.root, branch).map_err(|e| e.0);
         self.record(
             CommandKind::Checkout {
                 branch: branch.to_owned(),

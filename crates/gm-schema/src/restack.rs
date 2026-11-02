@@ -118,6 +118,10 @@ pub struct RestackMove {
     pub old_base: Option<String>,
     /// The parent's tip the branch now sits on, recorded as its base.
     pub new_base: String,
+    /// The stack parent before the move, restored by undo. `None` in records written before
+    /// `reparent.apply` (`WF4a`); undo then keeps `parent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_parent: Option<String>,
 }
 
 /// A conflict of a restack being resolved (D154): what `StartRestackResolution` opened,

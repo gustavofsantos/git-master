@@ -30,7 +30,7 @@ use crate::grep::{Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::port::{
     BlameRead, CommitPresence, CommitSnapshot, DetailRead, FileListRead, GrepRead, HistoryRevs,
-    RemoteRun, Rewrite, StackRead,
+    RemoteRun, Rewrite, ScriptRemote, StackRead,
 };
 use crate::port::{
     ConfigScope, ConfigValue, DiscardOutcome, FileMerge, RefMove, ReviewSide, TreeMerge,
@@ -376,6 +376,89 @@ impl SubprocessGit {
                 .stdin(Stdio::null());
             git.logged(command, None).map(drop)
         })
+    }
+
+    /// One remote command for a script run (`WF4a`). The run thread starts Git and polls it, so
+    /// `stop` can kill it while it waits on the network. The process is logged when it ends. Git
+    /// never prompts: a credential or host question fails the command with Git's text.
+    fn stoppable_remote(&self, root: &Path, args: &[&str]) -> ScriptRemote {
+        let mut command = self.git(root);
+        command
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = {
+            let slot = Arc::clone(&slot);
+            let stopped = Arc::clone(&stopped);
+            Box::new(move || {
+                stopped.store(true, Ordering::SeqCst);
+                if let Some(child) = slot.lock().unwrap().as_mut() {
+                    let _ = child.kill();
+                }
+            })
+        };
+        let log = self.log.clone();
+        let dir = root.to_path_buf();
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        let run = Box::new(move || {
+            let started = Instant::now();
+            let mut child = command
+                .spawn()
+                .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            let out = std::thread::spawn(move || read_pipe(stdout));
+            let err = std::thread::spawn(move || read_pipe(stderr));
+            *slot.lock().unwrap() = Some(child);
+            // A stop that came before the child was stored kills it now.
+            if stopped.load(Ordering::SeqCst)
+                && let Some(child) = slot.lock().unwrap().as_mut()
+            {
+                let _ = child.kill();
+            }
+            let status = loop {
+                let mut guard = slot.lock().unwrap();
+                let Some(child) = guard.as_mut() else {
+                    return Err(GitError("the git command was stopped".into()));
+                };
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) => {}
+                    Err(e) => return Err(GitError(format!("cannot wait for git: {e}"))),
+                }
+                drop(guard);
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            if stopped.load(Ordering::SeqCst) {
+                // The readers are not joined: a helper of Git may keep the pipes open.
+                return Err(GitError("cancelled".into()));
+            }
+            let stdout = out.join().unwrap_or_default();
+            let stderr = err.join().unwrap_or_default();
+            if let Some(log) = &log {
+                log.record(CommandRecord {
+                    source: Source::Git,
+                    program: "git".to_owned(),
+                    dir,
+                    args,
+                    code: status.code(),
+                    stdout_bytes: stdout.len(),
+                    stdout: bounded_text(stdout.as_bytes()),
+                    stderr: bounded_text(stderr.as_bytes()),
+                    took: started.elapsed(),
+                });
+            }
+            if status.success() {
+                Ok(())
+            } else {
+                Err(GitError(stderr.trim().to_owned()))
+            }
+        });
+        ScriptRemote { run, stop }
     }
 
     /// One logged `git` write of `path` for `discard_file`. The path comes after
@@ -2424,6 +2507,29 @@ impl GitPort for SubprocessGit {
         Ok(self.remote_run(root, args))
     }
 
+    fn fetch_remote(&self, root: &Path, remote: &str) -> Result<ScriptRemote, GitError> {
+        Ok(self.stoppable_remote(root, &["fetch", remote, "--prune"]))
+    }
+
+    fn push_branch_with_lease(
+        &self,
+        root: &Path,
+        branch: &str,
+        remote: &str,
+    ) -> Result<ScriptRemote, GitError> {
+        let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+        Ok(self.stoppable_remote(
+            root,
+            &[
+                "push",
+                "--no-follow-tags",
+                "--force-with-lease",
+                remote,
+                &refspec,
+            ],
+        ))
+    }
+
     fn prepare_commit_config(
         &self,
         root: &Path,
@@ -3641,6 +3747,15 @@ fn require_commit_id(oid: &str) -> Result<(), GitError> {
         return Err(GitError(format!("not a commit id: {oid:?}")));
     }
     Ok(())
+}
+
+/// Everything a pipe of a child process holds, as text. Empty when there is no pipe.
+fn read_pipe<R: Read>(pipe: Option<R>) -> String {
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        let _ = pipe.read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 #[cfg(test)]

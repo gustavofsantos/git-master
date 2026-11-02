@@ -186,13 +186,13 @@ static ACTIONS: &[ActionSpec] = &[
         name: "stack.tree",
         level: Level::Read,
         outcomes: &["done", "failed"],
-        fields: &[], // Not run by the driver yet.
+        fields: &[],
     },
     ActionSpec {
         name: "stack.stale",
         level: Level::Read,
         outcomes: &["done", "failed"],
-        fields: &[], // Not run by the driver yet.
+        fields: &[],
     },
     ActionSpec {
         name: "restack.plan",

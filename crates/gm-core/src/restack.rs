@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use gm_schema::{
-    OWN_COMMITS_LIMIT, PlannedBranch, PlannedCommit, ReplayStep, RestackBlock, RestackPlan,
+    OWN_COMMITS_LIMIT, PlannedBranch, PlannedCommit, ReplayStep, RestackBlock, RestackPlan, Stack,
     StackBranch, StackSnapshot, StackState,
 };
 use sha2::{Digest, Sha256};
@@ -57,6 +57,19 @@ pub struct Inputs<'a> {
     pub checked_out: &'a HashMap<String, CheckedOut>,
     /// Branches the person left out.
     pub skip: &'a HashSet<String>,
+    /// The stack parent replaced for this plan (`reparent.plan`, `WF4a`); `None` for a restack.
+    pub reparent: Option<Reparent<'a>>,
+}
+
+/// The branch a plan moves to another parent (`reparent.plan`, `WF4a`). It is the plan's `from`.
+/// It is replayed onto `parent`'s tip whatever its state, and its own commits are `own`, read from
+/// its recorded base by the engine: a snapshot leaves them out when the old parent is gone.
+#[derive(Clone, Copy, Debug)]
+pub struct Reparent<'a> {
+    pub branch: &'a str,
+    pub parent: &'a str,
+    /// The branch's own commits, `stackParentBase..tip`, newest first.
+    pub own: &'a [String],
 }
 
 /// Plans a restack of `from` and the branches under it. `replay(onto, commit)`
@@ -75,22 +88,8 @@ pub fn plan(
         .iter()
         .find(|stack| stack.branches.iter().any(|entry| entry.name == from))
         .ok_or_else(|| format!("{from} is in no stack."))?;
-    let mut in_subtree: HashSet<&str> = HashSet::from([from]);
-    let subtree: Vec<&StackBranch> = stack
-        .branches
-        .iter()
-        .filter(|entry| {
-            let wanted = entry.name == from
-                || entry
-                    .parent
-                    .as_deref()
-                    .is_some_and(|parent| in_subtree.contains(parent));
-            if wanted {
-                in_subtree.insert(entry.name.as_str());
-            }
-            wanted
-        })
-        .collect();
+    let (subtree, in_subtree) = subtree(stack, from);
+    check_reparent(inputs.reparent, from, &in_subtree)?;
 
     let mut out = RestackPlan {
         from: from.to_owned(),
@@ -99,20 +98,21 @@ pub fn plan(
     let mut moved: HashMap<&str, String> = HashMap::new();
     let mut held_back: HashSet<&str> = HashSet::new();
     for entry in subtree {
-        let Some(parent) = entry.parent.as_deref() else {
+        // The branch a reparent moves is replayed whatever its state; a reparent to the parent it
+        // has already is a plain restack of it.
+        let moving = inputs.reparent.filter(|moved| {
+            moved.branch == entry.name && entry.parent.as_deref() != Some(moved.parent)
+        });
+        let Some(parent) = moving.map(|moved| moved.parent).or(entry.parent.as_deref()) else {
             continue;
         };
         let parent_moved = moved.get(parent).cloned();
         let parent_held_back = held_back.contains(parent);
-        let own_trouble = matches!(
-            entry.state,
-            StackState::DivergedBase | StackState::ParentGone | StackState::ParentMerged
-        );
-        if !(parent_moved.is_some()
-            || parent_held_back
-            || entry.state == StackState::Stale
-            || own_trouble)
-        {
+        if !needs_replay(
+            entry,
+            moving.is_some(),
+            parent_moved.is_some() || parent_held_back,
+        ) {
             continue;
         }
         let name = entry.name.as_str();
@@ -143,17 +143,26 @@ pub fn plan(
             new_tip: None,
             block: None,
         };
+        let own = match moving {
+            Some(moved) => moved.own,
+            None => entry.commits.as_slice(),
+        };
         if inputs.skip.contains(name) {
             branch.block = Some(RestackBlock::Skipped);
         } else if parent_held_back {
             branch.block = Some(RestackBlock::ParentBlocked {
                 parent: parent.to_owned(),
             });
-        } else if let Some(reason) = refusal(entry, inputs.checked_out.get(name), &mut out.stopped)
-        {
+        } else if let Some(reason) = refusal(
+            entry,
+            own,
+            moving.is_some(),
+            inputs.checked_out.get(name),
+            &mut out.stopped,
+        ) {
             branch.block = Some(RestackBlock::Refused { reason });
         } else {
-            replay_branch(entry, &mut branch, replay)?;
+            replay_branch(own, &mut branch, replay)?;
         }
         match (&branch.block, &branch.new_tip) {
             (None, Some(tip)) => {
@@ -169,10 +178,74 @@ pub fn plan(
     Ok(out)
 }
 
+/// The branches under `from` in its stack, `from` first and parents before children, and the names
+/// of those branches. A branch whose parent is not in the stack is not under `from`.
+fn subtree<'a>(stack: &'a Stack, from: &'a str) -> (Vec<&'a StackBranch>, HashSet<&'a str>) {
+    let mut in_subtree: HashSet<&str> = HashSet::from([from]);
+    let subtree: Vec<&StackBranch> = stack
+        .branches
+        .iter()
+        .filter(|entry| {
+            let wanted = entry.name == from
+                || entry
+                    .parent
+                    .as_deref()
+                    .is_some_and(|parent| in_subtree.contains(parent));
+            if wanted {
+                in_subtree.insert(entry.name.as_str());
+            }
+            wanted
+        })
+        .collect();
+    (subtree, in_subtree)
+}
+
+/// A reparent must name the plan's branch, and a parent that is neither it nor under it.
+fn check_reparent(
+    reparent: Option<Reparent<'_>>,
+    from: &str,
+    under: &HashSet<&str>,
+) -> Result<(), String> {
+    let Some(moved) = reparent else {
+        return Ok(());
+    };
+    if moved.branch != from {
+        return Err(format!(
+            "the plan starts from {from}, not {}.",
+            moved.branch
+        ));
+    }
+    if moved.parent == from {
+        return Err(format!("{from} cannot be its own parent."));
+    }
+    if under.contains(moved.parent) {
+        return Err(format!(
+            "{} is under {from}, so it cannot become its parent.",
+            moved.parent
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `entry` is replayed: it is moved by a reparent, its parent moved or is held back, or it is
+/// stale or has a trouble of its own that a restack has to settle.
+fn needs_replay(entry: &StackBranch, reparenting: bool, parent_changed: bool) -> bool {
+    if reparenting {
+        return true;
+    }
+    let own_trouble = matches!(
+        entry.state,
+        StackState::DivergedBase | StackState::ParentGone | StackState::ParentMerged
+    );
+    parent_changed || entry.state == StackState::Stale || own_trouble
+}
+
 /// Why `entry` cannot be restacked at all, or `None`. A dirty working copy on
 /// its branch stops the whole plan instead (Q2).
 fn refusal(
     entry: &StackBranch,
+    own: &[String],
+    reparenting: bool,
     placed: Option<&CheckedOut>,
     stopped: &mut Vec<String>,
 ) -> Option<String> {
@@ -183,17 +256,18 @@ fn refusal(
                 "The recorded base of {name} no longer marks where its commits start; set its parent again."
             ));
         }
-        StackState::ParentGone => {
+        // A reparent takes the branch away from a gone or merged parent, so that state is no reason.
+        StackState::ParentGone if !reparenting => {
             return Some(format!("The parent of {name} is gone; reparent it first."));
         }
-        StackState::ParentMerged => {
+        StackState::ParentMerged if !reparenting => {
             return Some(format!(
                 "The parent of {name} is already merged; reparent it to its grandparent first."
             ));
         }
         _ => {}
     }
-    if entry.commits.len() >= OWN_COMMITS_LIMIT {
+    if own.len() >= OWN_COMMITS_LIMIT {
         return Some(format!(
             "{name} has {OWN_COMMITS_LIMIT} or more commits of its own, more than a restack replays."
         ));
@@ -213,12 +287,12 @@ fn refusal(
 }
 
 fn replay_branch(
-    entry: &StackBranch,
+    own: &[String],
     branch: &mut PlannedBranch,
     replay: &mut dyn FnMut(&str, &str) -> Result<Replayed, String>,
 ) -> Result<(), String> {
     let mut cur = branch.onto.clone();
-    for oid in entry.commits.iter().rev() {
+    for oid in own.iter().rev() {
         let replayed = replay(&cur, oid)?;
         let step = match replayed.kind {
             ReplayKind::Clean { new } => {
@@ -308,10 +382,13 @@ fn plan_id(plan: &RestackPlan) -> String {
         } else {
             branch.onto.as_str()
         };
+        // The parent is in the id: a reparent that moves the same commits onto another parent is
+        // another plan (WF4a).
         let _ = writeln!(
             text,
-            "{} {} {} {onto} {}",
+            "{} {} {} {} {onto} {}",
             branch.name,
+            branch.parent,
             branch.old_tip,
             branch.old_base.as_deref().unwrap_or("-"),
             branch.new_tip.is_some(),
@@ -410,6 +487,7 @@ mod tests {
             tips: &tips,
             checked_out: placed,
             skip: &HashSet::new(),
+            reparent: None,
         };
         plan(from, &inputs, replay).unwrap()
     }
@@ -614,5 +692,156 @@ mod tests {
         let other = run(chain(), "main", &HashMap::new(), &["a2"]);
         assert_eq!(one.plan_id, same.plan_id);
         assert_ne!(one.plan_id, other.plan_id);
+    }
+    /// Plans `from` moved onto `parent` with `own` as its own commits, the replay of `run`.
+    fn run_moved(
+        branches: Vec<StackBranch>,
+        from: &str,
+        parent: &str,
+        own: &[String],
+    ) -> Result<RestackPlan, String> {
+        let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+        let mut tips = tips(&names);
+        tips.entry(parent.to_owned())
+            .or_insert_with(|| format!("{parent}-tip"));
+        let snapshot = StackSnapshot {
+            stacks: vec![Stack { branches }],
+            looped: vec![],
+        };
+        let placed = HashMap::new();
+        let inputs = Inputs {
+            snapshot: &snapshot,
+            links: &[],
+            tips: &tips,
+            checked_out: &placed,
+            skip: &HashSet::new(),
+            reparent: Some(Reparent {
+                branch: from,
+                parent,
+                own,
+            }),
+        };
+        plan(from, &inputs, &mut |onto, commit| {
+            Ok(Replayed {
+                subject: format!("subject of {commit}"),
+                kind: ReplayKind::Clean {
+                    new: format!("{commit}@{onto}"),
+                },
+            })
+        })
+    }
+
+    /// `main`, `a` under it with the commits `a1` and `a2`, `b` under `a`, and a second root `x`.
+    fn moved_chain(a_state: StackState) -> Vec<StackBranch> {
+        vec![
+            branch("main", None, StackState::Root, &[]),
+            branch("a", Some("main"), a_state, &[]),
+            branch("b", Some("a"), StackState::Current, &["b1"]),
+            branch("x", None, StackState::Root, &[]),
+        ]
+    }
+
+    fn own(commits: &[&str]) -> Vec<String> {
+        commits.iter().map(|c| (*c).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_reparented_branch_and_its_subtree_are_replayed_onto_the_new_parent() {
+        let plan = run_moved(
+            moved_chain(StackState::Current),
+            "a",
+            "x",
+            &own(&["a2", "a1"]),
+        )
+        .unwrap();
+        let names: Vec<_> = plan.branches.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        let a = &plan.branches[0];
+        assert_eq!(a.parent, "x", "the plan records the new parent");
+        assert_eq!(a.onto, "x-tip");
+        let oids: Vec<_> = a.commits.iter().map(|c| c.oid.as_str()).collect();
+        assert_eq!(oids, ["a1", "a2"], "own commits replay oldest first");
+        assert_eq!(a.new_tip.as_deref(), Some("a2@a1@x-tip"));
+        assert_eq!(plan.branches[1].onto, "a2@a1@x-tip");
+        assert!(plan.can_apply());
+    }
+
+    #[test]
+    fn a_branch_whose_old_parent_is_gone_is_moved_with_the_commits_it_was_given() {
+        let mut branches = moved_chain(StackState::ParentGone);
+        branches[1].parent = Some("gone".into());
+        let plan = run_moved(branches, "a", "x", &own(&["a1"])).unwrap();
+        assert_eq!(plan.branches[0].new_tip.as_deref(), Some("a1@x-tip"));
+        assert!(plan.can_apply());
+    }
+
+    #[test]
+    fn a_reparent_to_the_parent_it_has_is_a_plain_restack_of_it() {
+        let plan = run_moved(moved_chain(StackState::Current), "a", "main", &own(&["a1"])).unwrap();
+        assert!(
+            plan.branches.is_empty(),
+            "nothing is stale, so nothing moves"
+        );
+        assert!(!plan.can_apply());
+    }
+
+    #[test]
+    fn a_reparent_refuses_the_branch_itself_and_any_branch_under_it() {
+        let under = run_moved(moved_chain(StackState::Current), "a", "b", &own(&["a1"]));
+        assert!(under.unwrap_err().contains("b is under a"));
+        let itself = run_moved(moved_chain(StackState::Current), "a", "a", &own(&["a1"]));
+        assert!(itself.unwrap_err().contains("cannot be its own parent"));
+    }
+
+    #[test]
+    fn a_reparent_names_the_branch_the_plan_starts_from() {
+        let names: Vec<String> = Vec::new();
+        let branches = moved_chain(StackState::Current);
+        let tips = tips(&["main", "a", "b", "x"]);
+        let snapshot = StackSnapshot {
+            stacks: vec![Stack { branches }],
+            looped: vec![],
+        };
+        let placed = HashMap::new();
+        let inputs = Inputs {
+            snapshot: &snapshot,
+            links: &[],
+            tips: &tips,
+            checked_out: &placed,
+            skip: &HashSet::new(),
+            reparent: Some(Reparent {
+                branch: "b",
+                parent: "x",
+                own: &names,
+            }),
+        };
+        let error = plan("a", &inputs, &mut |_, _| unreachable!()).unwrap_err();
+        assert!(error.contains("starts from a, not b"), "{error}");
+    }
+
+    #[test]
+    fn a_reparent_with_a_diverged_base_is_still_refused() {
+        let plan = run_moved(
+            moved_chain(StackState::DivergedBase),
+            "a",
+            "x",
+            &own(&["a1"]),
+        )
+        .unwrap();
+        assert!(matches!(
+            plan.branches[0].block,
+            Some(RestackBlock::Refused { .. })
+        ));
+        assert!(!plan.can_apply());
+    }
+
+    #[test]
+    fn a_reparent_counts_its_own_commits_against_the_limit_it_was_given() {
+        let many: Vec<String> = (0..OWN_COMMITS_LIMIT).map(|i| format!("c{i}")).collect();
+        let plan = run_moved(moved_chain(StackState::Current), "a", "x", &many).unwrap();
+        assert!(matches!(
+            plan.branches[0].block,
+            Some(RestackBlock::Refused { .. })
+        ));
     }
 }

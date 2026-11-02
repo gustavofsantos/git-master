@@ -223,7 +223,7 @@ fn simulated_result(func: &str, args: &Value) -> (&'static str, Value) {
             "nothing is applied",
             json!({"plan_id": "dry-run", "branch_count": 1}),
         ),
-        "stack.tree" | "stack.stale" => ("not available yet", json!({"branches": []})),
+        "stack.tree" | "stack.stale" => ("nothing is read", json!({"branches": []})),
         _ => ("nothing is applied", Value::Null),
     }
 }
@@ -309,7 +309,7 @@ mod tests {
             lines(&host.calls)
                 .last()
                 .unwrap()
-                .contains("simulated: not available yet")
+                .contains("simulated: nothing is read")
         );
     }
 

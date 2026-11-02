@@ -21,6 +21,20 @@ pub(crate) fn plan(
     skip: &[String],
     same_folder: &dyn Fn(&str) -> bool,
 ) -> Result<RestackPlan, String> {
+    plan_with(git, root, branch, skip, None, same_folder)
+}
+
+/// Plans a restack of `from` and the branches under it, or, with `reparent` = `(branch, parent)`,
+/// a move of `branch` onto `parent` with the branches under it (`reparent.plan`, `WF4a`). A read: no
+/// ref moves and no config is written.
+pub(crate) fn plan_with(
+    git: &dyn GitPort,
+    root: &Path,
+    from: &str,
+    skip: &[String],
+    reparent: Option<(&str, &str)>,
+    same_folder: &dyn Fn(&str) -> bool,
+) -> Result<RestackPlan, String> {
     let snapshot = stack_session::snapshot(git, root)?;
     let links = git.stack_links(root).map_err(|e| e.0)?;
     let mut tips = HashMap::new();
@@ -29,6 +43,31 @@ pub(crate) fn plan(
             tips.insert(entry.name.clone(), tip);
         }
     }
+    // The own commits of a reparented branch come from its recorded base, whatever its old
+    // parent was (a gone parent leaves none in the snapshot), and its new parent's tip is needed
+    // even when that parent is in no stack.
+    let moved_own = match reparent {
+        None => None,
+        Some((branch, parent)) => {
+            if !tips.contains_key(branch) {
+                return Err(format!("{branch} is not a local branch."));
+            }
+            let parent_tip = git
+                .branch_tip(root, parent)
+                .map_err(|e| e.0)?
+                .ok_or_else(|| format!("{parent} is not a local branch."))?;
+            tips.insert(parent.to_owned(), parent_tip);
+            let base = link_base(&links, branch).ok_or_else(|| {
+                format!(
+                    "{branch} has no recorded base, so its own commits are not known; set its parent again."
+                )
+            })?;
+            let edge = git
+                .stack_edge(root, branch, parent, Some(&base))
+                .map_err(|e| e.0)?;
+            Some((branch, parent, edge.own))
+        }
+    };
     let status = git.status(root).map_err(|e| e.0)?;
     let mut checked_out = HashMap::new();
     for entry in git.worktrees(root).map_err(|e| e.0)? {
@@ -48,11 +87,18 @@ pub(crate) fn plan(
         tips: &tips,
         checked_out: &checked_out,
         skip: &skip.iter().cloned().collect::<HashSet<_>>(),
+        reparent: moved_own
+            .as_ref()
+            .map(|(branch, parent, own)| restack::Reparent {
+                branch,
+                parent,
+                own,
+            }),
     };
     // A commit replayed onto exactly the base its resolution was made on is the resolved
     // commit (D154); any other base replays again.
     let resolutions = restack_resolutions::load(git, root)?;
-    restack::plan(branch, &inputs, &mut |onto, commit| {
+    restack::plan(from, &inputs, &mut |onto, commit| {
         let replayed = git.restack_replay(root, onto, commit).map_err(|e| e.0)?;
         match restack_resolutions::lookup(&resolutions, onto, commit) {
             Some(new) => Ok(Replayed {
@@ -92,6 +138,14 @@ fn used_resolutions(plan: &RestackPlan) -> Vec<Resolution> {
         }
     }
     used
+}
+
+/// The recorded base of `branch`, if it has a link with one.
+fn link_base(links: &[crate::stack::StackLink], branch: &str) -> Option<String> {
+    links
+        .iter()
+        .find(|link| link.branch == branch)
+        .and_then(|link| link.base.clone())
 }
 
 fn local(name: &str) -> String {
@@ -142,9 +196,22 @@ pub(crate) fn apply(
     if plan.plan_id != plan_id {
         return Err("The stacks changed since the plan was made. Plan again.".to_owned());
     }
+    apply_plan(git, root, &plan)
+}
+
+/// Applies a plan that was made and checked against its id: moves its unblocked branches in one
+/// transaction and records them (D142). Returns the record and the replays of the moved commits
+/// (D145). Fails when the plan is stopped or moves nothing.
+pub(crate) fn apply_plan(
+    git: &dyn GitPort,
+    root: &Path,
+    plan: &RestackPlan,
+) -> Result<(RestackRecord, Vec<(String, String)>), String> {
     if let Some(reason) = plan.stopped.first() {
         return Err(reason.clone());
     }
+    // The parent each branch has now, which undo puts back (`reparent.apply`, WF4a).
+    let links = git.stack_links(root).map_err(|e| e.0)?;
     let moves: Vec<RestackMove> = plan
         .branches
         .iter()
@@ -158,6 +225,10 @@ pub(crate) fn apply(
                 new_tip,
                 old_base: entry.old_base.clone(),
                 new_base: entry.onto.clone(),
+                old_parent: links
+                    .iter()
+                    .find(|link| link.branch == entry.name)
+                    .map(|link| link.parent.clone()),
             })
         })
         .collect();
@@ -179,10 +250,10 @@ pub(crate) fn apply(
         })
         .collect();
     // The resolutions this apply uses are spent once the refs have moved (D154).
-    let used = used_resolutions(&plan);
+    let used = used_resolutions(plan);
     let record = RestackRecord {
-        plan_id: plan.plan_id,
-        from: branch.to_owned(),
+        plan_id: plan.plan_id.clone(),
+        from: plan.from.clone(),
         moves,
         phase: RestackPhase::Applying,
     };
@@ -282,7 +353,8 @@ pub(crate) fn undo(git: &dyn GitPort, root: &Path) -> Result<(), String> {
     transact(git, root, &record, true)?;
     for item in &record.moves {
         if let Some(base) = &item.old_base {
-            git.write_stack_link(root, &item.name, Some((&item.parent, base)))
+            let parent = item.old_parent.as_deref().unwrap_or(&item.parent);
+            git.write_stack_link(root, &item.name, Some((parent, base)))
                 .map_err(|e| e.0)?;
         }
     }

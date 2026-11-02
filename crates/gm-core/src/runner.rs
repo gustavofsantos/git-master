@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use async_channel::{Receiver, Sender};
+use async_channel::{Receiver, Sender, WeakSender};
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId};
 
 use crate::commit_detail::DetailReport;
@@ -18,7 +18,7 @@ use crate::files::{
 use crate::history::HistoryReport;
 use crate::remote::RemoteReport;
 use crate::script::run::ScriptEvent;
-use crate::script_session::{EffectRequest, ScriptLink};
+use crate::script_session::{EffectRequest, ScriptLink, ScriptReport};
 use crate::threads_session::{ProvenanceJob, ProvenanceReport};
 use crate::{Engine, GitPort};
 
@@ -43,6 +43,8 @@ enum Message {
     Provenance(ProvenanceReport),
     /// A script run asks the engine to carry out an effect. The run waits for the answer.
     ScriptEffect(EffectRequest),
+    /// A Git command a script run waits for has ended (`WF4a`).
+    ScriptRemote(ScriptReport),
     /// A script run reports; the front ends hear it as events.
     ScriptEvent(ScriptEvent),
     /// The thread database changed on disk; the subscribers hear `ThreadsChanged`.
@@ -138,6 +140,7 @@ fn spawn_engine(git: Box<dyn GitPort>, triggers: bool) -> EngineHandle {
     // Script runs reach the engine thread through weak handles, so they do not keep it alive.
     let effects_to = tx.downgrade();
     let events_to = tx.downgrade();
+    let reports_to = tx.downgrade();
     let link = ScriptLink {
         effects: Arc::new(move |request| {
             if let Some(tx) = effects_to.upgrade() {
@@ -156,7 +159,7 @@ fn spawn_engine(git: Box<dyn GitPort>, triggers: bool) -> EngineHandle {
             let mut engine = Engine::new(git);
             engine.set_script_link(link);
             engine.set_triggers(triggers);
-            run(engine, &rx, &thread_busy);
+            run(engine, &rx, &thread_busy, &reports_to);
         })
         .expect("spawn the engine thread");
     EngineHandle {
@@ -166,7 +169,12 @@ fn spawn_engine(git: Box<dyn GitPort>, triggers: bool) -> EngineHandle {
     }
 }
 
-fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
+fn run(
+    mut engine: Engine,
+    rx: &Receiver<Message>,
+    busy: &AtomicBool,
+    reports_to: &WeakSender<Message>,
+) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     let broadcast = |events: Vec<Event>, subscribers: &mut Vec<Sender<Event>>| {
         for event in events {
@@ -178,6 +186,11 @@ fn run(mut engine: Engine, rx: &Receiver<Message>, busy: &AtomicBool) {
             Message::Subscribe(tx) => subscribers.push(tx),
             Message::ScriptEffect(request) => {
                 let events = engine.script_effect(request);
+                broadcast(events, &mut subscribers);
+                spawn_script_jobs(&mut engine, reports_to);
+            }
+            Message::ScriptRemote(report) => {
+                let events = engine.script_remote_report(report);
                 broadcast(events, &mut subscribers);
             }
             Message::ScriptEvent(event) => {
@@ -285,6 +298,23 @@ fn spawn_read_jobs(engine: &mut Engine, reports: &Sender<Message>) {
                 let _ = reports.send_blocking(Message::Remote(report));
             })
             .expect("spawn a remote thread");
+    }
+}
+
+/// Runs the Git commands script runs wait for, each on a thread of its own (`WF4a`). The report
+/// goes back to the engine through `reports_to`, which does not keep the engine thread alive.
+fn spawn_script_jobs(engine: &mut Engine, reports_to: &WeakSender<Message>) {
+    for job in engine.take_script_jobs() {
+        let reports_to = reports_to.clone();
+        std::thread::Builder::new()
+            .name("gm-script".into())
+            .spawn(move || {
+                let report = job.run();
+                if let Some(tx) = reports_to.upgrade() {
+                    let _ = tx.send_blocking(Message::ScriptRemote(report));
+                }
+            })
+            .expect("spawn a script thread");
     }
 }
 

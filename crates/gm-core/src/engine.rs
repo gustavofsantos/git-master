@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
@@ -44,19 +44,21 @@ use crate::script::luau::LuauEngine;
 use crate::script::meta::Concurrency;
 use crate::script::phases::{self, Facts, Gate, Timing};
 use crate::script::policy::StartedBy;
-use crate::script::run::ScriptEvent;
+use crate::script::run::{EffectResult, ScriptEvent};
 use crate::script::run::{RunSpec, Runtime};
 use crate::script::transforms;
 use crate::script::transforms::Fingerprint;
 use crate::script::triggers::{self, Decision, Lanes, TriggerEvent};
 use crate::script::trust::{self, TrustStore};
 use crate::script::{api_docs, input as script_input, templates as script_templates};
-use crate::script_session::{self, EffectRequest, ScriptLink, ScriptSession};
+use crate::script_session::{
+    self, Carried, EffectRequest, ScriptJob, ScriptLink, ScriptReport, ScriptSession, Waiting,
+};
 use crate::stack_session;
 use crate::syntax;
 use crate::threads::config;
 use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSession};
-use crate::workflow_session;
+use crate::workflow_session::{self, Effected};
 use crate::worktree;
 
 /// One state change of one operation. The log is audit, and the base for undo
@@ -71,6 +73,16 @@ pub struct LogEntry {
 
 /// Synchronous and deterministic: the same commands over the same repository
 /// give the same events and the same log. Threads live in `runner`.
+/// A Git command a script run waits for, while it runs (`WF4a`): the call to answer, and how to
+/// stop the command.
+struct ScriptWaiting {
+    origin: OperationId,
+    root: PathBuf,
+    kind: CommandKind,
+    reply: std::sync::mpsc::Sender<EffectResult>,
+    stop: Box<dyn Fn() + Send + Sync>,
+}
+
 pub struct Engine {
     git: Box<dyn GitPort>,
     root: Option<PathBuf>,
@@ -117,6 +129,11 @@ pub struct Engine {
     remote: Option<ActiveRemote>,
     /// Remote operations accepted since the last call; see `take_remote_jobs`.
     remote_jobs: Vec<RemoteJob>,
+    /// Git commands that script runs wait for, by run (`WF4a`): the call to answer, and the way to
+    /// stop its command.
+    script_waiting: BTreeMap<ScriptRunId, ScriptWaiting>,
+    /// The Git commands script runs started, for the runner to run (`WF4a`).
+    script_jobs: Vec<ScriptJob>,
     /// The user's workflow directory, read before `gitmaster.workflowPath`.
     workflow_user_dir: Option<PathBuf>,
     /// The folder a deleted workflow file is moved to; see `delete_workflow_file`.
@@ -288,6 +305,8 @@ impl Engine {
             provenance_jobs: Vec::new(),
             remote: None,
             remote_jobs: Vec::new(),
+            script_waiting: BTreeMap::new(),
+            script_jobs: Vec::new(),
             workflow_user_dir: loader::default_user_dir(),
             workflow_trash_dir: crate::paths::data_dir().map(|data| data.join("workflow-trash")),
             script_link: None,
@@ -431,23 +450,117 @@ impl Engine {
         self.script.as_ref().map(|session| session.runtime.clone())
     }
 
-    /// Carries out an effect a script run posted, and answers the run. Returns the events the
+    /// Carries out an effect a script run posted, and answers the run. An effect that waits for Git
+    /// (`ctx.fetch`, `ctx.push.lease`) is answered when its command ends, or when the run is
+    /// cancelled, and meanwhile the engine serves other commands (`WF4a`). Returns the events the
     /// Git write caused (the new status).
     pub fn script_effect(&mut self, request: EffectRequest) -> Vec<Event> {
-        let Some(session) = self.script.as_ref() else {
+        let Some(session) = self.script.as_mut() else {
             return Vec::new();
         };
         let root = session.root.clone();
         let origin = session.origin(request.call.run);
-        let wrote = session.execute(self.git.as_ref(), &mut self.log, request);
+        match session.execute(self.git.as_ref(), &mut self.log, request) {
+            Carried::Answered(effected) => self.script_answered(origin, &root, &effected),
+            Carried::Waiting(waiting) => {
+                let Waiting {
+                    run,
+                    kind,
+                    remote,
+                    reply,
+                } = *waiting;
+                self.script_waiting.insert(
+                    run,
+                    ScriptWaiting {
+                        origin,
+                        root,
+                        kind,
+                        reply,
+                        stop: remote.stop,
+                    },
+                );
+                self.script_jobs.push(ScriptJob {
+                    run,
+                    command: remote.run,
+                });
+                Vec::new()
+            }
+        }
+    }
+
+    /// Takes the Git commands script runs wait for, to start them on threads of their own.
+    pub fn take_script_jobs(&mut self) -> Vec<ScriptJob> {
+        std::mem::take(&mut self.script_jobs)
+    }
+
+    /// The end of a Git command a script run waits for: the run gets its answer, and the command is
+    /// logged under the run's operation (D81). A report for a run that was cancelled meanwhile is
+    /// dropped.
+    pub fn script_remote_report(&mut self, report: ScriptReport) -> Vec<Event> {
+        let Some(waiting) = self.script_waiting.remove(&report.run) else {
+            return Vec::new();
+        };
+        let (state, result, refs) = match report.outcome {
+            Ok(()) => (OperationState::Done, EffectResult::done(Value::Null), true),
+            Err(message) => (OperationState::Failed, EffectResult::failed(message), false),
+        };
+        self.log.push(LogEntry {
+            id: waiting.origin,
+            actor: Actor::Human,
+            kind: waiting.kind,
+            state,
+        });
+        let _ = waiting.reply.send(result);
+        let effected = Effected {
+            wrote: true,
+            refs,
+            remaps: Vec::new(),
+        };
+        self.script_answered(waiting.origin, &waiting.root, &effected)
+    }
+
+    /// Ends the wait of a script run whose command is still running: the command is stopped, and
+    /// the run gets `cancelled` (`WF4a`). The command is logged as failed.
+    fn stop_script_wait(&mut self, run: ScriptRunId) {
+        let Some(waiting) = self.script_waiting.remove(&run) else {
+            return;
+        };
+        (waiting.stop)();
+        self.log.push(LogEntry {
+            id: waiting.origin,
+            actor: Actor::Human,
+            kind: waiting.kind,
+            state: OperationState::Failed,
+        });
+        let _ = waiting.reply.send(EffectResult::cancelled());
+    }
+
+    /// What an answered script call changed, as events: the replays of moved commits resolve the
+    /// thread links (D145), the triggers see the baseline of this write (`WF3a`), and the window reads
+    /// the status again, and the branches and the stacks if refs moved (`WF4a`).
+    fn script_answered(
+        &mut self,
+        origin: OperationId,
+        root: &Path,
+        effected: &Effected,
+    ) -> Vec<Event> {
+        threads_session::remap(&mut self.threads, self.git.as_ref(), root, &effected.remaps);
         // A run's own writes become the baseline of `refs.changed`, so they fire nothing (no
         // cascades, WF3a).
-        if wrote && self.triggers {
-            self.snapshot_tips(&root);
+        if effected.wrote && self.triggers {
+            self.snapshot_tips(root);
             // The same for the stacks: a run's commit on a parent fires no `stack.*` (D162(2)).
-            self.refresh_stacks(origin, &root, false);
+            self.refresh_stacks(origin, root, false);
         }
-        self.workflow_events(origin, &root, Vec::new(), wrote)
+        let mut events = self.workflow_events(origin, root, Vec::new(), effected.wrote);
+        // Moved refs change the branch list and the stacks the window shows (WF4a).
+        if effected.refs {
+            events.extend(self.branches_changed(origin, root).unwrap_or_default());
+            if let Ok(stacks) = stack_session::snapshot(self.git.as_ref(), root) {
+                events.push(Event::StacksLoaded { id: origin, stacks });
+            }
+        }
+        events
     }
 
     /// Turns what a script run reported into the events the front ends get.
@@ -1966,6 +2079,9 @@ impl Engine {
                 Ok(vec![Event::HookSectionsListed { id, sections }])
             }
             CommandKind::ConvertHooksToWorkflows => self.convert_hooks(id, actor),
+            CommandKind::ApplyReparent { .. } => {
+                Err("a reparent is applied by a workflow run".to_owned())
+            }
             _ if is_handled_run(kind) => Err("a run is started by handle, not execute".to_owned()),
             CommandKind::StageAll => self.stage_all(id),
             CommandKind::CancelOperation { op } => self.cancel_operation(actor, *op),
@@ -4286,10 +4402,13 @@ impl Engine {
     }
 
     /// Stops a script run: a blocked call wakes and its program is killed.
-    fn cancel_script_run(&self, actor: &Actor, run: i64) -> Result<Vec<Event>, String> {
+    fn cancel_script_run(&mut self, actor: &Actor, run: i64) -> Result<Vec<Event>, String> {
         only_a_human(actor, "cancel a workflow run")?;
         match self.script_runtime() {
-            Some(runtime) if runtime.cancel(run) => Ok(Vec::new()),
+            Some(runtime) if runtime.cancel(run) => {
+                self.stop_script_wait(run);
+                Ok(Vec::new())
+            }
             _ => Err(format!("run {run} is not active")),
         }
     }

@@ -604,6 +604,7 @@ mod tests {
                 new_tip: "new".into(),
                 old_base: None,
                 new_base: "main".into(),
+                old_parent: None,
             }],
             phase: RestackPhase::Applied,
         };

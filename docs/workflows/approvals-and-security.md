@@ -23,8 +23,6 @@ Each run records who started it. The Runs tab shows the starter for every run.
 
 Every action has one effect level. The level tells you whether the action can change anything.
 
-> **Planned.** The `fetch`, `push.lease` and stack calls are listed by their level here. They are not available yet.
-
 | Level | Meaning | Examples |
 |---|---|---|
 | `read` | Only reads state. Runs without asking. | `ctx.notify`, `ctx.stack.tree`, `ctx.exec` (its output is untrusted) |
@@ -35,7 +33,7 @@ Every action has one effect level. The level tells you whether the action can ch
 
 ## Rules for applying actions
 
-> **Planned.** The agent column and the `ctx.push.lease` row are not available yet.
+> **Planned.** The agent column is not available yet.
 
 The table shows what happens to an `apply` action, depending on who started the run.
 
