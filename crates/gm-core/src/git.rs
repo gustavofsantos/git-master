@@ -515,6 +515,18 @@ impl SubprocessGit {
         if real.is_file() {
             std::fs::copy(&real, index)
                 .map_err(|e| GitError(format!("cannot copy the index: {e}")))?;
+            // Git trusts an entry's stat data only when the entry is older than the index file
+            // (the racy-git rule). A copy stamped with the time of the copy would make a file
+            // rewritten in the same timestamp tick look unchanged, so the copy keeps the real
+            // index's modification time and takes the same decisions the real index would.
+            let modified = std::fs::metadata(&real)
+                .and_then(|meta| meta.modified())
+                .map_err(|e| GitError(format!("cannot read the index time: {e}")))?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(index)
+                .and_then(|file| file.set_modified(modified))
+                .map_err(|e| GitError(format!("cannot stamp the index copy: {e}")))?;
         } else if let Some(head) = head {
             self.read_tree(root, index, head, true)?;
         }
@@ -3852,5 +3864,44 @@ u UU N... 100644 100644 100644 100644 a b c both.rs\0\
         assert_eq!(clean_email(" \n"), None);
         assert_eq!(clean_email("<>"), None);
         assert_eq!(clean_email("< >"), None);
+    }
+    /// The snapshot's copy of the index keeps the real index's time. Git decides from the index
+    /// file's own time whether an entry's stat data can be trusted (the racy rule), so a copy
+    /// stamped with the time of the copy would trust entries that it must check by content.
+    #[test]
+    fn the_snapshot_copy_of_the_index_keeps_the_time_of_the_real_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .current_dir(root)
+                    .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                    .args(args)
+                    .status()
+                    .expect("git")
+                    .success(),
+                "git {args:?}"
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("f.txt"), "a\n").expect("write");
+        git(&["add", "f.txt"]);
+        let real = root.join(".git").join("index");
+        let past = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&real)
+            .and_then(|file| file.set_modified(past))
+            .expect("stamp the real index");
+
+        let copy = root.join("snapshot-index");
+        SubprocessGit::default()
+            .seed_index(root, &copy, None)
+            .expect("seed");
+        let copied = std::fs::metadata(&copy)
+            .and_then(|meta| meta.modified())
+            .expect("copy time");
+        assert_eq!(copied, past);
     }
 }
