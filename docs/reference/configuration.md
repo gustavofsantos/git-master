@@ -129,7 +129,8 @@ The `branch.<name>.` keys belong to stacks, which is a preview feature. See [Pre
 | `XDG_CONFIG_HOME` | Absolute path | The base of the user config directory on Linux. Defaults to `~/.config`. A relative or empty value is ignored. |
 | `XDG_DATA_HOME` | Absolute path | The base of the user data directory on Linux. Defaults to `~/.local/share`. A relative or empty value is ignored. |
 | `HOME` | Absolute path | The base of the default folders when the XDG variables are not set. On macOS, the folders are always under `Library/Application Support` in your home directory. |
-| `GITMASTER_PREVIEW` | `all`, `none` or a list of feature ids | Turns preview features on or off. See [Preview features](#preview-features). |
+| `GITMASTER_ENABLE_STACKS` | `1`, `0`, or unset | Turns the stacks preview feature on or off. See [Preview features](#preview-features). |
+| `GITMASTER_ENABLE_CONFLICT_RESOLVER` | `1`, `0`, or unset | Turns the conflict resolver preview feature on or off. See [Preview features](#preview-features). |
 
 ### Login-shell PATH
 
@@ -143,30 +144,44 @@ Programs started before the PATH is read use the PATH the app started with. If `
 
 ## Preview features
 
-Some areas are finished in the code but not yet part of the release. A preview feature is hidden in the release build and shown in a build made from source. Each one has an id:
+Some areas are finished in the code but not yet part of the release. A preview feature is hidden in the release build. Each one has its own environment variable, which turns it on or off when GitMaster starts:
 
-| Id | Feature |
-|---|---|
-| `stacks` | Stacks and restack. See [Stacks](../guide/stacks.md). |
-| `conflict-resolver` | The conflict resolver. See [Conflicts](../guide/conflicts.md). |
+| Variable | Feature | What it shows |
+|---|---|---|
+| `GITMASTER_ENABLE_STACKS` | Stacks and restack | The by-stack view, the stack actions, restack and the stack marks in the graph. See [Stacks](../guide/stacks.md). |
+| `GITMASTER_ENABLE_CONFLICT_RESOLVER` | Conflict resolver | The conflict resolver, which resolves a file's conflicts by hand. See [Conflicts](../guide/conflicts.md). |
 
-Set the `GITMASTER_PREVIEW` variable to choose which features are on:
+The name of the variable is the id of the feature in capitals, with `-` replaced by `_`.
+
+### Values
 
 | Value | Effect |
 |---|---|
-| Unset, or empty | The default of the build. A release build has no preview feature on. A build made with `make` has all of them on. |
-| `all`, `1`, `on` | Every preview feature is on. |
-| `none`, `0`, `off` | No preview feature is on. |
-| A comma-separated list of ids | Only the listed features are on. |
+| `1`, `true`, `on` or `yes` | The feature is on. |
+| `0`, `false`, `off` or `no` | The feature is off. |
+| Unset, or empty | The default of the build applies. |
 
-The value is not case sensitive, and spaces around an id are ignored. An id that GitMaster does not know prints a warning that lists the known ids. The other ids in the list still apply.
+The value is not case sensitive, and spaces around it are ignored. A value that is not in this table prints a warning on stderr, and the default of the build applies. A variable that starts with `GITMASTER_ENABLE_` and names no feature prints a warning and has no effect. Each variable changes only its own feature.
+
+### Build defaults
+
+A release build has every preview feature off. A build made with `make build`, `make run` or `make install` has every preview feature on. The variables override these defaults.
+
+### Examples
+
+Turn stacks on in the release build:
 
 ```sh
-GITMASTER_PREVIEW=stacks gitmaster ~/src/project
-GITMASTER_PREVIEW=stacks,conflict-resolver gitmaster ~/src/project
+GITMASTER_ENABLE_STACKS=1 gitmaster
 ```
 
-When one or more preview features are on, `gitmaster --version` also prints a `preview features:` line. See [Command line](cli.md#open-a-repository).
+Turn the conflict resolver off in your own build, to see what users get:
+
+```sh
+GITMASTER_ENABLE_CONFLICT_RESOLVER=0 gitmaster
+```
+
+Check which preview features are on with `gitmaster --version`. When one or more are on, it prints a second line, `preview features:`, followed by their ids, such as `preview features: stacks`. See [Command line](cli.md#open-a-repository).
 
 ## Settings dialog
 

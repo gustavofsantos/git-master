@@ -129,7 +129,7 @@ fn a_preview_page_shows_the_badge_and_how_to_turn_it_on() {
     let page = std::fs::read_to_string(site.join("guide/stacks.html")).unwrap();
     assert!(page.contains("badge preview"), "Preview badge missing");
     assert!(
-        page.contains("GITMASTER_PREVIEW=stacks"),
+        page.contains("GITMASTER_ENABLE_STACKS=1"),
         "turn-on note missing"
     );
     let plain = std::fs::read_to_string(site.join("guide/history.html")).unwrap();
@@ -140,7 +140,7 @@ fn a_preview_page_shows_the_badge_and_how_to_turn_it_on() {
 
     let availability = std::fs::read_to_string(site.join("availability.html")).unwrap();
     assert!(availability.contains("Preview features"));
-    assert!(availability.contains("GITMASTER_PREVIEW=conflict-resolver"));
+    assert!(availability.contains("GITMASTER_ENABLE_CONFLICT_RESOLVER=1"));
 
     let status = docsite(&["status", "--docs", docs.to_str().unwrap()]);
     assert!(text(&status.stdout).contains("preview: stacks"));

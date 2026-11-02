@@ -154,7 +154,7 @@ The global environment is read-only, and each run starts with a fresh one, so no
 
 ## Worked examples
 
-> **Note.** The restack examples use stacks, a preview feature. Turn it on with `GITMASTER_PREVIEW=stacks`. The other examples work without it.
+> **Note.** The restack examples use stacks, a preview feature. Turn it on with `GITMASTER_ENABLE_STACKS=1`. The other examples work without it.
 
 ### Branch from a ticket
 

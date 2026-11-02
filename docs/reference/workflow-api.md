@@ -129,7 +129,7 @@ local r = ctx.exec({ "llm-cli", "-p", "Write a conventional commit message for t
 
 ### Stacks
 
-> **Note.** The stack and restack calls belong to stacks, a preview feature. Turn them on with `GITMASTER_PREVIEW=stacks`. See [Preview features](configuration.md#preview-features).
+> **Note.** The stack and restack calls belong to stacks, a preview feature. Turn them on with `GITMASTER_ENABLE_STACKS=1`. See [Preview features](configuration.md#preview-features).
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|

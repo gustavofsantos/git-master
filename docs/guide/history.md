@@ -138,7 +138,7 @@ The scope pill in the history header chooses which commits the list shows. Click
 | **All refs** | The commits of every local branch, remote branch and tag, plus HEAD. |
 | **One ref** | The commits of one branch. On the History page, click a branch in the sidebar to show only that branch. |
 
-> **Note.** **Current stack**, its chip and the stack marks in the graph are part of the Stacks preview feature. They are hidden in the release build. Start GitMaster with `GITMASTER_PREVIEW=stacks` to turn them on. See [Stacks and restack](stacks.md).
+> **Note.** **Current stack**, its chip and the stack marks in the graph are part of the Stacks preview feature. They are hidden in the release build. Start GitMaster with `GITMASTER_ENABLE_STACKS=1` to turn them on. See [Stacks and restack](stacks.md).
 
 When the checked-out branch is in a stack, the list opens on **Current stack**, shown by the chip **Scope: current stack**. Otherwise it opens on **Current branch**, and **Current stack** is disabled with the reason. The choice lasts while the window is open. A left click on a branch in the sidebar shows that branch's commits, and does not check it out. To check the branch out, use its menu and choose **Checkout Branch**. See [Branches](branches.md#switch-to-another-branch).
 
@@ -146,7 +146,7 @@ The default branch is the branch of `origin/HEAD`, else the first of `main`, `ma
 
 ## Stacks in the graph
 
-> **Note.** Stacks in the graph are part of the Stacks preview feature. Start GitMaster with `GITMASTER_PREVIEW=stacks` to see them. See [Stacks and restack](stacks.md).
+> **Note.** Stacks in the graph are part of the Stacks preview feature. Start GitMaster with `GITMASTER_ENABLE_STACKS=1` to see them. See [Stacks and restack](stacks.md).
 
 The graph reads the stack metadata, never the branch names, to draw stacks:
 

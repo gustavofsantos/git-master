@@ -30,7 +30,7 @@ Workflows replace GitMaster's own hooks: the points where a script runs inside a
 - **Gates before an operation.** A workflow runs before an operation, such as a restack, and can block it with a reason. For example, a restack on `main` can be forbidden.
 - **Automatic stack policies.** A workflow reacts to a stack event, such as a parent branch receiving new commits, and restacks the branches above it.
 
-> **Note.** Stacks, restack and their workflow phases are a preview feature. Turn them on with `GITMASTER_PREVIEW=stacks`. See [Stacks](../guide/stacks.md) and [Preview features](../reference/configuration.md#preview-features).
+> **Note.** Stacks, restack and their workflow phases are a preview feature. Turn them on with `GITMASTER_ENABLE_STACKS=1`. See [Stacks](../guide/stacks.md) and [Preview features](../reference/configuration.md#preview-features).
 
 ## Where workflow files live
 

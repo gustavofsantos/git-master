@@ -147,7 +147,7 @@ A branch that is checked out in a linked worktree has a different menu, for work
 
 ## Stack actions
 
-Stacks are a preview feature. They are hidden in the release build. Start GitMaster with `GITMASTER_PREVIEW=stacks` to turn them on. See [Stacks and restack](stacks.md).
+Stacks are a preview feature. They are hidden in the release build. Start GitMaster with `GITMASTER_ENABLE_STACKS=1` to turn them on. See [Stacks and restack](stacks.md).
 
 The branch menu has these stack actions:
 

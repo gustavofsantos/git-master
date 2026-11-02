@@ -260,11 +260,20 @@ fn badge_html(status: Status, title: &str) -> String {
     )
 }
 
+/// The environment variable that turns a preview feature on, as `gm_schema` names it: the id in
+/// capitals with `-` as `_`, such as `GITMASTER_ENABLE_CONFLICT_RESOLVER`.
+fn preview_variable(feature: &str) -> String {
+    format!(
+        "GITMASTER_ENABLE_{}",
+        feature.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
 /// The note under the title of a preview page: how to turn the feature on.
 fn preview_note(feature: &str) -> String {
     format!(
-        "<p class=\"preview-note\">This is a preview feature. It is hidden in the release build; start GitMaster with <code>GITMASTER_PREVIEW={}</code> to turn it on.</p>\n",
-        escape(feature)
+        "<p class=\"preview-note\">This is a preview feature. It is hidden in the release build; start GitMaster with <code>{}=1</code> to turn it on.</p>\n",
+        escape(&preview_variable(feature))
     )
 }
 
@@ -473,10 +482,10 @@ fn availability_page(docs: &Docs, analyses: &[Analysis]) -> SitePage {
             let feature = page.preview.as_deref().unwrap_or_default();
             let _ = writeln!(
                 html,
-                "  <li><a href=\"{}\">{}</a>: <code>GITMASTER_PREVIEW={}</code></li>",
+                "  <li><a href=\"{}\">{}</a>: <code>{}=1</code></li>",
                 page.html_path(),
                 escape(&page.title),
-                escape(feature)
+                escape(&preview_variable(feature))
             );
             text.push_str(&page.title);
             text.push(' ');
@@ -601,6 +610,15 @@ mod tests {
         assert_eq!(root_of("index.html"), "");
         assert_eq!(root_of("guide/a.html"), "../");
         assert_eq!(root_of("a/b/c.html"), "../../");
+    }
+
+    #[test]
+    fn preview_variable_is_the_feature_id_in_capitals() {
+        assert_eq!(preview_variable("stacks"), "GITMASTER_ENABLE_STACKS");
+        assert_eq!(
+            preview_variable("conflict-resolver"),
+            "GITMASTER_ENABLE_CONFLICT_RESOLVER"
+        );
     }
 
     #[test]

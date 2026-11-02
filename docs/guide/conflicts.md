@@ -8,7 +8,7 @@ preview: conflict-resolver
 
 When Git stops on a conflict, the resolver shows both sides next to the result. You choose what goes into each part of the file, and GitMaster records how each part was resolved.
 
-The conflict resolver is a preview feature, hidden in the release build. Start GitMaster with `GITMASTER_PREVIEW=conflict-resolver` to turn it on.
+The conflict resolver is a preview feature, hidden in the release build. Start GitMaster with `GITMASTER_ENABLE_CONFLICT_RESOLVER=1` to turn it on.
 
 ## Layout
 
@@ -57,7 +57,7 @@ Each conflict has its own choices. You can mix them, and you can edit the Result
 
 ## Resolve in a restack
 
-When a restack holds a branch back on a conflict, choose **Resolve conflict** in the restack dialog. Restack is part of the Stacks preview feature, which you turn on with `GITMASTER_PREVIEW=stacks`. The resolver opens on the commit being replayed, in a private worktree, so your working copy is not touched. The sides are labeled **new parent**, the branch the commit is replayed onto, and **commit being replayed**. The header names the branch and the commit, and lists each conflicted file: resolve and **Apply** each one. Then choose **Continue restack** to go back to the plan, where the commit shows as **Resolved**. **Cancel** goes back to the plan without the resolution. See [Stacks and restack](stacks.md).
+When a restack holds a branch back on a conflict, choose **Resolve conflict** in the restack dialog. Restack is part of the Stacks preview feature, which you turn on with `GITMASTER_ENABLE_STACKS=1`. The resolver opens on the commit being replayed, in a private worktree, so your working copy is not touched. The sides are labeled **new parent**, the branch the commit is replayed onto, and **commit being replayed**. The header names the branch and the commit, and lists each conflicted file: resolve and **Apply** each one. Then choose **Continue restack** to go back to the plan, where the commit shows as **Resolved**. **Cancel** goes back to the plan without the resolution. See [Stacks and restack](stacks.md).
 
 ## Recorded resolutions
 
