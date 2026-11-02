@@ -34,7 +34,7 @@ M.meta = {
 | `stack.parent_merged` | The parent branch is gone, or it is already merged into `main`. It fires once when that becomes true, with `branch` and `parent` in the payload, and `grandparent` when there is one: the parent the branch would get from **Reparent to Grandparent**. |
 | `composer.opened` | The empty message box of the commit composer gets focus while something is staged. |
 
-The stack events compare the stacks with what GitMaster saw last. The state a repository has when it opens is the starting point, so opening a repository with a stale branch does not fire `stack.parent_moved`.
+The stack events compare the stacks with what GitMaster saw last. The state a repository has when it opens is the starting point, so opening a repository with a stale branch does not fire `stack.parent_moved`. **Undo restack** is a starting point too: the branches it puts back are stale again, but no stack event fires for them until the parent moves again, so an automatic restack does not undo your undo.
 
 ### No time-based triggers
 
