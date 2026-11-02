@@ -8,6 +8,7 @@ The product is specified in [`docs/`](../docs/README.md): the official documenta
 |---|---|
 | [`decisions.md`](decisions.md) | Decision log (D01–D108) with status, open questions (Q1–Q23) and implementation notes. Decisions marked Decided bind the code. |
 | [`roadmap.md`](roadmap.md) | The order of the work: slices, what is done, known gaps, what comes next. |
+| [`release-readiness.md`](release-readiness.md) | What the first public release needs: done, steps for the author, and open items. |
 | [`architecture.md`](architecture.md) | Hexagonal architecture, engine rules, persistence, crates, risks. |
 | [`screens.md`](screens.md) | Screen-level design decisions behind the user guide. |
 | [`stacks-restack.md`](stacks-restack.md) | Stack model and the restack algorithm. |
