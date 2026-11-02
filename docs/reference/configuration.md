@@ -228,6 +228,6 @@ The settings dialog is not available yet, so these fields are edited today in **
 | Field | What it does |
 |---|---|
 | **Directories** | Shows the folders that workflows are read from: your workflows directory and the folders in `gitmaster.workflowPath`. |
-| **Enabled per Repository** | Chooses which workflows run in each repository. |
+| **Enabled per Repository** | Chooses which workflows run in each repository. Your own workflows are on unless you switch them off; the built-in stack workflows are off unless you switch them on. |
 | **Automatic Approvals** | Lists the approvals that let a workflow run without asking again. Each approval is tied to one script hash. Use **Revoke** to remove an approval. See [Approvals and security](../workflows/approvals-and-security.md). |
 | **Run History** | Keeps the last 200 runs of each workflow in each repository. An output larger than 64 KiB is stored as its hash, its size and its first 4 KiB. |

@@ -218,7 +218,7 @@ Known gaps:
 
 ## Slice 3: history and branches (by-name view) (in progress: H1 to H5 done, with H4b-A, H4b-B and H4c)
 
-**Next step (author's decision, 2026-11-01):** the order is (1) **resolving a restack conflict** (slice 5, sub-slice 5f; done), (2) **WF3** (slice 3w, sub-slices in D155; done), (3) ~~N5~~, removed by the author on 2026-11-02 (D163). H6 is done in slice 4c; H7 and H8 stay postponed. The "How to continue" note below is from 2026-10-25 and describes N5 as it was then.
+**Next step (author's decision, 2026-11-01):** the order is (1) **resolving a restack conflict** (slice 5, sub-slice 5f; done), (2) **WF3** (slice 3w, sub-slices in D155; done), (3) ~~N5~~, removed by the author on 2026-11-02 (D163); then (4) **WF4** (author, 2026-11-02; sub-slices in D164; WF4a next). H6 is done in slice 4c; H7 and H8 stay postponed. The "How to continue" note below is from 2026-10-25 and describes N5 as it was then.
 
 ### How to continue (end of the 2026-10-25 session)
 
@@ -474,6 +474,10 @@ Proposal of 2026-10-19, detailed in the TOML workflow specification (available i
   - **WF3 status (2026-11-01):** WF3a to WF3f done. The "Done when" of WF3 is met: `prepare-commit` is reproduced by a transform and the hook path is removed; a `commit.created` workflow runs; apply steps of event runs wait for approval; an edit revokes review and automatic approval; a run interrupted by closing the app is `interrupted` (D100, from WS0); a run waiting on `restack.resumed` resumes on the event. Open: `transform.conflict_hunk`, the WF4 calls, agent runs (WF5).
   - After WF3, on its own: `transform.conflict_hunk` (Script suggestion in the resolver).
 - **WF4, stack actions and templates (with slices 4 and 5).** `ctx.stack.*`, `ctx.restack.*`, `ctx.reparent.*`, `ctx.push.lease`, the events `stack.parent_moved` and `stack.parent_merged`, and three built-in templates, in Lua. Done when: turning on "Restack children when parent moves" restacks the subtree after a commit on the parent, with a plan, undo and a pause on conflict, and with no code specific to this policy.
+  Sub-slices (D164, author, 2026-11-02):
+  - **WF4a, engine calls (to do).** `ctx.stack.tree`, `ctx.stack.stale`, `ctx.fetch`, `ctx.restack.plan`/`apply`/`undo`, `ctx.reparent.plan`/`apply`, `ctx.push.lease` carried out by the engine with the catalog's outcomes (`stale`, `conflict`), over the same commands as the window. Done when each call has a real-Git test, including `apply` ending `stale` after a branch moved and `conflict` with the unblocked branches moved.
+  - **WF4b, per-repository switches and built-in stack workflows (to do).** Done when a switched-off workflow does not fire in that repository, a built-in one is off until switched on, and "Restack children when parent moves" restacks the subtree after a commit on the parent with no code specific to this policy.
+  - **WF4c, workflow restack in the window (to do).** The approval of `restack.apply` shows the plan; a conflict in a run notifies and opens Resolve conflict; the run resumes on `restack.resumed`. Done when seen in a window.
 - **WF5, MCP (with slice 7).** `workflow_list` and `workflow_run`. There is no tool to create or edit scripts (D102). Done when: an agent lists the workflows and fires one; the `apply` steps of the run wait for the human's approval in the UI (D64(c)).
 
 ## Slice 3c: code navigation (in progress: S-A, S-B, S-C, N1, N2, N3 and N4 done; N5 removed by D163; N6 to do)

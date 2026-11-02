@@ -151,7 +151,7 @@ Restack brings a stack up to date. It walks the tree from the top down, so paren
 
 > **Planned.** The stack events and the stack workflow templates are not available yet.
 
-Automation is built with workflows, not with a restack setting. Three built-in templates are available, and all three are off by default. Turn on each one per repository:
+Automation is built with workflows, not with a restack setting. Three built-in workflows ship with GitMaster. They are listed on the Workflows page under **Built-in**, and each one is off in every repository until you switch it on there. Switching one on asks whether its applying actions may run without asking, as reviewing a version does. They ship with the app, so they need no review. **Copy to Edit** writes a copy into your workflows folder, which you then review and change like your own.
 
 - **Restack children when parent moves** runs on the `stack.parent_moved` event.
 - **Restack stale stacks after fetch** runs after a fetch.

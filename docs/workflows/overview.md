@@ -56,6 +56,7 @@ These rules apply:
 - Files in directories whose names start with a dot are not read as workflows. GitMaster writes generated reference files for editors and agents into a `.api` directory in the workflows folder. Those files are not workflows.
 - A `.toml` file in a workflows directory is ignored, and GitMaster shows a warning for it.
 - A workflow file holds only the definition. Whether a workflow is enabled for a repository, and your approvals, are kept by GitMaster, not in the file.
+- Your own workflows run in every repository. To keep one out of a repository, switch off **Enabled in this repository** on the Workflows page. The choice is kept in that repository's `.git/gitmaster/` folder, never in the working tree. The built-in stack workflows work the other way round: they are off until you switch them on for a repository.
 - Nothing is written into the working tree of a repository.
 
 ## Running a workflow
