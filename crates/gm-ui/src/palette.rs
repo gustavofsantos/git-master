@@ -307,7 +307,7 @@ pub(crate) fn build(
 fn top_level(query: &str, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Vec<Candidate> {
     let mut candidates: Vec<Candidate> = Action::ALL
         .into_iter()
-        .filter(|action| action.listed_in_palette())
+        .filter(|action| action.listed_in_palette() && action.offered(ctx.features))
         .map(|action| action_row(action, ctx, branches))
         .collect();
     if !query.is_empty() {
@@ -664,6 +664,7 @@ mod tests {
             selected_thread: None,
             code: crate::action_registry::CodeCtx::default(),
             selected_label: None,
+            features: gm_schema::FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
@@ -1469,6 +1470,36 @@ mod tests {
                     starred: true,
                 },
             }
+        );
+    }
+
+    #[test]
+    fn a_preview_action_is_listed_only_while_its_feature_is_on() {
+        let entries: [StatusEntry; 0] = [];
+        let off = ActionContext {
+            features: gm_schema::FeatureSet::none(),
+            ..ctx_with(&entries, "")
+        };
+        let on = ActionContext {
+            features: gm_schema::FeatureSet::all(),
+            ..ctx_with(&entries, "")
+        };
+        // A row runs its action, or picks its target first; either way it lists the action.
+        let lists_preview = |candidates: &[Candidate]| {
+            candidates.iter().any(|candidate| match &candidate.choice {
+                Choice::Run { action, .. } | Choice::Pick(action) => action.feature().is_some(),
+            })
+        };
+        assert!(!lists_preview(&build(Stage::Actions, "", &off, &[])));
+        assert!(lists_preview(&build(Stage::Actions, "", &on, &[])));
+        assert!(
+            build(Stage::Actions, "", &off, &[])
+                .iter()
+                .any(|candidate| candidate.choice
+                    == Choice::Run {
+                        action: Action::Commit,
+                        args: Args::None
+                    })
         );
     }
 }

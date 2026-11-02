@@ -5,7 +5,7 @@
 //! local branches in no tree under "No stack" (D138). "By name" is the classic
 //! view: local, then remote, grouped by the prefix before the first slash.
 
-use gm_schema::{BranchEntry, StackBranch};
+use gm_schema::{BranchEntry, Feature, FeatureSet, StackBranch};
 
 use crate::stacks::Stacks;
 
@@ -83,6 +83,17 @@ pub enum Row<'a> {
         /// The branch's recorded parents form a loop.
         looped: bool,
     },
+}
+
+/// The grouping the tree shows: the saved one while the Stacks preview is on, and By name
+/// otherwise, since By stack needs stacks (D169).
+#[must_use]
+pub fn effective_grouping(saved: Grouping, features: FeatureSet) -> Grouping {
+    if features.is_enabled(Feature::Stacks) {
+        saved
+    } else {
+        Grouping::ByName
+    }
 }
 
 /// The tree's rows for `branches` under `grouping`: the branches the filter
@@ -205,6 +216,26 @@ fn grouped<'a>(rows: &mut Vec<Row<'a>>, branches: impl Iterator<Item = &'a Branc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn by_stack_is_shown_only_while_the_stacks_preview_is_on() {
+        assert_eq!(
+            effective_grouping(Grouping::ByStack, FeatureSet::all()),
+            Grouping::ByStack
+        );
+        assert_eq!(
+            effective_grouping(Grouping::ByName, FeatureSet::all()),
+            Grouping::ByName
+        );
+        assert_eq!(
+            effective_grouping(Grouping::ByStack, FeatureSet::none()),
+            Grouping::ByName
+        );
+        assert_eq!(
+            effective_grouping(Grouping::ByName, FeatureSet::none()),
+            Grouping::ByName
+        );
+    }
 
     #[test]
     fn sections_start_open_and_fold_one_at_a_time() {

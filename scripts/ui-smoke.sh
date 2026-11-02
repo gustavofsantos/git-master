@@ -113,7 +113,8 @@ done
 
 # Always build: cargo is a no-op when current, and a stale binary would pass or fail for the wrong code.
 echo "building $BIN ..."
-(cd "$ROOT" && cargo build --release -p gitmaster)
+# The preview features are on, as in the author's builds (D169), so their scenarios run.
+(cd "$ROOT" && cargo build --release -p gitmaster --features preview)
 [ -x "$BIN" ] || { echo "binary not found after build: $BIN" >&2; exit 1; }
 
 mkdir -p "$SMOKE_OUT" "$RUN_ROOT"

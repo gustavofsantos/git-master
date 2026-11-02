@@ -490,7 +490,8 @@ pub(crate) fn done_line(record: &RestackRecord) -> String {
 }
 
 impl StatusView {
-    /// Opens the dialog for the stack `branch` is in and plans it.
+    /// Opens the dialog for the stack `branch` is in and plans it. Not gated by the Stacks
+    /// flag: its entry points are hidden instead, and a flow in progress is never cut (D169).
     pub(crate) fn open_restack_dialog(
         &mut self,
         branch: &str,
@@ -513,7 +514,8 @@ impl StatusView {
     }
 
     /// Opens the dialog on the restack that starts at `root`, and plans it. A workflow's conflict
-    /// notice opens it on the plan's own root (`WF4c`).
+    /// notice opens it on the plan's own root (`WF4c`). Not gated by the Stacks flag: a
+    /// workflow's "Resolve conflict" must still open it (D169: hide entry points, not flows).
     pub(crate) fn open_restack_dialog_on(
         &mut self,
         root: &str,

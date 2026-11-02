@@ -112,10 +112,13 @@ impl StatusView {
 
     /// The toolbar buttons at the right of the title bar.
     pub(crate) fn toolbar(&self, cx: &Context<Self>) -> Div {
-        TOOLBAR.into_iter().fold(
-            div().flex().flex_row().items_center().gap_1(),
-            |row, action| row.child(self.toolbar_button(action, cx)),
-        )
+        TOOLBAR
+            .into_iter()
+            .filter(|action| action.offered(self.features))
+            .fold(
+                div().flex().flex_row().items_center().gap_1(),
+                |row, action| row.child(self.toolbar_button(action, cx)),
+            )
     }
 
     fn toolbar_button(&self, action: Action, cx: &Context<Self>) -> Stateful<Div> {
@@ -227,6 +230,7 @@ mod tests {
             selected_thread: None,
             code: crate::action_registry::CodeCtx::default(),
             selected_label: None,
+            features: gm_schema::FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             worktrees: &[],
@@ -263,6 +267,7 @@ mod tests {
             selected_thread: None,
             code: crate::action_registry::CodeCtx::default(),
             selected_label: None,
+            features: gm_schema::FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             worktrees: &[],

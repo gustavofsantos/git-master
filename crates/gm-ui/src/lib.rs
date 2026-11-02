@@ -161,6 +161,7 @@ pub fn run(
     command_log: CommandLog,
     watch: (gm_core::watch::WatchHandle, gm_core::watch::Notices),
     start: StartPath,
+    features: gm_schema::FeatureSet,
 ) {
     Application::new()
         .with_assets(assets::Assets)
@@ -223,8 +224,9 @@ pub fn run(
             // The component's `Input` needs the window root to be a `Root` (D152). `Root` draws
             // its own padding and border; `window_chrome` moves the view back over them.
             let opened = cx.open_window(options, move |window, cx| {
-                let view =
-                    cx.new(|cx| StatusView::new(engine, command_log, watch, start, window, cx));
+                let view = cx.new(|cx| {
+                    StatusView::new(engine, command_log, watch, start, features, window, cx)
+                });
                 cx.new(|cx| Root::new(view, window, cx))
             });
             if let Err(error) = opened {

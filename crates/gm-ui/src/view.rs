@@ -11,8 +11,8 @@ use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
 use gm_core::watch::{Notice, Notices, WatchHandle};
 use gm_schema::{
-    Actor, CommandKind, ConflictSite, DiffSide, Event, FileDiff, HistoryScope, OperationId,
-    OperationState,
+    Actor, CommandKind, ConflictSite, DiffSide, Event, FeatureSet, FileDiff, HistoryScope,
+    OperationId, OperationState,
 };
 use gpui::{
     ClipboardItem, Context, Div, Entity, FocusHandle, KeyDownEvent, Render, ScrollHandle,
@@ -153,6 +153,8 @@ pub struct StatusView {
     pub(crate) commit_height: f32,
     /// How the sidebar's branch tree is grouped.
     pub(crate) sidebar_grouping: Grouping,
+    /// The preview features that are on (D169); a feature that is off has no surface here.
+    pub(crate) features: FeatureSet,
     /// Which sidebar sections are folded.
     pub(crate) sidebar_folded: Folded,
     /// The sidebar's branch filter: the typed query (D53).
@@ -266,6 +268,7 @@ impl StatusView {
         command_log: CommandLog,
         watch: (WatchHandle, Notices),
         start: StartPath,
+        features: FeatureSet,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -435,6 +438,7 @@ impl StatusView {
             thread_list_width: resize::THREAD_LIST_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
             sidebar_grouping: Grouping::default(),
+            features,
             sidebar_folded: Folded::default(),
             sidebar_filter: BranchFilter::default(),
             sidebar_input,
@@ -1310,6 +1314,8 @@ impl StatusView {
         let spot = self.comment_spot(cx);
         let planned = action.plan(args, &self.action_context_with(&message, spot));
         match planned {
+            // A preview action whose feature is off does nothing at all, not even a notice (D169).
+            Err(action_registry::PREVIEW_OFF) => {}
             Err(reason) => self.notify_user(reason, cx),
             Ok(Effect::Send(kinds)) => self.send_commands(action, kinds, cx),
             Ok(
@@ -1525,6 +1531,7 @@ impl StatusView {
     ) -> ActionContext<'a> {
         ActionContext {
             repo_open: self.model.status().is_some(),
+            features: self.features,
             selected_file: self.model.selected_path(),
             stack: crate::action_registry::StackCtx {
                 stacks: Some(&self.model.stacks),

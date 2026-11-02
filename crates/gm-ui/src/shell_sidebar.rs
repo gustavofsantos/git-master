@@ -6,7 +6,7 @@
 
 use std::ops::Range;
 
-use gm_schema::{BranchEntry, HistoryScope, StackBranch, StackState};
+use gm_schema::{BranchEntry, Feature, HistoryScope, StackBranch, StackState};
 use gpui::{
     AnyElement, Context, Div, ElementId, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
     SharedString, Stateful, Subscription, Window, div, prelude::*, px, uniform_list,
@@ -71,7 +71,7 @@ impl StatusView {
             ))
             .children(self.branches_body(cx))
             .child(self.worktrees_section(cx))
-            .children((self.sidebar_grouping == Grouping::ByStack).then(footer_hint))
+            .children((self.grouping() == Grouping::ByStack).then(footer_hint))
             .child(width_strip)
     }
 
@@ -169,7 +169,11 @@ impl StatusView {
                 .min_h(px(0.))
                 .flex()
                 .flex_col()
-                .child(self.grouping_switch(cx))
+                .children(
+                    self.features
+                        .is_enabled(Feature::Stacks)
+                        .then(|| self.grouping_switch(cx)),
+                )
                 .children(self.has_branches().then(|| self.branch_filter_bar(cx)))
                 .child(self.branch_tree(cx)),
         )
@@ -294,10 +298,15 @@ impl StatusView {
             )
     }
 
+    /// The grouping the tree shows now: the saved one, or By name while Stacks is off (D169).
+    fn grouping(&self) -> Grouping {
+        sidebar::effective_grouping(self.sidebar_grouping, self.features)
+    }
+
     /// The two-way switch between "By stack" and "By name".
     fn grouping_switch(&self, cx: &mut Context<Self>) -> Div {
         let segment_for = |grouping: Grouping| {
-            segment(grouping.label(), self.sidebar_grouping == grouping).on_mouse_down(
+            segment(grouping.label(), self.grouping() == grouping).on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                     this.sidebar_grouping = grouping;
@@ -429,7 +438,7 @@ impl StatusView {
                 .flex_col()
                 .child(no_match_state(cx));
         }
-        let count = sidebar::rows(&visible, self.sidebar_grouping, &self.model.stacks).len();
+        let count = sidebar::rows(&visible, self.grouping(), &self.model.stacks).len();
         div().flex_1().min_h(px(0.)).flex().flex_col().child(
             uniform_list(
                 "sidebar-branches",
@@ -440,13 +449,12 @@ impl StatusView {
                      _window: &mut Window,
                      cx: &mut Context<StatusView>| {
                         let visible = this.visible_branches();
-                        let rows =
-                            sidebar::rows(&visible, this.sidebar_grouping, &this.model.stacks);
+                        let rows = sidebar::rows(&visible, this.grouping(), &this.model.stacks);
                         let head = this
                             .model
                             .status()
                             .and_then(|status| status.branch.head.clone());
-                        let by_stack = this.sidebar_grouping == Grouping::ByStack;
+                        let by_stack = this.grouping() == Grouping::ByStack;
                         rows.get(range.clone())
                             .unwrap_or_default()
                             .iter()

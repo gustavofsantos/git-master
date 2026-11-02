@@ -26,7 +26,8 @@ const UNREADABLE: &str =
 const NO_CONFLICT_OPEN: &str = "No conflict is open.";
 
 impl StatusView {
-    /// Shows the Conflicts page for the file the model's resolver holds.
+    /// Shows the Conflicts page for the file the model's resolver holds. Not gated by the
+    /// preview flag: flags hide entry points, never a flow in progress (D169).
     pub(crate) fn show_conflicts(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::Conflicts;
         self.sync_conflict_result(cx);

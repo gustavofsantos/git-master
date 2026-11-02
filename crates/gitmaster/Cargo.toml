@@ -13,6 +13,12 @@ workspace = true
 name = "gitmaster"
 path = "src/main.rs"
 
+[features]
+# Turns the preview features (gm_schema::features) on by default. `make build/run/install`
+# enable it; the release workflow does not, so the public build hides them. Each feature's
+# GITMASTER_ENABLE_<ID> variable overrides it at run time.
+preview = []
+
 [dependencies]
 gm-core.workspace = true
 gm-schema.workspace = true

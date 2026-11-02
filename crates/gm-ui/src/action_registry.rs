@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use gm_schema::{
-    BranchEntry, CommandKind, ConflictSite, DiffSide, HunkId, ReviewComment, ReviewStatus,
-    StageTarget, StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
+    BranchEntry, CommandKind, ConflictSite, DiffSide, Feature, FeatureSet, HunkId, ReviewComment,
+    ReviewStatus, StageTarget, StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
 };
 
 use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, SAME_WORKTREE};
@@ -396,6 +396,8 @@ pub struct Context<'a> {
     pub stack: StackCtx<'a>,
     /// The text file open in the Code viewer, and the lines picked in it (P4).
     pub code: CodeCtx<'a>,
+    /// The preview features that are on (D169): an action of a feature that is off is hidden.
+    pub features: FeatureSet,
 }
 
 /// What the Code viewer shows, for the rules: the text file on screen and the lines picked in it.
@@ -1527,6 +1529,9 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
 /// The reason of an action the engine cannot run yet, whatever its target.
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
+/// Why a preview action is not enabled while its feature is off (D169).
+pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
+
 impl Action {
     pub const ALL: [Action; 99] = [
         Action::StageFile,
@@ -1664,6 +1669,29 @@ impl Action {
                 | Action::ReparentToGrandparent
                 | Action::Restack
         )
+    }
+
+    /// The preview feature the action belongs to, if any (D169). Its menus, its palette
+    /// entry and its toolbar button are hidden while the feature is off.
+    #[must_use]
+    pub fn feature(self) -> Option<Feature> {
+        if self.is_stack_action() {
+            Some(Feature::Stacks)
+        } else if self == Action::ResolveConflict {
+            Some(Feature::ConflictResolver)
+        } else {
+            None
+        }
+    }
+
+    /// Whether a window with `features` offers the action at all: false only for a preview
+    /// action whose feature is off.
+    #[must_use]
+    pub fn offered(self, features: FeatureSet) -> bool {
+        match self.feature() {
+            Some(feature) => features.is_enabled(feature),
+            None => true,
+        }
     }
 
     /// Whether the palette lists the action at its top level. Choose Parent is
@@ -1845,6 +1873,10 @@ impl Action {
 
     /// Whether the action can run now with `args`; the reason when it cannot.
     pub fn enabled(self, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+        // A preview action whose feature is off never runs (D169); the menus do not list it.
+        if !self.offered(ctx.features) {
+            return Err(PREVIEW_OFF);
+        }
         // A thread action run with no thread (the palette, with none selected) says so.
         if self.spec().args == ArgKind::Thread && matches!(args, Args::None) {
             return Err(SELECT_THREAD);
@@ -2909,6 +2941,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
@@ -3074,6 +3107,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&entries, "")
         };
@@ -3150,6 +3184,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3208,6 +3243,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3383,6 +3419,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3455,6 +3492,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&entries, "")
@@ -3489,6 +3527,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&entries, "")
@@ -3515,6 +3554,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&[], "")
@@ -3582,6 +3622,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3772,6 +3813,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3906,6 +3948,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
         };
@@ -3971,6 +4014,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3992,6 +4036,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4017,6 +4062,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4054,6 +4100,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4085,6 +4132,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4101,6 +4149,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4125,6 +4174,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4371,6 +4421,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
         };
@@ -4493,6 +4544,7 @@ mod tests {
                 selected_file: None,
                 selected_thread: None,
                 selected_label: None,
+                features: FeatureSet::all(),
                 stack: crate::action_registry::StackCtx::default(),
                 root: None,
                 ..with_stashes(&stashes)
@@ -4597,6 +4649,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4845,6 +4898,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
         };
@@ -4998,6 +5052,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
         };
@@ -5139,6 +5194,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(lines("a.txt", Some((1, 1))), None)
         };
@@ -5249,6 +5305,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(CommentSpot::Nothing, Some(&listed))
         };
@@ -5301,6 +5358,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -5369,6 +5427,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..open_ctx(&entries, Some(&current))
         };
@@ -5963,6 +6022,7 @@ mod tests {
     fn new_child_branch_opens_the_child_dialog_for_a_local_branch_only() {
         let remotes = [remote_entry("origin/main")];
         let context = Context {
+            features: FeatureSet::all(),
             stack: StackCtx {
                 branches: &remotes,
                 ..StackCtx::default()
@@ -5987,6 +6047,7 @@ mod tests {
     fn restack_opens_its_dialog_for_a_branch_in_a_stack_and_refuses_others() {
         let stacks = stack_snapshot(gm_schema::StackState::Stale);
         let known = Context {
+            features: FeatureSet::all(),
             stack: StackCtx {
                 stacks: Some(&stacks),
                 subject: None,
@@ -6027,6 +6088,7 @@ mod tests {
             Err("Run Set Parent… on a branch first.")
         );
         let picking = |subject| Context {
+            features: FeatureSet::all(),
             stack: StackCtx {
                 stacks: Some(&stacks),
                 subject: Some(subject),
@@ -6058,6 +6120,7 @@ mod tests {
         let current = stack_snapshot(gm_schema::StackState::Current);
         let merged = stack_snapshot(gm_schema::StackState::ParentMerged);
         let with = |stacks| Context {
+            features: FeatureSet::all(),
             stack: StackCtx {
                 stacks: Some(stacks),
                 ..StackCtx::default()
@@ -6110,6 +6173,84 @@ mod tests {
         assert_eq!(
             Action::ConvertHooks.plan(&Args::None, &with_messages(offered)),
             Ok(Effect::Send(vec![CommandKind::ConvertHooksToWorkflows]))
+        );
+    }
+
+    #[test]
+    fn a_preview_action_belongs_to_its_feature_and_the_rest_to_none() {
+        assert_eq!(Action::Restack.feature(), Some(Feature::Stacks));
+        assert_eq!(Action::NewChildBranch.feature(), Some(Feature::Stacks));
+        assert_eq!(
+            Action::ResolveConflict.feature(),
+            Some(Feature::ConflictResolver)
+        );
+        assert_eq!(Action::Commit.feature(), None);
+        assert_eq!(Action::Fetch.feature(), None);
+        let preview = Action::ALL
+            .iter()
+            .filter(|action| action.feature().is_some())
+            .count();
+        assert_eq!(preview, 7);
+    }
+
+    #[test]
+    fn with_no_preview_feature_on_the_palette_and_menus_leave_the_preview_actions_out() {
+        let off = Context {
+            features: FeatureSet::none(),
+            ..ctx(&[], "")
+        };
+        let offered: Vec<Action> = Action::ALL
+            .into_iter()
+            .filter(|action| action.listed_in_palette() && action.offered(off.features))
+            .collect();
+        assert!(offered.iter().all(|action| action.feature().is_none()));
+        assert!(!offered.contains(&Action::Restack));
+        assert!(!offered.contains(&Action::ResolveConflict));
+        assert!(offered.contains(&Action::Commit));
+        assert_eq!(
+            Action::Restack.enabled(&Args::Branch("main".into()), &off),
+            Err(PREVIEW_OFF)
+        );
+        assert_eq!(
+            Action::ResolveConflict.enabled(&Args::File("a.txt".into()), &off),
+            Err(PREVIEW_OFF)
+        );
+        assert!(matches!(
+            Action::Restack.plan(&Args::Branch("main".into()), &off),
+            Err(PREVIEW_OFF)
+        ));
+    }
+
+    #[test]
+    fn each_preview_feature_turns_on_only_its_own_actions() {
+        let (stacks_only, _) = gm_schema::features::resolve(
+            false,
+            [("GITMASTER_ENABLE_STACKS".to_owned(), "1".to_owned())],
+        );
+        assert!(Action::Restack.offered(stacks_only));
+        assert!(!Action::ResolveConflict.offered(stacks_only));
+        let (resolver_only, _) = gm_schema::features::resolve(
+            false,
+            [(
+                "GITMASTER_ENABLE_CONFLICT_RESOLVER".to_owned(),
+                "1".to_owned(),
+            )],
+        );
+        assert!(!Action::Restack.offered(resolver_only));
+        assert!(Action::ResolveConflict.offered(resolver_only));
+    }
+
+    #[test]
+    fn with_every_preview_feature_on_the_actions_are_offered_as_before() {
+        let on = ctx(&[], "");
+        assert!(
+            Action::ALL
+                .into_iter()
+                .all(|action| action.offered(on.features))
+        );
+        assert_eq!(
+            Action::Restack.enabled(&Args::Branch("main".into()), &on),
+            Err("The stacks are still being read.")
         );
     }
 }

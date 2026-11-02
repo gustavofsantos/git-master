@@ -13,10 +13,27 @@ use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
 
 fn main() {
+    // The preview features (D169): each `GITMASTER_ENABLE_<ID>` variable, else the build's default.
+    let vars = std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let (features, warnings) = gm_schema::features::resolve(cfg!(feature = "preview"), vars);
+    for warning in &warnings {
+        eprintln!("gitmaster: {warning}");
+    }
     let mut args = std::env::args().skip(1);
     let first = args.next();
     if first.as_deref() == Some("--version") {
-        println!("gitmaster {}", env!("CARGO_PKG_VERSION"));
+        println!("gitmaster {}", version());
+        let enabled: Vec<&str> = features.enabled().map(gm_schema::Feature::id).collect();
+        if !enabled.is_empty() {
+            println!("preview features: {}", enabled.join(", "));
+        }
         return;
     }
     if first.as_deref() == Some("workflow") {
@@ -96,7 +113,20 @@ fn main() {
         path: path.to_string_lossy().into_owned(),
         from_argument,
     };
-    gm_ui::run(engine, command_log, watch, start);
+    gm_ui::run(engine, command_log, watch, start, features);
+}
+
+/// The version `--version` prints: the release tag the binary was built for, or the package version.
+fn version() -> &'static str {
+    display_version(option_env!("GITMASTER_VERSION"), env!("CARGO_PKG_VERSION"))
+}
+
+/// `tag` without its leading `v`, or `fallback` when there is no tag.
+fn display_version<'a>(tag: Option<&'a str>, fallback: &'a str) -> &'a str {
+    match tag.map(|tag| tag.strip_prefix('v').unwrap_or(tag)) {
+        Some(version) if !version.is_empty() => version,
+        _ => fallback,
+    }
 }
 
 /// `gitmaster workflow check | dry-run | test` (docs/reference/cli.md). Never applies an effect.
@@ -116,8 +146,26 @@ fn workflow_command(words: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use super::display_version;
+
     #[test]
     fn version_comes_from_the_package() {
         assert!(!env!("CARGO_PKG_VERSION").is_empty());
+    }
+
+    #[test]
+    fn the_leading_v_of_a_tag_is_dropped() {
+        assert_eq!(
+            display_version(Some("v0.1.0-beta.1"), "0.0.0"),
+            "0.1.0-beta.1"
+        );
+        assert_eq!(display_version(Some("0.2.0"), "0.0.0"), "0.2.0");
+    }
+
+    #[test]
+    fn without_a_tag_the_package_version_is_used() {
+        assert_eq!(display_version(None, "0.3.0"), "0.3.0");
+        assert_eq!(display_version(Some("v"), "0.3.0"), "0.3.0");
+        assert_eq!(display_version(Some(""), "0.3.0"), "0.3.0");
     }
 }

@@ -119,6 +119,14 @@ impl Item {
     }
 }
 
+/// The items a menu offers: a preview action whose feature is off is left out (D169).
+fn offered_items(items: Vec<Item>, ctx: &ActionContext<'_>) -> Vec<Item> {
+    items
+        .into_iter()
+        .filter(|item| item.action.offered(ctx.features))
+        .collect()
+}
+
 /// The menu of a branch row, in the order of the design: checkout, the ways to
 /// build on the branch, pushing, copying the name, then renaming and deleting.
 /// Actions the engine cannot run yet are listed disabled.
@@ -128,20 +136,23 @@ pub(crate) fn branch_items(name: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     }
     let target = Args::Branch(name.to_owned());
     let item = |action, group| Item::new(action, target.clone(), group, ctx);
-    vec![
-        item(Action::CheckoutBranch, 0),
-        item(Action::NewBranch, 1),
-        item(Action::NewChildBranch, 1),
-        item(Action::CreateWorktree, 1),
-        item(Action::SetStackParent, 2),
-        item(Action::RemoveFromStack, 2),
-        item(Action::ReparentToGrandparent, 2),
-        item(Action::Restack, 2),
-        item(Action::PushWithLease, 3),
-        item(Action::CopyBranchName, 4),
-        item(Action::RenameBranch, 5),
-        item(Action::DeleteBranch, 5),
-    ]
+    offered_items(
+        vec![
+            item(Action::CheckoutBranch, 0),
+            item(Action::NewBranch, 1),
+            item(Action::NewChildBranch, 1),
+            item(Action::CreateWorktree, 1),
+            item(Action::SetStackParent, 2),
+            item(Action::RemoveFromStack, 2),
+            item(Action::ReparentToGrandparent, 2),
+            item(Action::Restack, 2),
+            item(Action::PushWithLease, 3),
+            item(Action::CopyBranchName, 4),
+            item(Action::RenameBranch, 5),
+            item(Action::DeleteBranch, 5),
+        ],
+        ctx,
+    )
 }
 
 /// The menu of a file row: stage or unstage (both are listed, each disabled
@@ -169,7 +180,7 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     {
         items.insert(0, item(Action::ResolveConflict, 0));
     }
-    items
+    offered_items(items, ctx)
 }
 
 /// The menu of a thread row: rename, note, tags and star, then the link and the
@@ -288,18 +299,21 @@ fn checked_out_in_worktree<'a>(
 fn worktree_branch_items(path: &str, name: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     let worktree = Args::Worktree(path.to_owned());
     let branch = Args::Branch(name.to_owned());
-    vec![
-        Item::new(Action::OpenWorktree, worktree.clone(), 0, ctx),
-        Item::new(Action::RevealWorktree, worktree.clone(), 1, ctx),
-        Item::new(Action::CopyWorktreePath, worktree.clone(), 1, ctx),
-        Item::new(Action::NewBranch, branch.clone(), 2, ctx),
-        Item::new(Action::NewChildBranch, branch.clone(), 2, ctx),
-        Item::new(Action::SetStackParent, branch.clone(), 3, ctx),
-        Item::new(Action::RemoveFromStack, branch.clone(), 3, ctx),
-        Item::new(Action::ReparentToGrandparent, branch.clone(), 3, ctx),
-        Item::new(Action::Restack, branch, 3, ctx),
-        Item::new(Action::RemoveWorktree, worktree, 4, ctx),
-    ]
+    offered_items(
+        vec![
+            Item::new(Action::OpenWorktree, worktree.clone(), 0, ctx),
+            Item::new(Action::RevealWorktree, worktree.clone(), 1, ctx),
+            Item::new(Action::CopyWorktreePath, worktree.clone(), 1, ctx),
+            Item::new(Action::NewBranch, branch.clone(), 2, ctx),
+            Item::new(Action::NewChildBranch, branch.clone(), 2, ctx),
+            Item::new(Action::SetStackParent, branch.clone(), 3, ctx),
+            Item::new(Action::RemoveFromStack, branch.clone(), 3, ctx),
+            Item::new(Action::ReparentToGrandparent, branch.clone(), 3, ctx),
+            Item::new(Action::Restack, branch, 3, ctx),
+            Item::new(Action::RemoveWorktree, worktree, 4, ctx),
+        ],
+        ctx,
+    )
 }
 
 /// The menu of a worktree row: open it, reveal and copy its folder, lock or
@@ -776,6 +790,7 @@ mod tests {
             selected_thread: None,
             code: crate::action_registry::CodeCtx::default(),
             selected_label: None,
+            features: gm_schema::FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
@@ -1146,6 +1161,7 @@ mod tests {
             selected_thread: None,
             code: crate::action_registry::CodeCtx::default(),
             selected_label: None,
+            features: gm_schema::FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&[])

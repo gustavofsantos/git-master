@@ -3,6 +3,7 @@
 
 mod conflict;
 mod diff;
+pub mod features;
 mod files;
 mod grep;
 mod history;
@@ -22,6 +23,7 @@ pub use conflict::{
     ConflictFileRead, ConflictOperation, ConflictSide, ConflictSite, HunkOrigin, RecordedResolution,
 };
 pub use diff::{DiffLine, DiffSide, FileDiff, Hunk, HunkId, LineKind, StageTarget};
+pub use features::{Feature, FeatureSet};
 pub use files::{
     DirEntry, DirListing, FILE_HIT_LIMIT, FILE_VIEW_LIMIT, FileBody, FileHit, FileSearch, FileView,
 };

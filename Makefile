@@ -8,11 +8,12 @@ CARGO_AUDIT := $(TARGET_DIR)/tools/bin/cargo-audit
 
 .PHONY: build run install uninstall test lint fmt audit docs docs-status docs-site docs-test check hooks clean sizes prune
 
+# The author's builds turn the preview features on (D169); the release workflow does not.
 build:
-	cargo build --release -p gitmaster
+	cargo build --release -p gitmaster --features preview
 
 run:
-	cargo run --release -p gitmaster -- $(ARGS)
+	cargo run --release -p gitmaster --features preview -- $(ARGS)
 
 # PREFIX is where `make install` puts bin/gitmaster. Unset, cargo's own install
 # root applies: $CARGO_INSTALL_ROOT, else ~/.cargo, so ~/.cargo/bin/gitmaster.
@@ -27,7 +28,7 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.
 STAGE := $(TARGET_DIR)/stage
 
 install:
-	cargo install --path crates/gitmaster --locked --force --root '$(ROOT)'
+	cargo install --path crates/gitmaster --locked --force --features preview --root '$(ROOT)'
 	rm -rf '$(STAGE)'
 	scripts/stage-release.sh '$(ROOT)/bin/gitmaster' '$(STAGE)' '$(VERSION)'
 ifeq ($(shell uname -s),Darwin)
