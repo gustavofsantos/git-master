@@ -56,8 +56,6 @@ When Git has a recorded resolution for the file, the resolver shows the banner *
 
 ## Script suggestions
 
-> **Planned.** Workflows do not suggest resolutions for hunks yet, so no **Script suggestion** option appears.
-
 A workflow using the `transform.conflict_hunk` trigger can suggest a resolution for a hunk. The suggestion appears as a third option, labeled **Script suggestion**, next to **Left**, **Right** and **Both**. GitMaster never applies a script suggestion by itself. You choose it, or you choose another option.
 
 - The workflows run when the resolver opens a file, once for each conflict, in the background. A suggestion appears on its hunk card when it is ready, so you can start resolving at once.
@@ -69,7 +67,5 @@ A workflow using the `transform.conflict_hunk` trigger can suggest a resolution 
 An agent can propose a resolution in the same way, through MCP. See the [MCP server](../agents/mcp-server.md) page. For how workflows run their triggers, see [Triggers and phases](../workflows/triggers-and-phases.md).
 
 ## Who resolved each hunk
-
-> **Planned.** No workflow suggests a resolution yet, so no hunk is recorded as **script**.
 
 The operation log records how every hunk was resolved: by you (**human**), or by a recorded resolution (**recorded resolution**). A hunk you choose or edit is **human**. A hunk whose text came from the recorded resolution, and that you have not changed since, is **recorded resolution**. Each hunk card shows its origin next to its choice.

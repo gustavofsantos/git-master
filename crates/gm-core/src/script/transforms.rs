@@ -3,6 +3,7 @@
 //! into the value of the field. Pure: the engine loads and runs the scripts and acts on the answers,
 //! so every rule has a test without a repository or a window.
 
+use gm_schema::ConflictFileRead;
 use serde_json::{Value, json};
 
 use super::loader::sha256_hex;
@@ -10,6 +11,7 @@ use super::loader::sha256_hex;
 use super::journal::RunStatus;
 use super::phases::one_line;
 use super::triggers::TriggerEvent;
+use crate::conflict::Hunk;
 
 /// The fields a transform builds in this slice: the commit message and the new branch's name.
 pub const FIELDS: [&str; 2] = ["commit_message", "branch_name"];
@@ -28,6 +30,35 @@ pub fn trigger(field: &str, branch: Option<String>, current: &str) -> TriggerEve
         on: format!("transform.{field}"),
         branch,
         payload: json!({ "field": field, "current": current }),
+    }
+}
+
+/// The event a `transform.conflict_hunk` run starts for one hunk of a conflicted file (`WF3d`,
+/// D168). `index` is the hunk's place among the file's conflicts, from 0; its sides and base are
+/// the parser's, and the labels are the read's side labels. `current` is the suggestion of the
+/// workflows before, empty for the first. `branch` is what `match` reads.
+#[must_use]
+pub fn conflict_hunk(
+    file: &ConflictFileRead,
+    index: usize,
+    hunk: &Hunk,
+    branch: Option<String>,
+    current: &str,
+) -> TriggerEvent {
+    TriggerEvent {
+        on: "transform.conflict_hunk".to_owned(),
+        branch,
+        payload: json!({
+            "field": "conflict_hunk",
+            "path": file.path,
+            "index": index,
+            "left": hunk.left,
+            "right": hunk.right,
+            "base": hunk.base,
+            "left_label": file.left.branch,
+            "right_label": file.right.branch,
+            "current": current,
+        }),
     }
 }
 
@@ -59,6 +90,8 @@ pub struct Sequence {
     pub produced: bool,
     /// The notices the transforms so far raised, not yet taken by the engine.
     notices: Vec<String>,
+    /// The transform whose text became the value last (`kept_by`).
+    kept: Option<String>,
 }
 
 impl Sequence {
@@ -69,7 +102,15 @@ impl Sequence {
             current: current.to_owned(),
             produced: false,
             notices: Vec::new(),
+            kept: None,
         }
+    }
+
+    /// The name of the transform whose text is the value now: the last one that gave a non-empty
+    /// text. `None` while no transform gave one.
+    #[must_use]
+    pub fn kept_by(&self) -> Option<&str> {
+        self.kept.as_deref()
     }
 
     /// The transform `name` ended with `status`, `reason` and `value` (what `execute` returned).
@@ -93,6 +134,7 @@ impl Sequence {
             Some(Value::String(text)) => {
                 text.clone_into(&mut self.current);
                 self.produced = true;
+                self.kept = Some(name.to_owned());
             }
             Some(_) => self.notices.push(format!(
                 "{name} failed: it returned a value that is not text"
@@ -133,6 +175,8 @@ fn failure(name: &str, reason: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conflict::{self, Segment};
+    use gm_schema::{ConflictOperation, ConflictSide};
 
     fn done(seq: Sequence, name: &str, text: &str) -> Sequence {
         seq.advance(name, RunStatus::Done, None, Some(&json!(text)))
@@ -237,6 +281,92 @@ mod tests {
     #[test]
     fn with_no_transform_the_text_is_not_a_value() {
         assert_eq!(Sequence::new("typed").value(), None);
+    }
+
+    fn file(text: &str) -> ConflictFileRead {
+        ConflictFileRead {
+            path: "src/lib.rs".into(),
+            operation: ConflictOperation::Merge,
+            left: ConflictSide {
+                branch: "main".into(),
+                role: "current branch".into(),
+                subject: "Add the parser".into(),
+            },
+            right: ConflictSide {
+                branch: "feature/x".into(),
+                role: "merged branch".into(),
+                subject: "Rewrite the parser".into(),
+            },
+            text: text.into(),
+            has_base: text.contains("|||||||"),
+            recorded: None,
+        }
+    }
+
+    /// The conflicts of `text` in file order, as the parser gives them.
+    fn hunks_of(text: &str) -> Vec<Hunk> {
+        conflict::parse(text)
+            .unwrap()
+            .segments
+            .into_iter()
+            .filter_map(|segment| match segment {
+                Segment::Conflict(hunk) => Some(hunk),
+                Segment::Text(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_conflict_hunk_event_carries_the_parsed_sides_and_the_read_labels() {
+        let text = "top\n<<<<<<< main\nleft one\n=======\nright one\n>>>>>>> feature/x\nend\n";
+        let file = file(text);
+        let hunks = hunks_of(text);
+        let event = conflict_hunk(&file, 0, &hunks[0], Some("main".into()), "");
+        assert_eq!(event.on, "transform.conflict_hunk");
+        assert_eq!(event.branch.as_deref(), Some("main"));
+        assert_eq!(
+            event.trigger_value(),
+            json!({
+                "on": "transform.conflict_hunk",
+                "field": "conflict_hunk",
+                "path": "src/lib.rs",
+                "index": 0,
+                "left": hunks[0].left,
+                "right": hunks[0].right,
+                "base": null,
+                "left_label": "main",
+                "right_label": "feature/x",
+                "current": "",
+            })
+        );
+        assert_eq!(hunks[0].left, "left one\n");
+        assert_eq!(hunks[0].right, "right one\n");
+    }
+
+    #[test]
+    fn a_conflict_hunk_event_carries_the_base_and_the_index_and_current() {
+        let text = "<<<<<<< main\na\n=======\nb\n>>>>>>> feature/x\nmid\n<<<<<<< main\nc\n||||||| base\nold\n=======\nd\n>>>>>>> feature/x\n";
+        let file = file(text);
+        let hunks = hunks_of(text);
+        let event = conflict_hunk(&file, 1, &hunks[1], None, "suggested");
+        let value = event.trigger_value();
+        assert_eq!(value["index"], json!(1));
+        assert_eq!(value["left"], json!("c\n"));
+        assert_eq!(value["right"], json!("d\n"));
+        assert_eq!(value["base"], json!("old\n"));
+        assert_eq!(value["current"], json!("suggested"));
+        assert_eq!(event.branch, None);
+    }
+
+    #[test]
+    fn the_kept_transform_is_the_last_one_that_gave_text() {
+        let seq = done(Sequence::new(""), "a", "one");
+        assert_eq!(seq.kept_by(), Some("a"));
+        let seq = seq.advance("b", RunStatus::Done, None, None);
+        assert_eq!(seq.kept_by(), Some("a"), "nil keeps the earlier one");
+        let seq = done(seq, "c", "one+two");
+        assert_eq!(seq.kept_by(), Some("c"));
+        assert_eq!(Sequence::new("typed").kept_by(), None);
     }
 
     #[test]

@@ -1343,6 +1343,13 @@ impl Model {
             // The label and link answers are read by the Labels page (P4); the rows follow `ThreadsChanged`.
             | Event::ThreadRelationChanged { .. }
             | Event::ThreadsChanged => None,
+            // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
+            Event::HunkSuggested { .. } => {
+                if let Some(conflict) = self.conflict.as_mut() {
+                    conflict.on_event(&event);
+                }
+                None
+            }
             // The read opens the resolver; the staged note is the resolver's own.
             Event::ConflictRead { id, read } => {
                 // A read after a forget keeps the note that says so. A read while a restack
@@ -1362,7 +1369,8 @@ impl Model {
                     } else {
                         ResolverState::new(&read)
                     }
-                    .with_site(site),
+                    .with_site(site)
+                    .with_read(id),
                 );
                 self.conflict_opened = Some(id);
                 None
@@ -1761,7 +1769,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkflowRestackConflict { .. }
         | Event::WorkflowWantsReview { .. }
         | Event::WorkflowRequestDropped { .. }
-        | Event::WorkflowRunFinished { .. } => None,
+        | Event::WorkflowRunFinished { .. }
+        | Event::HunkSuggested { .. } => None,
     }
 }
 

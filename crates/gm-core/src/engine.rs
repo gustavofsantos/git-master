@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,11 +7,11 @@ use serde_json::{Map, Value, json};
 
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
-    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictSite, DirListing,
-    Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED, MergedBranch,
-    OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackPlan, RestackResolution,
-    ReviewChange, ReviewComment, ReviewStatus, STASH_LIST_CHANGED, StackSnapshot,
-    WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
+    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
+    ConflictSite, DirListing, Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED,
+    MergedBranch, OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackPlan,
+    RestackResolution, ReviewChange, ReviewComment, ReviewStatus, STASH_LIST_CHANGED,
+    StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -19,6 +19,7 @@ use crate::blame::BlameLine;
 use crate::branch;
 use crate::commit_detail::{DetailJob, DetailReport};
 use crate::commit_diff::{StackJob, StackReport};
+use crate::conflict::{self, Hunk, Segment};
 use crate::files::{
     Building, FilesSession, HighlightJob, HighlightReport, IndexJob, IndexReport, ReadJob,
     ReadReport, SearchJob, SearchReport, TextJob, TextReport,
@@ -169,6 +170,9 @@ pub struct Engine {
     /// The transform operation whose `transform.<field>` runs are in progress (`WF3d`), if any.
     /// One at a time: a new one supersedes it.
     transform: Option<TransformRun>,
+    /// The `transform.conflict_hunk` runs of the file last read (`WF3d`, D168), if any. One at a
+    /// time: a new read of a file supersedes it.
+    conflict_hunks: Option<HunkRun>,
     /// The event runs that wait for the review of their version, one per workflow: the latest
     /// trigger wins (`WF3b`, D155(3)). Dropped when the file changes, the person dismisses it or
     /// the repository is left.
@@ -227,6 +231,36 @@ struct TransformRun {
     fingerprint: Option<Fingerprint>,
     /// The run of the transform in progress, and its workflow's name.
     run: Option<(ScriptRunId, String)>,
+}
+
+/// The `transform.conflict_hunk` runs of one read of a conflicted file (`WF3d`, D168). The hunks go
+/// one after another in file order, and the workflows of each hunk go one after another in
+/// file-name order, each reading the suggestion so far.
+struct HunkRun {
+    /// The read the suggestions answer: `HunkSuggested { read }`.
+    read: OperationId,
+    site: ConflictSite,
+    root: PathBuf,
+    file: ConflictFileRead,
+    /// The branch `match` reads: HEAD's, or the conflicted branch of a restack.
+    branch: Option<String>,
+    /// The hunks not finished, in file order. The first one is the hunk in progress.
+    hunks: VecDeque<HunkJob>,
+    /// The workflows of the hunk in progress not started yet: name and hash.
+    waiting: VecDeque<(String, String)>,
+    /// The suggestion of the hunk in progress, folded from its workflows.
+    seq: transforms::Sequence,
+    /// The workflows already asked for review for this read: one request each (`WF3b`).
+    asked: BTreeSet<String>,
+    /// The workflow run in progress, and its name.
+    run: Option<(ScriptRunId, String)>,
+}
+
+/// One conflict hunk of a read, with the workflows that apply to it.
+struct HunkJob {
+    index: usize,
+    hunk: Hunk,
+    workflows: Vec<(String, String)>,
 }
 
 /// The restack conflict being resolved (D154): the plan it came from, and the conflict
@@ -325,6 +359,7 @@ impl Engine {
             gate: None,
             observers: BTreeMap::new(),
             transform: None,
+            conflict_hunks: None,
             wanted: BTreeMap::new(),
         }
     }
@@ -626,6 +661,13 @@ impl Engine {
                 started.extend(self.phase_finished(*run, *status, reason.as_deref()));
                 // A transform run gives its answer to the sequence of its field (`WF3d`).
                 started.extend(self.transform_finished(
+                    *run,
+                    *status,
+                    reason.as_deref(),
+                    value.as_ref(),
+                ));
+                // A conflict hunk run gives its suggestion for the hunk in progress (D168).
+                started.extend(self.hunk_finished(
                     *run,
                     *status,
                     reason.as_deref(),
@@ -1264,6 +1306,15 @@ impl Engine {
     /// operation ends `Cancelled` with nothing written. Refused for any other operation.
     fn cancel_operation(&mut self, actor: &Actor, op: OperationId) -> Result<Vec<Event>, String> {
         only_a_human(actor, "cancel an operation")?;
+        // The read of a conflicted file is done when it answers; its hunk runs are what is cancelled (D168).
+        if self
+            .conflict_hunks
+            .as_ref()
+            .is_some_and(|hunks| hunks.read == op)
+        {
+            self.stop_conflict_hunks();
+            return Ok(Vec::new());
+        }
         if self
             .transform
             .as_ref()
@@ -1478,6 +1529,237 @@ impl Engine {
         flush_notices(&mut transform.seq, &mut events);
         self.next_transform(transform, &mut events);
         events
+    }
+
+    /// After a read of a conflicted file answers (`WF3d`, D168): the `transform.conflict_hunk`
+    /// workflows run for each conflict of the file, in the background, hunk by hunk. Nothing runs
+    /// without a reviewed, enabled workflow for the hunk; an unreviewed one is asked for once.
+    fn start_conflict_hunks(
+        &mut self,
+        id: OperationId,
+        command: &Command,
+        events: &mut Vec<Event>,
+    ) {
+        let CommandKind::ReadConflict { site, .. } = &command.kind else {
+            return;
+        };
+        if !self.triggers {
+            return;
+        }
+        let Some(file) = events.iter().find_map(|event| match event {
+            Event::ConflictRead { id: answered, read } if *answered == id => Some(read.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        let (root, branch) = match site {
+            ConflictSite::WorkingCopy => {
+                let Ok(root) = self.open_root() else {
+                    return;
+                };
+                let branch = self.current(&root).ok().and_then(|(branch, _)| branch);
+                (root, branch)
+            }
+            ConflictSite::Restack => {
+                let Ok(session) = self.open_resolution() else {
+                    return;
+                };
+                (session.worktree.clone(), Some(session.conflicted.clone()))
+            }
+        };
+        let hunks = conflict_hunks_of(&file.text);
+        if hunks.is_empty() {
+            return;
+        }
+        let loaded = match self.load_active_scripts(&root) {
+            Ok(loaded) => loaded,
+            Err(reason) => {
+                events.push(workflow_notice(format!(
+                    "workflows did not run on transform.conflict_hunk: {reason}"
+                )));
+                return;
+            }
+        };
+        let jobs: VecDeque<HunkJob> = hunks
+            .into_iter()
+            .enumerate()
+            .map(|(index, hunk)| {
+                let event = transforms::conflict_hunk(&file, index, &hunk, branch.clone(), "");
+                let workflows = phases::select(&loaded.entries, &event);
+                HunkJob {
+                    index,
+                    hunk,
+                    workflows,
+                }
+            })
+            .collect();
+        if jobs.iter().all(|job| job.workflows.is_empty()) {
+            return;
+        }
+        self.stop_conflict_hunks();
+        let run = HunkRun {
+            read: id,
+            site: *site,
+            root,
+            file,
+            branch,
+            waiting: jobs
+                .front()
+                .map(|job| job.workflows.iter().cloned().collect())
+                .unwrap_or_default(),
+            hunks: jobs,
+            seq: transforms::Sequence::new(""),
+            asked: BTreeSet::new(),
+            run: None,
+        };
+        self.advance_conflict_hunks(run, events);
+    }
+
+    /// Starts the next workflow of the conflict hunks that is reviewed, or moves on: when every
+    /// workflow of a hunk has answered, its suggestion is sent when one was kept, and the next
+    /// hunk starts. The runs end with the last hunk (`WF3d`, D168).
+    fn advance_conflict_hunks(&mut self, mut run: HunkRun, events: &mut Vec<Event>) {
+        loop {
+            if let Some((name, hash)) = run.waiting.pop_front() {
+                match self.reviewed(&hash) {
+                    Ok(true) => {}
+                    // Asked once for the file, not once per hunk; the file is read again after the review.
+                    Ok(false) => {
+                        if run.asked.insert(name.clone()) {
+                            events.push(Event::WorkflowWantsReview {
+                                workflow: name,
+                                hash,
+                                trigger: "transform.conflict_hunk".to_owned(),
+                            });
+                        }
+                        continue;
+                    }
+                    Err(reason) => {
+                        let notice =
+                            format!("{name} did not run on transform.conflict_hunk: {reason}");
+                        run.seq = std::mem::take(&mut run.seq).skipped(notice);
+                        flush_notices(&mut run.seq, events);
+                        continue;
+                    }
+                }
+                let Some(job) = run.hunks.front() else {
+                    return;
+                };
+                let trigger = transforms::conflict_hunk(
+                    &run.file,
+                    job.index,
+                    &job.hunk,
+                    run.branch.clone(),
+                    &run.seq.current,
+                );
+                match self.start_event_run(run.read, &run.root, &name, &trigger) {
+                    Ok(script_run) => {
+                        run.run = Some((script_run, name));
+                        self.conflict_hunks = Some(run);
+                        return;
+                    }
+                    Err(reason) => {
+                        run.seq = std::mem::take(&mut run.seq)
+                            .skipped(format!("{name} failed: {reason}"));
+                        flush_notices(&mut run.seq, events);
+                    }
+                }
+                continue;
+            }
+            // Every workflow of the hunk in progress has answered.
+            let Some(job) = run.hunks.pop_front() else {
+                return;
+            };
+            if let Some(text) = run.seq.value() {
+                events.push(Event::HunkSuggested {
+                    read: run.read,
+                    path: run.file.path.clone(),
+                    index: job.index,
+                    text,
+                    workflow: run.seq.kept_by().unwrap_or_default().to_owned(),
+                });
+            }
+            flush_notices(&mut run.seq, events);
+            run.seq = transforms::Sequence::new("");
+            run.waiting = run
+                .hunks
+                .front()
+                .map(|job| job.workflows.iter().cloned().collect())
+                .unwrap_or_default();
+            if run.hunks.is_empty() {
+                return;
+            }
+        }
+    }
+
+    /// A script run ended (`WF3d`, D168). When it was a workflow of the conflict hunks in progress,
+    /// its answer goes into the hunk's suggestion and the sequence goes on. A run cancelled on its
+    /// own ends the suggestions of the file with no event. Other runs return nothing.
+    fn hunk_finished(
+        &mut self,
+        run: ScriptRunId,
+        status: RunStatus,
+        reason: Option<&str>,
+        value: Option<&serde_json::Value>,
+    ) -> Vec<Event> {
+        let owned = self
+            .conflict_hunks
+            .as_ref()
+            .and_then(|hunks| hunks.run.as_ref())
+            .is_some_and(|(script_run, _)| *script_run == run);
+        if !owned {
+            return Vec::new();
+        }
+        let Some(mut hunks) = self.conflict_hunks.take() else {
+            return Vec::new();
+        };
+        let Some((_, name)) = hunks.run.take() else {
+            return Vec::new();
+        };
+        if status == RunStatus::Cancelled {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        hunks.seq = std::mem::take(&mut hunks.seq).advance(&name, status, reason, value);
+        flush_notices(&mut hunks.seq, &mut events);
+        self.advance_conflict_hunks(hunks, &mut events);
+        events
+    }
+
+    /// Stops the conflict hunk runs in progress: the workflow running now is cancelled, and no
+    /// late answer of it is sent (D168(4)).
+    fn stop_conflict_hunks(&mut self) {
+        let Some(hunks) = self.conflict_hunks.take() else {
+            return;
+        };
+        if let (Some((run, _)), Some(runtime)) = (hunks.run.as_ref(), self.script_runtime()) {
+            runtime.cancel(*run);
+        }
+    }
+
+    /// A command that makes the conflict hunk runs in progress out of date stops them (D168(4)): a
+    /// read of any file (the newest read is the one that counts), a write or forget of the file
+    /// they read, opening another repository, and starting, finishing or cancelling a restack
+    /// resolution.
+    fn supersede_conflict_hunks(&mut self, kind: &CommandKind) {
+        let Some(hunks) = self.conflict_hunks.as_ref() else {
+            return;
+        };
+        let supersedes = match kind {
+            CommandKind::ReadConflict { .. }
+            | CommandKind::OpenRepo { .. }
+            | CommandKind::StartRestackResolution { .. }
+            | CommandKind::FinishRestackResolution
+            | CommandKind::CancelRestackResolution => true,
+            CommandKind::ResolveConflict { path, site, .. }
+            | CommandKind::ForgetRecordedResolution { path, site } => {
+                *path == hunks.file.path && *site == hunks.site
+            }
+            _ => false,
+        };
+        if supersedes {
+            self.stop_conflict_hunks();
+        }
     }
 
     /// The watcher saw refs move, after its quiet period (`WF3a`). The local branch tips are compared
@@ -1988,6 +2270,7 @@ impl Engine {
 
     /// Runs one command to a terminal state and returns the events, in order.
     pub fn handle(&mut self, id: OperationId, command: &Command) -> Vec<Event> {
+        self.supersede_conflict_hunks(&command.kind);
         let mut events = Vec::new();
         let mut op = Op {
             id,
@@ -2055,7 +2338,10 @@ impl Engine {
                 };
                 self.step_gates(gate, &mut events);
             }
-            Ok(found) => self.run_op(&mut op, found.as_ref(), &mut events),
+            Ok(found) => {
+                self.run_op(&mut op, found.as_ref(), &mut events);
+                self.start_conflict_hunks(id, command, &mut events);
+            }
         }
         events
     }
@@ -4801,6 +5087,22 @@ pub(crate) fn same_folder(open: &Path, path: &str) -> bool {
 /// A notice of the Workflows page. It is not about a run, so it carries no run id.
 fn workflow_notice(text: String) -> Event {
     Event::WorkflowNotice { run: 0, text }
+}
+
+/// The conflicts of a file's text, in file order (`WF3d`, D168). A text that does not parse has none.
+fn conflict_hunks_of(text: &str) -> Vec<Hunk> {
+    conflict::parse(text).map_or_else(
+        |_| Vec::new(),
+        |doc| {
+            doc.segments
+                .into_iter()
+                .filter_map(|segment| match segment {
+                    Segment::Conflict(hunk) => Some(hunk),
+                    Segment::Text(_) => None,
+                })
+                .collect()
+        },
+    )
 }
 
 /// Moves the notices of a transform sequence into the events, in order (`WF3d`).

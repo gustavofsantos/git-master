@@ -4,10 +4,12 @@
 //! document. A free edit re-parses it, so the counts always follow the text in
 //! the pane, and a text that does not parse is kept as typed until it does.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use gm_core::conflict::{self, ConflictDoc, Hunk, Resolution, Segment};
 use gm_schema::{
     ConflictFileRead, ConflictOperation, ConflictSide, ConflictSite, Event, HunkOrigin,
-    RecordedResolution, RestackResolution,
+    OperationId, RecordedResolution, RestackResolution,
 };
 
 /// The note when a choice is made while the Result pane cannot be read.
@@ -30,6 +32,10 @@ const OPENING: &str = "Opening the conflicted file.";
 
 /// How many characters of the commit id the restack header shows.
 const SHORT: usize = 7;
+
+/// A suggestion longer than this many lines or characters is shown in part, behind a show toggle (D168).
+const PREVIEW_LINES: usize = 3;
+const PREVIEW_CHARS: usize = 160;
 
 /// Which side of a conflict a pane shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +65,28 @@ pub(crate) struct HunkView {
     /// Who made the choice: "human", "recorded resolution" or "script". Empty while unresolved.
     pub origin_label: &'static str,
     pub resolved: bool,
+    /// The workflow's suggestion for this hunk, when one arrived for the read (D168).
+    pub suggestion: Option<SuggestionView>,
+}
+
+/// A workflow's suggested text for one hunk, as its card shows it (D168).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SuggestionView {
+    /// The option's label: "Script suggestion · <workflow>".
+    pub label: String,
+    /// The text the card shows: all of it, or its preview while it is long and not shown.
+    pub text: String,
+    /// Whether the text is long, so that the card offers Show or Hide.
+    pub long: bool,
+    /// Whether the long text is shown in full.
+    pub expanded: bool,
+}
+
+/// A suggestion the engine sent for one hunk: its text and the workflow that kept it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Suggestion {
+    workflow: String,
+    text: String,
 }
 
 /// The document in the Result pane.
@@ -97,6 +125,62 @@ pub(crate) struct ResolverState {
     from_recorded: bool,
     /// Which worktree the file is in: the open checkout, or the restack's resolution worktree (D154).
     site: ConflictSite,
+    /// The read that opened the resolver. Suggestions of any other read are ignored (D168).
+    read: Option<OperationId>,
+    /// The workflows' suggestions by the hunk's index in the read, for this read (D168). They stay
+    /// until the file closes.
+    suggestions: BTreeMap<usize, Suggestion>,
+    /// The hunks whose long suggestion is shown in full, by the hunk's index in the read.
+    expanded: BTreeSet<usize>,
+    /// The index in the read of each conflict of the Result pane, in order. A free edit re-parses
+    /// the text, so the positions move; `None` for a conflict whose lines a free edit changed.
+    read_index: Vec<Option<usize>>,
+}
+
+/// The lines of one conflict that identify it across a free edit: left, base and right.
+type Sides = (String, Option<String>, String);
+
+fn sides(hunk: &Hunk) -> Sides {
+    (hunk.left.clone(), hunk.base.clone(), hunk.right.clone())
+}
+
+/// Matches the conflicts of a re-parsed Result pane to the conflicts it had before (`old`, each
+/// with its index in the read), so a suggestion stays on its hunk (D168). Conflicts that keep
+/// their lines match in order; a conflict whose lines changed takes the one old conflict left
+/// between its matched neighbours, and none when there is not exactly one.
+fn realign(old: &[(Sides, Option<usize>)], new: &[Sides]) -> Vec<Option<usize>> {
+    let mut matched: Vec<Option<usize>> = vec![None; new.len()];
+    let mut cursor = 0;
+    for (n, key) in new.iter().enumerate() {
+        if let Some(offset) = old[cursor..].iter().position(|(sides, _)| sides == key) {
+            matched[n] = Some(cursor + offset);
+            cursor += offset + 1;
+        }
+    }
+    for n in 0..new.len() {
+        if matched[n].is_some() {
+            continue;
+        }
+        let lower = matched[..n]
+            .iter()
+            .rev()
+            .find_map(|found| *found)
+            .map_or(0, |found| found + 1);
+        let upper = matched[n + 1..]
+            .iter()
+            .find_map(|found| *found)
+            .unwrap_or(old.len());
+        let free: Vec<usize> = (lower..upper)
+            .filter(|j| !matched.contains(&Some(*j)))
+            .collect();
+        if let [only] = free[..] {
+            matched[n] = Some(only);
+        }
+    }
+    matched
+        .into_iter()
+        .map(|found| found.and_then(|j| old[j].1))
+        .collect()
 }
 
 /// Git's recorded resolution of the file, as the resolver holds it.
@@ -126,12 +210,14 @@ impl ResolverState {
     /// kept as an `Unreadable` document, never a panic.
     #[must_use]
     pub(crate) fn new(read: &ConflictFileRead) -> Self {
+        let doc = parse_doc(read.text.clone());
+        let read_index = (0..conflict_total(&doc)).map(Some).collect();
         Self {
             path: read.path.clone(),
             operation: read.operation,
             left: read.left.clone(),
             right: read.right.clone(),
-            doc: parse_doc(read.text.clone()),
+            doc,
             show_base: false,
             selected: 0,
             applied_note: None,
@@ -143,7 +229,18 @@ impl ResolverState {
             origins: Vec::new(),
             from_recorded: false,
             site: ConflictSite::WorkingCopy,
+            read: None,
+            suggestions: BTreeMap::new(),
+            expanded: BTreeSet::new(),
+            read_index,
         }
+    }
+
+    /// The same resolver, for the read `read` that opened it. Only this read's suggestions are shown (D168).
+    #[must_use]
+    pub(crate) fn with_read(mut self, read: OperationId) -> Self {
+        self.read = Some(read);
+        self
     }
 
     /// The same resolver, for the worktree `site` names: a restack's conflict is read,
@@ -279,9 +376,35 @@ impl ResolverState {
     }
 
     /// Takes the choice back from the conflict at `index`, so it shows its
-    /// markers again.
+    /// markers again. The workflow's suggestion for it stays on the card.
     pub(crate) fn clear(&mut self, index: usize) {
         self.set_resolution(index, None);
+    }
+
+    /// Chooses the workflow's suggestion for the conflict at `index`: its text becomes the hunk's
+    /// resolution, with the origin `script` (D168). Does nothing when the card has no suggestion.
+    pub(crate) fn choose_suggestion(&mut self, index: usize) {
+        let Some(found) = self
+            .read_index_at(index)
+            .and_then(|read| self.suggestions.get(&read))
+        else {
+            return;
+        };
+        let text = found.text.clone();
+        self.set_resolution(index, Some(Resolution::Custom(text)));
+        if index < self.conflict_count() {
+            self.set_origin(index, Some(HunkOrigin::Script));
+        }
+    }
+
+    /// Shows the whole of a long suggestion, or shows its preview again.
+    pub(crate) fn toggle_suggestion(&mut self, index: usize) {
+        let Some(read) = self.read_index_at(index) else {
+            return;
+        };
+        if !self.expanded.remove(&read) {
+            self.expanded.insert(read);
+        }
     }
 
     fn set_resolution(&mut self, index: usize, resolution: Option<Resolution>) {
@@ -306,7 +429,7 @@ impl ResolverState {
             return;
         };
         let text = recorded.text.clone();
-        self.doc = parse_doc(text);
+        self.replace_doc(parse_doc(text));
         self.origins = vec![Some(HunkOrigin::Rerere); self.conflict_count()];
         self.from_recorded = true;
         self.clamp_selected();
@@ -406,8 +529,36 @@ impl ResolverState {
             self.origins.clear();
             self.from_recorded = false;
         }
-        self.doc = parse_doc(text);
+        self.replace_doc(parse_doc(text));
         self.clamp_selected();
+    }
+
+    /// Replaces the Result pane's document, keeping each conflict's place in the read (D168).
+    fn replace_doc(&mut self, doc: Doc) {
+        let old: Vec<(Sides, Option<usize>)> = self
+            .hunks()
+            .into_iter()
+            .enumerate()
+            .map(|(index, hunk)| (sides(hunk), self.read_index_at(index)))
+            .collect();
+        let new: Vec<Sides> = match &doc {
+            Doc::Parsed(parsed) => parsed
+                .segments
+                .iter()
+                .filter_map(|segment| match segment {
+                    Segment::Conflict(hunk) => Some(sides(hunk)),
+                    Segment::Text(_) => None,
+                })
+                .collect(),
+            Doc::Unreadable { .. } => Vec::new(),
+        };
+        self.read_index = realign(&old, &new);
+        self.doc = doc;
+    }
+
+    /// The index in the read of the conflict at `index` of the Result pane, when it still has one.
+    fn read_index_at(&self, index: usize) -> Option<usize> {
+        self.read_index.get(index).copied().flatten()
     }
 
     /// Who resolved each conflict, in file order: one entry per conflict. A file
@@ -483,9 +634,16 @@ impl ResolverState {
                 } else {
                     None
                 },
-                resolution_label: resolution_label(hunk.resolution.as_ref()),
+                resolution_label: if hunk.resolution.is_some()
+                    && self.origin_at(index) == Some(HunkOrigin::Script)
+                {
+                    SUGGESTED
+                } else {
+                    resolution_label(hunk.resolution.as_ref())
+                },
                 origin_label: origin_label(hunk.resolution.is_some(), self.origin_at(index)),
                 resolved: hunk.resolution.is_some(),
+                suggestion: self.suggestion_view(index),
             })
             .collect()
     }
@@ -503,8 +661,43 @@ impl ResolverState {
                 self.applied_note = Some(FORGOTTEN.to_owned());
                 true
             }
+            Event::HunkSuggested {
+                read,
+                path,
+                index,
+                text,
+                workflow,
+            } if self.read == Some(*read) && *path == self.path => {
+                self.suggestions.insert(
+                    *index,
+                    Suggestion {
+                        workflow: workflow.clone(),
+                        text: text.clone(),
+                    },
+                );
+                true
+            }
             _ => false,
         }
+    }
+
+    /// The suggestion card of the hunk `index`, when a workflow suggested one for this read.
+    fn suggestion_view(&self, index: usize) -> Option<SuggestionView> {
+        let read = self.read_index_at(index)?;
+        let found = self.suggestions.get(&read)?;
+        let long = found.text.lines().count() > PREVIEW_LINES
+            || found.text.chars().count() > PREVIEW_CHARS;
+        let expanded = self.expanded.contains(&read);
+        Some(SuggestionView {
+            label: format!("Script suggestion · {}", found.workflow),
+            text: if long && !expanded {
+                preview(&found.text)
+            } else {
+                found.text.clone()
+            },
+            long,
+            expanded,
+        })
     }
 
     fn side(&self, side: Side) -> &ConflictSide {
@@ -670,6 +863,29 @@ fn origin_label(resolved: bool, origin: Option<HunkOrigin>) -> &'static str {
         HunkOrigin::Script => "script",
     }
 }
+
+/// How many conflicts a document holds.
+fn conflict_total(doc: &Doc) -> usize {
+    match doc {
+        Doc::Parsed(parsed) => parsed.conflict_count(),
+        Doc::Unreadable { .. } => 0,
+    }
+}
+
+/// The first lines of a long suggestion, cut to the preview length, with an ellipsis when cut.
+fn preview(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().take(PREVIEW_LINES).collect();
+    let joined = lines.join("\n");
+    if joined.chars().count() <= PREVIEW_CHARS {
+        return joined;
+    }
+    let cut: String = joined.chars().take(PREVIEW_CHARS).collect();
+    format!("{cut}…")
+}
+
+/// The label of a hunk's choice, as the panes and the counter name it. A suggestion that was
+/// chosen reads "Suggested" in the heading, so the text is not taken for the person's own.
+const SUGGESTED: &str = "Suggested";
 
 /// The label of a hunk's choice, as the panes and the counter name it.
 fn resolution_label(resolution: Option<&Resolution>) -> &'static str {
@@ -1175,6 +1391,211 @@ mod tests {
             Some("Recorded resolution forgotten. The conflict is open again.")
         );
         assert_eq!(reread.conflict_count(), 2);
+    }
+
+    fn suggested(read: u64, index: usize, text: &str) -> Event {
+        Event::HunkSuggested {
+            read: OperationId(read),
+            path: "src/lib.rs".into(),
+            index,
+            text: text.into(),
+            workflow: "llm-resolve".into(),
+        }
+    }
+
+    #[test]
+    fn a_suggestion_is_offered_on_its_hunk_only() {
+        let mut state = ResolverState::new(&read(THREE)).with_read(OperationId(7));
+        assert!(state.on_event(&suggested(7, 1, "merged b\n")));
+        let views = state.hunk_views();
+        assert!(views[0].suggestion.is_none());
+        let offered = views[1].suggestion.as_ref().expect("offered on hunk 2");
+        assert_eq!(offered.label, "Script suggestion · llm-resolve");
+        assert_eq!(offered.text, "merged b\n");
+        assert!(!offered.long);
+        assert!(views[2].suggestion.is_none());
+        assert!(!views[1].resolved, "offered is not chosen");
+    }
+
+    #[test]
+    fn choosing_a_suggestion_resolves_the_hunk_with_origin_script() {
+        let mut state = ResolverState::new(&read(THREE)).with_read(OperationId(7));
+        state.on_event(&suggested(7, 1, "merged b\n"));
+        state.choose(0, Resolution::Left);
+        state.choose_suggestion(1);
+        let views = state.hunk_views();
+        assert!(views[1].resolved);
+        assert_eq!(views[1].origin_label, "script");
+        assert_eq!(views[1].resolution_label, "Suggested");
+        assert_eq!(
+            state.origins(),
+            vec![HunkOrigin::Human, HunkOrigin::Script, HunkOrigin::Human]
+        );
+        assert!(state.result_text().contains("merged b\n"));
+        assert!(!state.result_text().contains("b-left"));
+    }
+
+    #[test]
+    fn apply_sends_the_script_origin_with_the_suggested_text() {
+        let mut state = ResolverState::new(&read(THREE)).with_read(OperationId(7));
+        state.on_event(&suggested(7, 1, "merged b\n"));
+        state.choose(0, Resolution::Left);
+        state.choose(2, Resolution::Right);
+        state.choose_suggestion(1);
+        let (path, text, origins) = state.apply().expect("every conflict is resolved");
+        assert_eq!(path, "src/lib.rs");
+        assert!(text.contains("merged b\n"));
+        assert_eq!(
+            origins,
+            vec![HunkOrigin::Human, HunkOrigin::Script, HunkOrigin::Human]
+        );
+    }
+
+    #[test]
+    fn clear_removes_the_choice_but_keeps_the_option() {
+        let mut state = ResolverState::new(&read(THREE)).with_read(OperationId(7));
+        state.on_event(&suggested(7, 1, "merged b\n"));
+        state.choose_suggestion(1);
+        state.clear(1);
+        let views = state.hunk_views();
+        assert!(!views[1].resolved);
+        assert_eq!(views[1].origin_label, "");
+        assert!(views[1].suggestion.is_some(), "the option stays");
+        state.choose_suggestion(1);
+        assert_eq!(state.hunk_views()[1].origin_label, "script");
+    }
+
+    #[test]
+    fn another_option_takes_the_suggestion_back_to_human() {
+        let mut state = ResolverState::new(&read(THREE)).with_read(OperationId(7));
+        state.on_event(&suggested(7, 1, "merged b\n"));
+        state.choose_suggestion(1);
+        state.choose(1, Resolution::Left);
+        let views = state.hunk_views();
+        assert_eq!(views[1].origin_label, "human");
+        assert_eq!(views[1].resolution_label, "Left");
+        assert!(views[1].suggestion.is_some());
+    }
+
+    #[test]
+    fn editing_the_result_keeps_the_suggestion_on_its_hunk() {
+        let mut state = ResolverState::new(&read(THREE)).with_read(OperationId(7));
+        state.on_event(&suggested(7, 2, "merged c\n"));
+        state.choose(0, Resolution::Left);
+        state.set_result_text(format!("{}extra\n", state.result_text()));
+        let views = state.hunk_views();
+        assert_eq!(views.len(), 2, "the resolved hunk is text now");
+        assert!(views[0].suggestion.is_none());
+        let offered = views[1].suggestion.as_ref().expect("still on its hunk");
+        assert_eq!(offered.text, "merged c\n");
+        state.choose_suggestion(1);
+        assert!(state.result_text().contains("merged c\n"));
+        assert_eq!(state.hunk_views()[1].origin_label, "script");
+    }
+
+    #[test]
+    fn an_edit_inside_a_conflict_keeps_its_suggestion_when_its_neighbours_are_known() {
+        let mut state = ResolverState::new(&read(THREE)).with_read(OperationId(7));
+        state.on_event(&suggested(7, 1, "merged b\n"));
+        state.set_result_text(state.result_text().replace("b-left", "b-edited"));
+        let views = state.hunk_views();
+        assert_eq!(views.len(), 3);
+        assert_eq!(views[1].left, "b-edited\n");
+        assert_eq!(
+            views[1].suggestion.as_ref().map(|s| s.text.as_str()),
+            Some("merged b\n")
+        );
+        assert!(views[0].suggestion.is_none());
+    }
+
+    #[test]
+    fn realign_keeps_the_read_index_of_each_conflict_that_is_still_there() {
+        let key = |text: &str| (text.to_owned(), None, text.to_owned());
+        let old = vec![
+            (key("a"), Some(0)),
+            (key("b"), Some(1)),
+            (key("c"), Some(2)),
+        ];
+        assert_eq!(
+            realign(&old, &[key("a"), key("b"), key("c")]),
+            vec![Some(0), Some(1), Some(2)]
+        );
+        assert_eq!(realign(&old, &[key("b"), key("c")]), vec![Some(1), Some(2)]);
+        assert_eq!(
+            realign(&old, &[key("a"), key("b2"), key("c")]),
+            vec![Some(0), Some(1), Some(2)],
+            "an edited conflict between two known ones is the one left between them"
+        );
+        assert_eq!(
+            realign(&old, &[key("x"), key("y")]),
+            vec![None, None],
+            "conflicts with no known neighbour have no index"
+        );
+        assert_eq!(realign(&old, &[]), Vec::<Option<usize>>::new());
+    }
+
+    #[test]
+    fn a_suggestion_for_another_read_is_ignored() {
+        let mut state = ResolverState::new(&read(THREE)).with_read(OperationId(7));
+        assert!(!state.on_event(&suggested(8, 1, "stale\n")));
+        assert!(
+            state
+                .hunk_views()
+                .iter()
+                .all(|view| view.suggestion.is_none())
+        );
+        let mut unread = ResolverState::new(&read(THREE));
+        assert!(!unread.on_event(&suggested(7, 1, "stale\n")));
+        assert!(
+            unread
+                .hunk_views()
+                .iter()
+                .all(|view| view.suggestion.is_none())
+        );
+    }
+
+    #[test]
+    fn a_suggestion_for_another_file_is_ignored() {
+        let mut state = ResolverState::new(&read(THREE)).with_read(OperationId(7));
+        let other = Event::HunkSuggested {
+            read: OperationId(7),
+            path: "other.rs".into(),
+            index: 0,
+            text: "x\n".into(),
+            workflow: "llm-resolve".into(),
+        };
+        assert!(!state.on_event(&other));
+    }
+
+    #[test]
+    fn a_long_suggestion_is_previewed_until_it_is_shown() {
+        let long = "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\n".to_owned();
+        let mut state = ResolverState::new(&read(THREE)).with_read(OperationId(7));
+        state.on_event(&suggested(7, 0, &long));
+        let shown = state.hunk_views()[0].suggestion.clone().expect("offered");
+        assert!(shown.long);
+        assert!(!shown.expanded);
+        assert_eq!(shown.text, "line 0\nline 1\nline 2");
+        state.toggle_suggestion(0);
+        let full = state.hunk_views()[0].suggestion.clone().expect("offered");
+        assert!(full.expanded);
+        assert_eq!(full.text, long);
+        state.toggle_suggestion(0);
+        assert!(
+            !state.hunk_views()[0]
+                .suggestion
+                .clone()
+                .expect("offered")
+                .expanded
+        );
+    }
+
+    #[test]
+    fn a_suggestion_of_a_read_that_has_no_conflict_does_nothing_on_choice() {
+        let mut state = ResolverState::new(&read("plain\n")).with_read(OperationId(7));
+        state.choose_suggestion(0);
+        assert!(state.hunk_views().is_empty());
+        assert!(state.origins().is_empty());
     }
 
     fn restack(paths: &[&str]) -> RestackResolution {

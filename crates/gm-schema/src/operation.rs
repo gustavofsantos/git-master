@@ -1225,6 +1225,17 @@ pub enum Event {
         id: OperationId,
         path: String,
     },
+    /// A workflow suggested the text of conflict hunk `index` (from 0) of the file `path`, for the
+    /// read `read` (`WF3d`, D168). The suggestion is never applied by itself: the person chooses it.
+    /// `workflow` is the last workflow whose text was kept. Sent only for a non-empty answer, and
+    /// never for a read that a newer read, a write of the file or a cancel has superseded.
+    HunkSuggested {
+        read: OperationId,
+        path: String,
+        index: usize,
+        text: String,
+        workflow: String,
+    },
     /// Answers `ForgetRecordedResolution`: the conflict markers are back in the
     /// working tree file.
     RecordedResolutionForgotten {

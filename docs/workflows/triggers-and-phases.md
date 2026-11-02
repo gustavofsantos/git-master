@@ -68,8 +68,6 @@ An applying action is an action at the `apply` level. See [Approvals and securit
 
 ## Phases
 
-> **Planned.** The `transform.conflict_hunk` phase is not available yet.
-
 The phases apply to the operations listed in the table of operations and fields, further down this page. Each phase is a workflow whose trigger is the phase name, such as `before.restack`.
 
 ### Before: gates
@@ -131,14 +129,12 @@ An `after.<operation>` workflow runs after the operation finishes. It returns no
 
 ## Operations and fields
 
-> **Planned.** `transform.conflict_hunk` is not available yet; the other phases in this table are.
-
 | Operation | Phases | Field for `transform` |
 |---|---|---|
 | `commit` | `before.commit`, `after.commit` | `transform.commit_message`: the message in the composer |
 | `restack` | `before.restack`, `after.restack` | None |
 | `branch_create` | `before.branch_create`, `after.branch_create` | `transform.branch_name`: the name of the new branch |
-| `conflict_resolve` | `before.conflict_resolve`, `after.conflict_resolve` | `transform.conflict_hunk`: a resolution suggestion for one conflict hunk. `input.trigger` has `path`, `index` (the hunk, from 0), `left`, `right`, `base` (the texts of the hunk), `left_label`, `right_label` and `current` (the previous workflow's suggestion, or empty). Return the suggested text of the hunk, or `nil`. |
+| `conflict_resolve` | `before.conflict_resolve`, `after.conflict_resolve` | `transform.conflict_hunk`: a resolution suggestion for one conflict hunk. `input.trigger` has `path`, `index` (the hunk, from 0), `left`, `right`, `base` (the texts of the hunk, `nil` when the conflict has no base), `left_label`, `right_label` and `current` (the previous workflow's suggestion, or empty). Return the suggested text of the hunk, or `nil`. |
 
 See also [Branches](../guide/branches.md), [Stacks](../guide/stacks.md) and [Conflicts](../guide/conflicts.md).
 

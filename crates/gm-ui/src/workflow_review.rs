@@ -108,13 +108,18 @@ pub(crate) fn grant_offered(request: &ReviewRequest) -> bool {
 }
 
 /// The line of a notice for an event run that waits for its review. A transform is not run
-/// retroactively, so its notice asks the person to ask again.
+/// retroactively, so its notice asks the person to ask again; a conflict hunk's runs start when
+/// the file is read, so its notice asks the person to reopen the file (D168(4)).
 #[must_use]
 pub(crate) fn wanted_text(name: &str, trigger: &str) -> String {
-    if trigger.starts_with("transform.") {
-        format!("{name} wants to run on {trigger}: review it, then ask again")
-    } else {
-        format!("{name} wants to run on {trigger}")
+    match trigger {
+        "transform.conflict_hunk" => {
+            format!("{name} wants to run on {trigger}: review it, then reopen the file")
+        }
+        _ if trigger.starts_with("transform.") => {
+            format!("{name} wants to run on {trigger}: review it, then ask again")
+        }
+        _ => format!("{name} wants to run on {trigger}"),
     }
 }
 
@@ -820,6 +825,10 @@ mod tests {
         assert_eq!(
             wanted_text("llm", "transform.commit_message"),
             "llm wants to run on transform.commit_message: review it, then ask again"
+        );
+        assert_eq!(
+            wanted_text("llm-resolve", "transform.conflict_hunk"),
+            "llm-resolve wants to run on transform.conflict_hunk: review it, then reopen the file"
         );
     }
 

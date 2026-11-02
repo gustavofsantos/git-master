@@ -12,7 +12,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::conflict_resolver::{HunkView, ResolverState, RestackConflicts, Side};
+use crate::conflict_resolver::{HunkView, ResolverState, RestackConflicts, Side, SuggestionView};
 use crate::gate_wait;
 use crate::theme;
 use crate::view::{Screen, StatusView};
@@ -70,6 +70,24 @@ impl StatusView {
             conflict.choose(index, resolution);
         }
         self.sync_conflict_result(cx);
+        cx.notify();
+    }
+
+    /// Chooses the workflow's suggestion for the conflict `index` (D168).
+    pub(crate) fn choose_suggestion(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(conflict) = self.model.conflict.as_mut() {
+            conflict.select(index);
+            conflict.choose_suggestion(index);
+        }
+        self.sync_conflict_result(cx);
+        cx.notify();
+    }
+
+    /// Shows the whole of the long suggestion of the conflict `index`, or its preview again.
+    pub(crate) fn toggle_suggestion(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(conflict) = self.model.conflict.as_mut() {
+            conflict.toggle_suggestion(index);
+        }
         cx.notify();
     }
 
@@ -615,17 +633,19 @@ fn hunk_card(
     cx: &Context<StatusView>,
 ) -> Stateful<Div> {
     let index = hunk.index;
-    let [left_id, right_id, both_id, clear_id] = side_ids(side);
+    let [left_id, right_id, both_id, clear_id, suggest_id, show_id] = side_ids(side);
     let lines = match side {
         Side::Left => hunk.left.as_str(),
         Side::Right => hunk.right.as_str(),
     };
+    // The buttons wrap under the heading when the card is narrow, so the suggestion's label is never cut.
     let mut buttons = div()
         .flex()
         .flex_row()
+        .flex_wrap()
         .items_center()
         .gap_1()
-        .flex_none()
+        .min_w(px(0.))
         .child(hunk_button(
             (left_id, index),
             "Left",
@@ -644,6 +664,14 @@ fn hunk_card(
             cx,
             move |this, cx| this.choose_conflict(index, Resolution::Both, cx),
         ));
+    if let Some(suggestion) = &hunk.suggestion {
+        buttons = buttons.child(hunk_button(
+            (suggest_id, index),
+            suggestion.label.clone(),
+            cx,
+            move |this, cx| this.choose_suggestion(index, cx),
+        ));
+    }
     if hunk.resolved {
         buttons = buttons.child(hunk_button(
             (clear_id, index),
@@ -672,6 +700,7 @@ fn hunk_card(
             div()
                 .flex()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
                 .justify_between()
                 .gap_2()
@@ -684,6 +713,11 @@ fn hunk_card(
                 )
                 .child(buttons),
         )
+        .children(
+            hunk.suggestion
+                .as_ref()
+                .map(|suggestion| suggestion_text(suggestion, (show_id, index), cx)),
+        )
         .children(hunk.base.as_deref().map(|base| {
             div()
                 .pb_1()
@@ -691,6 +725,27 @@ fn hunk_card(
                 .child(code_lines(base))
         }))
         .child(code_lines(lines))
+}
+
+/// The text a workflow suggested for a hunk, under the card's header, with Show or Hide when it is
+/// long (D168). The text is for reading: it is applied only by the Script suggestion option.
+fn suggestion_text(
+    suggestion: &SuggestionView,
+    toggle: (&'static str, usize),
+    cx: &Context<StatusView>,
+) -> Div {
+    let toggle_label = if suggestion.expanded { "Hide" } else { "Show" };
+    div()
+        .pb_1()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(code_lines(&suggestion.text))
+        .children(suggestion.long.then(|| {
+            hunk_button(toggle, toggle_label, cx, move |this, cx| {
+                this.toggle_suggestion(toggle.1, cx);
+            })
+        }))
 }
 
 /// The heading of a conflict's card: its number, its choice and who made it, for
@@ -741,21 +796,25 @@ fn recorded_banner_row(text: &'static str, cx: &Context<StatusView>) -> Div {
         )
 }
 
-/// The element ids of one side's buttons, Left, Right, Both and Clear. Ids must be
-/// unique among the siblings, and the two panes hold the same conflict indexes.
-fn side_ids(side: Side) -> [&'static str; 4] {
+/// The element ids of one side's buttons: Left, Right, Both, Clear, the Script suggestion and its
+/// Show toggle. Ids must be unique among the siblings, and the two panes hold the same conflict indexes.
+fn side_ids(side: Side) -> [&'static str; 6] {
     match side {
         Side::Left => [
             "conflict-left-pick-left",
             "conflict-left-pick-right",
             "conflict-left-pick-both",
             "conflict-left-clear",
+            "conflict-left-pick-suggestion",
+            "conflict-left-suggestion-show",
         ],
         Side::Right => [
             "conflict-right-pick-left",
             "conflict-right-pick-right",
             "conflict-right-pick-both",
             "conflict-right-clear",
+            "conflict-right-pick-suggestion",
+            "conflict-right-suggestion-show",
         ],
     }
 }
@@ -779,7 +838,7 @@ fn code_lines(text: &str) -> Div {
 /// A header button. It is never disabled: each click runs its handler.
 fn header_button(
     id: &'static str,
-    label: &'static str,
+    label: impl Into<String>,
     cx: &Context<StatusView>,
     on_click: impl Fn(&mut StatusView, &mut Context<StatusView>) + 'static,
 ) -> Stateful<Div> {
@@ -789,7 +848,7 @@ fn header_button(
 /// A button on one hunk card.
 fn hunk_button(
     id: (&'static str, usize),
-    label: &'static str,
+    label: impl Into<String>,
     cx: &Context<StatusView>,
     on_click: impl Fn(&mut StatusView, &mut Context<StatusView>) + 'static,
 ) -> Stateful<Div> {
@@ -798,7 +857,7 @@ fn hunk_button(
 
 fn button(
     id: ElementId,
-    label: &'static str,
+    label: impl Into<String>,
     cx: &Context<StatusView>,
     on_click: impl Fn(&mut StatusView, &mut Context<StatusView>) + 'static,
 ) -> Stateful<Div> {
@@ -815,7 +874,7 @@ fn button(
         .text_xs()
         .text_color(theme::text())
         .cursor_pointer()
-        .child(label)
+        .child(label.into())
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| on_click(this, cx)),
