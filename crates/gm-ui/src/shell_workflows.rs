@@ -30,10 +30,10 @@ use crate::view::{Screen, StatusView};
 use crate::workflow_editor;
 use crate::workflow_keys;
 use crate::workflows_page::{
-    Preview, ReviewLine, RunControls, SaveState, StepRecord, Tab, context_blocks, context_key,
-    diagnostic_text, duration_label, expand_key, input_text, output_text, pretty_json, preview,
-    review_line, review_text, run_controls, run_duration, status_label, step_duration, step_rows,
-    step_summary,
+    Preview, ReviewLine, RunControls, SaveState, StepRecord, SwitchClick, Tab, context_blocks,
+    context_key, copy_request, diagnostic_text, duration_label, expand_key, input_text,
+    output_text, pretty_json, preview, review_line, review_text, row_title, run_controls,
+    run_duration, status_label, step_duration, step_rows, step_summary, switch_click, switch_text,
 };
 
 /// The width of the workflow list on the left.
@@ -320,15 +320,10 @@ impl StatusView {
         let listed = self.model.workflows.listed.as_deref();
         let selected = self.model.workflows_page.path();
         let dirty = self.model.workflows_page.dirty();
-        let rows: Vec<Stateful<Div>> = listed
-            .unwrap_or(&[])
-            .iter()
-            .enumerate()
-            .map(|(index, info)| {
-                let is_selected = selected == Some(info.path.as_str());
-                workflow_row(index, info, is_selected && dirty, is_selected, cx)
-            })
-            .collect();
+        let all = listed.unwrap_or(&[]);
+        // Your workflows first, then the built-in ones under their own heading (`WF4b`).
+        let rows = workflow_rows(all, false, selected, dirty, cx);
+        let built_in = workflow_rows(all, true, selected, dirty, cx);
         let empty = match listed {
             None => "Reading workflows…",
             Some([]) => "No workflows yet.",
@@ -398,6 +393,8 @@ impl StatusView {
                             .then(|| div().px_2().py_1().text_color(theme::muted()).child(empty)),
                     )
                     .children(rows)
+                    .children((!built_in.is_empty()).then(|| section_label("Built-in")))
+                    .children(built_in)
                     .child(
                         div()
                             .mt_3()
@@ -447,10 +444,17 @@ impl StatusView {
     fn workflow_header(&self, name: &str, cx: &Context<Self>) -> Div {
         let page = &self.model.workflows_page;
         let path = page.path().unwrap_or_default();
+        let builtin = page.is_builtin();
+        let info = self.selected_workflow_info();
+        let shown = info.map_or_else(|| name.to_owned(), |info| row_title(info).to_owned());
+        let location = if builtin {
+            "Built into GitMaster: read only".to_owned()
+        } else {
+            path.to_owned()
+        };
         let run_reason = Action::RunWorkflow
             .enabled(&Args::Workflow(name.to_owned()), &self.action_context(""))
             .err();
-        let run_name = name.to_owned();
         let dirty_note = page.dirty().then_some("Unsaved changes");
         div()
             .px_4()
@@ -471,11 +475,7 @@ impl StatusView {
                         div()
                             .flex_1()
                             .min_w(px(0.))
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(name.to_owned()),
-                            )
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(shown))
                             .child(
                                 div()
                                     .font_family(theme::code_font())
@@ -484,58 +484,89 @@ impl StatusView {
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
-                                    .child(path.to_owned()),
+                                    .child(location),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .children(dirty_note.map(|note| {
-                                div().text_xs().text_color(theme::warn_fg()).child(note)
-                            }))
-                            .child(action_button(
-                                "workflow-run",
-                                "Run",
-                                Action::RunWorkflow,
-                                Args::Workflow(run_name),
-                                run_reason.is_some(),
-                                cx,
-                            ))
-                            .child(self.dry_run_button(cx))
-                            .child(action_button(
-                                "workflow-save",
-                                "Save",
-                                Action::SaveWorkflow,
-                                Args::None,
-                                false,
-                                cx,
-                            ))
-                            .child(action_button(
-                                "workflow-revert",
-                                "Revert",
-                                Action::RevertWorkflow,
-                                Args::None,
-                                false,
-                                cx,
-                            ))
-                            .child(action_button(
-                                "workflow-delete",
-                                "Delete…",
-                                Action::DeleteWorkflow,
-                                Args::None,
-                                false,
-                                cx,
-                            )),
-                    ),
+                    .child(self.header_actions(
+                        name,
+                        builtin,
+                        dirty_note,
+                        run_reason.is_some(),
+                        cx,
+                    )),
             )
             .children(run_reason.map(|reason| {
                 div()
                     .text_xs()
                     .text_color(theme::muted())
                     .child(format!("Run is off: {reason}"))
+            }))
+    }
+
+    /// The buttons of the header: Run, Dry Run and, for a file the person wrote, Save, Revert and
+    /// Delete; for a built-in one, Copy to Edit (`WF4b`). `run_off` says Run is refused.
+    fn header_actions(
+        &self,
+        name: &str,
+        builtin: bool,
+        dirty_note: Option<&'static str>,
+        run_off: bool,
+        cx: &Context<Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .children(
+                dirty_note.map(|note| div().text_xs().text_color(theme::warn_fg()).child(note)),
+            )
+            .child(action_button(
+                "workflow-run",
+                "Run",
+                Action::RunWorkflow,
+                Args::Workflow(name.to_owned()),
+                run_off,
+                cx,
+            ))
+            .child(self.dry_run_button(cx))
+            .children((!builtin).then(|| {
+                action_button(
+                    "workflow-save",
+                    "Save",
+                    Action::SaveWorkflow,
+                    Args::None,
+                    false,
+                    cx,
+                )
+            }))
+            .children((!builtin).then(|| {
+                action_button(
+                    "workflow-revert",
+                    "Revert",
+                    Action::RevertWorkflow,
+                    Args::None,
+                    false,
+                    cx,
+                )
+            }))
+            .children((!builtin).then(|| {
+                action_button(
+                    "workflow-delete",
+                    "Delete…",
+                    Action::DeleteWorkflow,
+                    Args::None,
+                    false,
+                    cx,
+                )
+            }))
+            .children(builtin.then(|| {
+                band_button("workflow-copy", "Copy to Edit", cx, |this, _, cx| {
+                    let kind = this.selected_workflow_info().and_then(copy_request);
+                    if let Some(kind) = kind {
+                        this.send_human(kind, cx);
+                    }
+                })
             }))
     }
 
@@ -548,7 +579,7 @@ impl StatusView {
             self.model.workflows.awaiting_approval_of(name),
             self.model.workflows.active_of(name),
         );
-        if line.is_none() && controls == RunControls::default() {
+        if info.is_none() && controls == RunControls::default() {
             return None;
         }
         let mut row = div()
@@ -564,6 +595,9 @@ impl StatusView {
             .border_b_1()
             .border_color(theme::hairline())
             .text_sm();
+        if let Some(info) = info {
+            row = row.child(switch_row(info, cx));
+        }
         if let (Some(line), Some(info)) = (line, info) {
             row = row.child(review_row(&line, &info.hash, cx));
         }
@@ -674,7 +708,11 @@ impl StatusView {
                     .flex_1()
                     .min_h(px(0.))
                     .p_2()
-                    .child(Input::new(&self.workflow_source).h_full()),
+                    .child(
+                        Input::new(&self.workflow_source)
+                            .h_full()
+                            .disabled(page.is_builtin()),
+                    ),
             )
             .child(
                 div()
@@ -903,6 +941,25 @@ fn ignored_line(line: &str) -> Div {
 
 /// One workflow in the list: its name, trigger and key, and a red dot with the
 /// first error when it does not load. `dirty` marks the open file with unsaved changes.
+/// The rows of the listed workflows that are built-in (`built`) or the user's; each row keeps its
+/// index in the listing as its id.
+fn workflow_rows(
+    all: &[WorkflowInfo],
+    built: bool,
+    selected: Option<&str>,
+    dirty: bool,
+    cx: &Context<StatusView>,
+) -> Vec<Stateful<Div>> {
+    all.iter()
+        .enumerate()
+        .filter(|(_, info)| info.builtin() == built)
+        .map(|(index, info)| {
+            let is_selected = selected == Some(info.path.as_str());
+            workflow_row(index, info, is_selected && dirty, is_selected, cx)
+        })
+        .collect()
+}
+
 fn workflow_row(
     index: usize,
     info: &WorkflowInfo,
@@ -1389,6 +1446,47 @@ fn review_row(line: &ReviewLine, hash: &str, cx: &Context<StatusView>) -> Div {
             ))
         }
     }
+}
+
+/// "Enabled in this repository" (`WF4b`, D164(1)): the switch of the open workflow. A built-in one
+/// that is off opens the Switch On dialog; the rest switch at once.
+fn switch_row(info: &WorkflowInfo, cx: &Context<StatusView>) -> Div {
+    let mark = if info.enabled {
+        icon::filled(Icon::CheckSquare, icon::SMALL, theme::accent())
+    } else {
+        icon::view(Icon::Square, icon::SMALL, theme::muted())
+    };
+    let click = switch_click(info);
+    let text = switch_text(info);
+    let info = info.clone();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .id("workflow-enabled")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .child(mark)
+                .child(
+                    div()
+                        .text_color(theme::text())
+                        .child("Enabled in this repository"),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| match &click {
+                        SwitchClick::Send(kind) => this.send_human((**kind).clone(), cx),
+                        SwitchClick::Ask => this.open_switch_dialog(&info, window, cx),
+                    }),
+                ),
+        )
+        .child(div().text_xs().text_color(theme::muted()).child(text))
 }
 
 /// The run that waits for an approval, with what it asks, and Approve and Reject.

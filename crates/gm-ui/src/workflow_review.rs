@@ -32,6 +32,10 @@ pub(crate) const TITLE: &str = "Run this version?";
 pub(crate) const REVIEW_TITLE: &str = "Review this version?";
 pub(crate) const MARK: &str = "Mark Reviewed";
 pub(crate) const RUN: &str = "Run this version";
+/// The title of the dialog that switches a built-in workflow on in this repository (`WF4b`).
+pub(crate) const SWITCH_TITLE: &str = "Switch this workflow on?";
+/// The confirm button of that dialog.
+pub(crate) const SWITCH_ON: &str = "Switch On";
 /// The checkbox that grants automatic approval for the event runs of the version (D101).
 pub(crate) const GRANT: &str =
     "Approve applying actions automatically for event runs of this version";
@@ -52,16 +56,33 @@ pub(crate) fn review_intro(name: &str, on: &str) -> String {
     )
 }
 
+/// The line under the title of the switch dialog: what the workflow does, and that it changes the
+/// repository when it runs.
+#[must_use]
+pub(crate) fn switch_intro(name: &str, on: &str) -> String {
+    format!(
+        "{name} runs on {on}. It is off in every repository until you switch it on here, and then it changes this repository when it runs."
+    )
+}
+
 /// The title of the dialog for `request`: the question when it runs the script.
 #[must_use]
 pub(crate) fn title(request: &ReviewRequest) -> &'static str {
-    if request.run { TITLE } else { REVIEW_TITLE }
+    if request.switch {
+        SWITCH_TITLE
+    } else if request.run {
+        TITLE
+    } else {
+        REVIEW_TITLE
+    }
 }
 
 /// The line under the title for `request`.
 #[must_use]
 pub(crate) fn intro_for(request: &ReviewRequest) -> String {
-    if request.run {
+    if request.switch {
+        switch_intro(&request.name, &request.on)
+    } else if request.run {
         intro(&request.name)
     } else {
         review_intro(&request.name, &request.on)
@@ -71,7 +92,13 @@ pub(crate) fn intro_for(request: &ReviewRequest) -> String {
 /// The confirm button's words: a run confirms and runs, a review only marks the version.
 #[must_use]
 pub(crate) fn confirm_label(request: &ReviewRequest) -> &'static str {
-    if request.run { RUN } else { MARK }
+    if request.switch {
+        SWITCH_ON
+    } else if request.run {
+        RUN
+    } else {
+        MARK
+    }
 }
 
 /// Whether the dialog offers the grant. A manual workflow has no event runs, so it never does.
@@ -119,6 +146,10 @@ pub(crate) fn source_lines(source: &str, max: usize) -> (Vec<(usize, String)>, u
 /// starts inside the review.
 #[must_use]
 pub(crate) fn commands(request: &ReviewRequest, auto_approve: bool) -> Vec<CommandKind> {
+    if request.switch {
+        let ticked = grant_offered(request) && auto_approve;
+        return switch_commands(&request.name, &request.hash, ticked, request.granted);
+    }
     let mut kinds = vec![CommandKind::ReviewWorkflow {
         name: request.name.clone(),
         hash: request.hash.clone(),
@@ -133,6 +164,45 @@ pub(crate) fn commands(request: &ReviewRequest, auto_approve: bool) -> Vec<Comma
     kinds
 }
 
+/// The commands that switch a workflow on in this repository (`WF4b`): `SetWorkflowEnabled`, and
+/// `ReviewWorkflow` with the grant when the ticked grant differs from the one the version has. A
+/// version that is already granted and not ticked loses its grant; the review stays.
+#[must_use]
+pub(crate) fn switch_commands(
+    name: &str,
+    hash: &str,
+    ticked: bool,
+    granted: bool,
+) -> Vec<CommandKind> {
+    let mut kinds = vec![CommandKind::SetWorkflowEnabled {
+        name: name.to_owned(),
+        enabled: true,
+    }];
+    if ticked != granted {
+        kinds.push(CommandKind::ReviewWorkflow {
+            name: name.to_owned(),
+            hash: hash.to_owned(),
+            auto_approve: ticked,
+        });
+    }
+    kinds
+}
+
+/// The request of the Switch On dialog for a built-in workflow the page shows (`WF4b`).
+#[must_use]
+pub(crate) fn switch_request_for_info(info: &WorkflowInfo) -> ReviewRequest {
+    ReviewRequest {
+        name: info.name.clone(),
+        hash: info.hash.clone(),
+        source: info.source.clone(),
+        inputs: std::collections::BTreeMap::new(),
+        on: info.trigger.clone(),
+        run: false,
+        switch: true,
+        granted: info.auto_approve,
+    }
+}
+
 /// The review request for a loaded workflow the page shows (the Review button of the page).
 /// A manual workflow with declared inputs is only marked reviewed: its run asks for the inputs.
 #[must_use]
@@ -144,6 +214,21 @@ pub(crate) fn request_for_info(info: &WorkflowInfo) -> ReviewRequest {
         inputs: std::collections::BTreeMap::new(),
         on: info.trigger.clone(),
         run: info.trigger == "manual" && info.inputs.is_empty(),
+        switch: false,
+        granted: info.auto_approve,
+    }
+}
+
+impl StatusView {
+    /// Opens the Switch On dialog for the built-in `info` (`WF4b`): its script, the grant, and the
+    /// switch on confirm.
+    pub(crate) fn open_switch_dialog(
+        &mut self,
+        info: &WorkflowInfo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_workflow_review_dialog(switch_request_for_info(info), window, cx);
     }
 }
 
@@ -165,9 +250,11 @@ impl StatusView {
     ) {
         let focus = cx.focus_handle();
         focus.focus(window);
+        // The grant starts as the version has it: unticked for a review, the current one for a switch.
+        let auto_approve = request.granted;
         self.workflow_review_dialog = Some(WorkflowReviewDialog {
             request,
-            auto_approve: false,
+            auto_approve,
             focus,
         });
         cx.notify();
@@ -596,6 +683,8 @@ mod tests {
             inputs: BTreeMap::new(),
             on: on.into(),
             run,
+            switch: false,
+            granted: false,
         }
     }
 
@@ -724,6 +813,8 @@ mod tests {
             inputs: inputs.clone(),
             on: "manual".into(),
             run: true,
+            switch: false,
+            granted: false,
         };
         assert_eq!(
             commands(&req, true),
@@ -799,6 +890,8 @@ mod tests {
             source: "src".into(),
             reviewed: false,
             auto_approve: false,
+            enabled: false,
+            title: None,
         }
     }
 
@@ -821,5 +914,96 @@ mod tests {
         let req = request_for_info(&info("commit.created", 0));
         assert!(!req.run);
         assert_eq!(req.on, "commit.created");
+    }
+
+    fn built_in(granted: bool) -> WorkflowInfo {
+        WorkflowInfo {
+            name: "restack-stale-after-fetch".into(),
+            path: "builtin:restack-stale-after-fetch".into(),
+            trigger: "fetch.done".into(),
+            key: None,
+            inputs: Vec::new(),
+            hash: "shipped-hash".into(),
+            error: None,
+            warnings: Vec::new(),
+            source: "return 1".into(),
+            reviewed: true,
+            auto_approve: granted,
+            enabled: false,
+            title: Some("Restack stale stacks after fetch".into()),
+        }
+    }
+
+    #[test]
+    fn switching_on_sends_the_switch_and_the_grant_only_when_it_changes() {
+        // Not ticked and not granted: the switch alone.
+        assert_eq!(
+            switch_commands("b", "h", false, false),
+            vec![CommandKind::SetWorkflowEnabled {
+                name: "b".into(),
+                enabled: true,
+            }]
+        );
+        // Ticked: the switch, then the review with the grant.
+        assert_eq!(
+            switch_commands("b", "h", true, false),
+            vec![
+                CommandKind::SetWorkflowEnabled {
+                    name: "b".into(),
+                    enabled: true,
+                },
+                CommandKind::ReviewWorkflow {
+                    name: "b".into(),
+                    hash: "h".into(),
+                    auto_approve: true,
+                },
+            ]
+        );
+        // Granted before and unticked now: the grant goes, the review stays.
+        assert_eq!(
+            switch_commands("b", "h", false, true),
+            vec![
+                CommandKind::SetWorkflowEnabled {
+                    name: "b".into(),
+                    enabled: true,
+                },
+                CommandKind::ReviewWorkflow {
+                    name: "b".into(),
+                    hash: "h".into(),
+                    auto_approve: false,
+                },
+            ]
+        );
+        // Granted and still ticked: nothing about the grant changes.
+        assert_eq!(switch_commands("b", "h", true, true).len(), 1);
+    }
+
+    #[test]
+    fn the_switch_dialog_says_switch_on_and_offers_the_grant() {
+        let info = built_in(false);
+        let request = switch_request_for_info(&info);
+        assert_eq!(title(&request), SWITCH_TITLE);
+        assert_eq!(confirm_label(&request), SWITCH_ON);
+        assert!(grant_offered(&request));
+        assert!(intro_for(&request).contains("fetch.done"));
+    }
+
+    #[test]
+    fn the_switch_dialog_confirms_with_the_commands_of_its_grant() {
+        let request = switch_request_for_info(&built_in(false));
+        assert_eq!(commands(&request, false).len(), 1);
+        assert_eq!(commands(&request, true).len(), 2);
+        // A switch never runs the script: it is not a run.
+        assert!(
+            !commands(&request, true)
+                .iter()
+                .any(|kind| matches!(kind, CommandKind::RunWorkflow { .. }))
+        );
+    }
+
+    #[test]
+    fn the_dialog_for_a_granted_built_in_starts_from_its_grant() {
+        assert!(switch_request_for_info(&built_in(true)).granted);
+        assert!(!switch_request_for_info(&built_in(false)).granted);
     }
 }

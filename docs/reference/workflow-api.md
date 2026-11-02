@@ -171,7 +171,7 @@ These calls do not act on the repository, so they have no effect level or outcom
 - `ctx.try(fn)` returns the outcome instead of raising. Use it when the script handles the outcome itself:
 
 ```lua
-local plan = ctx.restack.plan({ root = input.trigger.parent })
+local plan = ctx.restack.plan({ root = input.trigger.branch })
 local r = ctx.try(function() return ctx.restack.apply({ plan_id = plan.plan_id }) end)
 if r.outcome == "conflict" then
   local w = ctx.wait("restack.resumed", { timeout = "24h" })

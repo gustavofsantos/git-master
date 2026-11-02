@@ -16,6 +16,7 @@ use gm_schema::{
 use serde_json::{Value, json};
 
 use crate::port::{RemoteRun, ScriptRemote};
+use crate::script::builtins;
 use crate::script::dry::{self, DryRun};
 use crate::script::journal::{CallRow, Journal, RunId, RunRow, RunStatus};
 use crate::script::loader::{Loaded, ScriptEntry};
@@ -359,6 +360,11 @@ pub(crate) fn workflow_info(entry: &ScriptEntry) -> WorkflowInfo {
         source: entry.source.clone(),
         reviewed: false,
         auto_approve: false,
+        // The engine sets these from the switches and the reviews it holds.
+        enabled: false,
+        title: builtins::get(&entry.name)
+            .filter(|_| entry.builtin)
+            .map(|builtin| builtin.title.to_owned()),
     }
 }
 

@@ -64,26 +64,28 @@ const MAX_COPIES: u32 = 1000;
 /// `<name>-2.lua`, `<name>-3.lua`… When a copy carries a suffix, its `name` in `M.meta` gets the
 /// same suffix so names stay unique. Never overwrites a file.
 pub fn create(dir: &Path, template: &Template) -> Result<Created, String> {
+    copy(dir, template.name, template.source, template.name)
+}
+
+/// Copies `source` into `dir` as `base` (`WF4b`, D164(4)): the first file name not taken is
+/// `<base>.lua`, then `<base>-2.lua`… Each copy's `name` in `M.meta`, which is `from` in `source`,
+/// becomes the name of the file it is written to. Never overwrites a file.
+pub fn copy(dir: &Path, base: &str, source: &str, from: &str) -> Result<Created, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     for copy in 1..=MAX_COPIES {
         let name = if copy == 1 {
-            template.name.to_owned()
+            base.to_owned()
         } else {
-            format!("{}-{copy}", template.name)
+            format!("{base}-{copy}")
         };
-        let text = if copy == 1 {
-            template.source.to_owned()
-        } else {
-            renamed(template.source, template.name, &name)
-        };
+        let text = renamed(source, from, &name);
         let path = dir.join(format!("{name}.lua"));
         if place(dir, &path, copy, &text)? {
             return Ok(Created { path, name });
         }
     }
     Err(format!(
-        "there are already {MAX_COPIES} copies of `{}` in {}",
-        template.name,
+        "there are already {MAX_COPIES} copies of `{base}` in {}",
         dir.display()
     ))
 }
@@ -375,5 +377,26 @@ mod tests {
             renamed("local M = {}\nreturn M\n", "x", "y"),
             "local M = {}\nreturn M\n"
         );
+    }
+
+    #[test]
+    fn a_copy_of_a_built_in_takes_the_custom_name_in_file_and_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let builtin = crate::script::builtins::get("restack-stale-after-fetch").unwrap();
+        let base = crate::script::builtins::copy_base(builtin.name);
+        let first = copy(dir.path(), &base, builtin.source, builtin.name).unwrap();
+        assert_eq!(first.name, "restack-stale-after-fetch-custom");
+        assert_eq!(
+            first.path.file_name().unwrap(),
+            "restack-stale-after-fetch-custom.lua"
+        );
+        let second = copy(dir.path(), &base, builtin.source, builtin.name).unwrap();
+        assert_eq!(second.name, "restack-stale-after-fetch-custom-2");
+        // The file loads under the name it was given, so the copies never clash.
+        let loaded = crate::script::loader::load_file(&LuauEngine::new(), &second.path);
+        let meta = loaded.meta.expect("the copy loads");
+        assert_eq!(meta.name, second.name);
+        assert_eq!(meta.trigger.on, "fetch.done");
+        assert!(!loaded.builtin);
     }
 }

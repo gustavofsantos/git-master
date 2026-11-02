@@ -234,8 +234,7 @@ local M = {}
 M.meta = { name = "restack-children-on-parent-move", trigger = { on = "stack.parent_moved" }, concurrency = "replace" }
 
 function M.execute(ctx, input)
-  local plan = ctx.restack.plan({ root = input.trigger.parent })
-  if plan.branch_count == 0 then return end
+  local plan = ctx.restack.plan({ root = input.trigger.branch })
   local r = ctx.try(function() return ctx.restack.apply({ plan_id = plan.plan_id }) end)
   if r.outcome == "conflict" then
     local w = ctx.wait("restack.resumed", { timeout = "24h" })
@@ -243,13 +242,13 @@ function M.execute(ctx, input)
   elseif r.outcome ~= "done" then
     return ctx.fail("restack " .. r.outcome)
   end
-  ctx.notify("Restacked " .. plan.branch_count .. " branches on " .. input.trigger.parent)
+  ctx.notify("Restacked " .. input.trigger.branch .. " onto " .. input.trigger.parent)
 end
 
 return M
 ```
 
-The script plans the restack and stops if no branch needs it. It applies the plan inside `ctx.try`, so a conflict does not raise an error. On a conflict, it waits up to 24 hours for the restack to be resumed. If the wait ends in anything other than `resumed`, the run fails with a reason. Any other outcome also fails the run. On success, it sends a notification.
+The script plans a restack of the branch whose parent moved, and of the branches under it. It always applies the plan, even when it moves no branch, because a plan whose only branch conflicts moves nothing and the conflict is reported by the apply. It applies the plan inside `ctx.try`, so a conflict does not raise an error. On a conflict, it waits up to 24 hours for the restack to be resumed. If the wait ends in anything other than `resumed`, the run fails with a reason. Any other outcome also fails the run. On success, it sends a notification.
 
 ## Check, dry-run and test while you write
 

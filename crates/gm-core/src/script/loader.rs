@@ -29,6 +29,8 @@ pub struct ScriptEntry {
     pub source: String,
     /// The checked `M.meta`, or every problem found, each with the line it points at.
     pub meta: Result<Meta, Vec<ScriptDiagnostic>>,
+    /// Whether the script ships with the app (`WF4b`, D164(2)): no file, `path` is `builtin:<name>`.
+    pub builtin: bool,
 }
 
 /// A directory or file that was not read as a workflow, and why. The page shows these as warnings.
@@ -173,6 +175,7 @@ pub fn load_file(engine: &dyn ScriptEngine, path: &Path) -> ScriptEntry {
         hash,
         source,
         meta,
+        builtin: false,
     }
 }
 
@@ -231,6 +234,7 @@ fn refused(path: &Path, file_name: &str, hash: String, message: impl Into<String
             line: 0,
             message: message.into(),
         }]),
+        builtin: false,
     }
 }
 

@@ -223,7 +223,7 @@ The settings dialog is not available yet, so these fields are edited today in **
 
 ### Workflows
 
-> **Planned.** Automatic approvals and the choice of workflows per repository are not available yet, so the **Automatic Approvals** and **Enabled per Repository** fields are not shown.
+> **Planned.** There is no settings dialog yet, so the **Automatic Approvals** and **Enabled per Repository** fields are not shown. Until it exists, the switch **Enabled in this repository** is on the Workflows page, and each workflow's grant is in its review line.
 
 | Field | What it does |
 |---|---|

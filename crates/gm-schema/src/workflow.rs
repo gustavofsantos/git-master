@@ -31,6 +31,23 @@ pub struct WorkflowInfo {
     /// Whether event runs of this reviewed version apply without asking (the grant of D101).
     #[serde(default)]
     pub auto_approve: bool,
+    /// Whether the workflow runs in this repository: a user workflow is on unless it was switched
+    /// off here, a built-in one is off unless it was switched on here (`WF4b`, D164(1)).
+    #[serde(default)]
+    pub enabled: bool,
+    /// The display title of a built-in workflow, such as "Restack children when parent moves"
+    /// (`WF4b`, D164(2)). `None` for a workflow the person wrote: only built-ins carry one.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+impl WorkflowInfo {
+    /// Whether the workflow ships with the app (`WF4b`, D164(2)): it has a title and no file. Its
+    /// `source` is read-only.
+    #[must_use]
+    pub fn builtin(&self) -> bool {
+        self.title.is_some()
+    }
 }
 
 /// One declared input of a workflow.

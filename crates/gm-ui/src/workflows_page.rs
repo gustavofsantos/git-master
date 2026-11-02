@@ -62,7 +62,9 @@ pub enum ReviewLine {
 #[must_use]
 pub fn review_line(info: Option<&WorkflowInfo>) -> Option<ReviewLine> {
     let info = info?;
-    if info.error.is_some() {
+    // A built-in workflow is reviewed by the app, not by the person (D164(2)): its switch is its
+    // only control.
+    if info.error.is_some() || info.builtin() {
         return None;
     }
     Some(if info.reviewed {
@@ -84,6 +86,51 @@ pub fn review_text(line: &ReviewLine) -> &'static str {
         } => "Reviewed",
         ReviewLine::Reviewed { auto_approve: true } => "Reviewed: event runs apply without asking",
     }
+}
+
+/// The title a row of the list shows: a built-in workflow's title, else its name (`WF4b`).
+#[must_use]
+pub fn row_title(info: &WorkflowInfo) -> &str {
+    info.title.as_deref().unwrap_or(&info.name)
+}
+
+/// What a click on "Enabled in this repository" does (`WF4b`, D164(1)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SwitchClick {
+    /// Sends this command at once: switching off needs no dialog, nor does a user workflow on.
+    Send(Box<CommandKind>),
+    /// Opens the Switch On dialog, which shows the built-in script and asks about the grant.
+    Ask,
+}
+
+/// What clicking the switch of `info` does: switching a built-in on asks first, the rest are sent.
+#[must_use]
+pub fn switch_click(info: &WorkflowInfo) -> SwitchClick {
+    if !info.enabled && info.builtin() {
+        return SwitchClick::Ask;
+    }
+    SwitchClick::Send(Box::new(CommandKind::SetWorkflowEnabled {
+        name: info.name.clone(),
+        enabled: !info.enabled,
+    }))
+}
+
+/// The words beside the switch: whether the workflow runs here, and for a built-in what to do.
+#[must_use]
+pub fn switch_text(info: &WorkflowInfo) -> &'static str {
+    match (info.enabled, info.builtin()) {
+        (true, _) => "Runs in this repository.",
+        (false, true) => "Off here. Switch it on to run it in this repository.",
+        (false, false) => "Off here. It does not run in this repository.",
+    }
+}
+
+/// The command Copy to Edit sends for `info`: a built-in workflow only (`WF4b`, D164(4)).
+#[must_use]
+pub fn copy_request(info: &WorkflowInfo) -> Option<CommandKind> {
+    info.builtin().then(|| CommandKind::CopyBuiltinWorkflow {
+        name: info.name.clone(),
+    })
 }
 
 /// The run controls the open workflow offers (`WF3b`): Approve and Reject for a run that waits for
@@ -120,6 +167,8 @@ struct DryRunAnswer {
 struct Open {
     path: String,
     name: String,
+    /// A built-in workflow: its script is read-only, and only Copy to Edit changes it (`WF4b`).
+    builtin: bool,
     /// The text on disk as the page last loaded or saved it. The buffer is
     /// dirty while it differs from this.
     baseline: String,
@@ -562,7 +611,7 @@ impl WorkflowsPage {
     /// the hash now on disk. The text is tracked by `track_save` once sent.
     pub fn save_request(&mut self, overwrite: bool) -> Option<CommandKind> {
         let open = self.open.as_ref()?;
-        if self.saving.is_some() || (!overwrite && !self.dirty()) {
+        if open.builtin || self.saving.is_some() || (!overwrite && !self.dirty()) {
             return None;
         }
         let expected = if overwrite {
@@ -647,9 +696,15 @@ impl WorkflowsPage {
 
     /// The delete confirmation opens for the open workflow.
     pub fn ask_delete(&mut self) {
-        if self.open.is_some() {
+        if self.open.as_ref().is_some_and(|open| !open.builtin) {
             self.asking_delete = true;
         }
+    }
+
+    /// Whether the open workflow is a built-in one: read-only, with no file to save or delete.
+    #[must_use]
+    pub fn is_builtin(&self) -> bool {
+        self.open.as_ref().is_some_and(|open| open.builtin)
     }
 
     /// Closes the delete confirmation without deleting.
@@ -661,6 +716,9 @@ impl WorkflowsPage {
     /// was loaded from. Closes the confirmation.
     pub fn delete_request(&mut self) -> Option<CommandKind> {
         let open = self.open.as_ref()?;
+        if open.builtin {
+            return None;
+        }
         let expected_hash = open.loaded_hash.clone();
         let path = open.path.clone();
         self.asking_delete = false;
@@ -684,6 +742,7 @@ impl WorkflowsPage {
         self.open = Some(Open {
             path: info.path.clone(),
             name: info.name.clone(),
+            builtin: info.builtin(),
             baseline: info.source.clone(),
             text: info.source.clone(),
             loaded_hash: info.hash.clone(),
@@ -932,6 +991,8 @@ return M
             source: source.into(),
             reviewed: false,
             auto_approve: false,
+            enabled: false,
+            title: None,
         }
     }
 
@@ -1610,5 +1671,121 @@ return M
                 cancel: Some(4)
             }
         );
+    }
+
+    fn built_in(name: &str, title: &str, enabled: bool) -> WorkflowInfo {
+        WorkflowInfo {
+            trigger: "stack.parent_moved".into(),
+            title: Some(title.into()),
+            enabled,
+            reviewed: true,
+            path: format!("builtin:{name}"),
+            ..info(&format!("builtin:{name}"), name, SAMPLE, "shipped")
+        }
+    }
+
+    #[test]
+    fn a_built_in_shows_its_title_and_a_user_workflow_its_name() {
+        let shipped = built_in(
+            "restack-stale-after-fetch",
+            "Restack stale stacks after fetch",
+            false,
+        );
+        assert_eq!(row_title(&shipped), "Restack stale stacks after fetch");
+        assert_eq!(row_title(&info("/w/x.lua", "mine", SAMPLE, "h")), "mine");
+    }
+
+    #[test]
+    fn switching_a_built_in_on_asks_and_switching_off_is_sent_at_once() {
+        let off = built_in("restack-stale-after-fetch", "t", false);
+        assert_eq!(switch_click(&off), SwitchClick::Ask);
+        let on = built_in("restack-stale-after-fetch", "t", true);
+        assert_eq!(
+            switch_click(&on),
+            SwitchClick::Send(Box::new(CommandKind::SetWorkflowEnabled {
+                name: "restack-stale-after-fetch".into(),
+                enabled: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn a_user_workflow_switches_at_once_both_ways() {
+        let mut mine = info("/w/mine.lua", "mine", SAMPLE, "h");
+        mine.enabled = true;
+        assert_eq!(
+            switch_click(&mine),
+            SwitchClick::Send(Box::new(CommandKind::SetWorkflowEnabled {
+                name: "mine".into(),
+                enabled: false,
+            }))
+        );
+        mine.enabled = false;
+        assert_eq!(
+            switch_click(&mine),
+            SwitchClick::Send(Box::new(CommandKind::SetWorkflowEnabled {
+                name: "mine".into(),
+                enabled: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn the_switch_says_whether_the_workflow_runs_here() {
+        let mut mine = info("/w/mine.lua", "mine", SAMPLE, "h");
+        mine.enabled = true;
+        assert_eq!(switch_text(&mine), "Runs in this repository.");
+        mine.enabled = false;
+        assert_eq!(
+            switch_text(&mine),
+            "Off here. It does not run in this repository."
+        );
+        let off = built_in("b", "t", false);
+        assert_eq!(
+            switch_text(&off),
+            "Off here. Switch it on to run it in this repository."
+        );
+    }
+
+    #[test]
+    fn copy_to_edit_is_for_built_ins_only() {
+        assert_eq!(
+            copy_request(&built_in("restack-stale-after-fetch", "t", false)),
+            Some(CommandKind::CopyBuiltinWorkflow {
+                name: "restack-stale-after-fetch".into(),
+            })
+        );
+        assert_eq!(
+            copy_request(&info("/w/mine.lua", "mine", SAMPLE, "h")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_built_in_is_never_reviewed_by_hand_and_has_no_file_to_save_or_delete() {
+        let shipped = built_in("restack-stale-after-fetch", "t", false);
+        assert_eq!(review_line(Some(&shipped)), None);
+
+        let mut page = WorkflowsPage::default();
+        assert!(page.select(&shipped.path, std::slice::from_ref(&shipped)));
+        assert!(page.is_builtin());
+        assert_eq!(page.save_request(false), None);
+        assert_eq!(page.save_request(true), None);
+        page.ask_delete();
+        assert!(!page.asking_delete());
+        assert_eq!(page.delete_request(), None);
+    }
+
+    #[test]
+    fn a_user_file_still_saves_and_deletes() {
+        let (mut page, _) = opened();
+        assert!(!page.is_builtin());
+        page.edit("changed");
+        assert!(matches!(
+            page.save_request(false),
+            Some(CommandKind::SaveWorkflowFile { .. })
+        ));
+        page.ask_delete();
+        assert!(page.asking_delete());
     }
 }

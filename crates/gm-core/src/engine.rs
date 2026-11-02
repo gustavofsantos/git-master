@@ -35,6 +35,7 @@ use crate::restack_session;
 use crate::review;
 use crate::review_session::{self, ReviewSession};
 use crate::review_store::ReviewStore;
+use crate::script::builtins;
 use crate::script::dry;
 use crate::script::hook_convert;
 use crate::script::inspect::inspect;
@@ -46,6 +47,7 @@ use crate::script::phases::{self, Facts, Gate, Timing};
 use crate::script::policy::StartedBy;
 use crate::script::run::{EffectResult, ScriptEvent};
 use crate::script::run::{RunSpec, Runtime};
+use crate::script::switches::{self, Switches};
 use crate::script::transforms;
 use crate::script::transforms::Fingerprint;
 use crate::script::triggers::{self, Decision, Lanes, TriggerEvent};
@@ -688,8 +690,15 @@ impl Engine {
             return Vec::new();
         }
         let mut events = self.drop_stale_requests(root);
-        let Ok(loaded) = self.load_scripts(root) else {
-            return events;
+        let loaded = match self.load_active_scripts(root) {
+            Ok(loaded) => loaded,
+            Err(reason) => {
+                events.push(workflow_notice(format!(
+                    "workflows did not run on {}: {reason}",
+                    event.on
+                )));
+                return events;
+            }
         };
         let matched: Vec<&loader::ScriptEntry> = loaded
             .entries
@@ -718,7 +727,7 @@ impl Engine {
             let Ok(meta) = &entry.meta else {
                 continue;
             };
-            match trust.is_reviewed(&entry.hash) {
+            match reviewed_by(&trust, &entry.hash) {
                 Ok(true) => {}
                 Ok(false) => {
                     let request = self.want_review(
@@ -735,7 +744,7 @@ impl Engine {
                 Err(reason) => {
                     events.push(workflow_notice(format!(
                         "{} did not run on {}: {}",
-                        entry.name, event.on, reason.0
+                        entry.name, event.on, reason
                     )));
                     continue;
                 }
@@ -809,7 +818,7 @@ impl Engine {
         if self.wanted.is_empty() {
             return Vec::new();
         }
-        let Ok(loaded) = self.load_scripts(root) else {
+        let Ok(loaded) = self.load_active_scripts(root) else {
             return Vec::new();
         };
         let stale: Vec<String> = self
@@ -884,7 +893,8 @@ impl Engine {
 
     /// Whether the version with `hash` was reviewed, or why that cannot be read.
     fn reviewed(&mut self, hash: &str) -> Result<bool, String> {
-        self.trust_store()?.is_reviewed(hash).map_err(|e| e.0)
+        let trust = self.trust_store()?;
+        reviewed_by(&trust, hash)
     }
 
     /// Starts the run of the script `name` for `trigger`, which the lanes let through. A run that
@@ -920,7 +930,7 @@ impl Engine {
     ) -> Result<ScriptRunId, String> {
         let entry = self.find_script(root, name)?;
         let trust = self.trust_store()?;
-        if !trust.is_reviewed(&entry.hash).map_err(|e| e.0)? {
+        if !reviewed_by(&trust, &entry.hash)? {
             return Err(format!(
                 "{name} did not run on {}: review it first.",
                 trigger.on
@@ -979,7 +989,7 @@ impl Engine {
             return Ok(None);
         };
         let facts = self.phase_facts(&root, &command.kind)?;
-        let loaded = self.load_scripts(&root)?;
+        let loaded = self.load_active_scripts(&root)?;
         let (Some(before), Some(after)) = (
             phases::trigger(&command.kind, &facts, Timing::Before),
             phases::trigger(&command.kind, &facts, Timing::After),
@@ -1299,7 +1309,7 @@ impl Engine {
             } else {
                 None
             };
-            let loaded = self.load_scripts(&root)?;
+            let loaded = self.load_active_scripts(&root)?;
             if composer {
                 let opened = TriggerEvent {
                     on: "composer.opened".to_owned(),
@@ -1487,10 +1497,28 @@ impl Engine {
             return Vec::new();
         }
         let mut events = Vec::new();
-        for event in triggers::stack_transitions(&before, stacks) {
+        for mut event in triggers::stack_transitions(&before, stacks) {
+            if event.on == "stack.parent_merged" {
+                self.add_grandparent(root, &mut event);
+            }
             events.extend(self.fire_triggers(id, root, &event));
         }
         events
+    }
+
+    /// Adds `grandparent` to a `stack.parent_merged` event: the branch `ReparentToGrandparent` would
+    /// give its branch (D138(5)), read now. The built-in reparent workflow moves onto it (`WF4b`).
+    /// A read that fails leaves the payload without it, and the script then fails with a reason.
+    fn add_grandparent(&self, root: &Path, event: &mut TriggerEvent) {
+        let Some(branch) = event.branch.clone() else {
+            return;
+        };
+        if let Ok(Some(grandparent)) =
+            stack_session::grandparent_of(self.git.as_ref(), root, &branch)
+            && let Some(fields) = event.payload.as_object_mut()
+        {
+            fields.insert("grandparent".to_owned(), json!(grandparent));
+        }
     }
 
     /// Reads the stacks of `root` and takes them as the newest snapshot (`WF3f`). They are read only
@@ -1500,7 +1528,7 @@ impl Engine {
         if !self.triggers {
             return Vec::new();
         }
-        let listened = self.load_scripts(root).is_ok_and(|loaded| {
+        let listened = self.load_active_scripts(root).is_ok_and(|loaded| {
             loaded.entries.iter().any(|entry| {
                 entry
                     .meta
@@ -2094,6 +2122,8 @@ impl Engine {
             | CommandKind::ApproveWorkflowStep { .. }
             | CommandKind::CancelWorkflowRun { .. }
             | CommandKind::CreateWorkflowFromTemplate { .. }
+            | CommandKind::SetWorkflowEnabled { .. }
+            | CommandKind::CopyBuiltinWorkflow { .. }
             | CommandKind::ListWorkflowRuns { .. }
             | CommandKind::LoadWorkflowRun { .. }
             | CommandKind::DryRunWorkflow { .. }
@@ -3971,6 +4001,10 @@ impl Engine {
             CommandKind::CreateWorkflowFromTemplate { template } => {
                 self.create_script_from_template(id, actor, template)
             }
+            CommandKind::SetWorkflowEnabled { name, enabled } => {
+                self.set_workflow_enabled(id, actor, name, *enabled)
+            }
+            CommandKind::CopyBuiltinWorkflow { name } => self.copy_builtin(id, actor, name),
             CommandKind::ListWorkflowRuns { workflow, limit } => {
                 self.list_workflow_runs(id, workflow, *limit)
             }
@@ -4183,14 +4217,31 @@ impl Engine {
             .ok_or_else(|| "the review store is not open".to_owned())
     }
 
-    /// The scripts of the user's directories, read in the sandbox without `ctx`.
+    /// The scripts of the user's directories, read in the sandbox without `ctx`, then the built-in
+    /// ones that no user script takes the name of (`WF4b`).
     fn load_scripts(&self, root: &Path) -> Result<loader::Loaded, String> {
         let dirs = workflow_session::workflow_dirs(
             self.git.as_ref(),
             root,
             self.workflow_user_dir.as_deref(),
         )?;
-        Ok(loader::load_dirs(&LuauEngine::new(), &dirs, Some(root)))
+        let engine = LuauEngine::new();
+        let mut loaded = loader::load_dirs(&engine, &dirs, Some(root));
+        builtins::add_to(&engine, &mut loaded);
+        Ok(loaded)
+    }
+
+    /// The scripts that run in the open repository: `load_scripts` without the ones switched off
+    /// here (D164(1)). Triggers, phases and transforms read them this way; a manual run does not.
+    fn load_active_scripts(&self, root: &Path) -> Result<loader::Loaded, String> {
+        let mut loaded = self.load_scripts(root)?;
+        switches::retain_enabled(&mut loaded.entries, &self.switches_of(root)?);
+        Ok(loaded)
+    }
+
+    /// The workflow switches of the repository at `root` (`WF4b`).
+    fn switches_of(&self, root: &Path) -> Result<Switches, String> {
+        switches::load(self.git.as_ref(), root)
     }
 
     /// The script `name`, if it loads.
@@ -4236,8 +4287,10 @@ impl Engine {
     fn scripts_listed(&mut self, id: OperationId, root: &Path) -> Result<Event, String> {
         let loaded = self.load_scripts(root)?;
         // Each version's review and grant, read once for the listing (`WF3b`). A store that cannot
-        // be read lists every version as unreviewed.
+        // be read lists every version as unreviewed. The switches of an unreadable file are the
+        // defaults here: the listing still shows the scripts, and the triggers say why they do not run.
         let trust = self.trust_store().ok();
+        let switches = self.switches_of(root).unwrap_or_default();
         Ok(Event::WorkflowsListed {
             id,
             workflows: loaded
@@ -4248,8 +4301,9 @@ impl Engine {
                     let review = trust
                         .as_ref()
                         .and_then(|trust| trust.get(&entry.hash).ok().flatten());
-                    info.reviewed = review.is_some();
+                    info.reviewed = review.is_some() || builtins::is_shipped(&entry.hash);
                     info.auto_approve = review.is_some_and(|review| review.auto_approve);
+                    info.enabled = switches.is_enabled(&entry.name, entry.builtin);
                     info
                 })
                 .collect(),
@@ -4263,6 +4317,65 @@ impl Engine {
                 .map(|template| template.name.to_owned())
                 .collect(),
         })
+    }
+
+    /// Turns the workflow `name` on or off in the open repository (`WF4b`, D164(1)). A built-in is
+    /// switched on by its name, a user workflow off by its name. Switching a stack workflow changes
+    /// which stacks it watches, so the stacks are read again as the baseline: the change that was
+    /// already there fires nothing (D162(2)).
+    fn set_workflow_enabled(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        name: &str,
+        enabled: bool,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "switch a workflow")?;
+        let root = self.open_root()?;
+        let loaded = self.load_scripts(&root)?;
+        // The user's file wins over a built-in of the same name, as the listing shows it.
+        let builtin = loaded
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| format!("no workflow named `{name}`"))?
+            .builtin;
+        let mut switched = self.switches_of(&root)?;
+        switched.set(name, builtin, enabled);
+        switches::save(self.git.as_ref(), &root, &switched)?;
+        let mut events = self.drop_stale_requests(&root);
+        events.extend(self.refresh_stacks(id, &root, false));
+        events.push(self.scripts_listed(id, &root)?);
+        Ok(events)
+    }
+
+    /// Copies the built-in `name` into the user's workflows directory as `<name>-custom.lua` (then
+    /// `-2`, ...), for editing (`WF4b`, D164(4)). The copy is unreviewed, so it runs only after the
+    /// person reviews it (D101). Never into a repository.
+    fn copy_builtin(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        name: &str,
+    ) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "copy a built-in workflow")?;
+        let builtin = builtins::get(name)
+            .ok_or_else(|| format!("there is no built-in workflow named `{name}`"))?;
+        let dir = self
+            .workflow_user_dir
+            .as_deref()
+            .ok_or_else(|| "there is no user workflows directory (HOME is not set)".to_owned())?;
+        let copied = script_templates::copy(
+            dir,
+            &builtins::copy_base(builtin.name),
+            builtin.source,
+            builtin.name,
+        )?;
+        Ok(vec![Event::WorkflowCopied {
+            id,
+            path: copied.path.display().to_string(),
+            name: copied.name,
+        }])
     }
 
     /// Copies a built-in template into the user's workflows directory; never into a repository.
@@ -4325,7 +4438,7 @@ impl Engine {
             return Err(format!("`{name}` has no input named `{extra}`"));
         }
         let trust = self.trust_store()?;
-        if !trust.is_reviewed(&entry.hash).map_err(|e| e.0)? {
+        if !reviewed_by(&trust, &entry.hash)? {
             return Ok(vec![Event::WorkflowReviewRequested {
                 id,
                 name: entry.name,
@@ -4463,6 +4576,8 @@ impl Engine {
                 | CommandKind::DryRunWorkflow { .. }
                 | CommandKind::CheckWorkflowScript { .. }
                 | CommandKind::CreateWorkflowFromTemplate { .. }
+                | CommandKind::SetWorkflowEnabled { .. }
+                | CommandKind::CopyBuiltinWorkflow { .. }
                 | CommandKind::SaveWorkflowFile { .. }
                 | CommandKind::DeleteWorkflowFile { .. }
                 | CommandKind::DismissWorkflowRequest { .. }
@@ -4568,6 +4683,15 @@ fn is_conflict_command(kind: &CommandKind) -> bool {
             | CommandKind::ResolveConflict { .. }
             | CommandKind::ForgetRecordedResolution { .. }
     )
+}
+
+/// Whether the version with `hash` was reviewed (D101): the app's own built-ins are (D164(2)), any
+/// other version when the person reviewed it. Reads the review store the caller holds.
+fn reviewed_by(trust: &TrustStore, hash: &str) -> Result<bool, String> {
+    if builtins::is_shipped(hash) {
+        return Ok(true);
+    }
+    trust.is_reviewed(hash).map_err(|e| e.0)
 }
 
 fn only_a_human(actor: &Actor, what: &str) -> Result<(), String> {

@@ -4,6 +4,7 @@
 
 pub mod api_docs;
 pub mod args;
+pub mod builtins;
 pub mod catalog;
 pub mod cli;
 pub mod dry;
@@ -21,6 +22,7 @@ pub mod policy;
 pub mod port;
 pub mod run;
 pub mod surface;
+pub mod switches;
 pub mod templates;
 pub mod transforms;
 pub mod triggers;

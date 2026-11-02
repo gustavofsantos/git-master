@@ -1251,7 +1251,7 @@ impl Model {
                 self.workflows_page.deleted(&path);
                 None
             }
-            Event::WorkflowCreated { path, .. } => {
+            Event::WorkflowCreated { path, .. } | Event::WorkflowCopied { path, .. } => {
                 self.workflows.created(path);
                 None
             }
@@ -1715,6 +1715,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::HooksConverted { id, .. }
         | Event::WorkflowsListed { id, .. }
         | Event::WorkflowCreated { id, .. }
+        | Event::WorkflowCopied { id, .. }
         | Event::WorkflowReviewRequested { id, .. }
         | Event::WorkflowRunsListed { id, .. }
         | Event::WorkflowRunLoaded { id, .. }

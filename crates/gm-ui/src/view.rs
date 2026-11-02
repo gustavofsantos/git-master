@@ -861,6 +861,11 @@ impl StatusView {
                 }
                 false
             }
+            // A copy of a built-in is selected once the listing has it; its folder stays closed.
+            Event::WorkflowCopied { .. } => {
+                self.request_workflow_list();
+                false
+            }
             Event::WorkflowsListed { .. }
             | Event::WorkflowRunChanged { .. }
             | Event::WorkflowApprovalRequested { .. }

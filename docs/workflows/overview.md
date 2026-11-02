@@ -25,8 +25,6 @@ Workflows replace GitMaster's own hooks: the points where a script runs inside a
 
 ## What workflows are for
 
-> **Planned.** The stack policies need the restack calls, which are not available yet.
-
 - **Commit message suggestions.** A command-line LLM that you already use writes a message from the staged diff, and the commit composer shows it as a suggestion. You decide whether to use it.
 - **Branch names from a ticket.** You enter a ticket key, a program builds the branch name, you confirm it, and GitMaster creates and checks out the branch.
 - **Gates before an operation.** A workflow runs before an operation, such as a restack, and can block it with a reason. For example, a restack on `main` can be forbidden.
@@ -86,7 +84,7 @@ In the **Script** tab, a dry run uses the text open in the editor. From the comm
 
 ## The Workflows page
 
-The Workflows page lists your workflows on the left and shows the selected one on the right. The right side has two tabs:
+The Workflows page lists your workflows on the left, with the built-in stack workflows under **Built-in**, and shows the selected one on the right. A built-in workflow is read only: **Copy to Edit** makes an editable copy of it. Under the name of each workflow, **Enabled in this repository** switches it on or off in this repository. The right side has two tabs:
 
 | Tab | What it shows |
 |---|---|

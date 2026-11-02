@@ -149,7 +149,7 @@ Restack brings a stack up to date. It walks the tree from the top down, so paren
 
 ## Automate stack updates
 
-> **Planned.** The stack events and the stack workflow templates are not available yet.
+> **Planned.** A conflict in a workflow run does not notify you or open Resolve conflict yet, and the approval of its restack does not show the plan yet.
 
 Automation is built with workflows, not with a restack setting. Three built-in workflows ship with GitMaster. They are listed on the Workflows page under **Built-in**, and each one is off in every repository until you switch it on there. Switching one on asks whether its applying actions may run without asking, as reviewing a version does. They ship with the app, so they need no review. **Copy to Edit** writes a copy into your workflows folder, which you then review and change like your own.
 

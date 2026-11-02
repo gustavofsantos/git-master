@@ -471,6 +471,20 @@ pub enum CommandKind {
     CreateWorkflowFromTemplate {
         template: String,
     },
+    /// Turns the workflow `name` on or off in the open repository (`WF4b`, D164(1)). The name
+    /// of a user workflow is switched off with `disabled`; a built-in one is switched on with
+    /// `enabled_builtin`. Writes `.git/gitmaster/workflows.json` and no Git state, so it is not
+    /// logged. Answers `WorkflowsListed`. Human only.
+    SetWorkflowEnabled {
+        name: String,
+        enabled: bool,
+    },
+    /// Copies the built-in workflow `name` into the user's workflows directory as
+    /// `<name>-custom.lua` (then `-2`, ...), unreviewed (`WF4b`, D164(4)). Answers
+    /// `WorkflowCopied`. Human only.
+    CopyBuiltinWorkflow {
+        name: String,
+    },
     /// Lists the newest `limit` runs of `workflow` in the open repository.
     /// Answers `WorkflowRunsListed`. A read: never recorded.
     ListWorkflowRuns {
@@ -1065,6 +1079,13 @@ pub enum Event {
         id: OperationId,
         path: String,
         trashed_to: String,
+    },
+    /// A built-in workflow was copied to `path` for editing (`WF4b`); the copy is named `name`. The
+    /// page selects it; the window does not reveal the folder.
+    WorkflowCopied {
+        id: OperationId,
+        path: String,
+        name: String,
     },
     /// A template was copied to `path`; the workflow inside is named `name`.
     WorkflowCreated {

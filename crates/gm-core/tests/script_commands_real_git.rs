@@ -226,13 +226,18 @@ fn failure(events: &[Event]) -> Option<String> {
     })
 }
 
+/// The listing's workflows the person wrote, and what was not read. The built-in stack workflows
+/// (`WF4b`) are listed too; these tests are about the files in the user's folder, so they are left out.
 fn listed(events: &[Event]) -> (Vec<WorkflowInfo>, Vec<String>) {
     events
         .iter()
         .find_map(|e| match e {
             Event::WorkflowsListed {
                 workflows, ignored, ..
-            } => Some((workflows.clone(), ignored.clone())),
+            } => Some((
+                workflows.iter().filter(|w| !w.builtin()).cloned().collect(),
+                ignored.clone(),
+            )),
             _ => None,
         })
         .expect("a listing")

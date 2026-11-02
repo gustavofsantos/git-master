@@ -101,17 +101,34 @@ pub(crate) fn reparent_to_grandparent(
             "The parent of {branch} is neither gone nor merged, so it keeps its parent."
         ));
     }
-    let links = git.stack_links(root).map_err(|e| e.0)?;
-    let locals = locals(git, root)?;
-    let fallback = default_branch(git, root, &locals)?;
-    let target = stack::grandparent(branch, &links, &locals, fallback.as_deref())
+    let target = grandparent_of(git, root, branch)?
         .ok_or_else(|| format!("There is no branch to reparent {branch} to."))?;
+    let links = git.stack_links(root).map_err(|e| e.0)?;
     let base = link_of(&links, branch)
         .and_then(|link| link.base.clone())
         .ok_or_else(|| format!("{branch} has no recorded base."))?;
     git.write_stack_link(root, branch, Some((&target, &base)))
         .map_err(|e| e.0)?;
     Ok(target)
+}
+
+/// The parent `ReparentToGrandparent` gives `branch` (D138(5)), read now: the recorded parent of
+/// its old parent, else the default branch. `None` when there is none. The `stack.parent_merged`
+/// event carries it as `grandparent`, read when the event fires.
+pub(crate) fn grandparent_of(
+    git: &dyn GitPort,
+    root: &Path,
+    branch: &str,
+) -> Result<Option<String>, String> {
+    let links = git.stack_links(root).map_err(|e| e.0)?;
+    let locals = locals(git, root)?;
+    let fallback = default_branch(git, root, &locals)?;
+    Ok(stack::grandparent(
+        branch,
+        &links,
+        &locals,
+        fallback.as_deref(),
+    ))
 }
 
 /// Checks a new child of `parent` and returns the parent's tip, where the child

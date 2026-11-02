@@ -70,6 +70,11 @@ pub struct ReviewRequest {
     /// Whether confirming runs the script too, as a manual run does. Event and phase workflows
     /// are only marked reviewed: their runs come from their events (`WF3b`).
     pub run: bool,
+    /// The dialog switches the workflow on in this repository (`WF4b`): confirming sends
+    /// `SetWorkflowEnabled`, and the grant when it changes.
+    pub switch: bool,
+    /// The grant the version has now, so the dialog starts from it and a change is sent.
+    pub granted: bool,
 }
 
 /// An event run that waits for the review of its version (`WF3b`, D155(3)): the window shows a
@@ -151,6 +156,8 @@ impl Workflows {
             inputs,
             on: "manual".to_owned(),
             run: true,
+            switch: false,
+            granted: false,
         });
     }
 
@@ -408,6 +415,8 @@ mod tests {
             source: String::new(),
             reviewed: false,
             auto_approve: false,
+            enabled: false,
+            title: None,
         }
     }
 

@@ -4681,6 +4681,8 @@ mod tests {
             source: String::new(),
             reviewed: false,
             auto_approve: false,
+            enabled: false,
+            title: None,
         }
     }
 

@@ -268,6 +268,7 @@ mod tests {
             hash: format!("hash-{file}"),
             source: String::new(),
             meta: parse(&json!({ "name": file, "trigger": trigger })).map_err(|_| Vec::new()),
+            builtin: false,
         }
     }
 

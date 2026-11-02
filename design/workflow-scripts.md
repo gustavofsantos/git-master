@@ -127,8 +127,7 @@ local M = {}
 M.meta = { name = "restack-children-on-parent-move", trigger = { on = "stack.parent_moved" }, concurrency = "replace" }
 
 function M.execute(ctx, input)
-  local plan = ctx.restack.plan({ root = input.trigger.parent })
-  if plan.branch_count == 0 then return end
+  local plan = ctx.restack.plan({ root = input.trigger.branch })
   local r = ctx.try(function() return ctx.restack.apply({ plan_id = plan.plan_id }) end)
   if r.outcome == "conflict" then
     local w = ctx.wait("restack.resumed", { timeout = "24h" })
@@ -136,7 +135,7 @@ function M.execute(ctx, input)
   elseif r.outcome ~= "done" then
     return ctx.fail("restack " .. r.outcome)
   end
-  ctx.notify("Restacked " .. plan.branch_count .. " branches on " .. input.trigger.parent)
+  ctx.notify("Restacked " .. input.trigger.branch .. " onto " .. input.trigger.parent)
 end
 return M
 ```
