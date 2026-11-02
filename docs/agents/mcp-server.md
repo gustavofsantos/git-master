@@ -62,13 +62,13 @@ To call a tool, send `tools/call` with the tool's `name` and its `arguments`. Th
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"review_comments_list","arguments":{"status":"open"}}}
 ```
 
-A repository with no review comments answers with an empty list:
+A repository with no review comments answers with an empty list. This is the real answer of `gitmaster` 0.0.0 for a new repository:
 
 ```json
-{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\n  \"comments\": []\n}"}],"isError":false}}
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"comments\":[]}"}],"structuredContent":{"comments":[]},"isError":false}}
 ```
 
-The text inside `content` is the JSON result, as the agent reads it. Each comment in `comments` has the fields listed under [review_comments_list](../reference/mcp-tools.md#read).
+The same JSON is in `content` as text and in `structuredContent`. Each comment in `comments` has the fields listed under [review_comments_list](../reference/mcp-tools.md#read).
 
 ## Several servers at once
 

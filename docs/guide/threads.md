@@ -237,7 +237,18 @@ Add patterns for secrets that are specific to you, such as an internal token for
 }
 ```
 
-A pattern is a regular expression. Use the test field in **Threads Settings…**, or `gitmaster thread redact-test`, to try a pattern on sample text before you rely on it.
+A pattern is a regular expression. Use the test field in **Threads Settings…**, or `gitmaster thread redact-test`, to try a pattern on sample text before you rely on it. The command reads the sample from standard input, or from `--text`:
+
+```sh
+echo 'token ghp_abcdefghijklmnopqrstuvwxyz0123456789' | gitmaster thread redact-test
+```
+
+```text
+token [REDACTED:github-token]
+redacted: github-token x1
+```
+
+The second line goes to standard error. It names each pattern that matched and how many times.
 
 A pattern that is not a valid regular expression **pauses capture** in every repository until you fix or remove it. Events that arrive while it is paused are not stored. The Threads page says how many were skipped and which pattern is at fault. GitMaster stops capturing rather than risk storing a secret.
 
