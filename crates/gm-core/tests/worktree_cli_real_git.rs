@@ -49,19 +49,23 @@ impl Fixture {
             cwd: cwd.to_path_buf(),
             home: Some(self.base.path().join("home")),
             worktrees_home: None,
-            projects_file: None,
         }
     }
 
     /// Runs `gitmaster worktree <words>` in `cwd`; returns the status, standard output and error.
     fn run(&self, env: &Env, words: &[&str]) -> (i32, String, String) {
+        self.run_with(env, words, "")
+    }
+
+    /// `run` with `stdin` as the standard input.
+    fn run_with(&self, env: &Env, words: &[&str], stdin: &str) -> (i32, String, String) {
         let words: Vec<String> = words.iter().map(|w| (*w).to_owned()).collect();
         let git = SubprocessGit {
             global_config: Some(self.base.path().join("no-global-config")),
             ..SubprocessGit::default()
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = run(&words, env, &git, &mut out, &mut err);
+        let code = run(&words, env, &git, &mut stdin.as_bytes(), &mut out, &mut err);
         (
             code,
             String::from_utf8(out).unwrap(),
@@ -598,9 +602,10 @@ fn remove_never_takes_the_main_checkout_or_the_directory_it_runs_in() {
 
 // several repositories
 
-/// A second repository `<base>/billing` with a branch `topic`, and a projects file that lists it,
-/// the fixture's repository, a folder that is no repository and a glob.
-fn with_projects(f: &Fixture) -> (PathBuf, PathBuf) {
+/// A second repository `<base>/billing` with a branch `topic`, a folder that is no repository, and
+/// the list a caller would pass: both repositories, the plain folder, and a linked worktree of the
+/// first repository.
+fn with_list(f: &Fixture) -> (PathBuf, String) {
     let billing = f.main.parent().unwrap().join("billing");
     std::fs::create_dir(&billing).unwrap();
     git_in(&billing, &["init", "-q", "-b", "main"]);
@@ -608,85 +613,121 @@ fn with_projects(f: &Fixture) -> (PathBuf, PathBuf) {
     git_in(&billing, &["branch", "topic"]);
     let plain = f.base.path().canonicalize().unwrap().join("plain");
     std::fs::create_dir(&plain).unwrap();
-    let file = f.base.path().join("projects");
-    std::fs::write(
-        &file,
-        format!(
-            "# projects\n{}\n{}  # billing\n{}\n{}/*\n",
-            f.main.display(),
-            billing.display(),
-            plain.display(),
-            f.main.parent().unwrap().display(),
-        ),
-    )
-    .unwrap();
-    (billing, file)
+    let (_, linked, _) = f.run(&f.env_with_home(), &["add", "feature"]);
+    let list = format!(
+        "{}\n\n{}\n{}\n{}\n",
+        f.main.display(),
+        billing.display(),
+        plain.display(),
+        linked.trim_end(),
+    );
+    (billing, list)
 }
 
-fn outside(f: &Fixture, projects: &Path) -> Env {
+fn elsewhere(f: &Fixture) -> Env {
     let cwd = f.base.path().join("home");
     std::fs::create_dir_all(&cwd).unwrap();
-    Env {
-        projects_file: Some(projects.to_path_buf()),
-        ..f.env(&cwd)
-    }
+    f.env(&cwd)
 }
 
 #[test]
-fn all_lists_the_worktrees_of_every_project_once_with_the_project_first() {
+fn a_list_on_stdin_gives_every_worktree_once_with_the_project_first() {
     let f = fixture();
-    let (billing, projects) = with_projects(&f);
-    let env = outside(&f, &projects);
-    f.run(&f.env_with_home(), &["add", "feature"]);
-    let (code, out, err) = f.run(&env, &["list", "--all", "--format", "tsv"]);
+    let (billing, list) = with_list(&f);
+    let env = elsewhere(&f);
+    let (code, out, err) = f.run_with(
+        &env,
+        &["list", "--repos-from", "-", "--format", "tsv"],
+        &list,
+    );
     assert_eq!(code, 0, "{err}");
     let feature = f.worktrees_home().join("repo/feature");
-    let expected = [
-        format!("repo\tmain\t{}", f.main.display()),
-        format!("repo\tfeature\t{}", feature.display()),
-        format!("billing\tmain\t{}", billing.display()),
-    ];
     assert_eq!(
         lines(&out),
-        expected
-            .map(String::from)
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
+        [
+            format!("repo\tmain\t{}", f.main.display()),
+            format!("repo\tfeature\t{}", feature.display()),
+            format!("billing\tmain\t{}", billing.display()),
+        ]
     );
-
-    // Paths stay plain: one path per line, a worktree once.
-    let (_, paths, _) = f.run(&env, &["list", "--all"]);
+    // The linked worktree in the list did not add its repository a second time, and the plain
+    // folder was skipped without a word.
+    assert_eq!(err, "");
+    let (_, paths, _) = f.run_with(&env, &["list", "--repos-from", "-"], &list);
     assert_eq!(paths.lines().count(), 3, "{paths}");
 }
 
 #[test]
-fn repo_works_on_a_folder_or_a_project_name_without_changing_the_format() {
+fn a_list_in_a_file_works_and_a_relative_path_is_taken_from_the_current_directory() {
     let f = fixture();
-    let (billing, projects) = with_projects(&f);
-    let env = outside(&f, &projects);
-    for spec in [billing.to_str().unwrap(), "billing"] {
-        let (code, out, err) = f.run(&env, &["list", "--repo", spec, "--format", "tsv"]);
-        assert_eq!(code, 0, "{err}");
-        assert_eq!(out, format!("main\t{}\n", billing.display()));
-    }
-    let (_, out, _) = f.run(
+    let (billing, _) = with_list(&f);
+    let env = elsewhere(&f);
+    std::fs::write(
+        env.cwd.join("repos.txt"),
+        format!("{}\n~/../billing\n", billing.display()),
+    )
+    .unwrap();
+    let (code, out, err) = f.run(
         &env,
-        &[
-            "list", "--repo", "billing", "--repo", "repo", "--format", "branches",
-        ],
+        &["list", "--repos-from", "repos.txt", "--format", "branches"],
     );
-    assert_eq!(lines(&out), ["billing\tmain", "repo\tmain"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(lines(&out), ["billing\tmain"]);
+    let (code, _, err) = f.run(&env, &["list", "--repos-from", "missing.txt"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("cannot read 'missing.txt'"), "{err}");
 }
 
 #[test]
-fn branches_across_projects_carry_the_project_and_the_checkout() {
+fn repo_works_on_a_folder_without_changing_the_format() {
     let f = fixture();
-    let (billing, projects) = with_projects(&f);
-    let env = outside(&f, &projects);
-    let (code, out, err) = f.run(&env, &["branches", "--all", "--missing"]);
+    let (billing, _) = with_list(&f);
+    let env = elsewhere(&f);
+    let (code, out, err) = f.run(
+        &env,
+        &[
+            "list",
+            "--repo",
+            billing.to_str().unwrap(),
+            "--format",
+            "tsv",
+        ],
+    );
     assert_eq!(code, 0, "{err}");
-    // `main` has the main checkout in both repositories; only billing's `topic` is missing.
+    assert_eq!(out, format!("main\t{}\n", billing.display()));
+    // More than one `--repo` is a list too.
+    let (_, out, _) = f.run(
+        &env,
+        &[
+            "list",
+            "--repo",
+            billing.to_str().unwrap(),
+            "--repo",
+            f.main.to_str().unwrap(),
+            "--format",
+            "branches",
+        ],
+    );
+    assert_eq!(
+        lines(&out),
+        ["billing\tmain", "repo\tmain\nrepo\tfeature"]
+            .iter()
+            .flat_map(|l| l.split('\n'))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn branches_across_repositories_carry_the_project_and_the_checkout() {
+    let f = fixture();
+    let (billing, list) = with_list(&f);
+    let (code, out, err) = f.run_with(
+        &elsewhere(&f),
+        &["branches", "--repos-from", "-", "--missing"],
+        &list,
+    );
+    assert_eq!(code, 0, "{err}");
+    // Every `main` has the main checkout, and `feature` has its worktree: only `topic` is missing.
     assert_eq!(
         lines(&out),
         [format!("billing\ttopic\t{}", billing.display())]
@@ -694,32 +735,36 @@ fn branches_across_projects_carry_the_project_and_the_checkout() {
 }
 
 #[test]
-fn json_across_projects_gains_the_project_and_the_repository() {
+fn json_across_repositories_gains_the_project_and_the_repository() {
     let f = fixture();
-    let (_, projects) = with_projects(&f);
-    let env = outside(&f, &projects);
-    let (_, out, _) = f.run(&env, &["list", "--all", "--format", "json"]);
+    let (_, list) = with_list(&f);
+    let (_, out, _) = f.run_with(
+        &elsewhere(&f),
+        &["list", "--repos-from", "-", "--format", "json"],
+        &list,
+    );
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(parsed.as_array().unwrap().len(), 2);
+    assert_eq!(parsed.as_array().unwrap().len(), 3);
     assert_eq!(parsed[0]["project"], "repo");
-    assert_eq!(parsed[1]["repo"], parsed[1]["path"]);
+    assert_eq!(parsed[2]["repo"], parsed[2]["path"]);
 }
 
 #[test]
 fn add_path_and_remove_work_on_another_repository() {
     let f = fixture();
-    let (_, projects) = with_projects(&f);
+    let (billing, _) = with_list(&f);
     let env = Env {
         worktrees_home: Some(f.worktrees_home()),
-        ..outside(&f, &projects)
+        ..elsewhere(&f)
     };
-    let (code, out, err) = f.run(&env, &["add", "topic", "--repo", "billing"]);
+    let repo = billing.to_str().unwrap();
+    let (code, out, err) = f.run(&env, &["add", "topic", "--repo", repo]);
     assert_eq!(code, 0, "{err}");
     let tree = f.worktrees_home().join("billing/topic");
     assert_eq!(out.trim_end(), tree.to_str().unwrap());
-    let (_, found, _) = f.run(&env, &["path", "topic", "--repo", "billing"]);
+    let (_, found, _) = f.run(&env, &["path", "topic", "--repo", repo]);
     assert_eq!(found, out);
-    let (code, _, err) = f.run(&env, &["remove", "topic", "--repo", "billing"]);
+    let (code, _, err) = f.run(&env, &["remove", "topic", "--repo", repo]);
     assert_eq!(code, 0, "{err}");
     assert!(!tree.exists());
 }
@@ -727,78 +772,71 @@ fn add_path_and_remove_work_on_another_repository() {
 #[test]
 fn the_repository_decides_the_worktree_settings_of_a_remote_add() {
     let f = fixture();
-    let (billing, projects) = with_projects(&f);
+    let (billing, _) = with_list(&f);
     let root = f.base.path().join("billing-root");
     git_in(
         &billing,
         &["config", "gitmaster.worktree.root", root.to_str().unwrap()],
     );
-    let env = outside(&f, &projects);
-    let (_, out, _) = f.run(&env, &["add", "x", "--repo", "billing"]);
+    let (_, out, _) = f.run(
+        &elsewhere(&f),
+        &["add", "x", "--repo", billing.to_str().unwrap()],
+    );
     assert_eq!(out.trim_end(), root.join("billing/x").to_str().unwrap());
 }
 
 #[test]
 fn commands_that_change_things_take_one_repository() {
     let f = fixture();
-    let (_, projects) = with_projects(&f);
-    let env = outside(&f, &projects);
+    let (billing, list) = with_list(&f);
+    let repo = billing.to_str().unwrap();
     for words in [
-        &["add", "x", "--all"][..],
-        &["add", "x", "--repo", "billing", "--repo", "repo"],
-        &["remove", "x", "--all"],
-        &["path", "x", "--all"],
+        &["add", "x", "--repos-from", "-"][..],
+        &["add", "x", "--repo", repo, "--repo", repo],
+        &["remove", "x", "--repos-from", "-"],
+        &["path", "x", "--repos-from", "-"],
     ] {
-        let (code, _, err) = f.run(&env, words);
+        let (code, _, err) = f.run_with(&elsewhere(&f), words, &list);
         assert_eq!(code, 2, "{words:?}: {err}");
     }
 }
 
 #[test]
-fn a_bad_repository_is_an_error_but_a_bad_project_is_skipped() {
+fn a_bad_repo_is_an_error_but_a_bad_folder_in_a_list_is_skipped() {
     let f = fixture();
-    let (_, projects) = with_projects(&f);
-    let env = outside(&f, &projects);
+    let env = elsewhere(&f);
     let (code, _, err) = f.run(&env, &["list", "--repo", "nowhere"]);
     assert_eq!(code, 1);
-    assert!(err.contains("not a folder or a project"), "{err}");
+    assert!(err.contains("'nowhere' is not a folder"), "{err}");
     let plain = f.base.path().canonicalize().unwrap().join("plain");
+    std::fs::create_dir(&plain).unwrap();
     let (code, _, err) = f.run(&env, &["list", "--repo", plain.to_str().unwrap()]);
     assert_eq!(code, 1);
     assert!(err.contains("not inside a git repository"), "{err}");
-    // `--all` has the plain folder in its list and carries on.
-    let (code, _, _) = f.run(&env, &["list", "--all"]);
+    let (code, out, _) = f.run_with(
+        &env,
+        &["list", "--repos-from", "-"],
+        &format!("{}\n", plain.display()),
+    );
+    assert_eq!((code, out.as_str()), (0, ""));
+    let (code, _, err) = f.run_with(&env, &["list", "--repos-from", "-"], "\n");
     assert_eq!(code, 0);
+    assert!(err.contains("list of repositories is empty"), "{err}");
 }
 
 #[test]
-fn the_projects_file_comes_from_the_flag_the_variable_or_the_git_config() {
+fn nothing_reads_a_projects_file() {
     let f = fixture();
-    let (billing, projects) = with_projects(&f);
-    let only = f.base.path().join("only-billing");
-    std::fs::write(&only, format!("{}\n", billing.display())).unwrap();
-    let cwd = f.base.path().join("home");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let env = Env {
-        projects_file: Some(projects),
-        ..f.env(&cwd)
-    };
-    // The flag beats the variable.
-    let (_, out, _) = f.run(
-        &env,
-        &["list", "--all", "--projects", only.to_str().unwrap()],
-    );
-    assert_eq!(lines(&out), [billing.to_str().unwrap()]);
-    // Without the variable the Git key applies, and without that `~/.projects`.
-    let bare = Env {
-        projects_file: None,
-        ..env
-    };
+    let env = elsewhere(&f);
     std::fs::write(
-        f.base.path().join("no-global-config"),
-        format!("[gitmaster]\n\tprojectsFile = {}\n", only.display()),
+        env.home.as_ref().unwrap().join(".projects"),
+        format!("{}\n", f.main.display()),
     )
     .unwrap();
-    let (_, out, _) = f.run(&bare, &["list", "--all"]);
-    assert_eq!(lines(&out), [billing.to_str().unwrap()]);
+    // The list is the caller's: with none given the command works on the current directory.
+    let (code, _, err) = f.run(&env, &["list"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("not inside a git repository"), "{err}");
+    let (code, _, _) = f.run(&env, &["list", "--all"]);
+    assert_eq!(code, 2);
 }

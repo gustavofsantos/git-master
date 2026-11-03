@@ -120,7 +120,12 @@ fn engine_command(name: &str, words: &[String]) -> Option<i32> {
         "harness" => Some(gm_core::threads::cli::harness_command(
             words, &mut out, &mut err,
         )),
-        "worktree" => Some(gm_core::worktree_cli::command(words, &mut out, &mut err)),
+        "worktree" => Some(gm_core::worktree_cli::command(
+            words,
+            &mut std::io::stdin().lock(),
+            &mut out,
+            &mut err,
+        )),
         _ => None,
     }
 }

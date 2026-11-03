@@ -116,26 +116,26 @@ A link to a folder does not match a folder pattern such as `node_modules/`. GitM
 
 ### Several repositories
 
-Every worktree subcommand takes `--repo <folder-or-project>` to work on a repository other than the current one, from any directory. A project is named by the name of its folder in the projects file.
+Every worktree subcommand takes `--repo <folder>` to work on a repository other than the current one, from any directory. A relative folder is taken from the current directory, and a leading `~` is the home directory.
 
 ```sh
-gitmaster worktree add feature/x --repo billing     # create it in another repository
-gitmaster worktree path feature/x --repo ~/src/app  # find its worktree there
-gitmaster worktree list --all --format tsv          # every worktree of every project
+gitmaster worktree add feature/x --repo ~/src/billing    # create it in another repository
+gitmaster worktree path feature/x --repo ~/src/app       # find its worktree there
 ```
 
-`list` and `branches` read more than one repository: give `--repo` more than once, or `--all` for every project in the projects file. The other subcommands change or look up one thing and take `--repo` once; `--all` or a second `--repo` is a wrong command line.
+`list` and `branches` can read more than one repository. The command never looks for a list of repositories itself: you pass it.
 
-The projects file has one folder per line. A leading `~` is the home directory, blank lines and text after `#` are ignored, and a glob such as `~/Workplace/*` stands for the folders it matches. The first of these names the file:
+- `--repo <folder>`, more than once.
+- `--repos-from <file>` reads one folder per line from the file, or from the standard input when the file is `-`. Blank lines are ignored.
 
-| Source | File |
-|---|---|
-| `--projects <file>` | The file given. |
-| The environment variable `PROJECTS_FILE` | The file it names. |
-| The Git key `gitmaster.projectsFile` | The file it names. |
-| None | `~/.projects` |
+```sh
+ls -d ~/src/*/ | gitmaster worktree list --repos-from - --format tsv
+gitmaster worktree branches --repos-from repos.txt
+```
 
-With more than one repository, the output says which one a line is from:
+The other subcommands change or look up one thing, so they take `--repo` once. `--repos-from` or a second `--repo` is a wrong command line.
+
+With a list, the output says which repository a line is from:
 
 | Output | A line holds |
 |---|---|
@@ -145,15 +145,15 @@ With more than one repository, the output says which one a line is from:
 | `list --format json` | The same objects, each with `project` and `repo`, the path of the main checkout. |
 | `branches` | The project, the branch and the path of the main checkout, separated by tabs. |
 
-With one repository, even one named by `--repo`, the output is the one shown above. Each repository appears once: two projects in one repository, such as folders of a monorepo, count as one. A project that is not a repository is skipped, and a repository named with `--repo` that is not one is an error.
+The project is the folder name of the main checkout. A list is more than one `--repo` or any `--repos-from`; with a single `--repo` the output is the one shown above. A repository is read once, however many of its folders the list holds: a linked worktree and its main checkout count as one. A folder in `--repos-from` that is not a repository is skipped, since the list may hold other folders, but a folder named with `--repo` that is not one is an error. A list that is empty, or has no repository, gives no output and does not fall back to the current directory.
 
 A command that works on another repository reads that repository's own Git configuration, so its `gitmaster.worktree.root` and `gitmaster.worktree.include` apply to it, not the current one's.
 
 ### Example: a tmux binding
 
 ```sh
-# pick a branch of any project; the line holds the project, the branch and the checkout
-IFS=$'\t' read -r _ branch repo < <(gitmaster worktree branches --all | fzf --delimiter='\t') &&
+# pick a branch of any repository in a list; a line holds the project, the branch and the checkout
+IFS=$'\t' read -r _ branch repo < <(my-repos | gitmaster worktree branches --repos-from - | fzf --delimiter='\t') &&
   tmux-sessionizer "$(gitmaster worktree add "$branch" --repo "$repo")"
 ```
 
