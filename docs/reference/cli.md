@@ -5,7 +5,7 @@ status: partial
 order: 30
 ---
 
-The `gitmaster` command opens the app. The worktree, workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs. Only `gitmaster worktree add` and `gitmaster worktree include` change a repository. The section Open a repository covers the arguments the app accepts. `gitmaster mcp` is the MCP server your agent starts.
+The `gitmaster` command opens the app. The worktree, workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs. Only `gitmaster worktree add`, `remove` and `include` change a repository. The section Open a repository covers the arguments the app accepts. `gitmaster mcp` is the MCP server your agent starts.
 
 ## Open a repository
 
@@ -32,6 +32,7 @@ gitmaster worktree list [--format paths|branches|tsv|json] [--linked]
 gitmaster worktree branches [--missing]
 gitmaster worktree path <branch>
 gitmaster worktree add <branch> [<base>] [--root <dir>] [--include symlink|reflink|none]
+gitmaster worktree remove <branch> [--force]
 gitmaster worktree include [<branch>] [--include symlink|reflink] [--dry-run]
 ```
 
@@ -79,6 +80,15 @@ The folder comes from the first of these that is set:
 | None | `../<repo>-<branch>`, next to the main checkout |
 
 `<repo>` is the name of the main checkout's folder, so the same branch of two repositories never collides. A leading `~` is the home directory. A relative `--root` is taken from the current directory and a relative key from the main checkout.
+
+### Remove a worktree
+
+`remove <branch>` removes the worktree that has `<branch>` checked out and prints its path. The branch is kept. It follows the rules of the **Remove Worktree** dialog and never deletes a folder by hand: Git does it, so the files the worktree shares through `.worktreeinclude` disappear as links and the files they point to stay in the main checkout.
+
+- It refuses the main checkout, and the worktree that contains the current directory. `--force` does not lift either.
+- It refuses a worktree that is locked, has staged, unstaged or untracked files, or has commits that no other local or remote branch has, or that are ahead of its upstream. It says which, and removes nothing. `--force` removes it anyway, with what it discards.
+- A worktree whose folder is gone is not listed; clear its record with `git worktree prune`.
+- When the worktree sat under a `--root`, `gitmaster.worktree.root` or `WORKTREES_HOME` folder and that `<repo>` folder is now empty, it is removed too.
 
 ### Share ignored files: `.worktreeinclude`
 

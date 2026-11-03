@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use gm_schema::{WorktreeEntry, WorktreeMode};
+use gm_schema::{Blocker, WorktreeEntry, WorktreeMode};
 
 use crate::git::SubprocessGit;
 use crate::worktree_include::{self, Action, Mode};
@@ -21,6 +21,7 @@ const USAGE: &str = "usage: gitmaster worktree list [--format paths|branches|tsv
        gitmaster worktree branches [--missing]
        gitmaster worktree path <branch>
        gitmaster worktree add <branch> [<base>] [--root <dir>] [--include symlink|reflink|none]
+       gitmaster worktree remove <branch> [--force]
        gitmaster worktree include [<branch>] [--include symlink|reflink] [--dry-run]
 ";
 
@@ -86,6 +87,7 @@ pub fn run(
         "branches" => branches(rest, env, git, out),
         "path" => path(rest, env, git, out),
         "add" => add(rest, env, git, out, err),
+        "remove" => remove(rest, env, git, out, err),
         "include" => include(rest, env, git, err),
         _ => Err(Failure::Usage(format!("unknown subcommand '{name}'"))),
     };
@@ -541,6 +543,90 @@ fn share(
             let _ = writeln!(err, "gitmaster: cannot update info/exclude: {error}");
         }
     }
+}
+
+/// Removes the worktree that has `<branch>` checked out; the branch is kept. The rules are the
+/// app's (D31): the main checkout and the worktree the command runs in are never removed, and a
+/// worktree that is locked, has changes or has commits no other branch has needs `--force`.
+fn remove(
+    words: &[String],
+    env: &Env,
+    git: &dyn GitPort,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), Failure> {
+    let args = Args::parse(words, &[], &["force"])?;
+    args.exactly(1, "a branch")?;
+    let branch = &args.positional[0];
+    // `worktrees` leaves out a worktree whose folder is gone: that one is pruned, not removed.
+    let (_, entries) = worktrees(env, git)?;
+    let entry = holder(&entries, branch)
+        .ok_or_else(|| Failure::Run(format!("no worktree has branch '{branch}' checked out")))?;
+    let path = PathBuf::from(&entry.path);
+    let here = std::fs::canonicalize(&env.cwd).unwrap_or_else(|_| env.cwd.clone());
+    let there = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+
+    let status = git.status(&path)?;
+    let changes = status
+        .entries
+        .iter()
+        .any(|c| c.staged.is_some() || c.unstaged.is_some() || c.untracked);
+    let unpushed = git.unpushed_commits(&path, Some(branch))?;
+    let found = crate::worktree::blockers([
+        (entry.is_main, Blocker::Main),
+        (here.starts_with(&there), Blocker::Current),
+        (false, Blocker::Missing),
+        (entry.locked.is_some(), Blocker::Locked),
+        (changes, Blocker::Dirty),
+        (unpushed > 0, Blocker::Unpushed),
+    ]);
+    if found.contains(&Blocker::Main) {
+        return Err(Failure::Run(format!(
+            "'{branch}' is checked out in the main checkout"
+        )));
+    }
+    if found.contains(&Blocker::Current) {
+        return Err(Failure::Run(
+            "this directory is inside that worktree; run the command from another one".into(),
+        ));
+    }
+    if !found.is_empty() && !args.switch("force") {
+        let why: Vec<String> = found
+            .iter()
+            .map(|b| match b {
+                Blocker::Locked => "it is locked".to_owned(),
+                Blocker::Dirty => "it has uncommitted or untracked files".to_owned(),
+                _ => format!("it has {unpushed} commit(s) that no other branch or remote has"),
+            })
+            .collect();
+        return Err(Failure::Run(format!(
+            "not removing {}: {}; use --force to discard them",
+            path.display(),
+            why.join(", ")
+        )));
+    }
+    let force = if found.contains(&Blocker::Locked) {
+        2
+    } else {
+        u8::from(!found.is_empty())
+    };
+    // From the main checkout, so the folder being removed is never the one git runs in.
+    let main = PathBuf::from(&entries[0].path);
+    git.remove_worktree(&main, &entry.path, force)?;
+    // An empty `<root>/<project>` folder is left behind by the layout; the sibling layout shares
+    // the main checkout's parent, which is not ours to tidy.
+    if let Some(parent) = path.parent()
+        && Some(parent) != main.parent()
+    {
+        let _ = std::fs::remove_dir(parent);
+    }
+    writeln!(out, "{}", path.display())?;
+    writeln!(
+        err,
+        "removed worktree {} (branch '{branch}' kept)",
+        path.display()
+    )?;
+    Ok(())
 }
 
 fn include(

@@ -493,3 +493,104 @@ fn include_refuses_the_main_checkout() {
     assert_eq!(code, 1);
     assert!(err.contains("main checkout"), "{err}");
 }
+
+// remove
+
+#[test]
+fn remove_deletes_the_worktree_keeps_the_branch_and_tidies_the_project_folder() {
+    let f = fixture();
+    let env = f.env_with_home();
+    let (_, out, _) = f.run(&env, &["add", "feature/x"]);
+    let tree = PathBuf::from(out.trim_end());
+    let (code, out, _) = f.run(&env, &["remove", "feature/x"]);
+    assert_eq!(code, 0);
+    assert_eq!(out.trim_end(), tree.to_str().unwrap());
+    assert!(!tree.exists());
+    assert!(!f.worktrees_home().join("repo").exists());
+    assert_eq!(
+        git_in(&f.main, &["branch", "--list", "feature/x"]),
+        "feature/x"
+    );
+    let (_, paths, _) = f.run(&env, &["list"]);
+    assert_eq!(lines(&paths), [f.main.to_str().unwrap()]);
+}
+
+#[test]
+fn remove_leaves_the_files_it_linked_in_the_main_checkout() {
+    let f = fixture();
+    with_include(&f);
+    let env = f.env_with_home();
+    let (_, out, _) = f.run(&env, &["add", "feature"]);
+    let tree = PathBuf::from(out.trim_end());
+    let (code, _, err) = f.run(&env, &["remove", "feature"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!tree.exists());
+    assert_eq!(
+        std::fs::read_to_string(f.main.join(".env")).unwrap(),
+        "SECRET=1\n"
+    );
+    assert!(f.main.join("node_modules/pkg/index.js").exists());
+}
+
+#[test]
+fn remove_refuses_changes_until_forced() {
+    let f = fixture();
+    let env = f.env_with_home();
+    let (_, out, _) = f.run(&env, &["add", "feature"]);
+    let tree = PathBuf::from(out.trim_end());
+    std::fs::write(tree.join("new.txt"), "x").unwrap();
+    let (code, _, err) = f.run(&env, &["remove", "feature"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("uncommitted or untracked"), "{err}");
+    assert!(tree.exists());
+    let (code, _, _) = f.run(&env, &["remove", "feature", "--force"]);
+    assert_eq!(code, 0);
+    assert!(!tree.exists());
+}
+
+#[test]
+fn remove_refuses_unpushed_commits_and_a_lock_until_forced() {
+    let f = fixture();
+    let env = f.env_with_home();
+    let (_, out, _) = f.run(&env, &["add", "feature"]);
+    let tree = PathBuf::from(out.trim_end());
+    std::fs::write(tree.join("c.txt"), "x").unwrap();
+    git_in(&tree, &["add", "."]);
+    git_in(&tree, &["commit", "-q", "-m", "only here"]);
+    let (code, _, err) = f.run(&env, &["remove", "feature"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("no other branch or remote"), "{err}");
+
+    git_in(&f.main, &["worktree", "lock", tree.to_str().unwrap()]);
+    let (_, _, err) = f.run(&env, &["remove", "feature"]);
+    assert!(err.contains("it is locked"), "{err}");
+    let (code, _, err) = f.run(&env, &["remove", "feature", "--force"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!tree.exists());
+}
+
+#[test]
+fn remove_never_takes_the_main_checkout_or_the_directory_it_runs_in() {
+    let f = fixture();
+    let env = f.env_with_home();
+    let (code, _, err) = f.run(&env, &["remove", "main", "--force"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("main checkout"), "{err}");
+
+    let (_, out, _) = f.run(&env, &["add", "feature"]);
+    let tree = PathBuf::from(out.trim_end());
+    let inside = Env {
+        cwd: tree.clone(),
+        ..env.clone()
+    };
+    let (code, _, err) = f.run(&inside, &["remove", "feature", "--force"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("inside that worktree"), "{err}");
+    assert!(tree.exists());
+
+    let (code, _, err) = f.run(&env, &["remove", "unknown"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("no worktree has branch"), "{err}");
+    let (code, _, _) = f.run(&env, &["remove"]);
+    assert_eq!(code, 2);
+}
