@@ -49,6 +49,7 @@ impl Fixture {
             cwd: cwd.to_path_buf(),
             home: Some(self.base.path().join("home")),
             worktrees_home: None,
+            projects_file: None,
         }
     }
 
@@ -593,4 +594,211 @@ fn remove_never_takes_the_main_checkout_or_the_directory_it_runs_in() {
     assert!(err.contains("no worktree has branch"), "{err}");
     let (code, _, _) = f.run(&env, &["remove"]);
     assert_eq!(code, 2);
+}
+
+// several repositories
+
+/// A second repository `<base>/billing` with a branch `topic`, and a projects file that lists it,
+/// the fixture's repository, a folder that is no repository and a glob.
+fn with_projects(f: &Fixture) -> (PathBuf, PathBuf) {
+    let billing = f.main.parent().unwrap().join("billing");
+    std::fs::create_dir(&billing).unwrap();
+    git_in(&billing, &["init", "-q", "-b", "main"]);
+    git_in(&billing, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git_in(&billing, &["branch", "topic"]);
+    let plain = f.base.path().canonicalize().unwrap().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    let file = f.base.path().join("projects");
+    std::fs::write(
+        &file,
+        format!(
+            "# projects\n{}\n{}  # billing\n{}\n{}/*\n",
+            f.main.display(),
+            billing.display(),
+            plain.display(),
+            f.main.parent().unwrap().display(),
+        ),
+    )
+    .unwrap();
+    (billing, file)
+}
+
+fn outside(f: &Fixture, projects: &Path) -> Env {
+    let cwd = f.base.path().join("home");
+    std::fs::create_dir_all(&cwd).unwrap();
+    Env {
+        projects_file: Some(projects.to_path_buf()),
+        ..f.env(&cwd)
+    }
+}
+
+#[test]
+fn all_lists_the_worktrees_of_every_project_once_with_the_project_first() {
+    let f = fixture();
+    let (billing, projects) = with_projects(&f);
+    let env = outside(&f, &projects);
+    f.run(&f.env_with_home(), &["add", "feature"]);
+    let (code, out, err) = f.run(&env, &["list", "--all", "--format", "tsv"]);
+    assert_eq!(code, 0, "{err}");
+    let feature = f.worktrees_home().join("repo/feature");
+    let expected = [
+        format!("repo\tmain\t{}", f.main.display()),
+        format!("repo\tfeature\t{}", feature.display()),
+        format!("billing\tmain\t{}", billing.display()),
+    ];
+    assert_eq!(
+        lines(&out),
+        expected
+            .map(String::from)
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    );
+
+    // Paths stay plain: one path per line, a worktree once.
+    let (_, paths, _) = f.run(&env, &["list", "--all"]);
+    assert_eq!(paths.lines().count(), 3, "{paths}");
+}
+
+#[test]
+fn repo_works_on_a_folder_or_a_project_name_without_changing_the_format() {
+    let f = fixture();
+    let (billing, projects) = with_projects(&f);
+    let env = outside(&f, &projects);
+    for spec in [billing.to_str().unwrap(), "billing"] {
+        let (code, out, err) = f.run(&env, &["list", "--repo", spec, "--format", "tsv"]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out, format!("main\t{}\n", billing.display()));
+    }
+    let (_, out, _) = f.run(
+        &env,
+        &[
+            "list", "--repo", "billing", "--repo", "repo", "--format", "branches",
+        ],
+    );
+    assert_eq!(lines(&out), ["billing\tmain", "repo\tmain"]);
+}
+
+#[test]
+fn branches_across_projects_carry_the_project_and_the_checkout() {
+    let f = fixture();
+    let (billing, projects) = with_projects(&f);
+    let env = outside(&f, &projects);
+    let (code, out, err) = f.run(&env, &["branches", "--all", "--missing"]);
+    assert_eq!(code, 0, "{err}");
+    // `main` has the main checkout in both repositories; only billing's `topic` is missing.
+    assert_eq!(
+        lines(&out),
+        [format!("billing\ttopic\t{}", billing.display())]
+    );
+}
+
+#[test]
+fn json_across_projects_gains_the_project_and_the_repository() {
+    let f = fixture();
+    let (_, projects) = with_projects(&f);
+    let env = outside(&f, &projects);
+    let (_, out, _) = f.run(&env, &["list", "--all", "--format", "json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed.as_array().unwrap().len(), 2);
+    assert_eq!(parsed[0]["project"], "repo");
+    assert_eq!(parsed[1]["repo"], parsed[1]["path"]);
+}
+
+#[test]
+fn add_path_and_remove_work_on_another_repository() {
+    let f = fixture();
+    let (_, projects) = with_projects(&f);
+    let env = Env {
+        worktrees_home: Some(f.worktrees_home()),
+        ..outside(&f, &projects)
+    };
+    let (code, out, err) = f.run(&env, &["add", "topic", "--repo", "billing"]);
+    assert_eq!(code, 0, "{err}");
+    let tree = f.worktrees_home().join("billing/topic");
+    assert_eq!(out.trim_end(), tree.to_str().unwrap());
+    let (_, found, _) = f.run(&env, &["path", "topic", "--repo", "billing"]);
+    assert_eq!(found, out);
+    let (code, _, err) = f.run(&env, &["remove", "topic", "--repo", "billing"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!tree.exists());
+}
+
+#[test]
+fn the_repository_decides_the_worktree_settings_of_a_remote_add() {
+    let f = fixture();
+    let (billing, projects) = with_projects(&f);
+    let root = f.base.path().join("billing-root");
+    git_in(
+        &billing,
+        &["config", "gitmaster.worktree.root", root.to_str().unwrap()],
+    );
+    let env = outside(&f, &projects);
+    let (_, out, _) = f.run(&env, &["add", "x", "--repo", "billing"]);
+    assert_eq!(out.trim_end(), root.join("billing/x").to_str().unwrap());
+}
+
+#[test]
+fn commands_that_change_things_take_one_repository() {
+    let f = fixture();
+    let (_, projects) = with_projects(&f);
+    let env = outside(&f, &projects);
+    for words in [
+        &["add", "x", "--all"][..],
+        &["add", "x", "--repo", "billing", "--repo", "repo"],
+        &["remove", "x", "--all"],
+        &["path", "x", "--all"],
+    ] {
+        let (code, _, err) = f.run(&env, words);
+        assert_eq!(code, 2, "{words:?}: {err}");
+    }
+}
+
+#[test]
+fn a_bad_repository_is_an_error_but_a_bad_project_is_skipped() {
+    let f = fixture();
+    let (_, projects) = with_projects(&f);
+    let env = outside(&f, &projects);
+    let (code, _, err) = f.run(&env, &["list", "--repo", "nowhere"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("not a folder or a project"), "{err}");
+    let plain = f.base.path().canonicalize().unwrap().join("plain");
+    let (code, _, err) = f.run(&env, &["list", "--repo", plain.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("not inside a git repository"), "{err}");
+    // `--all` has the plain folder in its list and carries on.
+    let (code, _, _) = f.run(&env, &["list", "--all"]);
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn the_projects_file_comes_from_the_flag_the_variable_or_the_git_config() {
+    let f = fixture();
+    let (billing, projects) = with_projects(&f);
+    let only = f.base.path().join("only-billing");
+    std::fs::write(&only, format!("{}\n", billing.display())).unwrap();
+    let cwd = f.base.path().join("home");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let env = Env {
+        projects_file: Some(projects),
+        ..f.env(&cwd)
+    };
+    // The flag beats the variable.
+    let (_, out, _) = f.run(
+        &env,
+        &["list", "--all", "--projects", only.to_str().unwrap()],
+    );
+    assert_eq!(lines(&out), [billing.to_str().unwrap()]);
+    // Without the variable the Git key applies, and without that `~/.projects`.
+    let bare = Env {
+        projects_file: None,
+        ..env
+    };
+    std::fs::write(
+        f.base.path().join("no-global-config"),
+        format!("[gitmaster]\n\tprojectsFile = {}\n", only.display()),
+    )
+    .unwrap();
+    let (_, out, _) = f.run(&bare, &["list", "--all"]);
+    assert_eq!(lines(&out), [billing.to_str().unwrap()]);
 }

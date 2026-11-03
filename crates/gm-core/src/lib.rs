@@ -22,6 +22,7 @@ mod move_preview;
 pub mod path_match;
 mod paths;
 mod port;
+pub mod projects;
 mod reflog;
 pub mod remote;
 pub mod restack;

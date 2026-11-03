@@ -14,6 +14,7 @@ use std::process::Command;
 use gm_schema::{Blocker, WorktreeEntry, WorktreeMode};
 
 use crate::git::SubprocessGit;
+use crate::projects;
 use crate::worktree_include::{self, Action, Mode};
 use crate::{GitError, GitPort};
 
@@ -23,6 +24,10 @@ const USAGE: &str = "usage: gitmaster worktree list [--format paths|branches|tsv
        gitmaster worktree add <branch> [<base>] [--root <dir>] [--include symlink|reflink|none]
        gitmaster worktree remove <branch> [--force]
        gitmaster worktree include [<branch>] [--include symlink|reflink] [--dry-run]
+
+Every command takes --repo <path-or-project> to work on another repository. list and branches
+take --repo more than once, or --all for every project in the projects file (--projects <file>,
+$PROJECTS_FILE or ~/.projects).
 ";
 
 /// The git config key that sets the folder worktrees are created under.
@@ -39,6 +44,8 @@ pub struct Env {
     pub home: Option<PathBuf>,
     /// `WORKTREES_HOME`: the folder worktrees go under when nothing else says.
     pub worktrees_home: Option<PathBuf>,
+    /// `PROJECTS_FILE`: the list of projects `--all` and project names are taken from.
+    pub projects_file: Option<PathBuf>,
 }
 
 impl Env {
@@ -54,6 +61,7 @@ impl Env {
             cwd: std::env::current_dir().unwrap_or_default(),
             home: var("HOME"),
             worktrees_home: var("WORKTREES_HOME"),
+            projects_file: var("PROJECTS_FILE"),
         }
     }
 }
@@ -83,8 +91,8 @@ pub fn run(
         return 2;
     };
     let result = match name.as_str() {
-        "list" => list(rest, env, git, out),
-        "branches" => branches(rest, env, git, out),
+        "list" => list(rest, env, git, out, err),
+        "branches" => branches(rest, env, git, out, err),
         "path" => path(rest, env, git, out),
         "add" => add(rest, env, git, out, err),
         "remove" => remove(rest, env, git, out, err),
@@ -173,6 +181,15 @@ impl Args {
             .map(|(_, value)| value.as_str())
     }
 
+    /// Every value given for `name`, in order.
+    fn values(&self, name: &str) -> Vec<&str> {
+        self.options
+            .iter()
+            .filter(|(flag, _)| flag == name)
+            .map(|(_, value)| value.as_str())
+            .collect()
+    }
+
     fn switch(&self, name: &str) -> bool {
         self.switches.iter().any(|flag| flag == name)
     }
@@ -201,10 +218,10 @@ fn toplevel(dir: &Path) -> Result<PathBuf, Failure> {
     Ok(PathBuf::from(text.trim_end_matches('\n')))
 }
 
-/// The worktrees of the repository around `env.cwd` whose folder still exists, main checkout
-/// first, and the folder Git commands run in.
-fn worktrees(env: &Env, git: &dyn GitPort) -> Result<(PathBuf, Vec<WorktreeEntry>), Failure> {
-    let root = toplevel(&env.cwd)?;
+/// The worktrees of the repository around `dir` whose folder still exists, main checkout first,
+/// and the folder Git commands run in.
+fn worktrees_in(dir: &Path, git: &dyn GitPort) -> Result<(PathBuf, Vec<WorktreeEntry>), Failure> {
+    let root = toplevel(dir)?;
     let entries = git.worktrees(&root)?;
     if entries.first().is_some_and(|main| main.bare) {
         return Err(Failure::Run("bare repositories are not supported".into()));
@@ -216,80 +233,227 @@ fn worktrees(env: &Env, git: &dyn GitPort) -> Result<(PathBuf, Vec<WorktreeEntry
     Ok((root, usable))
 }
 
+/// The projects file: `--projects`, else `$PROJECTS_FILE`, else the Git key
+/// `gitmaster.projectsFile`, else `~/.projects`.
+fn projects_file(args: &Args, env: &Env, git: &dyn GitPort) -> Option<PathBuf> {
+    if let Some(flag) = args.option("projects") {
+        return Some(env.cwd.join(expand(flag, env.home.as_deref())));
+    }
+    if let Some(file) = &env.projects_file {
+        return Some(file.clone());
+    }
+    let key = "gitmaster.projectsFile";
+    if let Ok(Some(value)) = config(git, &env.cwd, key) {
+        return Some(env.cwd.join(expand(&value, env.home.as_deref())));
+    }
+    Some(env.home.as_ref()?.join(".projects"))
+}
+
+/// The directory `spec` names: a folder, or the name of a listed project.
+fn resolve_repo(spec: &str, args: &Args, env: &Env, git: &dyn GitPort) -> Result<PathBuf, Failure> {
+    let as_path = env.cwd.join(expand(spec, env.home.as_deref()));
+    if as_path.is_dir() {
+        return Ok(as_path);
+    }
+    let listed = projects_file(args, env, git)
+        .map(|file| projects::read(&file, env.home.as_deref()))
+        .unwrap_or_default();
+    let named: Vec<&PathBuf> = listed
+        .iter()
+        .filter(|dir| dir.file_name().is_some_and(|name| name == spec))
+        .collect();
+    match named.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(Failure::Run(format!(
+            "'{spec}' is not a folder or a project in the projects file"
+        ))),
+        _ => Err(Failure::Run(format!(
+            "'{spec}' names more than one project; use its path"
+        ))),
+    }
+}
+
+/// A repository a command works on.
+struct Repo {
+    /// The main checkout's folder name.
+    project: String,
+    /// The folder Git commands run in.
+    root: PathBuf,
+    entries: Vec<WorktreeEntry>,
+}
+
+/// The repositories of a read command: those named by `--repo`, those of the projects file with
+/// `--all`, else the one around the current directory. The flag is `true` when there is more than
+/// one source, which adds the project to the output. A project that is not a repository is
+/// skipped; one named with `--repo` that is not is an error. Each repository once.
+fn repositories(
+    args: &Args,
+    env: &Env,
+    git: &dyn GitPort,
+    err: &mut dyn Write,
+) -> Result<(Vec<Repo>, bool), Failure> {
+    let specs = args.values("repo");
+    let all = args.switch("all");
+    let multi = all || specs.len() > 1;
+    let mut dirs: Vec<(PathBuf, bool)> = Vec::new();
+    for spec in &specs {
+        dirs.push((resolve_repo(spec, args, env, git)?, true));
+    }
+    if all {
+        let file = projects_file(args, env, git);
+        let listed = file
+            .as_deref()
+            .map(|file| projects::read(file, env.home.as_deref()))
+            .unwrap_or_default();
+        if listed.is_empty() {
+            let _ = writeln!(err, "gitmaster: no projects listed in the projects file");
+        }
+        dirs.extend(listed.into_iter().map(|dir| (dir, false)));
+    }
+    if dirs.is_empty() {
+        dirs.push((env.cwd.clone(), true));
+    }
+    let mut repos: Vec<Repo> = Vec::new();
+    for (dir, explicit) in dirs {
+        let (root, entries) = match worktrees_in(&dir, git) {
+            Ok(found) => found,
+            Err(error) if explicit => return Err(error),
+            Err(_) => continue,
+        };
+        let main = PathBuf::from(&entries[0].path);
+        if repos
+            .iter()
+            .any(|repo| repo.entries[0].path == entries[0].path)
+        {
+            continue;
+        }
+        let project = main
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        repos.push(Repo {
+            project,
+            root,
+            entries,
+        });
+    }
+    Ok((repos, multi))
+}
+
+/// The one repository a command that changes or looks up something works on: `--repo`, else the
+/// one around the current directory.
+fn one_repo(args: &Args, env: &Env, git: &dyn GitPort) -> Result<PathBuf, Failure> {
+    if args.switch("all") || args.values("repo").len() > 1 {
+        return Err(Failure::Usage(
+            "this command works on one repository: give --repo once".into(),
+        ));
+    }
+    match args.values("repo").first() {
+        Some(spec) => resolve_repo(spec, args, env, git),
+        None => Ok(env.cwd.clone()),
+    }
+}
+
 fn list(
     words: &[String],
     env: &Env,
     git: &dyn GitPort,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let args = Args::parse(words, &["format"], &["linked"])?;
+    let args = Args::parse(words, &["format", "repo", "projects"], &["linked", "all"])?;
     args.exactly(0, "no arguments")?;
     let format = args.option("format").unwrap_or("paths");
     if !["paths", "branches", "tsv", "json"].contains(&format) {
         return Err(Failure::Usage(format!("unknown format '{format}'")));
     }
-    let (_, entries) = worktrees(env, git)?;
-    let shown: Vec<&WorktreeEntry> = entries
-        .iter()
-        .filter(|entry| !(args.switch("linked") && entry.is_main))
-        .collect();
-    match format {
-        "paths" => {
-            for entry in shown {
-                writeln!(out, "{}", entry.path)?;
+    let (repos, multi) = repositories(&args, env, git, err)?;
+    let mut objects = Vec::new();
+    for repo in &repos {
+        for entry in repo
+            .entries
+            .iter()
+            .filter(|entry| !(args.switch("linked") && entry.is_main))
+        {
+            let branch = entry.branch.as_deref();
+            let project = if multi {
+                format!("{}\t", repo.project)
+            } else {
+                String::new()
+            };
+            match format {
+                "paths" => writeln!(out, "{}", entry.path)?,
+                "branches" => {
+                    if let Some(branch) = branch {
+                        writeln!(out, "{project}{branch}")?;
+                    }
+                }
+                "tsv" => writeln!(
+                    out,
+                    "{project}{}\t{}",
+                    branch.unwrap_or("(detached)"),
+                    entry.path
+                )?,
+                _ => {
+                    let mut object =
+                        serde_json::to_value(entry).map_err(|e| Failure::Run(e.to_string()))?;
+                    if multi && let Some(fields) = object.as_object_mut() {
+                        fields.insert("project".into(), repo.project.clone().into());
+                        fields.insert("repo".into(), repo.entries[0].path.clone().into());
+                    }
+                    objects.push(object);
+                }
             }
         }
-        "branches" => {
-            for branch in shown.iter().filter_map(|entry| entry.branch.as_deref()) {
-                writeln!(out, "{branch}")?;
-            }
-        }
-        "tsv" => {
-            for entry in shown {
-                let branch = entry.branch.as_deref().unwrap_or("(detached)");
-                writeln!(out, "{branch}\t{}", entry.path)?;
-            }
-        }
-        _ => {
-            let json = serde_json::to_string(&shown).map_err(|e| Failure::Run(e.to_string()))?;
-            writeln!(out, "{json}")?;
-        }
+    }
+    if format == "json" {
+        let json = serde_json::to_string(&objects).map_err(|e| Failure::Run(e.to_string()))?;
+        writeln!(out, "{json}")?;
     }
     Ok(())
 }
 
 /// Every branch a worktree could be made for: the local branches, then the remote ones that have
-/// no local branch of the same name, each once.
+/// no local branch of the same name, each once. With several repositories a line is the project,
+/// the branch and the main checkout, separated by tabs.
 fn branches(
     words: &[String],
     env: &Env,
     git: &dyn GitPort,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let args = Args::parse(words, &[], &["missing"])?;
+    let args = Args::parse(words, &["repo", "projects"], &["missing", "all"])?;
     args.exactly(0, "no arguments")?;
-    let (root, entries) = worktrees(env, git)?;
-    let mut names: Vec<String> = Vec::new();
-    for branch in git.branches(&root)? {
-        let name = if branch.is_remote {
-            // `origin/feature/x` is the branch `feature/x`.
-            branch
-                .name
-                .split_once('/')
-                .map_or(branch.name.clone(), |(_, rest)| rest.to_owned())
-        } else {
-            branch.name
-        };
-        if !names.contains(&name) {
-            names.push(name);
+    let (repos, multi) = repositories(&args, env, git, err)?;
+    for repo in &repos {
+        let mut names: Vec<String> = Vec::new();
+        for branch in git.branches(&repo.root)? {
+            let name = if branch.is_remote {
+                // `origin/feature/x` is the branch `feature/x`.
+                branch
+                    .name
+                    .split_once('/')
+                    .map_or(branch.name.clone(), |(_, rest)| rest.to_owned())
+            } else {
+                branch.name
+            };
+            if !names.contains(&name) {
+                names.push(name);
+            }
         }
-    }
-    for name in names {
-        let has_worktree = entries
-            .iter()
-            .any(|entry| entry.branch.as_deref() == Some(name.as_str()));
-        if !(args.switch("missing") && has_worktree) {
-            writeln!(out, "{name}")?;
+        for name in names {
+            let has_worktree = repo
+                .entries
+                .iter()
+                .any(|entry| entry.branch.as_deref() == Some(name.as_str()));
+            if args.switch("missing") && has_worktree {
+                continue;
+            }
+            if multi {
+                writeln!(out, "{}\t{name}\t{}", repo.project, repo.entries[0].path)?;
+            } else {
+                writeln!(out, "{name}")?;
+            }
         }
     }
     Ok(())
@@ -301,10 +465,10 @@ fn path(
     git: &dyn GitPort,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let args = Args::parse(words, &[], &[])?;
+    let args = Args::parse(words, &["repo", "projects"], &[])?;
     args.exactly(1, "a branch")?;
     let branch = &args.positional[0];
-    let (_, entries) = worktrees(env, git)?;
+    let (_, entries) = worktrees_in(&one_repo(&args, env, git)?, git)?;
     match holder(&entries, branch) {
         Some(entry) => {
             writeln!(out, "{}", entry.path)?;
@@ -395,7 +559,7 @@ fn add(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let args = Args::parse(words, &["root", "include"], &[])?;
+    let args = Args::parse(words, &["root", "include", "repo", "projects"], &[])?;
     if args.positional.is_empty() || args.positional.len() > 2 {
         return Err(Failure::Usage(
             "expected a branch and an optional base".into(),
@@ -408,7 +572,7 @@ fn add(
             "'{branch}' is not a valid branch name"
         )));
     }
-    let (root, entries) = worktrees(env, git)?;
+    let (root, entries) = worktrees_in(&one_repo(&args, env, git)?, git)?;
     let mode = include_mode(git, &root, args.option("include"))?;
 
     // A branch is checked out in one worktree only: reuse it wherever it is.
@@ -555,11 +719,11 @@ fn remove(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let args = Args::parse(words, &[], &["force"])?;
+    let args = Args::parse(words, &["repo", "projects"], &["force"])?;
     args.exactly(1, "a branch")?;
     let branch = &args.positional[0];
     // `worktrees` leaves out a worktree whose folder is gone: that one is pruned, not removed.
-    let (_, entries) = worktrees(env, git)?;
+    let (_, entries) = worktrees_in(&one_repo(&args, env, git)?, git)?;
     let entry = holder(&entries, branch)
         .ok_or_else(|| Failure::Run(format!("no worktree has branch '{branch}' checked out")))?;
     let path = PathBuf::from(&entry.path);
@@ -635,11 +799,11 @@ fn include(
     git: &dyn GitPort,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let args = Args::parse(words, &["include"], &["dry-run"])?;
+    let args = Args::parse(words, &["include", "repo", "projects"], &["dry-run"])?;
     if args.positional.len() > 1 {
         return Err(Failure::Usage("expected at most one branch".into()));
     }
-    let (root, entries) = worktrees(env, git)?;
+    let (root, entries) = worktrees_in(&one_repo(&args, env, git)?, git)?;
     let main = PathBuf::from(&entries[0].path);
     let target = match args.positional.first() {
         Some(branch) => holder(&entries, branch)

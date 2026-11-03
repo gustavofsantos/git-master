@@ -36,7 +36,7 @@ gitmaster worktree remove <branch> [--force]
 gitmaster worktree include [<branch>] [--include symlink|reflink] [--dry-run]
 ```
 
-These subcommands work on the repository that contains the current directory, from the main checkout or from any worktree. They are made for shell scripts and key bindings: the result is on the standard output, one item per line, and messages are on the standard error. Worktrees whose folder is gone are left out, because there is nowhere to go.
+These subcommands work on the repository that contains the current directory, from the main checkout or from any worktree. Every one can work on other repositories too, as the section Several repositories describes. They are made for shell scripts and key bindings: the result is on the standard output, one item per line, and messages are on the standard error. Worktrees whose folder is gone are left out, because there is nowhere to go.
 
 The exit status is `0` on success, `1` when the work fails and `2` for a wrong command line.
 
@@ -114,11 +114,47 @@ A link to a folder does not match a folder pattern such as `node_modules/`. GitM
 
 `include [<branch>]` shares the paths into a worktree that already exists: the one that has `<branch>`, or the current one. It skips what is there, so it is safe to repeat. `--dry-run` prints what it would do and writes nothing. It refuses the main checkout.
 
+### Several repositories
+
+Every worktree subcommand takes `--repo <folder-or-project>` to work on a repository other than the current one, from any directory. A project is named by the name of its folder in the projects file.
+
+```sh
+gitmaster worktree add feature/x --repo billing     # create it in another repository
+gitmaster worktree path feature/x --repo ~/src/app  # find its worktree there
+gitmaster worktree list --all --format tsv          # every worktree of every project
+```
+
+`list` and `branches` read more than one repository: give `--repo` more than once, or `--all` for every project in the projects file. The other subcommands change or look up one thing and take `--repo` once; `--all` or a second `--repo` is a wrong command line.
+
+The projects file has one folder per line. A leading `~` is the home directory, blank lines and text after `#` are ignored, and a glob such as `~/Workplace/*` stands for the folders it matches. The first of these names the file:
+
+| Source | File |
+|---|---|
+| `--projects <file>` | The file given. |
+| The environment variable `PROJECTS_FILE` | The file it names. |
+| The Git key `gitmaster.projectsFile` | The file it names. |
+| None | `~/.projects` |
+
+With more than one repository, the output says which one a line is from:
+
+| Output | A line holds |
+|---|---|
+| `list --format paths` | The path, as always. A path belongs to one repository. |
+| `list --format branches` | The project, a tab and the branch. |
+| `list --format tsv` | The project, the branch and the path, separated by tabs. |
+| `list --format json` | The same objects, each with `project` and `repo`, the path of the main checkout. |
+| `branches` | The project, the branch and the path of the main checkout, separated by tabs. |
+
+With one repository, even one named by `--repo`, the output is the one shown above. Each repository appears once: two projects in one repository, such as folders of a monorepo, count as one. A project that is not a repository is skipped, and a repository named with `--repo` that is not one is an error.
+
+A command that works on another repository reads that repository's own Git configuration, so its `gitmaster.worktree.root` and `gitmaster.worktree.include` apply to it, not the current one's.
+
 ### Example: a tmux binding
 
 ```sh
-branch=$(gitmaster worktree branches | fzf) &&
-  tmux-sessionizer "$(gitmaster worktree add "$branch")"
+# pick a branch of any project; the line holds the project, the branch and the checkout
+IFS=$'\t' read -r _ branch repo < <(gitmaster worktree branches --all | fzf --delimiter='\t') &&
+  tmux-sessionizer "$(gitmaster worktree add "$branch" --repo "$repo")"
 ```
 
 ## MCP server
