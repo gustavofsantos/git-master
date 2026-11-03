@@ -1,11 +1,11 @@
 ---
 title: Command line
-description: The gitmaster command, the arguments it accepts, and the subcommands that check and test workflow scripts.
+description: The gitmaster command, the arguments it accepts, the subcommands that list and create worktrees, and the ones that check and test workflow scripts.
 status: partial
 order: 30
 ---
 
-The `gitmaster` command opens the app. The workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs, and none of them applies a change to a repository. The section Open a repository covers the arguments the app accepts. `gitmaster mcp` is the MCP server your agent starts.
+The `gitmaster` command opens the app. The worktree, workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs. Only `gitmaster worktree add` and `gitmaster worktree include` change a repository. The section Open a repository covers the arguments the app accepts. `gitmaster mcp` is the MCP server your agent starts.
 
 ## Open a repository
 
@@ -20,10 +20,96 @@ gitmaster --version       # print the version and exit
 - With no argument, the app opens the repository that contains the current directory. Outside a repository, it opens the most recent repository that still exists.
 - With a path, the app opens the repository at that path. A relative path is resolved from the current directory.
 - `--version` prints `gitmaster` followed by the version number, then exits. When a preview feature is on, it also prints a `preview features:` line. See [Preview features](configuration.md#preview-features).
-- Any other single argument is taken as a path, so `--help` is not a help option. The word `workflow` is the subcommand below; to open a folder with that name, write `./workflow`.
+- Any other single argument is taken as a path, so `--help` is not a help option. The words `worktree` and `workflow` are the subcommands below; to open a folder with one of those names, write `./worktree` or `./workflow`.
 - Two or more arguments print `usage: gitmaster [PATH]` to the standard error and exit with status `2`.
 
 The theme is chosen with the `GITMASTER_THEME` environment variable, as described in [Configuration](configuration.md). Installation puts the command on your `PATH`, as described in [Installation](../getting-started/installation.md).
+
+## Worktrees
+
+```sh
+gitmaster worktree list [--format paths|branches|tsv|json] [--linked]
+gitmaster worktree branches [--missing]
+gitmaster worktree path <branch>
+gitmaster worktree add <branch> [<base>] [--root <dir>] [--include symlink|reflink|none]
+gitmaster worktree include [<branch>] [--include symlink|reflink] [--dry-run]
+```
+
+These subcommands work on the repository that contains the current directory, from the main checkout or from any worktree. They are made for shell scripts and key bindings: the result is on the standard output, one item per line, and messages are on the standard error. Worktrees whose folder is gone are left out, because there is nowhere to go.
+
+The exit status is `0` on success, `1` when the work fails and `2` for a wrong command line.
+
+### List worktrees
+
+`list` prints one line per worktree, the main checkout first. `--format` chooses what a line holds:
+
+| Format | A line holds |
+|---|---|
+| `paths` (the default) | The absolute path of the worktree. |
+| `branches` | The branch the worktree has checked out. A detached worktree has no line. |
+| `tsv` | The branch, a tab and the path. A detached worktree shows `(detached)` as its branch. |
+| `json` | One line with a JSON array that has an object per worktree: `path`, `head`, `branch`, `detached`, `bare`, `is_main`, `locked` and `prunable`. |
+
+`--linked` leaves out the main checkout.
+
+### Find a branch
+
+`branches` prints the names of the branches a worktree can be made for: the local branches, then the branches that exist only on a remote, each once and without the remote's name. `--missing` leaves out the branches that already have a worktree.
+
+`path <branch>` prints the path of the worktree that has `<branch>` checked out. It prints nothing and exits `1` when no worktree has it. Use it to jump to a worktree only when it exists, and `add` to jump to it and create it when it does not.
+
+### Create a worktree
+
+`add <branch>` prints the path of the worktree for `<branch>`, and creates the worktree when there is none. The last line of the output is always the path, so `cd "$(gitmaster worktree add feature/login)"` works whether or not the worktree existed.
+
+- When a worktree has the branch checked out, `add` prints its path and changes nothing.
+- When the local branch exists, it is checked out in the new worktree. A `<base>` is ignored, with a note.
+- When only a remote has the branch and there is no `<base>`, a local branch is created that tracks it. A branch on `origin` is preferred.
+- Otherwise a new branch is created from `<base>`, or from `HEAD` without one.
+
+The new folder must not exist. A `/` in the branch name is written as `-` in the folder name.
+
+The folder comes from the first of these that is set:
+
+| Source | The worktree goes to |
+|---|---|
+| `--root <dir>` | `<dir>/<repo>/<branch>` |
+| The Git key `gitmaster.worktree.root` | `<dir>/<repo>/<branch>` |
+| The environment variable `WORKTREES_HOME` | `<dir>/<repo>/<branch>` |
+| None | `../<repo>-<branch>`, next to the main checkout |
+
+`<repo>` is the name of the main checkout's folder, so the same branch of two repositories never collides. A leading `~` is the home directory. A relative `--root` is taken from the current directory and a relative key from the main checkout.
+
+### Share ignored files: `.worktreeinclude`
+
+A new worktree has only the files Git tracks. Local files that Git ignores, such as `.env` or `node_modules/`, stay behind. A `.worktreeinclude` file at the root of the main checkout lists the ones to bring along, one pattern per line, with the syntax of `.gitignore`: comments, `!` to exclude, `/` to anchor and a trailing `/` for folders.
+
+```gitignore
+# .worktreeinclude
+.env
+.env.local
+node_modules/
+```
+
+A path is brought along only when a pattern of the file matches it **and** Git ignores it. A tracked file is never touched. Nothing is copied: each path becomes a symbolic link to the file in the main checkout, so every worktree sees one file and no disk space is used. A pattern that matches a folder links the folder with one link. A file pattern such as `.env` also finds `.env` inside an ignored folder, which is then a real folder that holds the links.
+
+`add` does this when it creates the worktree, and prints a line on the standard error for each path: `linked <path>`, `cloned <path>` or `skipped <path>: <why>`. A path that exists in the worktree is skipped, never replaced. A problem here, such as a pattern that does not compile, is a warning: the worktree is still created.
+
+- `--include symlink` is the default.
+- `--include reflink` makes a copy-on-write clone instead, with `cp --reflink=always` on Linux and `cp -c` on macOS. The clone takes no space until one side changes, and the two sides are independent afterwards. On a file system that cannot clone, the path is linked instead and the line says so.
+- `--include none` shares nothing.
+- The Git key `gitmaster.worktree.include` sets the default for the repository or for every repository.
+
+A link to a folder does not match a folder pattern such as `node_modules/`. GitMaster lists linked folders in a marked block of `.git/info/exclude`, which every worktree reads, so they do not appear as untracked.
+
+`include [<branch>]` shares the paths into a worktree that already exists: the one that has `<branch>`, or the current one. It skips what is there, so it is safe to repeat. `--dry-run` prints what it would do and writes nothing. It refuses the main checkout.
+
+### Example: a tmux binding
+
+```sh
+branch=$(gitmaster worktree branches | fzf) &&
+  tmux-sessionizer "$(gitmaster worktree add "$branch")"
+```
 
 ## MCP server
 

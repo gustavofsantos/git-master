@@ -114,7 +114,8 @@ GitMaster reads Git's own configuration through `git`, so Git's scope rules appl
 | `core.editor` | Any | Not set | The program that **Open in editor** starts. | Planned |
 | `merge.conflictStyle` | Any | `zdiff3` | The style of the conflict markers the conflict resolver shows. | Planned |
 | `gitmaster.workflowPath` | Any, can be set more than once | Not set | Extra folders to read workflow files from, after your workflows directory. A folder inside the repository's working tree is ignored, with a warning. | |
-| `gitmaster.worktree.root` | Any | `../<repo>-<branch>` | The base folder for new worktrees. See [Worktrees](../guide/worktrees.md). | Planned |
+| `gitmaster.worktree.root` | Any | `../<repo>-<branch>` | The base folder for new worktrees. `gitmaster worktree add` reads it; see [Command line](cli.md#create-a-worktree). The worktree dialog does not read it yet. | Planned |
+| `gitmaster.worktree.include` | Any | `symlink` | How `gitmaster worktree add` brings the paths of `.worktreeinclude` into a new worktree: `symlink`, `reflink` or `none`. See [Command line](cli.md#share-ignored-files-worktreeinclude). | |
 | `branch.<name>.stackParent` | Repository | Not set | The parent branch of a branch in a stack. See [Stacks](../guide/stacks.md). | |
 | `branch.<name>.stackParentBase` | Repository | Not set | The commit the parent branch pointed to when this branch was last created or re-anchored. | |
 

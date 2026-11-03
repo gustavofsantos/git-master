@@ -122,6 +122,10 @@ When a branch is checked out in a linked worktree, its branch menu offers worktr
 
 **Checkout Branch**, **Rename Branch**, **Delete Branch**, **Push With Lease** and **Create Worktree** are not in this menu, because the branch already has a worktree. The main checkout keeps the normal branch menu.
 
+## From the shell
+
+`gitmaster worktree` lists worktrees by path or by branch, finds the worktree of a branch and creates one, from a terminal or a script. It also brings ignored files such as `.env` into a new worktree with links, as listed in a `.worktreeinclude` file, instead of copying them. See [Command line](../reference/cli.md#worktrees).
+
 ## Open in a terminal
 
 > **Planned.** **Open in Terminal** is not available yet.
