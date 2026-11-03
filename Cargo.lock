@@ -2155,6 +2155,7 @@ dependencies = [
  "gm-schema",
  "gm-ui",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2218,6 +2219,7 @@ dependencies = [
  "async-channel 2.5.0",
  "git2",
  "gm-schema",
+ "ignore",
  "mlua",
  "notify 8.2.0",
  "proptest",

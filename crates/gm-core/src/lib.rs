@@ -44,6 +44,8 @@ mod threads_session;
 pub mod watch;
 mod workflow_session;
 pub mod worktree;
+pub mod worktree_cli;
+pub mod worktree_include;
 
 pub use engine::{Engine, LogEntry};
 pub use files::{

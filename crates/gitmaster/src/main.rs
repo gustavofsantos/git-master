@@ -2,8 +2,9 @@
 //! working directory. `gitmaster --version` prints the version. `gitmaster workflow …` runs one
 //! of the one-shot workflow commands and exits; it opens no window and keeps no process.
 //! `gitmaster mcp` is the MCP server over stdio (D135). `gitmaster thread …` (the hook and the
-//! redaction test) and `gitmaster harness list` are one-shot too (docs/reference/cli.md). To open
-//! a folder named `thread` or `harness`, write `./thread`, `./harness` or `./mcp`.
+//! redaction test), `gitmaster harness list` and `gitmaster worktree …` (list, find and create
+//! worktrees from the shell) are one-shot too (docs/reference/cli.md). To open a folder named
+//! `thread`, `harness`, `worktree` or `mcp`, write `./thread`, `./harness`, `./worktree` or `./mcp`.
 
 mod shell_env;
 
@@ -55,28 +56,16 @@ fn main() {
         );
         std::process::exit(code);
     }
-    if first.as_deref() == Some("thread") {
-        let words: Vec<String> = args.collect();
-        let code = gm_core::threads::cli::thread_command(
-            &words,
-            &mut std::io::stdin().lock(),
-            &mut std::io::stdout().lock(),
-            &mut std::io::stderr().lock(),
-        );
-        std::process::exit(code);
-    }
-    if first.as_deref() == Some("harness") {
-        let words: Vec<String> = args.collect();
-        let code = gm_core::threads::cli::harness_command(
-            &words,
-            &mut std::io::stdout().lock(),
-            &mut std::io::stderr().lock(),
-        );
-        std::process::exit(code);
-    }
-    if args.next().is_some() {
-        eprintln!("usage: gitmaster [PATH]");
-        std::process::exit(2);
+    if let Some(name) = first.as_deref() {
+        let words: Vec<String> = args.by_ref().collect();
+        if let Some(code) = engine_command(name, &words) {
+            std::process::exit(code);
+        }
+        // Not a subcommand: the first word is the path, and `words` holds what follows it.
+        if !words.is_empty() {
+            eprintln!("usage: gitmaster [PATH]");
+            std::process::exit(2);
+        }
     }
     let from_argument = first.is_some();
     let path = match first {
@@ -114,6 +103,26 @@ fn main() {
         from_argument,
     };
     gm_ui::run(engine, command_log, watch, start, features);
+}
+
+/// Runs the one-shot subcommand `name` that lives in `gm-core` (`thread`, `harness`, `worktree`)
+/// and returns its exit status, or `None` when `name` is not one of them.
+fn engine_command(name: &str, words: &[String]) -> Option<i32> {
+    let mut out = std::io::stdout().lock();
+    let mut err = std::io::stderr().lock();
+    match name {
+        "thread" => Some(gm_core::threads::cli::thread_command(
+            words,
+            &mut std::io::stdin().lock(),
+            &mut out,
+            &mut err,
+        )),
+        "harness" => Some(gm_core::threads::cli::harness_command(
+            words, &mut out, &mut err,
+        )),
+        "worktree" => Some(gm_core::worktree_cli::command(words, &mut out, &mut err)),
+        _ => None,
+    }
 }
 
 /// The version `--version` prints: the release tag the binary was built for, or the package version.
