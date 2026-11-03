@@ -180,8 +180,9 @@ threads_search(query="retry backoff")
     -> { hits: [{ thread: "01J9Z...", title: "...", seq: 12, turn: 4,
                   snippet: "...we chose jittered backoff because...", untrusted: true }],
          has_more: false, next_cursor: null, filters: {...}, diagnosis: null }
-thread_read(id="01J9Z...", from=12, limit=10)
-    -> { entries: [{ seq: 12, turn: 4, kind: ..., text: "...", untrusted: true }], has_more: true }
+thread_read(id="01J9Z...", around=12)
+    -> { entries: [{ seq: 7, ... }, ..., { seq: 12, turn: 4, kind: ..., text: "...", untrusted: true }, ..., { seq: 17, ... }],
+         has_more_before: true, has_more: true, around: 12 }
 ```
 
 An agent that asks why a range of lines is the way it is gets the commits that wrote them and the threads behind each commit:

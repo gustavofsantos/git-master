@@ -397,6 +397,210 @@ fn an_agent_searches_a_thread_then_reads_it_in_pages() {
     assert_eq!(page["has_more"], true);
 }
 
+/// A thread of `count` assistant entries, seq 0 to `count - 1`, each saying its own seq.
+fn store_numbered_thread(dir: &Path, count: u32) -> String {
+    let entries = (0..count)
+        .map(|seq| {
+            new_entry(
+                &format!("n{seq}"),
+                EntryKind::Assistant,
+                &format!("entry number {seq}"),
+                i64::from(seq),
+            )
+        })
+        .collect();
+    let batch = Batch {
+        harness: "claude-code".to_owned(),
+        session_id: "long".to_owned(),
+        worktree: dir.to_string_lossy().into_owned(),
+        branch: Some("main".to_owned()),
+        head: None,
+        model: None,
+        harness_version: None,
+        transcript: None,
+        cursor: None,
+        started_at: 1,
+        at: 5,
+        ended: None,
+        entries,
+        gaps: Vec::new(),
+    };
+    let mut store = ThreadStore::open(&dir.join(".git")).unwrap();
+    store.apply(&batch).unwrap();
+    ThreadStore::thread_uid("claude-code", "long")
+}
+
+/// The reply to one `thread_read` of thread `uid` with `arguments`.
+fn read_window(dir: &Path, uid: &str, arguments: &Value) -> Value {
+    let mut arguments = arguments.clone();
+    arguments["id"] = json!(uid);
+    session(dir, &[initialize(), call(2, "thread_read", &arguments)]).remove(1)
+}
+
+/// The seqs of a read's entries, in the order they came back.
+fn seqs(reply: &Value) -> Vec<i64> {
+    result(reply)["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["seq"].as_i64().unwrap())
+        .collect()
+}
+
+#[test]
+fn a_window_around_a_hit_reads_the_entries_either_side_in_order() {
+    let dir = repo();
+    let uid = store_numbered_thread(dir.path(), 12);
+    let reply = read_window(
+        dir.path(),
+        &uid,
+        &json!({ "around": 6, "before": 2, "after": 3 }),
+    );
+    assert_eq!(seqs(&reply), vec![4, 5, 6, 7, 8, 9]);
+    let page = result(&reply);
+    assert_eq!(page["around"], 6);
+    assert_eq!(page["has_more_before"], true);
+    assert_eq!(page["has_more"], true);
+    assert_eq!(page["entries"][2]["text"], "entry number 6");
+    assert_eq!(page["entries"][2]["untrusted"], true);
+}
+
+#[test]
+fn a_window_takes_five_entries_each_side_by_default() {
+    let dir = repo();
+    let uid = store_numbered_thread(dir.path(), 12);
+    let reply = read_window(dir.path(), &uid, &json!({ "around": 6 }));
+    assert_eq!(seqs(&reply), (1..=11).collect::<Vec<i64>>());
+    assert_eq!(result(&reply)["has_more_before"], true);
+    assert_eq!(result(&reply)["has_more"], false);
+}
+
+#[test]
+fn a_window_at_the_first_entry_has_nothing_before_it() {
+    let dir = repo();
+    let uid = store_numbered_thread(dir.path(), 12);
+    let reply = read_window(dir.path(), &uid, &json!({ "around": 0 }));
+    assert_eq!(seqs(&reply), (0..=5).collect::<Vec<i64>>());
+    assert_eq!(result(&reply)["has_more_before"], false);
+    assert_eq!(result(&reply)["has_more"], true);
+}
+
+#[test]
+fn a_window_past_the_end_of_the_thread_is_empty_not_an_error() {
+    let dir = repo();
+    let uid = store_numbered_thread(dir.path(), 12);
+    let reply = read_window(dir.path(), &uid, &json!({ "around": 40 }));
+    assert!(seqs(&reply).is_empty());
+    assert_eq!(result(&reply)["has_more"], false);
+    assert_eq!(result(&reply)["around"], 40);
+}
+
+#[test]
+fn around_is_refused_with_from_or_limit_and_before_or_after_need_around() {
+    let dir = repo();
+    let uid = store_numbered_thread(dir.path(), 12);
+    let path = dir.path();
+    refused_with(
+        &read_window(path, &uid, &json!({ "around": 6, "from": 2 })),
+        "around cannot be combined with from or limit",
+    );
+    refused_with(
+        &read_window(path, &uid, &json!({ "around": 6, "limit": 2 })),
+        "around cannot be combined with from or limit",
+    );
+    refused_with(
+        &read_window(path, &uid, &json!({ "before": 2 })),
+        "before and after need around",
+    );
+    refused_with(
+        &read_window(path, &uid, &json!({ "after": 2 })),
+        "before and after need around",
+    );
+    refused_with(
+        &read_window(path, &uid, &json!({ "around": 6, "before": 26 })),
+        "before must be between 0 and 25",
+    );
+    refused_with(
+        &read_window(path, &uid, &json!({ "around": -1 })),
+        "around must be between 0",
+    );
+}
+
+#[test]
+fn paging_with_from_and_limit_says_whether_entries_precede_the_page() {
+    let dir = repo();
+    let uid = store_numbered_thread(dir.path(), 12);
+    let first = read_window(dir.path(), &uid, &json!({ "from": 0, "limit": 3 }));
+    assert_eq!(seqs(&first), vec![0, 1, 2]);
+    assert_eq!(result(&first)["has_more_before"], false);
+    assert_eq!(result(&first)["has_more"], true);
+    assert!(result(&first).get("around").is_none());
+    let next = read_window(dir.path(), &uid, &json!({ "from": 3, "limit": 3 }));
+    assert_eq!(seqs(&next), vec![3, 4, 5]);
+    assert_eq!(result(&next)["has_more_before"], true);
+}
+
+#[test]
+fn an_agent_finds_a_hit_and_reads_the_window_around_its_seq() {
+    let dir = repo();
+    let uid = store_thread(dir.path());
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "threads_search",
+                &json!({ "query": "backoff", "limit": 5 }),
+            ),
+        ],
+    );
+    let hit = result(&replies[1])["hits"][0].clone();
+    assert_eq!(hit["thread"], uid.as_str());
+    let seq = hit["seq"].as_i64().unwrap();
+    let reply = read_window(
+        dir.path(),
+        &uid,
+        &json!({ "around": seq, "before": 1, "after": 1 }),
+    );
+    // store_thread holds seqs 0 to 3.
+    let expected: Vec<i64> = (seq - 1..=seq + 1)
+        .filter(|s| (0..=3).contains(s))
+        .collect();
+    assert_eq!(seqs(&reply), expected);
+}
+
+#[test]
+fn the_tool_descriptions_send_an_agent_to_a_window_not_to_the_start() {
+    let dir = repo();
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        ],
+    );
+    let tools = replies[1]["result"]["tools"].as_array().unwrap();
+    let tool = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("no tool {name}"))
+            .clone()
+    };
+    let description = |name: &str| tool(name)["description"].as_str().unwrap().to_owned();
+    assert!(
+        description("threads_search")
+            .contains("call thread_read with the thread id and `around` set to the entry's seq")
+    );
+    assert!(!description("thread_get").contains("Read this before thread_read"));
+    assert!(description("thread_read").contains("pass `around` = the hit's `seq`"));
+    let properties = &tool("thread_read")["inputSchema"]["properties"];
+    for key in ["around", "before", "after"] {
+        assert!(properties.get(key).is_some(), "thread_read declares {key}");
+    }
+}
+
 const COMMIT: &str = "abcdef1234567890abcdef1234567890abcdef12";
 
 fn new_batch(
