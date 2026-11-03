@@ -66,7 +66,7 @@ Use the **Unified | Split** selector in the diff header to switch layouts. **Uni
 
 Each line shows its line number. Both layouts scroll sideways (in Split, both sides together): use a horizontal wheel or a trackpad gesture.
 
-The layout you choose is saved for your user account in `settings.json`, in your configuration folder: `~/.config/gitmaster/` on Linux and `~/Library/Application Support/gitmaster/` on macOS. The Working Copy diff and the commit diff share the choice, so changing it in one changes both. If the file is missing or invalid, Unified is used.
+The layout you choose is saved for your user account as `gitmaster.diffLayout` in `~/.gitconfig`. The Working Copy diff and the commit diff share the choice, so changing it in one changes both. A repository can override it with `git config gitmaster.diffLayout split`. If the key is missing or has another value, Unified is used. See [Configuration](../reference/configuration.md#preferences).
 
 ## Binary files
 

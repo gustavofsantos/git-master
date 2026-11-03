@@ -16,7 +16,6 @@ use gm_schema::threads::{
 use gm_schema::{Actor, CommandKind, Event, OperationId};
 
 use crate::blame::BlameLine;
-use crate::threads::config::ThreadsConfig;
 use crate::threads::provenance::{
     self, COMMIT_LIMIT, CONTEXT, EDIT_LIMIT, EditFact, LABEL_LIMIT, LINK_LIMIT, Owner,
     THREAD_LIMIT, Verdict,
@@ -99,13 +98,13 @@ fn now_ms() -> i64 {
         })
 }
 
-/// What a command reads besides the store: the repository, and the settings file
-/// whose `threads` key holds the redaction patterns.
+/// What a command reads besides the store: the repository, whose `gitmaster.*` configuration
+/// holds the redaction patterns.
 pub(crate) struct Context<'a> {
     pub(crate) git: &'a dyn GitPort,
     pub(crate) root: &'a Path,
-    /// `None` takes the default configuration.
-    pub(crate) settings: Option<&'a Path>,
+    /// A file to read as the global Git configuration; `None` is the user's own. For the tests.
+    pub(crate) global_config: Option<&'a Path>,
 }
 
 /// What a thread command needs a human for, or `None` when an agent may run it.
@@ -867,12 +866,13 @@ fn page(limit: u32) -> Result<u32, String> {
     }
 }
 
-/// The redaction patterns of the settings file, compiled. Invalid patterns refuse
+/// The redaction patterns of the `gitmaster.*` configuration, compiled. Invalid patterns refuse
 /// the command, as capture does (design/threads.md, "Redaction").
 fn redactor(ctx: &Context<'_>) -> Result<Redactor, String> {
-    let config = ctx
-        .settings
-        .map_or_else(ThreadsConfig::default, ThreadsConfig::load);
+    let source = crate::settings::Source {
+        global: ctx.global_config.map(Path::to_path_buf),
+    };
+    let config = crate::settings::Settings::load(ctx.root, &source).threads;
     Redactor::new(&config.redact).map_err(|problems| {
         let listed: Vec<String> = problems
             .iter()
@@ -1944,12 +1944,9 @@ mod tests {
 
         // Invalid patterns do not block the read or the export: redaction is an
         // ingest and scrub concern, so the stored text is what both return.
-        let broken = out.path().join("broken.json");
-        std::fs::write(
-            &broken,
-            r#"{"threads":{"redact":{"patterns":[{"name":"bad","regex":"(","group":0}]}}}"#,
-        )
-        .expect("write settings");
+        let broken = out.path().join("broken-gitconfig");
+        std::fs::write(&broken, "[gitmaster-redact \"bad\"]\n\tregex = (\n")
+            .expect("write settings");
         let broken_ctx = context(&fake, &root, &broken);
         let read = run(
             OperationId(7),
@@ -2001,12 +1998,12 @@ mod tests {
         );
     }
 
-    /// A settings file whose redaction patterns match `TICKET-<digits>`.
+    /// A global Git configuration whose redaction patterns match `TICKET-<digits>`.
     fn ticket_settings(dir: &Path) -> PathBuf {
-        let path = dir.join("settings.json");
+        let path = dir.join("gitconfig");
         std::fs::write(
             &path,
-            r#"{"threads":{"redact":{"patterns":[{"name":"ticket","regex":"TICKET-[0-9]+","group":0}]}}}"#,
+            "[gitmaster-redact \"ticket\"]\n\tregex = TICKET-[0-9]+\n",
         )
         .expect("write settings");
         path
@@ -2016,7 +2013,7 @@ mod tests {
         Context {
             git,
             root,
-            settings: Some(settings),
+            global_config: Some(settings),
         }
     }
 
@@ -2146,12 +2143,9 @@ mod tests {
             .expect("note");
 
         // A bad pattern refuses the scrub and changes nothing.
-        let broken = out.path().join("broken.json");
-        std::fs::write(
-            &broken,
-            r#"{"threads":{"redact":{"patterns":[{"name":"bad","regex":"(","group":0}]}}}"#,
-        )
-        .expect("write settings");
+        let broken = out.path().join("broken-gitconfig");
+        std::fs::write(&broken, "[gitmaster-redact \"bad\"]\n\tregex = (\n")
+            .expect("write settings");
         let ctx = context(&fake, &root, &broken);
         assert!(
             run(

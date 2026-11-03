@@ -1035,10 +1035,10 @@ run_scenario() {
   RUN_DIR="$RUN_ROOT/$LABEL"
   rm -rf "$RUN_DIR"
   mkdir -p "$RUN_DIR" "$RUN_DIR/xdg/gitmaster" "$RUN_DIR/xdg-config/gitmaster"
-  if [ "$LAYOUT" = split ]; then
-    printf '{"diff_layout": "split"}\n' > "$RUN_DIR/xdg-config/gitmaster/settings.json"
-  fi
   : > "$RUN_DIR/gitconfig"
+  if [ "$LAYOUT" = split ]; then
+    printf '[gitmaster]\n\tdiffLayout = split\n' > "$RUN_DIR/gitconfig"
+  fi
   make_repo "$RUN_DIR/repo"
   make_other_repo "$RUN_DIR/billing-api"
   case "$base" in
@@ -1525,10 +1525,10 @@ make_split_repo() {
   git -C "$repo" commit -q -m "feat: replace, add and delete"
 }
 
-# Waits up to five seconds for the settings file to hold the layout $2.
+# Waits up to five seconds for the global Git config to hold the layout $2.
 wait_for_layout_saved() {
   local file="$1" layout="$2" tries=0
-  until grep -qs "\"diff_layout\": \"$layout\"" "$file"; do
+  until grep -qs "diffLayout = $layout" "$file"; do
     tries=$((tries + 1))
     [ "$tries" -lt 50 ] || fail "the layout '$layout' was not saved to $file"
     sleep 0.1
@@ -1537,7 +1537,7 @@ wait_for_layout_saved() {
 
 scenario_commit_diff_split() {
   local repo="$RUN_DIR/detail" theme="$1" differing
-  local settings="$RUN_DIR/xdg-config/gitmaster/settings.json"
+  local settings="$RUN_DIR/gitconfig"
   launch_app "$theme" "$repo"
   xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
   xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5

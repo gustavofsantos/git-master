@@ -288,6 +288,9 @@ impl StatusView {
         Self::follow_command_log(&command_log, cx);
         Self::follow_watch(notices, cx);
         let may_fall_back = !start.from_argument;
+        // The preferences are read where the window starts, so a repository's own `gitmaster.*`
+        // keys override the global ones for it.
+        let start_dir = std::path::PathBuf::from(&start.path);
         let open = engine.dispatch(Actor::Human, CommandKind::OpenRepo { path: start.path });
         if theme::follow(window.appearance()) {
             editor_theme::apply(cx);
@@ -334,7 +337,7 @@ impl StatusView {
             app_settings::default_file().map(|file| Arc::new(app_settings::Store::new(file)));
         let settings = settings_store
             .as_ref()
-            .map(|store| store.load())
+            .map(|store| store.load(&start_dir))
             .unwrap_or_default();
         let avatars = Avatars::new(
             settings_store
@@ -1132,7 +1135,7 @@ impl StatusView {
     }
 
     /// Saves the commit diff's layout in the background (D40). The choice takes
-    /// effect on screen before the file is written.
+    /// effect on screen before `~/.gitconfig` is written.
     fn save_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
         self.settings.diff_layout = layout;
         self.save_settings(cx);

@@ -9,7 +9,7 @@
 
 use std::io::{Read, Write};
 use std::panic::{self, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -19,6 +19,7 @@ use super::harness::{self, HarnessAdapter};
 use super::pipeline::{self, Context};
 use super::redact::Redactor;
 use super::store::{HookStore, ThreadStore};
+use crate::settings::{self, Settings, Source};
 
 /// The largest hook payload read from standard input, in bytes. A larger one is dropped.
 const PAYLOAD_LIMIT: u64 = 8 * 1024 * 1024;
@@ -36,8 +37,8 @@ const HARNESS_USAGE: &str = "usage: gitmaster harness list
 /// What the commands need from the process. Built once by `Env::from_process`.
 #[derive(Clone, Debug)]
 pub struct Env {
-    /// The settings file, when one can be found.
-    pub settings: Option<PathBuf>,
+    /// Which Git configuration the `gitmaster.*` settings are read from.
+    pub source: Source,
     /// The time of this invocation, in milliseconds since the Unix epoch.
     pub now_ms: i64,
 }
@@ -47,7 +48,7 @@ impl Env {
     #[must_use]
     pub fn from_process() -> Self {
         Self {
-            settings: config::settings_path(),
+            source: Source::default(),
             now_ms: now_ms(),
         }
     }
@@ -71,6 +72,10 @@ pub fn thread_command(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
+    // The preferences used to be a JSON file: move them once, on whichever command runs first.
+    if let Some(legacy) = config::settings_path() {
+        let _ = settings::migrate_legacy(&legacy, &Source::default());
+    }
     thread_with(words, stdin, out, err, &Env::from_process(), &registry())
 }
 
@@ -140,7 +145,7 @@ fn hook(rest: &[String], stdin: &mut dyn Read, env: &Env, adapters: &[&dyn Harne
     let Some(repo) = cwd.as_deref().and_then(pipeline::locate_repo) else {
         return;
     };
-    let config = load_config(env);
+    let config = load_config(env, &repo.worktree);
     if !config.capture {
         return;
     }
@@ -179,10 +184,10 @@ fn cwd_of(payload: &[u8]) -> Option<PathBuf> {
     parsed.cwd.filter(|cwd| !cwd.is_empty()).map(PathBuf::from)
 }
 
-fn load_config(env: &Env) -> ThreadsConfig {
-    env.settings
-        .as_deref()
-        .map_or_else(ThreadsConfig::default, ThreadsConfig::load)
+/// The threads settings that apply in `dir`: the repository's own `gitmaster.*` keys over the
+/// global ones.
+fn load_config(env: &Env, dir: &Path) -> ThreadsConfig {
+    Settings::load(dir, &env.source).threads
 }
 
 /// `thread redact-test [--text <text>]`: prints the redacted sample and one line per hit.
@@ -219,7 +224,7 @@ fn redact_test(
         }
         String::from_utf8_lossy(&bytes).into_owned()
     };
-    let config = load_config(env);
+    let config = load_config(env, &std::env::current_dir().unwrap_or_default());
     let redactor = match Redactor::new(&config.redact) {
         Ok(redactor) => redactor,
         Err(problems) => {
@@ -381,7 +386,10 @@ mod tests {
 
         fn env() -> Env {
             Env {
-                settings: None,
+                // A file that does not exist: the tests never read the developer's settings.
+                source: Source {
+                    global: Some(PathBuf::from("/nonexistent/gitconfig")),
+                },
                 now_ms: 1_000,
             }
         }
@@ -466,11 +474,11 @@ mod tests {
     fn redact_test_prints_the_redacted_text_and_the_hits() {
         let sandbox = Sandbox::new();
         let settings = sandbox.write(
-            "settings.json",
-            r#"{"threads":{"redact":{"patterns":[{"name":"ticket","regex":"TKT-\\d+"}]}}}"#,
+            "gitconfig",
+            "[gitmaster-redact \"ticket\"]\n\tregex = TKT-\\\\d+\n",
         );
         let mut env = Sandbox::env();
-        env.settings = Some(settings);
+        env.source.global = Some(settings);
         let (code, out, err) = run_thread(
             &["redact-test", "--text", "see TKT-42 and TKT-7"],
             b"",
@@ -494,12 +502,9 @@ mod tests {
     #[test]
     fn redact_test_reports_invalid_patterns_and_exits_one() {
         let sandbox = Sandbox::new();
-        let settings = sandbox.write(
-            "settings.json",
-            r#"{"threads":{"redact":{"patterns":[{"name":"bad","regex":"("}]}}}"#,
-        );
+        let settings = sandbox.write("gitconfig", "[gitmaster-redact \"bad\"]\n\tregex = (\n");
         let mut env = Sandbox::env();
-        env.settings = Some(settings);
+        env.source.global = Some(settings);
         let (code, out, err) = run_thread(&["redact-test", "--text", "x"], b"", &env, &[]);
         assert_eq!(code, 1);
         assert_eq!(out, "");

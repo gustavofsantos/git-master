@@ -215,7 +215,7 @@ The command always exits with status `0` and prints nothing, even when it cannot
 gitmaster thread redact-test [--text <text>]
 ```
 
-Reads a sample from the standard input, or from `--text`, applies the patterns of your `settings.json` and prints the result, with a line per match naming the pattern. Nothing is stored. The exit status is `0` when the patterns are valid, `1` when a pattern is not valid (the problem is printed as `pattern <name>: message`), and `2` for a wrong command line.
+Reads a sample from the standard input, or from `--text`, applies the `gitmaster-redact` patterns and the other `gitmaster.threads.*` keys that apply in the current directory and prints the result, with a line per match naming the pattern. Nothing is stored. The exit status is `0` when the patterns are valid, `1` when a pattern is not valid (the problem is printed as `pattern <name>: message`), and `2` for a wrong command line.
 
 ## List the agents
 

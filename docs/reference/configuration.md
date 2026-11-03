@@ -5,7 +5,7 @@ status: partial
 order: 20
 ---
 
-GitMaster keeps little configuration of its own. Git options stay in Git's configuration files, app preferences go to a small JSON file in your user config directory, and state about a repository stays in that repository's Git directory. GitMaster never writes into the working tree of a repository.
+GitMaster keeps little configuration of its own. Git options and app preferences both live in Git's configuration files, as `gitmaster.*` keys, so they can be tracked with your dotfiles and overridden per repository. State about a repository stays in that repository's Git directory. GitMaster never writes into the working tree of a repository.
 
 ## Where GitMaster stores data
 
@@ -15,8 +15,6 @@ GitMaster keeps its files in three places: your user config directory, your user
 
 | Path | What it holds | Status |
 |---|---|---|
-| `~/.config/gitmaster/settings.json` (Linux) | App preferences. See the `settings.json` section below. | |
-| `~/Library/Application Support/gitmaster/settings.json` (macOS) | App preferences, on macOS. | |
 | `~/.config/gitmaster/workflows/` (Linux), `~/Library/Application Support/gitmaster/workflows/` (macOS) | Your workflow files. A workflow file holds only its definition, never run state. | |
 
 ### User data directory
@@ -44,66 +42,50 @@ GitMaster keeps per-repository state in `.git/gitmaster/`, inside the Git common
 
 The Git command log, the list of Git commands with side effects that the **Git commands** panel shows, is kept in memory only. It keeps the last 1000 commands and is lost when the app closes.
 
-## settings.json
+## Preferences
 
-GitMaster keeps its own preferences in `settings.json` in the user config directory. The app creates the file when a setting first changes and rewrites it when a value changes. If you edit the file by hand, keep it a valid JSON object.
+GitMaster keeps its own preferences as `gitmaster.*` keys in Git's configuration. Put your base values in `~/.gitconfig`, so they are tracked with the rest of your dotfiles, and override them in one repository with `git config` or by editing its `.git/config`. Git's rules apply: the system file, then `~/.gitconfig`, then the repository's `.git/config`, then the worktree's config, and each later layer wins. `include` and `includeIf` work too, so a work repository can take a different set from a personal one.
 
-| Key | Type | Values | Default | Meaning |
-|---|---|---|---|---|
-| `diff_layout` | string | `unified`, `split` | `unified` | The layout of the diff, set by the **Unified** or **Split** selector. The choice applies to the Working Copy diff and to the commit diff. |
-| `threads` | object | See below | See below | Capture and redaction of [threads](../guide/threads.md). |
-
-```json
-{
-  "diff_layout": "split"
-}
+```gitconfig
+# ~/.gitconfig
+[gitmaster]
+	diffLayout = split
+[gitmaster "threads"]
+	maxResultBytes = 131072
+	redactPath = .env
+	redactPath = secrets/**
+[gitmaster-redact "acme-token"]
+	regex = acme_[A-Za-z0-9]{32}
 ```
 
-### The threads key
+```sh
+git config --global gitmaster.diffLayout split   # for every repository
+git config gitmaster.threads.capture false       # for this repository only
+```
 
-The `threads` key is an object. Every field is optional, and a missing field has the default shown. The agent integration reads this key each time a hook runs, so a change applies to the next event.
+When you change a preference in the app, it is written to `~/.gitconfig` (`git config --global`). Only a value that differs from the default is stored, and a value that goes back to its default is removed, so the file holds only what you chose. The app never changes a repository's `.git/config`, so an override you wrote there stays and wins. A repository's preferences are read when its window opens.
 
-| Field | Type | Default | Meaning |
+| Key | Values | Default | Meaning |
 |---|---|---|---|
-| `capture` | boolean | `true` | Turns capture off everywhere when `false`. |
-| `max_result_bytes` | integer | `65536` | The most bytes of one tool result that are stored. A longer result is cut, and the entry records its original size. |
-| `redact.builtin` | boolean | `true` | Turns the built-in patterns on or off as a group. Leave it on unless you replace them with your own. |
-| `redact.disabled_builtins` | array of strings | `[]` | Names of built-in patterns to turn off, for example `"jwt"`. A name that is not a built-in pattern is ignored with a warning. |
-| `redact.patterns` | array of objects | `[]` | Your own patterns. Each has `name`, `regex` and an optional `group`. |
-| `redact.paths` | array of strings | `[".env", ".env.*", "*.pem", "id_rsa*"]` | Globs on repository-relative paths. The content of a matching file is never stored; the path is. |
+| `gitmaster.diffLayout` | `unified`, `split` | `unified` | The layout of the diff, set by the **Unified** or **Split** selector. The choice applies to the Working Copy diff and to the commit diff. |
+| `gitmaster.authorPictures` | boolean | `false` | Whether author pictures are looked up on Gravatar. |
+| `gitmaster.threads.capture` | boolean | `true` | Turns [thread](../guide/threads.md) capture off when `false`. |
+| `gitmaster.threads.maxResultBytes` | integer | `65536` | The most bytes of one tool result that are stored. A longer result is cut, and the entry records its original size. |
+| `gitmaster.threads.redactBuiltin` | boolean | `true` | Turns the built-in redaction patterns on or off as a group. Leave it on unless you replace them with your own. |
+| `gitmaster.threads.redactDisabledBuiltin` | name, can be set more than once | none | A built-in pattern to turn off, for example `jwt`. A name that is not a built-in pattern is ignored with a warning. |
+| `gitmaster.threads.redactPath` | glob, can be set more than once | `.env`, `.env.*`, `*.pem`, `id_rsa*` | A glob on repository-relative paths. The content of a matching file is never stored; the path is. |
+| `gitmaster-redact.<name>.regex` | regular expression | none | A redaction pattern of your own. `<name>` is the label in `[REDACTED:<name>]`. |
+| `gitmaster-redact.<name>.group` | integer | `0` | The capture group that holds the secret. `0` is the whole match. Use a group to keep a readable name, as in `(password=)(\S+)` with `group` set to `2`. |
 
-A pattern object has these fields:
+The agent integration reads these keys each time a hook runs, from the repository the event comes from, so a change applies to the next event. A pattern `<name>` uses letters, digits, `-` and `_`, and it must not repeat a built-in or another pattern. The regular expression has the syntax of Rust's `regex` crate and matches in linear time, so a pattern cannot make the hook hang. A pattern that is not valid pauses capture in every repository until it is fixed. See [Secrets](../guide/threads.md#secrets).
 
-| Field | Meaning |
-|---|---|
-| `name` | The label in `[REDACTED:name]`. Letters, digits, `-` and `_`. It must not repeat a built-in or another pattern. |
-| `regex` | A regular expression in the syntax of Rust's `regex` crate. It matches in linear time, so a pattern cannot make the hook hang. |
-| `group` | The number of the capture group that holds the secret. The default is `0`, the whole match. Use a group to keep a readable name, as in `(password=)(\S+)` with `group` set to `2`. |
+Rules for lists and patterns:
 
-A pattern that is not valid pauses capture in every repository until it is fixed. See [Secrets](../guide/threads.md#secrets).
-
-```json
-{
-  "threads": {
-    "capture": true,
-    "redact": {
-      "disabled_builtins": ["jwt"],
-      "patterns": [
-        { "name": "acme-token", "regex": "acme_[A-Za-z0-9]{32}" },
-        { "name": "db-password", "regex": "(DB_PASS=)(\\S+)", "group": 2 }
-      ],
-      "paths": [".env", ".env.*", "*.pem", "id_rsa*", "secrets/**"]
-    }
-  }
-}
-```
-
-The app applies these rules when it reads and writes the file:
-
-- A missing file, a missing key, or a value it does not recognize reads as the default.
-- A file that is not a JSON object reads as the defaults.
-- A save keeps every key the app does not own.
-- A save over a file that is not valid JSON replaces it with a valid file.
+- A key that can be set more than once adds up across the layers, as Git's own lists do. A repository adds its entries to the global ones.
+- An empty value clears what the layers below it set. `redactPath =` in a repository removes the global paths; add your own after it. A single `redactPath =` in `~/.gitconfig` means no paths at all.
+- A pattern whose `regex` is empty is dropped, so a repository can turn off a global pattern with `[gitmaster-redact "acme-token"]` and `regex =`.
+- Git reads a backslash in a value as an escape. Write `\\d` for the regular expression `\d`, or let `git config gitmaster-redact.acme.regex '\d+'` write it for you.
+- A value that is not valid, such as `maxResultBytes = lots`, reads as the default.
 
 ## Git configuration keys
 
@@ -193,7 +175,7 @@ Open the settings dialog with `Ctrl+,` (`⌘,` on macOS), with **Open Settings**
 Changes apply as you make them, and there is no **Save** button. A value is saved when you change it, and a text field is saved when it loses focus. A value that is not valid is flagged inline and is not saved. Each change goes to the right place:
 
 - Git options go to Git's configuration. The scope selector sets where they go: **Global** writes to `~/.gitconfig`, and **This Repository** writes to `.git/config`.
-- App preferences go to `settings.json`.
+- App preferences go to `~/.gitconfig` as `gitmaster.*` keys, whatever the scope selector says.
 - Workflow reviews and automatic approvals go to your user data directory.
 - Nothing is written to the working tree.
 
@@ -201,7 +183,7 @@ Changes apply as you make them, and there is no **Save** button. A value is save
 
 | Field | What it does |
 |---|---|
-| **Appearance** | Sets the theme to **System**, **Dark** or **Light**. Saved in `settings.json`. |
+| **Appearance** | Sets the theme to **System**, **Dark** or **Light**. |
 | **Typography** | Sets the font families for the interface and for code. Each choice shows a preview. |
 | **Recent Repositories** | Lists the recently opened repositories. You can remove one entry or clear the list. |
 | **File Watcher** | Sets the maximum number of directories the file watcher follows, and shows whether it has fallen back to refreshing on focus. |

@@ -222,19 +222,16 @@ GitMaster ships patterns for private key blocks, cloud and API keys and tokens f
 
 ### Add your own patterns
 
-Add patterns for secrets that are specific to you, such as an internal token format or a private host name, in **Threads Settings…** from the command palette, or with the **Settings…** button on the Threads page. You can also edit `settings.json`. See [Configuration](../reference/configuration.md) for the keys.
+Add patterns for secrets that are specific to you, such as an internal token format or a private host name, in **Threads Settings…** from the command palette, or with the **Settings…** button on the Threads page. You can also set them in Git's configuration, in `~/.gitconfig` for every repository or in one repository's `.git/config`. See [Configuration](../reference/configuration.md#preferences) for the keys.
 
-```json
-{
-  "threads": {
-    "redact": {
-      "patterns": [
-        { "name": "acme-token", "regex": "acme_[A-Za-z0-9]{32}" }
-      ],
-      "paths": [".env", ".env.*", "*.pem", "secrets/**"]
-    }
-  }
-}
+```gitconfig
+[gitmaster-redact "acme-token"]
+	regex = acme_[A-Za-z0-9]{32}
+[gitmaster "threads"]
+	redactPath = .env
+	redactPath = .env.*
+	redactPath = *.pem
+	redactPath = secrets/**
 ```
 
 A pattern is a regular expression. Use the test field in **Threads Settings…**, or `gitmaster thread redact-test`, to try a pattern on sample text before you rely on it. The command reads the sample from standard input, or from `--text`:

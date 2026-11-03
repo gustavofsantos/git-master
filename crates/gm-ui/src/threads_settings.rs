@@ -4,8 +4,8 @@
 //! is read from a `ThreadsConfig` and written back to one, the problems are the
 //! ones `Redactor::new` reports (plus a group that is not a number), and the
 //! numbers and paths are parsed here. The window side is the `impl StatusView` at
-//! the bottom. A save writes `settings.json` in the background and keeps every
-//! other key of the file (`app_settings`).
+//! the bottom. A save writes the `gitmaster.threads.*` keys of `~/.gitconfig` in the background
+//! and leaves a repository's own overrides alone (`app_settings`).
 
 use gm_core::threads::config::{RedactConfig, ThreadsConfig, UserPattern};
 use gm_core::threads::redact::{Hit, PatternProblem, Redacted, Redactor, builtin_names};
@@ -931,23 +931,28 @@ mod tests {
     }
 
     #[test]
-    fn the_draft_round_trips_through_app_settings_and_keeps_unknown_keys() {
-        let existing = r#"{"theme":"dark","threads":{"future":1,"redact":{"note":"kept"}}}"#;
+    fn the_draft_round_trips_through_the_git_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("gitconfig");
+        let store = crate::app_settings::Store::with_source(
+            dir.path().join("settings.json"),
+            gm_core::settings::Source {
+                global: Some(global.clone()),
+            },
+        );
         let settings = AppSettings {
             threads: config(),
             ..AppSettings::default()
         };
-        let text = settings.merge_into(existing);
-        let saved = AppSettings::parse(&text);
+        store.save(&settings, 1).unwrap();
+        let saved = store.load(dir.path());
         assert_eq!(saved.threads, config());
         assert_eq!(
             ThreadsSettingsDraft::from_config(&saved.threads),
             ThreadsSettingsDraft::from_config(&config())
         );
-        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["theme"], "dark");
-        assert_eq!(value["threads"]["future"], 1);
-        assert_eq!(value["threads"]["redact"]["note"], "kept");
+        let text = std::fs::read_to_string(global).unwrap();
+        assert!(text.contains("[gitmaster \"threads\"]"), "{text}");
     }
 
     #[test]

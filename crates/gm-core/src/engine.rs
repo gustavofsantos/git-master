@@ -59,7 +59,6 @@ use crate::script_session::{
 };
 use crate::stack_session;
 use crate::syntax;
-use crate::threads::config;
 use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSession};
 use crate::workflow_session::{self, Effected};
 use crate::worktree;
@@ -2845,12 +2844,11 @@ impl Engine {
         lines: &[BlameLine],
     ) -> Result<ProvenanceResult, String> {
         let root = self.open_root()?;
-        let settings = config::settings_path();
         let store = threads_session::store(&mut self.threads, self.git.as_ref(), &root)?;
         let ctx = threads_session::Context {
             git: self.git.as_ref(),
             root: &root,
-            settings: settings.as_deref(),
+            global_config: None,
         };
         threads_session::provenance_from_lines(store, &ctx, path, from, to, lines)
     }
@@ -3957,12 +3955,11 @@ impl Engine {
             only_a_human(actor, what)?;
         }
         let root = self.open_root()?;
-        let settings = config::settings_path();
         let store = threads_session::store(&mut self.threads, self.git.as_ref(), &root)?;
         let ctx = threads_session::Context {
             git: self.git.as_ref(),
             root: &root,
-            settings: settings.as_deref(),
+            global_config: None,
         };
         threads_session::run(id, store, &ctx, actor, kind)
     }

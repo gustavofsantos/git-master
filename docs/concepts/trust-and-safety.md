@@ -88,7 +88,7 @@ The operation log records each operation that changes a repository, what was ask
 |---|---|---|
 | Working tree | Never receives GitMaster's own files. Changes come only from Git operations you start or approve. | Implemented |
 | Recent repositories | The app data directory. Repositories whose folder no longer exists are not offered. | Implemented |
-| Settings, such as the diff layout and whether author pictures show | The user config directory, in `settings.json`. | Implemented |
+| Settings, such as the diff layout and whether author pictures show | Git's configuration, as `gitmaster.*` keys: `~/.gitconfig`, and a repository's `.git/config` when you override one. | Implemented |
 | Git commands panel | Memory only. | Implemented |
 | Operation log | Outside the working tree. | Planned |
 | Threads | `.git/gitmaster/threads.db` in the Git common directory, readable only by you. | Implemented |
