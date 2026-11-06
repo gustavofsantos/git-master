@@ -56,13 +56,26 @@ A workspace opens in its own window, like any repository. The Working Copy shows
 
 ### Record a combination
 
-The workspace repository records the commit of every member. Commit in the workspace repository to keep the combination you tested: "these commits of A, B and C work together". The workspace's history is the list of those combinations, and each one opens to the commits of each member.
+> **Planned.** **Record Combination** is not available in the app yet.
+
+The workspace repository records the commit of every member. Record the combination you tested, "these commits of A, B and C work together", with **Record Combination** in the command palette or the menu of the Working Copy. It stages the new commit of every member that has one, and commits in the workspace repository with a message that lists each member, its branch and its commit:
+
+```text
+Record combination
+
+billing   feat/pay-v2  4f2a9c1
+checkout  feat/pay-v2  9be03d7
+```
+
+Your own files in the workspace repository, such as notes or scripts, are not staged by it: commit them as in any repository. **Record Combination** is not available when no member has a new commit, or when a member is on a detached HEAD.
+
+The combinations follow each other on one branch, `main`. The workspace's [History](history.md) is the list of the combinations you recorded, and each one opens to the commits of each member.
 
 ## Run an agent in a workspace
 
 Start the agent in the folder of the workspace, for example in a [terminal](terminals.md) of the workspace window. The agent sees every member and can change them all.
 
-With the [agent integration](../agents/agent-integration.md) installed, the session is recorded as a [thread](threads.md) of the workspace. Each edit and each commit in the thread names the member it was made in. The [MCP tools](../reference/mcp-tools.md) take the member a call is about, and the review loop covers every member.
+With the [agent integration](../agents/agent-integration.md) installed, the session is recorded as a [thread](threads.md) of the workspace. The thread is stored once, in the workspace repository, and each edit and each commit in it names the member it was made in. See [Threads in a workspace](threads.md#threads-in-a-workspace). The [MCP tools](../reference/mcp-tools.md) take the member a call is about, and the review loop covers every member.
 
 The local environment the agent sets up, such as containers that run the services, is the agent's and yours: GitMaster does not start or stop it. Its files belong in the workspace repository, so they are versioned with the combination they run.
 
