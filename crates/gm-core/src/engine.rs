@@ -4113,7 +4113,7 @@ impl Engine {
         let anchor = review::anchor_for(&text, start_line, end_line)?;
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
         let comment = store.add(path, body, &anchor, now_ms()).map_err(|e| e.0)?;
-        let snapshot = self.git.snapshot_worktree(&root).and_then(|oid| {
+        let snapshot = self.git.snapshot_worktree_for(&root, path).and_then(|oid| {
             self.git
                 .set_review_ref(&root, comment, ReviewSide::Before, &oid)?;
             Ok(oid)
@@ -4198,15 +4198,19 @@ impl Engine {
         }
         let root = self.open_root()?;
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let earlier = find_review(store, comment)?.after_snapshot;
+        let current = find_review(store, comment)?;
+        let (earlier, path) = (current.after_snapshot, current.path);
         if !store.set_handled(comment, summary).map_err(|e| e.0)? {
             return Err("the comment is already resolved".to_owned());
         }
-        let snapshot = self.git.snapshot_worktree(&root).and_then(|oid| {
-            self.git
-                .set_review_ref(&root, comment, ReviewSide::After, &oid)?;
-            Ok(oid)
-        });
+        let snapshot = self
+            .git
+            .snapshot_worktree_for(&root, &path)
+            .and_then(|oid| {
+                self.git
+                    .set_review_ref(&root, comment, ReviewSide::After, &oid)?;
+                Ok(oid)
+            });
         match snapshot {
             Ok(oid) => store.set_after_snapshot(comment, &oid).map_err(|e| e.0)?,
             Err(_) if earlier.is_some() => {

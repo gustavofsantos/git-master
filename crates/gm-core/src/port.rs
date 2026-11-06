@@ -502,6 +502,14 @@ pub trait GitPort: Send {
         ))
     }
 
+    /// The review snapshot of `root` (as `snapshot_worktree`) for a comment on `path`
+    /// (D182). In a workspace a file of a checked-out member is also put in the
+    /// snapshot under its workspace path, so `file_at_commit` finds it. The default is
+    /// the whole-worktree snapshot.
+    fn snapshot_worktree_for(&self, root: &Path, _path: &str) -> Result<String, GitError> {
+        self.snapshot_worktree(root)
+    }
+
     /// Builds a commit that is HEAD with only `paths` taken from the working
     /// tree (`add -A` on those paths alone). It is the move snapshot of D109:
     /// the other paths are HEAD's, whatever the index holds. The real index,

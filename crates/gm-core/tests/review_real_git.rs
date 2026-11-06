@@ -1240,3 +1240,213 @@ fn a_comment_by_text_is_anchored_where_the_text_is_once_and_refused_otherwise() 
     assert!(!done(&events));
     assert_eq!(list(&mut engine).len(), 1);
 }
+
+/// A workspace on `main` whose member `billing` is a linked worktree of the repository
+/// `member` on `feat` (D180, D182): the workspace's index holds the gitlink, and the folder
+/// has a `.git` file. Returns the two repositories, which stay alive with the test.
+fn workspace() -> (tempfile::TempDir, tempfile::TempDir) {
+    let member = tempfile::tempdir().unwrap();
+    git(member.path(), &["init", "-q", "-b", "main"]);
+    git(member.path(), &["config", "user.name", "t"]);
+    git(member.path(), &["config", "user.email", "t@t"]);
+    std::fs::create_dir_all(member.path().join("src")).unwrap();
+    write(member.path(), "src/x.rs", "one\ntwo\nthree\nfour\n");
+    write(member.path(), "run.sh", "#!/bin/sh\n");
+    git(member.path(), &["add", "."]);
+    git(member.path(), &["commit", "-q", "-m", "init"]);
+
+    let ws = tempfile::tempdir().unwrap();
+    git(ws.path(), &["init", "-q", "-b", "main"]);
+    write(ws.path(), "README.md", "workspace\n");
+    git(ws.path(), &["add", "."]);
+    git(ws.path(), &["commit", "-q", "-m", "init"]);
+
+    let billing = ws.path().join("billing");
+    git(
+        member.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat",
+            billing.to_str().unwrap(),
+        ],
+    );
+    write(
+        ws.path(),
+        ".gitmodules",
+        &format!(
+            "[submodule \"billing\"]\n\tpath = billing\n\turl = {}\n",
+            member.path().display()
+        ),
+    );
+    let head = git(&billing, &["rev-parse", "HEAD"]).trim().to_owned();
+    git(ws.path(), &["add", ".gitmodules"]);
+    git(
+        ws.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{head},billing"),
+        ],
+    );
+    git(ws.path(), &["commit", "-q", "-m", "add billing"]);
+    (ws, member)
+}
+
+/// The index of the member's linked worktree `billing` (in the member's `.git`) and its time.
+fn member_index(member: &Path) -> (Vec<u8>, std::time::SystemTime) {
+    let path = member
+        .join(".git")
+        .join("worktrees")
+        .join("billing")
+        .join("index");
+    let bytes = std::fs::read(&path).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    (bytes, modified)
+}
+
+/// The change of comment `id` on the member file `billing/src/x.rs`, read by the agent.
+fn member_change(engine: &mut Engine, id: i64) -> Option<ReviewChange> {
+    let events = engine.handle(
+        OperationId(41),
+        &agent(CommandKind::LoadReviewChange { id }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    events
+        .iter()
+        .find_map(|e| match e {
+            Event::ReviewChange { path, change, .. } => {
+                assert_eq!(path, "billing/src/x.rs");
+                Some(change.clone())
+            }
+            _ => None,
+        })
+        .expect("a review change")
+}
+
+#[test]
+fn a_comment_on_a_members_file_keeps_its_text_before_and_after_the_edit() {
+    let (ws, member) = workspace();
+    let log = CommandLog::default();
+    let mut engine = engine_on(ws.path(), &log);
+    let ws_index = index_bytes(ws.path());
+    let member_refs = public_refs(member.path());
+    let member_state = member_index(member.path());
+
+    let events = engine.handle(
+        OperationId(10),
+        &human(add("billing/src/x.rs", 2, 3, "about two and three")),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    let id = only(&mut engine).id;
+    let events = engine.handle(
+        OperationId(11),
+        &human(CommandKind::LoadReviewSnapshotText { id }),
+    );
+    let (path, lines) = snapshot_text(&events);
+    assert_eq!(path, "billing/src/x.rs");
+    assert_eq!(
+        lines,
+        vec!["two", "three"],
+        "the before text of the member file"
+    );
+
+    // The before snapshot holds the member's file under its workspace path, not a gitlink.
+    assert!(private_refs(ws.path()).contains(&before_ref(id)));
+    let oid = git(ws.path(), &["rev-parse", &before_ref(id)]);
+    let oid = oid.trim();
+    let folder = git(ws.path(), &["ls-tree", oid, "billing"]);
+    assert!(folder.starts_with("040000 tree"), "{folder}");
+    assert!(git(ws.path(), &["ls-tree", "-r", oid, "billing/src/x.rs"]).starts_with("100644 blob"));
+
+    write(
+        &ws.path().join("billing").join("src"),
+        "x.rs",
+        "one\nTWO\nthree\nfour\n",
+    );
+    let events = engine.handle(
+        OperationId(12),
+        &agent(CommandKind::HandleReviewComment {
+            id,
+            summary: "renamed two".to_owned(),
+        }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+
+    let change = member_change(&mut engine, id).expect("a change of the member file");
+    assert!(change.changed, "{change:?}");
+    assert_eq!(change.before, vec!["two", "three"]);
+    assert_eq!(change.after, vec!["TWO", "three"]);
+
+    // The member's refs and index, and the workspace's real index, are as they were.
+    assert_eq!(public_refs(member.path()), member_refs);
+    assert_eq!(member_index(member.path()), member_state);
+    assert_eq!(index_bytes(ws.path()), ws_index);
+    assert_eq!(private_refs(ws.path()).len(), 2, "both snapshots are kept");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_member_snapshot_keeps_the_mode_of_a_file_and_a_symlink_and_drops_a_deleted_one() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (ws, _member) = workspace();
+    let billing = ws.path().join("billing");
+    let meta = std::fs::metadata(billing.join("run.sh")).unwrap();
+    std::fs::set_permissions(
+        billing.join("run.sh"),
+        std::fs::Permissions::from_mode(meta.permissions().mode() | 0o755),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("src/x.rs", billing.join("link")).unwrap();
+    let ws_index = index_bytes(ws.path());
+
+    let oid = port()
+        .snapshot_worktree_for(ws.path(), "billing/run.sh")
+        .unwrap();
+    assert!(
+        git(ws.path(), &["ls-tree", &oid, "billing/run.sh"]).starts_with("100755 blob"),
+        "an executable file keeps its mode"
+    );
+    let oid = port()
+        .snapshot_worktree_for(ws.path(), "billing/link")
+        .unwrap();
+    assert!(git(ws.path(), &["ls-tree", &oid, "billing/link"]).starts_with("120000 blob"));
+    assert_eq!(
+        git(
+            ws.path(),
+            &["cat-file", "blob", &format!("{oid}:billing/link")]
+        ),
+        "src/x.rs"
+    );
+
+    std::fs::remove_file(billing.join("src").join("x.rs")).unwrap();
+    let oid = port()
+        .snapshot_worktree_for(ws.path(), "billing/src/x.rs")
+        .unwrap();
+    assert!(
+        git(ws.path(), &["ls-tree", "-r", &oid, "billing/src/x.rs"]).is_empty(),
+        "a deleted file has no entry"
+    );
+    assert_eq!(
+        index_bytes(ws.path()),
+        ws_index,
+        "the real index is untouched"
+    );
+}
+
+#[test]
+fn a_snapshot_of_a_plain_file_is_the_same_tree_as_the_whole_worktree() {
+    let dir = repo();
+    write(dir.path(), "f.txt", "changed\n");
+    let whole = port().snapshot_worktree(dir.path()).unwrap();
+    let for_path = port().snapshot_worktree_for(dir.path(), "f.txt").unwrap();
+    assert_eq!(
+        git(dir.path(), &["rev-parse", &format!("{whole}^{{tree}}")]),
+        git(dir.path(), &["rev-parse", &format!("{for_path}^{{tree}}")]),
+        "a repository without members is snapshotted as before"
+    );
+}

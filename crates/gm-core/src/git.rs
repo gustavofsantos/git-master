@@ -599,6 +599,75 @@ impl SubprocessGit {
         }
     }
 
+    /// Like `snapshot_step`, with `input` on the command's standard input.
+    fn snapshot_input_step(
+        &self,
+        mut command: Command,
+        input: &[u8],
+        record: bool,
+    ) -> Result<Vec<u8>, GitError> {
+        if record {
+            return self.logged(command, Some(input));
+        }
+        let output = Self::execute(&mut command, Some(input))
+            .map_err(|e| GitError(format!("cannot run git: {e}")))?;
+        Self::checked(output, &[0])
+    }
+
+    /// Puts the file `path` into the temporary index `index` of a snapshot when it is
+    /// in a checked-out member of the workspace at `root` (D182). `add -A` recorded
+    /// the member as a gitlink, so the gitlink goes from the temporary index; the
+    /// file's content goes into the workspace's object store as a blob, at its
+    /// workspace path. A file that is gone gets no entry, as a deleted file of the
+    /// workspace has none. Nothing outside the temporary index and the object store
+    /// changes. Without `.gitmodules`, or for a path in no member, nothing is done.
+    fn put_member_file(
+        &self,
+        root: &Path,
+        index: &Path,
+        path: &str,
+        record: bool,
+    ) -> Result<(), GitError> {
+        if !root.join(".gitmodules").exists() {
+            return Ok(());
+        }
+        let members = crate::threads::members::checked_out(root);
+        let Some(member) = crate::threads::members::member_of(path, &members) else {
+            return Ok(());
+        };
+        let mut remove = self.git(root);
+        remove
+            .env("GIT_INDEX_FILE", index)
+            .args(["update-index", "--force-remove", "--", member]);
+        self.snapshot_step(remove, record)?;
+        let full = root.join(path);
+        let Ok(meta) = full.symlink_metadata() else {
+            return Ok(());
+        };
+        let mode = worktree_mode(root, path)?;
+        let id = if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&full)
+                .map_err(|e| GitError(format!("cannot read {path}: {e}")))?;
+            let mut hash = self.git(root);
+            hash.args(["hash-object", "-w", "--stdin"]);
+            self.snapshot_input_step(hash, target.as_os_str().as_encoded_bytes(), record)?
+        } else {
+            let mut hash = self.git(root);
+            hash.args(["hash-object", "-w"])
+                .arg(format!("--path={path}"))
+                .arg("--")
+                .arg(&full);
+            self.snapshot_step(hash, record)?
+        };
+        let id = String::from_utf8_lossy(&id).trim().to_owned();
+        let mut add = self.git(root);
+        add.env("GIT_INDEX_FILE", index)
+            .args(["update-index", "--add", "--cacheinfo"])
+            .arg(format!("{mode:o}"))
+            .args([id.as_str(), path]);
+        self.snapshot_step(add, record).map(drop)
+    }
+
     /// A folder under `<common_dir>/gitmaster/tmp` for scratch files. It and its
     /// contents go when the returned value drops, on every way out.
     fn scratch_dir(&self, root: &Path) -> Result<tempfile::TempDir, GitError> {
@@ -737,12 +806,15 @@ impl SubprocessGit {
     }
     /// Builds a commit of the working tree (`paths` of `None`) or of HEAD with
     /// only `paths` taken from the working tree (`Some`), for `message`. The work
-    /// is done in a copy of the index, which is removed afterwards.
+    /// is done in a copy of the index, which is removed afterwards. `file` is the
+    /// path of a review comment: when it is in a member of a workspace, that file
+    /// is put in the commit too (D182).
     fn snapshot(
         &self,
         root: &Path,
         paths: Option<&[String]>,
         message: &str,
+        file: Option<&str>,
     ) -> Result<String, GitError> {
         // The folder and the copy of the index in it go when `scratch` drops, on
         // every way out of this function.
@@ -771,6 +843,9 @@ impl SubprocessGit {
                 .args(paths),
         };
         self.snapshot_step(add, record)?;
+        if let Some(file) = file {
+            self.put_member_file(root, &index, file, record)?;
+        }
         let mut write = self.git(root);
         write.env("GIT_INDEX_FILE", &index).arg("write-tree");
         let tree = String::from_utf8_lossy(&self.snapshot_step(write, record)?)
@@ -1213,11 +1288,15 @@ impl GitPort for SubprocessGit {
     }
 
     fn snapshot_worktree(&self, root: &Path) -> Result<String, GitError> {
-        self.snapshot(root, None, "gitmaster review snapshot")
+        self.snapshot(root, None, "gitmaster review snapshot", None)
+    }
+
+    fn snapshot_worktree_for(&self, root: &Path, path: &str) -> Result<String, GitError> {
+        self.snapshot(root, None, "gitmaster review snapshot", Some(path))
     }
 
     fn snapshot_paths(&self, root: &Path, paths: &[String]) -> Result<String, GitError> {
-        self.snapshot(root, Some(paths), "gitmaster move snapshot")
+        self.snapshot(root, Some(paths), "gitmaster move snapshot", None)
     }
 
     fn git_version(&self) -> Result<String, GitError> {
