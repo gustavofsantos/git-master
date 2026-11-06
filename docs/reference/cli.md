@@ -159,8 +159,6 @@ IFS=$'\t' read -r _ branch repo < <(my-repos | gitmaster worktree branches --rep
 
 ## Workspaces
 
-> **Planned.** The workspace subcommands are not available yet.
-
 ```sh
 gitmaster workspace create <name> [--root <dir>] [--ephemeral] [--branch <branch> --repos-from <file|->]
 gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--as <member>] [--include symlink|reflink|none]
@@ -182,7 +180,7 @@ A workspace is a folder `<root>/<name>` that holds a Git repository. The root co
 
 A leading `~` is the home directory, and a relative root is taken from the current directory. A workspace's repository has the Git key `gitmaster.workspace.kind` set to `durable` or `ephemeral` in its own `.git/config`; a folder without it is not a workspace.
 
-`--workspace <name|dir>` chooses the workspace a command works on. A value with a `/` is a folder; any other value is a name under the root. Without it, the command works on the workspace that contains the current directory, from its root or from inside a member.
+`--workspace <name|dir>` chooses the workspace a command works on. A value with a `/` is a folder; any other value is a name under the root. `add` and `status` take no `--root`: to reach a workspace under another root by name, set `gitmaster.workspace.root`, or give its folder. Without it, the command works on the workspace that contains the current directory, from its root or from inside a member.
 
 ### Create a workspace
 
@@ -198,7 +196,7 @@ A leading `~` is the home directory, and a relative root is taken from the curre
 2. The worktree is registered in the workspace's repository as a submodule that follows `<branch>`, with the path of the main checkout as its URL.
 3. The workspace's repository commits `.gitmodules` and the member.
 
-`add` refuses a branch that is checked out in another worktree, and says which. It refuses a `<member>` folder that exists, and a repository that is already a member. When the commit fails, for example because Git has no user name, the member stays added and staged, and the message says so.
+`add` refuses a branch that is checked out in another worktree, and says which. It refuses a `<member>` folder that exists, and a repository that is already a member. When the commit fails, for example because Git has no user name, the member stays added and staged, the message says how to commit it, and the exit status is `1`. When registering the submodule fails, the new worktree is removed again.
 
 ### List and find workspaces
 
@@ -236,6 +234,8 @@ A member whose folder is gone prints `(missing)` as its branch, and the command 
 - It refuses a workspace that contains the current directory. `--force` does not lift that.
 - It refuses when a member has staged, unstaged or untracked files, when a member is on a detached `HEAD` that holds commits no branch has, or when the workspace's repository has changes other than the commits its members point to. It says which, and removes nothing. `--force` removes it anyway, with what it discards.
 - A member whose folder is gone is pruned from its repository's worktree records.
+- It refuses a workspace whose member's repository is gone, even with `--force`, because Git cannot remove that member's worktree.
+- Members are removed one at a time. When one fails, the ones before it stay removed, the message says which failed, and the workspace folder is kept.
 
 ## MCP server
 
