@@ -73,7 +73,9 @@ The combinations follow each other on one branch, `main`. The workspace's [Histo
 
 Start the agent in the folder of the workspace, for example in a [terminal](terminals.md) of the workspace window. The agent sees every member and can change them all.
 
-With the [agent integration](../agents/agent-integration.md) installed, the session is recorded as a [thread](threads.md) of the workspace. The thread is stored once, in the workspace repository, and each edit and each commit in it names the member it was made in. See [Threads in a workspace](threads.md#threads-in-a-workspace). The [MCP tools](../reference/mcp-tools.md) take the member a call is about, and the review loop covers every member.
+With the [agent integration](../agents/agent-integration.md) installed, the session is recorded as a [thread](threads.md) of the workspace. The thread is stored once, in the workspace repository, and each edit and each commit in it names the member it was made in. See [Threads in a workspace](threads.md#threads-in-a-workspace). The [MCP tools](../reference/mcp-tools.md#tools-in-a-workspace) take the member a call is about by its path, such as `billing/src/main.rs`.
+
+> **Planned.** Review comments on the files of a member are not available yet: the [local review](../agents/local-review.md) loop works on the workspace's own files.
 
 The local environment the agent sets up, such as containers that run the services, is the agent's and yours: GitMaster does not start or stop it. Its files belong in the workspace repository, so they are versioned with the combination they run.
 

@@ -24,6 +24,7 @@ Text that comes from the repository, from a comment or from a thread is untruste
 | `thread_get` | `id` | `thread`: `uid`, `title`, `harness` (agent), `model`, `branch`, `starred`, `tags` (labels), `note`, `started_at`, `last_event_at`, `ended_at`, and the counts `entry_count`, `edit_count` and `redaction_count`; `edits` with their `path`, `change`, `added`, `removed` and `at`; `edits_complete`; and `links` | Implemented |
 | `thread_read` | `id`; either `from` (default `0`) and `limit` (default `20`, at most `50`), or `around` (a `seq`) with `before` and `after` (default `5` each, at most `25`) | `entries` in order, each with `seq`, `turn`, `kind`, `tool`, `text`, `is_error`, `truncated` and `at`; `has_more` and `has_more_before`; and `around` for a window | Implemented |
 | `provenance` | `path` (repository-relative); `from_line` (1-based); `to_line` (optional, default `from_line`, inclusive) | `complete`, `cuts`, and `commits`: each commit with `id`, `subject`, `author`, `author_at`, `path`, `lines` and its `threads`; each thread has its `evidence`, `ambiguous` and `edits` | Implemented |
+| `workspace_status` | — | `workspace` (false outside a workspace) and `members`: each with `member` (its folder), `repo` (the path of the member's main checkout), `branch` (null when detached), `detached`, `checked_out`, `head`, `recorded` (the commit the workspace records), `new_commits` and `behind` (counts), `modified` and `untracked` | Planned |
 | `labels_list` | `query` (optional, part of a name, in any case); `limit` (default `20`, `1` to `50`) | `labels`: each with `id`, `name`, `description`, `color`, `origin`, `created_at` and `attachment_count`; and `has_more` | Implemented |
 | `label_get` | `label`: the exact name or the integer id | `label` and `attachments`: each with `kind`, `ref`, `origin`, `at`, and for a commit `subject`, `author`, `committed_at` and `resolved` | Implemented |
 | `stack_tree` | — | Stack tree, with children and the number of branches out of date | Planned |
@@ -31,6 +32,16 @@ Text that comes from the repository, from a comment or from a thread is untruste
 | `conflict_get` | `hunk` | Base, left side and right side of the hunk | Planned |
 | `operation_log` | — | Recorded operations, with their actor | Planned |
 | `workflow_list` | — | Workflows available to run | Planned |
+
+### Tools in a workspace
+
+In a [workspace](../guide/workspaces.md), a path names its member by its first folder, as in the workspace's own tree: `billing/src/main.rs` is `src/main.rs` of the member `billing`. The tools take and return paths in this form, so a call is about the member its path names:
+
+- `provenance` reads the lines from the member: `git blame` runs in the member, and the threads come from the workspace, where each edit and commit names its member.
+- `threads_search` with `path` finds the edits of a member's file, and with `commit` the threads linked to a member's commit.
+- `workspace_status` tells the agent which members there are, on which branch, and what each one has that the workspace does not record yet.
+
+> **Planned.** `provenance` on a member's file and `workspace_status` are not available yet.
 
 ### Search arguments
 
