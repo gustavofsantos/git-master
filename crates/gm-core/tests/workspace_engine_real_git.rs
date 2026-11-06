@@ -508,6 +508,99 @@ fn check_out_member_branch_puts_a_detached_member_back_on_its_branch() {
 }
 
 #[test]
+fn check_out_refuses_a_detached_member_whose_commits_are_on_no_branch() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(create(
+        "orphan",
+        &[(&c, "feat/c")],
+        &scratch.root()
+    ))));
+    let member = scratch.ws("orphan/c");
+    git_in(&member, &["checkout", "-q", "--detach"]);
+    std::fs::write(member.join("b.txt"), "two\n").unwrap();
+    git_in(&member, &["add", "."]);
+    git_in(&member, &["commit", "-q", "-m", "on no branch"]);
+    let head = git_in(&member, &["rev-parse", "HEAD"]);
+    harness.open(&scratch.ws("orphan"));
+
+    let events = harness.human(CommandKind::CheckOutMemberBranch { path: "c".into() });
+
+    assert!(!done(&events), "the checkout must refuse: {events:?}");
+    assert!(
+        refusal(&events).is_some_and(|reason| reason
+            .contains("1 commit on the detached HEAD is on no branch; put it on a branch first.")),
+        "{events:?}"
+    );
+    assert_eq!(
+        git_in(&member, &["rev-parse", "HEAD"]),
+        head,
+        "HEAD unchanged"
+    );
+    assert_eq!(
+        git_in(&member, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "HEAD",
+        "still detached"
+    );
+}
+
+#[test]
+fn check_out_counts_the_commits_a_refused_detached_member_would_leave() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(create(
+        "two",
+        &[(&c, "feat/c")],
+        &scratch.root()
+    ))));
+    let member = scratch.ws("two/c");
+    git_in(&member, &["checkout", "-q", "--detach"]);
+    for name in ["b.txt", "d.txt"] {
+        std::fs::write(member.join(name), "x\n").unwrap();
+        git_in(&member, &["add", "."]);
+        git_in(&member, &["commit", "-q", "-m", name]);
+    }
+    harness.open(&scratch.ws("two"));
+
+    let events = harness.human(CommandKind::CheckOutMemberBranch { path: "c".into() });
+
+    assert!(!done(&events));
+    assert!(
+        refusal(&events).is_some_and(|reason| reason.contains("2 commits on the detached HEAD")),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn check_out_puts_a_detached_member_on_a_commit_a_branch_holds() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(create(
+        "held",
+        &[(&c, "feat/c")],
+        &scratch.root()
+    ))));
+    let member = scratch.ws("held/c");
+    // A commit that feat/c holds: detaching at its tip leaves nothing on no branch.
+    git_in(&member, &["checkout", "-q", "--detach"]);
+    harness.open(&scratch.ws("held"));
+
+    let events = harness.human(CommandKind::CheckOutMemberBranch { path: "c".into() });
+
+    assert!(done(&events), "a held commit is checked out: {events:?}");
+    assert_eq!(
+        git_in(&member, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feat/c"
+    );
+}
+
+#[test]
 fn an_agent_cannot_write_a_workspace_but_can_read_one() {
     let scratch = Scratch::new();
     let c = scratch.repo("c");

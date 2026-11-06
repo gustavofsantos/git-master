@@ -21,7 +21,7 @@ use crate::text_area::{Down, Newline, TextArea, TextAreaEvent, Up};
 use crate::text_search::DEBOUNCE_MS;
 use crate::theme;
 use crate::view::StatusView;
-use crate::worktree_create::{SUGGESTIONS_SHOWN, field_row, move_pick};
+use crate::worktree_create::{SUGGESTIONS_SHOWN, move_pick};
 use crate::worktree_list::same_path;
 
 const WIDTH: f32 = 560.;
@@ -380,6 +380,12 @@ impl Making {
 /// Whether Create Workspace is enabled: the form is complete, its plan is the answer for it with
 /// no problem, and no create is in flight.
 #[must_use]
+/// What Escape does in the dialog: an open repository list closes first and the dialog stays, so
+/// a second Escape closes the dialog. Returns whether the dialog closes.
+pub(crate) fn escape_closes_dialog(choosing: &mut Option<usize>) -> bool {
+    choosing.take().is_none()
+}
+
 pub(crate) fn may_create(form: &Form, planning: &Planning, making: &Making) -> bool {
     form.complete() && planning.ready() && !making.is_pending()
 }
@@ -462,7 +468,7 @@ impl StatusView {
                 window,
                 |this, _, event: &TextAreaEvent, window, cx| {
                     if *event == TextAreaEvent::Cancel {
-                        this.close_workspace_dialog(window, cx);
+                        this.cancel_workspace_dialog(window, cx);
                     }
                 },
             ));
@@ -509,7 +515,7 @@ impl StatusView {
                 window,
                 |this, _, event: &TextAreaEvent, window, cx| {
                     if *event == TextAreaEvent::Cancel {
-                        this.close_workspace_dialog(window, cx);
+                        this.cancel_workspace_dialog(window, cx);
                     }
                 },
             ),
@@ -526,6 +532,19 @@ impl StatusView {
             self.list_focus.focus(window);
         }
         cx.notify();
+    }
+
+    /// Escape in a field: closes the repository list when one is open and keeps the dialog and its
+    /// input; with no list open it closes the dialog.
+    fn cancel_workspace_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.workspace_dialog.as_mut() else {
+            return;
+        };
+        if escape_closes_dialog(&mut dialog.choosing) {
+            self.close_workspace_dialog(window, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     /// A field changed: the form is compared with the one last seen. **Branch for all** fills
@@ -876,12 +895,16 @@ impl StatusView {
                 div()
                     .text_color(theme::text())
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("New Workspace…"),
+                    .child("New workspace"),
             )
-            .child(field_row("NAME", dialog.name.clone()))
+            .child(focus_field_row("NAME", dialog.name.clone(), cx))
             .child(kind_switch(dialog.kind, cx))
             .child(self.workspace_members(dialog, cx))
-            .child(field_row("BRANCH FOR ALL", dialog.branch_all.clone()))
+            .child(focus_field_row(
+                "BRANCH FOR ALL",
+                dialog.branch_all.clone(),
+                cx,
+            ))
             .child(folder_line(&dialog.form(cx), self.model.workspaces.root()))
             .children(self.workspace_problems(dialog, cx))
             .children(dialog.error.as_ref().map(|error| {
@@ -959,6 +982,33 @@ impl StatusView {
             }))
             .collect()
     }
+}
+
+/// A labelled field of the dialog, as `field_row`, but a click anywhere in its box takes the focus,
+/// as a click on a row's branch field does. The padding of the box is not the field's own area, so
+/// a click there would otherwise leave the focus where it was.
+fn focus_field_row(label: &'static str, field: Entity<TextArea>, cx: &Context<StatusView>) -> Div {
+    let target = field.clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_xs().text_color(theme::muted()).child(label))
+        .child(
+            div()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(theme::hairline())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_, _: &MouseDownEvent, window, cx| {
+                        target.update(cx, |area, cx| area.focus(window, cx));
+                    }),
+                )
+                .child(field),
+        )
 }
 
 /// The FOLDER line: `<root>/<name>`, or a hint until the name is typed.
@@ -1156,9 +1206,14 @@ fn chooser(index: usize, choices: &[String], cx: &Context<StatusView>) -> Div {
                 .cursor_pointer()
                 .text_color(theme::text())
                 .hover(|style| style.bg(theme::selected_row()))
-                .child(repo_label(path))
+                .child(div().flex_none().child(repo_label(path)))
                 .child(
                     div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .text_xs()
                         .text_color(theme::muted())
                         .child(path.clone()),
@@ -1440,6 +1495,21 @@ mod tests {
             upstream: None,
             author_email: None,
         }
+    }
+
+    #[test]
+    fn escape_closes_an_open_repository_list_first_and_the_dialog_on_the_next() {
+        let mut choosing = Some(1);
+        assert!(
+            !escape_closes_dialog(&mut choosing),
+            "the list closes, not the dialog"
+        );
+        assert_eq!(choosing, None);
+        assert!(
+            escape_closes_dialog(&mut choosing),
+            "a second Escape closes the dialog"
+        );
+        assert_eq!(choosing, None);
     }
 
     #[test]

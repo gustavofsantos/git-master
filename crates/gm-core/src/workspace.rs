@@ -1150,8 +1150,9 @@ impl<'a> Workspaces<'a> {
 
     /// Checks out the branch the workspace's `.gitmodules` names for the member `member` (its path
     /// relative to the workspace), inside the member (D183). Refused when the member has no branch
-    /// or its folder is gone, and when another worktree holds the branch; otherwise Git's own
-    /// refusal is the error.
+    /// or its folder is gone, when its detached HEAD is on no branch (its commits would be left
+    /// behind), and when another worktree holds the branch; otherwise Git's own refusal is the
+    /// error.
     pub fn check_out_member_branch(&self, ws: &Path, member: &str) -> Result<(), Error> {
         let members = self.members(ws)?;
         let Some(found) = members.iter().find(|candidate| candidate.path == member) else {
@@ -1169,6 +1170,32 @@ impl<'a> Workspaces<'a> {
             return Err(Error::Run(format!(
                 "{member} is missing: its folder is not there"
             )));
+        }
+        // A detached HEAD that no branch holds would be left behind by the checkout (D183):
+        // refuse, as removal does, and say how many commits.
+        let state = self.git.status(&dir)?;
+        if state.branch.head.is_none() && !self.held(&dir, state.branch.oid.as_deref()) {
+            let count = self.sub.text(
+                &dir,
+                &[
+                    "rev-list",
+                    "--count",
+                    "HEAD",
+                    "--not",
+                    "--branches",
+                    "--remotes",
+                ],
+            )?;
+            let count: usize = count.trim().parse().unwrap_or(1);
+            return Err(Error::Run(if count == 1 {
+                format!(
+                    "{member}: 1 commit on the detached HEAD is on no branch; put it on a branch first."
+                )
+            } else {
+                format!(
+                    "{member}: {count} commits on the detached HEAD are on no branch; put them on a branch first."
+                )
+            }));
         }
         let entries = self.git.worktrees(Path::new(&found.url))?;
         if let Some(entry) = worktree_cli::holder(&entries, branch)
