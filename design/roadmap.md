@@ -712,6 +712,15 @@ Done when: an agent can read the stack, propose a restack and apply it with appr
 - **7b2, comment on any code** (built 2026-10-31, D141). A line pick separate from the staging selection: drag across line numbers or Shift-click, in the Working Copy diff (any line, both sides), the Code viewer and the commit, stash and reflog diffs; Ctrl+Shift+M or the header button opens the composer. Where the surface is the working tree (unstaged side, Code viewer) the comment is by line numbers; elsewhere the engine command `AddReviewCommentByText` finds the picked text exactly once in the file or refuses. Tests: pure (`review::picked`, the registry rule, the composer target), real Git (`review_real_git.rs`: once, twice, absent, agent refused).
   - Known gaps: comments already written are not drawn inline in the Code viewer or in commit and stash diffs (`Planned` in `docs/agents/local-review.md`); no autoscroll while dragging past the edge of the list; the commit-diff flow and Ctrl+Shift+M were not tried in a window (no key reaches the app under Xvfb without a window manager), the drag and the header button were, in the Working Copy diff and the Code viewer.
 
+## Slice 7s: workspaces (planned 2026-11-06; D174, D175, Q36)
+
+Several repositories in one workspace: a superproject whose submodules are linked worktrees of the user's clones. Docs: `guide/workspaces.md`. The ids are `SW*` because `WS*` belongs to the workflow slice.
+
+- **SW0, engine and CLI:** `gitmaster workspace create|add|list|status|remove` over the worktree commands of D172; real-Git tests in temporary repositories for the shape of D174 (worktree member added as a submodule in place, no `protocol.file.allow`, detached member detected, removal blocked as D31 says). Answer Q36 (b) and (d) here.
+- **SW1, submodule reads in the UI (D175):** member rows in the Working Copy (branch, dirty, new commits, detached), submodule diff as a commit list, opening a member, `--recurse-submodules` in Quick Open and text search. Rename the sidebar section of D176.
+- **SW2, provenance:** threads of the workspace name the member of each edit and commit (Q36 a); recording a combination as a superproject commit (Q36 c).
+- **SW3, agent tools:** MCP tools that take a member, a workspace status tool, the review loop over every member.
+
 ## Slice 8: local review
 
 - Comments, states, anchor without guessing, before and after snapshots.
