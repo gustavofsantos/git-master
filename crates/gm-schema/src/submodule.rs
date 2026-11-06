@@ -43,4 +43,9 @@ pub struct SubmoduleDetail {
     /// Commits the repository records that the submodule's HEAD does not have
     /// (`head..recorded`): the submodule is behind. Counted, not listed.
     pub missing_commits: usize,
+    /// The main checkout of the submodule's repository: the repository a linked
+    /// worktree was made from, or the submodule's own folder when its Git
+    /// directory is its own. `None` when the folder is not checked out.
+    #[serde(default)]
+    pub repo: Option<String>,
 }

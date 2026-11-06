@@ -1104,6 +1104,7 @@ impl GitPort for SubprocessGit {
                 commits: Vec::new(),
                 more: false,
                 missing_commits: 0,
+                repo: None,
             });
         }
         // `symbolic-ref` exits 1 when HEAD is detached; the name is then empty.
@@ -1120,6 +1121,13 @@ impl GitPort for SubprocessGit {
             .trim()
             .to_owned();
         let head = (!head.is_empty()).then_some(head);
+        // The common Git directory names the repository the member was made from (D181).
+        let mut common = self.git(&folder);
+        common.args(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+        let common = String::from_utf8_lossy(&Self::run(common)?)
+            .trim()
+            .to_owned();
+        let repo = submodule_files::main_checkout(&folder.to_string_lossy(), &common);
         let (commits, more, missing_commits) = match &head {
             None => (Vec::new(), false, 0),
             Some(head) => {
@@ -1149,6 +1157,7 @@ impl GitPort for SubprocessGit {
             commits,
             more,
             missing_commits,
+            repo: Some(repo),
         })
     }
 

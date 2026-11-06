@@ -128,6 +128,7 @@ fn the_handshake_lists_only_the_tools_the_agent_does_not_have() {
             "thread_get",
             "thread_read",
             "provenance",
+            "workspace_status",
             "labels_list",
             "label_get",
             "label_create",
@@ -2007,4 +2008,167 @@ fn the_record_tools_are_not_read_only_and_the_reads_are() {
             "{human_only} is for the person"
         );
     }
+}
+
+/// A workspace with two members, each a linked worktree of one clone (D180): `billing` on `feat`
+/// and `ledger` on `ledger`, both registered as submodules and committed in the workspace.
+struct Members {
+    _dir: tempfile::TempDir,
+    ws: std::path::PathBuf,
+    repo: std::path::PathBuf,
+    billing: std::path::PathBuf,
+    ledger: std::path::PathBuf,
+}
+
+fn members() -> Members {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "clone\n").unwrap();
+    git(&repo, &["add", "a.txt"]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    git(&repo, &["branch", "feat"]);
+    git(&repo, &["branch", "ledger"]);
+
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    std::fs::write(ws.join("README.md"), "workspace\n").unwrap();
+    git(&ws, &["add", "README.md"]);
+    git(&ws, &["commit", "-q", "-m", "init"]);
+
+    let repo_arg = repo.to_str().unwrap().to_owned();
+    let billing = ws.join("billing");
+    let ledger = ws.join("ledger");
+    for (folder, branch) in [(&billing, "feat"), (&ledger, "ledger")] {
+        git(
+            &repo,
+            &["worktree", "add", "-q", folder.to_str().unwrap(), branch],
+        );
+        std::fs::write(folder.join("x.rs"), "one\n").unwrap();
+        git(folder, &["add", "x.rs"]);
+        git(folder, &["commit", "-q", "-m", "base"]);
+    }
+    git(
+        &ws,
+        &["submodule", "add", "-q", "-b", "feat", &repo_arg, "billing"],
+    );
+    git(
+        &ws,
+        &[
+            "submodule",
+            "add",
+            "-q",
+            "-b",
+            "ledger",
+            &repo_arg,
+            "ledger",
+        ],
+    );
+    git(&ws, &["commit", "-q", "-m", "add members"]);
+    Members {
+        _dir: dir,
+        ws,
+        repo,
+        billing,
+        ledger,
+    }
+}
+
+fn member<'a>(answer: &'a Value, name: &str) -> &'a Value {
+    answer["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["member"] == name)
+        .unwrap_or_else(|| panic!("no member {name} in {answer}"))
+}
+
+#[test]
+fn the_workspace_status_names_each_member_and_what_it_has_that_the_workspace_does_not() {
+    let members = members();
+    // billing: one commit the workspace does not record, and a tracked file changed.
+    std::fs::write(members.billing.join("y.rs"), "fn y() {}\n").unwrap();
+    git(&members.billing, &["add", "y.rs"]);
+    git(&members.billing, &["commit", "-q", "-m", "more"]);
+    std::fs::write(members.billing.join("x.rs"), "two\n").unwrap();
+    // ledger: nothing committed, one untracked file.
+    std::fs::write(members.ledger.join("notes.txt"), "n\n").unwrap();
+
+    let replies = session(
+        &members.ws,
+        &[initialize(), call(2, "workspace_status", &json!({}))],
+    );
+    let answer = result(&replies[1]);
+
+    assert_eq!(answer["untrusted"], true);
+    assert_eq!(answer["workspace"], true);
+    assert_eq!(answer["members"].as_array().unwrap().len(), 2);
+
+    let billing = member(answer, "billing");
+    assert_eq!(billing["branch"], "feat");
+    assert_eq!(billing["detached"], false);
+    assert_eq!(billing["checked_out"], true);
+    assert_eq!(billing["head"], rev(&members.billing, "HEAD").as_str());
+    assert_eq!(
+        billing["recorded"],
+        rev(&members.billing, "HEAD~1").as_str(),
+        "the workspace records the commit before the new one"
+    );
+    assert_eq!(billing["new_commits"], 1);
+    assert_eq!(billing["new_commits_more"], false);
+    assert_eq!(billing["behind"], 0);
+    assert_eq!(billing["modified"], true);
+    assert_eq!(billing["untracked"], false);
+    assert_eq!(
+        std::fs::canonicalize(billing["repo"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(&members.repo).unwrap(),
+        "the member is a worktree of the clone"
+    );
+
+    let ledger = member(answer, "ledger");
+    assert_eq!(ledger["branch"], "ledger");
+    assert_eq!(ledger["head"], ledger["recorded"]);
+    assert_eq!(ledger["new_commits"], 0);
+    assert_eq!(ledger["behind"], 0);
+    assert_eq!(ledger["modified"], false);
+    assert_eq!(ledger["untracked"], true);
+}
+
+#[test]
+fn outside_a_workspace_the_status_says_so_with_no_members() {
+    let dir = repo();
+
+    let replies = session(
+        dir.path(),
+        &[initialize(), call(2, "workspace_status", &json!({}))],
+    );
+    let answer = result(&replies[1]);
+
+    assert_eq!(answer["workspace"], false);
+    assert_eq!(answer["members"], json!([]));
+}
+
+#[test]
+fn the_workspace_status_schema_is_read_only_and_takes_no_arguments() {
+    let dir = repo();
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        ],
+    );
+    let tool = replies[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "workspace_status")
+        .expect("workspace_status is listed")
+        .clone();
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
+    assert_eq!(tool["annotations"]["destructiveHint"], false);
+    assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+    assert_eq!(tool["inputSchema"]["properties"], json!({}));
 }

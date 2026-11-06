@@ -6394,6 +6394,7 @@ mod tests {
                 commits: Vec::new(),
                 more: false,
                 missing_commits: 0,
+                repo: None,
             },
         );
         submodules

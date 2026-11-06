@@ -199,6 +199,7 @@ mod tests {
             commits: Vec::new(),
             more: false,
             missing_commits: 0,
+            repo: None,
         }
     }
 
@@ -259,6 +260,7 @@ mod tests {
         let ahead = SubmoduleDetail {
             commits: vec![commit("one", NOW), commit("two", NOW)],
             missing_commits: 3,
+            repo: None,
             ..detail("s")
         };
         assert_eq!(
@@ -294,6 +296,7 @@ mod tests {
     fn modified_and_untracked_follow_the_counts() {
         let behind = SubmoduleDetail {
             missing_commits: 1,
+            repo: None,
             ..detail("s")
         };
         assert_eq!(
@@ -307,6 +310,7 @@ mod tests {
         let stale = SubmoduleDetail {
             commits: vec![commit("one", NOW)],
             missing_commits: 2,
+            repo: None,
             ..detail("s")
         };
         assert_eq!(
@@ -350,6 +354,7 @@ mod tests {
         let behind = SubmoduleDetail {
             more: true,
             missing_commits: 4,
+            repo: None,
             ..detail("s")
         };
         let text = pane(&behind, NOW);
@@ -360,6 +365,7 @@ mod tests {
         );
         let one = SubmoduleDetail {
             missing_commits: 1,
+            repo: None,
             ..detail("s")
         };
         assert_eq!(

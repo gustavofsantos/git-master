@@ -152,6 +152,11 @@ pub enum CommandKind {
     LoadSubmodule {
         path: String,
     },
+    /// Lists the submodules checked out in the worktree (D181): the workspace's
+    /// members, by path, in index order. Empty when none is checked out, which
+    /// is when the repository is not a workspace. Never recorded in the command
+    /// log (D28).
+    ListMembers,
     /// Reads the file list of the worktree again (N1): `git ls-files` with the
     /// untracked files `.gitignore` does not hide, minus what a sparse checkout
     /// leaves out. The list the last read made keeps answering until the new one
@@ -949,6 +954,11 @@ pub enum Event {
     SubmoduleLoaded {
         id: OperationId,
         submodule: SubmoduleDetail,
+    },
+    /// Answers `ListMembers`: the paths of the checked-out submodules.
+    MembersListed {
+        id: OperationId,
+        members: Vec<String>,
     },
     /// Answers `SearchFiles`.
     FilesFound {

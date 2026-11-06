@@ -1354,7 +1354,9 @@ impl Model {
             // The list is read again by the view on a change, so the status bar has nothing to say.
             // The label and link answers are read by the Labels page (P4); the rows follow `ThreadsChanged`.
             | Event::ThreadRelationChanged { .. }
-            | Event::ThreadsChanged => None,
+            | Event::ThreadsChanged
+        // The members of a workspace are read by the agent's tools; the app keeps none (D181).
+        | Event::MembersListed { .. } => None,
             // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
             Event::HunkSuggested { .. } => {
                 if let Some(conflict) = self.conflict.as_mut() {
@@ -1761,6 +1763,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::StashesListed { id, .. }
         | Event::ReflogLoaded { id, .. }
         | Event::SubmoduleLoaded { id, .. }
+        | Event::MembersListed { id, .. }
         | Event::HookSectionsListed { id, .. }
         | Event::HooksConverted { id, .. }
         | Event::WorkflowsListed { id, .. }
@@ -3772,6 +3775,7 @@ mod submodule_tests {
             commits: Vec::new(),
             more: false,
             missing_commits: 0,
+            repo: None,
         }
     }
 

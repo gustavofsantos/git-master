@@ -17,6 +17,7 @@ use gm_schema::threads::{
 use gm_schema::{Actor, CommandKind, Event, OperationId};
 
 use crate::blame::BlameLine;
+use crate::threads::members;
 use crate::threads::provenance::{
     self, COMMIT_LIMIT, CONTEXT, EDIT_LIMIT, EditFact, LABEL_LIMIT, LINK_LIMIT, Owner,
     THREAD_LIMIT, Verdict,
@@ -621,6 +622,8 @@ impl ProvenanceJob {
 /// Explains lines `from` to `to` of `path` (D144) from the lines blame gave: the commits, each
 /// commit the threads linked to it and the edits that match its lines, each edit the entries
 /// around it. The bounds are the rules' (`provenance`), and a cut result says what it cut.
+/// The lines carry workspace paths. `member` is the member their commits live in (D181): the
+/// blob of each commit is read from its checkout, not from the workspace.
 pub(crate) fn provenance_from_lines(
     store: &mut ThreadStore,
     ctx: &Context<'_>,
@@ -628,6 +631,7 @@ pub(crate) fn provenance_from_lines(
     from: u32,
     to: u32,
     lines: &[BlameLine],
+    member: Option<&str>,
 ) -> Result<ProvenanceResult, String> {
     let owners = provenance::owners(lines);
     let mut result = ProvenanceResult {
@@ -645,7 +649,7 @@ pub(crate) fn provenance_from_lines(
         });
     }
     for owner in owners.into_iter().take(COMMIT_LIMIT) {
-        let commit = commit_provenance(store, ctx, &owner, &mut result.cuts)?;
+        let commit = commit_provenance(store, ctx, &owner, member, &mut result.cuts)?;
         result.commits.push(commit);
     }
     Ok(result)
@@ -656,11 +660,20 @@ fn commit_provenance(
     store: &ThreadStore,
     ctx: &Context<'_>,
     owner: &Owner,
+    member: Option<&str>,
     cuts: &mut Vec<ProvenanceCut>,
 ) -> Result<ProvenanceCommit, String> {
+    // A member's commits are in its own repository, so the blob is read there, under the path
+    // inside the member (D181). The store keeps the workspace path.
+    let (checkout, inside) = match member.and_then(|name| {
+        members::in_member(&owner.path, name).map(|inside| (ctx.root.join(name), inside))
+    }) {
+        Some(checkout) => checkout,
+        None => (ctx.root.to_path_buf(), owner.path.as_str()),
+    };
     let blob = ctx
         .git
-        .blob_at_commit(ctx.root, &owner.commit, &owner.path)
+        .blob_at_commit(&checkout, &owner.commit, inside)
         .map_err(|e| e.0)?;
     let limit = u32::try_from(EDIT_LIMIT + 1).unwrap_or(u32::MAX);
     let rows = store

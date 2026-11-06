@@ -61,6 +61,7 @@ use crate::script_session::{
 use crate::stack_session;
 use crate::submodule;
 use crate::syntax;
+use crate::threads::members;
 use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSession};
 use crate::workflow_session::{self, Effected};
 use crate::worktree;
@@ -2804,10 +2805,15 @@ impl Engine {
     ) -> Result<Vec<Event>, String> {
         threads_session::check_provenance(path, from, to)?;
         let root = self.open_root()?;
-        let read = self
-            .git
-            .blame_lines(&root, path, from, to)
-            .map_err(|e| e.0)?;
+        // In a member, blame runs in the member's checkout with the path inside it (D181).
+        let read = match member_named(&root, path) {
+            Some(member) => {
+                let inside = members::in_member(path, &member).unwrap_or(path);
+                self.git.blame_lines(&root.join(&member), inside, from, to)
+            }
+            None => self.git.blame_lines(&root, path, from, to),
+        }
+        .map_err(|e| e.0)?;
         let superseded = self.drop_provenance();
         let stop = Arc::new(AtomicBool::new(false));
         self.provenance = Some(ActiveDetail {
@@ -2845,13 +2851,29 @@ impl Engine {
         lines: &[BlameLine],
     ) -> Result<ProvenanceResult, String> {
         let root = self.open_root()?;
+        let member = member_named(&root, path);
+        // Blame reports member-relative paths; the threads and the answer use the workspace's.
+        let mut lines = lines.to_vec();
+        if let Some(member) = &member {
+            for line in &mut lines {
+                line.path = format!("{member}/{}", line.path);
+            }
+        }
         let store = threads_session::store(&mut self.threads, self.git.as_ref(), &root)?;
         let ctx = threads_session::Context {
             git: self.git.as_ref(),
             root: &root,
             global_config: None,
         };
-        threads_session::provenance_from_lines(store, &ctx, path, from, to, lines)
+        threads_session::provenance_from_lines(
+            store,
+            &ctx,
+            path,
+            from,
+            to,
+            &lines,
+            member.as_deref(),
+        )
     }
 
     /// Ends the text search: it is stopped, and a request in flight is cancelled.
@@ -2987,6 +3009,7 @@ impl Engine {
             CommandKind::CheckoutCommit { oid } => self.checkout_commit(id, actor, oid),
             CommandKind::LoadReflog { skip } => self.load_reflog(id, *skip),
             CommandKind::LoadSubmodule { path } => self.load_submodule(id, path),
+            CommandKind::ListMembers => self.list_members(id),
             CommandKind::ListStashes => self.list_stashes(id),
             CommandKind::CreateStash { .. }
             | CommandKind::ApplyStash { .. }
@@ -3482,6 +3505,17 @@ impl Engine {
             .submodule(&root, path, SUBMODULE_COMMIT_LIMIT)
             .map_err(|e| e.0)?;
         Ok(vec![Event::SubmoduleLoaded { id, submodule }])
+    }
+
+    /// The checked-out submodules of the repository (D181), the workspace's members. The same test
+    /// the threads capture uses. A read, so nothing is recorded.
+    fn list_members(&self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let members = members::checked_out(&root)
+            .into_iter()
+            .map(|member| member.name)
+            .collect();
+        Ok(vec![Event::MembersListed { id, members }])
     }
 
     /// Detaches HEAD at a commit, as a reflog entry is checked out (B3, D95). The
@@ -4931,6 +4965,7 @@ impl Engine {
                 | CommandKind::ListHookSections
                 | CommandKind::LoadReflog { .. }
                 | CommandKind::LoadSubmodule { .. }
+                | CommandKind::ListMembers
                 | CommandKind::ListWorkflowRuns { .. }
                 | CommandKind::LoadWorkflowRun { .. }
                 | CommandKind::DryRunWorkflow { .. }
@@ -4986,6 +5021,13 @@ fn success_message(kind: &CommandKind) -> &'static str {
         CommandKind::Pull => "Pulled",
         _ => "Pushed",
     }
+}
+
+/// The member of the workspace at `root` that `path` is in (D181), by name. `None` for a file of
+/// the workspace itself, and for every path of a repository without checked-out members.
+fn member_named(root: &Path, path: &str) -> Option<String> {
+    let members = members::checked_out(root);
+    members::member_of(path, &members).map(str::to_owned)
 }
 
 /// Milliseconds since the Unix epoch: the clock of workflow runs.
@@ -6505,6 +6547,10 @@ mod tests {
             let (log, _) = run(&kinds);
             for n in 1..=kinds.len() as u64 {
                 let own: Vec<_> = log.iter().filter(|e| e.id == OperationId(n)).collect();
+                // A read is not logged (D28), so it has no entry to check.
+                if own.is_empty() {
+                    continue;
+                }
                 for pair in own.windows(2) {
                     prop_assert!(pair[0].state.can_move_to(pair[1].state));
                 }

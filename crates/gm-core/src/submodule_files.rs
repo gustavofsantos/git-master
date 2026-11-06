@@ -5,6 +5,7 @@
 //! functions. Only one level is read: a submodule's own submodules are not.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 /// Mode of a gitlink (a submodule) in the index.
 const GITLINK_MODE: &str = "160000";
@@ -23,6 +24,19 @@ pub fn gitlinks(stage: &[u8]) -> Vec<String> {
                 .then(|| String::from_utf8_lossy(path).into_owned())
         })
         .collect()
+}
+
+/// The main checkout of a submodule from its common Git directory, as `git rev-parse
+/// --git-common-dir` prints it (D181). A linked worktree shares the `.git` of the repository it was
+/// made from, so that repository's folder is the checkout. A submodule's own Git directory is not
+/// in a checkout; its folder is the checkout.
+#[must_use]
+pub fn main_checkout(folder: &str, common_dir: &str) -> String {
+    let common = Path::new(common_dir);
+    match (common.file_name(), common.parent()) {
+        (Some(name), Some(repo)) if name == ".git" => repo.to_string_lossy().into_owned(),
+        _ => folder.to_owned(),
+    }
 }
 
 /// `raw` (records `T path` ended by NUL, as `git ls-files -v` prints them) without
@@ -68,6 +82,22 @@ mod tests {
         let stage = b"100644 aaaa 0\tREADME.md\x00160000 bbbb 0\tservice-a\x00160000 cccc 0\tnested/lib\x00";
 
         assert_eq!(gitlinks(stage), ["service-a", "nested/lib"]);
+    }
+
+    #[test]
+    fn a_linked_worktree_member_is_checked_out_in_the_repository_it_was_made_from() {
+        assert_eq!(
+            main_checkout("/ws/billing", "/home/me/repo/.git"),
+            "/home/me/repo"
+        );
+    }
+
+    #[test]
+    fn a_submodule_with_its_own_git_directory_is_checked_out_in_its_folder() {
+        assert_eq!(
+            main_checkout("/ws/billing", "/ws/.git/modules/billing"),
+            "/ws/billing"
+        );
     }
 
     #[test]

@@ -49,12 +49,16 @@ pub fn checked_out(root: &Path) -> Vec<Member> {
 pub fn member_of<'a>(path: &str, members: &'a [Member]) -> Option<&'a str> {
     members
         .iter()
-        .filter(|member| {
-            path.strip_prefix(member.name.as_str())
-                .is_some_and(|rest| rest.starts_with('/'))
-        })
+        .filter(|member| in_member(path, &member.name).is_some())
         .max_by_key(|member| member.name.len())
         .map(|member| member.name.as_str())
+}
+
+/// `path` (relative to the workspace root) as it is inside the member `name`: `billing/src/x.rs`
+/// is `src/x.rs` in `billing`. `None` when the path is not under the member's folder.
+#[must_use]
+pub fn in_member<'a>(path: &'a str, name: &str) -> Option<&'a str> {
+    path.strip_prefix(name)?.strip_prefix('/')
 }
 
 /// The standard output of `git` run in `cwd`, or `None` when it fails or is missing.
