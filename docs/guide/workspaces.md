@@ -32,13 +32,13 @@ The workspace repository is yours to write in. Your service repositories are not
 
 A workspace is **durable** or **ephemeral**. A durable workspace stays until you remove it. An ephemeral workspace is removed when you close it.
 
-Removing a workspace, of either kind, follows the rules of [removing a worktree](worktrees.md) for each member. It is blocked when a member has changes that are not committed, when a member is on a detached HEAD with commits no branch holds, or when the workspace repository has changes of its own, and the dialog lists what would be lost. Commits on a member's branch are never lost: they are on the branches of your clones.
+Removing a workspace, of either kind, follows the rules of [removing a worktree](worktrees.md) for each member. It is blocked when a member has changes that are not committed, when a member is on a detached HEAD with commits no local or remote branch holds, or when the workspace repository has changes of its own, and the dialog lists what would be lost. Commits on a member's branch are never lost: they are on the branches of your clones.
 
 ## Create a workspace
 
 1. Run **New Workspace…** from the command palette, or click **+** in the **Workspaces** section of the sidebar.
 2. Name the workspace.
-3. Add a member for each repository: choose the repository and its branch. **Add by branch name** lists every repository you choose that has a branch with that name, and adds them all.
+3. Add a member for each repository: choose the repository and its branch. A branch that does not exist yet is created from the repository's base branch, such as `main`. **Add by branch name** gives one branch name to every repository you choose, and creates it where it is missing.
 4. Choose **Durable** or **Ephemeral**.
 5. Check the folder and click **Create workspace**.
 

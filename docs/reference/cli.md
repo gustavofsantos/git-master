@@ -160,11 +160,11 @@ IFS=$'\t' read -r _ branch repo < <(my-repos | gitmaster worktree branches --rep
 ## Workspaces
 
 ```sh
-gitmaster workspace create <name> [--root <dir>] [--ephemeral] [--branch <branch> --repos-from <file|->]
-gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--as <member>] [--include symlink|reflink|none]
+gitmaster workspace create <name> [--root <dir>] [--ephemeral] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
+gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none]
 gitmaster workspace list [--format paths|names|tsv|json] [--root <dir>]
 gitmaster workspace path <name> [--root <dir>]
-gitmaster workspace status [--workspace <name|dir>] [--format tsv|json]
+gitmaster workspace status [--workspace <name|dir>] [--root <dir>] [--format tsv|json]
 gitmaster workspace remove <name> [--root <dir>] [--force]
 ```
 
@@ -180,19 +180,27 @@ A workspace is a folder `<root>/<name>` that holds a Git repository. The root co
 
 A leading `~` is the home directory, and a relative root is taken from the current directory. A workspace's repository has the Git key `gitmaster.workspace.kind` set to `durable` or `ephemeral` in its own `.git/config`; a folder without it is not a workspace.
 
-`--workspace <name|dir>` chooses the workspace a command works on. A value with a `/` is a folder; any other value is a name under the root. `add` and `status` take no `--root`: to reach a workspace under another root by name, set `gitmaster.workspace.root`, or give its folder. Without it, the command works on the workspace that contains the current directory, from its root or from inside a member.
+`--workspace <name|dir>` chooses the workspace a command works on. A value with a `/` is a folder; any other value is a name under the root. `--root` chooses the root a name is looked up under, as for `create`. Without it, the command works on the workspace that contains the current directory, from its root or from inside a member.
 
 ### Create a workspace
 
+> **Planned.** Creating the missing branches, `--base`, `--existing`, the all-or-nothing check, and `--root` on `add` and `status` are not available yet.
+
 `create <name>` creates the folder `<root>/<name>`, makes it a Git repository on a branch `main`, marks it as a workspace and prints its path. `--ephemeral` marks it ephemeral; it is durable otherwise. The folder must not exist. A name is a single folder name: it has no `/` and does not start with `.` or `-`.
 
-`--branch <branch>` together with `--repos-from <file|->` adds a member for every repository of the list that has `<branch>`, as a local branch or on a remote, the way `add` does. A repository of the list without the branch is skipped, with a note. The list is read like the one of `gitmaster worktree list`.
+`--branch <branch>` together with `--repos-from <file|->` adds every repository of the list as a member on `<branch>`, the way `add` does. Where a repository does not have the branch yet, it is created, so a workspace for a new change needs no branch made beforehand. The list is read like the one of `gitmaster worktree list`: a folder that is not a repository is skipped, with a note.
+
+- A new branch starts from `--base <rev>` when it is given, in every repository of the list. Otherwise it starts from the repository's base branch: the local branch that `origin/HEAD` names, else the first of `main`, `master`, `trunk` and `develop`, else the current branch.
+- The standard error says, for each member, whether its branch was checked out, created to track a remote branch, or created from a base, and which.
+- `--existing` adds only the repositories that already have `<branch>`, as a local branch or on a remote, and skips the others with a note. Use it to find which repositories a change already touches.
+
+Every repository of the list is checked before anything is created. When one of them cannot be added, for example because the branch is checked out in another worktree or two repositories have the same folder name, `create` says which, exits `1` and creates nothing. It also exits `1` and creates nothing when no repository would be added: an empty list, a list with no repository, or, with `--existing`, no repository that has the branch.
 
 ### Add a member
 
 `add <repo> <branch>` adds the repository `<repo>` to the workspace as a member checked out on `<branch>`, commits the change in the workspace's repository and prints the member's path.
 
-1. A worktree of `<repo>` is created in the workspace folder, at `<member>`, the folder name of the repository's main checkout unless `--as` names another. The branch is chosen as in `gitmaster worktree add`: the local branch, else a new local branch that tracks the remote one, else a new branch from `<base>` or from `HEAD`. The `.worktreeinclude` paths are shared into it, as `--include` says.
+1. A worktree of `<repo>` is created in the workspace folder, at `<member>`, the folder name of the repository's main checkout unless `--as` names another. The branch is the local branch, else a new local branch that tracks the remote one, else a new branch from `<base>` or, without one, from the repository's base branch, as `create` chooses it. The `.worktreeinclude` paths are shared into it, as `--include` says.
 2. The worktree is registered in the workspace's repository as a submodule that follows `<branch>`, with the path of the main checkout as its URL.
 3. The workspace's repository commits `.gitmodules` and the member.
 
@@ -232,7 +240,7 @@ A member whose folder is gone prints `(missing)` as its branch, and the command 
 `remove <name>` removes every member's worktree from its repository, then the workspace folder, and prints the folder's path. The branches stay in the repositories.
 
 - It refuses a workspace that contains the current directory. `--force` does not lift that.
-- It refuses when a member has staged, unstaged or untracked files, when a member is on a detached `HEAD` that holds commits no branch has, or when the workspace's repository has changes other than the commits its members point to. It says which, and removes nothing. `--force` removes it anyway, with what it discards.
+- It refuses when a member has staged, unstaged or untracked files, when a member is on a detached `HEAD` that holds commits no local or remote branch has, or when the workspace's repository has changes other than the commits its members point to. It says which, and removes nothing. `--force` removes it anyway, with what it discards.
 - A member whose folder is gone is pruned from its repository's worktree records.
 - It refuses a workspace whose member's repository is gone, even with `--force`, because Git cannot remove that member's worktree.
 - Members are removed one at a time. When one fails, the ones before it stay removed, the message says which failed, and the workspace folder is kept.
