@@ -727,7 +727,7 @@ Several repositories in one workspace: a superproject whose submodules are linke
   - **SW2c, Record Combination (D180 (3)) (done 2026-11-06; seen in a window under Xvfb: palette, the commit and its message, the row after it):** a pathspec commit (`git commit -- <gitlinks>`) leaves other staged files staged; a member with no commit yet is refused too. Gaps: palette only (the Working Copy has no repository-wide menu); no workflow trigger fires for it. Spec: engine command and UI action. Docs: `guide/workspaces.md`, "Record a combination".
 - **SW3, agent tools:** MCP tools that take a member, a workspace status tool, the review loop over every member.
   - **SW3a, read tools (D181):** `workspace_status`; `provenance` on a member's path (blame in the member, threads from the workspace). Docs: `reference/mcp-tools.md`, "Tools in a workspace".
-  - **SW3b, review across members:** open. A review snapshot (`add -A` on a temporary index, D97) records a member as a gitlink, not its files, so a comment on a member's file has no "before" text. Where member snapshots live and what they cost is to be decided with the author.
+  - **SW3b, review across members (D182):** a comment on a member's file snapshots that one file into the workspace's object store, so the before and after text and the measured change work as for the workspace's own files.
 
 ## Slice 8: local review
 
