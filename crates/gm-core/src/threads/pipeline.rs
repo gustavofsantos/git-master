@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 
 use super::config::ThreadsConfig;
 use super::harness::{EditPhaseInfo, HarnessAdapter, HookInput};
+use super::members::{self, Member};
 use super::redact::{self, PatternProblem, Redactor};
 use super::store::{Applied, Batch, NewEdit, NewEntry, StoreError, ThreadStore};
 
@@ -133,6 +134,10 @@ struct Record {
     edits: Vec<PendingEdit>,
     /// Whether the batch closed a turn, which is when commit links are read.
     turn_ended: bool,
+    /// The checked-out members of the workspace and their HEADs, read by this invocation (D180).
+    /// Empty for a repository without members, and for a record spooled before schema 6.
+    #[serde(default)]
+    members: Vec<Member>,
 }
 
 /// Finds the repository `cwd` is in. `None` outside a repository or when `git` is missing.
@@ -277,6 +282,10 @@ fn prepare(
     {
         edits.push(edit);
     }
+    let members = members::checked_out(&repo.worktree);
+    for pending in &mut edits {
+        pending.edit.member = members::member_of(&pending.edit.path, &members).map(str::to_owned);
+    }
 
     let (started_at, at) = span(&events, ctx.now_ms);
     let mut batch = base_batch(adapter.id(), &hook.session_id, repo, ctx.now_ms);
@@ -301,6 +310,7 @@ fn prepare(
         batch,
         edits,
         turn_ended: converted.meta.turn_ended,
+        members,
     })
 }
 
@@ -488,6 +498,7 @@ fn refuse_invalid(
             batch,
             edits: Vec::new(),
             turn_ended: false,
+            members: members::checked_out(&repo.worktree),
         }
     });
     Prepared::Refused { record, names }
@@ -518,6 +529,7 @@ fn store_record(
     if let (true, Some(repo)) = (record.turn_ended, repo) {
         link_commits(store, &applied.uid, repo);
     }
+    link_members(store, &applied.uid, &record.members, repo)?;
     Ok(applied)
 }
 
@@ -527,6 +539,17 @@ fn observe(
     kind: LinkKind,
     reference: &str,
 ) -> Result<(), StoreError> {
+    observe_in(store, uid, kind, reference, None)
+}
+
+/// `observe` for a link made in a workspace member (D180): the member is named on the link.
+fn observe_in(
+    store: &mut ThreadStore,
+    uid: &str,
+    kind: LinkKind,
+    reference: &str,
+    member: Option<&str>,
+) -> Result<(), StoreError> {
     store.link(
         uid,
         &ThreadLink {
@@ -535,6 +558,7 @@ fn observe(
             origin: LinkOrigin::Observed,
             resolved: None,
             state: None,
+            member: member.map(str::to_owned),
         },
     )
 }
@@ -551,17 +575,59 @@ fn link_commits(store: &mut ThreadStore, uid: &str, repo: &RepoInfo) {
     if start == head || !is_commit_id(&start) {
         return;
     }
+    for commit in commits_between(&repo.worktree, &start, head) {
+        let _ = observe(store, uid, LinkKind::Commit, &commit);
+    }
+}
+
+/// Links the commits each checked-out member gained since the thread's first event, with the
+/// member named on the link (D180), then moves each member's `head_end` to its HEAD now. A member
+/// first seen now starts here. Its commits are read in its own folder, so they need a repository:
+/// a spooled record is drained without one, and the next invocation links them, since the start
+/// is kept. A Git failure links nothing, as for the workspace's own commits; a store error is
+/// returned.
+fn link_members(
+    store: &mut ThreadStore,
+    uid: &str,
+    members: &[Member],
+    repo: Option<&RepoInfo>,
+) -> Result<(), StoreError> {
+    if members.is_empty() {
+        return Ok(());
+    }
+    let known = store.member_heads(uid)?;
+    for member in members {
+        let Some(head) = member.head.as_deref() else {
+            continue;
+        };
+        let start = known
+            .iter()
+            .find(|row| row.member == member.name)
+            .and_then(|row| row.head_start.as_deref());
+        if let (Some(start), Some(repo)) = (start, repo)
+            && start != head
+            && is_commit_id(start)
+        {
+            let folder = repo.worktree.join(&member.name);
+            for commit in commits_between(&folder, start, head) {
+                let _ = observe_in(store, uid, LinkKind::Commit, &commit, Some(&member.name));
+            }
+        }
+        store.record_member_head(uid, &member.name, head)?;
+    }
+    Ok(())
+}
+
+/// The commits in `start..head`, newest first, read in `cwd`; at most `COMMITS_PER_TURN`. Empty
+/// when Git fails.
+fn commits_between(cwd: &Path, start: &str, head: &str) -> Vec<String> {
     let range = format!("{start}..{head}");
     let limit = format!("--max-count={COMMITS_PER_TURN}");
-    let Some(commits) = git_output(
-        &repo.worktree,
-        &["rev-list", limit.as_str(), range.as_str()],
-    ) else {
-        return;
-    };
-    for commit in commits.iter().filter(|commit| is_commit_id(commit)) {
-        let _ = observe(store, uid, LinkKind::Commit, commit);
-    }
+    git_output(cwd, &["rev-list", limit.as_str(), range.as_str()])
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|commit| is_commit_id(commit))
+        .collect()
 }
 
 /// The batch fields every ingest starts from; the caller fills the events in.
@@ -984,6 +1050,7 @@ impl Converter<'_> {
             _ => (UNMEASURED_NOTE.to_owned(), 0, 0),
         };
         let edit = NewEdit {
+            member: None,
             path,
             old_path: intent
                 .old_path
@@ -1329,6 +1396,7 @@ fn measure(
         post.unwrap_or_default(),
     );
     let edit = NewEdit {
+        member: None,
         path: path.to_owned(),
         old_path: None,
         change,
@@ -1392,7 +1460,7 @@ fn len_u64(text: &str) -> u64 {
     u64::try_from(text.len()).unwrap_or(u64::MAX)
 }
 
-fn is_commit_id(text: &str) -> bool {
+pub(super) fn is_commit_id(text: &str) -> bool {
     text.len() >= 7 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
@@ -1944,6 +2012,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let common = dir.path().join(".git");
         let record = Record {
+            members: Vec::new(),
             batch: base_batch(
                 fake::ID,
                 "s",

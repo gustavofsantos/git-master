@@ -525,6 +525,7 @@ fn a_commit_link_without_a_snapshot_gets_one_when_the_store_opens() {
             .link(
                 &uid,
                 &gm_schema::threads::ThreadLink {
+                    member: None,
                     kind: gm_schema::threads::LinkKind::Commit,
                     reference: head.clone(),
                     origin: gm_schema::threads::LinkOrigin::Observed,

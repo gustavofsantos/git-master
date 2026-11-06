@@ -958,13 +958,17 @@ fn export_target(root: &Path, path: &str) -> Result<PathBuf, String> {
 }
 
 /// The derived state of an edit (design/threads.md, "Links to Git"). `Unknown`
-/// when the edit was not measured or a file cannot be read.
+/// when the edit was not measured or a file cannot be read. An edit in a workspace
+/// member reads its `HEAD` from the member's own repository (D180).
 fn edit_state(ctx: &Context<'_>, edit: &ThreadEdit) -> EditState {
     if edit.post_oid.is_none() {
         return EditState::Unknown;
     }
     let working = working_blob(ctx.root, &edit.path);
-    let head = head_blob(ctx.git, ctx.root, &edit.path);
+    let head = match edit.member.as_deref() {
+        Some(member) => member_head_blob(ctx.git, ctx.root, member, &edit.path),
+        None => head_blob(ctx.git, ctx.root, &edit.path),
+    };
     derive_state(edit.post_oid.as_deref(), working, head)
 }
 
@@ -1025,6 +1029,21 @@ fn head_blob(git: &dyn GitPort, root: &Path, path: &str) -> Result<Option<String
         Ok(None) => Ok(None),
         Err(_) => Err(()),
     }
+}
+
+/// The blob id of the workspace path `path` at the `HEAD` of its `member` (D180). The member's
+/// commits are in its own repository, so the path is read there, without the member's folder.
+fn member_head_blob(
+    git: &dyn GitPort,
+    root: &Path,
+    member: &str,
+    path: &str,
+) -> Result<Option<String>, ()> {
+    let inside = path
+        .strip_prefix(member)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .ok_or(())?;
+    head_blob(git, &root.join(member), inside)
 }
 
 /// The thread as Markdown: a title, a metadata list, then each turn with the
@@ -1289,6 +1308,7 @@ mod tests {
         let mut entry = text_entry(source, EntryKind::ToolCall, "Edit", at);
         entry.tool = Some("Edit".into());
         entry.edit = Some(NewEdit {
+            member: None,
             path: path.into(),
             old_path: None,
             change: EditChange::Modify,
@@ -1646,6 +1666,7 @@ mod tests {
                 CommandKind::LinkThread {
                     uid: a.clone(),
                     link: ThreadLink {
+                        member: None,
                         kind: LinkKind::Branch,
                         reference: "main".into(),
                         origin: LinkOrigin::Human,
@@ -1724,6 +1745,7 @@ mod tests {
         assert_eq!(row.tags, vec!["flaky".to_owned()]);
 
         let link = ThreadLink {
+            member: None,
             kind: LinkKind::Commit,
             reference: "abc123".into(),
             origin: LinkOrigin::Human,

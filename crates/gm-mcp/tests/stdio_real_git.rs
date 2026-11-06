@@ -312,6 +312,7 @@ fn store_thread(dir: &Path) -> String {
     let entry = new_entry;
     let mut edited = entry("e2", EntryKind::ToolCall, "Edit f.txt", 3);
     edited.edit = Some(NewEdit {
+        member: None,
         path: "f.txt".to_owned(),
         old_path: None,
         change: EditChange::Modify,
@@ -636,6 +637,7 @@ fn new_batch(
 fn store_search_threads(dir: &Path) -> (String, String) {
     let mut edited = new_entry("a2", EntryKind::ToolCall, "Edit f.txt", 1002);
     edited.edit = Some(NewEdit {
+        member: None,
         path: "f.txt".to_owned(),
         old_path: None,
         change: EditChange::Modify,
@@ -707,6 +709,7 @@ fn store_search_threads(dir: &Path) -> (String, String) {
         .link(
             &uid_a,
             &ThreadLink {
+                member: None,
                 kind: LinkKind::Commit,
                 reference: COMMIT.to_owned(),
                 origin: LinkOrigin::Human,
@@ -1228,6 +1231,7 @@ fn rev(dir: &Path, rev: &str) -> String {
 /// A `f.txt` edit with the given patch. `post_oid` is what the edit wrote, when it is known.
 fn file_edit(patch: &str, added: u32, post_oid: Option<String>, from_input: bool) -> NewEdit {
     NewEdit {
+        member: None,
         path: "f.txt".to_owned(),
         old_path: None,
         change: EditChange::Modify,
@@ -1469,6 +1473,7 @@ fn a_cut_answer_says_which_bound_cut_it() {
             .link(
                 &uid,
                 &ThreadLink {
+                    member: None,
                     kind: LinkKind::Commit,
                     reference: head.clone(),
                     origin: LinkOrigin::Human,

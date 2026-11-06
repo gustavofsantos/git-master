@@ -550,6 +550,7 @@ mod tests {
 
     fn edit(id: i64, entry_id: i64) -> ThreadEdit {
         ThreadEdit {
+            member: None,
             id,
             entry_id,
             path: "src/a.rs".to_owned(),

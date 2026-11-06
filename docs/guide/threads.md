@@ -119,7 +119,7 @@ GitMaster never guesses that a thread produced a commit because the contents loo
 
 ### Threads in a workspace
 
-> **Planned.** Threads do not yet name the member of a workspace, and a member's own repository does not list them.
+> **Planned.** The **Commits** and **Files** panels do not show the member yet, and a member's own repository does not list the workspace's threads yet. GitMaster already records the member of each edit and commit.
 
 An agent started in a [workspace](workspaces.md) works in several repositories at once. Its thread is stored once, in the workspace repository, and names the member each part belongs to:
 

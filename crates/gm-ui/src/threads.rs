@@ -2008,6 +2008,7 @@ mod tests {
 
     fn edit(id: i64, entry_id: i64, path: &str) -> ThreadEdit {
         ThreadEdit {
+            member: None,
             id,
             entry_id,
             path: path.to_owned(),
@@ -3048,6 +3049,7 @@ mod tests {
         detail.edits = vec![first, again, other];
         detail.links = vec![
             ThreadLink {
+                member: None,
                 kind: LinkKind::File,
                 reference: "docs/manual.md".to_owned(),
                 origin: LinkOrigin::Human,
@@ -3055,6 +3057,7 @@ mod tests {
                 state: None,
             },
             ThreadLink {
+                member: None,
                 kind: LinkKind::File,
                 reference: "src/b.rs".to_owned(),
                 origin: LinkOrigin::Human,
@@ -3062,6 +3065,7 @@ mod tests {
                 state: None,
             },
             ThreadLink {
+                member: None,
                 kind: LinkKind::File,
                 reference: "src/a.rs".to_owned(),
                 origin: LinkOrigin::Observed,
@@ -3113,6 +3117,7 @@ mod tests {
         let mut detail = detail("a", Vec::new(), Vec::new(), false);
         detail.links = vec![
             ThreadLink {
+                member: None,
                 kind: LinkKind::Commit,
                 reference: "abc".to_owned(),
                 origin: LinkOrigin::Observed,
@@ -3120,6 +3125,7 @@ mod tests {
                 state: None,
             },
             ThreadLink {
+                member: None,
                 kind: LinkKind::Commit,
                 reference: "def".to_owned(),
                 origin: LinkOrigin::Human,
@@ -3127,6 +3133,7 @@ mod tests {
                 state: None,
             },
             ThreadLink {
+                member: None,
                 kind: LinkKind::Branch,
                 reference: "main".to_owned(),
                 origin: LinkOrigin::Observed,

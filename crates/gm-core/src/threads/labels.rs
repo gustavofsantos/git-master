@@ -1005,6 +1005,7 @@ mod tests {
             .link(
                 &uid,
                 &ThreadLink {
+                    member: None,
                     kind: LinkKind::Commit,
                     reference: OID.to_owned(),
                     origin: LinkOrigin::Observed,

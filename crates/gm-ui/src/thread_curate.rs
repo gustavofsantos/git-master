@@ -240,6 +240,7 @@ pub(crate) fn field_command(
         ThreadField::LinkCommit => vec![CommandKind::LinkThread {
             uid,
             link: ThreadLink {
+                member: None,
                 kind: LinkKind::Commit,
                 reference: link_of(text)?,
                 origin: LinkOrigin::Human,
@@ -813,6 +814,7 @@ mod tests {
             Ok(vec![CommandKind::LinkThread {
                 uid: "u1".into(),
                 link: ThreadLink {
+                    member: None,
                     kind: LinkKind::Commit,
                     reference: "a1b2c3d".into(),
                     origin: LinkOrigin::Human,
@@ -914,6 +916,7 @@ mod tests {
     #[test]
     fn an_unlink_names_the_link_it_removes() {
         let link = ThreadLink {
+            member: None,
             kind: LinkKind::Commit,
             reference: "a1b2".into(),
             origin: LinkOrigin::Human,

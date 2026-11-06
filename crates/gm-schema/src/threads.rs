@@ -245,6 +245,10 @@ pub struct ThreadEdit {
     /// True when the edit comes from the tool input, not from measuring the file (D123).
     pub from_input: bool,
     pub at: i64,
+    /// The member of the workspace the file is in (D180). `None` for the workspace itself and for
+    /// an ordinary repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
 }
 
 /// Where an edit's file is now, derived on read and never stored (D126).
@@ -466,6 +470,10 @@ pub struct ThreadLink {
     /// For a commit link: how the stored id resolves now (D145). `None` for other kinds.
     #[serde(default)]
     pub state: Option<CommitState>,
+    /// The member of the workspace the commit was made in (D180). `None` for the workspace itself
+    /// and for an ordinary repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
 }
 
 /// A thread with its entries, edits and links, as `ReadThread` returns it.

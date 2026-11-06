@@ -156,6 +156,7 @@ impl Repo {
             .link(
                 uid,
                 &ThreadLink {
+                    member: None,
                     kind: LinkKind::Commit,
                     reference: commit.to_owned(),
                     origin: LinkOrigin::Observed,

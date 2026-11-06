@@ -148,6 +148,7 @@ fn edit_entry(
     let mut found = entry(source, EntryKind::ToolCall, "Edit", at);
     found.tool = Some("Edit".into());
     found.edit = Some(NewEdit {
+        member: None,
         path: path.into(),
         old_path: None,
         change: EditChange::Modify,
@@ -696,6 +697,7 @@ fn at_most_five_threads_are_shown_for_a_commit_and_the_cut_is_said() {
             .link(
                 &uid,
                 &ThreadLink {
+                    member: None,
                     kind: LinkKind::Commit,
                     reference: commit.clone(),
                     origin: LinkOrigin::Observed,
@@ -738,6 +740,7 @@ fn a_manual_link_is_shown_as_linked_by_you() {
         .link(
             &uid,
             &ThreadLink {
+                member: None,
                 kind: LinkKind::Commit,
                 reference: commit.clone(),
                 origin: LinkOrigin::Human,
@@ -869,6 +872,7 @@ fn a_thread_shows_its_labels_and_linked_threads_at_most_ten_each_and_says_the_cu
         .link(
             &hub,
             &ThreadLink {
+                member: None,
                 kind: LinkKind::Commit,
                 reference: commit.clone(),
                 origin: LinkOrigin::Human,
@@ -946,6 +950,7 @@ fn a_thread_inside_the_bound_has_no_cut_and_shows_inbound_links_as_in() {
         .link(
             &hub,
             &ThreadLink {
+                member: None,
                 kind: LinkKind::Commit,
                 reference: commit.clone(),
                 origin: LinkOrigin::Human,

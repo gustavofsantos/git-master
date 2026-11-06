@@ -27,7 +27,9 @@ use super::query::{
 };
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
+const MIGRATIONS: &[&str] = &[
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+];
 /// The index in `MIGRATIONS` of the schema that repairs stored entries with the cleaner (D133).
 const REPAIR_MIGRATION: usize = 3;
 
@@ -345,6 +347,22 @@ DROP INDEX thread_tag_tag;
 DROP TABLE thread_tag;
 ";
 
+/// Schema 6 (D180): the member of a workspace thread. An edit and a commit link name the member
+/// they belong to, `NULL` for the workspace itself and for an ordinary repository. `thread_member`
+/// holds each member's HEAD at the thread's first event (`head_start`) and at the latest
+/// invocation (`head_end`). Existing rows keep `NULL`: the migration does not run Git, so an edit
+/// made in a member before this schema is read as the workspace's own file, as it was.
+const SCHEMA_V6: &str = "
+ALTER TABLE edit ADD COLUMN member TEXT;
+ALTER TABLE thread_link ADD COLUMN member TEXT;
+CREATE TABLE thread_member (
+    thread_id INTEGER NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+    member TEXT NOT NULL,
+    head_start TEXT,
+    head_end TEXT,
+    PRIMARY KEY(thread_id, member));
+";
+
 const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
 /// Opening a file another process is initializing is retried this many times, this far apart.
 const OPEN_ATTEMPTS: u32 = 200;
@@ -404,7 +422,7 @@ const ENTRY_FILTER_SQL: &str = " AND (:role IS NULL OR e.kind = :role)
     AND (:turn_from IS NULL OR e.turn >= :turn_from)
     AND (:turn_to IS NULL OR e.turn <= :turn_to)";
 
-const EDIT_COLUMNS: &str = "id, entry_id, path, old_path, change, patch, added, removed, pre_oid, post_oid, from_input, at";
+const EDIT_COLUMNS: &str = "id, entry_id, path, old_path, change, patch, added, removed, pre_oid, post_oid, from_input, at, member";
 
 /// Errors of the thread store.
 #[derive(Debug)]
@@ -514,6 +532,20 @@ pub struct NewEdit {
     pub from_input: bool,
     /// Redactions made in the path and the patch. Added when the edit is stored as a new row.
     pub hits: Vec<(String, u32)>,
+    /// The workspace member the path is in, decided by the pipeline when it reads the edit (D180).
+    #[serde(default)]
+    pub member: Option<String>,
+}
+
+/// A member of a workspace thread and the HEADs it was seen at (D180).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadMember {
+    /// The member's folder, relative to the workspace root.
+    pub member: String,
+    /// The member's HEAD at the thread's first event.
+    pub head_start: Option<String>,
+    /// The member's HEAD at the latest invocation.
+    pub head_end: Option<String>,
 }
 
 /// What `apply` did with a batch.
@@ -1237,7 +1269,7 @@ impl ThreadStore {
 
         let links = {
             let mut statement = self.conn.prepare_cached(
-                "SELECT kind, ref, origin FROM thread_link WHERE thread_id = ?1 ORDER BY kind, ref",
+                "SELECT kind, ref, origin, member FROM thread_link WHERE thread_id = ?1 ORDER BY kind, ref",
             )?;
             statement
                 .query_map(params![thread], link_row)?
@@ -1400,13 +1432,15 @@ impl ThreadStore {
         let tx = begin(&mut self.conn)?;
         let thread = thread_id(&tx, uid)?;
         tx.execute(
-            "INSERT INTO thread_link (thread_id, kind, ref, origin) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (thread_id, kind, ref) DO UPDATE SET origin = excluded.origin",
+            "INSERT INTO thread_link (thread_id, kind, ref, origin, member) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (thread_id, kind, ref) DO UPDATE SET origin = excluded.origin,
+                member = COALESCE(excluded.member, thread_link.member)",
             params![
                 thread,
                 link_kind_text(link.kind),
                 link.reference,
-                origin_text(link.origin)
+                origin_text(link.origin),
+                link.member
             ],
         )?;
         tx.commit()?;
@@ -1585,6 +1619,42 @@ impl ThreadStore {
             params![thread],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?)
+    }
+
+    /// The members of a workspace thread with the HEADs they were seen at (D180), by name.
+    pub fn member_heads(&self, uid: &str) -> Result<Vec<ThreadMember>, StoreError> {
+        let mut query = self.conn.prepare(
+            "SELECT m.member, m.head_start, m.head_end FROM thread_member m
+             JOIN thread t ON t.id = m.thread_id WHERE t.uid = ?1 ORDER BY m.member",
+        )?;
+        let rows = query.query_map(params![uid], |row| {
+            Ok(ThreadMember {
+                member: row.get(0)?,
+                head_start: row.get(1)?,
+                head_end: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Records the HEAD of a member seen at this invocation (D180). The first one seen is the
+    /// member's `head_start`; every call moves `head_end` to `head`.
+    pub fn record_member_head(
+        &mut self,
+        uid: &str,
+        member: &str,
+        head: &str,
+    ) -> Result<(), StoreError> {
+        let tx = begin(&mut self.conn)?;
+        let thread = thread_id(&tx, uid)?;
+        tx.execute(
+            "INSERT INTO thread_member (thread_id, member, head_start, head_end)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT (thread_id, member) DO UPDATE SET head_end = excluded.head_end",
+            params![thread, member, head],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Whether the entry `entry_source_id` of a session already carries an edit.
@@ -2365,6 +2435,7 @@ fn edit_row(row: &Row<'_>) -> rusqlite::Result<ThreadEdit> {
         post_oid: row.get(9)?,
         from_input: row.get(10)?,
         at: row.get(11)?,
+        member: row.get(12)?,
     })
 }
 
@@ -2378,6 +2449,7 @@ fn link_row(row: &Row<'_>) -> rusqlite::Result<ThreadLink> {
         // The resolution is made on read by the engine (D145), not stored here.
         resolved: None,
         state: None,
+        member: row.get(3)?,
     })
 }
 
@@ -2636,8 +2708,8 @@ fn insert_edit(
     )?;
     conn.execute(
         "INSERT INTO edit (thread_id, entry_id, path, old_path, change, patch, added, removed,
-            pre_oid, post_oid, from_input, at, rel_path)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            pre_oid, post_oid, from_input, at, rel_path, member)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             thread,
             entry_id,
@@ -2651,7 +2723,8 @@ fn insert_edit(
             edit.post_oid,
             edit.from_input,
             at,
-            repo_path(&edit.path, &worktree)
+            repo_path(&edit.path, &worktree),
+            edit.member
         ],
     )?;
     add_redactions(conn, thread, &edit.hits)
@@ -2980,6 +3053,7 @@ mod tests {
 
     fn measured_edit(path: &str) -> NewEdit {
         NewEdit {
+            member: None,
             path: path.to_owned(),
             old_path: None,
             change: EditChange::Modify,
@@ -3033,7 +3107,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert_eq!(store.total_threads().expect("count"), 1);
     }
 
@@ -3418,6 +3492,7 @@ mod tests {
 
     fn link_to(store: &mut ThreadStore, session: &str, kind: LinkKind, reference: &str) {
         let link = ThreadLink {
+            member: None,
             kind,
             reference: reference.to_owned(),
             origin: LinkOrigin::Human,
@@ -3524,6 +3599,7 @@ mod tests {
         link_to(&mut store, "a", LinkKind::Commit, OID);
         let other_uid = ThreadStore::thread_uid("other", "b");
         let link = ThreadLink {
+            member: None,
             kind: LinkKind::Commit,
             reference: OID.to_owned(),
             origin: LinkOrigin::Human,
@@ -3984,6 +4060,7 @@ mod tests {
         let mut store = ThreadStore::open_memory().expect("open");
         store.apply(&batch("s", 1, vec![])).expect("apply");
         let link = |origin| ThreadLink {
+            member: None,
             kind: LinkKind::Commit,
             reference: "abc123".to_owned(),
             origin,
@@ -4009,6 +4086,7 @@ mod tests {
             store.link(
                 &uid("s"),
                 &ThreadLink {
+                    member: None,
                     kind: LinkKind::File,
                     reference: " ".to_owned(),
                     origin: LinkOrigin::Human,
@@ -4446,7 +4524,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         let hits = store
             .search("ndex", &ThreadFilter::default(), 10)
             .expect("search");
@@ -5052,11 +5130,11 @@ mod tests {
     #[test]
     fn a_legacy_database_keeps_only_the_conversation_in_its_indexes() {
         // Versions 1 and 2 index tool rows too; the migration to 3 drops them from the index.
-        for versions in [1, 2, 3] {
+        for versions in [1, 2, 3, 4, 5] {
             let dir = tempfile::tempdir().expect("tempdir");
             legacy_database(dir.path(), versions, EVERY_KIND_ROWS);
             let store = ThreadStore::open(dir.path()).expect("migrate");
-            assert_eq!(version_of(dir.path()), 5, "from version {versions}");
+            assert_eq!(version_of(dir.path()), 6, "from version {versions}");
             assert_eq!(index_rows(&store), (2, 2), "from version {versions}");
             assert_eq!(stage_hits(&store, "backoff", "ckof", "bakcoff"), [1, 1, 1]);
             assert_eq!(
@@ -5084,6 +5162,159 @@ mod tests {
             let detail = store.read_thread("old1", 0, 10).expect("read");
             assert_eq!(detail.entries[1].text, "run plumbago");
         }
+    }
+
+    #[test]
+    fn a_version_five_database_gains_the_member_columns_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rows = format!(
+            "{EVERY_KIND_ROWS}
+            INSERT INTO thread_link (thread_id, kind, ref, origin)
+            VALUES (1, 'commit', 'c0ffee1', 'observed');"
+        );
+        legacy_database(dir.path(), 5, &rows);
+
+        let store = ThreadStore::open(dir.path()).expect("migrate");
+
+        assert_eq!(version_of(dir.path()), 6);
+        let detail = store.read_thread("old1", 0, 10).expect("read");
+        assert_eq!(detail.edits.len(), 1);
+        assert_eq!(detail.edits[0].path, "src/hexagonal_port.rs");
+        assert_eq!(detail.edits[0].member, None);
+        assert_eq!(detail.links.len(), 1);
+        assert_eq!(detail.links[0].reference, "c0ffee1");
+        assert_eq!(detail.links[0].member, None);
+        let members: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM thread_member", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(members, 0);
+    }
+
+    #[test]
+    fn a_member_is_stored_on_edits_and_links_and_read_back() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        let mut call = with_edit(
+            new_entry("t1", EntryKind::ToolCall, "Edit billing", 2),
+            "billing/src/x.rs",
+        );
+        if let Some(edit) = call.edit.as_mut() {
+            edit.member = Some("billing".to_owned());
+        }
+        let uid = store
+            .apply(&batch(
+                "a",
+                1,
+                vec![new_entry("u1", EntryKind::User, "go", 1), call],
+            ))
+            .expect("apply")
+            .uid;
+        let link = |kind, reference: &str, member: Option<&str>| ThreadLink {
+            kind,
+            reference: reference.to_owned(),
+            origin: LinkOrigin::Observed,
+            resolved: None,
+            state: None,
+            member: member.map(str::to_owned),
+        };
+        store
+            .link(&uid, &link(LinkKind::Commit, "c0ffee1", Some("billing")))
+            .expect("link member commit");
+        store
+            .link(&uid, &link(LinkKind::Commit, "c0ffee2", None))
+            .expect("link workspace commit");
+
+        let detail = store.read_thread(&uid, 0, 100).expect("read");
+
+        assert_eq!(detail.edits[0].member.as_deref(), Some("billing"));
+        let member_of = |reference: &str| {
+            detail
+                .links
+                .iter()
+                .find(|link| link.reference == reference)
+                .and_then(|link| link.member.clone())
+        };
+        assert_eq!(member_of("c0ffee1").as_deref(), Some("billing"));
+        assert_eq!(member_of("c0ffee2"), None);
+    }
+
+    #[test]
+    fn a_later_link_without_a_member_keeps_the_member_of_the_commit() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        let uid = store
+            .apply(&batch(
+                "a",
+                1,
+                vec![new_entry("u1", EntryKind::User, "go", 1)],
+            ))
+            .expect("apply")
+            .uid;
+        let commit = |origin, member: Option<&str>| ThreadLink {
+            kind: LinkKind::Commit,
+            reference: "c0ffee1".to_owned(),
+            origin,
+            resolved: None,
+            state: None,
+            member: member.map(str::to_owned),
+        };
+        store
+            .link(&uid, &commit(LinkOrigin::Observed, Some("billing")))
+            .expect("observed");
+
+        store
+            .link(&uid, &commit(LinkOrigin::Human, None))
+            .expect("linked by hand");
+
+        let detail = store.read_thread(&uid, 0, 100).expect("read");
+        assert_eq!(detail.links[0].origin, LinkOrigin::Human);
+        assert_eq!(detail.links[0].member.as_deref(), Some("billing"));
+    }
+
+    #[test]
+    fn a_member_keeps_its_first_head_and_moves_the_last_one() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        let uid = store
+            .apply(&batch(
+                "a",
+                1,
+                vec![new_entry("u1", EntryKind::User, "go", 1)],
+            ))
+            .expect("apply")
+            .uid;
+        assert!(store.member_heads(&uid).expect("heads").is_empty());
+
+        store
+            .record_member_head(&uid, "billing", "1111111")
+            .expect("first");
+        store
+            .record_member_head(&uid, "billing", "2222222")
+            .expect("second");
+        store
+            .record_member_head(&uid, "docs", "3333333")
+            .expect("docs");
+
+        let heads = store.member_heads(&uid).expect("heads");
+        let row = |name: &str| heads.iter().find(|row| row.member == name).cloned();
+        assert_eq!(heads.len(), 2);
+        assert_eq!(
+            row("billing"),
+            Some(ThreadMember {
+                member: "billing".to_owned(),
+                head_start: Some("1111111".to_owned()),
+                head_end: Some("2222222".to_owned()),
+            })
+        );
+        assert_eq!(
+            row("docs").map(|row| row.head_start),
+            Some(Some("3333333".to_owned()))
+        );
+
+        store.delete_thread(&uid).expect("delete");
+        let left: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM thread_member", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(left, 0);
     }
 
     /// Rows of a version 3 database holding Claude Code markers of every kind: a slash command
@@ -5141,7 +5372,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 3, MARKER_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 5);
+        assert_eq!(version_of(dir.path()), 6);
 
         // Slash command as typed, output and bash as notices and a bash prompt, reminders
         // gone, the interruption as a notice; the marker-only prompt is deleted.
@@ -5261,7 +5492,7 @@ mod tests {
             open_for_hook_below(dir.path(), 6).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(dir.path()), 5);
+        assert_eq!(version_of(dir.path()), 6);
 
         // An up-to-date database is opened whatever its size.
         assert!(matches!(
@@ -5274,7 +5505,7 @@ mod tests {
             open_for_hook_below(fresh.path(), 1).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(fresh.path()), 5);
+        assert_eq!(version_of(fresh.path()), 6);
     }
 
     /// A deterministic generator for the benchmark: no randomness crate, same text every run.
@@ -6071,7 +6302,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 4, VERSION_FOUR_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 5);
+        assert_eq!(version_of(dir.path()), 6);
         assert_eq!(
             store.thread_summary("t1uid").expect("t1").tags,
             ["api", "bug"]

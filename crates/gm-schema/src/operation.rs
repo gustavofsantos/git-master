@@ -1553,6 +1553,7 @@ mod tests {
         let link = serde_json::to_value(CommandKind::LinkThread {
             uid: "0123456789abcdef".into(),
             link: ThreadLink {
+                member: None,
                 kind: LinkKind::Commit,
                 reference: "a".repeat(40),
                 origin: LinkOrigin::Human,
@@ -1643,6 +1644,7 @@ mod tests {
         let edit = Event::ThreadEditRead {
             id: OperationId(5),
             edit: ThreadEdit {
+                member: None,
                 id: 9,
                 entry_id: 3,
                 path: "src/a.rs".into(),
