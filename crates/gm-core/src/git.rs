@@ -27,7 +27,7 @@ use crate::conflict;
 use crate::conflict_sides::{self, SideCommit, SideFacts};
 use crate::diff::{hunk_patch, parse_unified};
 use crate::file_index::FileIndex;
-use crate::grep::{Collector, Flow, GrepRequest};
+use crate::grep::{self, Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::port::{
     BlameRead, CommitPresence, CommitSnapshot, DetailRead, FileListRead, GrepRead, HistoryRevs,
@@ -42,9 +42,9 @@ use crate::restack::{ReplayKind, Replayed};
 use crate::stack::{self, EdgeFacts, StackLink};
 use crate::stage_math;
 use crate::stash;
-use crate::submodule;
 use crate::worktree;
 use crate::{GitError, GitPort};
+use crate::{submodule, submodule_files};
 
 /// `login_path` is the user's login-shell PATH, filled in once from a
 /// background thread. Until it is set, git runs with the process's own PATH.
@@ -209,6 +209,43 @@ impl SubprocessGit {
             stderr: err.join().unwrap_or_default(),
         };
         Self::checked(output, &[0])
+    }
+
+    /// The gitlinks of the index: the submodules of the repository (D175). Read
+    /// only when `.gitmodules` exists, so a repository without submodules costs no
+    /// more than before.
+    fn gitlinks(&self, root: &Path, stop: &AtomicBool) -> Result<Vec<String>, GitError> {
+        if !root.join(".gitmodules").exists() {
+            return Ok(Vec::new());
+        }
+        let stage = self.run_stoppable(root, &["ls-files", "-z", "--stage"], stop)?;
+        Ok(submodule_files::gitlinks(&stage))
+    }
+
+    /// `run_grep` over the repository and, with submodules (D175), over each
+    /// checked-out submodule with the pathspecs routed to it. The parts are joined
+    /// under the limits, so the answer is the same whatever the arrival order.
+    fn run_grep_with_submodules(
+        &self,
+        root: &Path,
+        request: &GrepRequest,
+        stop: &AtomicBool,
+    ) -> Result<gm_schema::GrepResult, GitError> {
+        let gitlinks = self.gitlinks(root, stop)?;
+        let submodules = checked_out(root, &gitlinks);
+        if submodules.is_empty() {
+            return self.run_grep(root, request, stop);
+        }
+        let split = request.split(&submodules);
+        let mut parts = Vec::new();
+        if let Some(repo) = &split.repo {
+            parts.push(self.run_grep(root, repo, stop)?);
+        }
+        for (folder, search) in &split.submodules {
+            let result = self.run_grep(&root.join(folder), search, stop)?;
+            parts.push(grep::under_folder(result, folder));
+        }
+        Ok(grep::merge(&request.query, parts))
     }
 
     /// Runs `git grep` for `request` and collects its records under the limits.
@@ -1848,24 +1885,23 @@ impl GitPort for SubprocessGit {
 
     /// The files of the worktree, from one `git ls-files`: tracked (`--cached`)
     /// and untracked-not-ignored (`--others --exclude-standard`). `-v` tags each
-    /// path so the files a sparse checkout leaves out can be dropped. Stoppable
-    /// and not logged (D28).
+    /// path so the files a sparse checkout leaves out can be dropped. With
+    /// submodules (D175), the gitlinks are dropped and the files of each
+    /// checked-out submodule are added under its folder. Stoppable and not
+    /// logged (D28).
     fn file_list(&self, root: &Path) -> Result<FileListRead, GitError> {
         let git = self.clone();
         let root = root.to_path_buf();
         Ok(Box::new(move |stop: &AtomicBool| {
-            let raw = git.run_stoppable(
-                &root,
-                &[
-                    "ls-files",
-                    "-z",
-                    "-v",
-                    "--cached",
-                    "--others",
-                    "--exclude-standard",
-                ],
-                stop,
-            )?;
+            let mut raw = git.run_stoppable(&root, LIST_FILES, stop)?;
+            let gitlinks = git.gitlinks(&root, stop)?;
+            if !gitlinks.is_empty() {
+                raw = submodule_files::without_paths(&raw, &gitlinks);
+                for folder in checked_out(&root, &gitlinks) {
+                    let files = git.run_stoppable(&root.join(&folder), LIST_FILES, stop)?;
+                    raw.extend(submodule_files::under_folder(&files, &folder));
+                }
+            }
             Ok(FileIndex::from_ls_files(raw))
         }))
     }
@@ -1878,7 +1914,7 @@ impl GitPort for SubprocessGit {
         let root = root.to_path_buf();
         let request = request.clone();
         Ok(Box::new(move |stop: &AtomicBool| {
-            git.run_grep(&root, &request, stop)
+            git.run_grep_with_submodules(&root, &request, stop)
         }))
     }
 
@@ -3733,6 +3769,28 @@ fn parse_header(header: &str, branch: &mut BranchInfo) {
             .and_then(|b| b.trim_start_matches('-').parse().ok())
             .unwrap_or(0);
     }
+}
+
+/// The arguments of the file list: tracked and untracked-not-ignored, tagged with
+/// their status letter (`-v`) so a sparse checkout's leftovers can be dropped.
+const LIST_FILES: &[&str] = &[
+    "ls-files",
+    "-z",
+    "-v",
+    "--cached",
+    "--others",
+    "--exclude-standard",
+];
+
+/// The submodules of `gitlinks` that are checked out: a `.git` sits in them, as a
+/// folder or, for a linked worktree, as a file. An uninitialised submodule has an
+/// empty folder and is left out.
+fn checked_out(root: &Path, gitlinks: &[String]) -> Vec<String> {
+    gitlinks
+        .iter()
+        .filter(|path| root.join(path).join(".git").exists())
+        .cloned()
+        .collect()
 }
 
 /// Everything the reader gives until its end. A read that fails keeps what it had.

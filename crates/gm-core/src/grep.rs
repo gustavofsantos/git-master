@@ -84,6 +84,150 @@ impl GrepRequest {
     }
 }
 
+/// The searches a request becomes when the project has submodules (D175): the
+/// repository's own search, and one search per submodule that is searched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Split {
+    /// `None` when every include word went to a submodule, so the repository is
+    /// not searched at all.
+    pub repo: Option<GrepRequest>,
+    /// The submodules searched, by path, each with its own pathspecs.
+    pub submodules: Vec<(String, GrepRequest)>,
+}
+
+impl GrepRequest {
+    /// Routes the pathspecs of the request to the repository and to each of
+    /// `submodules` (paths from the root, one level). A word `P` or `P/` names
+    /// the submodule `P` as a whole; `P/x` is `x` inside it. An exclude word
+    /// `P` skips the submodule. When there are include words and none names
+    /// `P`, `P` is not searched. The words that name no submodule go to the
+    /// repository as they are.
+    #[must_use]
+    pub fn split(&self, submodules: &[String]) -> Split {
+        let has_includes = self.paths.iter().any(|w| exclude_body(w).is_none());
+        let mut searched = Vec::new();
+        for module in submodules {
+            let mut whole = false;
+            let mut skip = false;
+            let mut includes = Vec::new();
+            let mut excludes = Vec::new();
+            for word in &self.paths {
+                match exclude_body(word) {
+                    Some(body) => match inside(body, module) {
+                        Some("") => skip = true,
+                        Some(rest) => excludes.push(format!(":(exclude){rest}")),
+                        None => {}
+                    },
+                    None => match inside(word, module) {
+                        Some("") => whole = true,
+                        Some(rest) => includes.push(rest.to_owned()),
+                        None => {}
+                    },
+                }
+            }
+            if skip || (has_includes && !whole && includes.is_empty()) {
+                continue;
+            }
+            // A word naming the whole submodule searches all of it: no include words.
+            let mut paths = if whole { Vec::new() } else { includes };
+            paths.extend(excludes);
+            searched.push((
+                module.clone(),
+                GrepRequest {
+                    query: self.query.clone(),
+                    options: self.options,
+                    paths,
+                },
+            ));
+        }
+        let repo_paths: Vec<String> = self
+            .paths
+            .iter()
+            .filter(|word| {
+                let body = exclude_body(word).unwrap_or(word.as_str());
+                !submodules.iter().any(|m| inside(body, m).is_some())
+            })
+            .cloned()
+            .collect();
+        let repo_has_includes = repo_paths.iter().any(|w| exclude_body(w).is_none());
+        let repo = (!has_includes || repo_has_includes).then(|| GrepRequest {
+            query: self.query.clone(),
+            options: self.options,
+            paths: repo_paths,
+        });
+        Split {
+            repo,
+            submodules: searched,
+        }
+    }
+}
+
+/// The body of an exclude word: `:(exclude)x` (as a request makes it), or the
+/// short forms `:!x` and `:^x`. `None` for an include word.
+fn exclude_body(word: &str) -> Option<&str> {
+    word.strip_prefix(":(exclude)")
+        .or_else(|| word.strip_prefix(":!"))
+        .or_else(|| word.strip_prefix(":^"))
+}
+
+/// What is left of `word` inside the submodule `module`: `""` for the
+/// submodule itself (`P` or `P/`), `x` for `P/x`, `None` when the word does not
+/// name anything inside it.
+fn inside<'a>(word: &'a str, module: &str) -> Option<&'a str> {
+    let rest = word.strip_prefix(module)?;
+    match rest.strip_prefix('/') {
+        Some(rest) => Some(rest),
+        None if rest.is_empty() => Some(""),
+        None => None,
+    }
+}
+
+/// Puts the files of a result under `folder/`, for the result of a submodule.
+#[must_use]
+pub fn under_folder(mut result: GrepResult, folder: &str) -> GrepResult {
+    for file in &mut result.files {
+        file.path = format!("{folder}/{}", file.path);
+    }
+    result
+}
+
+/// Joins the results of the parts of one search (the repository and its
+/// submodules) into one answer under the limits: files by full path, lines in
+/// line order, at most `GREP_TOTAL_LIMIT` lines in all. A part that was cut
+/// short, or lines that do not fit, make the answer cut off.
+#[must_use]
+pub fn merge(query: &str, parts: Vec<GrepResult>) -> GrepResult {
+    let mut truncated = parts.iter().any(|part| part.truncated);
+    let mut files: Vec<GrepFile> = parts.into_iter().flat_map(|part| part.files).collect();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut listed = 0;
+    let mut kept = Vec::new();
+    for file in files {
+        let mut lines = Vec::new();
+        for line in file.lines {
+            if listed >= GREP_TOTAL_LIMIT {
+                truncated = true;
+                break;
+            }
+            listed += 1;
+            lines.push(line);
+        }
+        if !lines.is_empty() {
+            kept.push(GrepFile {
+                path: file.path,
+                lines,
+                more: file.more,
+            });
+        }
+    }
+    GrepResult {
+        query: query.to_owned(),
+        files: kept,
+        listed,
+        truncated,
+    }
+}
+
 /// One record of Git's output: `path NUL line NUL column NUL text`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record<'a> {
@@ -557,6 +701,222 @@ mod tests {
     fn a_line_of_only_blanks_is_empty_text() {
         let line = shape_line(b"   \t", 1, None, 1);
         assert_eq!(line.text, "");
+    }
+
+    fn split(paths: &str, modules: &[&str]) -> Split {
+        let request = GrepRequest::new("x", GrepOptions::default(), paths).unwrap();
+        let modules: Vec<String> = modules.iter().map(|m| (*m).to_owned()).collect();
+        request.split(&modules)
+    }
+
+    /// The pathspecs of submodule `module`, if it is searched.
+    fn inside_paths(split: &Split, module: &str) -> Option<Vec<String>> {
+        split
+            .submodules
+            .iter()
+            .find(|(m, _)| m == module)
+            .map(|(_, request)| request.paths.clone())
+    }
+
+    fn repo_paths(split: &Split) -> Option<Vec<String>> {
+        split.repo.as_ref().map(|request| request.paths.clone())
+    }
+
+    #[test]
+    fn no_words_search_every_submodule_as_a_whole_and_the_repository() {
+        let s = split("", &["sub"]);
+        assert_eq!(inside_paths(&s, "sub"), Some(Vec::new()));
+        assert_eq!(repo_paths(&s), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_word_naming_a_submodule_searches_it_whole_and_not_the_repository() {
+        for word in ["sub", "sub/"] {
+            let s = split(word, &["sub"]);
+            assert_eq!(inside_paths(&s, "sub"), Some(Vec::new()), "{word}");
+            assert_eq!(repo_paths(&s), None, "{word}");
+        }
+    }
+
+    #[test]
+    fn a_word_inside_a_submodule_goes_to_it_with_the_folder_stripped() {
+        let s = split("sub/src", &["sub"]);
+        assert_eq!(inside_paths(&s, "sub"), Some(vec!["src".to_owned()]));
+        assert_eq!(repo_paths(&s), None);
+    }
+
+    #[test]
+    fn an_unrelated_include_word_skips_every_submodule() {
+        let s = split("docs", &["sub"]);
+        assert_eq!(inside_paths(&s, "sub"), None);
+        assert_eq!(repo_paths(&s), Some(vec!["docs".to_owned()]));
+    }
+
+    #[test]
+    fn words_split_between_the_repository_and_a_submodule() {
+        let s = split("docs sub/src", &["sub"]);
+        assert_eq!(inside_paths(&s, "sub"), Some(vec!["src".to_owned()]));
+        assert_eq!(repo_paths(&s), Some(vec!["docs".to_owned()]));
+    }
+
+    #[test]
+    fn a_name_that_only_starts_like_a_submodule_is_not_routed() {
+        let s = split("subway", &["sub"]);
+        assert_eq!(inside_paths(&s, "sub"), None);
+        assert_eq!(repo_paths(&s), Some(vec!["subway".to_owned()]));
+    }
+
+    #[test]
+    fn an_exclude_naming_a_submodule_skips_it() {
+        for word in ["!sub", "!sub/", ":!sub"] {
+            let s = split(word, &["sub"]);
+            assert_eq!(inside_paths(&s, "sub"), None, "{word}");
+            assert_eq!(repo_paths(&s), Some(Vec::new()), "{word}");
+        }
+    }
+
+    #[test]
+    fn an_exclude_inside_a_submodule_goes_to_it_and_not_the_repository() {
+        let s = split("!sub/tests", &["sub"]);
+        assert_eq!(
+            inside_paths(&s, "sub"),
+            Some(vec![":(exclude)tests".to_owned()])
+        );
+        assert_eq!(repo_paths(&s), Some(Vec::new()));
+    }
+
+    #[test]
+    fn an_exclude_of_the_repository_still_reaches_it_and_the_submodule_is_searched() {
+        let s = split("!docs", &["sub"]);
+        assert_eq!(inside_paths(&s, "sub"), Some(Vec::new()));
+        assert_eq!(repo_paths(&s), Some(vec![":(exclude)docs".to_owned()]));
+    }
+
+    #[test]
+    fn an_include_inside_and_an_exclude_inside_combine() {
+        let s = split("sub/src !sub/src/gen", &["sub"]);
+        assert_eq!(
+            inside_paths(&s, "sub"),
+            Some(vec!["src".to_owned(), ":(exclude)src/gen".to_owned()])
+        );
+        assert_eq!(repo_paths(&s), None);
+    }
+
+    #[test]
+    fn a_submodule_named_by_a_whole_word_drops_its_include_words_inside() {
+        let s = split("sub sub/src", &["sub"]);
+        assert_eq!(inside_paths(&s, "sub"), Some(Vec::new()));
+        assert_eq!(repo_paths(&s), None);
+    }
+
+    #[test]
+    fn two_submodules_are_routed_by_their_own_names() {
+        let s = split("a/x b/y", &["a", "b"]);
+        assert_eq!(inside_paths(&s, "a"), Some(vec!["x".to_owned()]));
+        assert_eq!(inside_paths(&s, "b"), Some(vec!["y".to_owned()]));
+        assert_eq!(repo_paths(&s), None);
+    }
+
+    #[test]
+    fn a_split_keeps_the_query_and_the_options_of_the_request() {
+        let options = GrepOptions {
+            case_sensitive: true,
+            whole_word: true,
+            regex: true,
+            scope: GrepScope::TrackedOnly,
+        };
+        let request = GrepRequest::new("a.b", options, "sub").unwrap();
+        let split = request.split(&["sub".to_owned()]);
+        let (_, inner) = &split.submodules[0];
+        assert_eq!(inner.query, "a.b");
+        assert_eq!(inner.options, options);
+    }
+
+    fn result(files: &[(&str, usize)]) -> GrepResult {
+        let files: Vec<GrepFile> = files
+            .iter()
+            .map(|&(path, count)| GrepFile {
+                path: path.to_owned(),
+                lines: (1..=count)
+                    .map(|line| GrepLine {
+                        line: u32::try_from(line).unwrap(),
+                        text: "x".to_owned(),
+                        ranges: Vec::new(),
+                        cut_start: false,
+                        cut_end: false,
+                    })
+                    .collect(),
+                more: 0,
+            })
+            .collect();
+        GrepResult {
+            query: "x".to_owned(),
+            listed: files.iter().map(|f| f.lines.len()).sum(),
+            files,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn a_submodule_result_gets_its_folder_in_front_of_every_path() {
+        let shown = under_folder(result(&[("src/a.rs", 1)]), "sub");
+        assert_eq!(shown.files[0].path, "sub/src/a.rs");
+    }
+
+    #[test]
+    fn merged_parts_are_ordered_by_full_path_and_keep_their_lines() {
+        let merged = merge(
+            "x",
+            vec![
+                under_folder(result(&[("b.rs", 1)]), "sub"),
+                result(&[("z.rs", 2), ("a.rs", 1)]),
+            ],
+        );
+
+        let paths: Vec<&str> = merged.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["a.rs", "sub/b.rs", "z.rs"]);
+        assert_eq!(merged.listed, 4);
+        assert!(!merged.truncated);
+        assert_eq!(merged.query, "x");
+    }
+
+    #[test]
+    fn merging_cuts_at_the_total_limit_across_parts() {
+        let repo = result(&[("a.rs", GREP_TOTAL_LIMIT - 5)]);
+        let sub = under_folder(result(&[("f.rs", 20)]), "sub");
+
+        let merged = merge("x", vec![repo, sub]);
+
+        assert_eq!(merged.listed, GREP_TOTAL_LIMIT);
+        assert!(merged.truncated);
+        // The five lines that still fit come from the submodule, then the rest is cut.
+        let last = merged.files.last().unwrap();
+        assert_eq!((last.path.as_str(), last.lines.len()), ("sub/f.rs", 5));
+    }
+
+    #[test]
+    fn a_part_cut_short_makes_the_merged_answer_cut_off() {
+        let mut short = result(&[("a.rs", 3)]);
+        short.truncated = true;
+
+        let merged = merge("x", vec![short, result(&[("b.rs", 1)])]);
+
+        assert!(merged.truncated);
+        assert_eq!(merged.listed, 4);
+    }
+
+    #[test]
+    fn exactly_the_limit_across_parts_is_not_cut_off() {
+        let merged = merge(
+            "x",
+            vec![
+                result(&[("a.rs", GREP_TOTAL_LIMIT / 2)]),
+                under_folder(result(&[("b.rs", GREP_TOTAL_LIMIT / 2)]), "sub"),
+            ],
+        );
+
+        assert_eq!(merged.listed, GREP_TOTAL_LIMIT);
+        assert!(!merged.truncated);
     }
 
     proptest! {
