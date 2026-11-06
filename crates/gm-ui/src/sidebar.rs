@@ -17,13 +17,25 @@ pub enum Section {
     Worktrees,
 }
 
-/// Which sections are folded. All are open at the start; the choice is kept for
-/// the window only.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Which sections are folded. When a window starts, Repository is open and
+/// Branches and Worktrees are folded (D184); the choice is kept for the window
+/// only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Folded {
     repository: bool,
     branches: bool,
     worktrees: bool,
+}
+
+impl Default for Folded {
+    /// The state a new window starts in: Repository open, the others folded.
+    fn default() -> Self {
+        Self {
+            repository: false,
+            branches: true,
+            worktrees: true,
+        }
+    }
 }
 
 impl Folded {
@@ -238,15 +250,33 @@ mod tests {
     }
 
     #[test]
-    fn sections_start_open_and_fold_one_at_a_time() {
+    fn a_new_window_starts_with_repository_open_and_the_others_folded() {
+        let folded = Folded::default();
+        assert!(!folded.is_folded(Section::Repository));
+        assert!(folded.is_folded(Section::Branches));
+        assert!(folded.is_folded(Section::Worktrees));
+    }
+
+    #[test]
+    fn toggling_a_section_opens_or_folds_only_that_section() {
         let mut folded = Folded::default();
+        folded.toggle(Section::Branches);
         assert!(!folded.is_folded(Section::Branches));
+        assert!(folded.is_folded(Section::Worktrees));
+        assert!(!folded.is_folded(Section::Repository));
         folded.toggle(Section::Branches);
         assert!(folded.is_folded(Section::Branches));
+
+        folded.toggle(Section::Repository);
+        assert!(folded.is_folded(Section::Repository));
+        assert!(folded.is_folded(Section::Branches));
+        assert!(folded.is_folded(Section::Worktrees));
+        folded.toggle(Section::Repository);
         assert!(!folded.is_folded(Section::Repository));
+
+        folded.toggle(Section::Worktrees);
         assert!(!folded.is_folded(Section::Worktrees));
-        folded.toggle(Section::Branches);
-        assert!(!folded.is_folded(Section::Branches));
+        assert!(folded.is_folded(Section::Branches));
     }
 
     fn branch(name: &str, remote: bool) -> BranchEntry {

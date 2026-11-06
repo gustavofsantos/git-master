@@ -31,7 +31,7 @@ ROW_HANDLERS_Y=194                          # api/handlers.rs (untracked)
 ROW_MOD_Y=146                               # src/ledger/mod.rs
 ROW_TOTAL_Y=170                             # src/ledger/total.rs
 LIST_EMPTY_X=540; LIST_EMPTY_Y=458          # empty list area, takes list focus
-DIFF_CHECK_X=841                            # gutter checkbox in the diff pane
+DIFF_CHECK_X=852                            # gutter checkbox in the diff pane
 DIFF_LINE_A_Y=239                           # first pure-insertion row in total.rs
 DIFF_LINE_B_Y=327                           # second pure-insertion row in total.rs
 CHUNK_Y=173                                 # hunk header row of total.rs (its buttons)
@@ -44,9 +44,11 @@ LOG_BUTTON_X=1300; LOG_BUTTON_Y=837         # "Git log" button, right end of the
 PROJECT_X=139; PROJECT_Y=61                 # project button at the left of the top bar
 RECENT_OTHER_X=150; RECENT_OTHER_Y=185      # second row of the open list: billing-api
 BRANCH_X=140; BRANCH_Y=81                   # branch button, right of the project button
-SIDEBAR_FEATURE_X=160; SIDEBAR_FEATURE_Y=423  # feature/x row in the sidebar (non-current)
+SIDEBAR_FEATURE_X=160; SIDEBAR_FEATURE_Y=673  # feature/x row in the sidebar (non-current), By stack, Branches open
+SIDEBAR_BRANCHES_X=120; SIDEBAR_BRANCHES_Y=441  # BRANCHES header: folded when a window starts (D184)
+SIDEBAR_WORKTREES_X=120; SIDEBAR_WORKTREES_Y=731  # WORKTREES header once Branches is open: it moves down
 MENU_STAGE_X=470; MENU_STAGE_Y=163          # "Stage File" in the file row's menu, opened at NAME_X, ROW_MOD_Y
-MENU_CHECKOUT_X=190; MENU_CHECKOUT_Y=439    # "Checkout Branch" in the branch menu, opened at SIDEBAR_FEATURE_X/Y
+MENU_CHECKOUT_X=190; MENU_CHECKOUT_Y=508    # "Checkout Branch" in the branch menu, opened at SIDEBAR_FEATURE_X/Y
 TITLE_BAR_H=44                              # the title bar: name row over the branch and path row
 TOOLBAR_Y=72; TOOLBAR_FETCH_X=1082; TOOLBAR_RESTACK_X=1322   # Fetch and Restack buttons, right of the title bar
 SECTION_CROP="240x84+0+612"                  # the WORKTREES rows at the sidebar's foot, window-relative
@@ -191,6 +193,17 @@ stop_app() {
   kill "$APP_PID" 2>/dev/null || true
   wait "$APP_PID" 2>/dev/null || true
   APP_PID=""
+}
+
+# A window starts with Branches and Worktrees folded (D184). Open them so the
+# coordinates below hold. Branches first: opening it pushes Worktrees down.
+# Branches and Worktrees start folded (D184). Every scenario opens Branches; only the worktree
+# scenarios ($1 = worktrees) open Worktrees too, since the open section shortens the branch list.
+open_sidebar_sections() {
+  xdotool mousemove "$SIDEBAR_BRANCHES_X" "$SIDEBAR_BRANCHES_Y" click 1; sleep 1
+  if [ "${1:-}" = worktrees ]; then
+    xdotool mousemove "$SIDEBAR_WORKTREES_X" "$SIDEBAR_WORKTREES_Y" click 1; sleep 1
+  fi
 }
 
 # Full screen, cropped to the window, saved as <scenario>-<theme>.png.
@@ -924,7 +937,7 @@ scenario_t() {
 # the worktree and its folder is gone. The row positions are the WORKTREES rows
 # at the sidebar's foot.
 WT_ROW_X=182; WT_ROW_Y=731                  # the feature/x worktree row, right-clicked
-MENU_REMOVE_X=252; MENU_REMOVE_Y=831        # "Remove Worktree" in that row's menu
+MENU_REMOVE_X=252; MENU_REMOVE_Y=816        # "Remove Worktree" in that row's menu
 CONFIRM_CHECK_X=486; CONFIRM_CHECK_Y=243  # the confirmation checkbox in the dialog
 REMOVE_BUTTON_X=894; REMOVE_BUTTON_Y=280  # "Remove worktree" in the dialog
 scenario_u() {
@@ -1120,6 +1133,10 @@ run_scenario() {
   printf '[\n  "%s",\n  "%s"\n]\n' "$RUN_DIR/billing-api" "$RUN_DIR/repo" > "$RUN_DIR/xdg/gitmaster/recent.json"
   launch_app "$theme" "$RUN_DIR/repo"
   case "$base" in
+    s-*|t-*|u-*|v-*) open_sidebar_sections worktrees ;;
+    *) open_sidebar_sections ;;
+  esac
+  case "$base" in
     a-stage-lines) scenario_a "$theme" ;;
     b-stage-file)  scenario_b "$theme" ;;
     c-commit)      scenario_c "$theme" ;;
@@ -1155,6 +1172,7 @@ scenario_history_unborn() {
   git init -q -b main "$RUN_DIR/unborn"
   launch_app "$theme" "$RUN_DIR/unborn"
   xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  open_sidebar_sections
   xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
   shoot "$SMOKE_OUT/h-history-unborn-$theme.png"
   stop_app
@@ -1174,6 +1192,7 @@ scenario_history_refresh() {
   launch_app "$theme" "$repo"
   # The first click wakes the window: until then it paints black.
   xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  open_sidebar_sections
   xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
   shoot "$RUN_DIR/refresh-before-$theme.png"
   git -C "$repo" -c user.name=smoke -c user.email=smoke@smoke commit -q --allow-empty \
@@ -1250,6 +1269,7 @@ scenario_commit_detail() {
   local repo="$RUN_DIR/detail" theme="$1" status_before differing
   launch_app "$theme" "$repo"
   xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  open_sidebar_sections
   xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
   shoot "$SMOKE_OUT/h-commit-detail-empty-$theme.png"
   status_before="$(git -C "$repo" status --porcelain=v1; git -C "$repo" rev-parse HEAD)"
@@ -1279,6 +1299,7 @@ scenario_commit_diff() {
   local repo="$RUN_DIR/detail" theme="$1" status_before differing
   launch_app "$theme" "$repo"
   xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  open_sidebar_sections
   xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
   xdotool mousemove "$HISTORY_ROW_X" "$(history_row_y "feat: add, modify, delete, rename")" click 1; sleep 1.5
   shoot "$SMOKE_OUT/h-commit-diff-commit-$theme.png"
@@ -1377,6 +1398,7 @@ scenario_commit_stack() {
   make_stack_repo "$repo"
   launch_app "$theme" "$repo"
   xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  open_sidebar_sections
   xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
   # The stack fixture's commit is HEAD, the top row of the history list.
   xdotool mousemove "$HISTORY_ROW_X" "$HISTORY_ROW_TOP_Y" click 1; sleep 1.5
@@ -1540,6 +1562,7 @@ scenario_commit_diff_split() {
   local settings="$RUN_DIR/gitconfig"
   launch_app "$theme" "$repo"
   xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  open_sidebar_sections
   xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
   xdotool mousemove "$HISTORY_ROW_X" "$(history_row_y "feat: replace, add and delete")" click 1; sleep 1.5
   xdotool mousemove "$SPLIT_FILE_X" "$SPLIT_CALC_Y" click 1; sleep 1.5
@@ -1566,6 +1589,7 @@ scenario_commit_diff_split() {
   stop_app
   launch_app "$theme" "$repo"
   xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1; sleep 1
+  open_sidebar_sections
   xdotool mousemove "$HISTORY_X" "$HISTORY_Y" click 1; sleep 1.5
   xdotool mousemove "$HISTORY_ROW_X" "$(history_row_y "feat: replace, add and delete")" click 1; sleep 1.5
   xdotool mousemove "$SPLIT_FILE_X" "$SPLIT_CALC_Y" click 1; sleep 1.5

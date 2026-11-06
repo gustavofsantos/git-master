@@ -735,6 +735,14 @@ Several repositories in one workspace: a superproject whose submodules are linke
 - **SW4b, UI:** the Workspaces section, the New Workspace dialog, the Remove Workspace dialog, **Check Out Branch** on a detached member row. Docs: `guide/workspaces.md`.
 - **SW4c, ephemeral on close:** remove an ephemeral workspace when its window closes, asking when something would be lost.
 
+## UI smoke suite: stale coordinates (found 2026-11-06)
+
+`scripts/ui-smoke.sh` had drifted from the app before D184. Fixed with D184 (both themes pass): `a-stage-lines` (the gutter checkbox moved to x=852), `l-branch-menu` (the feature/x row and its menu, with only Branches open), `u-remove-worktree` (the menu item moved to y=816). Still failing, not caused by D184:
+- `v-lock-prune-worktree`: the app does not list a worktree whose folder is gone (the fixture's `repo-gone`), although `guide/worktrees.md` documents a **missing** badge and the UI has code for it; so the prune half cannot run. A product bug to investigate, not only a coordinate.
+- `h-commit-diff-split`: the commit's diff does not open at the scripted position, so there is no **Split** to click.
+- The scenarios after `h-commit-diff-split` were not reached.
+- Also seen: the Branches hint "Drag a branch onto another to set its parent" shows while Branches is folded.
+
 ## Slice 8: local review
 
 - Comments, states, anchor without guessing, before and after snapshots.
