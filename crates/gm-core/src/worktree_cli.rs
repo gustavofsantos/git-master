@@ -115,7 +115,7 @@ pub fn run(
     }
 }
 
-enum Failure {
+pub(crate) enum Failure {
     Usage(String),
     Run(String),
 }
@@ -133,15 +133,19 @@ impl From<std::io::Error> for Failure {
 }
 
 /// The words of a command line sorted into positionals, valued options and switches.
-struct Args {
-    positional: Vec<String>,
+pub(crate) struct Args {
+    pub(crate) positional: Vec<String>,
     options: Vec<(String, String)>,
     switches: Vec<String>,
 }
 
 impl Args {
     /// `valued` options take a value (`--root DIR` or `--root=DIR`); `switches` take none.
-    fn parse(words: &[String], valued: &[&str], switches: &[&str]) -> Result<Self, Failure> {
+    pub(crate) fn parse(
+        words: &[String],
+        valued: &[&str],
+        switches: &[&str],
+    ) -> Result<Self, Failure> {
         let mut args = Self {
             positional: Vec::new(),
             options: Vec::new(),
@@ -175,7 +179,7 @@ impl Args {
         Ok(args)
     }
 
-    fn option(&self, name: &str) -> Option<&str> {
+    pub(crate) fn option(&self, name: &str) -> Option<&str> {
         self.options
             .iter()
             .rev()
@@ -184,7 +188,7 @@ impl Args {
     }
 
     /// Every value given for `name`, in order.
-    fn values(&self, name: &str) -> Vec<&str> {
+    pub(crate) fn values(&self, name: &str) -> Vec<&str> {
         self.options
             .iter()
             .filter(|(flag, _)| flag == name)
@@ -192,12 +196,12 @@ impl Args {
             .collect()
     }
 
-    fn switch(&self, name: &str) -> bool {
+    pub(crate) fn switch(&self, name: &str) -> bool {
         self.switches.iter().any(|flag| flag == name)
     }
 
     /// Exactly `count` positionals, else a usage error.
-    fn exactly(&self, count: usize, what: &str) -> Result<(), Failure> {
+    pub(crate) fn exactly(&self, count: usize, what: &str) -> Result<(), Failure> {
         if self.positional.len() == count {
             Ok(())
         } else {
@@ -222,7 +226,10 @@ fn toplevel(dir: &Path) -> Result<PathBuf, Failure> {
 
 /// The worktrees of the repository around `dir` whose folder still exists, main checkout first,
 /// and the folder Git commands run in.
-fn worktrees_in(dir: &Path, git: &dyn GitPort) -> Result<(PathBuf, Vec<WorktreeEntry>), Failure> {
+pub(crate) fn worktrees_in(
+    dir: &Path,
+    git: &dyn GitPort,
+) -> Result<(PathBuf, Vec<WorktreeEntry>), Failure> {
     let root = toplevel(dir)?;
     let entries = git.worktrees(&root)?;
     if entries.first().is_some_and(|main| main.bare) {
@@ -236,7 +243,7 @@ fn worktrees_in(dir: &Path, git: &dyn GitPort) -> Result<(PathBuf, Vec<WorktreeE
 }
 
 /// The folder `spec` names, taken from the current directory when it is relative.
-fn resolve_repo(spec: &str, env: &Env) -> Result<PathBuf, Failure> {
+pub(crate) fn resolve_repo(spec: &str, env: &Env) -> Result<PathBuf, Failure> {
     let path = env.cwd.join(expand(spec, env.home.as_deref()));
     if path.is_dir() {
         Ok(path)
@@ -246,12 +253,12 @@ fn resolve_repo(spec: &str, env: &Env) -> Result<PathBuf, Failure> {
 }
 
 /// A repository a command works on.
-struct Repo {
+pub(crate) struct Repo {
     /// The main checkout's folder name.
-    project: String,
+    pub(crate) project: String,
     /// The folder Git commands run in.
-    root: PathBuf,
-    entries: Vec<WorktreeEntry>,
+    pub(crate) root: PathBuf,
+    pub(crate) entries: Vec<WorktreeEntry>,
 }
 
 /// The repositories of a read command: those named by `--repo`, those listed in the file of
@@ -260,7 +267,7 @@ struct Repo {
 /// the project to the output. A repository named with `--repo` that is not one is an error; a
 /// folder in a list that is not one is skipped, since the caller's list may hold other folders.
 /// Each repository is read once, however many of its worktrees are listed.
-fn repositories(
+pub(crate) fn repositories(
     args: &Args,
     env: &Env,
     git: &dyn GitPort,
@@ -466,7 +473,7 @@ fn path(
     }
 }
 
-fn holder<'a>(entries: &'a [WorktreeEntry], branch: &str) -> Option<&'a WorktreeEntry> {
+pub(crate) fn holder<'a>(entries: &'a [WorktreeEntry], branch: &str) -> Option<&'a WorktreeEntry> {
     entries
         .iter()
         .find(|entry| entry.branch.as_deref() == Some(branch))
@@ -481,7 +488,7 @@ fn config(git: &dyn GitPort, root: &Path, key: &str) -> Result<Option<String>, F
 }
 
 /// `path` with a leading `~` replaced by the home directory.
-fn expand(path: &str, home: Option<&Path>) -> PathBuf {
+pub(crate) fn expand(path: &str, home: Option<&Path>) -> PathBuf {
     match (path.strip_prefix('~'), home) {
         (Some(""), Some(home)) => home.to_path_buf(),
         (Some(rest), Some(home)) if rest.starts_with('/') => home.join(&rest[1..]),
@@ -523,7 +530,11 @@ fn worktree_dir(
 }
 
 /// The mode from `--include`, else `gitmaster.worktree.include`, else symbolic links.
-fn include_mode(git: &dyn GitPort, root: &Path, flag: Option<&str>) -> Result<Mode, Failure> {
+pub(crate) fn include_mode(
+    git: &dyn GitPort,
+    root: &Path,
+    flag: Option<&str>,
+) -> Result<Mode, Failure> {
     let (name, source) = match flag {
         Some(flag) => (Some(flag.to_owned()), "--include"),
         None => (config(git, root, INCLUDE_KEY)?, INCLUDE_KEY),
@@ -573,33 +584,7 @@ fn add(
         return Err(Failure::Run(format!("'{}' already exists", dir.display())));
     }
     let known = git.branches(&root)?;
-    let local = known.iter().any(|b| !b.is_remote && b.name == branch);
-    let kind = if local {
-        if base.is_some() {
-            writeln!(
-                err,
-                "gitmaster: branch '{branch}' exists; ignoring the base"
-            )?;
-        }
-        WorktreeMode::Existing {
-            branch: branch.to_owned(),
-        }
-    } else if let Some(remote) = base
-        .is_none()
-        .then(|| remote_branch(&known, branch))
-        .flatten()
-    {
-        // Git sets the new branch to track a remote-tracking start point.
-        WorktreeMode::New {
-            branch: branch.to_owned(),
-            base: remote,
-        }
-    } else {
-        WorktreeMode::New {
-            branch: branch.to_owned(),
-            base: base.unwrap_or("HEAD").to_owned(),
-        }
-    };
+    let kind = branch_mode(&known, branch, base, err)?;
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -610,8 +595,46 @@ fn add(
     Ok(())
 }
 
+/// The branch a new worktree is made on, as `add` chooses it: the local branch `branch` (with a
+/// note when a `base` was given, which is then ignored), else a new local branch that tracks the
+/// remote one when there is no `base`, else a new branch from `base`, or from `HEAD`.
+pub(crate) fn branch_mode(
+    known: &[gm_schema::BranchEntry],
+    branch: &str,
+    base: Option<&str>,
+    err: &mut dyn Write,
+) -> Result<WorktreeMode, Failure> {
+    let local = known.iter().any(|b| !b.is_remote && b.name == branch);
+    if local {
+        if base.is_some() {
+            writeln!(
+                err,
+                "gitmaster: branch '{branch}' exists; ignoring the base"
+            )?;
+        }
+        return Ok(WorktreeMode::Existing {
+            branch: branch.to_owned(),
+        });
+    }
+    if let Some(remote) = base
+        .is_none()
+        .then(|| remote_branch(known, branch))
+        .flatten()
+    {
+        // Git sets the new branch to track a remote-tracking start point.
+        return Ok(WorktreeMode::New {
+            branch: branch.to_owned(),
+            base: remote,
+        });
+    }
+    Ok(WorktreeMode::New {
+        branch: branch.to_owned(),
+        base: base.unwrap_or("HEAD").to_owned(),
+    })
+}
+
 /// Whether `git check-ref-format --branch` accepts `name`.
-fn valid_branch_name(name: &str) -> bool {
+pub(crate) fn valid_branch_name(name: &str) -> bool {
     Command::new("git")
         .args(["check-ref-format", "--branch", name])
         .output()
@@ -619,7 +642,7 @@ fn valid_branch_name(name: &str) -> bool {
 }
 
 /// The remote-tracking branch for `branch`, `origin/…` first.
-fn remote_branch(known: &[gm_schema::BranchEntry], branch: &str) -> Option<String> {
+pub(crate) fn remote_branch(known: &[gm_schema::BranchEntry], branch: &str) -> Option<String> {
     let suffix = format!("/{branch}");
     let mut found: Vec<&str> = known
         .iter()
@@ -635,7 +658,7 @@ fn remote_branch(known: &[gm_schema::BranchEntry], branch: &str) -> Option<Strin
 
 /// Shares the `.worktreeinclude` paths of `main` into `target` and reports each on `err`. A
 /// problem here never fails the command: the worktree exists.
-fn share(
+pub(crate) fn share(
     git: &dyn GitPort,
     main: &Path,
     target: &Path,

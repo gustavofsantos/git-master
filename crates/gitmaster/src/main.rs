@@ -2,9 +2,11 @@
 //! working directory. `gitmaster --version` prints the version. `gitmaster workflow …` runs one
 //! of the one-shot workflow commands and exits; it opens no window and keeps no process.
 //! `gitmaster mcp` is the MCP server over stdio (D135). `gitmaster thread …` (the hook and the
-//! redaction test), `gitmaster harness list` and `gitmaster worktree …` (list, find and create
-//! worktrees from the shell) are one-shot too (docs/reference/cli.md). To open a folder named
-//! `thread`, `harness`, `worktree` or `mcp`, write `./thread`, `./harness`, `./worktree` or `./mcp`.
+//! redaction test), `gitmaster harness list`, `gitmaster worktree …` (list, find and create
+//! worktrees from the shell) and `gitmaster workspace …` (create, list and remove workspaces, each
+//! a folder of worktrees of your clones) are one-shot too (docs/reference/cli.md). To open a folder
+//! named `thread`, `harness`, `worktree`, `workspace` or `mcp`, write `./thread`, `./harness`,
+//! `./worktree`, `./workspace` or `./mcp`.
 
 mod shell_env;
 
@@ -105,7 +107,8 @@ fn main() {
     gm_ui::run(engine, command_log, watch, start, features);
 }
 
-/// Runs the one-shot subcommand `name` that lives in `gm-core` (`thread`, `harness`, `worktree`)
+/// Runs the one-shot subcommand `name` that lives in `gm-core` (`thread`, `harness`, `worktree`,
+/// `workspace`)
 /// and returns its exit status, or `None` when `name` is not one of them.
 fn engine_command(name: &str, words: &[String]) -> Option<i32> {
     let mut out = std::io::stdout().lock();
@@ -121,6 +124,12 @@ fn engine_command(name: &str, words: &[String]) -> Option<i32> {
             words, &mut out, &mut err,
         )),
         "worktree" => Some(gm_core::worktree_cli::command(
+            words,
+            &mut std::io::stdin().lock(),
+            &mut out,
+            &mut err,
+        )),
+        "workspace" => Some(gm_core::workspace_cli::command(
             words,
             &mut std::io::stdin().lock(),
             &mut out,
