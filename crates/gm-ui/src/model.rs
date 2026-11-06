@@ -1081,7 +1081,7 @@ impl Model {
                 None
             }
             Event::ThreadRead { id, detail } => {
-                self.threads.read(id, detail);
+                self.threads.read(id, *detail);
                 None
             }
             // The provenance panel keeps the answer to its read in flight; any other is dropped (P4).
@@ -3530,6 +3530,7 @@ mod thread_copy_tests {
             entry_count: 0,
             edit_count: 0,
             redaction_count: 0,
+            workspace: None,
         }
     }
 

@@ -192,6 +192,11 @@ pub struct ThreadSummary {
     pub entry_count: u32,
     pub edit_count: u32,
     pub redaction_count: u32,
+    /// The workspace folder the thread belongs to, when it is a thread of another repository's
+    /// workspace that the listing found through a member commit (D180 (2)). `None` for the
+    /// threads of the open repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// One stored entry of a thread (the `entry` table).

@@ -168,13 +168,10 @@ impl StatusView {
         }
     }
 
-    /// Reads the threads linked to commit `oid`, for the commit panel (H3). A repository
-    /// known to hold no threads asks for none.
+    /// Reads the threads linked to commit `oid`, for the commit panel (H3). It asks even when
+    /// this repository holds no thread: a member of a workspace finds the workspace's threads
+    /// through its pointer file (D180 (2)), and a member's own store is usually empty.
     pub(crate) fn request_commit_threads(&mut self, oid: &str) {
-        if self.model.threads.total() == Some(0) {
-            self.model.commit_threads.clear();
-            return;
-        }
         let id = self
             .engine
             .dispatch(Actor::Human, commit_threads::plan(oid));
@@ -2101,8 +2098,9 @@ const PATH_CHIP_WIDTH: f32 = 260.;
 /// The longest label chip on a row or header, in pixels; a longer name is cut.
 const LABEL_CHIP_WIDTH: f32 = 140.;
 
-/// The commit links of the details panel: the commit each one names, who made the link,
-/// and Unlink for a link the user made. Nothing else is said of a commit.
+/// The commit links of the details panel: the commit each one names, the member of the workspace
+/// it was made in (D180), who made the link, and Unlink for a link the user made. Nothing else is
+/// said of a commit.
 fn commit_rows(links: &[ThreadLink], uid: &str, cx: &Context<StatusView>) -> Div {
     let commits: Vec<&ThreadLink> = links
         .iter()
@@ -2121,20 +2119,24 @@ fn commit_rows(links: &[ThreadLink], uid: &str, cx: &Context<StatusView>) -> Div
                     LinkOrigin::Observed => "created during this thread",
                     LinkOrigin::Human => "linked by you",
                 };
-                let row = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .min_w(px(0.))
-                    .child(chip(hash))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .text_color(theme::muted())
-                            .child(who),
-                    );
+                let row =
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .min_w(px(0.))
+                        .child(chip(hash))
+                        .children(link.member.clone().map(|member| {
+                            div().flex_none().text_color(theme::muted()).child(member)
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_color(theme::muted())
+                                .child(who),
+                        );
                 match link.origin {
                     LinkOrigin::Observed => row,
                     LinkOrigin::Human => row.child(unlink_button(

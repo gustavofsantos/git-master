@@ -3,10 +3,39 @@
 //! selected. Only the answer to the read in flight is kept, so a commit selected
 //! after another never shows the other's threads.
 
+use std::path::Path;
+
 use gm_schema::{CommandKind, OperationId, ThreadFilter, ThreadSummary};
 
 /// The most threads a commit's section lists. A full page says that more may follow.
 pub const LIMIT: u32 = 10;
+
+/// What selecting a row of the section does (D180 (2)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// Opens the thread on the Threads page.
+    Thread(String),
+    /// Opens the workspace folder in a window of its own.
+    Workspace(String),
+}
+
+/// The target of a row: the workspace a thread of another repository belongs to, else the thread.
+#[must_use]
+pub fn target(thread: &ThreadSummary) -> Target {
+    match &thread.workspace {
+        Some(folder) => Target::Workspace(folder.clone()),
+        None => Target::Thread(thread.uid.clone()),
+    }
+}
+
+/// The words a workspace thread's row shows after its agent: `in workspace <folder name>`.
+/// `None` for a thread of the open repository.
+#[must_use]
+pub fn workspace_caption(thread: &ThreadSummary) -> Option<String> {
+    let folder = thread.workspace.as_deref()?;
+    let name = Path::new(folder).file_name()?.to_string_lossy();
+    Some(format!("in workspace {name}"))
+}
 
 /// The read of the threads linked to commit `oid`: the full id the panel shows.
 #[must_use]
@@ -39,11 +68,6 @@ impl CommitThreads {
         }
         self.oid = Some(oid.to_owned());
         self.pending = Some(id);
-    }
-
-    /// Forgets the commit and its threads, when the panel asks about none or the repository changes.
-    pub fn clear(&mut self) {
-        *self = Self::default();
     }
 
     /// The commit the threads are asked about, if any.
@@ -115,7 +139,25 @@ mod tests {
             entry_count: 0,
             edit_count: 0,
             redaction_count: 0,
+            workspace: None,
         }
+    }
+
+    #[test]
+    fn a_workspace_thread_names_its_folder_and_opens_the_workspace() {
+        let mut thread = summary("t1");
+        assert_eq!(workspace_caption(&thread), None);
+        assert_eq!(target(&thread), Target::Thread("t1".to_owned()));
+        thread.workspace = Some("/home/me/workspaces/checkout-v2".to_owned());
+        assert_eq!(
+            workspace_caption(&thread).as_deref(),
+            Some("in workspace checkout-v2")
+        );
+        assert_eq!(
+            target(&thread),
+            Target::Workspace("/home/me/workspaces/checkout-v2".to_owned()),
+            "selecting it opens the workspace, not the thread here"
+        );
     }
 
     #[test]
@@ -185,13 +227,11 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_read_leaves_nothing_in_flight_and_clearing_forgets_the_commit() {
+    fn a_failed_read_leaves_nothing_in_flight() {
         let mut threads = CommitThreads::default();
         threads.request("aaa", OperationId(3));
         threads.ended(OperationId(3));
         assert!(!threads.owns(OperationId(3)));
-        threads.clear();
-        assert_eq!(threads.oid(), None);
         assert!(threads.threads_of("aaa").is_empty());
     }
 }

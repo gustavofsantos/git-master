@@ -595,7 +595,7 @@ fn read_detail(engine: &mut Engine, uid: &str) -> ThreadDetail {
     events
         .iter()
         .find_map(|event| match event {
-            Event::ThreadRead { detail, .. } => Some(detail.clone()),
+            Event::ThreadRead { detail, .. } => Some((**detail).clone()),
             _ => None,
         })
         .expect("a thread read")

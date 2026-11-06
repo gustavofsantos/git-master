@@ -1284,10 +1284,10 @@ pub enum Event {
         #[serde(default)]
         diagnosis: Option<Vec<(String, u32)>>,
     },
-    /// Answers `ReadThread`.
+    /// Answers `ReadThread`. Boxed: a thread's detail is the largest payload of the enum.
     ThreadRead {
         id: OperationId,
-        detail: ThreadDetail,
+        detail: Box<ThreadDetail>,
     },
     /// Answers `ReadProvenance`: the commits, threads and evidence behind the lines.
     ThreadProvenance {
@@ -1532,6 +1532,7 @@ mod tests {
             entry_count: 3,
             edit_count: 1,
             redaction_count: 0,
+            workspace: None,
         }
     }
 

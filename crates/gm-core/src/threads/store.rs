@@ -416,6 +416,15 @@ const FILTER_SQL: &str = " AND (:harness IS NULL OR t.harness = :harness)
         WHERE ((r.from_thread = t.id AND r.to_thread = o.id) OR (r.to_thread = t.id AND r.from_thread = o.id))
         AND (:related_kind IS NULL OR r.kind = :related_kind)))";
 
+/// The commit match of `FILTER_SQL`'s commit clause, on a link with a member: the same rule, kept
+/// in step with it. Used with `ThreadFilter::commit` set, so `:commit` is bound.
+const MEMBER_COMMIT_SQL: &str = " AND EXISTS (SELECT 1 FROM thread_link m WHERE m.thread_id = t.id
+    AND m.kind = 'commit' AND m.member IS NOT NULL AND (
+        lower(m.ref) = lower(:commit)
+        OR (length(m.ref) >= 7 AND m.ref NOT GLOB '*[^0-9a-fA-F]*'
+            AND substr(lower(:commit), 1, length(m.ref)) = lower(m.ref))
+        OR (length(:commit) >= 7 AND substr(lower(m.ref), 1, length(:commit)) = lower(:commit))))";
+
 /// The entry filters as SQL (D147), for the statements of a search only: `e` is the entry the
 /// hit comes from. They are bound with the thread filter by `query_candidates`.
 const ENTRY_FILTER_SQL: &str = " AND (:role IS NULL OR e.kind = :role)
@@ -649,6 +658,28 @@ impl ThreadStore {
         })
     }
 
+    /// A read-only handle on the store of another repository's workspace (D180 (2)). `None` when
+    /// the file is missing or was written by another schema: such a store is skipped, never
+    /// created or migrated. Nothing is written.
+    pub fn open_workspace_read_only(git_common_dir: &Path) -> Result<Option<Self>, StoreError> {
+        let path = git_common_dir.join("gitmaster").join("threads.db");
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let latest = i64::try_from(MIGRATIONS.len()).unwrap_or(i64::MAX);
+        if version != latest {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            conn,
+            entry_limit: DEFAULT_ENTRY_LIMIT,
+            fallback_below: FALLBACK_BELOW,
+        }))
+    }
+
     /// A store that lives only in memory (tests).
     pub fn open_memory() -> Result<Self, StoreError> {
         let mut conn = Connection::open_in_memory()?;
@@ -730,13 +761,40 @@ impl ThreadStore {
         before: Option<(i64, String)>,
         limit: u32,
     ) -> Result<Vec<ThreadSummary>, StoreError> {
+        self.list_rows(filter, before, limit, "")
+    }
+
+    /// The threads linked to `commit` through a member of this workspace (D180 (2)): a commit
+    /// link with a member, whose commit matches as `list_threads` matches a commit filter. The
+    /// first page only; the caller decides what to do with the rest.
+    pub fn list_member_commit_threads(
+        &self,
+        commit: &str,
+        limit: u32,
+    ) -> Result<Vec<ThreadSummary>, StoreError> {
+        let filter = ThreadFilter {
+            commit: Some(commit.to_owned()),
+            ..ThreadFilter::default()
+        };
+        self.list_rows(&filter, None, limit, MEMBER_COMMIT_SQL)
+    }
+
+    /// The listing behind `list_threads`, with `extra` (a condition that starts with `AND`) added
+    /// to the filter.
+    fn list_rows(
+        &self,
+        filter: &ThreadFilter,
+        before: Option<(i64, String)>,
+        limit: u32,
+        extra: &str,
+    ) -> Result<Vec<ThreadSummary>, StoreError> {
         let (before_at, before_uid) = match before {
             Some((at, uid)) => (Some(at), Some(uid)),
             None => (None, None),
         };
         let limit = i64::from(limit);
         let sql = format!(
-            "{SUMMARY_SQL} WHERE 1 = 1{FILTER_SQL}
+            "{SUMMARY_SQL} WHERE 1 = 1{FILTER_SQL}{extra}
              AND (:before_at IS NULL OR (t.last_event_at, t.uid) < (:before_at, :before_uid))
              ORDER BY t.last_event_at DESC, t.uid DESC LIMIT :limit"
         );
@@ -2394,6 +2452,7 @@ fn summary_row(row: &Row<'_>) -> rusqlite::Result<(i64, ThreadSummary)> {
         entry_count: row.get(14)?,
         edit_count: row.get(15)?,
         redaction_count: row.get(16)?,
+        workspace: None,
     };
     Ok((row.get(0)?, summary))
 }
@@ -6425,5 +6484,43 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
         assert_eq!(rel, ["src/x.rs", "src/y.rs"]);
+    }
+
+    #[test]
+    fn a_workspace_store_opens_read_only_only_when_it_exists_with_this_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let common = dir.path().join(".git");
+        std::fs::create_dir(&common).expect("common dir");
+        // Missing: nothing is created.
+        assert!(
+            ThreadStore::open_workspace_read_only(&common)
+                .expect("no error")
+                .is_none()
+        );
+        assert!(!common.join("gitmaster").exists(), "no folder is created");
+
+        drop(ThreadStore::open(&common).expect("create the store"));
+        assert!(
+            ThreadStore::open_workspace_read_only(&common)
+                .expect("no error")
+                .is_some()
+        );
+
+        // Another schema: skipped, and the file is not migrated.
+        let path = common.join("gitmaster").join("threads.db");
+        let conn = Connection::open(&path).expect("open");
+        conn.pragma_update(None, "user_version", 99)
+            .expect("bump the version");
+        drop(conn);
+        assert!(
+            ThreadStore::open_workspace_read_only(&common)
+                .expect("no error")
+                .is_none()
+        );
+        let conn = Connection::open(&path).expect("open");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, 99, "a foreign schema is left as it is");
     }
 }

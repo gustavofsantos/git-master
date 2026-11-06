@@ -18,7 +18,7 @@ use serde::Serialize;
 use crate::git::SubprocessGit;
 use crate::worktree_cli::{self, Args, Env, Failure};
 use crate::worktree_include::Mode;
-use crate::{GitPort, branch};
+use crate::{GitPort, branch, workspace_pointer};
 
 const USAGE: &str = "usage: gitmaster workspace create <name> [--root <dir>] [--ephemeral] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
        gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none]
@@ -550,6 +550,27 @@ fn check_commit(ctx: &Ctx, main: &Path, rev: &str) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Lists the workspace `ws` in the pointer file of the repository whose main checkout is `main`
+/// (D180 (2)). The file lives in the common directory, so no working tree is written.
+fn pointer_add(ctx: &Ctx, main: &Path, ws: &Path) -> std::io::Result<()> {
+    let common = ctx
+        .git
+        .common_dir(main)
+        .map_err(|error| std::io::Error::other(error.0))?;
+    // Canonical, as `remove` names it and as the lookup compares it.
+    let key = std::fs::canonicalize(ws).unwrap_or_else(|_| ws.to_path_buf());
+    workspace_pointer::add(&common, &key)
+}
+
+/// Takes the workspace `ws` out of the pointer file of the repository of `main` (D180 (2)).
+fn pointer_remove(ctx: &Ctx, main: &Path, ws: &Path) -> std::io::Result<()> {
+    let common = ctx
+        .git
+        .common_dir(main)
+        .map_err(|error| std::io::Error::other(error.0))?;
+    workspace_pointer::remove(&common, ws)
+}
+
 /// Makes the member of `plan` in the workspace at `ws`: its worktree, the registration of the
 /// worktree as a submodule and the commit of the workspace's repository (D177 (2) and (3)). Reports
 /// it on `err`. Returns the member's folder. When the commit fails the member stays added and
@@ -579,6 +600,15 @@ fn add_member(ctx: &Ctx, ws: &Path, plan: &Plan, err: &mut dyn Write) -> Result<
             .git
             .remove_worktree(&plan.root, &dir.to_string_lossy(), 1);
         return Err(error);
+    }
+    // The member's repository lists the workspace from now on (D180 (2)). A failure does not undo
+    // the member, which is registered already; the report says what is missing.
+    if let Err(error) = pointer_add(ctx, &plan.main, ws) {
+        writeln!(
+            err,
+            "gitmaster: {}: the workspace is not recorded in its repository: {error}",
+            plan.main.display()
+        )?;
     }
 
     let message = format!("Add {member} on {branch}");
@@ -987,6 +1017,8 @@ fn remove(
     }
     let force = args.switch("force");
     let members = members(ctx, &ws)?;
+    // Canonical, as the pointer files hold it (D180 (2)).
+    let key = std::fs::canonicalize(&ws).unwrap_or_else(|_| ws.clone());
     for member in &members {
         if ws.join(&member.path).exists() && !Path::new(&member.url).is_dir() {
             return Err(Failure::Run(format!(
@@ -1059,7 +1091,24 @@ fn remove(
         )));
     }
 
-    for member in &members {
+    remove_members(ctx, &ws, &members, &key, force, err)?;
+    std::fs::remove_dir_all(&ws)?;
+    writeln!(out, "{}", ws.display())?;
+    writeln!(err, "removed workspace {name} (the branches are kept)")?;
+    Ok(())
+}
+
+/// Removes the worktree of each member of the workspace at `ws` from its repository, and takes the
+/// workspace `key` (canonical) out of each repository's pointer file (D180 (2)).
+fn remove_members(
+    ctx: &Ctx,
+    ws: &Path,
+    members: &[Member],
+    key: &Path,
+    force: bool,
+    err: &mut dyn Write,
+) -> Result<(), Failure> {
+    for member in members {
         let dir = ws.join(&member.path);
         let repo = Path::new(&member.url);
         if dir.exists() {
@@ -1069,10 +1118,14 @@ fn remove(
         } else if let Err(error) = ctx.sub.text(repo, &["worktree", "prune"]) {
             writeln!(err, "gitmaster: {}: {}", member.url, detail(error))?;
         }
+        if let Err(error) = pointer_remove(ctx, repo, key) {
+            writeln!(
+                err,
+                "gitmaster: {}: the workspace is still recorded there: {error}",
+                member.url
+            )?;
+        }
     }
-    std::fs::remove_dir_all(&ws)?;
-    writeln!(out, "{}", ws.display())?;
-    writeln!(err, "removed workspace {name} (the branches are kept)")?;
     Ok(())
 }
 

@@ -1053,3 +1053,55 @@ fn add_and_status_take_root_for_a_workspace_named_under_it() {
     assert_eq!(code, 0, "{err}");
     assert!(out.starts_with("service-a\tfeat/x\tclean\t"), "{out}");
 }
+
+/// The pointer file of the member repository `repo`: `gitmaster/workspaces` in its Git directory.
+fn pointer_file(repo: &Path) -> PathBuf {
+    repo.join(".git").join("gitmaster").join("workspaces")
+}
+
+#[test]
+fn add_lists_the_workspace_in_the_member_repository_and_writes_no_file_in_its_tree() {
+    let s = Scratch::new();
+    let repo = s.repo("service-a", &["feat/x"]);
+    let ws = s.create("w");
+    s.add(&ws, &repo, "feat/x");
+
+    let text = std::fs::read_to_string(pointer_file(&repo)).unwrap();
+    assert_eq!(text, format!("{}\n", ws.display()));
+    assert_eq!(git_in(&repo, &["status", "--porcelain"]), "");
+    assert!(
+        !repo.join("gitmaster").exists(),
+        "the working tree is untouched"
+    );
+}
+
+#[test]
+fn two_workspaces_sharing_a_repository_are_two_lines_and_remove_drops_only_its_own() {
+    let s = Scratch::new();
+    let repo = s.repo("service-a", &["feat/x", "feat/y"]);
+    let root = s.root();
+    let one = s.create("one");
+    let two = s.create("two");
+    s.add(&one, &repo, "feat/x");
+    s.add(&two, &repo, "feat/y");
+    assert_eq!(
+        std::fs::read_to_string(pointer_file(&repo)).unwrap(),
+        format!("{}\n{}\n", one.display(), two.display())
+    );
+
+    let (code, _, err) = s.run(&["remove", "one", "--root", root.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(pointer_file(&repo)).unwrap(),
+        format!("{}\n", two.display()),
+        "the other workspace keeps its line"
+    );
+
+    let (code, _, err) = s.run(&["remove", "two", "--root", root.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !pointer_file(&repo).exists(),
+        "the last removal deletes the file"
+    );
+    assert!(!repo.join("gitmaster").exists());
+}

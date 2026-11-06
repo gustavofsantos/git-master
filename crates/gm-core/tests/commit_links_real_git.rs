@@ -187,7 +187,7 @@ impl Repo {
         events
             .iter()
             .find_map(|event| match event {
-                Event::ThreadRead { detail, .. } => Some(detail.clone()),
+                Event::ThreadRead { detail, .. } => Some((**detail).clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no thread read: {events:?}"))

@@ -18,6 +18,7 @@ use gpui::{
 
 use crate::action_registry::{Action, Args, Context as ActionContext};
 use crate::avatar::{self, Avatars};
+use crate::commit_threads;
 use crate::history_graph::{self, Drawing, GraphRow, StackMarks, Tint};
 use crate::history_scope;
 use crate::icon::{self, Icon};
@@ -1110,7 +1111,8 @@ impl StatusView {
             .iter()
             .enumerate()
             .map(|(index, thread)| {
-                let uid = thread.uid.clone();
+                let target = commit_threads::target(thread);
+                let caption = commit_threads::workspace_caption(thread);
                 div()
                     .id(("commit-thread", index))
                     .cursor_pointer()
@@ -1120,8 +1122,13 @@ impl StatusView {
                     .min_w(px(0.))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                            this.open_thread_from_commit(&uid, window, cx);
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| match &target {
+                            commit_threads::Target::Thread(uid) => {
+                                this.open_thread_from_commit(uid, window, cx);
+                            }
+                            commit_threads::Target::Workspace(folder) => {
+                                this.open_worktree(folder, cx);
+                            }
                         }),
                     )
                     .child(
@@ -1140,7 +1147,14 @@ impl StatusView {
                                     .text_ellipsis()
                                     .child(threads::title(thread)),
                             )
-                            .child(chip(thread.harness.clone())),
+                            .child(chip(thread.harness.clone()))
+                            .children(caption.map(|caption| {
+                                div()
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .text_color(theme::muted())
+                                    .child(caption)
+                            })),
                     )
                     .child(
                         div()

@@ -497,6 +497,7 @@ mod tests {
             entry_count: 0,
             edit_count: 0,
             redaction_count: 0,
+            workspace: None,
         }
     }
 

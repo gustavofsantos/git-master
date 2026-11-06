@@ -1080,7 +1080,7 @@ fn read_thread(
         })?
         .into_iter()
         .find_map(|event| match event {
-            Event::ThreadRead { detail, .. } => Some(detail),
+            Event::ThreadRead { detail, .. } => Some(*detail),
             _ => None,
         })
         .ok_or_else(|| "the read returned no answer".to_owned())

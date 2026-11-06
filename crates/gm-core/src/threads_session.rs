@@ -12,6 +12,7 @@ use gm_schema::threads::{
     AttachKind, CutBound, EditChange, EditState, EntryKind, Evidence, LabelDetail, LinkKind,
     LinkOrigin, ProvenanceCommit, ProvenanceCut, ProvenanceEdit, ProvenanceLabel, ProvenanceLink,
     ProvenanceResult, ProvenanceThread, RelationDirection, ThreadDetail, ThreadEdit, ThreadFilter,
+    ThreadSummary,
 };
 use gm_schema::{Actor, CommandKind, Event, OperationId};
 
@@ -23,6 +24,7 @@ use crate::threads::provenance::{
 use crate::threads::redact::Redactor;
 use crate::threads::resolve::{self, FOLLOW_LIMIT, RESOLVE_LIMIT};
 use crate::threads::store::{MetaUpdate, SearchRequest, StoreError, ThreadStore};
+use crate::workspace_pointer;
 use crate::{BlameRead, GitPort};
 
 /// Commit names one Git process reads when a store opens (D145).
@@ -156,6 +158,30 @@ pub(crate) fn is_threads_command(kind: &CommandKind) -> bool {
     )
 }
 
+/// The threads linked to `commit` through a member in each workspace listed in this repository's
+/// pointer file (D180 (2)), each marked with its workspace folder. A workspace that is missing,
+/// unreadable or written by another schema is skipped without an error.
+fn workspace_threads(ctx: &Context<'_>, commit: &str, limit: u32) -> Vec<ThreadSummary> {
+    let Ok(common) = ctx.git.common_dir(ctx.root) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for workspace in workspace_pointer::read(&common) {
+        let Ok(Some(store)) = ThreadStore::open_workspace_read_only(&workspace.join(".git")) else {
+            continue;
+        };
+        let Ok(threads) = store.list_member_commit_threads(commit, limit) else {
+            continue;
+        };
+        let folder = workspace.to_string_lossy().into_owned();
+        found.extend(threads.into_iter().map(|mut thread| {
+            thread.workspace = Some(folder.clone());
+            thread
+        }));
+    }
+    found
+}
+
 /// Runs one thread command against `store`. Writes return `ThreadsChanged` after
 /// their own answer; the caller has checked the actor, and `actor` is the origin of the rows
 /// a record command writes.
@@ -184,9 +210,18 @@ pub(crate) fn run(
             limit,
         } => {
             let before = cursor(*before_at, before_uid.as_deref())?;
-            let threads = store
-                .list_threads(filter, before, page(*limit)?)
+            let size = page(*limit)?;
+            let mut threads = store
+                .list_threads(filter, before, size)
                 .map_err(|e| e.to_string())?;
+            // A commit's threads also come from the workspaces this repository is a member of, on
+            // the first page (D180 (2)). The page keeps its size: a workspace thread that does not
+            // fit on the first page is not listed, and later pages hold only this store's threads.
+            if let (Some(commit), None) = (&filter.commit, before_at) {
+                threads.extend(workspace_threads(ctx, commit, size));
+                threads.sort_by(|a, b| (b.last_event_at, &b.uid).cmp(&(a.last_event_at, &a.uid)));
+                threads.truncate(usize::try_from(size).unwrap_or(usize::MAX));
+            }
             let total = store.total_threads().map_err(|e| e.to_string())?;
             Ok(vec![Event::ThreadsListed { id, threads, total }])
         }
@@ -229,7 +264,10 @@ pub(crate) fn run(
                 .read_thread(uid, *from_seq, page(*limit)?)
                 .map_err(|e| named(e, THREAD_MISSING))?;
             resolve_thread(store, ctx, &mut detail)?;
-            Ok(vec![Event::ThreadRead { id, detail }])
+            Ok(vec![Event::ThreadRead {
+                id,
+                detail: Box::new(detail),
+            }])
         }
         CommandKind::ReadThreadEdit { id: edit_id } => {
             let edit = store
@@ -1461,7 +1499,7 @@ mod tests {
             },
         );
         match answer(&events) {
-            Event::ThreadRead { detail, .. } => detail.clone(),
+            Event::ThreadRead { detail, .. } => (**detail).clone(),
             other => panic!("expected a thread, got {other:?}"),
         }
     }
