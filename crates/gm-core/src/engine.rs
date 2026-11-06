@@ -9,9 +9,10 @@ use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
     ConflictSite, DirListing, Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED,
-    MergedBranch, OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackPlan,
-    RestackResolution, ReviewChange, ReviewComment, ReviewStatus, STASH_LIST_CHANGED,
-    SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
+    MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE, RestackBlock,
+    RestackPlan, RestackResolution, ReviewChange, ReviewComment, ReviewStatus, STASH_LIST_CHANGED,
+    SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorkspaceKind, WorktreeEntry,
+    WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -64,6 +65,7 @@ use crate::syntax;
 use crate::threads::members;
 use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSession};
 use crate::workflow_session::{self, Effected};
+use crate::workspace::{CreateRequest, Workspaces};
 use crate::worktree;
 
 /// One state change of one operation. The log is audit, and the base for undo
@@ -143,6 +145,11 @@ pub struct Engine {
     workflow_user_dir: Option<PathBuf>,
     /// The folder a deleted workflow file is moved to; see `delete_workflow_file`.
     workflow_trash_dir: Option<PathBuf>,
+    /// The home folder a workspace root may start with `~` (D174 (4)), from `HOME` at start.
+    workspace_home: Option<PathBuf>,
+    /// The global Git configuration the workspace commands' Git calls read; `None` reads the
+    /// process's own. See `set_workspace_global_config`.
+    workspace_config: Option<PathBuf>,
     /// How script runs reach the engine thread; see `script_session`. Set by the runner.
     script_link: Option<ScriptLink>,
     /// The script runs of the open repository; see `script_session`.
@@ -346,6 +353,10 @@ impl Engine {
             script_waiting: BTreeMap::new(),
             script_jobs: Vec::new(),
             workflow_user_dir: loader::default_user_dir(),
+            workspace_home: std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(PathBuf::from),
+            workspace_config: None,
             workflow_trash_dir: crate::paths::data_dir().map(|data| data.join("workflow-trash")),
             script_link: None,
             script: None,
@@ -376,6 +387,12 @@ impl Engine {
     /// deletes. The default is `workflow-trash` in the app's data directory.
     pub fn set_workflow_trash_dir(&mut self, dir: Option<PathBuf>) {
         self.workflow_trash_dir = dir;
+    }
+
+    /// Sets the global Git configuration the workspace commands' Git calls read (D177 (5)). `None`
+    /// reads the process's own. Tests give the commits of a workspace an identity this way.
+    pub fn set_workspace_global_config(&mut self, path: Option<PathBuf>) {
+        self.workspace_config = path;
     }
 
     pub fn log(&self) -> &[LogEntry] {
@@ -2451,6 +2468,7 @@ impl Engine {
             | CommandKind::DeleteWorkflowFile { .. } => self.workflow_command(id, actor, kind),
             _ if threads_session::is_threads_command(kind) => self.threads_command(id, actor, kind),
             _ if is_review_command(kind) => self.review_command(id, actor, kind),
+            _ if is_workspace_command(kind) => self.workspace_command(id, actor, kind),
             // The worktree and branch commands that `execute` does not list above.
             _ => self.manage_worktree(id, actor, kind),
         }
@@ -3983,6 +4001,181 @@ impl Engine {
         }])
     }
 
+    /// The workspace commands (D183). The reads answer with the listing, the plan and the removal
+    /// inspection, and write nothing. The writes are human only and refresh the open repository's
+    /// status, which may be one of the members. The window's own workspace is the one that cannot
+    /// be removed from it: the open repository stands for the directory the command runs in.
+    fn workspace_command(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        // Relative roots and the configured root are read from the open repository, if any.
+        let here = self.root.clone().unwrap_or_else(|| PathBuf::from("."));
+        let ws = Workspaces::new(self.git.as_ref(), self.workspace_config.clone());
+        match kind {
+            CommandKind::ListWorkspaces { root } => {
+                let root = ws
+                    .root(root.as_deref(), &here, self.workspace_home.as_deref())
+                    .map_err(|e| e.to_string())?;
+                let workspaces = ws.list(&root).map_err(|e| e.to_string())?;
+                Ok(vec![Event::WorkspacesListed {
+                    id,
+                    workspaces,
+                    root: root.display().to_string(),
+                }])
+            }
+            CommandKind::PlanWorkspace {
+                name,
+                kind,
+                members,
+                base,
+                root,
+            } => {
+                let request = self.workspace_request(
+                    &ws,
+                    &here,
+                    (name, *kind, members, base.as_deref(), root.as_deref()),
+                )?;
+                let plan = ws.plan(&request).map_err(|e| e.to_string())?;
+                Ok(vec![Event::WorkspacePlanned {
+                    id,
+                    path: plan.path.display().to_string(),
+                    members: plan.members,
+                    problems: plan.problems,
+                }])
+            }
+            CommandKind::CreateWorkspace {
+                name,
+                kind,
+                members,
+                base,
+                root,
+            } => {
+                only_a_human(actor, "create a workspace")?;
+                let request = self.workspace_request(
+                    &ws,
+                    &here,
+                    (name, *kind, members, base.as_deref(), root.as_deref()),
+                )?;
+                self.create_workspace(id, &ws, &request)
+            }
+            CommandKind::InspectWorkspaceRemoval { path } => {
+                let root = self.open_root()?;
+                let inspection = ws
+                    .inspect_removal(Path::new(path), &root)
+                    .map_err(|e| e.to_string())?;
+                Ok(vec![Event::WorkspaceRemovalInspected {
+                    id,
+                    path: path.clone(),
+                    blockers: inspection.blockers,
+                }])
+            }
+            CommandKind::RemoveWorkspace { path, force } => {
+                only_a_human(actor, "remove a workspace")?;
+                let root = self.open_root()?;
+                ws.remove(Path::new(path), &root, *force)
+                    .map_err(|e| e.to_string())?;
+                let mut events = self.refreshed(id)?;
+                events.push(Event::WorkspaceRemoved {
+                    id,
+                    path: path.clone(),
+                });
+                Ok(events)
+            }
+            CommandKind::CheckOutMemberBranch { path } => {
+                only_a_human(actor, "check out a member's branch")?;
+                let root = self.open_root()?;
+                ws.check_out_member_branch(&root, path)
+                    .map_err(|e| e.to_string())?;
+                self.reload_status(id, &root)
+            }
+            _ => Err("not a workspace command".to_owned()),
+        }
+    }
+
+    /// Creates the workspace `request` plans (D183). It refuses a plan with problems, or with no
+    /// member, before anything is written. A member that failed is reported with the workspace,
+    /// which exists either way.
+    fn create_workspace(
+        &self,
+        id: OperationId,
+        ws: &Workspaces,
+        request: &CreateRequest,
+    ) -> Result<Vec<Event>, String> {
+        let plan = ws.plan(request).map_err(|e| e.to_string())?;
+        if !plan.problems.is_empty() {
+            let problems: Vec<String> = plan
+                .problems
+                .iter()
+                .map(|problem| problem.message.clone())
+                .collect();
+            return Err(format!("no workspace was created: {}", problems.join("; ")));
+        }
+        if plan.members.is_empty() {
+            return Err("no repository would be added; no workspace was created".to_owned());
+        }
+        let created = ws.create(plan).map_err(|e| e.to_string())?;
+        let path = created.path.display().to_string();
+        let failed: Vec<String> = created
+            .added
+            .iter()
+            .filter_map(|added| {
+                added
+                    .failure
+                    .as_ref()
+                    .map(|failure| format!("{}: {failure}", added.member))
+            })
+            .collect();
+        if !failed.is_empty() {
+            return Err(format!(
+                "the workspace {path} was created, but {}",
+                failed.join("; ")
+            ));
+        }
+        let mut events = self.refreshed(id)?;
+        events.push(Event::WorkspaceCreated { id, path });
+        Ok(events)
+    }
+
+    /// The request a planned or created workspace is checked with: the root (the flag, else the
+    /// configured one, else `~/workspaces`) and the members as they were asked.
+    fn workspace_request(
+        &self,
+        ws: &Workspaces,
+        here: &Path,
+        asked: (
+            &str,
+            WorkspaceKind,
+            &[MemberRequest],
+            Option<&str>,
+            Option<&str>,
+        ),
+    ) -> Result<CreateRequest, String> {
+        let (name, kind, members, base, root) = asked;
+        let root = ws
+            .root(root, here, self.workspace_home.as_deref())
+            .map_err(|e| e.to_string())?;
+        Ok(CreateRequest {
+            name: name.to_owned(),
+            root,
+            kind,
+            members: members.to_vec(),
+            base: base.map(str::to_owned),
+            existing: false,
+        })
+    }
+
+    /// The status and the worktree list of the open repository, when one is open: a workspace
+    /// command may have changed a worktree of it.
+    fn refreshed(&self, id: OperationId) -> Result<Vec<Event>, String> {
+        match self.root.clone() {
+            Some(root) => self.reloaded(id, &root),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Record Combination (D180(3)): the gitlinks of the members whose commit is new are
     /// committed alone, with the message the members list. Refusals leave nothing written.
     /// Human only; the answer is the same as a commit's: the new id and the status.
@@ -4970,6 +5163,9 @@ impl Engine {
                 | CommandKind::LoadReflog { .. }
                 | CommandKind::LoadSubmodule { .. }
                 | CommandKind::ListMembers
+                | CommandKind::ListWorkspaces { .. }
+                | CommandKind::PlanWorkspace { .. }
+                | CommandKind::InspectWorkspaceRemoval { .. }
                 | CommandKind::ListWorkflowRuns { .. }
                 | CommandKind::LoadWorkflowRun { .. }
                 | CommandKind::DryRunWorkflow { .. }
@@ -5140,6 +5336,19 @@ fn review_body(body: &str) -> Result<&str, String> {
     } else {
         Ok(body)
     }
+}
+
+/// Whether `kind` is a workspace command (D183).
+fn is_workspace_command(kind: &CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::ListWorkspaces { .. }
+            | CommandKind::PlanWorkspace { .. }
+            | CommandKind::CreateWorkspace { .. }
+            | CommandKind::InspectWorkspaceRemoval { .. }
+            | CommandKind::RemoveWorkspace { .. }
+            | CommandKind::CheckOutMemberBranch { .. }
+    )
 }
 
 /// Whether `kind` is one of the review comment commands (B4).

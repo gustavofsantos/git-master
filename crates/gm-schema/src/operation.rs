@@ -29,6 +29,9 @@ use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
     WorkflowRunStatus, WorkflowRunSummary,
 };
+use crate::workspace::{
+    MemberPlan, MemberRequest, RemovalBlocker, WorkspaceKind, WorkspaceProblem, WorkspaceRow,
+};
 
 /// The refusal of `DeleteMergedBranches` when the merged list no longer matches
 /// the one the human confirmed. The UI matches it to list the branches again.
@@ -157,6 +160,55 @@ pub enum CommandKind {
     /// is when the repository is not a workspace. Never recorded in the command
     /// log (D28).
     ListMembers,
+    /// Lists the workspaces under the root (D183): the folders `<root>/<name>` whose repository
+    /// marks them as workspaces. `root` is the flag's value, `None` for the configured or the
+    /// default root (D174 (4)). Answers `WorkspacesListed`. Never recorded in the command log (D28).
+    ListWorkspaces {
+        root: Option<String>,
+    },
+    /// Checks the workspace `name` of `kind` with `members` before anything is written (D178):
+    /// the branch of each member and any problem. `base` is the `--base` rev of the members'
+    /// new branches; `root` as for `ListWorkspaces`. Answers `WorkspacePlanned`. Writes nothing,
+    /// so it is not recorded in the command log (D28).
+    PlanWorkspace {
+        name: String,
+        kind: WorkspaceKind,
+        members: Vec<MemberRequest>,
+        base: Option<String>,
+        root: Option<String>,
+    },
+    /// Creates the workspace that `PlanWorkspace` plans: the folder, its repository, a member
+    /// per repository, and each member's commit. It plans again first and refuses with the
+    /// problems when there are any, so nothing is created. Human only, and recorded in the
+    /// command log (D28). Answers `WorkspaceCreated`.
+    CreateWorkspace {
+        name: String,
+        kind: WorkspaceKind,
+        members: Vec<MemberRequest>,
+        base: Option<String>,
+        root: Option<String>,
+    },
+    /// Reads what removing the workspace at `path` would refuse or lose (D183). The window's own
+    /// workspace is a blocker. Answers `WorkspaceRemovalInspected`. Never recorded in the command
+    /// log (D28).
+    InspectWorkspaceRemoval {
+        path: String,
+    },
+    /// Removes the workspace at `path`: each member's worktree from its repository, then the
+    /// folder. It inspects again first and refuses a blocker that cannot be overridden, and the
+    /// overridable ones unless `force`. The branches stay. Human only, and recorded in the
+    /// command log (D28). Answers `WorkspaceRemoved`.
+    RemoveWorkspace {
+        path: String,
+        force: bool,
+    },
+    /// Checks out the branch the workspace's `.gitmodules` names for the member at `path`,
+    /// relative to the open repository, which is the workspace (D183). Refused when the member
+    /// has no branch or when another worktree holds it. Human only, and recorded in the command
+    /// log (D28). Answers with the status, as a checkout does.
+    CheckOutMemberBranch {
+        path: String,
+    },
     /// Reads the file list of the worktree again (N1): `git ls-files` with the
     /// untracked files `.gitignore` does not hide, minus what a sparse checkout
     /// leaves out. The list the last read made keeps answering until the new one
@@ -959,6 +1011,36 @@ pub enum Event {
     MembersListed {
         id: OperationId,
         members: Vec<String>,
+    },
+    /// Answers `ListWorkspaces`: the workspaces under `root`, the folder that was listed.
+    WorkspacesListed {
+        id: OperationId,
+        workspaces: Vec<WorkspaceRow>,
+        root: String,
+    },
+    /// Answers `PlanWorkspace`: each member's branch plan and the problems that refuse the
+    /// workspace. `path` is the folder the workspace would have.
+    WorkspacePlanned {
+        id: OperationId,
+        path: String,
+        members: Vec<MemberPlan>,
+        problems: Vec<WorkspaceProblem>,
+    },
+    /// Answers `CreateWorkspace`: the workspace folder exists, with its members.
+    WorkspaceCreated {
+        id: OperationId,
+        path: String,
+    },
+    /// Answers `InspectWorkspaceRemoval`: what would stop the removal; none when it would work.
+    WorkspaceRemovalInspected {
+        id: OperationId,
+        path: String,
+        blockers: Vec<RemovalBlocker>,
+    },
+    /// Answers `RemoveWorkspace`: the workspace folder is gone; the branches are kept.
+    WorkspaceRemoved {
+        id: OperationId,
+        path: String,
     },
     /// Answers `SearchFiles`.
     FilesFound {

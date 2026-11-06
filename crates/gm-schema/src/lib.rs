@@ -19,6 +19,7 @@ mod submodule;
 mod syntax;
 pub mod threads;
 mod workflow;
+mod workspace;
 
 pub use conflict::{
     ConflictFileRead, ConflictOperation, ConflictSide, ConflictSite, HunkOrigin, RecordedResolution,
@@ -66,4 +67,8 @@ pub use threads::{
 pub use workflow::{
     WorkflowCallRecord, WorkflowDiagnostic, WorkflowDryCall, WorkflowDryRun, WorkflowEnd,
     WorkflowInfo, WorkflowInput, WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,
+};
+pub use workspace::{
+    BranchHow, MemberPlan, MemberRequest, RemovalBlocker, RemovalBlockerKind, WorkspaceKind,
+    WorkspaceProblem, WorkspaceRow,
 };

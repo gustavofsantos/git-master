@@ -1355,6 +1355,12 @@ impl Model {
             // The label and link answers are read by the Labels page (P4); the rows follow `ThreadsChanged`.
             | Event::ThreadRelationChanged { .. }
             | Event::ThreadsChanged
+            // The workspace answers are read by the workspace UI (D183), which is not built yet.
+            | Event::WorkspacesListed { .. }
+            | Event::WorkspacePlanned { .. }
+            | Event::WorkspaceCreated { .. }
+            | Event::WorkspaceRemovalInspected { .. }
+            | Event::WorkspaceRemoved { .. }
         // The members of a workspace are read by the agent's tools; the app keeps none (D181).
         | Event::MembersListed { .. } => None,
             // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
@@ -1764,6 +1770,11 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ReflogLoaded { id, .. }
         | Event::SubmoduleLoaded { id, .. }
         | Event::MembersListed { id, .. }
+        | Event::WorkspacesListed { id, .. }
+        | Event::WorkspacePlanned { id, .. }
+        | Event::WorkspaceCreated { id, .. }
+        | Event::WorkspaceRemovalInspected { id, .. }
+        | Event::WorkspaceRemoved { id, .. }
         | Event::HookSectionsListed { id, .. }
         | Event::HooksConverted { id, .. }
         | Event::WorkflowsListed { id, .. }
