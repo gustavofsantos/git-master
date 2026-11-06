@@ -210,6 +210,8 @@ impl StatusView {
 
     /// The page for the main area: the tree, then the viewer.
     pub(crate) fn code_page(&self, cx: &mut Context<Self>) -> Div {
+        // A click in the page takes the focus: GPUI runs the window's shortcuts only when the
+        // focus is inside the app, and the file list's focus is not drawn on this page.
         div()
             .flex_1()
             .min_w(px(0.))
@@ -217,6 +219,11 @@ impl StatusView {
             .flex()
             .flex_row()
             .bg(theme::editor())
+            .track_focus(&self.code_focus)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, _| this.code_focus.focus(window)),
+            )
             .child(self.code_tree(cx))
             .child(self.code_viewer(cx))
             .children(self.provenance_panel(cx))

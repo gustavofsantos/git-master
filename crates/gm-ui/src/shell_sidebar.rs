@@ -32,6 +32,14 @@ use crate::workspace_list::{self, Open as WorkspaceOpen};
 use crate::worktree_list;
 
 const ROW_HEIGHT: f32 = 28.;
+/// The height of a section header's row, its control included: the tallest control is 26 px.
+const HEADER_ROW_HEIGHT: f32 = 26.;
+/// The space above and below a section header's row (its `pt_1` and `pb_1`).
+const HEADER_PADDING: f32 = 8.;
+/// A section header's whole height: every header is this tall, so the folded sections are evenly spaced.
+const HEADER_HEIGHT: f32 = HEADER_PADDING + HEADER_ROW_HEIGHT;
+/// The branch list's floor: two rows. The column scrolls below this rather than cut the list to nothing.
+const BRANCH_LIST_MIN_H: f32 = ROW_HEIGHT * 2.;
 /// The most worktree rows shown at once. The section does not scroll yet,
 /// so the rest are cut off.
 const WORKTREE_ROWS_SHOWN: f32 = 6.;
@@ -40,7 +48,11 @@ const WORKSPACE_ROWS_SHOWN: f32 = 6.;
 
 impl StatusView {
     /// The sidebar at `width`. Its right edge is the strip that resizes it.
-    pub(crate) fn sidebar(&self, width: f32, cx: &mut Context<Self>) -> Div {
+    ///
+    /// The column scrolls as a whole when the sections are taller than the window. The branch
+    /// list takes the height the other sections leave, never less than two rows, so it cannot
+    /// be cut to nothing; every other child keeps its own height (`flex_none`).
+    pub(crate) fn sidebar(&self, width: f32, cx: &mut Context<Self>) -> Stateful<Div> {
         let width_strip = resize_handle::handle(
             "sidebar-resize",
             Edge::Right,
@@ -50,7 +62,9 @@ impl StatusView {
             |this: &mut StatusView, _| this.sidebar_width = resize::SIDEBAR_DEFAULT,
             cx,
         );
+        let branches_open = !self.sidebar_folded.is_folded(Section::Branches);
         div()
+            .id("sidebar-column")
             .relative()
             .w(px(width))
             .flex_none()
@@ -58,7 +72,7 @@ impl StatusView {
             .min_h(px(0.))
             .flex()
             .flex_col()
-            .overflow_hidden()
+            .overflow_y_scroll()
             .bg(theme::ground())
             .border_r_1()
             .border_color(theme::hairline())
@@ -73,10 +87,13 @@ impl StatusView {
                 Some(new_branch_button(cx)),
                 cx,
             ))
-            .children(self.branches_body(cx))
+            .children(branches_open.then(|| self.branch_controls(cx)))
+            .children(branches_open.then(|| self.branch_tree(cx)))
             .child(self.worktrees_section(cx))
             .child(self.workspaces_section(cx))
-            .children((self.grouping() == Grouping::ByStack).then(footer_hint))
+            .children(
+                sidebar::drag_hint_shown(self.grouping(), self.sidebar_folded).then(footer_hint),
+            )
             .child(width_strip)
     }
 
@@ -104,12 +121,11 @@ impl StatusView {
         let open = !self.sidebar_folded.is_folded(Section::Worktrees);
         div()
             .flex_none()
-            .max_h(px(ROW_HEIGHT * WORKTREE_ROWS_SHOWN + 40.))
+            .max_h(px(HEADER_HEIGHT + ROW_HEIGHT * WORKTREE_ROWS_SHOWN + 8.))
             .overflow_hidden()
-            .pb_2()
             .child(header)
             .children(open.then(|| {
-                div().px_2().children(rows.iter().map(|row| {
+                div().px_2().pb_2().children(rows.iter().map(|row| {
                     let zone = self.drop_zone(DropTarget::Worktree {
                         path: row.entry.path.clone(),
                     });
@@ -132,13 +148,13 @@ impl StatusView {
         let open = !self.sidebar_folded.is_folded(Section::Workspaces);
         div()
             .flex_none()
-            .max_h(px(ROW_HEIGHT * WORKSPACE_ROWS_SHOWN + 40.))
+            .max_h(px(HEADER_HEIGHT + ROW_HEIGHT * WORKSPACE_ROWS_SHOWN + 8.))
             .overflow_hidden()
-            .pb_2()
             .child(header)
             .children(open.then(|| {
                 div()
                     .px_2()
+                    .pb_2()
                     .children(rows.iter().map(|row| workspace_row(row, cx)))
             }))
     }
@@ -166,8 +182,12 @@ impl StatusView {
         div()
             .id(title)
             .px_4()
-            .pt_4()
+            .pt_1()
             .pb_1()
+            // One height for every header, whatever its control is, so the gaps between
+            // the folded sections are the same (the Branches "+" is taller than the others).
+            .flex_none()
+            .h(px(HEADER_HEIGHT))
             .gap_1()
             .flex()
             .flex_row()
@@ -200,26 +220,19 @@ impl StatusView {
             )
     }
 
-    /// What the Branches section holds while it is open: the grouping switch,
-    /// the search and the tree. Nothing while it is folded.
-    fn branches_body(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if self.sidebar_folded.is_folded(Section::Branches) {
-            return None;
-        }
-        Some(
-            div()
-                .flex_1()
-                .min_h(px(0.))
-                .flex()
-                .flex_col()
-                .children(
-                    self.features
-                        .is_enabled(Feature::Stacks)
-                        .then(|| self.grouping_switch(cx)),
-                )
-                .children(self.has_branches().then(|| self.branch_filter_bar(cx)))
-                .child(self.branch_tree(cx)),
-        )
+    /// What the Branches section holds above the tree while it is open: the grouping switch and
+    /// the search. Each keeps its height; the tree below takes the rest of the column.
+    fn branch_controls(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .children(
+                self.features
+                    .is_enabled(Feature::Stacks)
+                    .then(|| self.grouping_switch(cx)),
+            )
+            .children(self.has_branches().then(|| self.branch_filter_bar(cx)))
     }
 
     /// The Threads line of the Repository section, with its count once it is known (T5).
@@ -243,6 +256,7 @@ impl StatusView {
         let count = self.model.entry_count();
         let working = self.screen == Screen::WorkingCopy;
         div()
+            .flex_none()
             .px_2()
             .flex()
             .flex_col()
@@ -471,56 +485,65 @@ impl StatusView {
         }
     }
 
+    /// The branch list. It is `flex_1` in the column with a floor of two rows, so it gets what
+    /// the other sections leave and the column scrolls when that is less than the floor.
     fn branch_tree(&self, cx: &mut Context<Self>) -> Div {
         let visible = self.visible_branches();
         if visible.is_empty() && self.has_branches() {
             return div()
                 .flex_1()
-                .min_h(px(0.))
+                .min_h(px(BRANCH_LIST_MIN_H))
                 .flex()
                 .flex_col()
                 .child(no_match_state(cx));
         }
         let count = sidebar::rows(&visible, self.grouping(), &self.model.stacks).len();
-        div().flex_1().min_h(px(0.)).flex().flex_col().child(
-            uniform_list(
-                "sidebar-branches",
-                count,
-                cx.processor(
-                    |this: &mut StatusView,
-                     range: Range<usize>,
-                     _window: &mut Window,
-                     cx: &mut Context<StatusView>| {
-                        let visible = this.visible_branches();
-                        let rows = sidebar::rows(&visible, this.grouping(), &this.model.stacks);
-                        let head = this
-                            .model
-                            .status()
-                            .and_then(|status| status.branch.head.clone());
-                        let by_stack = this.grouping() == Grouping::ByStack;
-                        rows.get(range.clone())
-                            .unwrap_or_default()
-                            .iter()
-                            .zip(range)
-                            .map(|(row, index)| {
-                                let zone = drop_target_of(&rows, index)
-                                    .map(|target| this.drop_zone(target));
-                                // In By stack, a local branch row is dragged and takes a branch.
-                                let branch_zone = match row {
-                                    Row::Branch { branch, .. } if by_stack && !branch.is_remote => {
-                                        Some(this.branch_zone(&branch.name))
-                                    }
-                                    _ => None,
-                                };
-                                tree_row(row, index, head.as_deref(), zone, branch_zone, cx)
-                            })
-                            .collect()
-                    },
-                ),
-            )
+        div()
             .flex_1()
-            .min_h(px(0.)),
-        )
+            .min_h(px(BRANCH_LIST_MIN_H))
+            .flex()
+            .flex_col()
+            .child(
+                uniform_list(
+                    "sidebar-branches",
+                    count,
+                    cx.processor(
+                        |this: &mut StatusView,
+                         range: Range<usize>,
+                         _window: &mut Window,
+                         cx: &mut Context<StatusView>| {
+                            let visible = this.visible_branches();
+                            let rows = sidebar::rows(&visible, this.grouping(), &this.model.stacks);
+                            let head = this
+                                .model
+                                .status()
+                                .and_then(|status| status.branch.head.clone());
+                            let by_stack = this.grouping() == Grouping::ByStack;
+                            rows.get(range.clone())
+                                .unwrap_or_default()
+                                .iter()
+                                .zip(range)
+                                .map(|(row, index)| {
+                                    let zone = drop_target_of(&rows, index)
+                                        .map(|target| this.drop_zone(target));
+                                    // In By stack, a local branch row is dragged and takes a branch.
+                                    let branch_zone = match row {
+                                        Row::Branch { branch, .. }
+                                            if by_stack && !branch.is_remote =>
+                                        {
+                                            Some(this.branch_zone(&branch.name))
+                                        }
+                                        _ => None,
+                                    };
+                                    tree_row(row, index, head.as_deref(), zone, branch_zone, cx)
+                                })
+                                .collect()
+                        },
+                    ),
+                )
+                .flex_1()
+                .min_h(px(0.)),
+            )
     }
 }
 
@@ -1156,8 +1179,9 @@ fn tag(text: &'static str, text_color: Hsla, background: Hsla) -> Div {
 /// The hint under the stack tree, for the drag that sets a parent.
 fn footer_hint() -> Div {
     div()
+        .flex_none()
         .px_4()
-        .py_3()
+        .py_2()
         .border_t_1()
         .border_color(theme::hairline())
         .text_color(theme::muted())

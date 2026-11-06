@@ -18,7 +18,10 @@ use crate::window_chrome;
 use crate::workspace_list;
 
 const ROW_HEIGHT: f32 = 24.;
+/// The least width of a menu: the one it had before it sized to its content.
 const MENU_WIDTH: f32 = 300.;
+/// The most width of a menu. A longer reason is cut with an ellipsis, never drawn outside.
+const MENU_MAX_WIDTH: f32 = 520.;
 /// The least space kept between a menu and the window's edges.
 const MARGIN: f32 = 4.;
 
@@ -668,7 +671,10 @@ impl StatusView {
                 .snap_to_window_with_margin(px(MARGIN))
                 .child(
                     div()
-                        .w(px(MENU_WIDTH))
+                        // Sized to the longest label and reason, between the two widths above.
+                        .min_w(px(MENU_WIDTH))
+                        .max_w(px(MENU_MAX_WIDTH))
+                        .overflow_hidden()
                         .bg(theme::panel())
                         .border_1()
                         .border_color(theme::hairline_strong())
@@ -712,11 +718,15 @@ impl StatusView {
                 row.cursor_pointer()
                     .hover(|style| style.bg(theme::selected_row()))
             })
-            .child(div().whitespace_nowrap().child(item.label()))
+            .child(div().flex_none().whitespace_nowrap().child(item.label()))
             .children(note.map(|text| {
+                // The note gives way first: a reason that does not fit ends in an ellipsis.
                 div()
+                    .min_w(px(0.))
+                    .overflow_hidden()
                     .text_xs()
                     .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_color(theme::muted())
                     .child(text)
             }));

@@ -109,6 +109,14 @@ pub fn effective_grouping(saved: Grouping, features: FeatureSet) -> Grouping {
     }
 }
 
+/// Whether the hint that says how to set a parent shows under the sidebar. It describes the
+/// drag in the branch tree, so it shows only while that tree is drawn: By stack, with the
+/// Branches section open.
+#[must_use]
+pub fn drag_hint_shown(grouping: Grouping, folded: Folded) -> bool {
+    grouping == Grouping::ByStack && !folded.is_folded(Section::Branches)
+}
+
 /// The tree's rows for `branches` under `grouping`: the branches the filter
 /// kept, in the order listed, and in "By stack" in the order of `stacks`. Empty
 /// until a listing has arrived. A header whose section has no branch left is
@@ -248,6 +256,18 @@ mod tests {
             effective_grouping(Grouping::ByName, FeatureSet::none()),
             Grouping::ByName
         );
+    }
+
+    #[test]
+    fn the_drag_hint_shows_only_in_the_open_by_stack_tree() {
+        let mut folded = Folded::default();
+        // A new window folds Branches, so the hint is hidden even though By stack is saved.
+        assert!(!drag_hint_shown(Grouping::ByStack, folded));
+        folded.toggle(Section::Branches);
+        assert!(drag_hint_shown(Grouping::ByStack, folded));
+        assert!(!drag_hint_shown(Grouping::ByName, folded));
+        folded.toggle(Section::Branches);
+        assert!(!drag_hint_shown(Grouping::ByStack, folded));
     }
 
     #[test]

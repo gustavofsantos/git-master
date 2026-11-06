@@ -136,6 +136,8 @@ pub struct StatusView {
     pub(crate) log_scroll: ScrollHandle,
     pub(crate) model: Model,
     pub(crate) list_focus: FocusHandle,
+    /// The Code page's focus: a click in the page holds it, so the window's keys reach the app.
+    pub(crate) code_focus: FocusHandle,
     pub(crate) scroll: UniformListScrollHandle,
     pub(crate) composer: Entity<Composer>,
     pub(crate) diff_pane: Entity<DiffPane>,
@@ -305,6 +307,7 @@ impl StatusView {
         }
         let list_focus = cx.focus_handle();
         list_focus.focus(window);
+        let code_focus = cx.focus_handle();
         let recent_store = recent::default_file().map(|file| Arc::new(recent::Store::new(file)));
         let recents = recent_store
             .as_ref()
@@ -440,6 +443,7 @@ impl StatusView {
             log_scroll: ScrollHandle::new(),
             model,
             list_focus,
+            code_focus,
             scroll: UniformListScrollHandle::new(),
             composer,
             diff_pane,
