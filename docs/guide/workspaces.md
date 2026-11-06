@@ -1,11 +1,9 @@
 ---
 title: Workspaces
 description: Group branches of several repositories into one workspace, a Git repository whose submodules are worktrees of your own clones, to change and test them together with an agent.
-status: planned
+status: partial
 order: 55
 ---
-
-> **Planned.** Workspaces are not available in the app yet.
 
 A workspace brings branches of several repositories together in one folder, so you can change them and test them as one system. Use one when a change touches more than one service: each service has its branch, and the workspace holds them side by side, for you and for your agent.
 
@@ -30,11 +28,15 @@ The workspace repository is yours to write in. Your service repositories are not
 
 ## Durable and ephemeral workspaces
 
+> **Planned.** The app does not yet remove an ephemeral workspace when you close it. `gitmaster workspace remove` removes either kind; see [Command line](../reference/cli.md#remove-a-workspace).
+
 A workspace is **durable** or **ephemeral**. A durable workspace stays until you remove it. An ephemeral workspace is removed when you close it.
 
 Removing a workspace, of either kind, follows the rules of [removing a worktree](worktrees.md) for each member. It is blocked when a member has changes that are not committed, when a member is on a detached HEAD with commits no local or remote branch holds, or when the workspace repository has changes of its own, and the dialog lists what would be lost. Commits on a member's branch are never lost: they are on the branches of your clones.
 
 ## Create a workspace
+
+> **Planned.** The **New Workspace…** dialog and the **Workspaces** section of the sidebar are not available yet. Create a workspace with `gitmaster workspace create` and open its folder; see [Command line](../reference/cli.md#create-a-workspace).
 
 1. Run **New Workspace…** from the command palette, or click **+** in the **Workspaces** section of the sidebar.
 2. Name the workspace.
@@ -53,6 +55,8 @@ A workspace opens in its own window, like any repository. The Working Copy shows
 - [Code navigation](code-navigation.md) searches every member: Quick Open lists the files of all members, and text search looks inside them.
 - The diff of a member shows the commits it gained, as a list, and opens each one.
 - Each member keeps its branch checked out. When a Git command leaves a member on a detached HEAD, its row is marked **detached**, and **Check Out Branch** puts it back on its branch.
+
+> **Planned.** **Check Out Branch** on a detached member's row is not available yet: open the member and check out its branch there.
 
 ### Record a combination
 
@@ -77,10 +81,10 @@ With the [agent integration](../agents/agent-integration.md) installed, the sess
 
 The [local review](../agents/local-review.md) loop covers the members too: comment on a line of a member's file in the **Code** page, and GitMaster measures the agent's change to it as for any file.
 
-> **Planned.** Review comments on the files of a member are not measured yet.
-
 The local environment the agent sets up, such as containers that run the services, is the agent's and yours: GitMaster does not start or stop it. Its files belong in the workspace repository, so they are versioned with the combination they run.
 
 ## Remove a workspace
+
+> **Planned.** **Remove Workspace** in the app is not available yet. Use `gitmaster workspace remove`.
 
 Run **Remove Workspace** from the palette or the menu of its row. GitMaster removes each member's worktree from your clone, then the workspace folder, after the checks described in [Durable and ephemeral workspaces](#durable-and-ephemeral-workspaces). The branches stay in your clones.
