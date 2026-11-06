@@ -17,6 +17,7 @@ use gm_schema::{
 use crate::GitPort;
 use crate::blame::BlameLine;
 use crate::branch;
+use crate::combination;
 use crate::commit_detail::{DetailJob, DetailReport};
 use crate::commit_diff::{StackJob, StackReport};
 use crate::conflict::{self, Hunk, Segment};
@@ -2391,10 +2392,9 @@ impl Engine {
                 }
                 let root = self.open_root()?;
                 let oid = self.git.commit(&root, message).map_err(|e| e.0)?;
-                let mut events = vec![Event::Committed { id, oid }];
-                events.extend(self.reload_status(id, &root)?);
-                Ok(events)
+                self.committed(id, &root, oid)
             }
+            CommandKind::RecordCombination => self.record_combination(id, actor),
             CommandKind::ListBranches => self.list_branches(id),
             CommandKind::IndexFiles => {
                 self.start_index(id)?;
@@ -3947,6 +3947,33 @@ impl Engine {
             skipped: converted.skipped,
             sections: converted.sections,
         }])
+    }
+
+    /// Record Combination (D180(3)): the gitlinks of the members whose commit is new are
+    /// committed alone, with the message the members list. Refusals leave nothing written.
+    /// Human only; the answer is the same as a commit's: the new id and the status.
+    fn record_combination(&self, id: OperationId, actor: &Actor) -> Result<Vec<Event>, String> {
+        only_a_human(actor, "record a combination")?;
+        let root = self.open_root()?;
+        let members = self.git.combination_members(&root).map_err(|e| e.0)?;
+        let plan = combination::plan(&members)?;
+        let oid = self
+            .git
+            .commit_paths(&root, &plan.paths, &plan.message)
+            .map_err(|e| e.0)?;
+        self.committed(id, &root, oid)
+    }
+
+    /// The answer of a commit: its id, then the status it leaves.
+    fn committed(
+        &self,
+        id: OperationId,
+        root: &std::path::Path,
+        oid: String,
+    ) -> Result<Vec<Event>, String> {
+        let mut events = vec![Event::Committed { id, oid }];
+        events.extend(self.reload_status(id, root)?);
+        Ok(events)
     }
 
     /// Stages every change of the working tree, then reads the status again.

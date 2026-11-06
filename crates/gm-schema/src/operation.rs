@@ -105,6 +105,12 @@ pub enum CommandKind {
     Commit {
         message: String,
     },
+    /// Records the combination of the workspace's members (D180(3)): stages the gitlink of
+    /// each checked-out member whose commit the workspace does not record, and commits those
+    /// gitlinks alone with a message that lists every member. Refused when no member has a
+    /// new commit, when a member is detached, and when there is no member. Human only, and
+    /// recorded in the command log (D28).
+    RecordCombination,
     ListBranches,
     /// Reads the first `HISTORY_PAGE` commits of `scope`, newest first, and
     /// starts the walk the next pages continue. Never recorded in the command

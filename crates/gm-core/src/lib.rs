@@ -3,6 +3,7 @@
 
 pub mod blame;
 pub mod branch;
+pub mod combination;
 pub mod command_log;
 pub mod commit_detail;
 pub mod commit_diff;

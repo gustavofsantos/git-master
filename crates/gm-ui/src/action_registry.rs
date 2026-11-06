@@ -453,7 +453,7 @@ pub struct LabelRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 100] = [
+const SPECS: [Spec; 101] = [
     spec(
         "file.stage",
         "Stage File",
@@ -890,6 +890,13 @@ const SPECS: [Spec; 100] = [
         Category::WorkingCopy,
     ),
     spec(
+        "combination.record",
+        "Record Combination",
+        None,
+        ArgKind::None,
+        Category::WorkingCopy,
+    ),
+    spec(
         "stash.show",
         "Show Stashes",
         None,
@@ -1233,6 +1240,7 @@ pub enum Action {
     MoveFileToWorktree,
     SearchText,
     DiscardAllChanges,
+    RecordCombination,
     ShowStashes,
     NewStash,
     StashApply,
@@ -1545,7 +1553,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 100] = [
+    pub const ALL: [Action; 101] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1609,6 +1617,7 @@ impl Action {
         Action::MoveFileToWorktree,
         Action::SearchText,
         Action::DiscardAllChanges,
+        Action::RecordCombination,
         Action::ShowStashes,
         Action::NewStash,
         Action::StashApply,
@@ -1947,6 +1956,7 @@ impl Action {
             Action::OpenSubmodule => open_submodule_rule(args, ctx),
             Action::MoveFileToBranch | Action::MoveFileToWorktree => move_rule(self, args, ctx),
             Action::DiscardFile | Action::DiscardAllChanges => discard_rule(self, args, ctx),
+            Action::RecordCombination => combination_rule(ctx),
             Action::ShowAuthorPictures if ctx.author_pictures == AuthorPictures::Shown => {
                 Err("Author pictures are already shown.")
             }
@@ -2006,6 +2016,7 @@ impl Action {
                 _,
             ) => change_effect(self, args, ctx)?,
             (Action::Refresh, _) => Effect::Send(vec![CommandKind::RefreshStatus]),
+            (Action::RecordCombination, _) => Effect::Send(vec![CommandKind::RecordCombination]),
             (Action::Fetch, _) => Effect::Send(vec![CommandKind::Fetch]),
             (Action::Pull, _) => Effect::Send(vec![CommandKind::Pull]),
             (Action::PushWithLease, _) => Effect::Send(vec![CommandKind::PushWithLease]),
@@ -2365,6 +2376,21 @@ fn discard_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Re
         _ if has_unstaged(entry) => Ok(()),
         _ => Err("Nothing unstaged to discard"),
     }
+}
+
+pub(crate) const NO_NEW_COMMIT: Reason = "No member has a new commit.";
+
+/// The rule of Record Combination (D180(3)): an idle repository, and a member whose
+/// commit is new. A detached member is refused by the engine, which names it.
+fn combination_rule(ctx: &Context<'_>) -> Result<(), Reason> {
+    idle(ctx)?;
+    let changed = ctx.entries.iter().any(|entry| {
+        entry
+            .submodule
+            .as_ref()
+            .is_some_and(|change| change.commit_changed)
+    });
+    if changed { Ok(()) } else { Err(NO_NEW_COMMIT) }
 }
 
 /// The rule of the two move actions (D109): an idle repository, a changed file
@@ -6468,6 +6494,63 @@ mod tests {
         assert_eq!(
             Action::DiscardChunk.enabled(&chunk, &context),
             Err("A submodule has no diff hunks.")
+        );
+    }
+
+    #[test]
+    fn record_combination_needs_a_member_with_a_new_commit() {
+        let moved = StatusEntry {
+            submodule: Some(gm_schema::SubmoduleChange {
+                commit_changed: true,
+                ..gm_schema::SubmoduleChange::default()
+            }),
+            ..entry("billing", None, Some(Change::Modified))
+        };
+        let same = submodule_row("checkout");
+        let plain = entry("a.rs", None, Some(Change::Modified));
+        let moved_entries = [same.clone(), moved];
+        let same_entries = [same, plain];
+
+        assert_eq!(
+            Action::RecordCombination.enabled(&Args::None, &ctx(&moved_entries, "")),
+            Ok(())
+        );
+        assert_eq!(
+            Action::RecordCombination.enabled(&Args::None, &ctx(&same_entries, "")),
+            Err(NO_NEW_COMMIT)
+        );
+        assert_eq!(
+            Action::RecordCombination.enabled(&Args::None, &ctx(&[], "")),
+            Err(NO_NEW_COMMIT)
+        );
+        assert!(NO_NEW_COMMIT.chars().count() < 30);
+    }
+
+    #[test]
+    fn record_combination_is_in_the_palette_as_a_working_copy_action() {
+        assert_eq!(Action::RecordCombination.id(), "combination.record");
+        assert_eq!(Action::RecordCombination.spec().title, "Record Combination");
+        assert_eq!(
+            Action::RecordCombination.spec().category,
+            Category::WorkingCopy
+        );
+        assert!(Action::RecordCombination.listed_in_palette());
+        assert!(!Action::RecordCombination.destructive());
+        assert_eq!(
+            Action::RecordCombination.plan(&Args::None, &ctx(&[], "")),
+            Err(NO_NEW_COMMIT)
+        );
+        let moved = StatusEntry {
+            submodule: Some(gm_schema::SubmoduleChange {
+                commit_changed: true,
+                ..gm_schema::SubmoduleChange::default()
+            }),
+            ..entry("billing", None, Some(Change::Modified))
+        };
+        let entries = [moved];
+        assert_eq!(
+            Action::RecordCombination.plan(&Args::None, &ctx(&entries, "")),
+            Ok(Effect::Send(vec![CommandKind::RecordCombination]))
         );
     }
 

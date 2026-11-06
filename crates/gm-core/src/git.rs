@@ -20,6 +20,7 @@ use gm_schema::{
 
 use crate::blame;
 use crate::branch;
+use crate::combination::Member;
 use crate::command_log::{CommandLog, CommandRecord, Source, bounded_text};
 use crate::commit_detail;
 use crate::commit_diff;
@@ -984,6 +985,31 @@ impl GitPort for SubprocessGit {
         Ok(String::from_utf8_lossy(&out).trim().to_owned())
     }
 
+    /// Record Combination (D180(3)): the gitlinks `paths` are staged, then committed
+    /// with `--only` semantics (`git commit -- <paths>`), so what else is staged stays
+    /// staged. The hooks and the identity are those of `commit`.
+    fn commit_paths(
+        &self,
+        root: &Path,
+        paths: &[String],
+        message: &str,
+    ) -> Result<String, GitError> {
+        check_index_lock(&open(root)?)?;
+        if message.trim().is_empty() {
+            return Err(GitError("commit message is empty".into()));
+        }
+        let mut add = self.git(root);
+        add.args(["add", "--"]).args(paths);
+        self.logged(add, None)?;
+        let mut command = self.git(root);
+        command.args(["commit", "-F", "-", "--"]).args(paths);
+        self.logged(command, Some(message.as_bytes()))?;
+        let mut command = self.git(root);
+        command.args(["rev-parse", "HEAD"]);
+        let out = Self::run(command)?;
+        Ok(String::from_utf8_lossy(&out).trim().to_owned())
+    }
+
     fn stage_all(&self, root: &Path) -> Result<(), GitError> {
         check_index_lock(&open(root)?)?;
         let mut command = self.git(root);
@@ -1124,6 +1150,41 @@ impl GitPort for SubprocessGit {
             more,
             missing_commits,
         })
+    }
+
+    fn combination_members(&self, root: &Path) -> Result<Vec<Member>, GitError> {
+        let mut index = self.git(root);
+        index.args(["ls-files", "-z", "--stage"]);
+        let gitlinks = submodule_files::gitlinks(&Self::run(index)?);
+        let mut members = Vec::new();
+        for path in checked_out(root, &gitlinks) {
+            let folder = root.join(&path);
+            // `symbolic-ref` exits 1 when HEAD is detached, `rev-parse` when there is no commit.
+            let mut symbolic = self.git(&folder);
+            symbolic.args(["symbolic-ref", "-q", "--short", "HEAD"]);
+            let name = String::from_utf8_lossy(&Self::run_allowing(symbolic, &[0, 1])?)
+                .trim()
+                .to_owned();
+            let mut rev = self.git(&folder);
+            rev.args(["rev-parse", "--verify", "-q", "HEAD"]);
+            let head = String::from_utf8_lossy(&Self::run_allowing(rev, &[0, 1])?)
+                .trim()
+                .to_owned();
+            let mut recorded = self.git(root);
+            recorded
+                .args(["rev-parse", "--verify", "-q"])
+                .arg(format!("HEAD:{path}"));
+            let recorded = String::from_utf8_lossy(&Self::run_allowing(recorded, &[0, 1])?)
+                .trim()
+                .to_owned();
+            members.push(Member {
+                path,
+                branch: (!name.is_empty()).then_some(name),
+                head: (!head.is_empty()).then_some(head),
+                recorded: (!recorded.is_empty()).then_some(recorded),
+            });
+        }
+        Ok(members)
     }
 
     fn reflog(&self, root: &Path, skip: u32, limit: usize) -> Result<Vec<ReflogEntry>, GitError> {

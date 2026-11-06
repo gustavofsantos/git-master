@@ -9,6 +9,7 @@ use gm_schema::{
 };
 
 use crate::blame::BlameLine;
+use crate::combination::Member;
 use crate::command_log::CommandLog;
 use crate::file_index::FileIndex;
 use crate::grep::GrepRequest;
@@ -261,6 +262,26 @@ pub trait GitPort: Send {
 
     /// Commits the index; returns the new commit id.
     fn commit(&self, _root: &Path, _message: &str) -> Result<String, GitError> {
+        Err(GitError("commit is not supported by this adapter".into()))
+    }
+
+    /// The checked-out members of the workspace (D180(3)): each gitlink of the index
+    /// whose folder holds a checkout, with its branch, its HEAD and the commit the
+    /// repository records for it. Never records anything.
+    fn combination_members(&self, _root: &Path) -> Result<Vec<Member>, GitError> {
+        Err(GitError(
+            "combinations are not supported by this adapter".into(),
+        ))
+    }
+
+    /// Stages the gitlinks `paths` and commits them alone, with `message`; the other
+    /// staged changes stay staged. Returns the new commit id.
+    fn commit_paths(
+        &self,
+        _root: &Path,
+        _paths: &[String],
+        _message: &str,
+    ) -> Result<String, GitError> {
         Err(GitError("commit is not supported by this adapter".into()))
     }
 
