@@ -274,6 +274,19 @@ pub(crate) fn repositories(
     stdin: &mut dyn Read,
     err: &mut dyn Write,
 ) -> Result<(Vec<Repo>, bool), Failure> {
+    let (repos, multi, _) = listed(args, env, git, stdin, err)?;
+    Ok((repos, multi))
+}
+
+/// `repositories`, which also returns the folders of a list that are not repositories and were
+/// skipped, for a caller that reports them.
+pub(crate) fn listed(
+    args: &Args,
+    env: &Env,
+    git: &dyn GitPort,
+    stdin: &mut dyn Read,
+    err: &mut dyn Write,
+) -> Result<(Vec<Repo>, bool, Vec<PathBuf>), Failure> {
     let specs = args.values("repo");
     let from = args.option("repos-from");
     let multi = from.is_some() || specs.len() > 1;
@@ -306,11 +319,15 @@ pub(crate) fn repositories(
         dirs.push((env.cwd.clone(), true));
     }
     let mut repos: Vec<Repo> = Vec::new();
+    let mut skipped: Vec<PathBuf> = Vec::new();
     for (dir, explicit) in dirs {
         let (root, entries) = match worktrees_in(&dir, git) {
             Ok(found) => found,
             Err(error) if explicit => return Err(error),
-            Err(_) => continue,
+            Err(_) => {
+                skipped.push(dir);
+                continue;
+            }
         };
         if repos
             .iter()
@@ -327,7 +344,7 @@ pub(crate) fn repositories(
             entries,
         });
     }
-    Ok((repos, multi))
+    Ok((repos, multi, skipped))
 }
 
 /// The one repository a command that changes or looks up something works on: `--repo`, else the

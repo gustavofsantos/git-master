@@ -12,18 +12,19 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use gm_schema::{StatusEntry, WorktreeEntry};
+use gm_schema::{BranchEntry, StatusEntry, WorktreeEntry, WorktreeMode};
 use serde::Serialize;
 
-use crate::GitPort;
 use crate::git::SubprocessGit;
 use crate::worktree_cli::{self, Args, Env, Failure};
+use crate::worktree_include::Mode;
+use crate::{GitPort, branch};
 
-const USAGE: &str = "usage: gitmaster workspace create <name> [--root <dir>] [--ephemeral] [--branch <branch> --repos-from <file|->]
-       gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--as <member>] [--include symlink|reflink|none]
+const USAGE: &str = "usage: gitmaster workspace create <name> [--root <dir>] [--ephemeral] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
+       gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none]
        gitmaster workspace list [--format paths|names|tsv|json] [--root <dir>]
        gitmaster workspace path <name> [--root <dir>]
-       gitmaster workspace status [--workspace <name|dir>] [--format tsv|json]
+       gitmaster workspace status [--workspace <name|dir>] [--root <dir>] [--format tsv|json]
        gitmaster workspace remove <name> [--root <dir>] [--force]
 ";
 
@@ -245,8 +246,9 @@ fn containing(ctx: &Ctx) -> Option<PathBuf> {
 }
 
 /// The workspace a command works on: `--workspace` (a folder when the value has a `/`, else a name
-/// under the root), else the one that contains the current directory.
-fn target(ctx: &Ctx, spec: Option<&str>) -> Result<PathBuf, Failure> {
+/// under the root that `--root` or the configured root gives), else the one that contains the
+/// current directory.
+fn target(ctx: &Ctx, spec: Option<&str>, root: Option<&str>) -> Result<PathBuf, Failure> {
     match spec {
         Some(spec) if spec.contains('/') => {
             let dir = ctx
@@ -258,7 +260,7 @@ fn target(ctx: &Ctx, spec: Option<&str>) -> Result<PathBuf, Failure> {
                 .ok_or_else(|| Failure::Run(format!("'{spec}' is not a workspace")))
         }
         Some(name) => {
-            let root = root_for(ctx, None)?;
+            let root = root_for(ctx, root)?;
             named(ctx, &root, name)
                 .ok_or_else(|| Failure::Run(format!("no workspace named '{name}'")))
         }
@@ -383,18 +385,33 @@ struct Choice<'a> {
     include: Option<&'a str>,
 }
 
-/// Adds the repository whose main checkout is `entries[0]` (its Git folder `root`) to the
-/// workspace at `ws` as a member on the chosen branch, and commits `.gitmodules` and the member
-/// (D177 (2) and (3)). Returns the member's folder. When the commit fails the member stays added
-/// and staged, and the error says so.
-fn add_member(
+/// A member that can be added, checked and decided before anything is created (D178 (3)).
+struct Plan {
+    /// The folder name of the member, relative to the workspace.
+    member: String,
+    /// The member's folder, `<workspace>/<member>`.
+    dir: PathBuf,
+    /// The path of the main checkout the member belongs to.
+    main: PathBuf,
+    /// The folder the repository's Git commands run in.
+    root: PathBuf,
+    branch: String,
+    mode: WorktreeMode,
+    /// What the report says the branch was, after `added <dir> on <branch>:`.
+    how: String,
+    include: Mode,
+}
+
+/// Checks the member `choice` would add to the workspace at `ws`, which need not exist yet, and
+/// decides its branch. Nothing is created. `known` are the repository's branches.
+fn plan_member(
     ctx: &Ctx,
     ws: &Path,
     root: &Path,
     entries: &[WorktreeEntry],
+    known: &[BranchEntry],
     choice: &Choice,
-    err: &mut dyn Write,
-) -> Result<PathBuf, Failure> {
+) -> Result<Plan, Failure> {
     let branch = choice.branch;
     check_branch(branch)?;
     let main = PathBuf::from(&entries[0].path);
@@ -418,14 +435,14 @@ fn add_member(
         )));
     }
     let existing = members(ctx, ws)?;
-    if existing.iter().any(|known| known.path == member) {
+    if existing.iter().any(|kept| kept.path == member) {
         return Err(Failure::Run(format!("'{member}' is already a member")));
     }
-    if let Some(known) = existing.iter().find(|known| same_folder(&known.url, &main)) {
+    if let Some(kept) = existing.iter().find(|kept| same_folder(&kept.url, &main)) {
         return Err(Failure::Run(format!(
             "{} is already a member, as '{}'",
             main.display(),
-            known.path
+            kept.path
         )));
     }
     let dir = ws.join(&member);
@@ -433,12 +450,117 @@ fn add_member(
         return Err(Failure::Run(format!("'{}' already exists", dir.display())));
     }
 
-    let mode = worktree_cli::include_mode(ctx.git, root, choice.include)?;
-    let known = ctx.git.branches(root)?;
-    let kind = worktree_cli::branch_mode(&known, branch, choice.base, err)?;
+    let include = worktree_cli::include_mode(ctx.git, root, choice.include)?;
+    let (mode, how) = branch_choice(ctx, root, &main, known, branch, choice.base)?;
+    Ok(Plan {
+        member,
+        dir,
+        main,
+        root: root.to_path_buf(),
+        branch: branch.to_owned(),
+        mode,
+        how,
+        include,
+    })
+}
+
+/// The branch a member is made on, and the words the report uses for it, as D178 (2) chooses it:
+/// the local branch `branch` when there is one; else a new local branch that tracks the remote
+/// one, whatever the `base`; else a new branch from `base`, or from the repository's base branch,
+/// or from `HEAD` when there is none.
+fn branch_choice(
+    ctx: &Ctx,
+    root: &Path,
+    main: &Path,
+    known: &[BranchEntry],
+    branch: &str,
+    base: Option<&str>,
+) -> Result<(WorktreeMode, String), Failure> {
+    if known.iter().any(|b| !b.is_remote && b.name == branch) {
+        let how = if base.is_some() {
+            "checked out the existing branch; the base is ignored"
+        } else {
+            "checked out the existing branch"
+        };
+        let mode = WorktreeMode::Existing {
+            branch: branch.to_owned(),
+        };
+        return Ok((mode, how.to_owned()));
+    }
+    // A branch a remote already has is tracked, never forked from a base under the same name.
+    if let Some(remote) = worktree_cli::remote_branch(known, branch) {
+        let how = if base.is_some() {
+            format!("created to track {remote}; the base is ignored")
+        } else {
+            format!("created to track {remote}")
+        };
+        let mode = WorktreeMode::New {
+            branch: branch.to_owned(),
+            base: remote,
+        };
+        return Ok((mode, how));
+    }
+    let from = match base {
+        Some(base) => {
+            check_commit(ctx, main, base)?;
+            base.to_owned()
+        }
+        None => repo_base(ctx, root, main, known)?.unwrap_or_else(|| "HEAD".to_owned()),
+    };
+    let how = format!("created from {from}");
+    let mode = WorktreeMode::New {
+        branch: branch.to_owned(),
+        base: from,
+    };
+    Ok((mode, how))
+}
+
+/// The base branch of a repository, as `merge_base` picks it from `origin/HEAD` and the local
+/// branches (D56, D178 (2)). `None` when there is none, and the caller then uses `HEAD`.
+fn repo_base(
+    ctx: &Ctx,
+    root: &Path,
+    main: &Path,
+    known: &[BranchEntry],
+) -> Result<Option<String>, Failure> {
+    let origin = ctx.git.origin_head(root)?;
+    let origin = origin.as_deref().and_then(branch::origin_head_branch);
+    let locals: Vec<&str> = known
+        .iter()
+        .filter(|b| !b.is_remote)
+        .map(|b| b.name.as_str())
+        .collect();
+    let current = ctx.git.status(main)?.branch.head;
+    Ok(branch::merge_base(origin, &locals, current.as_deref()))
+}
+
+/// Fails unless `rev` names a commit in the repository whose main checkout is `main`.
+fn check_commit(ctx: &Ctx, main: &Path, rev: &str) -> Result<(), Failure> {
+    let spec = format!("{rev}^{{commit}}");
+    if ctx
+        .sub
+        .text_if(main, &["rev-parse", "--verify", "--quiet", &spec])
+        .is_none()
+    {
+        return Err(Failure::Run(format!(
+            "'{rev}' is not a commit in {}",
+            main.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Makes the member of `plan` in the workspace at `ws`: its worktree, the registration of the
+/// worktree as a submodule and the commit of the workspace's repository (D177 (2) and (3)). Reports
+/// it on `err`. Returns the member's folder. When the commit fails the member stays added and
+/// staged, and the error says so.
+fn add_member(ctx: &Ctx, ws: &Path, plan: &Plan, err: &mut dyn Write) -> Result<PathBuf, Failure> {
+    let dir = &plan.dir;
+    let branch = plan.branch.as_str();
+    let member = plan.member.as_str();
     ctx.git
-        .create_worktree(root, &dir.to_string_lossy(), &kind)?;
-    worktree_cli::share(ctx.git, &main, &dir, mode, false, err);
+        .create_worktree(&plan.root, &dir.to_string_lossy(), &plan.mode)?;
+    worktree_cli::share(ctx.git, &plan.main, dir, plan.include, false, err);
 
     // Registers the existing worktree: Git adds it in place, without a clone (D174).
     let registered = ctx.sub.text(
@@ -448,12 +570,14 @@ fn add_member(
             "add",
             "-b",
             branch,
-            &main.to_string_lossy(),
-            &member,
+            &plan.main.to_string_lossy(),
+            member,
         ],
     );
     if let Err(error) = registered {
-        let _ = ctx.git.remove_worktree(root, &dir.to_string_lossy(), 1);
+        let _ = ctx
+            .git
+            .remove_worktree(&plan.root, &dir.to_string_lossy(), 1);
         return Err(error);
     }
 
@@ -461,7 +585,7 @@ fn add_member(
     ctx.sub
         .text(
             ws,
-            &["commit", "-q", "-m", &message, "--", ".gitmodules", &member],
+            &["commit", "-q", "-m", &message, "--", ".gitmodules", member],
         )
         .map_err(|error| {
             Failure::Run(format!(
@@ -471,13 +595,86 @@ fn add_member(
                 ws.display()
             ))
         })?;
-    Ok(dir)
+    writeln!(
+        err,
+        "gitmaster: added {} on {branch}: {}",
+        dir.display(),
+        plan.how
+    )?;
+    Ok(dir.clone())
 }
 
 /// Whether `branch` is a local branch or a remote one in `known`.
-fn has_branch(known: &[gm_schema::BranchEntry], branch: &str) -> bool {
+fn has_branch(known: &[BranchEntry], branch: &str) -> bool {
     known.iter().any(|b| !b.is_remote && b.name == branch)
         || worktree_cli::remote_branch(known, branch).is_some()
+}
+
+/// Plans the member of each repository of `repos` for `create --branch` (D178 (1) and (3)): every
+/// repository, or with `--existing` the ones that have the branch. Returns the plans. When one
+/// cannot be added, or when two would have one folder name, prints every problem and returns an
+/// error, so nothing is created. Nothing is created here either.
+fn plan_repos(
+    ctx: &Ctx,
+    ws: &Path,
+    args: &Args,
+    branch: &str,
+    repos: &[worktree_cli::Repo],
+    err: &mut dyn Write,
+) -> Result<Vec<Plan>, Failure> {
+    let existing = args.switch("existing");
+    let base = args.option("base");
+    let mut plans: Vec<Plan> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
+    for repo in repos {
+        let known = ctx.git.branches(&repo.root)?;
+        if existing && !has_branch(&known, branch) {
+            writeln!(
+                err,
+                "gitmaster: skipped {}: no branch '{branch}'",
+                repo.project
+            )?;
+            continue;
+        }
+        let choice = Choice {
+            branch,
+            base,
+            member: None,
+            include: None,
+        };
+        match plan_member(ctx, ws, &repo.root, &repo.entries, &known, &choice) {
+            Ok(plan) => plans.push(plan),
+            Err(error) => problems.push(format!("{}: {}", repo.project, detail(error))),
+        }
+    }
+    for (index, plan) in plans.iter().enumerate() {
+        if let Some(other) = plans[..index]
+            .iter()
+            .find(|other| other.member == plan.member)
+        {
+            problems.push(format!(
+                "{} and {} would both be the member '{}'",
+                other.main.display(),
+                plan.main.display(),
+                plan.member
+            ));
+        }
+    }
+    if !problems.is_empty() {
+        for problem in &problems {
+            writeln!(err, "gitmaster: {problem}")?;
+        }
+        return Err(Failure::Run(
+            "no workspace was created: fix the repositories above, or leave them out of the list"
+                .into(),
+        ));
+    }
+    if plans.is_empty() {
+        return Err(Failure::Run(
+            "no repository would be added; no workspace was created".into(),
+        ));
+    }
+    Ok(plans)
 }
 
 fn create(
@@ -487,7 +684,11 @@ fn create(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let args = Args::parse(words, &["root", "branch", "repos-from"], &["ephemeral"])?;
+    let args = Args::parse(
+        words,
+        &["root", "branch", "repos-from", "base"],
+        &["ephemeral", "existing"],
+    )?;
     args.exactly(1, "a workspace name")?;
     let name = args.positional[0].as_str();
     if !valid_name(name) {
@@ -498,21 +699,34 @@ fn create(
             "--branch and --repos-from go together".into(),
         ));
     }
+    if args.option("branch").is_none() && (args.option("base").is_some() || args.switch("existing"))
+    {
+        return Err(Failure::Usage("--base and --existing need --branch".into()));
+    }
     if let Some(branch) = args.option("branch") {
         check_branch(branch)?;
     }
     let root = root_for(ctx, args.option("root"))?;
-    // The list is read before anything is created, so a bad list leaves nothing behind.
-    let repos = if args.option("branch").is_some() {
-        Some(worktree_cli::repositories(&args, ctx.env, ctx.git, stdin, err)?.0)
-    } else {
-        None
-    };
-
     let dir = root.join(name);
     if dir.exists() {
         return Err(Failure::Run(format!("'{}' already exists", dir.display())));
     }
+    // The list is read and planned before anything is created, so a bad list leaves nothing behind.
+    let plans = match args.option("branch") {
+        Some(branch) => {
+            let (repos, _, skipped) = worktree_cli::listed(&args, ctx.env, ctx.git, stdin, err)?;
+            for folder in &skipped {
+                writeln!(
+                    err,
+                    "gitmaster: skipped {}: not a repository",
+                    folder.display()
+                )?;
+            }
+            Some(plan_repos(ctx, &dir, &args, branch, &repos, err)?)
+        }
+        None => None,
+    };
+
     std::fs::create_dir_all(&root)?;
     std::fs::create_dir(&dir)?;
     ctx.sub.text(&dir, &["init", "-q", "-b", "main"])?;
@@ -524,33 +738,14 @@ fn create(
     ctx.sub.text(&dir, &["config", "--local", KIND_KEY, kind])?;
     writeln!(out, "{}", dir.display())?;
 
-    let Some(repos) = repos else {
+    let Some(plans) = plans else {
         return Ok(());
     };
-    let branch = args.option("branch").unwrap_or_default();
     let mut failed = false;
-    for repo in &repos {
-        let known = ctx.git.branches(&repo.root)?;
-        if !has_branch(&known, branch) {
-            writeln!(
-                err,
-                "gitmaster: skipped {}: no branch '{branch}'",
-                repo.project
-            )?;
-            continue;
-        }
-        let choice = Choice {
-            branch,
-            base: None,
-            member: None,
-            include: None,
-        };
-        match add_member(ctx, &dir, &repo.root, &repo.entries, &choice, err) {
-            Ok(member) => writeln!(err, "gitmaster: added {} on {branch}", member.display())?,
-            Err(error) => {
-                failed = true;
-                writeln!(err, "gitmaster: {}: {}", repo.project, detail(error))?;
-            }
+    for plan in &plans {
+        if let Err(error) = add_member(ctx, &dir, plan, err) {
+            failed = true;
+            writeln!(err, "gitmaster: {}: {}", plan.member, detail(error))?;
         }
     }
     if failed {
@@ -567,7 +762,7 @@ fn add(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let args = Args::parse(words, &["workspace", "as", "include"], &[])?;
+    let args = Args::parse(words, &["workspace", "as", "include", "root"], &[])?;
     if args.positional.len() < 2 || args.positional.len() > 3 {
         return Err(Failure::Usage(
             "expected a repository, a branch and an optional base".into(),
@@ -580,10 +775,12 @@ fn add(
         member: args.option("as"),
         include: args.option("include"),
     };
-    let ws = target(ctx, args.option("workspace"))?;
+    let ws = target(ctx, args.option("workspace"), args.option("root"))?;
     let repo = worktree_cli::resolve_repo(&args.positional[0], ctx.env)?;
     let (root, entries) = worktree_cli::worktrees_in(&repo, ctx.git)?;
-    let dir = add_member(ctx, &ws, &root, &entries, &choice, err)?;
+    let known = ctx.git.branches(&root)?;
+    let plan = plan_member(ctx, &ws, &root, &entries, &known, &choice)?;
+    let dir = add_member(ctx, &ws, &plan, err)?;
     writeln!(out, "{}", dir.display())?;
     Ok(())
 }
@@ -734,13 +931,13 @@ fn member_row(ctx: &Ctx, ws: &Path, member: &Member) -> Result<MemberRow, Failur
 }
 
 fn status(words: &[String], ctx: &Ctx, out: &mut dyn Write) -> Result<(), Failure> {
-    let args = Args::parse(words, &["workspace", "format"], &[])?;
+    let args = Args::parse(words, &["workspace", "format", "root"], &[])?;
     args.exactly(0, "no arguments")?;
     let format = args.option("format").unwrap_or("tsv");
     if !["tsv", "json"].contains(&format) {
         return Err(Failure::Usage(format!("unknown format '{format}'")));
     }
-    let ws = target(ctx, args.option("workspace"))?;
+    let ws = target(ctx, args.option("workspace"), args.option("root"))?;
     let mut rows = Vec::new();
     for member in members(ctx, &ws)? {
         rows.push(member_row(ctx, &ws, &member)?);
@@ -828,6 +1025,7 @@ fn remove(
             ));
         }
         if state.branch.head.is_none() {
+            // Held by a local or a remote branch, as D31 counts them (D178 (4)).
             let held = match &state.branch.oid {
                 Some(oid) => ctx
                     .sub
@@ -840,6 +1038,7 @@ fn remove(
                             "--count=1",
                             "--format=%(refname)",
                             "refs/heads",
+                            "refs/remotes",
                         ],
                     )
                     .is_some_and(|text| !text.trim().is_empty()),

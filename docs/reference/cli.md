@@ -184,12 +184,11 @@ A leading `~` is the home directory, and a relative root is taken from the curre
 
 ### Create a workspace
 
-> **Planned.** Creating the missing branches, `--base`, `--existing`, the all-or-nothing check, and `--root` on `add` and `status` are not available yet.
-
 `create <name>` creates the folder `<root>/<name>`, makes it a Git repository on a branch `main`, marks it as a workspace and prints its path. `--ephemeral` marks it ephemeral; it is durable otherwise. The folder must not exist. A name is a single folder name: it has no `/` and does not start with `.` or `-`.
 
 `--branch <branch>` together with `--repos-from <file|->` adds every repository of the list as a member on `<branch>`, the way `add` does. Where a repository does not have the branch yet, it is created, so a workspace for a new change needs no branch made beforehand. The list is read like the one of `gitmaster worktree list`: a folder that is not a repository is skipped, with a note.
 
+- A branch that exists only on a remote is created to track it, even when `--base` is given: a second branch with the same name is never started.
 - A new branch starts from `--base <rev>` when it is given, in every repository of the list. Otherwise it starts from the repository's base branch: the local branch that `origin/HEAD` names, else the first of `main`, `master`, `trunk` and `develop`, else the current branch.
 - The standard error says, for each member, whether its branch was checked out, created to track a remote branch, or created from a base, and which.
 - `--existing` adds only the repositories that already have `<branch>`, as a local branch or on a remote, and skips the others with a note. Use it to find which repositories a change already touches.

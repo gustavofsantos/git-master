@@ -138,6 +138,48 @@ fn worktrees_of(repo: &Path) -> String {
     git_in(repo, &["worktree", "list", "--porcelain"])
 }
 
+/// The commit `rev` names in `repo`.
+fn oid(repo: &Path, rev: &str) -> String {
+    git_in(repo, &["rev-parse", rev])
+}
+
+/// The commit of the local branch `branch` in `repo`, or `None` when there is no such branch.
+fn local_oid(repo: &Path, branch: &str) -> Option<String> {
+    let output = Process::new("git")
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Commits a file on `branch` of `repo` and puts the main checkout back on `main`.
+fn commit_on(repo: &Path, branch: &str, file: &str) {
+    git_in(repo, &["checkout", "-q", branch]);
+    std::fs::write(repo.join(file), "x\n").unwrap();
+    git_in(repo, &["add", file]);
+    git_in(repo, &["commit", "-q", "-m", file]);
+    git_in(repo, &["checkout", "-q", "main"]);
+}
+
+/// Gives `repo` a bare `origin` remote named `<name>.git` in the scratch folder, with `main`
+/// pushed and fetched.
+fn origin_of(s: &Scratch, repo: &Path, name: &str) -> PathBuf {
+    let origin = s.path().join(format!("{name}.git"));
+    git_in(
+        &s.path(),
+        &["init", "-q", "--bare", origin.to_str().unwrap()],
+    );
+    git_in(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git_in(repo, &["push", "-q", "origin", "main"]);
+    git_in(repo, &["fetch", "-q", "origin"]);
+    origin
+}
+
 #[test]
 fn create_makes_a_folder_that_is_a_workspace_with_its_kind() {
     let s = Scratch::new();
@@ -330,7 +372,175 @@ fn add_gives_a_remote_only_branch_a_tracking_branch() {
 }
 
 #[test]
-fn create_with_branch_and_repos_from_adds_the_repos_that_have_it_and_skips_the_others() {
+fn a_remote_branch_is_tracked_even_with_a_base() {
+    let s = Scratch::new();
+    let repo = s.repo("service-a", &[]);
+    origin_of(&s, &repo, "origin-a");
+    git_in(&repo, &["push", "-q", "origin", "main:refs/heads/feat/x"]);
+    git_in(&repo, &["fetch", "-q", "origin"]);
+    let list = s.path().join("repos.txt");
+    std::fs::write(&list, format!("{}\n", repo.display())).unwrap();
+    let root = s.root();
+    let (code, _, err) = s.run(&[
+        "create",
+        "w",
+        "--root",
+        root.to_str().unwrap(),
+        "--branch",
+        "feat/x",
+        "--base",
+        "HEAD",
+        "--repos-from",
+        list.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("created to track origin/feat/x; the base is ignored"),
+        "{err}"
+    );
+    let member = root.join("w").join("service-a");
+    assert_eq!(
+        git_in(
+            &member,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]
+        ),
+        "origin/feat/x"
+    );
+}
+
+#[test]
+fn create_with_branch_adds_every_repo_of_the_list_and_creates_the_branch_where_missing() {
+    let s = Scratch::new();
+    let a = s.repo("service-a", &["feat/x"]);
+    let b = s.repo("service-b", &[]);
+    let c = s.repo("service-c", &[]);
+    // b has the branch only on a remote.
+    origin_of(&s, &b, "origin-b");
+    git_in(&b, &["push", "-q", "origin", "main:refs/heads/feat/x"]);
+    git_in(&b, &["fetch", "-q", "origin"]);
+    // c's main checkout is on another branch, with a commit of its own.
+    git_in(&c, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(c.join("side.txt"), "side\n").unwrap();
+    git_in(&c, &["add", "side.txt"]);
+    git_in(&c, &["commit", "-q", "-m", "side"]);
+    let main_of_c = oid(&c, "main");
+
+    let list = s.path().join("repos.txt");
+    std::fs::write(
+        &list,
+        format!("{}\n{}\n{}\n", a.display(), b.display(), c.display()),
+    )
+    .unwrap();
+    let root = s.root();
+    let (code, out, err) = s.run(&[
+        "create",
+        "w",
+        "--root",
+        root.to_str().unwrap(),
+        "--branch",
+        "feat/x",
+        "--repos-from",
+        list.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let ws = root.join("w");
+    assert_eq!(out, format!("{}\n", ws.display()));
+    assert_eq!(lines(&err).len(), 3, "{err}");
+    assert!(
+        err.contains("service-a") && err.contains("checked out the existing branch"),
+        "{err}"
+    );
+    assert!(
+        err.contains("service-b") && err.contains("created to track origin/feat/x"),
+        "{err}"
+    );
+    assert!(
+        err.contains("service-c") && err.contains("created from main"),
+        "{err}"
+    );
+    assert!(ws.join("service-a").join("a.txt").exists());
+    assert_eq!(
+        git_in(
+            &ws.join("service-b"),
+            &["rev-parse", "--abbrev-ref", "@{u}"]
+        ),
+        "origin/feat/x"
+    );
+    assert_eq!(oid(&ws.join("service-c"), "HEAD"), main_of_c);
+    assert_eq!(
+        git_in(&ws.join("service-c"), &["symbolic-ref", "--short", "HEAD"]),
+        "feat/x"
+    );
+    assert!(worktrees_of(&a).contains("feat/x"));
+}
+
+#[test]
+fn a_new_branch_starts_from_the_base_branch_that_origin_head_names() {
+    let s = Scratch::new();
+    let repo = s.repo("service-a", &["develop"]);
+    commit_on(&repo, "develop", "develop.txt");
+    origin_of(&s, &repo, "origin-a");
+    git_in(&repo, &["push", "-q", "origin", "develop"]);
+    git_in(&repo, &["fetch", "-q", "origin"]);
+    git_in(&repo, &["remote", "set-head", "origin", "develop"]);
+    assert_ne!(oid(&repo, "develop"), oid(&repo, "main"));
+
+    let list = s.path().join("repos.txt");
+    std::fs::write(&list, format!("{}\n", repo.display())).unwrap();
+    let root = s.root();
+    let (code, _, err) = s.run(&[
+        "create",
+        "w",
+        "--root",
+        root.to_str().unwrap(),
+        "--branch",
+        "newb",
+        "--repos-from",
+        list.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("created from develop"), "{err}");
+    assert_eq!(
+        oid(&root.join("w").join("service-a"), "HEAD"),
+        oid(&repo, "develop")
+    );
+}
+
+#[test]
+fn base_names_the_commit_every_new_branch_starts_from() {
+    let s = Scratch::new();
+    let a = s.repo("service-a", &["release"]);
+    let b = s.repo("service-b", &["release"]);
+    commit_on(&a, "release", "a.txt");
+    commit_on(&b, "release", "b.txt");
+    let list = s.path().join("repos.txt");
+    std::fs::write(&list, format!("{}\n{}\n", a.display(), b.display())).unwrap();
+    let root = s.root();
+    let (code, _, err) = s.run(&[
+        "create",
+        "w",
+        "--root",
+        root.to_str().unwrap(),
+        "--branch",
+        "newb",
+        "--repos-from",
+        list.to_str().unwrap(),
+        "--base",
+        "release",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("created from release"), "{err}");
+    for member in ["service-a", "service-b"] {
+        assert_eq!(
+            oid(&root.join("w").join(member), "HEAD"),
+            oid(&s.path().join(member), "release"),
+            "{member}"
+        );
+    }
+}
+
+#[test]
+fn create_with_existing_adds_only_the_repos_that_have_the_branch() {
     let s = Scratch::new();
     let a = s.repo("service-a", &["feat/x"]);
     let b = s.repo("service-b", &[]);
@@ -346,6 +556,7 @@ fn create_with_branch_and_repos_from_adds_the_repos_that_have_it_and_skips_the_o
         "feat/x",
         "--repos-from",
         list.to_str().unwrap(),
+        "--existing",
     ]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(out, format!("{}\n", root.join("w").display()));
@@ -353,6 +564,139 @@ fn create_with_branch_and_repos_from_adds_the_repos_that_have_it_and_skips_the_o
     assert!(root.join("w").join("service-a").join("a.txt").exists());
     assert!(!root.join("w").join("service-b").exists());
     assert!(worktrees_of(&a).contains("feat/x"));
+}
+
+#[test]
+fn create_with_existing_and_no_repo_having_the_branch_creates_nothing() {
+    let s = Scratch::new();
+    let b = s.repo("service-b", &[]);
+    let list = s.path().join("repos.txt");
+    std::fs::write(&list, format!("{}\n", b.display())).unwrap();
+    let root = s.root();
+    let (code, out, err) = s.run(&[
+        "create",
+        "w",
+        "--root",
+        root.to_str().unwrap(),
+        "--branch",
+        "feat/x",
+        "--repos-from",
+        list.to_str().unwrap(),
+        "--existing",
+    ]);
+    assert_eq!(code, 1);
+    assert_eq!(out, "");
+    assert!(err.contains("no repository would be added"), "{err}");
+    assert!(!root.join("w").exists());
+    assert!(!root.exists() || std::fs::read_dir(&root).unwrap().next().is_none());
+}
+
+#[test]
+fn create_refuses_a_branch_checked_out_in_one_repo_and_creates_nothing() {
+    let s = Scratch::new();
+    let a = s.repo("service-a", &[]);
+    let b = s.repo("service-b", &["feat/x"]);
+    git_in(&b, &["checkout", "-q", "feat/x"]);
+    let list = s.path().join("repos.txt");
+    std::fs::write(&list, format!("{}\n{}\n", a.display(), b.display())).unwrap();
+    let root = s.root();
+    let (code, out, err) = s.run(&[
+        "create",
+        "w",
+        "--root",
+        root.to_str().unwrap(),
+        "--branch",
+        "feat/x",
+        "--repos-from",
+        list.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert_eq!(out, "");
+    assert!(err.contains(b.to_str().unwrap()), "{err}");
+    assert!(!root.join("w").exists());
+    assert_eq!(local_oid(&a, "feat/x"), None);
+    assert!(!worktrees_of(&a).contains(root.to_str().unwrap()));
+}
+
+#[test]
+fn create_refuses_two_members_with_one_folder_name_and_creates_nothing() {
+    let s = Scratch::new();
+    std::fs::create_dir(s.path().join("x1")).unwrap();
+    std::fs::create_dir(s.path().join("x2")).unwrap();
+    let a = s.repo("x1/service", &[]);
+    let b = s.repo("x2/service", &[]);
+    let list = s.path().join("repos.txt");
+    std::fs::write(&list, format!("{}\n{}\n", a.display(), b.display())).unwrap();
+    let root = s.root();
+    let (code, _, err) = s.run(&[
+        "create",
+        "w",
+        "--root",
+        root.to_str().unwrap(),
+        "--branch",
+        "feat/y",
+        "--repos-from",
+        list.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert!(err.contains("would both be the member 'service'"), "{err}");
+    assert!(!root.join("w").exists());
+    assert_eq!(local_oid(&a, "feat/y"), None);
+    assert_eq!(local_oid(&b, "feat/y"), None);
+}
+
+#[test]
+fn create_with_an_empty_list_or_no_repository_in_it_creates_nothing() {
+    let s = Scratch::new();
+    let root = s.root();
+    let root_arg = root.to_str().unwrap();
+    let list = s.path().join("repos.txt");
+    std::fs::write(&list, "").unwrap();
+    let (code, _, err) = s.run(&[
+        "create",
+        "w",
+        "--root",
+        root_arg,
+        "--branch",
+        "feat/x",
+        "--repos-from",
+        list.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert!(err.contains("no repository would be added"), "{err}");
+    assert!(!root.join("w").exists());
+
+    let plain = s.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    std::fs::write(&list, format!("{}\n", plain.display())).unwrap();
+    let (code, _, err) = s.run(&[
+        "create",
+        "w",
+        "--root",
+        root_arg,
+        "--branch",
+        "feat/x",
+        "--repos-from",
+        list.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert!(err.contains("skipped"), "{err}");
+    assert!(!root.join("w").exists());
+}
+
+#[test]
+fn base_and_existing_without_a_branch_are_a_usage_error() {
+    let s = Scratch::new();
+    let root = s.root();
+    let root_arg = root.to_str().unwrap();
+    for extra in [["--base", "main"], ["--existing", ""]] {
+        let mut words = vec!["create", "w", "--root", root_arg];
+        words.extend(extra.iter().copied().filter(|word| !word.is_empty()));
+        let (code, out, _) = s.run(&words);
+        assert_eq!(code, 2, "{words:?}");
+        assert_eq!(out, "");
+        assert!(!root.join("w").exists());
+    }
 }
 
 #[test]
@@ -628,4 +972,84 @@ fn remove_prunes_the_record_of_a_member_whose_folder_is_gone() {
     assert_eq!(code, 0, "{err}");
     assert!(!ws.exists());
     assert!(!worktrees_of(&repo).contains(member.to_str().unwrap()));
+}
+
+#[test]
+fn add_without_a_base_starts_the_branch_from_the_repository_base_branch_not_head() {
+    let s = Scratch::new();
+    let repo = s.repo("service-a", &[]);
+    // The main checkout is on a side branch, so HEAD is not the base branch.
+    git_in(&repo, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(repo.join("side.txt"), "side\n").unwrap();
+    git_in(&repo, &["add", "side.txt"]);
+    git_in(&repo, &["commit", "-q", "-m", "side"]);
+    let ws = s.create("w");
+    let (code, out, err) = s.run_in(
+        &s.path(),
+        &[
+            "add",
+            repo.to_str().unwrap(),
+            "newb",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "{err}");
+    let member = PathBuf::from(out.trim_end());
+    assert_eq!(oid(&member, "HEAD"), oid(&repo, "main"));
+    assert_ne!(oid(&member, "HEAD"), oid(&repo, "side"));
+}
+
+#[test]
+fn remove_accepts_a_detached_member_whose_head_a_remote_branch_has() {
+    let s = Scratch::new();
+    let repo = s.repo("service-a", &["feat/x"]);
+    origin_of(&s, &repo, "origin-a");
+    let root = s.root();
+    let root_arg = root.to_str().unwrap();
+    let ws = s.create("w");
+    let member = s.add(&ws, &repo, "feat/x");
+    git_in(&member, &["checkout", "-q", "--detach"]);
+    std::fs::write(member.join("published.txt"), "x\n").unwrap();
+    git_in(&member, &["add", "published.txt"]);
+    git_in(&member, &["commit", "-q", "-m", "published"]);
+    git_in(
+        &member,
+        &["push", "-q", "origin", "HEAD:refs/heads/published"],
+    );
+    git_in(&repo, &["fetch", "-q", "origin"]);
+
+    let (code, _, err) = s.run(&["remove", "w", "--root", root_arg]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!ws.exists());
+}
+
+#[test]
+fn add_and_status_take_root_for_a_workspace_named_under_it() {
+    let s = Scratch::new();
+    let repo = s.repo("service-a", &["feat/x"]);
+    let custom = s.path().join("custom");
+    let custom_arg = custom.to_str().unwrap();
+    let (code, _, err) = s.run(&["create", "w", "--root", custom_arg]);
+    assert_eq!(code, 0, "{err}");
+
+    let (code, out, err) = s.run(&[
+        "add",
+        repo.to_str().unwrap(),
+        "feat/x",
+        "--workspace",
+        "w",
+        "--root",
+        custom_arg,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        format!("{}\n", custom.join("w").join("service-a").display())
+    );
+
+    let (code, out, err) = s.run(&["status", "--workspace", "w", "--root", custom_arg]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("service-a\tfeat/x\tclean\t"), "{out}");
 }
