@@ -2630,11 +2630,11 @@ impl GitPort for SubprocessGit {
 
     fn restack_resolution_close(&self, root: &Path) -> Result<(), GitError> {
         let path = self.resolution_worktree(root)?;
-        let wanted = canonical_or_as_is(&path);
+        let wanted = canonical_for_missing(&path);
         let registered = self
             .all_worktrees(root)?
             .iter()
-            .any(|entry| canonical_or_as_is(Path::new(&entry.path)) == wanted);
+            .any(|entry| canonical_for_missing(Path::new(&entry.path)) == wanted);
         if registered {
             let mut command = self.git(root);
             command
@@ -2650,7 +2650,12 @@ impl GitPort for SubprocessGit {
             std::fs::remove_dir_all(&path)
                 .map_err(|e| GitError(format!("cannot remove {}: {e}", path.display())))?;
         }
-        self.prune_worktrees(root)
+        if registered {
+            // Only this worktree's record: a blanket `git worktree prune` would also
+            // drop the records of other worktrees whose folders are missing.
+            forget_worktree_record(&self.common_dir(root)?, &path)?;
+        }
+        Ok(())
     }
 
     fn set_ref(&self, root: &Path, name: &str, oid: &str) -> Result<(), GitError> {
@@ -4029,6 +4034,50 @@ struct ReplayMetadata {
 /// `path` canonicalized, or as given when it cannot be (a folder that is gone).
 fn canonical_or_as_is(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Deletes the administrative record (`<common dir>/worktrees/<id>`) of the worktree
+/// whose folder is `path`, and no other. Git names a record's folder by an id and keeps the
+/// worktree's `.git` file path in its `gitdir` file, which is what is matched.
+fn forget_worktree_record(common: &Path, path: &Path) -> Result<(), GitError> {
+    let records = common.join("worktrees");
+    let entries = match std::fs::read_dir(&records) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GitError(format!(
+                "cannot read {}: {error}",
+                records.display()
+            )));
+        }
+    };
+    let wanted = canonical_for_missing(&path.join(".git"));
+    for entry in entries {
+        let record = entry
+            .map_err(|e| GitError(format!("cannot read {}: {e}", records.display())))?
+            .path();
+        let Ok(gitdir) = std::fs::read_to_string(record.join("gitdir")) else {
+            continue;
+        };
+        let linked = PathBuf::from(gitdir.trim_end_matches(['\n', '\r']));
+        if canonical_for_missing(&linked) == wanted {
+            std::fs::remove_dir_all(&record)
+                .map_err(|e| GitError(format!("cannot remove {}: {e}", record.display())))?;
+        }
+    }
+    Ok(())
+}
+
+/// `path` canonicalized, or, when it is gone, its parent canonicalized with the last name
+/// joined back on, so a missing folder under a symlinked directory still compares equal.
+fn canonical_for_missing(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => canonical_for_missing(parent).join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// A ref name under `refs/`, with no spaces or line breaks that would break `update-ref`.

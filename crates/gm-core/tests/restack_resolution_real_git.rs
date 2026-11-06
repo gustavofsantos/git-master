@@ -353,3 +353,70 @@ fn the_store_round_trips_and_keeps_each_resolved_commit_by_a_ref() {
     assert!(restack_resolutions::load(git, root).unwrap().is_empty());
     assert!(!ref_exists(root, &ref_of(&other)));
 }
+
+/// Adds a linked worktree on a new branch `gone` and deletes its folder by hand, so Git keeps
+/// the record and reports it as prunable. Returns the folder that was deleted.
+fn missing_worktree(fixture: &Fixture, name: &str) -> PathBuf {
+    let path = fixture.root.parent().unwrap().join(name);
+    git_in(
+        &fixture.root,
+        &["worktree", "add", "-q", "-b", name, path.to_str().unwrap()],
+    );
+    std::fs::remove_dir_all(&path).unwrap();
+    path
+}
+
+fn worktree_list(root: &Path) -> String {
+    git_in(root, &["worktree", "list", "--porcelain"])
+}
+
+#[test]
+fn closing_keeps_the_record_of_an_unrelated_missing_worktree() {
+    let fixture = fixture();
+    let gone = missing_worktree(&fixture, "gone");
+    assert!(worktree_list(&fixture.root).contains("prunable"));
+
+    fixture.git.restack_resolution_close(&fixture.root).unwrap();
+
+    let list = worktree_list(&fixture.root);
+    assert!(list.contains(&gone.display().to_string()), "{list}");
+    assert!(list.contains("prunable"), "{list}");
+    assert!(fixture.root.join(".git/worktrees/gone").is_dir());
+}
+
+#[test]
+fn closing_removes_a_leftover_resolution_worktree_and_its_record() {
+    let fixture = fixture();
+    let path = fixture
+        .git
+        .restack_resolution_open(&fixture.root, &fixture.onto, &fixture.commit)
+        .unwrap();
+    assert!(path.exists());
+
+    fixture.git.restack_resolution_close(&fixture.root).unwrap();
+
+    assert!(!path.exists());
+    assert!(!fixture.root.join(".git/worktrees/restack-resolve").exists());
+    assert!(!worktree_list(&fixture.root).contains("restack-resolve"));
+}
+
+#[test]
+fn closing_a_resolution_whose_folder_is_gone_removes_only_its_own_record() {
+    let fixture = fixture();
+    let gone = missing_worktree(&fixture, "gone");
+    let path = fixture
+        .git
+        .restack_resolution_open(&fixture.root, &fixture.onto, &fixture.commit)
+        .unwrap();
+    std::fs::remove_dir_all(&path).unwrap();
+    assert!(worktree_list(&fixture.root).contains("restack-resolve"));
+
+    fixture.git.restack_resolution_close(&fixture.root).unwrap();
+
+    let list = worktree_list(&fixture.root);
+    assert!(!list.contains("restack-resolve"), "{list}");
+    assert!(list.contains(&gone.display().to_string()), "{list}");
+    assert!(list.contains("prunable"), "{list}");
+    assert!(!fixture.root.join(".git/worktrees/restack-resolve").exists());
+    assert!(fixture.root.join(".git/worktrees/gone").is_dir());
+}
