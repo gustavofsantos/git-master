@@ -65,8 +65,6 @@ Ignored files are not listed. A tracked file that you deleted from disk stays in
 
 ### Submodules
 
-> **Planned.** Listing and searching the files of submodules is not available in the app yet.
-
 The files of a submodule that is checked out are part of the project: Quick Open lists them, the folder tree shows them under the submodule's folder, and text search looks inside them. Their paths start with the submodule's folder, such as `service-a/src/main.rs`. Each submodule follows its own `.gitignore`. A submodule that is not checked out has no files to list. Only the submodules of the repository you opened are read, not the submodules of a submodule.
 
 In a [workspace](workspaces.md), this lets you find a file or a name in every member at once.

@@ -24,8 +24,6 @@ Select a file to see its diff. The diff is described in [Diff and staging](diff-
 
 ## Submodules
 
-> **Planned.** Submodule rows are not available in the app yet.
-
 A submodule takes one row, with the folder icon and its path. The row shows the branch the submodule has checked out, or **detached**, and marks what changed:
 
 | Mark | Meaning |
