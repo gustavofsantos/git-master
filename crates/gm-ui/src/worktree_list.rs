@@ -82,7 +82,7 @@ pub fn display_name(entry: &WorktreeEntry) -> String {
 }
 
 /// Paths compare without a trailing separator.
-fn same_path(a: &str, b: &str) -> bool {
+pub(crate) fn same_path(a: &str, b: &str) -> bool {
     a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 

@@ -36,15 +36,11 @@ Removing a workspace, of either kind, follows the rules of [removing a worktree]
 
 ## The Workspaces section
 
-> **Planned.** The **Workspaces** section of the sidebar is not available yet.
-
 The **Workspaces** section of the sidebar lists the workspaces under the workspace root, by name, in every window. A **here** badge marks the workspace the window shows, and an **ephemeral** badge marks an ephemeral one. Click a row to open that workspace in its own window.
 
 The **+** in the section header opens **New Workspace…**. The menu of a row has **Open Workspace**, **Reveal in File Manager** and **Remove Workspace**. The section starts folded, like **Branches** and **Worktrees**: click its header to open it; see [Branches](branches.md#fold-the-sections).
 
 ## Create a workspace
-
-> **Planned.** The **New Workspace…** dialog is not available yet. Create a workspace with `gitmaster workspace create` and open its folder; see [Command line](../reference/cli.md#create-a-workspace).
 
 1. Run **New Workspace…** from the command palette, or click **+** in the **Workspaces** section of the sidebar.
 2. Name the workspace.
@@ -66,7 +62,9 @@ A workspace opens in its own window, like any repository. The Working Copy shows
 - The diff of a member shows the commits it gained, as a list, and opens each one.
 - Each member keeps its branch checked out. When a Git command leaves a member on a detached HEAD, its row is marked **detached**, and **Check Out Branch** puts it back on its branch.
 
-> **Planned.** **Check Out Branch** on a detached member's row is not available yet: open the member and check out its branch there.
+When the detached HEAD holds commits that no local or remote branch has, **Check Out Branch** refuses and says how many, so they are not left behind: put them on a branch first, from the member's own window.
+
+> **Planned.** **Check Out Branch** does not refuse yet: it leaves such commits behind, and only the member's reflog keeps them.
 
 ### Record a combination
 
@@ -94,8 +92,6 @@ The [local review](../agents/local-review.md) loop covers the members too: comme
 The local environment the agent sets up, such as containers that run the services, is the agent's and yours: GitMaster does not start or stop it. Its files belong in the workspace repository, so they are versioned with the combination they run.
 
 ## Remove a workspace
-
-> **Planned.** **Remove Workspace** in the app is not available yet. Use `gitmaster workspace remove`.
 
 1. Choose **Remove Workspace** in the menu of its row in the **Workspaces** section, or in the command palette and pick the workspace with **Tab**.
 2. Read the dialog. It checks every member and the workspace repository, and lists what would stop the removal.

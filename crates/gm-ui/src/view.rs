@@ -76,6 +76,8 @@ use crate::workflow_inputs::WorkflowInputsDialog;
 use crate::workflow_review::WorkflowReviewDialog;
 use crate::workflow_run::fill_for_message;
 use crate::workflows_page::is_conflict;
+use crate::workspace_create::WorkspaceDialog;
+use crate::workspace_remove::RemoveWorkspaceDialog;
 use crate::worktree_create::WorktreeDialog;
 use crate::worktree_prune::PruneDialog;
 use crate::worktree_remove::RemoveDialog;
@@ -187,6 +189,10 @@ pub struct StatusView {
     pub(crate) worktree_dialog: Option<WorktreeDialog>,
     /// The remove-worktree dialog, while it is open.
     pub(crate) removal_dialog: Option<RemoveDialog>,
+    /// The New Workspace dialog while it is open (D183).
+    pub(crate) workspace_dialog: Option<WorkspaceDialog>,
+    /// The Remove Workspace dialog while it is open (D183).
+    pub(crate) workspace_removal_dialog: Option<RemoveWorkspaceDialog>,
     /// The prune dialog, while it is open.
     pub(crate) prune_dialog: Option<PruneDialog>,
     /// The new-branch dialog, while it is open.
@@ -422,6 +428,9 @@ impl StatusView {
         subscriptions.extend(shell_sidebar::subscriptions(&sidebar_input, window, cx));
         let mut model = Model::default();
         model.request_open(open);
+        // The workspaces under the root are listed when the window starts (D183 (2)).
+        let listing = engine.dispatch(Actor::Human, CommandKind::ListWorkspaces { root: None });
+        model.workspaces.request(listing);
         Self {
             engine,
             command_log,
@@ -459,6 +468,8 @@ impl StatusView {
             labels_view: LabelsView::new(labels_query),
             worktree_dialog: None,
             removal_dialog: None,
+            workspace_dialog: None,
+            workspace_removal_dialog: None,
             prune_dialog: None,
             new_branch_dialog: None,
             stack_subject: None,
@@ -720,6 +731,12 @@ impl StatusView {
         }
         if let Some(outcome) = self.model.removal.take_outcome() {
             self.on_worktree_removal_settled(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.workspace_making.take() {
+            self.on_workspace_created(outcome, window, cx);
+        }
+        if let Some(outcome) = self.model.workspace_removal.take_outcome() {
+            self.on_workspace_removal_settled(outcome, window, cx);
         }
         if let Some(outcome) = self.model.pruning.take_outcome() {
             self.on_worktrees_pruned(outcome, window, cx);
@@ -1334,11 +1351,7 @@ impl StatusView {
             Ok(Effect::OpenReviewEdit { id }) => self.open_review_edit(id, window, cx),
             Ok(Effect::CopyThreadMarkdown(uid)) => self.copy_thread_markdown(uid, cx),
             Ok(Effect::ThreadFolds { open }) => self.fold_thread_groups(open, cx),
-            Ok(Effect::Copy(text)) => {
-                let notice = format!("Copied {text}");
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                self.notify_user(&notice, cx);
-            }
+            Ok(Effect::Copy(text)) => self.copy_text(text.clone(), &format!("Copied {text}"), cx),
             Ok(Effect::CopyMessage(text)) => self.copy_text(text, "Copied commit message", cx),
             Ok(Effect::Reveal(path)) => self.reveal(action, &path, cx),
             Ok(Effect::OpenWorkflowInputs { workflow, inputs }) => {
@@ -1356,6 +1369,10 @@ impl StatusView {
             }
             Ok(Effect::OpenWorktree(path)) => self.open_worktree(&path, cx),
             Ok(Effect::OpenRemoveDialog(path)) => self.open_remove_dialog(&path, window, cx),
+            Ok(Effect::OpenWorkspaceDialog) => self.open_workspace_dialog(window, cx),
+            Ok(Effect::OpenRemoveWorkspaceDialog(path)) => {
+                self.open_remove_workspace_dialog(&path, window, cx);
+            }
             Ok(Effect::OpenPruneDialog) => self.open_prune_dialog(cx),
             Ok(
                 effect @ (Effect::OpenNewBranchDialog { .. }
@@ -1571,6 +1588,7 @@ impl StatusView {
                 .and_then(|status| status.branch.head.as_deref()),
             root: self.model.status().map(|status| status.root.as_str()),
             worktrees: &self.model.worktrees,
+            workspaces: self.model.workspaces.workspaces(),
             author_pictures: crate::action_registry::AuthorPictures::from_on(
                 self.settings.author_pictures,
             ),
@@ -1933,6 +1951,12 @@ impl StatusView {
         }
         if self.removal_dialog.is_some() {
             layers.push(self.removal_layer(window, cx));
+        }
+        if self.workspace_dialog.is_some() {
+            layers.push(self.workspace_layer(window, cx));
+        }
+        if self.workspace_removal_dialog.is_some() {
+            layers.push(self.workspace_removal_layer(window, cx));
         }
         if self.prune_dialog.is_some() {
             layers.push(self.prune_layer(window, cx));

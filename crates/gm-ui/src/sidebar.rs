@@ -15,25 +15,34 @@ pub enum Section {
     Repository,
     Branches,
     Worktrees,
+    Workspaces,
 }
 
 /// Which sections are folded. When a window starts, Repository is open and
-/// Branches and Worktrees are folded (D184); the choice is kept for the window
-/// only.
+/// Branches, Worktrees and Workspaces are folded (D184); the choice is kept for
+/// the window only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Folded {
-    repository: bool,
-    branches: bool,
-    worktrees: bool,
+    /// Indexed by `Section::index`.
+    folded: [bool; 4],
 }
 
 impl Default for Folded {
     /// The state a new window starts in: Repository open, the others folded.
     fn default() -> Self {
         Self {
-            repository: false,
-            branches: true,
-            worktrees: true,
+            folded: [false, true, true, true],
+        }
+    }
+}
+
+impl Section {
+    fn index(self) -> usize {
+        match self {
+            Section::Repository => 0,
+            Section::Branches => 1,
+            Section::Worktrees => 2,
+            Section::Workspaces => 3,
         }
     }
 }
@@ -41,19 +50,11 @@ impl Default for Folded {
 impl Folded {
     #[must_use]
     pub fn is_folded(self, section: Section) -> bool {
-        match section {
-            Section::Repository => self.repository,
-            Section::Branches => self.branches,
-            Section::Worktrees => self.worktrees,
-        }
+        self.folded[section.index()]
     }
 
     pub fn toggle(&mut self, section: Section) {
-        let flag = match section {
-            Section::Repository => &mut self.repository,
-            Section::Branches => &mut self.branches,
-            Section::Worktrees => &mut self.worktrees,
-        };
+        let flag = &mut self.folded[section.index()];
         *flag = !*flag;
     }
 }
@@ -255,6 +256,18 @@ mod tests {
         assert!(!folded.is_folded(Section::Repository));
         assert!(folded.is_folded(Section::Branches));
         assert!(folded.is_folded(Section::Worktrees));
+        assert!(folded.is_folded(Section::Workspaces));
+    }
+
+    #[test]
+    fn the_workspaces_section_folds_on_its_own() {
+        let mut folded = Folded::default();
+        folded.toggle(Section::Workspaces);
+        assert!(!folded.is_folded(Section::Workspaces));
+        assert!(folded.is_folded(Section::Worktrees));
+        assert!(folded.is_folded(Section::Branches));
+        folded.toggle(Section::Workspaces);
+        assert!(folded.is_folded(Section::Workspaces));
     }
 
     #[test]

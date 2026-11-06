@@ -15,6 +15,7 @@ use crate::stashes;
 use crate::theme;
 use crate::view::StatusView;
 use crate::window_chrome;
+use crate::workspace_list;
 
 const ROW_HEIGHT: f32 = 24.;
 const MENU_WIDTH: f32 = 300.;
@@ -28,6 +29,8 @@ pub(crate) enum Target {
     File(String),
     /// A worktree, by its folder.
     Worktree(String),
+    /// A workspace of the sidebar, by its folder (D183).
+    Workspace(String),
     /// A stash, by its index and commit id, as the Stashes page listed it.
     Stash {
         index: u32,
@@ -71,6 +74,7 @@ impl Target {
             | Self::File(name)
             | Self::Worktree(name)
             | Self::Label { name, .. } => name.clone(),
+            Self::Workspace(path) => workspace_list::folder_name(path),
             Self::Stash { index, .. } => stashes::label(*index),
             Self::ReflogEntry { index, .. } => reflog::label(*index),
             Self::Thread { title, .. } | Self::ThreadMore { title, .. } => title.clone(),
@@ -188,6 +192,8 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         .any(|entry| entry.path == path && entry.submodule.is_some())
     {
         items.insert(0, item(Action::OpenSubmodule, 0));
+        // A member of a workspace leads with its branch, which Check Out Branch puts back (D183).
+        items.insert(1, item(Action::CheckOutMemberBranch, 0));
     }
     offered_items(items, ctx)
 }
@@ -350,6 +356,17 @@ pub(crate) fn worktree_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     items
 }
 
+/// The menu of a workspace row: open it, reveal it, then remove it in red (D183).
+pub(crate) fn workspace_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
+    let target = Args::Workspace(path.to_owned());
+    let item = |action, group| Item::new(action, target.clone(), group, ctx);
+    vec![
+        item(Action::OpenWorkspace, 0),
+        item(Action::RevealWorkspace, 1),
+        item(Action::RemoveWorkspace, 2),
+    ]
+}
+
 /// The items split where the group changes, one slice per group.
 pub(crate) fn sections(items: &[Item]) -> Vec<&[Item]> {
     items.chunk_by(|a, b| a.group == b.group).collect()
@@ -389,6 +406,16 @@ impl StatusView {
         cx: &mut Context<Self>,
     ) {
         self.open_menu(Target::Worktree(path.to_owned()), position, cx);
+    }
+
+    /// Opens the menu of the workspace whose folder is `path`, under the pointer (D183).
+    pub(crate) fn open_workspace_menu(
+        &mut self,
+        path: &str,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_menu(Target::Workspace(path.to_owned()), position, cx);
     }
 
     /// Opens the menu of the stash `oid` at `index`, under the pointer (B2).
@@ -585,6 +612,7 @@ impl StatusView {
             Target::Branch(name) => branch_items(name, &ctx),
             Target::File(path) => file_items(path, &ctx),
             Target::Worktree(path) => worktree_items(path, &ctx),
+            Target::Workspace(path) => workspace_items(path, &ctx),
             Target::Stash { index, oid } => stash_items(*index, oid, &ctx),
             Target::ReflogEntry { oid, .. } => reflog_items(oid, &ctx),
             Target::Thread { uid, starred, .. } => thread_items(uid, *starred, &ctx),
@@ -811,6 +839,7 @@ mod tests {
             messages: crate::action_registry::MessageCtx::default(),
             workflows: crate::action_registry::WorkflowCtx::default(),
             worktrees: &[],
+            workspaces: &[],
             author_pictures: crate::action_registry::AuthorPictures::Hidden,
             remote_running: false,
             stashes: None,
@@ -906,6 +935,7 @@ mod tests {
         let context = ActionContext {
             root: Some("/r"),
             worktrees: &listed,
+            workspaces: &[],
             ..ctx(&[])
         };
         let titles = |items: &[Item]| items.iter().map(Item::label).collect::<Vec<_>>();
@@ -955,6 +985,7 @@ mod tests {
         let context = ActionContext {
             root: Some("/r"),
             worktrees: &listed,
+            workspaces: &[],
             ..ctx(&[])
         };
         let titles = |items: &[Item]| items.iter().map(Item::label).collect::<Vec<_>>();
@@ -1321,5 +1352,51 @@ mod tests {
         assert_eq!(items[0].state, Ok(()));
         assert!(items[1].destructive());
         assert_eq!(sections(&items).len(), 2, "delete sits in its own group");
+    }
+
+    #[test]
+    fn a_workspace_menu_opens_reveals_then_removes_and_says_why_remove_is_off_here() {
+        let rows = [gm_schema::WorkspaceRow {
+            name: "checkout".into(),
+            kind: gm_schema::WorkspaceKind::Durable,
+            path: "/w/checkout".into(),
+            members: 2,
+        }];
+        let context = ActionContext {
+            workspaces: &rows,
+            root: Some("/w/checkout"),
+            ..ctx(&[])
+        };
+        let items = workspace_items("/w/checkout", &context);
+        let actions: Vec<Action> = items.iter().map(|item| item.action).collect();
+        assert_eq!(
+            actions,
+            [
+                Action::OpenWorkspace,
+                Action::RevealWorkspace,
+                Action::RemoveWorkspace
+            ]
+        );
+        assert_eq!(
+            find(&items, Action::RemoveWorkspace).state,
+            Err("Open in this window.")
+        );
+        assert_eq!(find(&items, Action::RevealWorkspace).state, Ok(()));
+        assert!(find(&items, Action::RemoveWorkspace).destructive());
+        assert_eq!(sections(&items).len(), 3);
+    }
+
+    #[test]
+    fn a_submodule_row_menu_offers_check_out_branch_after_open_submodule() {
+        let submodule = StatusEntry {
+            submodule: Some(gm_schema::SubmoduleChange::default()),
+            ..entry("libs/x", None, Some(Change::Modified))
+        };
+        let entries = [submodule];
+        let items = file_items("libs/x", &ctx(&entries));
+        assert_eq!(items[0].action, Action::OpenSubmodule);
+        assert_eq!(items[1].action, Action::CheckOutMemberBranch);
+        // Nothing has read the member yet, so the item says so.
+        assert_eq!(items[1].state, Err("The submodule is still being read."));
     }
 }

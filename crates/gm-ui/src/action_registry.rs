@@ -12,7 +12,8 @@ use std::path::PathBuf;
 
 use gm_schema::{
     BranchEntry, CommandKind, ConflictSite, DiffSide, Feature, FeatureSet, HunkId, ReviewComment,
-    ReviewStatus, StageTarget, StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorktreeEntry,
+    ReviewStatus, StageTarget, StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorkspaceRow,
+    WorktreeEntry,
 };
 
 use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, SAME_WORKTREE};
@@ -34,6 +35,7 @@ pub enum Category {
     Branches,
     Remote,
     Worktrees,
+    Workspaces,
     Repository,
     Workflows,
 }
@@ -46,6 +48,7 @@ impl Category {
             Category::Branches => "Branches",
             Category::Remote => "Remote",
             Category::Worktrees => "Worktrees",
+            Category::Workspaces => "Workspaces",
             Category::Repository => "Repository",
             Category::Workflows => "Workflows",
         }
@@ -62,6 +65,8 @@ pub enum ArgKind {
     File,
     Chunk,
     Worktree,
+    /// A workspace of the sidebar's list, by its folder (D183).
+    Workspace,
     Commit,
     /// A manual workflow, as the engine listed it.
     Workflow,
@@ -92,6 +97,8 @@ pub enum Args {
     },
     /// The worktree whose folder is `path`, as the list gives it.
     Worktree(String),
+    /// The workspace whose folder is `path`, as the list gives it (D183).
+    Workspace(String),
     /// The text to copy from a commit of the history page: its id, or its message.
     Commit(String),
     /// The name of a listed manual workflow.
@@ -155,8 +162,13 @@ pub enum Effect {
     OpenWorktreeDialog {
         branch: Option<String>,
     },
-    /// Opens the worktree at this path in its own window.
+    /// Opens the worktree or workspace folder at this path in its own window.
     OpenWorktree(String),
+    /// Opens the New Workspace dialog (D183 (3)).
+    OpenWorkspaceDialog,
+    /// Opens the Remove Workspace dialog for the workspace at this path; the dialog inspects it
+    /// and the removal is sent from there (D183 (4)).
+    OpenRemoveWorkspaceDialog(String),
     /// Opens the remove dialog for the worktree at this path; the dialog
     /// inspects it and the removal is sent from there.
     OpenRemoveDialog(String),
@@ -379,6 +391,8 @@ pub struct Context<'a> {
     pub workflows: WorkflowCtx<'a>,
     /// The worktrees listed for the open repository, main checkout first.
     pub worktrees: &'a [WorktreeEntry],
+    /// The workspaces the sidebar lists under the root, by name (D183).
+    pub workspaces: &'a [WorkspaceRow],
     /// The stashes the Stashes page listed, newest first; `None` until the first listing.
     pub stashes: Option<&'a [StashEntry]>,
     /// Whether author pictures are looked up on Gravatar (D110).
@@ -453,7 +467,7 @@ pub struct LabelRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 101] = [
+const SPECS: [Spec; 106] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1155,6 +1169,41 @@ const SPECS: [Spec; 101] = [
         ArgKind::File,
         Category::WorkingCopy,
     ),
+    spec(
+        "workspace.new",
+        "New Workspace…",
+        None,
+        ArgKind::None,
+        Category::Workspaces,
+    ),
+    spec(
+        "workspace.open",
+        "Open Workspace",
+        None,
+        ArgKind::Workspace,
+        Category::Workspaces,
+    ),
+    spec(
+        "workspace.reveal",
+        "Reveal in File Manager",
+        None,
+        ArgKind::Workspace,
+        Category::Workspaces,
+    ),
+    spec(
+        "workspace.remove",
+        "Remove Workspace",
+        None,
+        ArgKind::Workspace,
+        Category::Workspaces,
+    ),
+    spec(
+        "submodule.check_out_branch",
+        "Check Out Branch",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
+    ),
 ];
 
 const fn spec(
@@ -1280,6 +1329,16 @@ pub enum Action {
     CodeProvenance,
     /// Opens a checked-out submodule's folder in its own window (D175).
     OpenSubmodule,
+    /// Opens the New Workspace dialog (D183).
+    NewWorkspace,
+    /// Opens a workspace's folder in its own window (D183).
+    OpenWorkspace,
+    /// Opens a workspace's folder in the file manager (D183).
+    RevealWorkspace,
+    /// Opens the dialog that removes a workspace (D183).
+    RemoveWorkspace,
+    /// Checks out the branch a detached member of a workspace is meant to be on (D183).
+    CheckOutMemberBranch,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1546,6 +1605,81 @@ fn worktree_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorktreeEntr
     }
 }
 
+/// The reason an action gives on the workspace this window shows (D183).
+const IN_THIS_WINDOW: Reason = "Open in this window.";
+
+/// The reason a file is not a workspace member, for Check Out Branch.
+const NOT_A_MEMBER: Reason = "Not a workspace member.";
+
+/// The reason a member is already on its branch, for Check Out Branch.
+const ON_ITS_BRANCH: Reason = "It is on its branch.";
+
+/// The workspace the run names, as the sidebar lists it (D183).
+fn workspace_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorkspaceRow, Reason> {
+    match args {
+        Args::Workspace(path) => ctx
+            .workspaces
+            .iter()
+            .find(|row| &row.path == path)
+            .ok_or("This workspace is not listed."),
+        _ => Err("No target for this action"),
+    }
+}
+
+/// Open and Remove refuse the workspace this window shows: a window cannot remove its own folder
+/// (D183 (4)). Reveal has no such limit. Check Out Branch takes a member, so it has its own rule.
+fn workspace_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    if action == Action::CheckOutMemberBranch {
+        return check_out_member_rule(args, ctx);
+    }
+    let row = workspace_entry(args, ctx)?;
+    let here = ctx
+        .root
+        .is_some_and(|root| root.trim_end_matches('/') == row.path.trim_end_matches('/'));
+    match action {
+        Action::OpenWorkspace | Action::RemoveWorkspace if here => Err(IN_THIS_WINDOW),
+        _ => Ok(()),
+    }
+}
+
+/// Check Out Branch: a submodule row of a workspace, which is on a detached HEAD (D183). Only the
+/// submodule's read says where its HEAD is, so the rule waits for that read.
+fn check_out_member_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    let Args::File(path) = args else {
+        return Err("No target for this action");
+    };
+    let entry = submodule_entry(path, ctx).ok_or(NOT_A_MEMBER)?;
+    let detail = ctx
+        .submodules
+        .and_then(|submodules| submodules.detail(&entry.path))
+        .ok_or(SUBMODULE_READING)?;
+    if !detail.checked_out {
+        Err(NOT_CHECKED_OUT)
+    } else if detail.detached {
+        Ok(())
+    } else {
+        Err(ON_ITS_BRANCH)
+    }
+}
+
+/// What the workspace actions and Check Out Branch do (D183).
+fn workspace_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
+    Ok(match (action, args) {
+        (Action::NewWorkspace, _) => Effect::OpenWorkspaceDialog,
+        (Action::OpenWorkspace, Args::Workspace(path)) => Effect::OpenWorktree(path.clone()),
+        (Action::RevealWorkspace, Args::Workspace(path)) => Effect::Reveal(PathBuf::from(path)),
+        (Action::RemoveWorkspace, Args::Workspace(path)) => {
+            Effect::OpenRemoveWorkspaceDialog(path.clone())
+        }
+        (Action::CheckOutMemberBranch, Args::File(path)) => {
+            Effect::Send(vec![CommandKind::CheckOutMemberBranch {
+                path: path.clone(),
+            }])
+        }
+        _ => return Err(NOT_AVAILABLE),
+    })
+}
+
 /// The reason of an action the engine cannot run yet, whatever its target.
 pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 
@@ -1553,7 +1687,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 101] = [
+    pub const ALL: [Action; 106] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1655,6 +1789,11 @@ impl Action {
         Action::LabelDelete,
         Action::CodeProvenance,
         Action::OpenSubmodule,
+        Action::NewWorkspace,
+        Action::OpenWorkspace,
+        Action::RevealWorkspace,
+        Action::RemoveWorkspace,
+        Action::CheckOutMemberBranch,
     ];
 
     #[must_use]
@@ -1740,6 +1879,7 @@ impl Action {
                 | Action::DeleteBranch
                 | Action::DeleteMergedBranches
                 | Action::RemoveWorktree
+                | Action::RemoveWorkspace
                 | Action::DiscardAllChanges
                 | Action::StashDrop
                 | Action::DeleteReviewComment
@@ -1788,6 +1928,29 @@ impl Action {
                 | Action::RemoveWorktree
                 | Action::LockWorktree
                 | Action::UnlockWorktree
+        )
+    }
+
+    /// Whether `workspace_effect` plans the action (D183).
+    fn is_workspace_effect(self) -> bool {
+        matches!(
+            self,
+            Action::NewWorkspace
+                | Action::OpenWorkspace
+                | Action::RevealWorkspace
+                | Action::RemoveWorkspace
+                | Action::CheckOutMemberBranch
+        )
+    }
+
+    /// Whether the rule of `workspace_rule` decides the action.
+    fn is_workspace_rule(self) -> bool {
+        matches!(
+            self,
+            Action::OpenWorkspace
+                | Action::RevealWorkspace
+                | Action::RemoveWorkspace
+                | Action::CheckOutMemberBranch
         )
     }
 
@@ -1860,6 +2023,8 @@ impl Action {
                 | Action::NewWorktree
                 | Action::RemoveWorktree
                 | Action::PruneWorktrees
+                | Action::NewWorkspace
+                | Action::RemoveWorkspace
                 | Action::NewBranch
                 | Action::Restack
                 | Action::NewChildBranch
@@ -1954,6 +2119,7 @@ impl Action {
             Action::RevealFile => reveal_rule(args, ctx),
             Action::ViewFile => view_file_rule(args, ctx),
             Action::OpenSubmodule => open_submodule_rule(args, ctx),
+            _ if self.is_workspace_rule() => workspace_rule(self, args, ctx),
             Action::MoveFileToBranch | Action::MoveFileToWorktree => move_rule(self, args, ctx),
             Action::DiscardFile | Action::DiscardAllChanges => discard_rule(self, args, ctx),
             Action::RecordCombination => combination_rule(ctx),
@@ -1995,8 +2161,8 @@ impl Action {
             | Action::ThreadCollapseAll
             | Action::ThreadDelete => thread_rule(args, ctx),
             Action::ThreadScrub | Action::ShowThreadsForFile => repository_open(ctx),
-            // The settings dialog needs no repository.
-            Action::ThreadsSettings => Ok(()),
+            // The settings and New Workspace dialogs need no repository.
+            Action::ThreadsSettings | Action::NewWorkspace => Ok(()),
             // The placeholders, refused above by `available`.
             _ => Err(NOT_AVAILABLE),
         }
@@ -2053,6 +2219,7 @@ impl Action {
             }
             (Action::CodeProvenance, _) => provenance_effect(ctx)?,
             (Action::OpenSubmodule, _) => open_submodule_effect(args, ctx)?,
+            (action, _) if action.is_workspace_effect() => workspace_effect(action, args)?,
             (Action::CommentOnSelection, _) => comment_effect(ctx)?,
             (
                 Action::EditReviewComment
@@ -2120,6 +2287,7 @@ impl Action {
                 | (ArgKind::File, Args::File(_))
                 | (ArgKind::Chunk, Args::Chunk { .. })
                 | (ArgKind::Worktree, Args::Worktree(_))
+                | (ArgKind::Workspace, Args::Workspace(_))
                 | (ArgKind::Commit, Args::Commit(_))
                 | (ArgKind::Workflow, Args::Workflow(_))
                 | (ArgKind::Template, Args::Template(_))
@@ -3067,6 +3235,7 @@ mod tests {
             messages: crate::action_registry::MessageCtx::default(),
             workflows: WorkflowCtx::default(),
             worktrees: &[],
+            workspaces: &[],
             author_pictures: AuthorPictures::Hidden,
             remote_running: false,
             stashes: None,
@@ -3715,6 +3884,7 @@ mod tests {
                 Action::DeleteReviewComment,
                 Action::ThreadDelete,
                 Action::LabelDelete,
+                Action::RemoveWorkspace,
             ]
         );
     }
@@ -3802,6 +3972,7 @@ mod tests {
         let open_in = |root: &'static str| Context {
             root: Some(root),
             worktrees: &worktrees,
+            workspaces: &[],
             ..ctx(&[], "")
         };
         let args = |path: &str| Args::Worktree(path.to_owned());
@@ -3832,6 +4003,7 @@ mod tests {
         let context = Context {
             root: Some("/r"),
             worktrees: &worktrees,
+            workspaces: &[],
             ..ctx(&[], "")
         };
         let target = Args::Worktree("/r-feature".to_owned());
@@ -3855,6 +4027,7 @@ mod tests {
         let own = Context {
             root: Some("/r-feature"),
             worktrees: &worktrees,
+            workspaces: &[],
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3873,6 +4046,7 @@ mod tests {
         let context = Context {
             root: Some("/r"),
             worktrees: &unlocked,
+            workspaces: &[],
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3893,6 +4067,7 @@ mod tests {
         let context = Context {
             root: Some("/r"),
             worktrees: &locked,
+            workspaces: &[],
             ..ctx(&[], "")
         };
         assert_eq!(
@@ -3948,6 +4123,7 @@ mod tests {
         let context = Context {
             root: Some("/r"),
             worktrees: &worktrees,
+            workspaces: &[],
             ..ctx(&[], "")
         };
         let branch = |name: &str| Args::Branch(name.to_owned());
@@ -6572,5 +6748,155 @@ mod tests {
         assert_eq!(Action::DiscardFile.enabled(&file, &context), Ok(()));
         // A move that names only the file opens the target step, as it does for any file.
         assert_eq!(Action::MoveFileToBranch.enabled(&file, &context), Ok(()));
+    }
+
+    fn workspace_listed(name: &str, path: &str) -> gm_schema::WorkspaceRow {
+        gm_schema::WorkspaceRow {
+            name: name.into(),
+            kind: gm_schema::WorkspaceKind::Durable,
+            path: path.into(),
+            members: 2,
+        }
+    }
+
+    /// The submodules of a status listing `path` with its read answered, as a checked-out member,
+    /// detached or on its branch, or as a folder that is not checked out.
+    fn member_read(path: &str, checked_out: bool, detached: bool) -> Submodules {
+        let mut submodules = Submodules::default();
+        submodules.status_changed(&[submodule_row(path)]);
+        submodules.request(path.to_owned(), OperationId(1));
+        submodules.loaded(
+            OperationId(1),
+            gm_schema::SubmoduleDetail {
+                path: path.to_owned(),
+                branch: (checked_out && !detached).then(|| "feat".to_owned()),
+                detached,
+                head: None,
+                recorded: None,
+                checked_out,
+                commits: Vec::new(),
+                more: false,
+                missing_commits: 0,
+                repo: None,
+            },
+        );
+        submodules
+    }
+
+    #[test]
+    fn new_workspace_needs_no_repository_and_opens_the_dialog() {
+        let closed = Context {
+            repo_open: false,
+            root: None,
+            ..ctx(&[], "")
+        };
+        assert_eq!(Action::NewWorkspace.enabled(&Args::None, &closed), Ok(()));
+        assert_eq!(
+            Action::NewWorkspace.plan(&Args::None, &closed),
+            Ok(Effect::OpenWorkspaceDialog)
+        );
+        assert_eq!(Action::NewWorkspace.spec().title, "New Workspace…");
+        assert_eq!(Action::NewWorkspace.spec().category, Category::Workspaces);
+        assert!(Action::NewWorkspace.opens_dialog());
+    }
+
+    #[test]
+    fn open_and_remove_refuse_the_workspace_this_window_shows_with_a_short_reason() {
+        let rows = [
+            workspace_listed("billing", "/w/billing"),
+            workspace_listed("checkout", "/w/checkout"),
+        ];
+        let context = Context {
+            workspaces: &rows,
+            root: Some("/w/checkout"),
+            ..ctx(&[], "")
+        };
+        let here = Args::Workspace("/w/checkout".into());
+        let other = Args::Workspace("/w/billing".into());
+        assert_eq!(
+            Action::RemoveWorkspace.enabled(&here, &context),
+            Err("Open in this window.")
+        );
+        assert_eq!(
+            Action::OpenWorkspace.enabled(&here, &context),
+            Err("Open in this window.")
+        );
+        assert_eq!(Action::RevealWorkspace.enabled(&here, &context), Ok(()));
+        assert_eq!(Action::RemoveWorkspace.enabled(&other, &context), Ok(()));
+        assert_eq!(
+            Action::RemoveWorkspace.plan(&other, &context),
+            Ok(Effect::OpenRemoveWorkspaceDialog("/w/billing".into()))
+        );
+        assert_eq!(
+            Action::OpenWorkspace.plan(&other, &context),
+            Ok(Effect::OpenWorktree("/w/billing".into()))
+        );
+        assert_eq!(
+            Action::RevealWorkspace.plan(&other, &context),
+            Ok(Effect::Reveal(PathBuf::from("/w/billing")))
+        );
+        assert!("Open in this window.".chars().count() < 30);
+        assert_eq!(
+            Action::RemoveWorkspace.spec().category,
+            Category::Workspaces
+        );
+    }
+
+    #[test]
+    fn a_workspace_that_is_not_listed_is_refused() {
+        assert_eq!(
+            Action::OpenWorkspace.enabled(&Args::Workspace("/w/gone".into()), &ctx(&[], "")),
+            Err("This workspace is not listed.")
+        );
+    }
+
+    #[test]
+    fn check_out_branch_is_enabled_only_for_a_detached_member() {
+        let entries = [
+            submodule_row("billing"),
+            entry("a.rs", None, Some(Change::Modified)),
+        ];
+        let args = Args::File("billing".into());
+        let detached = member_read("billing", true, true);
+        let on_branch = member_read("billing", true, false);
+        let closed = member_read("billing", false, false);
+        let unread = Submodules::default();
+        assert_eq!(
+            Action::CheckOutMemberBranch.enabled(&args, &with_submodules(&entries, &detached)),
+            Ok(())
+        );
+        assert_eq!(
+            Action::CheckOutMemberBranch.enabled(&args, &with_submodules(&entries, &on_branch)),
+            Err("It is on its branch.")
+        );
+        assert_eq!(
+            Action::CheckOutMemberBranch.enabled(&args, &with_submodules(&entries, &closed)),
+            Err("This submodule is not checked out.")
+        );
+        assert_eq!(
+            Action::CheckOutMemberBranch.enabled(&args, &with_submodules(&entries, &unread)),
+            Err("The submodule is still being read.")
+        );
+        assert_eq!(
+            Action::CheckOutMemberBranch.enabled(
+                &Args::File("a.rs".into()),
+                &with_submodules(&entries, &detached)
+            ),
+            Err("Not a workspace member.")
+        );
+        assert_eq!(
+            Action::CheckOutMemberBranch.plan(&args, &with_submodules(&entries, &detached)),
+            Ok(Effect::Send(vec![CommandKind::CheckOutMemberBranch {
+                path: "billing".into()
+            }]))
+        );
+        assert_eq!(
+            Action::CheckOutMemberBranch.spec().title,
+            "Check Out Branch"
+        );
+        assert_eq!(
+            Action::CheckOutMemberBranch.spec().category,
+            Category::WorkingCopy
+        );
     }
 }

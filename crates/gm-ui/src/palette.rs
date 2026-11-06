@@ -8,7 +8,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use gm_schema::{BranchEntry, WorktreeEntry};
+use gm_schema::{BranchEntry, WorkspaceRow, WorktreeEntry};
 
 use crate::action_registry::{
     Action, ArgKind, Args, Category, Context as ActionContext, NOT_AVAILABLE, OPEN_STASHES, Reason,
@@ -26,6 +26,7 @@ const NEEDS_COMMIT: Reason = "Pick a commit in the history first.";
 const NEEDS_REFLOG_COMMIT: Reason = "Pick a commit on the Reflog page first.";
 const NEEDS_LOCAL_REVIEW_COMMENT: Reason = "Pick a comment on the Local review page first.";
 const NO_WORKTREE: Reason = "No worktree to choose from.";
+const NO_WORKSPACE: Reason = "No workspace to choose from.";
 const NO_WORKFLOW: Reason = "No workflow to choose from.";
 const NOT_LISTED: Reason = "Workflows are still being read.";
 const NO_TEMPLATE: Reason = "No templates listed yet";
@@ -36,6 +37,7 @@ const NO_STASH: Reason = "No stash to choose from.";
 pub(crate) enum Section {
     Actions,
     Worktrees,
+    Workspaces,
     Branches,
     Stashes,
     Workflows,
@@ -47,6 +49,7 @@ impl Section {
         match self {
             Self::Actions => "Actions",
             Self::Worktrees => "Worktrees",
+            Self::Workspaces => "Workspaces",
             Self::Branches => "Branches",
             Self::Stashes => "Stashes",
             Self::Workflows => "Workflows",
@@ -331,10 +334,10 @@ fn top_level(query: &str, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> 
 
 fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Candidate {
     let spec = action.spec();
-    let section = if spec.category == Category::Worktrees {
-        Section::Worktrees
-    } else {
-        Section::Actions
+    let section = match spec.category {
+        Category::Worktrees => Section::Worktrees,
+        Category::Workspaces => Section::Workspaces,
+        _ => Section::Actions,
     };
     let (choice, state) = match spec.args {
         ArgKind::None | ArgKind::OptionalBranch => (
@@ -375,6 +378,7 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
                 pick_state(action, &targets, ctx, NO_WORKTREE),
             )
         }
+        ArgKind::Workspace => workspace_pick(action, ctx),
         ArgKind::Workflow => {
             let targets = workflow_targets(ctx);
             let nothing = if ctx.workflows.listed.is_none() {
@@ -519,6 +523,27 @@ fn listed_worktrees(ctx: &ActionContext<'_>) -> Vec<(String, String)> {
         .collect()
 }
 
+/// An action that picks one of the listed workspaces (D183).
+fn workspace_pick(action: Action, ctx: &ActionContext<'_>) -> (Choice, Result<(), Reason>) {
+    let targets: Vec<Args> = listed_workspaces(ctx)
+        .into_iter()
+        .map(|(_, path)| Args::Workspace(path))
+        .collect();
+    (
+        Choice::Pick(action),
+        pick_state(action, &targets, ctx, NO_WORKSPACE),
+    )
+}
+
+/// The workspaces the palette can pick, by name, as the sidebar lists them (D183).
+fn listed_workspaces(ctx: &ActionContext<'_>) -> Vec<(String, String)> {
+    let mut rows: Vec<&WorkspaceRow> = ctx.workspaces.iter().collect();
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    rows.into_iter()
+        .map(|row| (row.name.clone(), row.path.clone()))
+        .collect()
+}
+
 /// An action the palette lists disabled and runs with no target: `reason` says
 /// what to do instead.
 fn disabled_run(action: Action, reason: Reason) -> (Choice, Result<(), Reason>) {
@@ -553,6 +578,13 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
             .map(|(name, path)| {
                 let args = Args::Worktree(path);
                 target_row(action, Section::Worktrees, name, args, ctx)
+            })
+            .collect(),
+        ArgKind::Workspace => listed_workspaces(ctx)
+            .into_iter()
+            .map(|(name, path)| {
+                let args = Args::Workspace(path);
+                target_row(action, Section::Workspaces, name, args, ctx)
             })
             .collect(),
         ArgKind::Workflow => ctx
@@ -677,6 +709,7 @@ mod tests {
             messages: crate::action_registry::MessageCtx::default(),
             workflows: crate::action_registry::WorkflowCtx::default(),
             worktrees: &[],
+            workspaces: &[],
             author_pictures: crate::action_registry::AuthorPictures::Hidden,
             remote_running: false,
             stashes: None,
@@ -733,13 +766,20 @@ mod tests {
             .iter()
             .filter(|action| action.spec().category == Category::Worktrees)
             .count();
+        let workspace_actions = Action::ALL
+            .iter()
+            .filter(|action| action.spec().category == Category::Workspaces)
+            .count();
         // Choose Parent is only the second step of Set Parent….
         let unlisted = Action::ALL
             .iter()
             .filter(|action| !action.listed_in_palette())
             .count();
         assert_eq!(unlisted, 1);
-        assert_eq!(actions, Action::ALL.len() - worktree_actions - unlisted);
+        assert_eq!(
+            actions,
+            Action::ALL.len() - worktree_actions - workspace_actions - unlisted
+        );
         assert!(candidates.iter().all(|c| c.label != "Choose Parent"));
         let worktree = find(&candidates, "Create Worktree");
         assert_eq!(worktree.section, Section::Worktrees);
@@ -981,7 +1021,8 @@ mod tests {
             headers,
             [
                 Line::Header(Section::Actions),
-                Line::Header(Section::Worktrees)
+                Line::Header(Section::Worktrees),
+                Line::Header(Section::Workspaces)
             ]
         );
     }
@@ -1502,6 +1543,48 @@ mod tests {
                         action: Action::Commit,
                         args: Args::None
                     })
+        );
+    }
+
+    #[test]
+    fn remove_workspace_is_picked_from_the_listed_workspaces_and_the_window_s_own_is_refused() {
+        let entries: [StatusEntry; 0] = [];
+        let rows = [
+            gm_schema::WorkspaceRow {
+                name: "billing".into(),
+                kind: gm_schema::WorkspaceKind::Durable,
+                path: "/w/billing".into(),
+                members: 2,
+            },
+            gm_schema::WorkspaceRow {
+                name: "checkout".into(),
+                kind: gm_schema::WorkspaceKind::Ephemeral,
+                path: "/w/checkout".into(),
+                members: 2,
+            },
+        ];
+        let context = ActionContext {
+            root: Some("/w/checkout"),
+            workspaces: &rows,
+            ..ctx_with(&entries, "")
+        };
+        let top = build(Stage::Actions, "", &context, &[]);
+        let remove = find(&top, "Remove Workspace");
+        assert_eq!(remove.section, Section::Workspaces);
+        assert_eq!(remove.choice, Choice::Pick(Action::RemoveWorkspace));
+        let pick = build(Stage::Pick(Action::RemoveWorkspace), "", &context, &[]);
+        assert!(pick.iter().all(|c| c.section == Section::Workspaces));
+        assert_eq!(find(&pick, "billing").state, Ok(()));
+        assert_eq!(find(&pick, "checkout").state, Err("Open in this window."));
+    }
+
+    #[test]
+    fn a_workspace_pick_with_no_workspace_listed_says_so() {
+        let entries: [StatusEntry; 0] = [];
+        let top = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
+        assert_eq!(
+            find(&top, "Remove Workspace").state,
+            Err("No workspace to choose from.")
         );
     }
 }

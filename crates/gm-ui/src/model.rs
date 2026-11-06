@@ -44,6 +44,9 @@ use crate::threads::{HitPage, MarkdownCopy, ThreadsPage};
 use crate::transform_run::Transforms;
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
+use crate::workspace_create::{Answer, Making, Planning};
+use crate::workspace_list::WorkspaceList;
+use crate::workspace_remove::WorkspaceRemoval;
 use crate::worktree_create::Creating;
 use crate::worktree_prune::Pruning;
 use crate::worktree_remove::Removal;
@@ -158,6 +161,14 @@ pub struct Model {
     pub creating: Creating,
     /// The remove-worktree dialog's inspection, removal in flight and outcome.
     pub removal: Removal,
+    /// The workspaces under the root, as the sidebar lists them, and the listing in flight (D183).
+    pub workspaces: WorkspaceList,
+    /// The New Workspace dialog's plan: the edit it answers, the plan in flight and its answer (D183).
+    pub workspace_plan: Planning,
+    /// The New Workspace dialog's create in flight, and its outcome (D183).
+    pub workspace_making: Making,
+    /// The Remove Workspace dialog's inspection, removal in flight and outcome (D183).
+    pub workspace_removal: WorkspaceRemoval,
     /// The prune dialog's listing, prune in flight and outcome.
     pub pruning: Pruning,
     /// The new-branch dialog's create in flight, and its outcome.
@@ -698,6 +709,26 @@ impl Model {
                 self.removal.settle(state, detail);
                 None
             }
+            // The dialogs' own operations belong to them, not to the status bar: a failed plan is
+            // shown in the New Workspace dialog, and so are a failed create or removal (D183).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if state.is_terminal() && self.workspace_plan.owns(id) => {
+                let _ = self.workspace_plan.settled(id, state, detail);
+                None
+            }
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.workspace_making.owns(id) => {
+                self.workspace_making.settle(state, detail);
+                None
+            }
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.workspace_removal.owns(id) => {
+                self.workspace_removal.settle(state, detail);
+                None
+            }
             // A branch create or delete belongs to its dialog, not to the status bar.
             Event::OperationChanged {
                 id, state, detail, ..
@@ -1009,6 +1040,37 @@ impl Model {
             }
             Event::WorktreesLoaded { worktrees, .. } => {
                 self.worktrees = worktrees;
+                None
+            }
+            Event::WorkspacesListed {
+                id,
+                workspaces,
+                root,
+            } => {
+                let _ = self.workspaces.listed(id, workspaces, root);
+                None
+            }
+            // The plan is kept for the dialog, which drops it when the form has moved on (D183 (3)).
+            Event::WorkspacePlanned {
+                id,
+                path,
+                members,
+                problems,
+            } => {
+                let _ = self
+                    .workspace_plan
+                    .answered(id, Answer { path, members, problems });
+                None
+            }
+            Event::WorkspaceCreated { id, path } => {
+                let _ = self.workspace_making.created(id, path);
+                None
+            }
+            // The inspection is kept for the dialog that asked it (D183 (4)).
+            Event::WorkspaceRemovalInspected { id, path, blockers } => {
+                if self.workspace_removal.owns(id) {
+                    self.workspace_removal.inspected(&path, blockers);
+                }
                 None
             }
             Event::HistoryLoaded { id, history } => {
@@ -1355,11 +1417,7 @@ impl Model {
             // The label and link answers are read by the Labels page (P4); the rows follow `ThreadsChanged`.
             | Event::ThreadRelationChanged { .. }
             | Event::ThreadsChanged
-            // The workspace answers are read by the workspace UI (D183), which is not built yet.
-            | Event::WorkspacesListed { .. }
-            | Event::WorkspacePlanned { .. }
-            | Event::WorkspaceCreated { .. }
-            | Event::WorkspaceRemovalInspected { .. }
+            // The removal's outcome is the settled operation's, which the dialog takes (D183).
             | Event::WorkspaceRemoved { .. }
         // The members of a workspace are read by the agent's tools; the app keeps none (D181).
         | Event::MembersListed { .. } => None,
@@ -3858,5 +3916,147 @@ mod submodule_tests {
         });
         model.reset_for_repo();
         assert!(model.submodules.detail("libs/x").is_none());
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    use gm_schema::{
+        Actor, BranchHow, MemberPlan, RemovalBlocker, RemovalBlockerKind, WorkspaceKind,
+        WorkspaceRow,
+    };
+
+    fn row(name: &str) -> WorkspaceRow {
+        WorkspaceRow {
+            name: name.to_owned(),
+            kind: WorkspaceKind::Durable,
+            path: format!("/w/{name}"),
+            members: 1,
+        }
+    }
+
+    #[test]
+    fn the_workspace_list_is_replaced_only_by_its_newest_listing() {
+        let mut model = Model::default();
+        model.workspaces.request(OperationId(1));
+        model.workspaces.request(OperationId(2));
+        let _ = model.apply(Event::WorkspacesListed {
+            id: OperationId(1),
+            workspaces: vec![row("old")],
+            root: "/w".to_owned(),
+        });
+        assert!(model.workspaces.workspaces().is_empty());
+        let _ = model.apply(Event::WorkspacesListed {
+            id: OperationId(2),
+            workspaces: vec![row("billing")],
+            root: "/w".to_owned(),
+        });
+        assert_eq!(model.workspaces.workspaces()[0].name, "billing");
+        assert_eq!(model.workspaces.root(), Some("/w"));
+    }
+
+    #[test]
+    fn a_plan_is_applied_by_its_id_and_a_late_answer_to_an_older_form_is_dropped() {
+        let mut model = Model::default();
+        model.workspace_plan.edited();
+        model.workspace_plan.sent(OperationId(4));
+        // The form moved on: the plan in flight no longer describes it.
+        model.workspace_plan.edited();
+        model.workspace_plan.sent(OperationId(5));
+        let member = MemberPlan {
+            repo: "/r".to_owned(),
+            member: "r".to_owned(),
+            branch: "feat".to_owned(),
+            how: BranchHow::CheckOut,
+        };
+        let _ = model.apply(Event::WorkspacePlanned {
+            id: OperationId(4),
+            path: "/w/x".to_owned(),
+            members: Vec::new(),
+            problems: Vec::new(),
+        });
+        assert!(model.workspace_plan.answer().is_none());
+        let _ = model.apply(Event::WorkspacePlanned {
+            id: OperationId(5),
+            path: "/w/x".to_owned(),
+            members: vec![member],
+            problems: Vec::new(),
+        });
+        assert_eq!(
+            model
+                .workspace_plan
+                .answer()
+                .map(|answer| answer.members.len()),
+            Some(1)
+        );
+        assert!(model.workspace_plan.ready());
+    }
+
+    #[test]
+    fn a_failed_plan_is_shown_by_the_dialog_and_not_the_status_bar() {
+        let mut model = Model::default();
+        model.workspace_plan.edited();
+        model.workspace_plan.sent(OperationId(6));
+        let _ = model.apply(Event::OperationChanged {
+            id: OperationId(6),
+            actor: Actor::Human,
+            state: OperationState::Failed,
+            detail: Some("'bad' is not a workspace name".to_owned()),
+        });
+        assert_eq!(
+            model.workspace_plan.failure(),
+            Some("'bad' is not a workspace name")
+        );
+        assert_eq!(model.error, None);
+    }
+
+    #[test]
+    fn a_created_workspace_is_the_outcome_of_its_operation() {
+        let mut model = Model::default();
+        model.workspace_making.start(OperationId(7));
+        let _ = model.apply(Event::WorkspaceCreated {
+            id: OperationId(7),
+            path: "/w/x".to_owned(),
+        });
+        let _ = model.apply(Event::OperationChanged {
+            id: OperationId(7),
+            actor: Actor::Human,
+            state: OperationState::Done,
+            detail: None,
+        });
+        assert_eq!(model.workspace_making.take(), Some(Ok("/w/x".to_owned())));
+    }
+
+    #[test]
+    fn a_removal_inspection_is_kept_for_the_dialog_that_asked_for_it() {
+        let mut model = Model::default();
+        model
+            .workspace_removal
+            .begin_inspect(OperationId(8), "/w/billing".to_owned());
+        let blockers = vec![RemovalBlocker {
+            kind: RemovalBlockerKind::MemberDirty,
+            member: Some("billing".to_owned()),
+            detail: "It has uncommitted changes.".to_owned(),
+            overridable: true,
+        }];
+        let _ = model.apply(Event::WorkspaceRemovalInspected {
+            id: OperationId(9),
+            path: "/w/billing".to_owned(),
+            blockers: blockers.clone(),
+        });
+        assert!(model.workspace_removal.inspection("/w/billing").is_none());
+        let _ = model.apply(Event::WorkspaceRemovalInspected {
+            id: OperationId(8),
+            path: "/w/billing".to_owned(),
+            blockers,
+        });
+        assert_eq!(
+            model
+                .workspace_removal
+                .inspection("/w/billing")
+                .map(<[_]>::len),
+            Some(1)
+        );
     }
 }

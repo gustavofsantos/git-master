@@ -6,10 +6,11 @@
 
 use std::ops::Range;
 
-use gm_schema::{BranchEntry, Feature, HistoryScope, StackBranch, StackState};
+use gm_schema::{Actor, BranchEntry, CommandKind, Feature, HistoryScope, StackBranch, StackState};
 use gpui::{
-    AnyElement, Context, Div, ElementId, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
-    SharedString, Stateful, Subscription, Window, div, prelude::*, px, uniform_list,
+    AnyElement, ClickEvent, Context, Div, ElementId, Entity, FontWeight, Hsla, MouseButton,
+    MouseDownEvent, SharedString, Stateful, Subscription, Window, div, prelude::*, px,
+    uniform_list,
 };
 
 use crate::action_registry::{Action, Args};
@@ -27,12 +28,15 @@ use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
 use crate::view::{Screen, StatusView};
 use crate::window_chrome;
+use crate::workspace_list::{self, Open as WorkspaceOpen};
 use crate::worktree_list;
 
 const ROW_HEIGHT: f32 = 28.;
 /// The most worktree rows shown at once. The section does not scroll yet,
 /// so the rest are cut off.
 const WORKTREE_ROWS_SHOWN: f32 = 6.;
+/// The most workspace rows shown at once, as for the worktrees.
+const WORKSPACE_ROWS_SHOWN: f32 = 6.;
 
 impl StatusView {
     /// The sidebar at `width`. Its right edge is the strip that resizes it.
@@ -71,6 +75,7 @@ impl StatusView {
             ))
             .children(self.branches_body(cx))
             .child(self.worktrees_section(cx))
+            .child(self.workspaces_section(cx))
             .children((self.grouping() == Grouping::ByStack).then(footer_hint))
             .child(width_strip)
     }
@@ -113,6 +118,40 @@ impl StatusView {
             }))
     }
 
+    /// The WORKSPACES section (D183): its header with the New Workspace control, then the
+    /// workspaces under the root. It shows in every window, since the list needs no repository.
+    fn workspaces_section(&self, cx: &Context<Self>) -> Div {
+        let here = self.model.status().map(|status| status.root.as_str());
+        let rows = workspace_list::rows(self.model.workspaces.workspaces(), here);
+        let header = self.section_header(
+            Section::Workspaces,
+            "Workspaces",
+            Some(new_workspace_button(cx)),
+            cx,
+        );
+        let open = !self.sidebar_folded.is_folded(Section::Workspaces);
+        div()
+            .flex_none()
+            .max_h(px(ROW_HEIGHT * WORKSPACE_ROWS_SHOWN + 40.))
+            .overflow_hidden()
+            .pb_2()
+            .child(header)
+            .children(open.then(|| {
+                div()
+                    .px_2()
+                    .children(rows.iter().map(|row| workspace_row(row, cx)))
+            }))
+    }
+
+    /// Asks the engine for the workspaces under the root (D183): when the window starts, when the
+    /// section opens, and after a workspace is created or removed.
+    pub(crate) fn request_workspaces(&mut self) {
+        let id = self
+            .engine
+            .dispatch(Actor::Human, CommandKind::ListWorkspaces { root: None });
+        self.model.workspaces.request(id);
+    }
+
     /// The header of a foldable section: a chevron, the title and an optional
     /// control at the end. A click on the header folds or opens the section;
     /// a click on the control does not reach it.
@@ -152,6 +191,10 @@ impl StatusView {
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                     this.sidebar_folded.toggle(section);
+                    // The list is read again when its section opens, so it is not stale.
+                    if section == Section::Workspaces && !this.sidebar_folded.is_folded(section) {
+                        this.request_workspaces();
+                    }
                     cx.notify();
                 }),
             )
@@ -589,6 +632,31 @@ fn new_worktree_button(cx: &Context<StatusView>) -> Stateful<Div> {
         )
 }
 
+/// The "+" of the Workspaces header, which opens New Workspace (D183).
+fn new_workspace_button(cx: &Context<StatusView>) -> Stateful<Div> {
+    div()
+        .id("workspaces-new")
+        .w(px(20.))
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_sm()
+        .text_color(theme::muted())
+        .hover(|style| style.bg(theme::selected_row()).text_color(theme::text()))
+        .child("+")
+        .tooltip(window_chrome::hint(Action::NewWorkspace.spec().title))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                this.run_action(Action::NewWorkspace, &Args::None, window, cx);
+            }),
+        )
+}
+
 /// The "×" that shows on hover of a linked worktree row and removes it through
 /// the same dialog as the menu. Its click does not reach the row, so a double
 /// click on it does not open the worktree.
@@ -1009,6 +1077,57 @@ fn worktree_row(
         })
         .children(remove);
     move_file::accept_drops(row_div, Some(zone), cx)
+}
+
+/// One workspace: its name, the tags that say it is the window's own or that it is ephemeral.
+/// A click opens the others in a window of their own; the right-click menu has the rest.
+fn workspace_row(row: &workspace_list::Row<'_>, cx: &Context<StatusView>) -> Stateful<Div> {
+    let name = row.workspace.name.clone();
+    let menu_path = row.workspace.path.clone();
+    let open = match workspace_list::open_target(row) {
+        WorkspaceOpen::Nothing => None,
+        WorkspaceOpen::Path(path) => Some(path.to_owned()),
+    };
+    div()
+        .id(SharedString::from(format!(
+            "sidebar-workspace-{}",
+            row.workspace.path
+        )))
+        .h(px(ROW_HEIGHT))
+        .px_2()
+        .gap_2()
+        .flex()
+        .flex_row()
+        .items_center()
+        .rounded_md()
+        .when(row.here, |this| this.bg(theme::selection()))
+        .when(open.is_some(), gpui::Styled::cursor_pointer)
+        .when(name_fit::needs_hover(&name), |this| {
+            this.tooltip(window_chrome::hint(name.clone()))
+        })
+        .child(name_label(&name, &[]).when(row.here, |this| {
+            this.text_color(theme::accent())
+                .font_weight(FontWeight::MEDIUM)
+        }))
+        .children(
+            row.here
+                .then(|| tag("here", theme::on_accent(), theme::accent())),
+        )
+        .children(
+            row.ephemeral
+                .then(|| tag("ephemeral", theme::muted(), theme::selected_row())),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.open_workspace_menu(&menu_path, event.position, cx);
+            }),
+        )
+        .when_some(open, |this, path| {
+            this.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.open_worktree(&path, cx);
+            }))
+        })
 }
 
 /// A small window glyph in the worktree's colour: an outline with a title bar.

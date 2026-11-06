@@ -24,7 +24,7 @@ The sidebar starts at 240 px. Its width is not kept between runs.
 
 ## Fold the sections
 
-The sidebar has three sections: **Repository**, **Branches** and **Worktrees**. Click a section's header to fold it, and click it again to open it. A caret before the title shows the state: it points down when the section is open and to the right when it is folded. A folded section shows its header only, so the sections you do not need leave room for the others. The **+** at the end of the Branches and Worktrees headers still works while the section is folded.
+The sidebar has four sections: **Repository**, **Branches**, **Worktrees** and **Workspaces**. Click a section's header to fold it, and click it again to open it. A caret before the title shows the state: it points down when the section is open and to the right when it is folded. A folded section shows its header only, so the sections you do not need leave room for the others. The **+** at the end of the Branches and Worktrees headers still works while the section is folded.
 
 When the window starts, **Repository** is open and the other sections are folded, so the sidebar shows its headers and the pages of the repository. Open the ones you need. Which ones are folded is not kept between runs.
 
