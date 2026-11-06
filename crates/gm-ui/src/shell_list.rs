@@ -10,9 +10,11 @@ use gpui::{
 };
 
 use crate::action_registry::{Action, Args};
+use crate::icon::{self, Icon};
 use crate::move_file;
 use crate::resize::{self, LEFT};
 use crate::resize_handle::{self, Edge};
+use crate::submodule::{self, Submodules};
 use crate::theme;
 use crate::view::{KEY_CONTEXT, StatusView};
 use crate::{CloseContextMenu, OpenContextMenu, Refresh, SelectNext, SelectPrev, ToggleStage};
@@ -125,13 +127,14 @@ impl StatusView {
                          cx: &mut Context<StatusView>| {
                             let selected = this.model.selected_row();
                             let entries = this.model.entries();
+                            let submodules = &this.model.submodules;
                             entries
                                 .get(range.clone())
                                 .unwrap_or_default()
                                 .iter()
                                 .zip(range)
                                 .map(|(entry, index)| {
-                                    file_row(entry, selected == Some(index), index, cx)
+                                    file_row(entry, selected == Some(index), index, submodules, cx)
                                 })
                                 .collect()
                         },
@@ -155,11 +158,13 @@ impl StatusView {
 }
 
 /// One file: its status letter and its full path. A discreet dot after the
-/// letter marks a file that has something staged.
+/// letter marks a file that has something staged. A submodule has the folder
+/// icon instead of the letter, and its branch and marks after its path (D175).
 fn file_row(
     entry: &StatusEntry,
     selected: bool,
     index: usize,
+    submodules: &Submodules,
     cx: &Context<StatusView>,
 ) -> Stateful<Div> {
     let (letter, colour) = status_letter(entry);
@@ -167,6 +172,11 @@ fn file_row(
         Some(orig) => format!("{}  ← {orig}", entry.path),
         None => entry.path.clone(),
     };
+    let marks = entry
+        .submodule
+        .map(|change| submodule::marks(change, submodules.detail(&entry.path)).join(" · "));
+    let is_submodule = entry.submodule.is_some();
+    let path = entry.path.clone();
     let staged_mark =
         (entry.staged.is_some() && !entry.conflicted && !entry.untracked).then(|| {
             div()
@@ -189,8 +199,12 @@ fn file_row(
         .cursor_pointer()
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 this.select_row(index, cx);
+                // A double-click on a submodule opens it in its own window (D175).
+                if event.click_count == 2 && is_submodule {
+                    this.run_action(Action::OpenSubmodule, &Args::File(path.clone()), window, cx);
+                }
             }),
         )
         .on_mouse_down(
@@ -199,14 +213,22 @@ fn file_row(
                 this.open_file_menu(index, event.position, window, cx);
             }),
         )
-        .child(
-            div()
+        .child(match entry.submodule {
+            Some(_) => div()
+                .w(px(14.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .child(icon::view(Icon::Folder, icon::SMALL, theme::muted()))
+                .into_any_element(),
+            None => div()
                 .w(px(14.))
                 .flex_none()
                 .font_family(theme::code_font())
                 .text_color(colour)
-                .child(letter.to_string()),
-        )
+                .child(letter.to_string())
+                .into_any_element(),
+        })
         .child(div().w(px(6.)).flex_none().children(staged_mark))
         .child(
             div()
@@ -217,7 +239,15 @@ fn file_row(
                 .text_ellipsis()
                 .font_family(theme::code_font())
                 .child(label),
-        );
+        )
+        .children(marks.map(|text| {
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(text)
+        }));
     // A changed file is dragged onto a sidebar row to move its change (D109).
     move_file::drag_source(row, &entry.path, cx)
 }

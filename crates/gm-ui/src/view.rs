@@ -782,11 +782,13 @@ impl StatusView {
                     .then(|| self.left_column(left_width, commit_height, cx)),
             )
             .children((self.screen == Screen::WorkingCopy).then(|| {
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .min_h(px(0.))
-                    .child(self.diff_pane.clone())
+                div().flex_1().min_w(px(0.)).min_h(px(0.)).child(
+                    if self.model.selected_submodule().is_some() {
+                        self.submodule_pane(cx).into_any_element()
+                    } else {
+                        self.diff_pane.clone().into_any_element()
+                    },
+                )
             }))
             .children((self.screen == Screen::History).then(|| self.history_page(cx)))
             .children((self.screen == Screen::Workflows).then(|| self.workflows_page(cx)))
@@ -822,6 +824,7 @@ impl StatusView {
     /// the Git config's hook sections when HEAD moved (the tree marks the new branch), and the diff.
     fn after_status(&mut self, head_before: Option<&str>, cx: &mut Context<Self>) {
         self.request_stacks();
+        self.request_submodules();
         if self.head_name().as_deref() != head_before {
             self.request_branch_list();
             self.request_hook_sections();
@@ -1239,7 +1242,8 @@ impl StatusView {
         if self.model.is_opening() {
             return;
         }
-        let Some(path) = self.model.selected_path().map(str::to_owned) else {
+        // A submodule row shows its commits, not a diff, so no diff is read for it (D175).
+        let Some(path) = self.model.diff_path().map(str::to_owned) else {
             self.model.forget_diffs();
             self.show_diffs(None, None, cx);
             return;
@@ -1555,6 +1559,7 @@ impl StatusView {
                 attachments: label.attachments,
             }),
             code: self.code_ctx(),
+            submodules: Some(&self.model.submodules),
             busy: self.busy_reason(),
             remote_running: self.model.remote.in_flight().is_some(),
             entries: self.model.entries(),

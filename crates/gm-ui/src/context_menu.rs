@@ -180,6 +180,15 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     {
         items.insert(0, item(Action::ResolveConflict, 0));
     }
+    // A submodule row leads with its window, and lists the file actions that do not apply to it
+    // as disabled, with the reason (D175).
+    if ctx
+        .entries
+        .iter()
+        .any(|entry| entry.path == path && entry.submodule.is_some())
+    {
+        items.insert(0, item(Action::OpenSubmodule, 0));
+    }
     offered_items(items, ctx)
 }
 
@@ -806,6 +815,7 @@ mod tests {
             remote_running: false,
             stashes: None,
             review: crate::action_registry::ReviewCtx::default(),
+            submodules: None,
         }
     }
 
@@ -1121,6 +1131,30 @@ mod tests {
         assert_eq!(find(&items, Action::ViewFile).state, Ok(()));
         let sizes: Vec<usize> = sections(&items).iter().map(|s| s.len()).collect();
         assert_eq!(sizes, [2, 2, 6]);
+    }
+
+    #[test]
+    fn a_submodule_row_leads_with_open_submodule_and_says_why_discard_is_off() {
+        let submodule = StatusEntry {
+            submodule: Some(gm_schema::SubmoduleChange::default()),
+            ..entry("libs/x", None, Some(Change::Modified))
+        };
+        let entries = [submodule, entry("a.txt", None, Some(Change::Modified))];
+        let items = file_items("libs/x", &ctx(&entries));
+        assert_eq!(items[0].action, Action::OpenSubmodule);
+        // Nothing has read the submodule yet, so the item says so.
+        assert_eq!(items[0].state, Err("The submodule is still being read."));
+        assert_eq!(
+            find(&items, Action::DiscardFile).state,
+            Err("Open the submodule to discard.")
+        );
+        assert_eq!(find(&items, Action::StageFile).state, Ok(()));
+        let plain = file_items("a.txt", &ctx(&entries));
+        assert!(
+            plain
+                .iter()
+                .all(|item| item.action != Action::OpenSubmodule)
+        );
     }
 
     #[test]

@@ -36,6 +36,7 @@ use crate::stacks::Stacks;
 use crate::stash_apply::Applying;
 use crate::stash_drop::Dropping;
 use crate::stashes::StashList;
+use crate::submodule::Submodules;
 use crate::suggestion::Suggestion;
 use crate::text_search::TextSearch;
 use crate::thread_curate::{LinkPicker, Outcome as ThreadOutcome, ThreadWork};
@@ -125,6 +126,8 @@ pub struct Model {
     pub reflog_stack: OpenStack,
     /// The detached checkout started from the Reflog page, and its outcome (B3).
     pub reflog_checkout: DetachedCheckout,
+    /// The submodules of the status: the state each read answered, and the reads in flight (D175).
+    pub submodules: Submodules,
     /// The Threads page: the list, the search, the selected thread and its entries (T5).
     pub threads: ThreadsPage,
     /// The threads linked to the commit the history page shows (H3).
@@ -666,6 +669,10 @@ impl Model {
                     self.reset_for_repo();
                 }
                 self.status = Some(status);
+                // Every submodule is read again for the new status (D175).
+                self.submodules.status_changed(
+                    self.status.as_ref().map_or(&[][..], |status| status.entries.as_slice()),
+                );
                 // Every answer about the old status may be stale now (D109).
                 self.move_file.hover.status_changed();
                 self.reconcile_selection(old_row);
@@ -1142,6 +1149,11 @@ impl Model {
                 self.list_reflog(id, skip, entries, has_more);
                 None
             }
+            // A submodule's state is kept for its row and its commit pane (D175).
+            Event::SubmoduleLoaded { id, submodule } => {
+                self.submodules.loaded(id, submodule);
+                None
+            }
             Event::FilesFound { id, search } => {
                 self.quick_open.received(id, search);
                 None
@@ -1339,8 +1351,6 @@ impl Model {
             | Event::HooksConverted { .. }
             // The wait is kept by `gate_wait` above; each surface reads it.
             | Event::GateStarted { .. }
-            // The submodule row is drawn in a later slice (D175); the answer is not shown yet.
-            | Event::SubmoduleLoaded { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
             // The label and link answers are read by the Labels page (P4); the rows follow `ThreadsChanged`.
             | Event::ThreadRelationChanged { .. }
@@ -1490,6 +1500,7 @@ impl Model {
         self.reflog = ReflogList::default();
         self.reflog_commit = CommitPane::Empty;
         self.reflog_stack = OpenStack::default();
+        self.submodules = Submodules::default();
         self.threads = ThreadsPage::default();
         self.commit_threads = CommitThreads::default();
         self.link_picker = LinkPicker::default();
@@ -1654,6 +1665,25 @@ impl Model {
     #[must_use]
     pub fn selected_path(&self) -> Option<&str> {
         self.selected.as_deref()
+    }
+
+    /// The selected row, when it is a submodule (D175).
+    #[must_use]
+    pub fn selected_submodule(&self) -> Option<&StatusEntry> {
+        let path = self.selected_path()?;
+        self.entries()
+            .iter()
+            .find(|entry| entry.path == path && entry.submodule.is_some())
+    }
+
+    /// The path whose diff the selection shows. A submodule has none: its row
+    /// shows its commits instead, so no diff is read for it (D175).
+    #[must_use]
+    pub fn diff_path(&self) -> Option<&str> {
+        match self.selected_submodule() {
+            Some(_) => None,
+            None => self.selected_path(),
+        }
     }
 
     /// The row of the selected file in the list.
@@ -3701,5 +3731,116 @@ mod thread_copy_tests {
             reason: None,
         });
         assert_eq!(model.workflows.restack_conflict, None, "the run ended");
+    }
+}
+
+#[cfg(test)]
+mod submodule_tests {
+    use super::*;
+    use gm_schema::{BranchInfo, Change, SubmoduleChange, SubmoduleDetail};
+
+    fn listed(path: &str, submodule: bool) -> StatusEntry {
+        StatusEntry {
+            path: path.to_owned(),
+            orig_path: None,
+            staged: None,
+            unstaged: Some(Change::Modified),
+            untracked: false,
+            conflicted: false,
+            submodule: submodule.then(SubmoduleChange::default),
+        }
+    }
+
+    /// A status whose listed paths are submodules where `submodule` is set.
+    fn status_with_submodules(paths: &[(&str, bool)]) -> RepoStatus {
+        RepoStatus {
+            root: "/r".to_owned(),
+            branch: BranchInfo::default(),
+            entries: paths.iter().map(|(path, sub)| listed(path, *sub)).collect(),
+        }
+    }
+
+    fn submodule_detail(path: &str) -> SubmoduleDetail {
+        SubmoduleDetail {
+            path: path.to_owned(),
+            branch: Some("main".to_owned()),
+            detached: false,
+            head: None,
+            recorded: None,
+            checked_out: true,
+            commits: Vec::new(),
+            more: false,
+            missing_commits: 0,
+        }
+    }
+
+    #[test]
+    fn a_status_asks_for_each_submodule_and_no_file() {
+        let mut model = Model::default();
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(1),
+            status: status_with_submodules(&[("a.rs", false), ("libs/x", true), ("libs/y", true)]),
+        });
+        assert_eq!(model.submodules.take_wanted(), ["libs/x", "libs/y"]);
+    }
+
+    #[test]
+    fn a_submodule_answer_is_applied_to_its_read_only() {
+        let mut model = Model::default();
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(1),
+            status: status_with_submodules(&[("libs/x", true)]),
+        });
+        let _ = model.submodules.take_wanted();
+        model
+            .submodules
+            .request("libs/x".to_owned(), OperationId(5));
+        let _ = model.apply(Event::SubmoduleLoaded {
+            id: OperationId(4),
+            submodule: submodule_detail("libs/x"),
+        });
+        assert!(model.submodules.detail("libs/x").is_none());
+        let _ = model.apply(Event::SubmoduleLoaded {
+            id: OperationId(5),
+            submodule: submodule_detail("libs/x"),
+        });
+        assert!(model.submodules.detail("libs/x").is_some());
+    }
+
+    #[test]
+    fn selecting_a_submodule_row_selects_it_and_reads_no_diff() {
+        let mut model = Model::default();
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(1),
+            status: status_with_submodules(&[("a.rs", false), ("libs/x", true)]),
+        });
+        assert!(model.select_row(1));
+        assert_eq!(
+            model.selected_submodule().map(|e| e.path.as_str()),
+            Some("libs/x")
+        );
+        assert_eq!(model.diff_path(), None);
+        assert!(model.select_row(0));
+        assert_eq!(model.selected_submodule(), None);
+        assert_eq!(model.diff_path(), Some("a.rs"));
+    }
+
+    #[test]
+    fn a_reset_for_another_repository_forgets_the_submodules() {
+        let mut model = Model::default();
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(1),
+            status: status_with_submodules(&[("libs/x", true)]),
+        });
+        let _ = model.submodules.take_wanted();
+        model
+            .submodules
+            .request("libs/x".to_owned(), OperationId(2));
+        let _ = model.apply(Event::SubmoduleLoaded {
+            id: OperationId(2),
+            submodule: submodule_detail("libs/x"),
+        });
+        model.reset_for_repo();
+        assert!(model.submodules.detail("libs/x").is_none());
     }
 }

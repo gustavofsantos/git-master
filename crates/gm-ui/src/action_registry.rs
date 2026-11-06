@@ -18,6 +18,7 @@ use gm_schema::{
 use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, SAME_WORKTREE};
 use crate::stacks::Stacks;
 use crate::stashes;
+use crate::submodule::Submodules;
 use crate::thread_curate::{self, ThreadField};
 use crate::transform_run;
 use crate::workflows_page::PageState;
@@ -396,6 +397,8 @@ pub struct Context<'a> {
     pub stack: StackCtx<'a>,
     /// The text file open in the Code viewer, and the lines picked in it (P4).
     pub code: CodeCtx<'a>,
+    /// The submodules of the status and the last read of each (D175); `None` when no status is loaded.
+    pub submodules: Option<&'a Submodules>,
     /// The preview features that are on (D169): an action of a feature that is off is hidden.
     pub features: FeatureSet,
 }
@@ -450,7 +453,7 @@ pub struct LabelRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 99] = [
+const SPECS: [Spec; 100] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1138,6 +1141,13 @@ const SPECS: [Spec; 99] = [
         ArgKind::None,
         Category::Repository,
     ),
+    spec(
+        "submodule.open",
+        "Open Submodule",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
+    ),
 ];
 
 const fn spec(
@@ -1260,6 +1270,8 @@ pub enum Action {
     LabelDelete,
     /// Opens the provenance panel for the lines picked in the Code viewer (P4, D144).
     CodeProvenance,
+    /// Opens a checked-out submodule's folder in its own window (D175).
+    OpenSubmodule,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1533,7 +1545,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 99] = [
+    pub const ALL: [Action; 100] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1633,6 +1645,7 @@ impl Action {
         Action::LabelRename,
         Action::LabelDelete,
         Action::CodeProvenance,
+        Action::OpenSubmodule,
     ];
 
     #[must_use]
@@ -1929,7 +1942,9 @@ impl Action {
             Action::DeleteMergedBranches | Action::CheckoutCommit | Action::NewBranchFromCommit => {
                 idle(ctx)
             }
-            Action::RevealFile | Action::ViewFile => reveal_rule(args, ctx),
+            Action::RevealFile => reveal_rule(args, ctx),
+            Action::ViewFile => view_file_rule(args, ctx),
+            Action::OpenSubmodule => open_submodule_rule(args, ctx),
             Action::MoveFileToBranch | Action::MoveFileToWorktree => move_rule(self, args, ctx),
             Action::DiscardFile | Action::DiscardAllChanges => discard_rule(self, args, ctx),
             Action::ShowAuthorPictures if ctx.author_pictures == AuthorPictures::Shown => {
@@ -2026,6 +2041,7 @@ impl Action {
                 stash_effect(self, args)?
             }
             (Action::CodeProvenance, _) => provenance_effect(ctx)?,
+            (Action::OpenSubmodule, _) => open_submodule_effect(args, ctx)?,
             (Action::CommentOnSelection, _) => comment_effect(ctx)?,
             (
                 Action::EditReviewComment
@@ -2211,6 +2227,12 @@ fn branch_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Rea
 /// hunk, discarding a hunk and committing. Each needs an idle repository.
 fn change_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
     idle(ctx)?;
+    // A submodule has no hunks; its row stages the commit it has checked out (D175).
+    if let Args::Chunk { path, .. } = args
+        && submodule_entry(path, ctx).is_some()
+    {
+        return Err(SUBMODULE_HUNKS);
+    }
     match (action, args) {
         (Action::StageFile, _) => {
             let entry = file_entry(args, ctx)?;
@@ -2265,14 +2287,77 @@ fn change_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Rea
     }
 }
 
+/// The reasons a submodule row gives for the actions that act on its files (D175).
+const SUBMODULE_DISCARD: Reason = "Open the submodule to discard.";
+const SUBMODULE_VIEW: Reason = "Open the submodule instead.";
+const SUBMODULE_MOVE: Reason = "A submodule cannot be moved.";
+const SUBMODULE_HUNKS: Reason = "A submodule has no diff hunks.";
+const SUBMODULE_READING: Reason = "The submodule is still being read.";
+const NOT_CHECKED_OUT: Reason = "This submodule is not checked out.";
+const NOT_A_SUBMODULE: Reason = "Only a submodule opens in its own window.";
+
+/// The listed submodule row the path names, if it is one (D175).
+fn submodule_entry<'a>(path: &str, ctx: &Context<'a>) -> Option<&'a StatusEntry> {
+    ctx.entries
+        .iter()
+        .find(|entry| entry.path == path && entry.submodule.is_some())
+}
+
+/// Open Submodule: a submodule row whose folder is checked out (D175). Only the
+/// submodule's read says whether it is, so the rule waits for that read.
+fn open_submodule_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    if !ctx.repo_open {
+        return Err("No repository is open.");
+    }
+    let entry = file_entry(args, ctx)?;
+    if entry.submodule.is_none() {
+        return Err(NOT_A_SUBMODULE);
+    }
+    match ctx
+        .submodules
+        .and_then(|submodules| submodules.detail(&entry.path))
+    {
+        Some(detail) if detail.checked_out => Ok(()),
+        Some(_) => Err(NOT_CHECKED_OUT),
+        None => Err(SUBMODULE_READING),
+    }
+}
+
+/// Opens the submodule's folder, `<repository root>/<path>`, in its own window (D175).
+fn open_submodule_effect(args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
+    let Args::File(path) = args else {
+        return Err("No target for this action");
+    };
+    let root = ctx.root.ok_or("No repository is open.")?;
+    Ok(Effect::OpenWorktree(
+        PathBuf::from(root)
+            .join(path)
+            .to_string_lossy()
+            .into_owned(),
+    ))
+}
+
+/// View File: the reveal rule, and a submodule has no file to view (D175).
+fn view_file_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    reveal_rule(args, ctx)?;
+    match args {
+        Args::File(path) if submodule_entry(path, ctx).is_some() => Err(SUBMODULE_VIEW),
+        _ => Ok(()),
+    }
+}
+
 /// The rule of the two discard actions: an idle repository and a listed file
 /// that is not conflicted, with something to throw away. Discard Changes needs
 /// an unstaged change or an untracked file; Discard All Changes needs any change.
+/// A submodule row has nothing to discard here (D175).
 fn discard_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
     idle(ctx)?;
     let entry = file_entry(args, ctx)?;
     if entry.conflicted {
         return Err("Resolve the conflict first.");
+    }
+    if entry.submodule.is_some() {
+        return Err(SUBMODULE_DISCARD);
     }
     match action {
         Action::DiscardAllChanges if entry.staged.is_some() || has_unstaged(entry) => Ok(()),
@@ -2333,6 +2418,9 @@ fn move_source<'a>(path: &str, ctx: &Context<'a>) -> Result<&'a StatusEntry, Rea
         .ok_or("That file is not in the working copy")?;
     if entry.conflicted {
         return Err("Resolve the conflict first.");
+    }
+    if entry.submodule.is_some() {
+        return Err(SUBMODULE_MOVE);
     }
     Ok(entry)
 }
@@ -2958,6 +3046,7 @@ mod tests {
             stashes: None,
             review: ReviewCtx::default(),
             code: CodeCtx::default(),
+            submodules: None,
         }
     }
 
@@ -6253,5 +6342,151 @@ mod tests {
             Action::Restack.enabled(&Args::Branch("main".into()), &on),
             Err("The stacks are still being read.")
         );
+    }
+
+    fn submodule_row(path: &str) -> StatusEntry {
+        StatusEntry {
+            submodule: Some(gm_schema::SubmoduleChange::default()),
+            ..entry(path, None, Some(Change::Modified))
+        }
+    }
+
+    /// The submodules of a status listing `path`, with its read answered: checked out or not.
+    fn read_submodules(path: &str, checked_out: bool) -> Submodules {
+        let mut submodules = Submodules::default();
+        submodules.status_changed(&[submodule_row(path)]);
+        submodules.request(path.to_owned(), OperationId(1));
+        submodules.loaded(
+            OperationId(1),
+            gm_schema::SubmoduleDetail {
+                path: path.to_owned(),
+                branch: checked_out.then(|| "main".to_owned()),
+                detached: false,
+                head: None,
+                recorded: None,
+                checked_out,
+                commits: Vec::new(),
+                more: false,
+                missing_commits: 0,
+            },
+        );
+        submodules
+    }
+
+    fn with_submodules<'a>(entries: &'a [StatusEntry], submodules: &'a Submodules) -> Context<'a> {
+        Context {
+            submodules: Some(submodules),
+            ..ctx(entries, "")
+        }
+    }
+
+    #[test]
+    fn open_submodule_needs_a_checked_out_submodule_row() {
+        let entries = [
+            submodule_row("libs/x"),
+            entry("a.rs", None, Some(Change::Modified)),
+        ];
+        let out = read_submodules("libs/x", true);
+        let closed = read_submodules("libs/x", false);
+        let unread = Submodules::default();
+        let args = Args::File("libs/x".into());
+        assert_eq!(
+            Action::OpenSubmodule.enabled(&args, &with_submodules(&entries, &out)),
+            Ok(())
+        );
+        assert_eq!(
+            Action::OpenSubmodule.enabled(&args, &with_submodules(&entries, &closed)),
+            Err("This submodule is not checked out.")
+        );
+        assert_eq!(
+            Action::OpenSubmodule.enabled(&args, &with_submodules(&entries, &unread)),
+            Err("The submodule is still being read.")
+        );
+        assert_eq!(
+            Action::OpenSubmodule
+                .enabled(&Args::File("a.rs".into()), &with_submodules(&entries, &out)),
+            Err("Only a submodule opens in its own window.")
+        );
+        assert_eq!(
+            Action::OpenSubmodule.enabled(&Args::None, &with_submodules(&entries, &out)),
+            Err("No target for this action")
+        );
+        let closed_repo = Context {
+            repo_open: false,
+            ..with_submodules(&entries, &out)
+        };
+        assert_eq!(
+            Action::OpenSubmodule.enabled(&args, &closed_repo),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn open_submodule_plans_the_folder_in_its_own_window() {
+        let entries = [submodule_row("libs/x")];
+        let out = read_submodules("libs/x", true);
+        assert_eq!(
+            Action::OpenSubmodule.plan(
+                &Args::File("libs/x".into()),
+                &with_submodules(&entries, &out)
+            ),
+            Ok(Effect::OpenWorktree("/repo/libs/x".to_owned()))
+        );
+        assert_eq!(Action::OpenSubmodule.id(), "submodule.open");
+        assert_eq!(Action::OpenSubmodule.spec().title, "Open Submodule");
+    }
+
+    #[test]
+    fn a_submodule_row_refuses_discard_view_move_and_hunks() {
+        let entries = [submodule_row("libs/x")];
+        let out = read_submodules("libs/x", true);
+        let context = with_submodules(&entries, &out);
+        let args = Args::File("libs/x".into());
+        for action in [Action::DiscardFile, Action::DiscardAllChanges] {
+            assert_eq!(
+                action.enabled(&args, &context),
+                Err("Open the submodule to discard."),
+                "{action:?}"
+            );
+        }
+        assert_eq!(
+            Action::ViewFile.enabled(&args, &context),
+            Err("Open the submodule instead.")
+        );
+        for action in [Action::MoveFileToBranch, Action::MoveFileToWorktree] {
+            assert_eq!(
+                action.enabled(&args, &context),
+                Err("A submodule cannot be moved."),
+                "{action:?}"
+            );
+        }
+        let chunk = Args::Chunk {
+            path: "libs/x".into(),
+            hunk: HunkId("h1".into()),
+            side: DiffSide::Unstaged,
+        };
+        assert_eq!(
+            Action::DiscardChunk.enabled(&chunk, &context),
+            Err("A submodule has no diff hunks.")
+        );
+    }
+
+    #[test]
+    fn a_submodule_row_still_stages_and_a_file_keeps_its_actions() {
+        let entries = [
+            submodule_row("libs/x"),
+            entry("a.rs", None, Some(Change::Modified)),
+        ];
+        let out = read_submodules("libs/x", true);
+        let context = with_submodules(&entries, &out);
+        assert_eq!(
+            Action::StageFile.enabled(&Args::File("libs/x".into()), &context),
+            Ok(())
+        );
+        let file = Args::File("a.rs".into());
+        assert_eq!(Action::ViewFile.enabled(&file, &context), Ok(()));
+        assert_eq!(Action::DiscardFile.enabled(&file, &context), Ok(()));
+        // A move that names only the file opens the target step, as it does for any file.
+        assert_eq!(Action::MoveFileToBranch.enabled(&file, &context), Ok(()));
     }
 }
