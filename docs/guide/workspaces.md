@@ -40,7 +40,7 @@ Removing a workspace, of either kind, follows the rules of [removing a worktree]
 
 The **Workspaces** section of the sidebar lists the workspaces under the workspace root, by name, in every window. A **here** badge marks the workspace the window shows, and an **ephemeral** badge marks an ephemeral one. Click a row to open that workspace in its own window.
 
-The **+** in the section header opens **New Workspace…**. The menu of a row has **Open Workspace**, **Reveal in File Manager** and **Remove Workspace**. Click the header to fold the section; see [Branches](branches.md#fold-the-sections).
+The **+** in the section header opens **New Workspace…**. The menu of a row has **Open Workspace**, **Reveal in File Manager** and **Remove Workspace**. The section starts folded, like **Branches** and **Worktrees**: click its header to open it; see [Branches](branches.md#fold-the-sections).
 
 ## Create a workspace
 
