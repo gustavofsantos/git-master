@@ -189,19 +189,27 @@ pub enum CommandKind {
         root: Option<String>,
     },
     /// Reads what removing the workspace at `path` would refuse or lose (D183). The window's own
-    /// workspace is a blocker. Answers `WorkspaceRemovalInspected`. Never recorded in the command
-    /// log (D28).
+    /// workspace is a blocker, unless `closing` says the window is going away (D185). Answers
+    /// `WorkspaceRemovalInspected`. Never recorded in the command log (D28).
     InspectWorkspaceRemoval {
         path: String,
+        #[serde(default)]
+        closing: bool,
     },
     /// Removes the workspace at `path`: each member's worktree from its repository, then the
     /// folder. It inspects again first and refuses a blocker that cannot be overridden, and the
-    /// overridable ones unless `force`. The branches stay. Human only, and recorded in the
-    /// command log (D28). Answers `WorkspaceRemoved`.
+    /// overridable ones unless `force`. The branches stay. With `closing` the window's own
+    /// workspace is not a blocker, since the window closes with it (D185). Human only, and
+    /// recorded in the command log (D28). Answers `WorkspaceRemoved`.
     RemoveWorkspace {
         path: String,
         force: bool,
+        #[serde(default)]
+        closing: bool,
     },
+    /// Reads the kind of the open repository: `None` when it is not a workspace (D185). Answers
+    /// `WorkspaceKindRead`. Never recorded in the command log (D28).
+    ReadWorkspaceKind,
     /// Checks out the branch the workspace's `.gitmodules` names for the member at `path`,
     /// relative to the open repository, which is the workspace (D183). Refused when the member
     /// has no branch or when another worktree holds it. Human only, and recorded in the command
@@ -1041,6 +1049,12 @@ pub enum Event {
     WorkspaceRemoved {
         id: OperationId,
         path: String,
+    },
+    /// Answers `ReadWorkspaceKind`: the kind of the open repository, `None` when it is not a
+    /// workspace.
+    WorkspaceKindRead {
+        id: OperationId,
+        kind: Option<WorkspaceKind>,
     },
     /// Answers `SearchFiles`.
     FilesFound {

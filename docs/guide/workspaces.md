@@ -30,8 +30,6 @@ The workspace repository is yours to write in. Your service repositories are not
 
 A workspace is **durable** or **ephemeral**. A durable workspace stays until you remove it. An ephemeral workspace is removed when you close its window, or quit GitMaster from it.
 
-> **Planned.** The app does not yet remove an ephemeral workspace when you close it. `gitmaster workspace remove` removes either kind; see [Command line](../reference/cli.md#remove-a-workspace).
-
 When nothing would be lost, the window closes and the workspace goes with it. When something would be lost, the window stays open and asks first. The dialog lists what would be lost, as **Remove Workspace** does, and offers three choices:
 
 - **Keep workspace**: the window closes and the workspace stays. Remove it later from the **Workspaces** section.

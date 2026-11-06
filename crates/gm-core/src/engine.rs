@@ -4061,10 +4061,10 @@ impl Engine {
                 )?;
                 self.create_workspace(id, &ws, &request)
             }
-            CommandKind::InspectWorkspaceRemoval { path } => {
+            CommandKind::InspectWorkspaceRemoval { path, closing } => {
                 let root = self.open_root()?;
                 let inspection = ws
-                    .inspect_removal(Path::new(path), &root)
+                    .inspect_removal(Path::new(path), &root, *closing)
                     .map_err(|e| e.to_string())?;
                 Ok(vec![Event::WorkspaceRemovalInspected {
                     id,
@@ -4072,17 +4072,31 @@ impl Engine {
                     blockers: inspection.blockers,
                 }])
             }
-            CommandKind::RemoveWorkspace { path, force } => {
+            CommandKind::RemoveWorkspace {
+                path,
+                force,
+                closing,
+            } => {
                 only_a_human(actor, "remove a workspace")?;
                 let root = self.open_root()?;
-                ws.remove(Path::new(path), &root, *force)
+                ws.remove(Path::new(path), &root, *force, *closing)
                     .map_err(|e| e.to_string())?;
-                let mut events = self.refreshed(id)?;
+                // A closing window's repository is the folder just removed: there is no status
+                // to read (D185).
+                let mut events = if *closing {
+                    Vec::new()
+                } else {
+                    self.refreshed(id)?
+                };
                 events.push(Event::WorkspaceRemoved {
                     id,
                     path: path.clone(),
                 });
                 Ok(events)
+            }
+            CommandKind::ReadWorkspaceKind => {
+                let kind = self.root.as_deref().and_then(|root| ws.kind_of(root));
+                Ok(vec![Event::WorkspaceKindRead { id, kind }])
             }
             CommandKind::CheckOutMemberBranch { path } => {
                 only_a_human(actor, "check out a member's branch")?;
@@ -5166,6 +5180,7 @@ impl Engine {
                 | CommandKind::ListWorkspaces { .. }
                 | CommandKind::PlanWorkspace { .. }
                 | CommandKind::InspectWorkspaceRemoval { .. }
+                | CommandKind::ReadWorkspaceKind
                 | CommandKind::ListWorkflowRuns { .. }
                 | CommandKind::LoadWorkflowRun { .. }
                 | CommandKind::DryRunWorkflow { .. }
@@ -5347,6 +5362,7 @@ fn is_workspace_command(kind: &CommandKind) -> bool {
             | CommandKind::CreateWorkspace { .. }
             | CommandKind::InspectWorkspaceRemoval { .. }
             | CommandKind::RemoveWorkspace { .. }
+            | CommandKind::ReadWorkspaceKind
             | CommandKind::CheckOutMemberBranch { .. }
     )
 }

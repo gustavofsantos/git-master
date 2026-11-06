@@ -396,6 +396,7 @@ fn inspection_reports_a_dirty_member_as_an_overridable_blocker() {
 
     let events = harness.human(CommandKind::InspectWorkspaceRemoval {
         path: text(&scratch.ws("dirty")),
+        closing: false,
     });
 
     let blockers = inspected(&events).expect("the inspection");
@@ -422,6 +423,7 @@ fn remove_is_refused_without_force_and_done_with_it() {
     let refused = harness.human(CommandKind::RemoveWorkspace {
         path: path.clone(),
         force: false,
+        closing: false,
     });
     assert!(!done(&refused));
     assert!(
@@ -436,6 +438,7 @@ fn remove_is_refused_without_force_and_done_with_it() {
     let forced = harness.human(CommandKind::RemoveWorkspace {
         path: path.clone(),
         force: true,
+        closing: false,
     });
     assert!(done(&forced), "forced removal failed: {forced:?}");
     assert!(!scratch.ws("gone").exists());
@@ -463,14 +466,20 @@ fn removing_the_window_own_workspace_is_refused_even_when_forced() {
     harness.open(&scratch.ws("own"));
     let path = text(&scratch.ws("own"));
 
-    let blockers =
-        inspected(&harness.human(CommandKind::InspectWorkspaceRemoval { path: path.clone() }))
-            .expect("the inspection");
+    let blockers = inspected(&harness.human(CommandKind::InspectWorkspaceRemoval {
+        path: path.clone(),
+        closing: false,
+    }))
+    .expect("the inspection");
     assert_eq!(blockers.len(), 1, "{blockers:?}");
     assert_eq!(blockers[0].kind, RemovalBlockerKind::Current);
     assert!(!blockers[0].overridable);
 
-    let events = harness.human(CommandKind::RemoveWorkspace { path, force: true });
+    let events = harness.human(CommandKind::RemoveWorkspace {
+        path,
+        force: true,
+        closing: false,
+    });
     assert!(!done(&events));
     assert!(
         refusal(&events).is_some_and(|reason| reason.contains("inside that workspace")),
@@ -633,6 +642,183 @@ fn an_agent_cannot_write_a_workspace_but_can_read_one() {
         harness.engine.log().iter().all(|entry| !matches!(
             entry.kind,
             CommandKind::ListWorkspaces { .. } | CommandKind::PlanWorkspace { .. }
+        )),
+        "reads are not logged"
+    );
+}
+
+/// The create command of an ephemeral workspace (D185).
+fn ephemeral(name: &str, members: &[(&Path, &str)], root: &Path) -> CommandKind {
+    match create(name, members, root) {
+        CommandKind::CreateWorkspace {
+            name,
+            members,
+            base,
+            root,
+            ..
+        } => CommandKind::CreateWorkspace {
+            name,
+            kind: WorkspaceKind::Ephemeral,
+            members,
+            base,
+            root,
+        },
+        _ => unreachable!(),
+    }
+}
+
+/// The kind the read answers, when it answers a workspace.
+fn kind_read(events: &[Event]) -> Option<WorkspaceKind> {
+    events.iter().find_map(|event| match event {
+        Event::WorkspaceKindRead { kind, .. } => *kind,
+        _ => None,
+    })
+}
+
+/// Whether the read answers at all.
+fn kind_answered(events: &[Event]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, Event::WorkspaceKindRead { .. }))
+}
+
+#[test]
+fn closing_removes_the_window_own_ephemeral_workspace_when_nothing_would_be_lost() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(ephemeral(
+        "shut",
+        &[(&c, "feat/c")],
+        &scratch.root()
+    ))));
+    harness.open(&scratch.ws("shut"));
+    let path = text(&scratch.ws("shut"));
+
+    // Without `closing` the window's own workspace is refused, even forced (D183 (4)).
+    let refused = harness.human(CommandKind::RemoveWorkspace {
+        path: path.clone(),
+        force: true,
+        closing: false,
+    });
+    assert!(!done(&refused));
+    assert!(scratch.ws("shut").exists());
+
+    let inspection = harness.human(CommandKind::InspectWorkspaceRemoval {
+        path: path.clone(),
+        closing: true,
+    });
+    assert!(
+        inspected(&inspection).is_some_and(|blockers| blockers.is_empty()),
+        "{inspection:?}"
+    );
+
+    let removed = harness.human(CommandKind::RemoveWorkspace {
+        path: path.clone(),
+        force: false,
+        closing: true,
+    });
+    assert!(done(&removed), "closing removal failed: {removed:?}");
+    assert!(
+        removed
+            .iter()
+            .any(|event| matches!(event, Event::WorkspaceRemoved { .. })),
+        "{removed:?}"
+    );
+    assert!(!scratch.ws("shut").exists());
+    assert!(!worktrees_of(&c).contains("shut/c"));
+    assert!(
+        !git_in(&c, &["branch", "--list", "feat/c"]).is_empty(),
+        "the branch is kept"
+    );
+}
+
+#[test]
+fn closing_still_refuses_a_dirty_member_without_force() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(ephemeral(
+        "dirty-shut",
+        &[(&c, "feat/c")],
+        &scratch.root()
+    ))));
+    harness.open(&scratch.ws("dirty-shut"));
+    std::fs::write(scratch.ws("dirty-shut/c/notes.txt"), "draft\n").unwrap();
+    let path = text(&scratch.ws("dirty-shut"));
+
+    let blockers = inspected(&harness.human(CommandKind::InspectWorkspaceRemoval {
+        path: path.clone(),
+        closing: true,
+    }))
+    .expect("the inspection");
+    assert_eq!(blockers.len(), 1, "{blockers:?}");
+    assert_eq!(blockers[0].kind, RemovalBlockerKind::MemberDirty);
+    assert!(blockers[0].overridable);
+
+    let refused = harness.human(CommandKind::RemoveWorkspace {
+        path: path.clone(),
+        force: false,
+        closing: true,
+    });
+    assert!(!done(&refused));
+    assert!(
+        refusal(&refused).is_some_and(|reason| reason.contains("use --force")),
+        "{refused:?}"
+    );
+    assert!(scratch.ws("dirty-shut").exists());
+
+    let forced = harness.human(CommandKind::RemoveWorkspace {
+        path,
+        force: true,
+        closing: true,
+    });
+    assert!(done(&forced), "forced closing removal failed: {forced:?}");
+    assert!(!scratch.ws("dirty-shut").exists());
+}
+
+#[test]
+fn read_workspace_kind_names_the_kind_of_an_open_workspace_and_none_for_a_repository() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(ephemeral(
+        "kinds-eph",
+        &[(&c, "feat/c")],
+        &scratch.root()
+    ))));
+    assert!(done(&harness.human(create(
+        "kinds-dur",
+        &[(&c, "feat/d")],
+        &scratch.root()
+    ))));
+
+    let plain = harness.human(CommandKind::ReadWorkspaceKind);
+    assert!(kind_answered(&plain), "{plain:?}");
+    assert_eq!(kind_read(&plain), None, "a repository is not a workspace");
+
+    harness.open(&scratch.ws("kinds-eph"));
+    let ephemeral_read = harness.human(CommandKind::ReadWorkspaceKind);
+    assert_eq!(
+        kind_read(&ephemeral_read),
+        Some(WorkspaceKind::Ephemeral),
+        "{ephemeral_read:?}"
+    );
+
+    harness.open(&scratch.ws("kinds-dur"));
+    let durable_read = harness.human(CommandKind::ReadWorkspaceKind);
+    assert_eq!(
+        kind_read(&durable_read),
+        Some(WorkspaceKind::Durable),
+        "{durable_read:?}"
+    );
+    assert!(
+        harness.engine.log().iter().all(|entry| !matches!(
+            entry.kind,
+            CommandKind::ReadWorkspaceKind | CommandKind::InspectWorkspaceRemoval { .. }
         )),
         "reads are not logged"
     );

@@ -383,7 +383,9 @@ fn remove(
         .ws
         .named(&root, name)
         .ok_or_else(|| Failure::Run(format!("no workspace named '{name}'")))?;
-    let removed = ctx.ws.remove(&ws, &ctx.env.cwd, args.switch("force"))?;
+    let removed = ctx
+        .ws
+        .remove(&ws, &ctx.env.cwd, args.switch("force"), false)?;
     writeln!(out, "{}", removed.path.display())?;
     for note in &removed.notes {
         writeln!(err, "{note}")?;

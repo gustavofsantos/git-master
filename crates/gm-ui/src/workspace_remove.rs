@@ -196,6 +196,7 @@ impl StatusView {
             Actor::Human,
             CommandKind::InspectWorkspaceRemoval {
                 path: path.to_owned(),
+                closing: false,
             },
         );
         self.model
@@ -268,6 +269,7 @@ impl StatusView {
             CommandKind::RemoveWorkspace {
                 path,
                 force: confirmed,
+                closing: false,
             },
         );
         self.model.workspace_removal.begin_remove(id);
@@ -370,7 +372,15 @@ impl StatusView {
                 body.into_iter()
                     .map(|line| div().text_sm().text_color(theme::text()).child(line)),
             )
-            .children(forced.then(|| confirm_row(dialog.confirmed, label, cx)))
+            .children(forced.then(|| {
+                confirm_row(
+                    "workspace-remove-confirm-check",
+                    dialog.confirmed,
+                    label,
+                    Self::toggle_workspace_confirmation,
+                    cx,
+                )
+            }))
             .children(
                 dialog
                     .error
@@ -382,15 +392,22 @@ impl StatusView {
     }
 }
 
-/// The checkbox that confirms a forced removal. Space and a click tick it.
-fn confirm_row(confirmed: bool, label: String, cx: &Context<StatusView>) -> Stateful<Div> {
+/// The checkbox that confirms a forced removal, shared with the close dialog (D185). Space and a
+/// click tick it through `toggle`.
+pub(crate) fn confirm_row(
+    id: &'static str,
+    confirmed: bool,
+    label: String,
+    toggle: fn(&mut StatusView, &mut Context<StatusView>),
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
     let mark = if confirmed {
         icon::filled(Icon::CheckSquare, icon::SMALL, theme::accent())
     } else {
         icon::view(Icon::Square, icon::SMALL, theme::muted())
     };
     div()
-        .id("workspace-remove-confirm-check")
+        .id(id)
         .flex()
         .flex_row()
         .items_center()
@@ -398,9 +415,7 @@ fn confirm_row(confirmed: bool, label: String, cx: &Context<StatusView>) -> Stat
         .cursor_pointer()
         .child(mark)
         .child(div().text_sm().text_color(theme::text()).child(label))
-        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.toggle_workspace_confirmation(cx);
-        }))
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| toggle(this, cx)))
 }
 
 /// Cancel, and the destructive remove button, enabled only when the rules allow.

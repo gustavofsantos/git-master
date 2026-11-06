@@ -101,6 +101,7 @@ mod workflow_keys;
 mod workflow_review;
 mod workflow_run;
 mod workflows_page;
+mod workspace_close;
 mod workspace_create;
 mod workspace_list;
 mod workspace_remove;
@@ -194,6 +195,7 @@ pub fn run(
                 .collect::<Vec<_>>();
             cx.set_global(ComponentKeys(component_keys));
             bind_keys(cx);
+            cx.set_global(workspace_close::OpenViews::default());
             quit_with_the_window(cx);
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
             let options = WindowOptions {
@@ -232,6 +234,8 @@ pub fn run(
                 let view = cx.new(|cx| {
                     StatusView::new(engine, command_log, watch, start, features, window, cx)
                 });
+                // The window holds its close while an ephemeral workspace is removed (D185).
+                workspace_close::register(&view, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             });
             if let Err(error) = opened {
@@ -330,7 +334,8 @@ pub(crate) fn bind_keys_with_workflows(cx: &mut App, bound: &[workflow_keys::Wor
     }
 }
 
-/// The window is the app: closing it quits, and so does ⌘Q from the app menu.
+/// The window is the app: closing it quits, and so does ⌘Q from the app menu. Both ask the window
+/// first whether it may close (D185).
 fn quit_with_the_window(cx: &mut App) {
     cx.on_window_closed(|cx| {
         if cx.windows().is_empty() {
@@ -338,7 +343,7 @@ fn quit_with_the_window(cx: &mut App) {
         }
     })
     .detach();
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| workspace_close::quit_requested(cx));
     cx.set_menus(vec![Menu {
         name: "GitMaster".into(),
         items: vec![MenuItem::action("Quit GitMaster", Quit)],

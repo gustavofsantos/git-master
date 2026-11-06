@@ -997,14 +997,19 @@ impl<'a> Workspaces<'a> {
     }
 
     /// What removing the workspace at `ws` would refuse or lose, read from the current state.
-    /// `here` is the directory the command runs in: a workspace that contains it is a blocker.
-    /// Reads only.
-    pub fn inspect_removal(&self, ws: &Path, here: &Path) -> Result<RemovalInspection, Error> {
+    /// `here` is the directory the command runs in: a workspace that contains it is a blocker,
+    /// unless `closing` says the window showing it is going away (D185). Reads only.
+    pub fn inspect_removal(
+        &self,
+        ws: &Path,
+        here: &Path,
+        closing: bool,
+    ) -> Result<RemovalInspection, Error> {
         if self.kind_of(ws).is_none() {
             return Err(Error::Run(format!("'{}' is not a workspace", ws.display())));
         }
         let mut blockers = Vec::new();
-        if canonical(here).starts_with(canonical(ws)) {
+        if !closing && canonical(here).starts_with(canonical(ws)) {
             blockers.push(RemovalBlocker {
                 kind: RemovalBlockerKind::Current,
                 member: None,
@@ -1097,11 +1102,20 @@ impl<'a> Workspaces<'a> {
     /// Removes the workspace at `ws` (D174 (3), D177 (4)): every member's worktree from its
     /// repository, then the folder. The inspection is taken again first, so a refusal names what
     /// is there now. The branches stay.
-    pub fn remove(&self, ws: &Path, here: &Path, force: bool) -> Result<Removed, Error> {
+    pub fn remove(
+        &self,
+        ws: &Path,
+        here: &Path,
+        force: bool,
+        closing: bool,
+    ) -> Result<Removed, Error> {
         let name = ws
             .file_name()
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        if let Some(refusal) = self.inspect_removal(ws, here)?.refusal(&name, force) {
+        if let Some(refusal) = self
+            .inspect_removal(ws, here, closing)?
+            .refusal(&name, force)
+        {
             return Err(refusal);
         }
         let members = self.members(ws)?;
