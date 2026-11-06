@@ -254,6 +254,7 @@ mod tests {
             unstaged: None,
             untracked: false,
             conflicted,
+            submodule: None,
         }
     }
 

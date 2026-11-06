@@ -39,6 +39,7 @@ pub mod stack;
 mod stack_session;
 pub mod stage_math;
 mod stash;
+mod submodule;
 pub mod syntax;
 pub mod threads;
 mod threads_session;

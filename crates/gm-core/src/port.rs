@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use gm_schema::{
     BranchEntry, CommitDetail, CommitFile, ConflictFileRead, ConflictOperation, DiffSide, FileDiff,
     GrepResult, HunkId, MergedBranch, PruneCandidate, ReflogEntry, RepoStatus, StageTarget,
-    StashEntry, WorktreeEntry, WorktreeMode,
+    StashEntry, SubmoduleDetail, WorktreeEntry, WorktreeMode,
 };
 
 use crate::blame::BlameLine;
@@ -453,6 +453,21 @@ pub trait GitPort: Send {
     ) -> Result<Vec<ReflogEntry>, GitError> {
         Err(GitError(
             "the reflog is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The state of the submodule at `path` (D175): its branch or detached HEAD,
+    /// the commit the index records, and at most `limit` commits it gained over
+    /// that one, newest first. Errs when the index holds no gitlink there. Never
+    /// records anything (D28).
+    fn submodule(
+        &self,
+        _root: &Path,
+        _path: &str,
+        _limit: usize,
+    ) -> Result<SubmoduleDetail, GitError> {
+        Err(GitError(
+            "submodules are not supported by this adapter".into(),
         ))
     }
 

@@ -15,6 +15,7 @@ mod review;
 mod stack;
 mod stash;
 mod status;
+mod submodule;
 mod syntax;
 pub mod threads;
 mod workflow;
@@ -50,8 +51,9 @@ pub use stack::{OWN_COMMITS_LIMIT, Stack, StackBranch, StackSnapshot, StackState
 pub use stash::StashEntry;
 pub use status::{
     Blocker, BranchEntry, BranchFailure, BranchInfo, Change, MergedBranch, PruneCandidate,
-    RepoStatus, StatusEntry, WorktreeEntry, WorktreeInspection,
+    RepoStatus, StatusEntry, SubmoduleChange, WorktreeEntry, WorktreeInspection,
 };
+pub use submodule::{SUBMODULE_COMMIT_LIMIT, SubmoduleCommit, SubmoduleDetail};
 pub use syntax::{HighlightSpan, SyntaxRole};
 pub use threads::{
     AttachKind, CanonicalEvent, CaptureGap, CutBound, EditChange, EditIntent, EditPhase, EditState,

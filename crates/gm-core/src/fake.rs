@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use gm_schema::{
     BranchEntry, CommitDetail, CommitFile, CommitSummary, ConflictFileRead, FileDiff, GrepResult,
-    History, ReflogEntry, RepoStatus, StashEntry, WorktreeEntry, WorktreeMode,
+    History, ReflogEntry, RepoStatus, StashEntry, SubmoduleDetail, WorktreeEntry, WorktreeMode,
 };
 
 use crate::blame::BlameLine;
@@ -49,6 +49,7 @@ pub struct FakeGit {
     writes: Arc<Mutex<Vec<&'static str>>>,
     stashes: Arc<Mutex<Result<Vec<StashEntry>, GitError>>>,
     reflog: Arc<Mutex<Result<Vec<ReflogEntry>, GitError>>>,
+    submodule: Arc<Mutex<Result<SubmoduleDetail, GitError>>>,
     conflict: Arc<Mutex<Result<ConflictFileRead, GitError>>>,
     /// The stack links of the config; `write_stack_link` changes them.
     links: Arc<Mutex<Vec<StackLink>>>,
@@ -90,6 +91,7 @@ impl FakeGit {
             writes: Arc::new(Mutex::new(Vec::new())),
             stashes: Arc::new(Mutex::new(Ok(Vec::new()))),
             reflog: Arc::new(Mutex::new(Ok(Vec::new()))),
+            submodule: Arc::new(Mutex::new(Err(GitError("no submodule set".into())))),
             conflict: Arc::new(Mutex::new(Err(GitError("no conflict is set".into())))),
             links: Arc::new(Mutex::new(Vec::new())),
             edges: Arc::new(Mutex::new(HashMap::new())),
@@ -164,6 +166,16 @@ impl FakeGit {
     /// If another thread panicked while holding the reflog lock.
     pub fn set_reflog(&self, entries: Result<Vec<ReflogEntry>, GitError>) {
         *self.reflog.lock().unwrap() = entries;
+    }
+
+    /// What the submodule reads answer: the detail, with its commits cut to the
+    /// limit the read asks for. Whatever path is asked for gets this detail.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the submodule lock.
+    pub fn set_submodule(&self, detail: Result<SubmoduleDetail, GitError>) {
+        *self.submodule.lock().unwrap() = detail;
     }
 
     /// What the next file list read answers: the paths of the worktree.
@@ -400,6 +412,18 @@ impl GitPort for FakeGit {
 
     fn stashes(&self, _root: &Path) -> Result<Vec<StashEntry>, GitError> {
         self.stashes.lock().unwrap().clone()
+    }
+
+    fn submodule(
+        &self,
+        _root: &Path,
+        _path: &str,
+        limit: usize,
+    ) -> Result<SubmoduleDetail, GitError> {
+        let mut detail = self.submodule.lock().unwrap().clone()?;
+        detail.more = detail.commits.len() > limit;
+        detail.commits.truncate(limit);
+        Ok(detail)
     }
 
     fn reflog(&self, _root: &Path, skip: u32, limit: usize) -> Result<Vec<ReflogEntry>, GitError> {

@@ -14,7 +14,8 @@ use git2::{BranchType, ConfigLevel, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, CommitFile, ConflictFileRead, ConflictOperation, DiffSide,
     FileDiff, Hunk, HunkId, MergedBranch, OWN_COMMITS_LIMIT, PruneCandidate, RecordedResolution,
-    ReflogEntry, RepoStatus, StageTarget, StashEntry, StatusEntry, WorktreeEntry, WorktreeMode,
+    ReflogEntry, RepoStatus, StageTarget, StashEntry, StatusEntry, SubmoduleDetail, WorktreeEntry,
+    WorktreeMode,
 };
 
 use crate::blame;
@@ -41,6 +42,7 @@ use crate::restack::{ReplayKind, Replayed};
 use crate::stack::{self, EdgeFacts, StackLink};
 use crate::stage_math;
 use crate::stash;
+use crate::submodule;
 use crate::worktree;
 use crate::{GitError, GitPort};
 
@@ -1013,6 +1015,78 @@ impl GitPort for SubprocessGit {
 
     fn drop_stash(&self, root: &Path, index: u32) -> Result<(), GitError> {
         self.stash_command(root, "drop", index)
+    }
+
+    fn submodule(
+        &self,
+        root: &Path,
+        path: &str,
+        limit: usize,
+    ) -> Result<SubmoduleDetail, GitError> {
+        let mut index = self.git(root);
+        index.args(["ls-files", "-s", "-z", "--", path]);
+        let recorded = submodule::recorded_commit(&Self::run(index)?, path)
+            .ok_or_else(|| GitError(format!("{path} is not a submodule")))?;
+        let folder = root.join(path);
+        // An empty folder is not a checkout. Git run inside it would find the
+        // superproject instead, so it is not asked.
+        if !folder.join(".git").exists() {
+            return Ok(SubmoduleDetail {
+                path: path.to_owned(),
+                branch: None,
+                detached: false,
+                head: None,
+                recorded: Some(recorded),
+                checked_out: false,
+                commits: Vec::new(),
+                more: false,
+                missing_commits: 0,
+            });
+        }
+        // `symbolic-ref` exits 1 when HEAD is detached; the name is then empty.
+        let mut symbolic = self.git(&folder);
+        symbolic.args(["symbolic-ref", "-q", "--short", "HEAD"]);
+        let name = String::from_utf8_lossy(&Self::run_allowing(symbolic, &[0, 1])?)
+            .trim()
+            .to_owned();
+        let branch = (!name.is_empty()).then_some(name);
+        // An unborn HEAD has no commit; `rev-parse` exits 1 then.
+        let mut rev = self.git(&folder);
+        rev.args(["rev-parse", "--verify", "-q", "HEAD"]);
+        let head = String::from_utf8_lossy(&Self::run_allowing(rev, &[0, 1])?)
+            .trim()
+            .to_owned();
+        let head = (!head.is_empty()).then_some(head);
+        let (commits, more, missing_commits) = match &head {
+            None => (Vec::new(), false, 0),
+            Some(head) => {
+                let mut log = self.git(&folder);
+                log.args(["log", "-z", submodule::LOG_FORMAT])
+                    .arg(format!("-n{}", limit + 1))
+                    .arg(format!("{recorded}..{head}"));
+                let (commits, more) = submodule::parse_log(&Self::run(log)?, limit)?;
+                let mut count = self.git(&folder);
+                count
+                    .args(["rev-list", "--count"])
+                    .arg(format!("{head}..{recorded}"));
+                let missing = String::from_utf8_lossy(&Self::run(count)?)
+                    .trim()
+                    .parse()
+                    .map_err(|_| GitError("unexpected count of missing commits".into()))?;
+                (commits, more, missing)
+            }
+        };
+        Ok(SubmoduleDetail {
+            path: path.to_owned(),
+            detached: branch.is_none(),
+            branch,
+            head,
+            recorded: Some(recorded),
+            checked_out: true,
+            commits,
+            more,
+            missing_commits,
+        })
     }
 
     fn reflog(&self, root: &Path, skip: u32, limit: usize) -> Result<Vec<ReflogEntry>, GitError> {
@@ -3601,6 +3675,7 @@ pub fn parse_status(raw: &[u8]) -> Result<RepoStatus, GitError> {
                 unstaged: None,
                 untracked: true,
                 conflicted: false,
+                submodule: None,
             });
         } else if line.starts_with("1 ") || line.starts_with("2 ") || line.starts_with("u ") {
             // Fixed fields before the path: 1 has 8, 2 has 9, u has 10.
@@ -3612,7 +3687,9 @@ pub fn parse_status(raw: &[u8]) -> Result<RepoStatus, GitError> {
             };
             let mut parts = line.splitn(fields + 1, ' ');
             let xy = parts.nth(1).ok_or_else(bad)?.as_bytes();
-            let path = parts.nth(fields - 2).ok_or_else(bad)?.to_owned();
+            // The `<sub>` field follows XY in all three kinds (D175).
+            let sub = parts.next().ok_or_else(bad)?;
+            let path = parts.nth(fields - 3).ok_or_else(bad)?.to_owned();
             if xy.len() != 2 {
                 return Err(bad());
             }
@@ -3630,6 +3707,7 @@ pub fn parse_status(raw: &[u8]) -> Result<RepoStatus, GitError> {
                 unstaged: if conflicted { None } else { change(xy[1]) },
                 untracked: false,
                 conflicted,
+                submodule: submodule::parse_change(sub),
             });
         }
         // "! " (ignored) records are not requested; anything else is skipped.
@@ -3772,6 +3850,8 @@ fn read_pipe<R: Read>(pipe: Option<R>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use gm_schema::SubmoduleChange;
+
     use super::*;
 
     #[test]
@@ -3806,6 +3886,51 @@ u UU N... 100644 100644 100644 100644 a b c both.rs\0\
     #[test]
     fn a_truncated_record_is_an_error_not_a_panic() {
         assert!(parse_status(b"1 .M N...\0").is_err());
+    }
+
+    #[test]
+    fn a_submodule_row_reads_its_three_flags_and_a_file_has_none() {
+        let raw = b"# branch.oid abc123\0# branch.head main\0\
+1 .M S.MU 160000 160000 160000 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 sub\0\
+1 M. SC.. 160000 160000 160000 aaa bbb libs/other\0\
+1 .M S..U 160000 160000 160000 aaa bbb third\0\
+2 R. N... 100644 100644 100644 aaa bbb R100 to.rs\0from.rs\0\
+1 .M N... 100644 100644 100644 aaa bbb src/a.rs\0";
+        let status = parse_status(raw).unwrap();
+        assert_eq!(status.entries.len(), 5);
+        assert_eq!(status.entries[0].path, "sub");
+        assert_eq!(
+            status.entries[0].submodule,
+            Some(SubmoduleChange {
+                commit_changed: false,
+                modified: true,
+                untracked: true,
+            })
+        );
+        assert_eq!(status.entries[0].unstaged, Some(Change::Modified));
+        assert_eq!(status.entries[1].path, "libs/other");
+        assert_eq!(status.entries[1].staged, Some(Change::Modified));
+        assert_eq!(
+            status.entries[1].submodule,
+            Some(SubmoduleChange {
+                commit_changed: true,
+                modified: false,
+                untracked: false,
+            })
+        );
+        assert_eq!(
+            status.entries[2].submodule,
+            Some(SubmoduleChange {
+                commit_changed: false,
+                modified: false,
+                untracked: true,
+            })
+        );
+        assert_eq!(status.entries[3].orig_path.as_deref(), Some("from.rs"));
+        assert_eq!(status.entries[3].submodule, None);
+        assert_eq!(status.entries[4].path, "src/a.rs");
+        assert_eq!(status.entries[4].submodule, None);
+        assert_eq!(status.entries[4].unstaged, Some(Change::Modified));
     }
 
     #[test]

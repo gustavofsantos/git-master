@@ -43,6 +43,7 @@ mod tests {
             unstaged: None,
             untracked: false,
             conflicted: false,
+            submodule: None,
         }
     }
 

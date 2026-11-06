@@ -644,6 +644,7 @@ mod tests {
             unstaged,
             untracked: false,
             conflicted: false,
+            submodule: None,
         }
     }
 

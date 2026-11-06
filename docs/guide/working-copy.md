@@ -31,6 +31,7 @@ A submodule takes one row, with the folder icon and its path. The row shows the 
 | Mark | Meaning |
 | --- | --- |
 | **N new commits** | The submodule's `HEAD` has commits that the repository does not record yet. |
+| **N behind** | The repository records commits that the submodule's `HEAD` does not have, for example after you pulled the repository. |
 | **modified** | Files tracked by the submodule have changes. |
 | **untracked** | The submodule has new files that its `.gitignore` does not hide. |
 

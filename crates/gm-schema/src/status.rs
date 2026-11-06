@@ -50,6 +50,22 @@ pub struct StatusEntry {
     pub unstaged: Option<Change>,
     pub untracked: bool,
     pub conflicted: bool,
+    /// Set when the path is a submodule (D175); `None` for a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submodule: Option<SubmoduleChange>,
+}
+
+/// What changed in a submodule, from the `<sub>` field of `git status`
+/// porcelain v2 (D175). Each flag is one letter of `S<c><m><u>`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SubmoduleChange {
+    /// The submodule's HEAD is not the commit the repository records: it may be
+    /// ahead, behind or elsewhere. `LoadSubmodule` tells which, with counts.
+    pub commit_changed: bool,
+    /// Files the submodule tracks have changes.
+    pub modified: bool,
+    /// The submodule has untracked files.
+    pub untracked: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

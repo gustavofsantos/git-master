@@ -11,7 +11,7 @@ use gm_schema::{
     ConflictSite, DirListing, Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED,
     MergedBranch, OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackPlan,
     RestackResolution, ReviewChange, ReviewComment, ReviewStatus, STASH_LIST_CHANGED,
-    StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
+    SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -58,6 +58,7 @@ use crate::script_session::{
     self, Carried, EffectRequest, ScriptJob, ScriptLink, ScriptReport, ScriptSession, Waiting,
 };
 use crate::stack_session;
+use crate::submodule;
 use crate::syntax;
 use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSession};
 use crate::workflow_session::{self, Effected};
@@ -2985,6 +2986,7 @@ impl Engine {
             }
             CommandKind::CheckoutCommit { oid } => self.checkout_commit(id, actor, oid),
             CommandKind::LoadReflog { skip } => self.load_reflog(id, *skip),
+            CommandKind::LoadSubmodule { path } => self.load_submodule(id, path),
             CommandKind::ListStashes => self.list_stashes(id),
             CommandKind::CreateStash { .. }
             | CommandKind::ApplyStash { .. }
@@ -3468,6 +3470,18 @@ impl Engine {
             entries,
             has_more,
         }])
+    }
+
+    /// The state of one submodule (D175). The path is checked before Git runs; a
+    /// read, so nothing is recorded.
+    fn load_submodule(&self, id: OperationId, path: &str) -> Result<Vec<Event>, String> {
+        submodule::check_path(path)?;
+        let root = self.open_root()?;
+        let submodule = self
+            .git
+            .submodule(&root, path, SUBMODULE_COMMIT_LIMIT)
+            .map_err(|e| e.0)?;
+        Ok(vec![Event::SubmoduleLoaded { id, submodule }])
     }
 
     /// Detaches HEAD at a commit, as a reflog entry is checked out (B3, D95). The
@@ -4889,6 +4903,7 @@ impl Engine {
                 | CommandKind::ListWorkflows
                 | CommandKind::ListHookSections
                 | CommandKind::LoadReflog { .. }
+                | CommandKind::LoadSubmodule { .. }
                 | CommandKind::ListWorkflowRuns { .. }
                 | CommandKind::LoadWorkflowRun { .. }
                 | CommandKind::DryRunWorkflow { .. }

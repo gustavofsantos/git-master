@@ -18,6 +18,7 @@ use crate::status::{
     BranchEntry, BranchFailure, MergedBranch, PruneCandidate, RepoStatus, WorktreeEntry,
     WorktreeInspection,
 };
+use crate::submodule::SubmoduleDetail;
 use crate::syntax::HighlightSpan;
 use crate::threads::{
     AttachKind, EditState, Label, LabelDetail, LinkKind, ProvenanceResult, SearchFacets,
@@ -136,6 +137,14 @@ pub enum CommandKind {
     /// (D28). An unborn HEAD or a repository without a reflog is an empty list.
     LoadReflog {
         skip: u32,
+    },
+    /// Reads the state of the submodule at `path` (D175): its branch or
+    /// detached HEAD, the commit the repository records, and the commits it
+    /// gained since. `path` is relative to the root and must be a submodule
+    /// the index records; an absolute path or one with `..` is refused. Never
+    /// recorded in the command log (D28).
+    LoadSubmodule {
+        path: String,
     },
     /// Reads the file list of the worktree again (N1): `git ls-files` with the
     /// untracked files `.gitignore` does not hide, minus what a sparse checkout
@@ -929,6 +938,11 @@ pub enum Event {
         skip: u32,
         entries: Vec<ReflogEntry>,
         has_more: bool,
+    },
+    /// Answers `LoadSubmodule`.
+    SubmoduleLoaded {
+        id: OperationId,
+        submodule: SubmoduleDetail,
     },
     /// Answers `SearchFiles`.
     FilesFound {

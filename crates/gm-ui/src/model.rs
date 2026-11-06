@@ -1339,6 +1339,8 @@ impl Model {
             | Event::HooksConverted { .. }
             // The wait is kept by `gate_wait` above; each surface reads it.
             | Event::GateStarted { .. }
+            // The submodule row is drawn in a later slice (D175); the answer is not shown yet.
+            | Event::SubmoduleLoaded { .. }
             // The list is read again by the view on a change, so the status bar has nothing to say.
             // The label and link answers are read by the Labels page (P4); the rows follow `ThreadsChanged`.
             | Event::ThreadRelationChanged { .. }
@@ -1728,6 +1730,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::MergedBranchesDeleted { id, .. }
         | Event::StashesListed { id, .. }
         | Event::ReflogLoaded { id, .. }
+        | Event::SubmoduleLoaded { id, .. }
         | Event::HookSectionsListed { id, .. }
         | Event::HooksConverted { id, .. }
         | Event::WorkflowsListed { id, .. }
@@ -1787,6 +1790,7 @@ mod tests {
             unstaged: Some(Change::Modified),
             untracked: false,
             conflicted: false,
+            submodule: None,
         }
     }
 
