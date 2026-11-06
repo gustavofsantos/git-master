@@ -729,6 +729,12 @@ Several repositories in one workspace: a superproject whose submodules are linke
   - **SW3a, read tools (D181) (done 2026-11-06; checked through the real MCP server over stdio on a two-member workspace: `workspace_status` fields, and `provenance` on a member line found the member commit and the thread with `blob_match` and `observed_commit`):** review reverted an unasked change that had taken status refreshes out of the command log. Gaps: `new_commits` is capped at 200. `workspace_status`; `provenance` on a member's path (blame in the member, threads from the workspace). Docs: `reference/mcp-tools.md`, "Tools in a workspace".
   - **SW3b, review across members (D182) (done 2026-11-06; checked in a window and over MCP: a comment from the Code page on a member's line, then `review_comment_resolve` measured the before and after text; the refs are in the workspace and none in the member clone; one member file adds about 9 ms to a snapshot):** gaps: `hash-object` applies the workspace's attributes and filters, not the member's own `.gitattributes`; `Ctrl+Shift+M` did not open the composer after a click on a line number in that run (the **Comment on line** button did), not investigated. a comment on a member's file snapshots that one file into the workspace's object store, so the before and after text and the measured change work as for the workspace's own files.
 
+## Slice 7u: workspace UI (planned 2026-11-06; D183)
+
+- **SW4a, engine:** move the `gitmaster workspace` logic into `gm-core::workspace`; the engine commands of D183 (1); the CLI keeps its behaviour and tests.
+- **SW4b, UI:** the Workspaces section, the New Workspace dialog, the Remove Workspace dialog, **Check Out Branch** on a detached member row. Docs: `guide/workspaces.md`.
+- **SW4c, ephemeral on close:** remove an ephemeral workspace when its window closes, asking when something would be lost.
+
 ## Slice 8: local review
 
 - Comments, states, anchor without guessing, before and after snapshots.

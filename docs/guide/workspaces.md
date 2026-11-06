@@ -34,19 +34,29 @@ A workspace is **durable** or **ephemeral**. A durable workspace stays until you
 
 Removing a workspace, of either kind, follows the rules of [removing a worktree](worktrees.md) for each member. It is blocked when a member has changes that are not committed, when a member is on a detached HEAD with commits no local or remote branch holds, or when the workspace repository has changes of its own, and the dialog lists what would be lost. Commits on a member's branch are never lost: they are on the branches of your clones.
 
+## The Workspaces section
+
+> **Planned.** The **Workspaces** section of the sidebar is not available yet.
+
+The **Workspaces** section of the sidebar lists the workspaces under the workspace root, by name, in every window. A **here** badge marks the workspace the window shows, and an **ephemeral** badge marks an ephemeral one. Click a row to open that workspace in its own window.
+
+The **+** in the section header opens **New Workspace…**. The menu of a row has **Open Workspace**, **Reveal in File Manager** and **Remove Workspace**. Click the header to fold the section; see [Branches](branches.md#fold-the-sections).
+
 ## Create a workspace
 
-> **Planned.** The **New Workspace…** dialog and the **Workspaces** section of the sidebar are not available yet. Create a workspace with `gitmaster workspace create` and open its folder; see [Command line](../reference/cli.md#create-a-workspace).
+> **Planned.** The **New Workspace…** dialog is not available yet. Create a workspace with `gitmaster workspace create` and open its folder; see [Command line](../reference/cli.md#create-a-workspace).
 
 1. Run **New Workspace…** from the command palette, or click **+** in the **Workspaces** section of the sidebar.
 2. Name the workspace.
-3. Add a member for each repository: choose the repository and its branch. A branch that does not exist yet is created from the repository's base branch, such as `main`. **Add by branch name** gives one branch name to every repository you choose, and creates it where it is missing.
+3. Add a member for each repository: choose the repository and type its branch. The repository list offers the repository of the window, your recent repositories and **Choose Folder…**. The branch field suggests the repository's branches as you type. **Branch for all** fills the same branch into every member.
 4. Choose **Durable** or **Ephemeral**.
 5. Check the folder and click **Create workspace**.
 
+A branch that does not exist yet is created from the repository's base branch, such as `main`; a branch that exists only on a remote is created to track it. Each member row says which will happen before you create the workspace.
+
 GitMaster suggests the folder `<root>/<name>`. The root is `~/workspaces` unless you set `gitmaster.workspace.root` (see [Configuration](../reference/configuration.md#git-configuration-keys)).
 
-A branch can be checked out in one worktree at a time. When a member's branch is already checked out in your clone or in another worktree, the dialog says where, and offers **Go to that worktree**.
+Every member is checked before anything is created. When one cannot be added, for example because its branch is checked out in another worktree, the dialog says which and where, offers **Go to that worktree**, and creates nothing. The new workspace opens in its own window.
 
 ## Work in a workspace
 
@@ -87,4 +97,9 @@ The local environment the agent sets up, such as containers that run the service
 
 > **Planned.** **Remove Workspace** in the app is not available yet. Use `gitmaster workspace remove`.
 
-Run **Remove Workspace** from the palette or the menu of its row. GitMaster removes each member's worktree from your clone, then the workspace folder, after the checks described in [Durable and ephemeral workspaces](#durable-and-ephemeral-workspaces). The branches stay in your clones.
+1. Choose **Remove Workspace** in the menu of its row in the **Workspaces** section, or in the command palette and pick the workspace with **Tab**.
+2. Read the dialog. It checks every member and the workspace repository, and lists what would stop the removal.
+3. To remove it anyway, tick the confirmation checkbox. The checkbox names what will be discarded. The remove button stays disabled until you tick it.
+4. Click **Remove workspace**.
+
+GitMaster removes each member's worktree from your clone, then the workspace folder. The branches stay in your clones. The workspace that the window shows cannot be removed from that window: close it, or remove it from another window.
