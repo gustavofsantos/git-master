@@ -50,7 +50,7 @@ MENU_CHECKOUT_X=190; MENU_CHECKOUT_Y=439    # "Checkout Branch" in the branch me
 TITLE_BAR_H=44                              # the title bar: name row over the branch and path row
 TOOLBAR_Y=72; TOOLBAR_FETCH_X=1082; TOOLBAR_RESTACK_X=1322   # Fetch and Restack buttons, right of the title bar
 SECTION_CROP="240x84+0+612"                  # the WORKTREES rows at the sidebar's foot, window-relative
-HISTORY_X=120; HISTORY_Y=175                 # "History" row under Workspace in the sidebar
+HISTORY_X=120; HISTORY_Y=175                 # "History" row under Repository in the sidebar
 WORKING_COPY_X=120; WORKING_COPY_Y=147       # "Working Copy" row, back from the history page
 HISTORY_ROW_X=420; HISTORY_ROW_TOP_Y=162     # the history list's first row, 48 px rows below it
 DETAIL_PANEL_CROP="360x700+920+88"           # the commit detail panel, window-relative

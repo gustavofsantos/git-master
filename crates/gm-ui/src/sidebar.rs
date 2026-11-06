@@ -12,7 +12,7 @@ use crate::stacks::Stacks;
 /// A section of the sidebar that folds away under its header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
-    Workspace,
+    Repository,
     Branches,
     Worktrees,
 }
@@ -21,7 +21,7 @@ pub enum Section {
 /// the window only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Folded {
-    workspace: bool,
+    repository: bool,
     branches: bool,
     worktrees: bool,
 }
@@ -30,7 +30,7 @@ impl Folded {
     #[must_use]
     pub fn is_folded(self, section: Section) -> bool {
         match section {
-            Section::Workspace => self.workspace,
+            Section::Repository => self.repository,
             Section::Branches => self.branches,
             Section::Worktrees => self.worktrees,
         }
@@ -38,7 +38,7 @@ impl Folded {
 
     pub fn toggle(&mut self, section: Section) {
         let flag = match section {
-            Section::Workspace => &mut self.workspace,
+            Section::Repository => &mut self.repository,
             Section::Branches => &mut self.branches,
             Section::Worktrees => &mut self.worktrees,
         };
@@ -243,7 +243,7 @@ mod tests {
         assert!(!folded.is_folded(Section::Branches));
         folded.toggle(Section::Branches);
         assert!(folded.is_folded(Section::Branches));
-        assert!(!folded.is_folded(Section::Workspace));
+        assert!(!folded.is_folded(Section::Repository));
         assert!(!folded.is_folded(Section::Worktrees));
         folded.toggle(Section::Branches);
         assert!(!folded.is_folded(Section::Branches));

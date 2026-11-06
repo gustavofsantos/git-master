@@ -1,4 +1,4 @@
-//! The sidebar at the window's left: the workspace destinations, the switch
+//! The sidebar at the window's left: the repository destinations, the switch
 //! between the two ways of grouping branches, the branch tree and the
 //! worktrees. Each of the three sections folds under its header. Every destination is a row of its own; the stack tree is a
 //! placeholder until its slice lands (design/roadmap.md). The worktrees show their state;
@@ -58,10 +58,10 @@ impl StatusView {
             .bg(theme::ground())
             .border_r_1()
             .border_color(theme::hairline())
-            .child(self.section_header(Section::Workspace, "Workspace", None, cx))
+            .child(self.section_header(Section::Repository, "Repository", None, cx))
             .children(
-                (!self.sidebar_folded.is_folded(Section::Workspace))
-                    .then(|| self.workspace_items(cx)),
+                (!self.sidebar_folded.is_folded(Section::Repository))
+                    .then(|| self.repository_items(cx)),
             )
             .child(self.section_header(
                 Section::Branches,
@@ -179,7 +179,7 @@ impl StatusView {
         )
     }
 
-    /// The Threads line of the workspace, with its count once it is known (T5).
+    /// The Threads line of the Repository section, with its count once it is known (T5).
     fn threads_item(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         item_row("Threads", self.screen == Screen::Threads)
             .on_mouse_down(
@@ -196,7 +196,7 @@ impl StatusView {
             )
     }
 
-    fn workspace_items(&self, cx: &mut Context<Self>) -> Div {
+    fn repository_items(&self, cx: &mut Context<Self>) -> Div {
         let count = self.model.entry_count();
         let working = self.screen == Screen::WorkingCopy;
         div()
@@ -653,7 +653,7 @@ fn segment_with_id(id: impl Into<ElementId>, label: &'static str, active: bool) 
         .child(label)
 }
 
-/// A workspace row; `selected` is the screen being shown.
+/// A Repository section row; `selected` is the screen being shown.
 fn item_row(label: &'static str, selected: bool) -> Stateful<Div> {
     div()
         .id(label)
