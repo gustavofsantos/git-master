@@ -1,11 +1,11 @@
 ---
 title: Command line
-description: The gitmaster command, the arguments it accepts, the subcommands that list and create worktrees, and the ones that check and test workflow scripts.
+description: The gitmaster command, the arguments it accepts, the subcommands that list and create worktrees and workspaces, and the ones that check and test workflow scripts.
 status: partial
 order: 30
 ---
 
-The `gitmaster` command opens the app. The worktree, workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs. Only `gitmaster worktree add`, `remove` and `include` change a repository. The section Open a repository covers the arguments the app accepts. `gitmaster mcp` is the MCP server your agent starts.
+The `gitmaster` command opens the app. The worktree, workspace, workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs. Only `gitmaster worktree add`, `remove` and `include`, and `gitmaster workspace create`, `add` and `remove`, change a repository. The section Open a repository covers the arguments the app accepts. `gitmaster mcp` is the MCP server your agent starts.
 
 ## Open a repository
 
@@ -20,7 +20,7 @@ gitmaster --version       # print the version and exit
 - With no argument, the app opens the repository that contains the current directory. Outside a repository, it opens the most recent repository that still exists.
 - With a path, the app opens the repository at that path. A relative path is resolved from the current directory.
 - `--version` prints `gitmaster` followed by the version number, then exits. When a preview feature is on, it also prints a `preview features:` line. See [Preview features](configuration.md#preview-features).
-- Any other single argument is taken as a path, so `--help` is not a help option. The words `worktree` and `workflow` are the subcommands below; to open a folder with one of those names, write `./worktree` or `./workflow`.
+- Any other single argument is taken as a path, so `--help` is not a help option. The words `worktree`, `workspace` and `workflow` are the subcommands below; to open a folder with one of those names, write `./worktree`, `./workspace` or `./workflow`.
 - Two or more arguments print `usage: gitmaster [PATH]` to the standard error and exit with status `2`.
 
 The theme is chosen with the `GITMASTER_THEME` environment variable, as described in [Configuration](configuration.md). Installation puts the command on your `PATH`, as described in [Installation](../getting-started/installation.md).
@@ -156,6 +156,86 @@ A command that works on another repository reads that repository's own Git confi
 IFS=$'\t' read -r _ branch repo < <(my-repos | gitmaster worktree branches --repos-from - | fzf --delimiter='\t') &&
   tmux-sessionizer "$(gitmaster worktree add "$branch" --repo "$repo")"
 ```
+
+## Workspaces
+
+> **Planned.** The workspace subcommands are not available yet.
+
+```sh
+gitmaster workspace create <name> [--root <dir>] [--ephemeral] [--branch <branch> --repos-from <file|->]
+gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--as <member>] [--include symlink|reflink|none]
+gitmaster workspace list [--format paths|names|tsv|json] [--root <dir>]
+gitmaster workspace path <name> [--root <dir>]
+gitmaster workspace status [--workspace <name|dir>] [--format tsv|json]
+gitmaster workspace remove <name> [--root <dir>] [--force]
+```
+
+These subcommands create and look after [workspaces](../guide/workspaces.md). They follow the rules of the worktree subcommands: the result is on the standard output, one item per line, messages are on the standard error, and the exit status is `0` on success, `1` when the work fails and `2` for a wrong command line.
+
+A workspace is a folder `<root>/<name>` that holds a Git repository. The root comes from the first of these that is set:
+
+| Source | Root |
+|---|---|
+| `--root <dir>` | `<dir>` |
+| The Git key `gitmaster.workspace.root` | Its value |
+| None | `~/workspaces` |
+
+A leading `~` is the home directory, and a relative root is taken from the current directory. A workspace's repository has the Git key `gitmaster.workspace.kind` set to `durable` or `ephemeral` in its own `.git/config`; a folder without it is not a workspace.
+
+`--workspace <name|dir>` chooses the workspace a command works on. A value with a `/` is a folder; any other value is a name under the root. Without it, the command works on the workspace that contains the current directory, from its root or from inside a member.
+
+### Create a workspace
+
+`create <name>` creates the folder `<root>/<name>`, makes it a Git repository on a branch `main`, marks it as a workspace and prints its path. `--ephemeral` marks it ephemeral; it is durable otherwise. The folder must not exist. A name is a single folder name: it has no `/` and does not start with `.` or `-`.
+
+`--branch <branch>` together with `--repos-from <file|->` adds a member for every repository of the list that has `<branch>`, as a local branch or on a remote, the way `add` does. A repository of the list without the branch is skipped, with a note. The list is read like the one of `gitmaster worktree list`.
+
+### Add a member
+
+`add <repo> <branch>` adds the repository `<repo>` to the workspace as a member checked out on `<branch>`, commits the change in the workspace's repository and prints the member's path.
+
+1. A worktree of `<repo>` is created in the workspace folder, at `<member>`, the folder name of the repository's main checkout unless `--as` names another. The branch is chosen as in `gitmaster worktree add`: the local branch, else a new local branch that tracks the remote one, else a new branch from `<base>` or from `HEAD`. The `.worktreeinclude` paths are shared into it, as `--include` says.
+2. The worktree is registered in the workspace's repository as a submodule that follows `<branch>`, with the path of the main checkout as its URL.
+3. The workspace's repository commits `.gitmodules` and the member.
+
+`add` refuses a branch that is checked out in another worktree, and says which. It refuses a `<member>` folder that exists, and a repository that is already a member. When the commit fails, for example because Git has no user name, the member stays added and staged, and the message says so.
+
+### List and find workspaces
+
+`list` prints one line per workspace under the root, by name. `--format` chooses what a line holds:
+
+| Format | A line holds |
+|---|---|
+| `paths` (the default) | The absolute path of the workspace. |
+| `names` | The name of the workspace. |
+| `tsv` | The name, the kind (`durable` or `ephemeral`) and the path, separated by tabs. |
+| `json` | One line with a JSON array that has an object per workspace: `name`, `kind`, `path` and `members`, the number of members. |
+
+`path <name>` prints the path of the workspace `<name>`. It prints nothing and exits `1` when there is none.
+
+### Show a workspace
+
+`status` prints one line per member, in the order of `.gitmodules`. A `tsv` line (the default) holds, separated by tabs:
+
+| Field | Value |
+|---|---|
+| Member | The member's folder name. |
+| Branch | The branch checked out in the member, or `(detached)`. |
+| Changes | `dirty` when the member has staged, unstaged or untracked files, else `clean`. |
+| New commits | How many commits the member's `HEAD` has that the commit recorded in the workspace does not. |
+| Repository | The path of the main checkout the member belongs to. |
+
+`--format json` prints one line with a JSON array that has an object per member: `member`, `branch` (`null` when detached), `detached`, `dirty`, `new_commits`, `recorded`, `head` and `repo`.
+
+A member whose folder is gone prints `(missing)` as its branch, and the command exits `1` after the last line.
+
+### Remove a workspace
+
+`remove <name>` removes every member's worktree from its repository, then the workspace folder, and prints the folder's path. The branches stay in the repositories.
+
+- It refuses a workspace that contains the current directory. `--force` does not lift that.
+- It refuses when a member has staged, unstaged or untracked files, when a member is on a detached `HEAD` that holds commits no branch has, or when the workspace's repository has changes other than the commits its members point to. It says which, and removes nothing. `--force` removes it anyway, with what it discards.
+- A member whose folder is gone is pruned from its repository's worktree records.
 
 ## MCP server
 

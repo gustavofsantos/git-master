@@ -716,8 +716,8 @@ Done when: an agent can read the stack, propose a restack and apply it with appr
 
 Several repositories in one workspace: a superproject whose submodules are linked worktrees of the user's clones. Docs: `guide/workspaces.md`. The ids are `SW*` because `WS*` belongs to the workflow slice.
 
-- **SW0, engine and CLI:** `gitmaster workspace create|add|list|status|remove` over the worktree commands of D172; real-Git tests in temporary repositories for the shape of D174 (worktree member added as a submodule in place, no `protocol.file.allow`, detached member detected, removal blocked as D31 says). Answer Q36 (b) and (d) here.
-- **SW1, submodule reads in the UI (D175):** member rows in the Working Copy (branch, dirty, new commits, detached), submodule diff as a commit list, opening a member, `--recurse-submodules` in Quick Open and text search. Rename the sidebar section of D176.
+- **SW0, engine and CLI (D177):** `gitmaster workspace create|add|list|status|remove` over the worktree commands of D172; real-Git tests in temporary repositories for the shape of D174 (worktree member added as a submodule in place, no `protocol.file.allow`, detached member detected, removal blocked as D31 says). Answer Q36 (b) and (d) here.
+- **SW1, submodule reads in the UI (D175):** member rows in the Working Copy (branch, dirty, new commits, detached), submodule diff as a commit list, opening a member, `--recurse-submodules` in Quick Open and text search.
 - **SW2, provenance:** threads of the workspace name the member of each edit and commit (Q36 a); recording a combination as a superproject commit (Q36 c).
 - **SW3, agent tools:** MCP tools that take a member, a workspace status tool, the review loop over every member.
 

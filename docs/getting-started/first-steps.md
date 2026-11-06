@@ -59,7 +59,7 @@ The sidebar lists the places in the repository and its branches and worktrees.
 | **Labels** | The labels of threads, files and commits. |
 | **Local review** | Review comments on your local changes, for an agent to handle. See [Local review](../agents/local-review.md). |
 
-Below the entries, the **Branches** section shows your branches in one of two views. **By name** shows local and remote branches in a tree grouped by prefix, such as `feature/`. **By stack** shows the local branches as a tree of parents. It is a preview feature; see [Stacks](../guide/stacks.md). The current branch carries a **HEAD** badge. A search box above the tree narrows the list. Click the header of the **Workspace**, **Branches** or **Worktrees** section to fold it. See [Branches](../guide/branches.md).
+Below the entries, the **Branches** section shows your branches in one of two views. **By name** shows local and remote branches in a tree grouped by prefix, such as `feature/`. **By stack** shows the local branches as a tree of parents. It is a preview feature; see [Stacks](../guide/stacks.md). The current branch carries a **HEAD** badge. A search box above the tree narrows the list. Click the header of the **Repository**, **Branches** or **Worktrees** section to fold it. See [Branches](../guide/branches.md).
 
 Below the branches, the **Worktrees** section lists the worktrees of the repository, with the main checkout first. See [Worktrees](../guide/worktrees.md).
 
