@@ -63,6 +63,14 @@ Quick Open lists what Git reports for the worktree:
 
 Ignored files are not listed. A tracked file that you deleted from disk stays in the list until Git stops tracking it. Opening it shows that it is not in the worktree now.
 
+### Submodules
+
+> **Planned.** Listing and searching the files of submodules is not available in the app yet.
+
+The files of a submodule that is checked out are part of the project: Quick Open lists them, the folder tree shows them under the submodule's folder, and text search looks inside them. Their paths start with the submodule's folder, such as `service-a/src/main.rs`. Each submodule follows its own `.gitignore`. A submodule that is not checked out has no files to list. Only the submodules of the repository you opened are read, not the submodules of a submodule.
+
+In a [workspace](workspaces.md), this lets you find a file or a name in every member at once.
+
 The list is read again each time you open Quick Open or the **Code** page. New files appear the next time you open either one.
 
 ## The Code page
@@ -192,6 +200,8 @@ The search starts 250 ms after you stop typing. Press Enter to start it at once.
 
 The files box takes words separated by spaces. Each word is a Git pathspec, so `src` matches everything under the `src` folder. A word that starts with `!` excludes those files. For example, `src crates/ui !docs` searches `src` and `crates/ui` and skips `docs`. Leave the box empty to search every file.
 
+A word that names a submodule's folder, or a path inside it, such as `service-a/src`, applies to that submodule. A word that starts with `!` and names a submodule's folder leaves the whole submodule out.
+
 ### Read the results
 
 - Results are grouped by file. Each group shows the file name, its folder, and the number of matches.
@@ -206,6 +216,7 @@ The files box takes words separated by spaces. Each word is a Git pathspec, so `
 - A line longer than 300 bytes is cut around the matched text.
 - Binary files are skipped.
 - Results are ordered by path, then by line number. The same search gives the same results in the same order.
+- The results of the files in submodules are ordered with the others, by their full path.
 
 ### Regular expressions
 
@@ -231,7 +242,7 @@ From the diff or the detail of a commit, choose **View file** to see that file a
 - It does not edit files. The viewer is read-only, and nothing is written into the worktree.
 - It does not index symbols: there is no symbol search, file outline, go to definition or find usages. Use the **Search** page, with the **ab** switch (whole word) for a name.
 - It does not provide language-server features, such as semantic references or renaming.
-- It does not search inside submodules or Git LFS content.
+- It does not search Git LFS content, or the submodules of a submodule.
 
 ## Comment on a range of lines
 

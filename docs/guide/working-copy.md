@@ -22,6 +22,22 @@ A subtle mark next to the letter shows that the file has something staged.
 
 Select a file to see its diff. The diff is described in [Diff and staging](diff-and-staging.md).
 
+## Submodules
+
+> **Planned.** Submodule rows are not available in the app yet.
+
+A submodule takes one row, with the folder icon and its path. The row shows the branch the submodule has checked out, or **detached**, and marks what changed:
+
+| Mark | Meaning |
+| --- | --- |
+| **N new commits** | The submodule's `HEAD` has commits that the repository does not record yet. |
+| **modified** | Files tracked by the submodule have changes. |
+| **untracked** | The submodule has new files that its `.gitignore` does not hide. |
+
+Select the row to see the commits the submodule gained, newest first, each with its subject, author and date, instead of a diff. Staging the row records the submodule's new commit in the repository, like staging a file. Changes made inside the submodule are committed in the submodule itself: choose **Open Submodule** in the row's menu, or double-click the row, to open it in its own window.
+
+In a [workspace](workspaces.md), each member is a submodule, so the Working Copy of a workspace lists the members whose state changed.
+
 ## Stage and unstage a file
 
 Staged changes go into the next commit. Stage a whole file when all of its changes belong in the commit:
