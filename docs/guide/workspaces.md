@@ -56,9 +56,7 @@ A workspace opens in its own window, like any repository. The Working Copy shows
 
 ### Record a combination
 
-> **Planned.** **Record Combination** is not available in the app yet.
-
-The workspace repository records the commit of every member. Record the combination you tested, "these commits of A, B and C work together", with **Record Combination** in the command palette or the menu of the Working Copy. It stages the new commit of every member that has one, and commits in the workspace repository with a message that lists each member, its branch and its commit:
+The workspace repository records the commit of every member. Record the combination you tested, "these commits of A, B and C work together", with **Record Combination** in the command palette. It stages the new commit of every member that has one, and commits in the workspace repository with a message that lists each member, its branch and its commit:
 
 ```text
 Record combination
