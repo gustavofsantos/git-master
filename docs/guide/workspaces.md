@@ -1,7 +1,7 @@
 ---
 title: Workspaces
 description: Group branches of several repositories into one workspace, a Git repository whose submodules are worktrees of your own clones, to change and test them together with an agent.
-status: partial
+status: implemented
 order: 55
 ---
 
@@ -33,8 +33,6 @@ The **Workspaces** section of the sidebar lists the workspaces under the workspa
 The **+** in the section header opens **New Workspace…**. The menu of a row has **Open Workspace**, **Reveal in File Manager** and **Remove Workspace**. A **×** appears when you point at a row: it removes that workspace, as **Remove Workspace** does. The section starts folded, like **Branches** and **Worktrees**: click its header to open it; see [Branches](branches.md#fold-the-sections).
 
 ## Create a workspace
-
-> **Planned.** The branch button and its filtered list are not in the app yet; the branch field still takes plain text, with suggestions only for the window's repository.
 
 1. Run **New Workspace…** from the command palette, or click **+** in the **Workspaces** section of the sidebar.
 2. Name the workspace.
