@@ -371,6 +371,7 @@ pub(crate) struct Listed {
     pub(crate) next_cursor: Option<String>,
     pub(crate) contexts_read: bool,
     pub(crate) note: Option<String>,
+    pub(crate) proposed_total: u32,
 }
 
 /// `ListMemories` (D193 (5), (6)): the repository's memories and those of the contexts it sees,
@@ -391,6 +392,7 @@ pub(crate) fn list_command(
                 next_cursor: None,
                 contexts_read,
                 note,
+                proposed_total: 0,
             });
         }
         Err(message) => return Err(message),
@@ -399,12 +401,52 @@ pub(crate) fn list_command(
     for memory in &mut memories {
         fill_changes(ctx, reach, memory);
     }
+    let proposed_total = count_proposed_in_scope(stores, ask.filter, scope)?;
     Ok(Listed {
         memories,
         next_cursor,
         contexts_read,
         note,
+        proposed_total,
     })
+}
+
+/// How many proposed memories `filter` selects in `scope`, exactly as the merged list would show
+/// them (D193 (6)): the repository's and the contexts' counted in SQL, a memory held by both once.
+/// The status and the query of the list play no part.
+fn count_proposed_in_scope(
+    stores: &Stores<'_>,
+    filter: &MemoryFilter,
+    scope: Scope,
+) -> Result<u32, String> {
+    let repository = if matches!(scope, Scope::All | Scope::Repository) {
+        stores
+            .threads
+            .count_proposed(filter)
+            .map_err(|e| e.to_string())?
+    } else {
+        0
+    };
+    let Some(contexts) = stores.reach.store().filter(|_| scope != Scope::Repository) else {
+        return Ok(repository);
+    };
+    let ids = stores.reach.scope_ids(scope);
+    let in_contexts = contexts
+        .count_proposed_in(&ids, filter)
+        .map_err(|e| e.to_string())?;
+    if repository == 0 || in_contexts == 0 {
+        return Ok(repository.saturating_add(in_contexts));
+    }
+    let uids = contexts
+        .proposed_uids_in(&ids, filter)
+        .map_err(|e| e.to_string())?;
+    let shared = stores
+        .threads
+        .count_proposed_among(&uids, filter)
+        .map_err(|e| e.to_string())?;
+    Ok(repository
+        .saturating_add(in_contexts)
+        .saturating_sub(shared))
 }
 
 /// One memory a list finds, before its page is read.

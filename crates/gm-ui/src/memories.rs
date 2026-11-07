@@ -103,6 +103,9 @@ pub struct MemoryPage {
     /// False when the contexts could not be read (`note` says why).
     pub contexts_read: bool,
     pub note: Option<String>,
+    /// The exact number of proposed memories the request's scope, kind, path and author select,
+    /// ignoring the status, the query and the page (the engine's `proposed_total`).
+    pub proposed_total: u32,
 }
 
 /// A memory the human writes. It is accepted at once (D190).
@@ -134,6 +137,9 @@ pub struct MemoriesPage {
     next_cursor: Option<String>,
     contexts_read: bool,
     note: Option<String>,
+    /// The engine's exact count of proposed memories, from the last list applied, moved by the
+    /// writes that change a loaded proposal; `None` before a list is applied.
+    proposed_total: Option<u32>,
     /// The list read in flight: its id, whether it appends, and the generation it was sent under.
     list_pending: Option<(OperationId, bool, u64)>,
     selected: Option<String>,
@@ -202,14 +208,18 @@ impl MemoriesPage {
         &self.memories
     }
 
-    /// How many proposed memories are loaded: the count on the tab. It is exact when the whole
-    /// list is loaded, which the engine's answer does not count on its own.
+    /// How many proposed memories the count on the tab shows: the engine's exact `proposed_total`
+    /// of the last list applied. Before a list is applied it counts the proposals loaded.
     #[must_use]
     pub fn proposed_count(&self) -> usize {
-        self.memories
-            .iter()
-            .filter(|memory| memory.status == MemoryStatus::Proposed)
-            .count()
+        match self.proposed_total {
+            Some(total) => usize::try_from(total).unwrap_or(usize::MAX),
+            None => self
+                .memories
+                .iter()
+                .filter(|memory| memory.status == MemoryStatus::Proposed)
+                .count(),
+        }
     }
 
     /// Whether a list has been applied at least once.
@@ -516,6 +526,7 @@ impl MemoriesPage {
         self.next_cursor = page.next_cursor;
         self.contexts_read = page.contexts_read;
         self.note = page.note;
+        self.proposed_total = Some(page.proposed_total);
         self.listed = true;
         self.prune_chosen();
         true
@@ -556,6 +567,12 @@ impl MemoriesPage {
         let Read::Change { uid, removes } = read else {
             return false;
         };
+        let shown = match &memory {
+            Some(memory) => Some(memory.uid.clone()),
+            None if removes => uid.clone(),
+            None => None,
+        };
+        let was = shown.as_deref().and_then(|uid| self.loaded_proposed(uid));
         match memory {
             Some(memory) => self.upsert(memory),
             None if removes => {
@@ -565,7 +582,31 @@ impl MemoriesPage {
             }
             None => {}
         }
+        let now = shown.as_deref().and_then(|uid| self.loaded_proposed(uid));
+        self.move_total(was, now);
         true
+    }
+
+    /// Whether memory `uid` is loaded and proposed; `None` when it is not loaded.
+    fn loaded_proposed(&self, uid: &str) -> Option<bool> {
+        self.memories
+            .iter()
+            .find(|memory| memory.uid == uid)
+            .map(|memory| memory.status == MemoryStatus::Proposed)
+    }
+
+    /// Moves the engine's total by a write that changed a loaded row between proposed and not
+    /// (an accept, a reject, a delete). A row that was not loaded before leaves the total as the
+    /// next list sets it.
+    fn move_total(&mut self, was: Option<bool>, now: Option<bool>) {
+        let Some(total) = self.proposed_total.as_mut() else {
+            return;
+        };
+        match (was, now) {
+            (Some(true), Some(false) | None) => *total = total.saturating_sub(1),
+            (Some(false), Some(true)) => *total = total.saturating_add(1),
+            _ => {}
+        }
     }
 
     /// A read or write `id` ended without an answer. A failure is kept for the tab to show; a
@@ -1025,11 +1066,27 @@ mod tests {
     }
 
     fn page(memories: Vec<Memory>, cursor: Option<&str>) -> MemoryPage {
+        let proposed_total = u32::try_from(
+            memories
+                .iter()
+                .filter(|memory| memory.status == MemoryStatus::Proposed)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
         MemoryPage {
             memories,
             next_cursor: cursor.map(str::to_owned),
             contexts_read: true,
             note: None,
+            proposed_total,
+        }
+    }
+
+    /// A page as `page`, with the engine's exact `proposed_total` given.
+    fn page_with_total(memories: Vec<Memory>, proposed_total: u32) -> MemoryPage {
+        MemoryPage {
+            proposed_total,
+            ..page(memories, None)
         }
     }
 
@@ -1079,6 +1136,70 @@ mod tests {
         assert_eq!(tab.proposed_count(), 2);
         assert!(tab.is_loaded());
         assert!(!tab.has_more());
+    }
+
+    #[test]
+    fn the_count_is_the_engine_total_once_a_list_is_applied() {
+        // One proposal is loaded, but the engine counts five on the whole list (a page of one).
+        let mut tab = MemoriesPage::default();
+        assert_eq!(tab.proposed_count(), 0, "nothing is counted before a list");
+        let read = tab.plan_list();
+        tab.sent(&read.read, OperationId(1));
+        assert!(tab.listed(
+            OperationId(1),
+            page_with_total(
+                vec![memory(
+                    "p1",
+                    MemoryStatus::Proposed,
+                    "agent:claude-code",
+                    "one"
+                )],
+                5,
+            ),
+        ));
+        assert_eq!(tab.proposed_count(), 5);
+        assert_eq!(tab.memories().len(), 1);
+    }
+
+    #[test]
+    fn a_write_moves_the_total_only_for_a_loaded_proposal() {
+        let mut tab = MemoriesPage::default();
+        let read = tab.plan_list();
+        tab.sent(&read.read, OperationId(1));
+        tab.listed(
+            OperationId(1),
+            page_with_total(
+                vec![
+                    memory("p1", MemoryStatus::Proposed, "agent:claude-code", "one"),
+                    memory("p2", MemoryStatus::Proposed, "agent:claude-code", "two"),
+                ],
+                5,
+            ),
+        );
+        let accept = tab.plan_accept("p1").expect("accept");
+        tab.sent(&accept.read, OperationId(2));
+        assert!(tab.changed(
+            OperationId(2),
+            Some(memory("p1", MemoryStatus::Accepted, "human", "one")),
+        ));
+        assert_eq!(tab.proposed_count(), 4);
+        let delete = tab.plan_delete("p2").expect("delete");
+        tab.sent(&delete.read, OperationId(3));
+        assert!(tab.changed(OperationId(3), None));
+        assert_eq!(tab.proposed_count(), 3);
+    }
+
+    #[test]
+    fn a_later_list_replaces_the_total() {
+        let mut tab = MemoriesPage::default();
+        let read = tab.plan_list();
+        tab.sent(&read.read, OperationId(1));
+        tab.listed(OperationId(1), page_with_total(Vec::new(), 3));
+        assert_eq!(tab.proposed_count(), 3);
+        let read = tab.plan_list();
+        tab.sent(&read.read, OperationId(2));
+        tab.listed(OperationId(2), page_with_total(Vec::new(), 0));
+        assert_eq!(tab.proposed_count(), 0);
     }
 
     #[test]

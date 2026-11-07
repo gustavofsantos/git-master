@@ -515,6 +515,7 @@ fn memories_command(
                 next_cursor: listed.next_cursor,
                 contexts_read: listed.contexts_read,
                 note: listed.note,
+                proposed_total: listed.proposed_total,
             }])
         }
         CommandKind::ReadMemory { uid } => {

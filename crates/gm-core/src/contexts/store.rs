@@ -564,15 +564,51 @@ impl ContextStore {
         if contexts.is_empty() {
             return Ok(Vec::new());
         }
+        memories::list_ids(&self.conn, query, filter, &Self::within_contexts(contexts))
+    }
+
+    /// How many memories attached to any of `contexts` `filter` selects with status `proposed`,
+    /// counted in SQL (see `memories::count_proposed`).
+    pub(crate) fn count_proposed_in(
+        &self,
+        contexts: &[i64],
+        filter: &MemoryFilter,
+    ) -> Result<u32, StoreError> {
+        if contexts.is_empty() {
+            return Ok(0);
+        }
+        memories::count_proposed(&self.conn, filter, &Self::within_contexts(contexts))
+    }
+
+    /// The uids of the proposed memories `count_proposed_in` counts, for the overlap with the
+    /// repository's store (a memory held by both is listed once).
+    pub(crate) fn proposed_uids_in(
+        &self,
+        contexts: &[i64],
+        filter: &MemoryFilter,
+    ) -> Result<Vec<String>, StoreError> {
+        if contexts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let proposed = MemoryFilter {
+            status: Some(MemoryStatus::Proposed),
+            ..filter.clone()
+        };
+        let found =
+            memories::list_ids(&self.conn, "", &proposed, &Self::within_contexts(contexts))?;
+        Ok(found.into_iter().map(|hit| hit.uid).collect())
+    }
+
+    /// The SQL restricting a memory to those attached to `contexts`.
+    fn within_contexts(contexts: &[i64]) -> String {
         let listed = contexts
             .iter()
             .map(i64::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        let within = format!(
+        format!(
             " AND m.id IN (SELECT memory_id FROM memory_context WHERE context_id IN ({listed}))"
-        );
-        memories::list_ids(&self.conn, query, filter, &within)
+        )
     }
 }
 

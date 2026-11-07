@@ -699,6 +699,7 @@ struct Seen {
     next: Option<String>,
     contexts_read: bool,
     note: Option<String>,
+    proposed_total: u32,
 }
 
 /// Lists the memories `actor` sees from the open repository in `scope`, one page at a time. A
@@ -736,12 +737,14 @@ fn search(
                 next_cursor,
                 contexts_read,
                 note,
+                proposed_total,
                 ..
             } => Some(Seen {
                 memories: memories.clone(),
                 next: next_cursor.clone(),
                 contexts_read: *contexts_read,
                 note: note.clone(),
+                proposed_total: *proposed_total,
             }),
             _ => None,
         })
@@ -1423,5 +1426,104 @@ fn a_copied_clone_with_a_clashing_id_lists_only_its_repository_memories_and_says
     assert!(
         search(&mut clone, &Actor::Human, "", Some("Platform"), 50, None).is_err(),
         "no context is visible from a clash"
+    );
+}
+
+/// The number of proposed memories in a merged list, for a comparison with its `proposed_total`.
+fn proposed_in(memories: &[Memory]) -> u32 {
+    u32::try_from(
+        memories
+            .iter()
+            .filter(|memory| memory.status == gm_schema::threads::MemoryStatus::Proposed)
+            .count(),
+    )
+    .unwrap()
+}
+
+/// Lists everything `actor` sees from the open repository in `scope`, unpaged.
+fn everything_in(engine: &mut Engine, scope: Option<&str>) -> Seen {
+    search(engine, &Actor::Human, "", scope, 50, None).expect("list")
+}
+
+#[test]
+fn the_proposed_total_of_a_context_shared_by_two_repositories_matches_their_merged_lists() {
+    let world = World::new();
+    populate(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let mut web = engine_on(&world.path("web"), &world.db);
+    // Two proposals in Platform, one from each repository, and one of api's own.
+    propose_at(
+        &mut api,
+        &agent(),
+        Some("Platform"),
+        "api proposal in Platform",
+    );
+    propose_at(
+        &mut web,
+        &agent(),
+        Some("Platform"),
+        "web proposal in Platform",
+    );
+    propose_at(&mut api, &agent(), None, "api repository proposal");
+    // An accepted memory in Platform is not counted.
+    propose_at(
+        &mut web,
+        &Actor::Human,
+        Some("Platform"),
+        "accepted in Platform",
+    );
+
+    for (name, engine) in [("api", &mut api), ("web", &mut web)] {
+        let seen = everything_in(engine, None);
+        assert_eq!(
+            seen.proposed_total,
+            proposed_in(&seen.memories),
+            "{name} counts what its merged list shows"
+        );
+    }
+    let everything = everything_in(&mut api, None);
+    assert_eq!(
+        everything.proposed_total, 3,
+        "api: two in Platform and its own"
+    );
+    assert_eq!(everything.memories.len(), 4);
+    assert_eq!(everything_in(&mut web, None).proposed_total, 2);
+
+    let platform = everything_in(&mut api, Some("Platform"));
+    assert_eq!(
+        platform.proposed_total, 2,
+        "the repository's own is out of scope"
+    );
+    assert_eq!(platform.memories.len(), 3);
+    let own = everything_in(&mut api, Some("repository"));
+    assert_eq!(own.proposed_total, 1);
+}
+
+#[test]
+fn the_proposed_total_is_full_on_a_page_of_one_and_ignores_the_query() {
+    let world = World::new();
+    populate(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let mut billing = engine_on(&world.path("billing"), &world.db);
+    propose_at(&mut api, &agent(), Some("Platform"), "alpha in Platform");
+    propose_at(&mut billing, &agent(), Some("Billing"), "beta in Billing");
+    propose_at(&mut api, &agent(), None, "gamma in the repository");
+
+    let page = search(&mut api, &Actor::Human, "", None, 1, None).expect("page");
+    assert_eq!(page.memories.len(), 1);
+    assert!(page.next.is_some());
+    assert_eq!(page.proposed_total, 3, "the page does not narrow the total");
+
+    let matching = search(&mut api, &Actor::Human, "gamma", None, 1, None).expect("query");
+    assert_eq!(texts(&matching.memories), ["gamma in the repository"]);
+    assert_eq!(
+        matching.proposed_total, 3,
+        "the query does not narrow the total"
+    );
+
+    let billing = everything_in(&mut api, Some("Billing"));
+    assert_eq!(
+        billing.proposed_total, 1,
+        "api sees Billing through Platform"
     );
 }

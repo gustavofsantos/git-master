@@ -636,6 +636,57 @@ pub(crate) fn list_ids(
     Ok(rows)
 }
 
+/// How many memories `filter` selects with status `proposed` (D193 (6)), as one SQL count over
+/// `within`. The status of `filter` is replaced by `proposed`; the list's query is not part of it.
+pub(crate) fn count_proposed(
+    conn: &Connection,
+    filter: &MemoryFilter,
+    within: &str,
+) -> Result<u32, StoreError> {
+    let kind = filter.kind.map(kind_text);
+    let status = Some(status_text(MemoryStatus::Proposed));
+    let path = filter.path.as_deref().filter(|path| !path.is_empty());
+    let author = filter.author.as_deref().filter(|author| !author.is_empty());
+    let sql = format!("SELECT COUNT(*) FROM memory m WHERE 1 = 1{MEMORY_FILTER_SQL}{within}");
+    let count: i64 = conn.query_row(
+        &sql,
+        params![None::<&str>, kind, status, path, author],
+        |row| row.get(0),
+    )?;
+    Ok(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
+/// How many of `uids` are proposed memories `filter` selects (the filter's status is replaced by
+/// `proposed`, as in `count_proposed`). Chunked, so a long list stays under SQLite's parameter limit.
+pub(crate) fn count_proposed_among(
+    conn: &Connection,
+    filter: &MemoryFilter,
+    uids: &[String],
+) -> Result<u32, StoreError> {
+    const CHUNK: usize = 500;
+    let kind = filter.kind.map(kind_text);
+    let status = Some(status_text(MemoryStatus::Proposed));
+    let path = filter.path.as_deref().filter(|path| !path.is_empty());
+    let author = filter.author.as_deref().filter(|author| !author.is_empty());
+    let mut total = 0_u32;
+    for chunk in uids.chunks(CHUNK) {
+        // The filter parameters are ?1 to ?5; the uids follow from ?6.
+        let placeholders = (6..6 + chunk.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT COUNT(*) FROM memory m WHERE 1 = 1{MEMORY_FILTER_SQL} AND m.uid IN ({placeholders})"
+        );
+        let mut values: Vec<&dyn rusqlite::ToSql> =
+            vec![&None::<&str>, &kind, &status, &path, &author];
+        values.extend(chunk.iter().map(|uid| uid as &dyn rusqlite::ToSql));
+        let count: i64 = conn.query_row(&sql, values.as_slice(), |row| row.get(0))?;
+        total = total.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+    }
+    Ok(total)
+}
+
 impl ThreadStore {
     /// Stores a memory, or returns the memory that holds its text: a non-rejected memory of the same
     /// kind with the same duplicate key is returned with `false`, and nothing is written (D192 (2)).
@@ -729,6 +780,21 @@ impl ThreadStore {
         filter: &MemoryFilter,
     ) -> Result<Vec<Found>, StoreError> {
         list_ids(&self.conn, query, filter, "")
+    }
+
+    /// How many memories `filter` selects with status `proposed`, unpaged and without the query
+    /// (the repository's own store; see `count_proposed`).
+    pub(crate) fn count_proposed(&self, filter: &MemoryFilter) -> Result<u32, StoreError> {
+        count_proposed(&self.conn, filter, "")
+    }
+
+    /// How many of `uids` are proposed memories `filter` selects in this store.
+    pub(crate) fn count_proposed_among(
+        &self,
+        uids: &[String],
+        filter: &MemoryFilter,
+    ) -> Result<u32, StoreError> {
+        count_proposed_among(&self.conn, filter, uids)
     }
 
     /// One page of memories. With a query they are ordered by relevance (the D128 builder over

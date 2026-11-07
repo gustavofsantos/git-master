@@ -652,3 +652,286 @@ fn memory_reads_are_not_logged_and_writes_are_with_their_actor() {
         "reads are not in the command log"
     );
 }
+
+/// Writes `text` to `path` under the repository root, making its folder.
+fn write_file_in(root: &Path, path: &str, text: &str) {
+    if let Some(parent) = root.join(path).parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(root.join(path), text).unwrap();
+}
+
+/// A `ListMemories` with the given filters, unpaged unless a cursor is given.
+fn listing_request(
+    query: &str,
+    kind: Option<MemoryKind>,
+    status: Option<MemoryStatus>,
+    path: Option<&str>,
+    author: Option<&str>,
+    limit: u32,
+    cursor: Option<&str>,
+) -> CommandKind {
+    CommandKind::ListMemories {
+        query: query.to_owned(),
+        kind,
+        status,
+        path: path.map(str::to_owned),
+        author: author.map(str::to_owned),
+        scope: None,
+        limit,
+        cursor: cursor.map(str::to_owned),
+    }
+}
+
+/// The memories a list answered, its next cursor and the exact count of proposed memories.
+fn listing(
+    engine: &mut Engine,
+    actor: &Actor,
+    request: CommandKind,
+) -> (Vec<Memory>, Option<String>, u32) {
+    let events = send(engine, actor, request);
+    assert_eq!(state_of(&events), OperationState::Done, "list: {events:?}");
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::MemoriesListed {
+                memories,
+                next_cursor,
+                proposed_total,
+                ..
+            } => Some((memories.clone(), next_cursor.clone(), *proposed_total)),
+            _ => None,
+        })
+        .expect("memories listed")
+}
+
+/// The number of proposed memories among `memories`.
+fn proposed_in(memories: &[Memory]) -> u32 {
+    u32::try_from(
+        memories
+            .iter()
+            .filter(|memory| memory.status == MemoryStatus::Proposed)
+            .count(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_proposed_total_is_zero_when_nothing_is_proposed() {
+    let repo = repo();
+    let mut engine = engine_on(&repo.root);
+    propose(
+        &mut engine,
+        &Actor::Human,
+        MemoryKind::Decision,
+        "We keep the store in SQLite",
+        Vec::new(),
+    );
+    let (memories, _, total) = listing(
+        &mut engine,
+        &Actor::Human,
+        listing_request("", None, None, None, None, 50, None),
+    );
+    assert_eq!(memories.len(), 1);
+    assert_eq!(total, 0);
+}
+
+#[test]
+fn the_proposed_total_follows_propose_accept_and_reject() {
+    let repo = repo();
+    let mut engine = engine_on(&repo.root);
+    let first = memory_of(&propose(
+        &mut engine,
+        &agent(),
+        MemoryKind::Rule,
+        "Run the release checks",
+        vec![file("parser.rs")],
+    ));
+    let second = memory_of(&propose(
+        &mut engine,
+        &agent(),
+        MemoryKind::Rule,
+        "Keep parse() pure",
+        vec![file("parser.rs")],
+    ));
+    let total = |engine: &mut Engine| {
+        listing(
+            engine,
+            &Actor::Human,
+            listing_request("", None, None, None, None, 50, None),
+        )
+        .2
+    };
+    assert_eq!(total(&mut engine), 2);
+
+    accept(&mut engine, &first.uid, None, Vec::new());
+    assert_eq!(total(&mut engine), 1);
+
+    send(
+        &mut engine,
+        &Actor::Human,
+        CommandKind::RejectMemory {
+            uid: second.uid.clone(),
+        },
+    );
+    assert_eq!(total(&mut engine), 0);
+
+    propose(
+        &mut engine,
+        &agent(),
+        MemoryKind::Lesson,
+        "A lost parse is a bug",
+        vec![file("parser.rs")],
+    );
+    assert_eq!(total(&mut engine), 1);
+}
+
+#[test]
+fn the_proposed_total_ignores_status_query_and_paging() {
+    let repo = repo();
+    let mut engine = engine_on(&repo.root);
+    for text in ["alpha widget", "beta gadget", "gamma widget"] {
+        propose(
+            &mut engine,
+            &agent(),
+            MemoryKind::Rule,
+            text,
+            vec![file("parser.rs")],
+        );
+    }
+    propose(
+        &mut engine,
+        &Actor::Human,
+        MemoryKind::Decision,
+        "An accepted note",
+        Vec::new(),
+    );
+
+    // Accepted only: the list holds one row, the total still counts the three proposals.
+    let (accepted, _, total) = listing(
+        &mut engine,
+        &Actor::Human,
+        listing_request("", None, Some(MemoryStatus::Accepted), None, None, 50, None),
+    );
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(total, 3);
+
+    // A query that matches nothing: no rows, the same total.
+    let (none, _, total) = listing(
+        &mut engine,
+        &Actor::Human,
+        listing_request("zebra", None, None, None, None, 50, None),
+    );
+    assert!(none.is_empty());
+    assert_eq!(total, 3);
+
+    // A query that matches two proposals: the total is not narrowed to the query.
+    let (matched, _, total) = listing(
+        &mut engine,
+        &Actor::Human,
+        listing_request(
+            "widget",
+            None,
+            Some(MemoryStatus::Proposed),
+            None,
+            None,
+            50,
+            None,
+        ),
+    );
+    assert_eq!(matched.len(), 2);
+    assert_eq!(total, 3);
+
+    // A page of one: the first page and the last both report the full number.
+    let (first, next, total) = listing(
+        &mut engine,
+        &agent(),
+        listing_request("", None, Some(MemoryStatus::Proposed), None, None, 1, None),
+    );
+    assert_eq!(first.len(), 1);
+    assert_eq!(total, 3);
+    let mut cursor = next;
+    let mut pages = 1;
+    while let Some(next) = cursor {
+        let (page, after, total) = listing(
+            &mut engine,
+            &agent(),
+            listing_request(
+                "",
+                None,
+                Some(MemoryStatus::Proposed),
+                None,
+                None,
+                1,
+                Some(&next),
+            ),
+        );
+        assert_eq!(page.len(), 1);
+        assert_eq!(total, 3);
+        cursor = after;
+        pages += 1;
+    }
+    assert_eq!(pages, 3);
+}
+
+#[test]
+fn the_proposed_total_respects_kind_author_and_path() {
+    let repo = repo();
+    let mut engine = engine_on(&repo.root);
+    write_file_in(&repo.root, "src/lexer.rs", "fn lex() {}\n");
+    commit_all(&repo.root, "add the lexer");
+    propose(
+        &mut engine,
+        &agent(),
+        MemoryKind::Rule,
+        "Claude rule about the parser",
+        vec![file("parser.rs")],
+    );
+    propose(
+        &mut engine,
+        &agent(),
+        MemoryKind::Decision,
+        "A decision about the lexer",
+        vec![file("src/lexer.rs")],
+    );
+    let codex = Actor::Agent {
+        name: "codex".into(),
+    };
+    propose(
+        &mut engine,
+        &codex,
+        MemoryKind::Rule,
+        "Codex rule about the parser",
+        vec![file("parser.rs")],
+    );
+    let total = |engine: &mut Engine, kind, path: Option<&str>, author: Option<&str>| {
+        listing(
+            engine,
+            &Actor::Human,
+            listing_request("", kind, None, path, author, 50, None),
+        )
+    };
+
+    let (_, _, all) = total(&mut engine, None, None, None);
+    assert_eq!(all, 3);
+    let (_, _, rules) = total(&mut engine, Some(MemoryKind::Rule), None, None);
+    assert_eq!(rules, 2, "a decision is not a rule");
+    let (_, _, by_codex) = total(&mut engine, None, None, Some("agent:codex"));
+    assert_eq!(by_codex, 1);
+    let (_, _, in_parser) = total(&mut engine, None, Some("parser.rs"), None);
+    assert_eq!(in_parser, 2);
+    let (_, _, in_src) = total(&mut engine, None, Some("src"), None);
+    assert_eq!(in_src, 1, "a directory names the files under it");
+    let (_, _, combined) = total(
+        &mut engine,
+        Some(MemoryKind::Rule),
+        Some("parser.rs"),
+        Some("agent:claude-code"),
+    );
+    assert_eq!(combined, 1);
+
+    // The total is the count of the proposals the same filters list.
+    let (listed, _, total_listed) =
+        total(&mut engine, Some(MemoryKind::Rule), Some("parser.rs"), None);
+    assert_eq!(proposed_in(&listed), total_listed);
+}

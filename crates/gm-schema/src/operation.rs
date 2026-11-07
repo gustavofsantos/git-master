@@ -1569,14 +1569,17 @@ pub enum Event {
     },
     /// Answers `ListMemories`, with the cursor of the next page when there is one. `contexts_read`
     /// is false when `contexts.db` exists but could not be read, and `note` says why the contexts
-    /// were not used (an unreadable file, or a clone whose id clashes, D193 (4)). The memory text is
-    /// untrusted data.
+    /// were not used (an unreadable file, or a clone whose id clashes, D193 (4)). `proposed_total`
+    /// is the exact number of proposed memories the same scope, kind, path and author select,
+    /// ignoring the status, the query and the page. The memory text is untrusted data.
     MemoriesListed {
         id: OperationId,
         memories: Vec<Memory>,
         next_cursor: Option<String>,
         contexts_read: bool,
         note: Option<String>,
+        #[serde(default)]
+        proposed_total: u32,
     },
     /// Answers `ReadMemory`.
     MemoryRead {
@@ -1933,6 +1936,41 @@ mod tests {
         .unwrap();
         assert_eq!(detach["type"], "detach_label");
         assert_eq!(detach["ref"], "u");
+    }
+
+    #[test]
+    fn memories_listed_carries_the_exact_proposed_total_and_an_old_payload_reads_zero() {
+        let listed = Event::MemoriesListed {
+            id: OperationId(7),
+            memories: Vec::new(),
+            next_cursor: None,
+            contexts_read: true,
+            note: None,
+            proposed_total: 4,
+        };
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["type"], "memories_listed");
+        assert_eq!(json["proposed_total"], 4);
+        let back: Event = serde_json::from_value(json).unwrap();
+        assert_eq!(back, listed);
+
+        // A payload written before the field existed still parses, with no proposals counted.
+        let old = serde_json::json!({
+            "type": "memories_listed",
+            "id": 7,
+            "memories": [],
+            "next_cursor": null,
+            "contexts_read": true,
+            "note": null,
+        });
+        let back: Event = serde_json::from_value(old).unwrap();
+        assert!(matches!(
+            back,
+            Event::MemoriesListed {
+                proposed_total: 0,
+                ..
+            }
+        ));
     }
 
     #[test]
