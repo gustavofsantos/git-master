@@ -1,7 +1,7 @@
 ---
 title: Workspaces
 description: Group branches of several repositories into one workspace, a Git repository whose submodules are worktrees of your own clones, to change and test them together with an agent.
-status: implemented
+status: partial
 order: 55
 ---
 
@@ -34,9 +34,11 @@ The **+** in the section header opens **New Workspace…**. The menu of a row ha
 
 ## Create a workspace
 
+> **Planned.** The branch button and its filtered list are not in the app yet; the branch field still takes plain text, with suggestions only for the window's repository.
+
 1. Run **New Workspace…** from the command palette, or click **+** in the **Workspaces** section of the sidebar.
 2. Name the workspace.
-3. Add a member for each repository: choose the repository and type its branch. The repository list offers the repository of the window, your recent repositories and **Choose Folder…**. The branch field suggests the repository's branches as you type. **Branch for all** fills the same branch into every member.
+3. Add a member for each repository: choose the repository, then its branch. The repository list offers the repository of the window, your recent repositories and **Choose Folder…**. The branch button opens the repository's branches, local ones first, then the remote ones that have no local branch, marked as remote. A filter at the top narrows the list as you type, and a name that matches no branch offers **Create branch** with that name. **Branch for all** fills the same branch into every member.
 4. Check the folder and click **Create workspace**.
 
 A branch that does not exist yet is created from the repository's base branch, such as `main`; a branch that exists only on a remote is created to track it. Each member row says which will happen before you create the workspace.
