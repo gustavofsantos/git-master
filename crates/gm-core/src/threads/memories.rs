@@ -230,6 +230,18 @@ pub fn files_changed_since(
 /// state, the clock and a counter (D192 (8)).
 #[must_use]
 pub fn new_uid() -> String {
+    hex_prefix(&Sha256::digest(random_seed()))
+}
+
+/// `digits` lowercase hex digits of SHA-256 over the same random seed as `new_uid`, for ids longer
+/// than a uid (the repository id, D193 (2)). `digits` is at most 64.
+#[must_use]
+pub fn new_hex(digits: usize) -> String {
+    hex_of(&Sha256::digest(random_seed()), digits)
+}
+
+/// 16 bytes from the process's random hasher state, the clock and a counter.
+fn random_seed() -> [u8; 16] {
     let first = RandomState::new().build_hasher().finish();
     let second = RandomState::new().build_hasher().finish();
     let nanos = SystemTime::now()
@@ -242,7 +254,265 @@ pub fn new_uid() -> String {
     seed[..8].copy_from_slice(&(first ^ nanos).to_le_bytes());
     seed[8..]
         .copy_from_slice(&(second ^ count.rotate_left(32) ^ nanos.rotate_left(17)).to_le_bytes());
-    hex_prefix(&Sha256::digest(seed))
+    seed
+}
+
+/// Where a memory is written and what its duplicate key is looked for among (D190 (7), D193 (6)).
+pub(crate) struct Placement<'a> {
+    /// Each thread source must name a thread stored in this store (`threads.db` only).
+    pub threads: bool,
+    /// The memories a duplicate is looked for among; `None` is every memory of the store.
+    pub among: Option<&'a [i64]>,
+}
+
+/// A proposal after the checks that need no store: its text as stored, its sources and its
+/// duplicate key.
+pub(crate) struct Checked {
+    pub text: String,
+    pub sources: Vec<MemorySource>,
+    pub key: String,
+}
+
+/// The rules of a proposal that need no store: the text, who may propose and with what status,
+/// the sources and the duplicate key (D192 (1), (2), (3), (5)).
+pub(crate) fn check_proposal(new: &NewMemory<'_>) -> Result<Checked, StoreError> {
+    let text = check_text(new.text)?;
+    let is_human = new.origin == HUMAN;
+    authorize(
+        is_human,
+        &MemoryAction::Propose {
+            sources: new.sources.len(),
+        },
+    )
+    .map_err(|message| invalid(&message))?;
+    if !matches!(new.status, MemoryStatus::Proposed | MemoryStatus::Accepted) {
+        return Err(invalid("a memory is created proposed or accepted"));
+    }
+    if new.status == MemoryStatus::Accepted && !is_human {
+        return Err(invalid("only a human creates an accepted memory"));
+    }
+    let sources = new
+        .sources
+        .iter()
+        .map(checked_source)
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = dedup_key(new.kind, &text);
+    Ok(Checked { text, sources, key })
+}
+
+/// Stores a checked proposal inside the caller's transaction (D192 (2), (3)). A memory with the
+/// given `uid` already in the store is returned with `false`, and so is a non-rejected memory of the
+/// same kind and key among `place.among`; nothing is written then. Otherwise the memory is inserted
+/// under `uid`, or under a new uid, and returned with `true`.
+pub(crate) fn propose_in(
+    conn: &Connection,
+    new: &NewMemory<'_>,
+    checked: &Checked,
+    place: &Placement<'_>,
+    uid: Option<&str>,
+) -> Result<(Memory, bool), StoreError> {
+    if let Some(uid) = uid
+        && let Some(id) = id_by_uid(conn, uid)?
+    {
+        return Ok((memory_by_id(conn, id)?, false));
+    }
+    if place.threads {
+        for source in checked
+            .sources
+            .iter()
+            .filter(|source| source.kind == MemorySourceKind::Thread)
+        {
+            thread_id(conn, &source.reference).map_err(|error| match error {
+                StoreError::NotFound => invalid("a thread source names a stored thread"),
+                other => other,
+            })?;
+        }
+    }
+    if let Some(existing) = find_duplicate(conn, new.kind, &checked.key, None, place.among)? {
+        return Ok((memory_by_id(conn, existing)?, false));
+    }
+    let accepted = new.status == MemoryStatus::Accepted;
+    let uid = uid.map_or_else(new_uid, str::to_owned);
+    conn.execute(
+        "INSERT INTO memory (uid, kind, text, status, origin, proposed_by, created_at,
+            decided_at, decided_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8)",
+        params![
+            uid,
+            kind_text(new.kind),
+            checked.text,
+            status_text(new.status),
+            new.origin,
+            new.at,
+            accepted.then_some(new.at),
+            accepted.then_some(HUMAN),
+        ],
+    )?;
+    let id = conn.last_insert_rowid();
+    insert_sources(conn, id, &checked.sources)?;
+    Ok((memory_by_id(conn, id)?, true))
+}
+
+/// Accepts a memory inside the caller's transaction (a human's action, D192 (3) and (4)). On a
+/// proposed memory this is the acceptance; on an accepted one it is an edit, or a supersede. `text`
+/// replaces the text when it differs (the origin becomes `human`; `proposed_by` stays), and a key
+/// that `place.among` holds for another memory is refused. `supersedes` must each name an accepted
+/// memory other than this one; they become `superseded` with a `memory_rel` row. `blobs` gives the
+/// blob of each file source at `HEAD` (`None` when the file is absent) and is recorded only when the
+/// memory first becomes accepted: accepting an accepted memory again keeps its status, `decided_at`,
+/// `decided_by` and the recorded blobs (D192 (4)), so "files changed since" still counts from the
+/// first acceptance.
+pub(crate) fn accept_in(
+    conn: &Connection,
+    place: &Placement<'_>,
+    id: i64,
+    text: Option<&str>,
+    supersedes: &[i64],
+    blobs: &[(String, Option<String>)],
+    at: i64,
+) -> Result<Memory, StoreError> {
+    let (kind, stored_text, before) = core_of(conn, id)?;
+    next_status(before, Transition::Accept).map_err(|message| invalid(&message))?;
+    if let Some(text) = text {
+        let text = check_text(text)?;
+        if text != stored_text {
+            if let Some(other) =
+                find_duplicate(conn, kind, &dedup_key(kind, &text), Some(id), place.among)?
+            {
+                return Err(invalid(&format!("memory {other} already says this")));
+            }
+            conn.execute(
+                "UPDATE memory SET text = ?1, origin = 'human' WHERE id = ?2",
+                params![text, id],
+            )?;
+        }
+    }
+    // Accepting an accepted memory again keeps its decision and its recorded blobs (D192 (4)).
+    if before != MemoryStatus::Accepted {
+        conn.execute(
+            "UPDATE memory SET status = 'accepted', decided_at = ?1, decided_by = 'human'
+             WHERE id = ?2",
+            params![at, id],
+        )?;
+        for (path, blob) in blobs {
+            conn.execute(
+                "UPDATE memory_source SET blob_oid = ?1
+                 WHERE memory_id = ?2 AND kind = 'file' AND ref = ?3",
+                params![blob, id, path],
+            )?;
+        }
+    }
+    for &old in supersedes {
+        if old == id {
+            return Err(invalid("a memory cannot supersede itself"));
+        }
+        let (_, _, old_status) = core_of(conn, old).map_err(|error| match error {
+            StoreError::NotFound => invalid(&format!("memory {old} does not exist")),
+            other => other,
+        })?;
+        next_status(old_status, Transition::Supersede)
+            .map_err(|message| invalid(&format!("memory {old}: {message}")))?;
+        conn.execute(
+            "UPDATE memory SET status = 'superseded', decided_at = ?1, decided_by = 'human'
+             WHERE id = ?2",
+            params![at, old],
+        )?;
+        conn.execute(
+            "INSERT INTO memory_rel (from_memory, to_memory, kind, origin, at)
+             VALUES (?1, ?2, 'supersedes', 'human', ?3)",
+            params![id, old, at],
+        )?;
+    }
+    memory_by_id(conn, id)
+}
+
+/// Rejects a proposed memory inside the caller's transaction (a human's action).
+pub(crate) fn reject_in(conn: &Connection, id: i64, at: i64) -> Result<Memory, StoreError> {
+    let (_, _, before) = core_of(conn, id)?;
+    next_status(before, Transition::Reject).map_err(|message| invalid(&message))?;
+    conn.execute(
+        "UPDATE memory SET status = 'rejected', decided_at = ?1, decided_by = 'human'
+         WHERE id = ?2",
+        params![at, id],
+    )?;
+    memory_by_id(conn, id)
+}
+
+/// Deletes a memory with its sources and its links (a human's action). `NotFound` when missing.
+pub(crate) fn delete_in(conn: &Connection, id: i64) -> Result<(), StoreError> {
+    if conn.execute("DELETE FROM memory WHERE id = ?1", params![id])? == 0 {
+        return Err(StoreError::NotFound);
+    }
+    Ok(())
+}
+
+/// The repository-relative paths of a memory's file sources, by path.
+pub(crate) fn file_source_paths(conn: &Connection, id: i64) -> Result<Vec<String>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT ref FROM memory_source WHERE memory_id = ?1 AND kind = 'file' ORDER BY ref",
+    )?;
+    let paths = statement
+        .query_map(params![id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(paths)
+}
+
+/// The row id of the memory with `uid`, when there is one.
+pub(crate) fn id_by_uid(conn: &Connection, uid: &str) -> Result<Option<i64>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM memory WHERE uid = ?1",
+            params![uid],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// The row id of the memory with `uid`, or `NotFound`.
+pub(crate) fn id_of_uid(conn: &Connection, uid: &str) -> Result<i64, StoreError> {
+    id_by_uid(conn, uid)?.ok_or(StoreError::NotFound)
+}
+
+/// A memory by uid, with its sources and relations. `NotFound` when missing.
+pub(crate) fn memory_by_uid(conn: &Connection, uid: &str) -> Result<Memory, StoreError> {
+    memory_by_id(conn, id_of_uid(conn, uid)?)
+}
+
+/// The memories that match `fts` (a full-text expression, or `None` for every memory) and `filter`,
+/// restricted to `within` (a SQL condition on `m.id`, or empty), as `(id, bm25)` pairs. With a query
+/// they are ordered by relevance, otherwise newest first; the score is 0.0 without a query. The
+/// caller passes `limit` and `offset`.
+pub(crate) fn list_ids(
+    conn: &Connection,
+    fts: Option<&str>,
+    filter: &MemoryFilter,
+    within: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<(i64, f64)>, StoreError> {
+    let sql = match fts {
+        Some(_) => format!(
+            "SELECT m.id, bm25(memory_fts) FROM memory m JOIN memory_fts ON memory_fts.rowid = m.id
+             WHERE memory_fts MATCH ?1{MEMORY_FILTER_SQL}{within}
+             ORDER BY bm25(memory_fts), m.id LIMIT ?6 OFFSET ?7"
+        ),
+        None => format!(
+            "SELECT m.id, 0.0 FROM memory m WHERE 1 = 1{MEMORY_FILTER_SQL}{within}
+             ORDER BY m.created_at DESC, m.id DESC LIMIT ?6 OFFSET ?7"
+        ),
+    };
+    let kind = filter.kind.map(kind_text);
+    let status = filter.status.map(status_text);
+    let path = filter.path.as_deref().filter(|path| !path.is_empty());
+    let author = filter.author.as_deref().filter(|author| !author.is_empty());
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement
+        .query_map(
+            params![fts, kind, status, path, author, limit, offset],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 impl ThreadStore {
@@ -250,72 +520,23 @@ impl ThreadStore {
     /// kind with the same duplicate key is returned with `false`, and nothing is written (D192 (2)).
     /// Otherwise the memory is inserted and returned with `true`.
     pub fn propose_memory(&mut self, new: &NewMemory<'_>) -> Result<(Memory, bool), StoreError> {
-        let text = check_text(new.text)?;
-        let is_human = new.origin == HUMAN;
-        authorize(
-            is_human,
-            &MemoryAction::Propose {
-                sources: new.sources.len(),
-            },
-        )
-        .map_err(|message| invalid(&message))?;
-        if !matches!(new.status, MemoryStatus::Proposed | MemoryStatus::Accepted) {
-            return Err(invalid("a memory is created proposed or accepted"));
-        }
-        if new.status == MemoryStatus::Accepted && !is_human {
-            return Err(invalid("only a human creates an accepted memory"));
-        }
-        let sources = new
-            .sources
-            .iter()
-            .map(checked_source)
-            .collect::<Result<Vec<_>, _>>()?;
-        let key = dedup_key(new.kind, &text);
+        let checked = check_proposal(new)?;
         let tx = begin(&mut self.conn)?;
-        for source in sources
-            .iter()
-            .filter(|source| source.kind == MemorySourceKind::Thread)
-        {
-            thread_id(&tx, &source.reference).map_err(|error| match error {
-                StoreError::NotFound => invalid("a thread source names a stored thread"),
-                other => other,
-            })?;
-        }
-        if let Some(existing) = find_duplicate(&tx, new.kind, &key, None)? {
-            let memory = memory_by_id(&tx, existing)?;
-            return Ok((memory, false));
-        }
-        let accepted = new.status == MemoryStatus::Accepted;
-        tx.execute(
-            "INSERT INTO memory (uid, kind, text, status, origin, proposed_by, created_at,
-                decided_at, decided_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8)",
-            params![
-                new_uid(),
-                kind_text(new.kind),
-                text,
-                status_text(new.status),
-                new.origin,
-                new.at,
-                accepted.then_some(new.at),
-                accepted.then_some(HUMAN),
-            ],
+        let placed = propose_in(
+            &tx,
+            new,
+            &checked,
+            &Placement {
+                threads: true,
+                among: None,
+            },
+            None,
         )?;
-        let id = tx.last_insert_rowid();
-        insert_sources(&tx, id, &sources)?;
-        let memory = memory_by_id(&tx, id)?;
         tx.commit()?;
-        Ok((memory, true))
+        Ok(placed)
     }
 
-    /// Accepts a memory (a human's action, D192 (3) and (4)). On a proposed memory this is the
-    /// acceptance; on an accepted one it is an edit, or a supersede. `text` replaces the text when it
-    /// differs (the origin becomes `human`; `proposed_by` stays). `supersedes` must each name an
-    /// accepted memory other than this one; they become `superseded` with a `memory_rel` row.
-    /// `blobs` gives the blob of each file source at `HEAD` (`None` when the file is absent) and is
-    /// recorded only when the memory first becomes accepted: accepting an accepted memory again
-    /// keeps its status, `decided_at`, `decided_by` and the recorded blobs (D192 (4)), so
-    /// "files changed since" still counts from the first acceptance. Every change is one
+    /// Accepts a memory (a human's action, D192 (3) and (4)); see `accept_in`. Every change is one
     /// transaction: a refusal writes nothing.
     pub fn accept_memory(
         &mut self,
@@ -326,57 +547,18 @@ impl ThreadStore {
         at: i64,
     ) -> Result<Memory, StoreError> {
         let tx = begin(&mut self.conn)?;
-        let (kind, stored_text, before) = core_of(&tx, id)?;
-        next_status(before, Transition::Accept).map_err(|message| invalid(&message))?;
-        if let Some(text) = text {
-            let text = check_text(text)?;
-            if text != stored_text {
-                if let Some(other) = find_duplicate(&tx, kind, &dedup_key(kind, &text), Some(id))? {
-                    return Err(invalid(&format!("memory {other} already says this")));
-                }
-                tx.execute(
-                    "UPDATE memory SET text = ?1, origin = 'human' WHERE id = ?2",
-                    params![text, id],
-                )?;
-            }
-        }
-        // Accepting an accepted memory again keeps its decision and its recorded blobs (D192 (4)).
-        if before != MemoryStatus::Accepted {
-            tx.execute(
-                "UPDATE memory SET status = 'accepted', decided_at = ?1, decided_by = 'human'
-                 WHERE id = ?2",
-                params![at, id],
-            )?;
-            for (path, blob) in blobs {
-                tx.execute(
-                    "UPDATE memory_source SET blob_oid = ?1
-                     WHERE memory_id = ?2 AND kind = 'file' AND ref = ?3",
-                    params![blob, id, path],
-                )?;
-            }
-        }
-        for &old in supersedes {
-            if old == id {
-                return Err(invalid("a memory cannot supersede itself"));
-            }
-            let (_, _, old_status) = core_of(&tx, old).map_err(|error| match error {
-                StoreError::NotFound => invalid(&format!("memory {old} does not exist")),
-                other => other,
-            })?;
-            next_status(old_status, Transition::Supersede)
-                .map_err(|message| invalid(&format!("memory {old}: {message}")))?;
-            tx.execute(
-                "UPDATE memory SET status = 'superseded', decided_at = ?1, decided_by = 'human'
-                 WHERE id = ?2",
-                params![at, old],
-            )?;
-            tx.execute(
-                "INSERT INTO memory_rel (from_memory, to_memory, kind, origin, at)
-                 VALUES (?1, ?2, 'supersedes', 'human', ?3)",
-                params![id, old, at],
-            )?;
-        }
-        let memory = memory_by_id(&tx, id)?;
+        let memory = accept_in(
+            &tx,
+            &Placement {
+                threads: false,
+                among: None,
+            },
+            id,
+            text,
+            supersedes,
+            blobs,
+            at,
+        )?;
         tx.commit()?;
         Ok(memory)
     }
@@ -384,14 +566,7 @@ impl ThreadStore {
     /// Rejects a proposed memory (a human's action).
     pub fn reject_memory(&mut self, id: i64, at: i64) -> Result<Memory, StoreError> {
         let tx = begin(&mut self.conn)?;
-        let (_, _, before) = core_of(&tx, id)?;
-        next_status(before, Transition::Reject).map_err(|message| invalid(&message))?;
-        tx.execute(
-            "UPDATE memory SET status = 'rejected', decided_at = ?1, decided_by = 'human'
-             WHERE id = ?2",
-            params![at, id],
-        )?;
-        let memory = memory_by_id(&tx, id)?;
+        let memory = reject_in(&tx, id, at)?;
         tx.commit()?;
         Ok(memory)
     }
@@ -399,9 +574,7 @@ impl ThreadStore {
     /// Deletes a memory with its sources and its links (a human's action). `NotFound` when missing.
     pub fn delete_memory(&mut self, id: i64) -> Result<(), StoreError> {
         let tx = begin(&mut self.conn)?;
-        if tx.execute("DELETE FROM memory WHERE id = ?1", params![id])? == 0 {
-            return Err(StoreError::NotFound);
-        }
+        delete_in(&tx, id)?;
         tx.commit()?;
         Ok(())
     }
@@ -411,15 +584,19 @@ impl ThreadStore {
         memory_by_id(&self.conn, id)
     }
 
+    /// A memory by uid, with its sources and its supersedes links. `NotFound` when missing.
+    pub fn read_memory_by_uid(&self, uid: &str) -> Result<Memory, StoreError> {
+        memory_by_uid(&self.conn, uid)
+    }
+
+    /// The row id of the memory with `uid`. `NotFound` when missing.
+    pub fn memory_id_of(&self, uid: &str) -> Result<i64, StoreError> {
+        id_of_uid(&self.conn, uid)
+    }
+
     /// The repository-relative paths of a memory's file sources, by path.
     pub fn memory_file_sources(&self, id: i64) -> Result<Vec<String>, StoreError> {
-        let mut statement = self.conn.prepare(
-            "SELECT ref FROM memory_source WHERE memory_id = ?1 AND kind = 'file' ORDER BY ref",
-        )?;
-        let paths = statement
-            .query_map(params![id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(paths)
+        file_source_paths(&self.conn, id)
     }
 
     /// One page of memories. With a query they are ordered by relevance (the D128 builder over
@@ -446,28 +623,7 @@ impl ThreadStore {
             None => 0,
         };
         let page = i64::from(limit.max(1));
-        let sql = match fts {
-            Some(_) => format!(
-                "SELECT m.id FROM memory m JOIN memory_fts ON memory_fts.rowid = m.id
-                 WHERE memory_fts MATCH ?1{MEMORY_FILTER_SQL}
-                 ORDER BY bm25(memory_fts), m.id LIMIT ?6 OFFSET ?7"
-            ),
-            None => format!(
-                "SELECT m.id FROM memory m WHERE 1 = 1{MEMORY_FILTER_SQL}
-                 ORDER BY m.created_at DESC, m.id DESC LIMIT ?6 OFFSET ?7"
-            ),
-        };
-        let kind = filter.kind.map(kind_text);
-        let status = filter.status.map(status_text);
-        let path = filter.path.as_deref().filter(|path| !path.is_empty());
-        let author = filter.author.as_deref().filter(|author| !author.is_empty());
-        let mut statement = self.conn.prepare(&sql)?;
-        let mut ids = statement
-            .query_map(
-                params![fts.as_deref(), kind, status, path, author, page + 1, offset],
-                |row| row.get::<_, i64>(0),
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut ids = list_ids(&self.conn, fts.as_deref(), filter, "", page + 1, offset)?;
         let next = if ids.len() > usize::try_from(page).unwrap_or(usize::MAX) {
             ids.truncate(usize::try_from(page).unwrap_or(usize::MAX));
             Some(format!("{digest}.{}", offset + page))
@@ -475,7 +631,7 @@ impl ThreadStore {
             None
         };
         let mut memories = Vec::with_capacity(ids.len());
-        for id in ids {
+        for (id, _) in ids {
             memories.push(memory_by_id(&self.conn, id)?);
         }
         Ok((memories, next))
@@ -534,12 +690,14 @@ fn check_thread(source: &MemorySourceInput) -> Result<MemorySourceInput, StoreEr
     })
 }
 
-/// The id of a non-rejected memory of `kind` with duplicate key `key`, other than `except`.
+/// The id of a non-rejected memory of `kind` with duplicate key `key`, other than `except`, among
+/// `among` when it is given.
 fn find_duplicate(
     conn: &Connection,
     kind: MemoryKind,
     key: &str,
     except: Option<i64>,
+    among: Option<&[i64]>,
 ) -> Result<Option<i64>, StoreError> {
     let mut statement = conn.prepare(
         "SELECT id, text FROM memory WHERE kind = ?1 AND status != 'rejected' ORDER BY id",
@@ -549,7 +707,8 @@ fn find_duplicate(
     })?;
     for row in rows {
         let (id, text) = row?;
-        if Some(id) != except && dedup_key(kind, &text) == key {
+        let listed = among.is_none_or(|ids| ids.contains(&id));
+        if Some(id) != except && listed && dedup_key(kind, &text) == key {
             return Ok(Some(id));
         }
     }
@@ -597,7 +756,7 @@ fn insert_sources(conn: &Connection, id: i64, sources: &[MemorySource]) -> Resul
 }
 
 /// A memory with its sources and relations, or `NotFound`.
-fn memory_by_id(conn: &Connection, id: i64) -> Result<Memory, StoreError> {
+pub(crate) fn memory_by_id(conn: &Connection, id: i64) -> Result<Memory, StoreError> {
     let sql = format!("SELECT {MEMORY_COLUMNS} FROM memory m WHERE m.id = ?1");
     let mut memory = conn
         .query_row(&sql, params![id], memory_row)
@@ -644,6 +803,7 @@ fn memory_row(row: &Row<'_>) -> rusqlite::Result<Result<Memory, StoreError>> {
         supersedes: Vec::new(),
         superseded_by: Vec::new(),
         files_changed_since: Vec::new(),
+        scope: String::new(),
     }))
 }
 
@@ -713,12 +873,18 @@ fn decode_offset(cursor: &str, digest: &str) -> Result<i64, StoreError> {
 
 /// The first 16 lowercase hex digits of `digest`.
 fn hex_prefix(digest: &[u8]) -> String {
+    hex_of(digest, UID_HEX)
+}
+
+/// The first `digits` lowercase hex digits of `digest`.
+fn hex_of(digest: &[u8], digits: usize) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut text = String::with_capacity(UID_HEX);
-    for byte in digest.iter().take(UID_HEX / 2) {
+    let mut text = String::with_capacity(digits + 1);
+    for byte in digest.iter().take(digits.div_ceil(2)) {
         text.push(char::from(HEX[usize::from(byte >> 4)]));
         text.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
+    text.truncate(digits);
     text
 }
 
@@ -1049,6 +1215,7 @@ mod tests {
             supersedes: Vec::new(),
             superseded_by: Vec::new(),
             files_changed_since: Vec::new(),
+            scope: String::new(),
         };
         let source = |path: &str, blob: Option<&str>| MemorySource {
             kind: MemorySourceKind::File,

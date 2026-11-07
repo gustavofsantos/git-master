@@ -9,6 +9,7 @@ pub mod commit_detail;
 pub mod commit_diff;
 pub mod conflict;
 mod conflict_sides;
+pub mod contexts;
 pub mod diff;
 mod engine;
 pub mod fake;

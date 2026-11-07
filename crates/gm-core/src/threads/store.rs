@@ -412,10 +412,10 @@ CREATE TRIGGER memory_fts_au AFTER UPDATE OF text ON memory BEGIN
 END;
 ";
 
-const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
 /// Opening a file another process is initializing is retried this many times, this far apart.
-const OPEN_ATTEMPTS: u32 = 200;
-const OPEN_PAUSE: Duration = Duration::from_millis(5);
+pub(crate) const OPEN_ATTEMPTS: u32 = 200;
+pub(crate) const OPEN_PAUSE: Duration = Duration::from_millis(5);
 /// Entries at or above which the hook does not migrate the database (D132): it spools instead.
 pub const HOOK_MIGRATION_LIMIT: i64 = 50_000;
 /// Entries below which a migration ends with `VACUUM`, which takes the dropped index pages out
@@ -1830,21 +1830,31 @@ impl ThreadStore {
 /// another process is creating the WAL or the schema, so the attempt is repeated for a
 /// short, bounded time.
 fn open_connection(path: &Path, clean: TextCleaner) -> Result<Connection, StoreError> {
+    retry_busy(|| {
+        let mut conn = Connection::open(path)?;
+        prepare(&mut conn, clean)?;
+        Ok(conn)
+    })
+}
+
+/// Runs `attempt` again, up to `OPEN_ATTEMPTS` times and `OPEN_PAUSE` apart, while it fails because
+/// the database is locked (the open of a file another process is creating, D122).
+pub(crate) fn retry_busy<T>(
+    mut attempt: impl FnMut() -> Result<T, StoreError>,
+) -> Result<T, StoreError> {
     let mut attempts = 0_u32;
     loop {
-        let mut conn = Connection::open(path)?;
-        match prepare(&mut conn, clean) {
-            Ok(()) => return Ok(conn),
+        match attempt() {
             Err(StoreError::Sqlite(error)) if is_busy(&error) && attempts < OPEN_ATTEMPTS => {
                 attempts += 1;
                 std::thread::sleep(OPEN_PAUSE);
             }
-            Err(error) => return Err(error),
+            other => return other,
         }
     }
 }
 
-fn is_busy(error: &rusqlite::Error) -> bool {
+pub(crate) fn is_busy(error: &rusqlite::Error) -> bool {
     matches!(
         error,
         rusqlite::Error::SqliteFailure(failure, _)
@@ -1910,7 +1920,7 @@ fn count_entries(conn: &Connection, limit: i64) -> Result<i64, StoreError> {
 }
 
 /// Creates the file with mode `0600` when missing, and makes it private when it is not.
-fn create_private(path: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private(path: &Path) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -1921,11 +1931,11 @@ fn create_private(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-pub(super) fn begin(conn: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
+pub(crate) fn begin(conn: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
 }
 
-pub(super) fn invalid(message: &str) -> StoreError {
+pub(crate) fn invalid(message: &str) -> StoreError {
     StoreError::Invalid(message.to_owned())
 }
 

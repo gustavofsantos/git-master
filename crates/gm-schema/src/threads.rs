@@ -831,6 +831,8 @@ pub enum FileChangeState {
     Missing,
     /// Git could not answer for the file; never reported as unchanged.
     Unknown,
+    /// The source's repository is not on this machine, so nothing can be read (D193 (9)).
+    Unavailable,
 }
 
 /// A file a memory names that has changed since it was accepted. Derived on read, never stored.
@@ -874,6 +876,39 @@ pub struct Memory {
     pub superseded_by: Vec<i64>,
     /// Files named by the memory that changed since acceptance. Always empty from the store.
     pub files_changed_since: Vec<FileChange>,
+    /// `repository`, or the path of the nearest visible context the memory is attached to, such as
+    /// `Platform / Billing` (D193 (5)). Set by the engine; empty from the store.
+    pub scope: String,
+}
+
+/// A context: a named set of repositories at the user level, with its nesting (design/threads.md,
+/// "Contexts"; D191). Its counts and paths are derived on read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct Context {
+    pub id: i64,
+    pub uid: String,
+    pub name: String,
+    /// The id of the parent context, `None` at the root.
+    pub parent: Option<i64>,
+    /// The names from the root down, joined with ` / `.
+    pub path: String,
+    /// The repositories of the context, by repository id.
+    pub repos: Vec<ContextRepo>,
+    /// Accepted memories attached to this context.
+    pub accepted_memories: u32,
+    /// Direct sub-contexts.
+    pub sub_contexts: u32,
+}
+
+/// A repository in a context: its identity (the content of `.git/gitmaster/repo-id`), the last
+/// known common directory of its clone and its display name (D191 (4) (b)).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextRepo {
+    pub repo_id: String,
+    pub path: String,
+    pub name: String,
 }
 
 /// The filters of a memory list. `author` matches the origin or the origin at creation.
