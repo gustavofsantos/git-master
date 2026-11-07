@@ -567,36 +567,21 @@ impl ContextStore {
         memories::list_ids(&self.conn, query, filter, &Self::within_contexts(contexts))
     }
 
-    /// How many memories attached to any of `contexts` `filter` selects with status `proposed`,
-    /// counted in SQL (see `memories::count_proposed`).
-    pub(crate) fn count_proposed_in(
-        &self,
-        contexts: &[i64],
-        filter: &MemoryFilter,
-    ) -> Result<u32, StoreError> {
+    /// How many proposed memories are attached to any of `contexts` (see `memories::count_proposed`).
+    pub(crate) fn count_proposed_in(&self, contexts: &[i64]) -> Result<u32, StoreError> {
         if contexts.is_empty() {
             return Ok(0);
         }
-        memories::count_proposed(&self.conn, filter, &Self::within_contexts(contexts))
+        memories::count_proposed(&self.conn, &Self::within_contexts(contexts))
     }
 
     /// The uids of the proposed memories `count_proposed_in` counts, for the overlap with the
     /// repository's store (a memory held by both is listed once).
-    pub(crate) fn proposed_uids_in(
-        &self,
-        contexts: &[i64],
-        filter: &MemoryFilter,
-    ) -> Result<Vec<String>, StoreError> {
+    pub(crate) fn proposed_uids_in(&self, contexts: &[i64]) -> Result<Vec<String>, StoreError> {
         if contexts.is_empty() {
             return Ok(Vec::new());
         }
-        let proposed = MemoryFilter {
-            status: Some(MemoryStatus::Proposed),
-            ..filter.clone()
-        };
-        let found =
-            memories::list_ids(&self.conn, "", &proposed, &Self::within_contexts(contexts))?;
-        Ok(found.into_iter().map(|hit| hit.uid).collect())
+        memories::proposed_uids(&self.conn, &Self::within_contexts(contexts))
     }
 
     /// The SQL restricting a memory to those attached to `contexts`.

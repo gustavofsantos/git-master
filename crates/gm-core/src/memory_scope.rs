@@ -392,7 +392,7 @@ pub(crate) fn list_command(
                 next_cursor: None,
                 contexts_read,
                 note,
-                proposed_total: 0,
+                proposed_total: count_proposed_visible(stores)?,
             });
         }
         Err(message) => return Err(message),
@@ -401,7 +401,7 @@ pub(crate) fn list_command(
     for memory in &mut memories {
         fill_changes(ctx, reach, memory);
     }
-    let proposed_total = count_proposed_in_scope(stores, ask.filter, scope)?;
+    let proposed_total = count_proposed_visible(stores)?;
     Ok(Listed {
         memories,
         next_cursor,
@@ -411,38 +411,25 @@ pub(crate) fn list_command(
     })
 }
 
-/// How many proposed memories `filter` selects in `scope`, exactly as the merged list would show
-/// them (D193 (6)): the repository's and the contexts' counted in SQL, a memory held by both once.
-/// The status and the query of the list play no part.
-fn count_proposed_in_scope(
-    stores: &Stores<'_>,
-    filter: &MemoryFilter,
-    scope: Scope,
-) -> Result<u32, String> {
-    let repository = if matches!(scope, Scope::All | Scope::Repository) {
-        stores
-            .threads
-            .count_proposed(filter)
-            .map_err(|e| e.to_string())?
-    } else {
-        0
-    };
-    let Some(contexts) = stores.reach.store().filter(|_| scope != Scope::Repository) else {
+/// How many proposed memories the repository sees (D193 (6)): its own store and every visible
+/// context, a memory held by both counted once. The filters, the status, the query and the scope of
+/// the request play no part.
+fn count_proposed_visible(stores: &Stores<'_>) -> Result<u32, String> {
+    let repository = stores.threads.count_proposed().map_err(|e| e.to_string())?;
+    let Some(contexts) = stores.reach.store() else {
         return Ok(repository);
     };
-    let ids = stores.reach.scope_ids(scope);
+    let ids = stores.reach.scope_ids(Scope::All);
     let in_contexts = contexts
-        .count_proposed_in(&ids, filter)
+        .count_proposed_in(&ids)
         .map_err(|e| e.to_string())?;
     if repository == 0 || in_contexts == 0 {
         return Ok(repository.saturating_add(in_contexts));
     }
-    let uids = contexts
-        .proposed_uids_in(&ids, filter)
-        .map_err(|e| e.to_string())?;
+    let uids = contexts.proposed_uids_in(&ids).map_err(|e| e.to_string())?;
     let shared = stores
         .threads
-        .count_proposed_among(&uids, filter)
+        .count_proposed_among(&uids)
         .map_err(|e| e.to_string())?;
     Ok(repository
         .saturating_add(in_contexts)

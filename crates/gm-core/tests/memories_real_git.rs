@@ -875,7 +875,7 @@ fn the_proposed_total_ignores_status_query_and_paging() {
 }
 
 #[test]
-fn the_proposed_total_respects_kind_author_and_path() {
+fn the_proposed_total_ignores_the_kind_author_and_path_of_the_request() {
     let repo = repo();
     let mut engine = engine_on(&repo.root);
     write_file_in(&repo.root, "src/lexer.rs", "fn lex() {}\n");
@@ -904,7 +904,7 @@ fn the_proposed_total_respects_kind_author_and_path() {
         "Codex rule about the parser",
         vec![file("parser.rs")],
     );
-    let total = |engine: &mut Engine, kind, path: Option<&str>, author: Option<&str>| {
+    let listing_with = |engine: &mut Engine, kind, path: Option<&str>, author: Option<&str>| {
         listing(
             engine,
             &Actor::Human,
@@ -912,26 +912,23 @@ fn the_proposed_total_respects_kind_author_and_path() {
         )
     };
 
-    let (_, _, all) = total(&mut engine, None, None, None);
-    assert_eq!(all, 3);
-    let (_, _, rules) = total(&mut engine, Some(MemoryKind::Rule), None, None);
-    assert_eq!(rules, 2, "a decision is not a rule");
-    let (_, _, by_codex) = total(&mut engine, None, None, Some("agent:codex"));
-    assert_eq!(by_codex, 1);
-    let (_, _, in_parser) = total(&mut engine, None, Some("parser.rs"), None);
-    assert_eq!(in_parser, 2);
-    let (_, _, in_src) = total(&mut engine, None, Some("src"), None);
-    assert_eq!(in_src, 1, "a directory names the files under it");
-    let (_, _, combined) = total(
+    // Every request sees the same total: three proposals in the repository.
+    let (all, _, total) = listing_with(&mut engine, None, None, None);
+    assert_eq!(total, 3);
+    assert_eq!(proposed_in(&all), 3);
+    let (rules, _, total) = listing_with(&mut engine, Some(MemoryKind::Rule), None, None);
+    assert_eq!(proposed_in(&rules), 2, "the list is filtered");
+    assert_eq!(total, 3, "the total is not");
+    let (_, _, total) = listing_with(&mut engine, None, None, Some("agent:codex"));
+    assert_eq!(total, 3);
+    let (in_src, _, total) = listing_with(&mut engine, None, Some("src"), None);
+    assert_eq!(proposed_in(&in_src), 1);
+    assert_eq!(total, 3);
+    let (_, _, total) = listing_with(
         &mut engine,
         Some(MemoryKind::Rule),
         Some("parser.rs"),
         Some("agent:claude-code"),
     );
-    assert_eq!(combined, 1);
-
-    // The total is the count of the proposals the same filters list.
-    let (listed, _, total_listed) =
-        total(&mut engine, Some(MemoryKind::Rule), Some("parser.rs"), None);
-    assert_eq!(proposed_in(&listed), total_listed);
+    assert_eq!(total, 3);
 }

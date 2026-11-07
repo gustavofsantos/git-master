@@ -1570,8 +1570,9 @@ pub enum Event {
     /// Answers `ListMemories`, with the cursor of the next page when there is one. `contexts_read`
     /// is false when `contexts.db` exists but could not be read, and `note` says why the contexts
     /// were not used (an unreadable file, or a clone whose id clashes, D193 (4)). `proposed_total`
-    /// is the exact number of proposed memories the same scope, kind, path and author select,
-    /// ignoring the status, the query and the page. The memory text is untrusted data.
+    /// is the exact number of proposed memories the repository sees (its own store and every visible
+    /// context, each memory once), whatever the request's filters, scope, status, query and page
+    /// are: the tab's badge. The memory text is untrusted data.
     MemoriesListed {
         id: OperationId,
         memories: Vec<Memory>,

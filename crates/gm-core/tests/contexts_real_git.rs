@@ -1489,14 +1489,13 @@ fn the_proposed_total_of_a_context_shared_by_two_repositories_matches_their_merg
     assert_eq!(everything.memories.len(), 4);
     assert_eq!(everything_in(&mut web, None).proposed_total, 2);
 
+    // The total is the same for every scope: the scope filters the list, not the count.
     let platform = everything_in(&mut api, Some("Platform"));
-    assert_eq!(
-        platform.proposed_total, 2,
-        "the repository's own is out of scope"
-    );
+    assert_eq!(platform.proposed_total, 3);
     assert_eq!(platform.memories.len(), 3);
     let own = everything_in(&mut api, Some("repository"));
-    assert_eq!(own.proposed_total, 1);
+    assert_eq!(own.proposed_total, 3);
+    assert_eq!(own.memories.len(), 1);
 }
 
 #[test]
@@ -1522,8 +1521,6 @@ fn the_proposed_total_is_full_on_a_page_of_one_and_ignores_the_query() {
     );
 
     let billing = everything_in(&mut api, Some("Billing"));
-    assert_eq!(
-        billing.proposed_total, 1,
-        "api sees Billing through Platform"
-    );
+    assert_eq!(billing.memories.len(), 1, "only beta is in Billing");
+    assert_eq!(billing.proposed_total, 3, "the total ignores the scope");
 }

@@ -103,8 +103,8 @@ pub struct MemoryPage {
     /// False when the contexts could not be read (`note` says why).
     pub contexts_read: bool,
     pub note: Option<String>,
-    /// The exact number of proposed memories the request's scope, kind, path and author select,
-    /// ignoring the status, the query and the page (the engine's `proposed_total`).
+    /// The exact number of proposed memories the repository sees, whatever the request's filters,
+    /// scope, status, query and page (the engine's `proposed_total`).
     pub proposed_total: u32,
 }
 
@@ -208,7 +208,7 @@ impl MemoriesPage {
         &self.memories
     }
 
-    /// How many proposed memories the count on the tab shows: the engine's exact `proposed_total`
+    /// How many proposed memories the badge on the tab shows: the engine's exact `proposed_total`
     /// of the last list applied. Before a list is applied it counts the proposals loaded.
     #[must_use]
     pub fn proposed_count(&self) -> usize {
