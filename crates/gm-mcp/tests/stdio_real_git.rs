@@ -133,7 +133,11 @@ fn the_handshake_lists_only_the_tools_the_agent_does_not_have() {
             "label_get",
             "label_create",
             "label_attach",
-            "thread_link"
+            "thread_link",
+            "memories_search",
+            "memory_get",
+            "contexts_list",
+            "memory_propose"
         ]
     );
 }

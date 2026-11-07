@@ -4,6 +4,7 @@
 //! app reads too. The tools are the ones only `GitMaster` has (review comments and
 //! threads); the agent has its own for files, search and Git.
 
+mod memory_tools;
 mod protocol;
 mod session;
 mod tools;
