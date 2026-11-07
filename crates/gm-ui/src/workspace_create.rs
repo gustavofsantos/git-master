@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gm_schema::{
-    Actor, BranchEntry, BranchHow, CommandKind, MemberPlan, MemberRequest, OperationId,
-    OperationState, WorkspaceProblem,
+    Actor, BranchHow, CommandKind, MemberPlan, MemberRequest, OperationId, OperationState,
+    WorkspaceProblem,
 };
 use gpui::{
     App, Context, Div, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions,
@@ -16,12 +16,12 @@ use gpui::{
 };
 
 use crate::FocusNext;
-use crate::fuzzy;
 use crate::text_area::{Down, Newline, TextArea, TextAreaEvent, Up};
 use crate::text_search::DEBOUNCE_MS;
 use crate::theme;
 use crate::view::StatusView;
-use crate::worktree_create::{SUGGESTIONS_SHOWN, move_pick};
+use crate::workspace_branch::{Choice, Known, RepoBranches, choices};
+use crate::worktree_create::move_pick;
 use crate::worktree_list::same_path;
 
 const WIDTH: f32 = 560.;
@@ -105,36 +105,6 @@ impl Form {
         for member in &mut self.members {
             branch.clone_into(&mut member.branch);
         }
-    }
-}
-
-/// The branches a row's field suggests. Only the window's own repository has a branch list the
-/// window already holds, so the field takes plain text for any other repository.
-#[must_use]
-pub(crate) fn suggestions(
-    repo: &str,
-    window_root: Option<&str>,
-    query: &str,
-    branches: &[BranchEntry],
-) -> Vec<String> {
-    match window_root {
-        Some(root) if same_path(root, repo.trim()) => {
-            let mut scored: Vec<(i64, &str)> = branches
-                .iter()
-                .filter(|branch| !branch.is_remote)
-                .filter_map(|branch| {
-                    fuzzy::fuzzy_match(query, &branch.name)
-                        .map(|found| (found.score, branch.name.as_str()))
-                })
-                .collect();
-            scored.sort_by_key(|a| std::cmp::Reverse(a.0));
-            scored
-                .into_iter()
-                .take(SUGGESTIONS_SHOWN)
-                .map(|(_, name)| name.to_owned())
-                .collect()
-        }
-        _ => Vec::new(),
     }
 }
 
@@ -377,41 +347,61 @@ impl Making {
 
 /// Whether Create Workspace is enabled: the form is complete, its plan is the answer for it with
 /// no problem, and no create is in flight.
-#[must_use]
-/// What Escape does in the dialog: an open repository list closes first and the dialog stays, so
-/// a second Escape closes the dialog. Returns whether the dialog closes.
-pub(crate) fn escape_closes_dialog(choosing: &mut Option<usize>) -> bool {
-    choosing.take().is_none()
+/// What Escape does in the dialog: an open repository list or branch list closes first and the
+/// dialog stays, so a second Escape closes the dialog. Returns whether the dialog closes.
+pub(crate) fn escape_closes_dialog(
+    choosing: &mut Option<usize>,
+    picking: &mut Option<usize>,
+) -> bool {
+    if choosing.take().is_some() {
+        return false;
+    }
+    picking.take().is_none()
 }
 
 pub(crate) fn may_create(form: &Form, planning: &Planning, making: &Making) -> bool {
     form.complete() && planning.ready() && !making.is_pending()
 }
 
-/// One row of the dialog: its repository folder, its branch field, and the observers that keep
-/// the form in step with the field.
+/// One row of the dialog: its repository folder and the branch chosen for it. The branch is
+/// picked from the repository's list, or typed as a new name in the list's filter.
+/// The branch list open under a row, as the window shows it: the filter field, what the filter
+/// leaves, why there may be nothing to choose yet, and the entry Enter takes.
+#[derive(Clone)]
+pub(crate) struct BranchList {
+    pub(crate) row: usize,
+    pub(crate) filter: Entity<TextArea>,
+    pub(crate) choices: Vec<Choice>,
+    pub(crate) notice: Option<&'static str>,
+    pub(crate) pick: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MemberRow {
     pub(crate) repo: String,
-    pub(crate) branch: Entity<TextArea>,
-    _subscriptions: Vec<Subscription>,
+    pub(crate) branch: String,
 }
 
 /// The dialog while it is open: its fields, the rows, the open choosers and the error it shows.
 pub(crate) struct WorkspaceDialog {
     pub(crate) name: Entity<TextArea>,
     pub(crate) branch_all: Entity<TextArea>,
+    /// The filter of the open branch list. One field serves whichever row's list is open.
+    pub(crate) filter: Entity<TextArea>,
     pub(crate) rows: Vec<MemberRow>,
     /// The row whose repository list is open.
     pub(crate) choosing: Option<usize>,
-    /// The row whose branch suggestions show: the one typed in last.
-    pub(crate) active: Option<usize>,
-    /// The suggestion Up and Down highlight; `None` until one is moved to.
+    /// The row whose branch list is open.
+    pub(crate) picking: Option<usize>,
+    /// The entry Up and Down highlight in the open branch list; `None` until one is moved to, and
+    /// then the first entry is the one Enter takes.
     pub(crate) pick: Option<usize>,
     pub(crate) error: Option<String>,
-    /// The form and the **Branch for all** text the observers last saw. A field notifies on every
-    /// caret blink, so a change counts only when these differ.
+    /// The form, the **Branch for all** text and the filter the observers last saw. A field
+    /// notifies on every caret blink, so a change counts only when these differ.
     seen: Form,
     seen_all: String,
+    seen_filter: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -424,23 +414,26 @@ impl WorkspaceDialog {
                 .iter()
                 .map(|row| Member {
                     repo: row.repo.clone(),
-                    branch: row.branch.read(cx).text().to_owned(),
+                    branch: row.branch.clone(),
                 })
                 .collect(),
         }
     }
 
-    /// The fields in the order Tab visits them: the name, Branch for all, then each row's branch.
+    /// The fields in the order Tab visits them: the name, Branch for all, then the filter of an
+    /// open branch list.
     fn fields(&self) -> Vec<&Entity<TextArea>> {
         let mut fields = vec![&self.name, &self.branch_all];
-        fields.extend(self.rows.iter().map(|row| &row.branch));
+        if self.picking.is_some() {
+            fields.push(&self.filter);
+        }
         fields
     }
 }
 
 impl StatusView {
     /// Opens the dialog. The first row starts with this window's repository and its branch, when
-    /// it has them, and the plan follows.
+    /// it has them, and the plan follows. The repository's branches are asked for at once.
     pub(crate) fn open_workspace_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace_dialog.is_some() {
             return;
@@ -456,6 +449,7 @@ impl StatusView {
         };
         let name = field("Workspace name", cx);
         let branch_all = field("Branch for all", cx);
+        let filter = field("Filter branches", cx);
         let mut subscriptions = Vec::new();
         for area in [&name, &branch_all] {
             subscriptions.push(cx.observe(area, |this, _, cx| this.on_workspace_field(cx)));
@@ -469,57 +463,44 @@ impl StatusView {
                 },
             ));
         }
+        subscriptions.push(cx.observe(&filter, |this, _, cx| this.on_branch_filter(cx)));
+        subscriptions.push(cx.subscribe_in(
+            &filter,
+            window,
+            |this, _, event: &TextAreaEvent, window, cx| {
+                if *event == TextAreaEvent::Cancel {
+                    this.cancel_workspace_dialog(window, cx);
+                }
+            },
+        ));
         let focus = name.clone();
-        let first_repo = window_root.clone().unwrap_or_default();
-        let first = Self::new_member_row(first_repo, &head, window, cx);
+        let first_repo = window_root.unwrap_or_default();
+        let first = MemberRow {
+            repo: first_repo.clone(),
+            branch: head,
+        };
         let mut dialog = WorkspaceDialog {
             name,
             branch_all,
+            filter,
             rows: vec![first],
             choosing: None,
-            active: None,
+            picking: None,
             pick: None,
             error: None,
             seen: Form::default(),
             seen_all: String::new(),
+            seen_filter: String::new(),
             _subscriptions: subscriptions,
         };
         dialog.seen = dialog.form(cx);
         self.workspace_dialog = Some(dialog);
         self.model.workspace_plan = Planning::default();
+        self.model.workspace_branches = RepoBranches::default();
         self.request_workspaces();
+        self.request_branches(&first_repo, cx);
         focus.update(cx, |area, cx| area.focus(window, cx));
         self.plan_soon(cx);
-    }
-
-    /// A row with a repository and a branch field. Its branch field is observed like the others.
-    fn new_member_row(
-        repo: String,
-        branch: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> MemberRow {
-        let branch_field = cx.new(|cx| TextArea::new("Branch", cx).with_lines(1, 1));
-        if !branch.is_empty() {
-            branch_field.update(cx, |area, cx| area.set_text(branch, cx));
-        }
-        let subscriptions = vec![
-            cx.observe(&branch_field, |this, _, cx| this.on_workspace_field(cx)),
-            cx.subscribe_in(
-                &branch_field,
-                window,
-                |this, _, event: &TextAreaEvent, window, cx| {
-                    if *event == TextAreaEvent::Cancel {
-                        this.cancel_workspace_dialog(window, cx);
-                    }
-                },
-            ),
-        ];
-        MemberRow {
-            repo,
-            branch: branch_field,
-            _subscriptions: subscriptions,
-        }
     }
 
     pub(crate) fn close_workspace_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -535,7 +516,7 @@ impl StatusView {
         let Some(dialog) = self.workspace_dialog.as_mut() else {
             return;
         };
-        if escape_closes_dialog(&mut dialog.choosing) {
+        if escape_closes_dialog(&mut dialog.choosing, &mut dialog.picking) {
             self.close_workspace_dialog(window, cx);
         } else {
             cx.notify();
@@ -553,31 +534,32 @@ impl StatusView {
             dialog.seen_all.clone_from(&all);
             let mut filled = dialog.form(cx);
             filled.set_branch_for_all(&all);
-            for (row, member) in dialog.rows.iter().zip(&filled.members) {
-                if row.branch.read(cx).text() != member.branch {
-                    row.branch
-                        .update(cx, |area, cx| area.set_text(&member.branch, cx));
-                }
+            for (row, member) in dialog.rows.iter_mut().zip(filled.members) {
+                row.branch = member.branch;
             }
         }
         let form = dialog.form(cx);
         if dialog.seen == form {
             return;
         }
-        // The row whose branch changed is the one whose suggestions show.
-        if let Some(at) = (0..form.members.len()).find(|&at| {
-            dialog
-                .seen
-                .members
-                .get(at)
-                .is_none_or(|seen| seen.branch != form.members[at].branch)
-        }) {
-            dialog.active = Some(at);
-        }
         dialog.seen = form;
         dialog.pick = None;
         dialog.error = None;
         self.plan_soon(cx);
+    }
+
+    /// The filter of the open branch list changed: its highlight starts again at the first entry.
+    /// A caret blink notifies too, so only a change of the text counts.
+    fn on_branch_filter(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.workspace_dialog.as_mut() else {
+            return;
+        };
+        let text = dialog.filter.read(cx).text().to_owned();
+        if text != dialog.seen_filter {
+            dialog.seen_filter = text;
+            dialog.pick = None;
+            cx.notify();
+        }
     }
 
     /// Asks for a plan after the edits settle: the plan of the newest edit is sent once the
@@ -620,7 +602,7 @@ impl StatusView {
         cx.notify();
     }
 
-    /// The repository list of row `index` opens or closes.
+    /// The repository list of row `index` opens or closes. Only one list is open at a time.
     pub(crate) fn toggle_repo_chooser(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(dialog) = self.workspace_dialog.as_mut() {
             dialog.choosing = if dialog.choosing == Some(index) {
@@ -628,67 +610,131 @@ impl StatusView {
             } else {
                 Some(index)
             };
+            dialog.picking = None;
         }
         cx.notify();
     }
 
-    /// Row `index` takes `repo`, and its list closes.
-    pub(crate) fn choose_repo(&mut self, index: usize, repo: String, cx: &mut Context<Self>) {
+    /// Row `index` takes `repo`, and its list closes. The repository's branches are asked for.
+    pub(crate) fn choose_repo(&mut self, index: usize, repo: &str, cx: &mut Context<Self>) {
         if let Some(dialog) = self.workspace_dialog.as_mut() {
             if let Some(row) = dialog.rows.get_mut(index) {
-                row.repo = repo;
+                repo.clone_into(&mut row.repo);
             }
             dialog.choosing = None;
             dialog.error = None;
         }
+        self.request_branches(repo, cx);
         self.on_workspace_field(cx);
+    }
+
+    /// The branch list of row `index` opens or closes. It asks for the repository's branches when
+    /// they are not known, and takes the focus for its filter.
+    pub(crate) fn toggle_branch_list(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.workspace_dialog.as_mut() else {
+            return;
+        };
+        if dialog.picking == Some(index) {
+            dialog.picking = None;
+            cx.notify();
+            return;
+        }
+        dialog.picking = Some(index);
+        dialog.choosing = None;
+        dialog.pick = None;
+        let repo = dialog
+            .rows
+            .get(index)
+            .map(|row| row.repo.clone())
+            .unwrap_or_default();
+        let filter = dialog.filter.clone();
+        filter.update(cx, |area, cx| area.set_text("", cx));
+        self.request_branches(&repo, cx);
+        filter.update(cx, |area, cx| area.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Asks the engine for the branches of `repo`, unless they are known or on their way. The
+    /// answer is kept by the model, which drops it when its request is no longer the one waited for.
+    pub(crate) fn request_branches(&mut self, repo: &str, cx: &mut Context<Self>) {
+        let repo = repo.trim();
+        if repo.is_empty() || !self.model.workspace_branches.wants(repo) {
+            return;
+        }
+        let id = self.engine.dispatch(
+            Actor::Human,
+            CommandKind::ListRepoBranches {
+                repo: repo.to_owned(),
+            },
+        );
+        self.model.workspace_branches.request(repo, id);
+        cx.notify();
     }
 
     /// + Add repository: a new row, with the **Branch for all** text as its branch.
-    pub(crate) fn add_repo_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = self.workspace_dialog.as_ref() else {
+    pub(crate) fn add_repo_row(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.workspace_dialog.as_mut() else {
             return;
         };
-        let all = dialog.branch_all.read(cx).text().to_owned();
-        let row = Self::new_member_row(String::new(), &all, window, cx);
-        if let Some(dialog) = self.workspace_dialog.as_mut() {
-            dialog.rows.push(row);
-        }
+        let branch = dialog.branch_all.read(cx).text().to_owned();
+        dialog.rows.push(MemberRow {
+            repo: String::new(),
+            branch,
+        });
         self.on_workspace_field(cx);
     }
 
-    /// The remove button of row `index`.
+    /// The remove button of row `index`. Both lists close: their rows may have moved.
     pub(crate) fn remove_repo_row(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(dialog) = self.workspace_dialog.as_mut() {
             if index < dialog.rows.len() {
                 dialog.rows.remove(index);
             }
             dialog.choosing = None;
-            dialog.active = None;
+            dialog.picking = None;
             dialog.pick = None;
         }
         self.on_workspace_field(cx);
     }
 
-    /// The branches row `index` suggests for what it has typed.
-    fn suggestions_of(&self, dialog: &WorkspaceDialog, cx: &App) -> Vec<String> {
-        let Some(row) = dialog.active.and_then(|at| dialog.rows.get(at)) else {
-            return Vec::new();
+    /// The branch list open under a row, as the window reads it now. `None` when no list is open.
+    pub(crate) fn workspace_branch_list(&self, cx: &App) -> Option<BranchList> {
+        let dialog = self.workspace_dialog.as_ref()?;
+        let row = dialog.picking?;
+        let member = dialog.rows.get(row)?;
+        let filter = dialog.filter.read(cx).text().to_owned();
+        let (known, notice) = if member.repo.trim().is_empty() {
+            (Known::Loading, Some("Choose a repository first."))
+        } else {
+            let known = self.model.workspace_branches.known(&member.repo);
+            let notice = match known {
+                Known::Loading => Some("Loading branches…"),
+                Known::Failed => {
+                    Some("Could not read this repository's branches. A new name still works.")
+                }
+                Known::Listed(_) => None,
+            };
+            (known, notice)
         };
-        let window_root = self.model.status().map(|status| status.root.as_str());
-        suggestions(
-            &row.repo,
-            window_root,
-            row.branch.read(cx).text(),
-            self.model.branches.known(),
-        )
+        Some(BranchList {
+            row,
+            filter: dialog.filter.clone(),
+            choices: choices(&filter, known),
+            notice,
+            pick: dialog.pick,
+        })
     }
 
-    /// Up or Down with suggestions on screen: moves the highlight. Returns whether it did, so the
+    /// Up or Down with a branch list open: moves the highlight. Returns whether it did, so the
     /// keys go on to the field when it did not.
     pub(crate) fn move_workspace_pick(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
-        let count = match self.workspace_dialog.as_ref() {
-            Some(dialog) => self.suggestions_of(dialog, cx).len(),
+        let count = match self.workspace_branch_list(cx) {
+            Some(list) => list.choices.len(),
             None => return false,
         };
         if count == 0 {
@@ -702,34 +748,35 @@ impl StatusView {
         true
     }
 
-    /// Enter: takes the highlighted suggestion, or else sends the create.
+    /// Enter: takes the highlighted entry of an open branch list, or else sends the create. While
+    /// a list is open Enter never sends the create, so a half-read list cannot create by accident.
     fn workspace_enter(&mut self, cx: &mut Context<Self>) {
-        let chosen = match self.workspace_dialog.as_ref() {
-            Some(dialog) => dialog.pick.and_then(|at| {
-                let row = dialog.active?;
-                self.suggestions_of(dialog, cx)
-                    .into_iter()
-                    .nth(at)
-                    .map(|name| (row, name))
-            }),
-            None => None,
+        let Some(list) = self.workspace_branch_list(cx) else {
+            self.submit_workspace(cx);
+            return;
         };
-        match chosen {
-            Some((row, name)) => self.choose_workspace_suggestion(row, &name, cx),
-            None => self.submit_workspace(cx),
+        if let Some(choice) = list.choices.get(list.pick.unwrap_or(0)) {
+            let value = choice.fills().to_owned();
+            self.choose_workspace_branch(list.row, value, cx);
         }
     }
 
-    /// Puts `name` in the branch field of row `index`. Its observer then asks for a plan.
-    fn choose_workspace_suggestion(&mut self, index: usize, name: &str, cx: &mut Context<Self>) {
+    /// Puts `branch` in row `index` and closes its list. The observer then asks for a plan.
+    pub(crate) fn choose_workspace_branch(
+        &mut self,
+        index: usize,
+        branch: String,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(dialog) = self.workspace_dialog.as_mut() {
-            dialog.pick = None;
-            dialog.active = None;
-            if let Some(row) = dialog.rows.get(index) {
-                row.branch.update(cx, |area, cx| area.set_text(name, cx));
+            if let Some(row) = dialog.rows.get_mut(index) {
+                row.branch = branch;
             }
+            dialog.picking = None;
+            dialog.pick = None;
+            dialog.error = None;
         }
-        cx.notify();
+        self.on_workspace_field(cx);
     }
 
     /// Create Workspace and Enter: sends the create when the rules allow it.
@@ -918,7 +965,7 @@ impl StatusView {
         };
         let window_root = self.model.status().map(|status| status.root.clone());
         let choices = repo_choices(window_root.as_deref(), self.recents.paths());
-        let suggested = self.suggestions_of(dialog, cx);
+        let open = self.workspace_branch_list(cx);
         div()
             .flex()
             .flex_col()
@@ -933,12 +980,7 @@ impl StatusView {
                         planning: planning.is_planning(),
                         choosing: dialog.choosing == Some(index),
                         choices: &choices,
-                        suggestions: if dialog.active == Some(index) {
-                            &suggested
-                        } else {
-                            &[]
-                        },
-                        pick: dialog.pick,
+                        branches: open.as_ref().filter(|list| list.row == index),
                     },
                     cx,
                 )
@@ -1031,7 +1073,7 @@ fn pick_repo_folder(index: usize, cx: &mut Context<StatusView>) {
         Ok(Ok(Some(paths))) => {
             if let Some(path) = paths.into_iter().next() {
                 let text = path.display().to_string();
-                let _ = this.update(cx, |view, cx| view.choose_repo(index, text, cx));
+                let _ = this.update(cx, |view, cx| view.choose_repo(index, &text, cx));
             }
         }
         // Cancelled: nothing to do.
@@ -1044,7 +1086,7 @@ fn pick_repo_folder(index: usize, cx: &mut Context<StatusView>) {
     .detach();
 }
 
-/// What one row of the dialog shows: its place, its field, the plan or problem of its branch,
+/// What one row of the dialog shows: its place, its branch, the plan or problem of its branch,
 /// and the pickers that are open for it.
 #[derive(Clone, Copy)]
 struct RowView<'a> {
@@ -1054,12 +1096,11 @@ struct RowView<'a> {
     planning: bool,
     choosing: bool,
     choices: &'a [String],
-    suggestions: &'a [String],
-    pick: Option<usize>,
+    branches: Option<&'a BranchList>,
 }
 
-/// One row: the repository button, the branch field, the remove button, the chooser or the
-/// suggestions when they are open, and what the row will do or why it cannot.
+/// One row: the repository button, the branch button, the remove button, the chooser or the branch
+/// list when they are open, and what the row will do or why it cannot.
 fn member_row(view: RowView<'_>, cx: &Context<StatusView>) -> Div {
     let RowView {
         index,
@@ -1068,8 +1109,7 @@ fn member_row(view: RowView<'_>, cx: &Context<StatusView>) -> Div {
         planning,
         choosing,
         choices,
-        suggestions,
-        pick,
+        branches,
     } = view;
     let repo_text = if row.repo.is_empty() {
         "Choose a repository".to_owned()
@@ -1112,7 +1152,7 @@ fn member_row(view: RowView<'_>, cx: &Context<StatusView>) -> Div {
                             }),
                         ),
                 )
-                .child(div().flex_1().min_w(px(0.)).child(row.branch.clone()))
+                .child(branch_button(index, row, branches.is_some(), cx))
                 .child(
                     div()
                         .id(remove)
@@ -1130,8 +1170,53 @@ fn member_row(view: RowView<'_>, cx: &Context<StatusView>) -> Div {
                 ),
         )
         .children(choosing.then(|| chooser(index, choices, cx)))
-        .children((!suggestions.is_empty()).then(|| suggestion_list(index, suggestions, pick, cx)))
+        .children(branches.map(|list| branch_list_view(index, list, cx)))
         .children(outcome_line(index, outcome, planning, cx))
+}
+
+/// The branch button of row `index`: the chosen branch, or "Choose a branch". A click opens or
+/// closes the row's branch list.
+fn branch_button(
+    index: usize,
+    row: &MemberRow,
+    open: bool,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    let chosen = !row.branch.trim().is_empty();
+    div()
+        .id(SharedString::from(format!("workspace-row-branch-{index}")))
+        .flex_1()
+        .min_w(px(0.))
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(if open {
+            theme::accent()
+        } else {
+            theme::hairline()
+        })
+        .cursor_pointer()
+        .text_sm()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_color(if chosen {
+            theme::text()
+        } else {
+            theme::muted()
+        })
+        .child(if chosen {
+            row.branch.clone()
+        } else {
+            "Choose a branch".to_owned()
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.toggle_branch_list(index, window, cx);
+            }),
+        )
 }
 
 /// The repositories a row can take, then Choose Folder….
@@ -1170,7 +1255,7 @@ fn chooser(index: usize, choices: &[String], cx: &Context<StatusView>) -> Div {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        this.choose_repo(index, repo.clone(), cx);
+                        this.choose_repo(index, &repo, cx);
                     }),
                 )
         }))
@@ -1197,43 +1282,104 @@ fn chooser(index: usize, choices: &[String], cx: &Context<StatusView>) -> Div {
         )
 }
 
-/// The branches the field of row `index` suggests. A click takes any row.
-fn suggestion_list(
-    index: usize,
-    names: &[String],
-    pick: Option<usize>,
-    cx: &Context<StatusView>,
-) -> Div {
+/// The branch list of row `index`: its filter, the notice while it loads or fails, and the
+/// choices with the entry Enter takes highlighted.
+fn branch_list_view(index: usize, list: &BranchList, cx: &Context<StatusView>) -> Div {
+    let target = list.filter.clone();
+    let highlighted = list.pick.unwrap_or(0);
     div()
         .flex()
         .flex_col()
-        .rounded_md()
-        .border_1()
-        .border_color(theme::hairline())
-        .children(names.iter().enumerate().map(|(at, name)| {
-            let chosen = name.clone();
+        .gap_1()
+        .child(
             div()
-                .id(SharedString::from(format!(
-                    "workspace-suggestion-{index}-{at}"
-                )))
-                .h(px(24.))
                 .px_2()
-                .flex()
-                .items_center()
-                .text_sm()
-                .cursor_pointer()
-                .text_color(theme::text())
-                .when(pick == Some(at), |this| {
-                    this.bg(theme::selection()).text_color(theme::accent())
-                })
-                .child(name.clone())
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(theme::hairline())
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        this.choose_workspace_suggestion(index, &chosen, cx);
+                    cx.listener(move |_, _: &MouseDownEvent, window, cx| {
+                        target.update(cx, |area, cx| area.focus(window, cx));
                     }),
                 )
+                .child(list.filter.clone()),
+        )
+        .children(
+            list.notice
+                .map(|notice| div().text_xs().text_color(theme::muted()).child(notice)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .rounded_md()
+                .border_1()
+                .border_color(theme::hairline())
+                .children(
+                    list.choices.iter().enumerate().map(|(at, choice)| {
+                        branch_choice(index, at, choice, at == highlighted, cx)
+                    }),
+                ),
+        )
+}
+
+/// One choice of a branch list: a branch, a remote-only branch marked as such, or the new name.
+fn branch_choice(
+    index: usize,
+    at: usize,
+    choice: &Choice,
+    highlighted: bool,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    let (label, marker) = match choice {
+        Choice::Branch {
+            name,
+            remote_only: false,
+        } => (name.clone(), None),
+        Choice::Branch {
+            name,
+            remote_only: true,
+        } => (name.clone(), Some("remote only")),
+        Choice::Create(name) => (format!("Create branch '{name}'"), None),
+    };
+    let value = choice.fills().to_owned();
+    div()
+        .id(SharedString::from(format!("workspace-branch-{index}-{at}")))
+        .h(px(24.))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_sm()
+        .cursor_pointer()
+        .text_color(theme::text())
+        .when(highlighted, |this| {
+            this.bg(theme::selection()).text_color(theme::accent())
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(label),
+        )
+        .children(marker.map(|text| {
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(text)
         }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.choose_workspace_branch(index, value.clone(), cx);
+            }),
+        )
 }
 
 /// What a row will do with its branch, or why it cannot. While the plan is in flight the row says so.
@@ -1335,8 +1481,8 @@ fn add_repo_button(cx: &Context<StatusView>) -> Stateful<Div> {
         .child("+ Add repository")
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                this.add_repo_row(window, cx);
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.add_repo_row(cx);
             }),
         )
 }
@@ -1396,7 +1542,7 @@ fn buttons(pending: bool, allowed: bool, cx: &Context<StatusView>) -> Div {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_schema::{BranchEntry, WorkspaceProblem};
+    use gm_schema::WorkspaceProblem;
 
     fn member(repo: &str, branch: &str) -> Member {
         Member {
@@ -1437,29 +1583,25 @@ mod tests {
         }
     }
 
-    fn branch(name: &str, is_remote: bool) -> BranchEntry {
-        BranchEntry {
-            name: name.to_owned(),
-            is_remote,
-            is_current: false,
-            upstream: None,
-            author_email: None,
-        }
-    }
-
     #[test]
-    fn escape_closes_an_open_repository_list_first_and_the_dialog_on_the_next() {
+    fn escape_closes_an_open_list_first_and_the_dialog_on_the_next() {
         let mut choosing = Some(1);
+        let mut picking = None;
         assert!(
-            !escape_closes_dialog(&mut choosing),
-            "the list closes, not the dialog"
+            !escape_closes_dialog(&mut choosing, &mut picking),
+            "the repository list closes, not the dialog"
         );
         assert_eq!(choosing, None);
+        let mut picking = Some(0);
         assert!(
-            escape_closes_dialog(&mut choosing),
+            !escape_closes_dialog(&mut choosing, &mut picking),
+            "the branch list closes, not the dialog"
+        );
+        assert_eq!(picking, None);
+        assert!(
+            escape_closes_dialog(&mut choosing, &mut picking),
             "a second Escape closes the dialog"
         );
-        assert_eq!(choosing, None);
     }
 
     #[test]
@@ -1494,21 +1636,6 @@ mod tests {
         let mut form = form("checkout", vec![member("/a", "old"), member("/b", "")]);
         form.set_branch_for_all("feat/pay");
         assert!(form.members.iter().all(|m| m.branch == "feat/pay"));
-    }
-
-    #[test]
-    fn only_the_window_repository_gets_branch_suggestions() {
-        let all = [
-            branch("main", false),
-            branch("feat/pay", false),
-            branch("origin/x", true),
-        ];
-        assert_eq!(
-            suggestions("/r", Some("/r/"), "", &all),
-            ["main", "feat/pay"]
-        );
-        assert!(suggestions("/other", Some("/r"), "", &all).is_empty());
-        assert!(suggestions("/r", None, "", &all).is_empty());
     }
 
     #[test]

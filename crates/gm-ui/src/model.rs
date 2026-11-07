@@ -44,6 +44,7 @@ use crate::threads::{HitPage, MarkdownCopy, ThreadsPage};
 use crate::transform_run::Transforms;
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
+use crate::workspace_branch::RepoBranches;
 use crate::workspace_create::{Answer, Making, Planning};
 use crate::workspace_list::WorkspaceList;
 use crate::workspace_remove::WorkspaceRemoval;
@@ -165,6 +166,8 @@ pub struct Model {
     pub workspaces: WorkspaceList,
     /// The New Workspace dialog's plan: the edit it answers, the plan in flight and its answer (D183).
     pub workspace_plan: Planning,
+    /// The branch listings of the repositories the New Workspace dialog asked for (D195).
+    pub workspace_branches: RepoBranches,
     /// The New Workspace dialog's create in flight, and its outcome (D183).
     pub workspace_making: Making,
     /// The Remove Workspace dialog's inspection, removal in flight and outcome (D183).
@@ -711,6 +714,12 @@ impl Model {
             }
             // The dialogs' own operations belong to them, not to the status bar: a failed plan is
             // shown in the New Workspace dialog, and so are a failed create or removal (D183).
+            Event::OperationChanged { id, state, .. }
+                if state == OperationState::Failed && self.workspace_branches.owns(id) =>
+            {
+                let _ = self.workspace_branches.failed(id);
+                None
+            }
             Event::OperationChanged {
                 id, state, detail, ..
             } if state.is_terminal() && self.workspace_plan.owns(id) => {
@@ -1048,6 +1057,15 @@ impl Model {
                 root,
             } => {
                 let _ = self.workspaces.listed(id, workspaces, root);
+                None
+            }
+            // A branch listing belongs to the dialog that asked for it (D195).
+            Event::RepoBranchesLoaded {
+                id,
+                repo,
+                branches,
+            } => {
+                let _ = self.workspace_branches.listed(id, &repo, branches);
                 None
             }
             // The plan is kept for the dialog, which drops it when the form has moved on (D183 (3)).
@@ -1835,6 +1853,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ReflogLoaded { id, .. }
         | Event::SubmoduleLoaded { id, .. }
         | Event::MembersListed { id, .. }
+        | Event::RepoBranchesLoaded { id, .. }
         | Event::WorkspacesListed { id, .. }
         | Event::WorkspacePlanned { id, .. }
         | Event::WorkspaceCreated { id, .. }
@@ -3935,7 +3954,7 @@ mod submodule_tests {
 mod workspace_tests {
     use super::*;
     use gm_schema::{
-        Actor, BranchHow, MemberPlan, RemovalBlocker, RemovalBlockerKind, WorkspaceRow,
+        Actor, BranchEntry, BranchHow, MemberPlan, RemovalBlocker, RemovalBlockerKind, WorkspaceRow,
     };
 
     fn row(name: &str) -> WorkspaceRow {
@@ -4017,6 +4036,54 @@ mod workspace_tests {
         assert_eq!(
             model.workspace_plan.failure(),
             Some("'bad' is not a workspace name")
+        );
+        assert_eq!(model.error, None);
+    }
+
+    #[test]
+    fn a_branch_listing_is_kept_for_the_request_its_repository_waits_for() {
+        let mut model = Model::default();
+        model.workspace_branches.request("/billing", OperationId(8));
+        let _ = model.apply(Event::RepoBranchesLoaded {
+            id: OperationId(7),
+            repo: "/billing".to_owned(),
+            branches: Vec::new(),
+        });
+        assert!(
+            model.workspace_branches.owns(OperationId(8)),
+            "a stale answer is dropped"
+        );
+        let _ = model.apply(Event::RepoBranchesLoaded {
+            id: OperationId(8),
+            repo: "/billing".to_owned(),
+            branches: vec![BranchEntry {
+                name: "main".to_owned(),
+                is_remote: false,
+                is_current: true,
+                upstream: None,
+                author_email: None,
+            }],
+        });
+        assert!(!model.workspace_branches.owns(OperationId(8)));
+        assert!(matches!(
+            model.workspace_branches.known("/billing"),
+            crate::workspace_branch::Known::Listed(branches) if branches.len() == 1
+        ));
+    }
+
+    #[test]
+    fn a_failed_branch_listing_is_recorded_and_not_shown_in_the_status_bar() {
+        let mut model = Model::default();
+        model.workspace_branches.request("/plain", OperationId(9));
+        let _ = model.apply(Event::OperationChanged {
+            id: OperationId(9),
+            actor: Actor::Human,
+            state: OperationState::Failed,
+            detail: Some("not a git repository".to_owned()),
+        });
+        assert_eq!(
+            model.workspace_branches.known("/plain"),
+            crate::workspace_branch::Known::Failed
         );
         assert_eq!(model.error, None);
     }

@@ -102,6 +102,7 @@ mod workflow_keys;
 mod workflow_review;
 mod workflow_run;
 mod workflows_page;
+mod workspace_branch;
 mod workspace_create;
 mod workspace_list;
 mod workspace_remove;
