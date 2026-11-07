@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gm_schema::threads::{
-    Memory, MemoryFilter, MemoryKind, MemorySource, MemorySourceInput, MemorySourceKind,
-    MemoryStatus,
+    FileChange, FileChangeState, Memory, MemoryFilter, MemoryKind, MemorySource, MemorySourceInput,
+    MemorySourceKind, MemoryStatus,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use sha2::{Digest, Sha256};
@@ -184,6 +184,46 @@ pub fn next_status(from: MemoryStatus, transition: Transition) -> Result<MemoryS
             transition_verb(transition)
         )
     })
+}
+
+/// Whether a file a memory names has changed since it was accepted (D192 (6)). `current` gives the
+/// blob of a path at `HEAD`: `Ok(None)` when there is no such file, an error when Git cannot answer.
+/// Only `accepted` and `superseded` memories are checked; a proposal has nothing to compare with.
+/// The recorded blob is the one of the last acceptance; a file that was absent then and is there now
+/// has changed. A renamed file is `missing` at its old path: nothing guesses its new name.
+#[must_use]
+pub fn files_changed_since(
+    memory: &Memory,
+    current: &dyn Fn(&str) -> Result<Option<String>, String>,
+) -> Vec<FileChange> {
+    if !matches!(
+        memory.status,
+        MemoryStatus::Accepted | MemoryStatus::Superseded
+    ) {
+        return Vec::new();
+    }
+    let mut files: Vec<&MemorySource> = memory
+        .sources
+        .iter()
+        .filter(|source| source.kind == MemorySourceKind::File)
+        .collect();
+    files.sort_by(|a, b| a.reference.cmp(&b.reference));
+    files
+        .into_iter()
+        .filter_map(|source| {
+            let state = match (source.blob_oid.as_deref(), current(&source.reference)) {
+                (_, Err(_)) => FileChangeState::Unknown,
+                (Some(recorded), Ok(Some(now))) if recorded != now => FileChangeState::Changed,
+                (Some(_), Ok(Some(_))) | (None, Ok(None)) => return None,
+                (Some(_), Ok(None)) => FileChangeState::Missing,
+                (None, Ok(Some(_))) => FileChangeState::Changed,
+            };
+            Some(FileChange {
+                path: source.reference.clone(),
+                state,
+            })
+        })
+        .collect()
 }
 
 /// A new uid: the first 16 hex digits of SHA-256 over 16 bytes from the process's random hasher
@@ -982,6 +1022,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn files_changed_since_covers_each_case_and_skips_proposals() {
+        let mut memory = Memory {
+            id: 1,
+            uid: "u".into(),
+            kind: MemoryKind::Rule,
+            text: "t".into(),
+            status: MemoryStatus::Accepted,
+            origin: "human".into(),
+            proposed_by: None,
+            model: None,
+            created_at: 1,
+            decided_at: Some(2),
+            decided_by: Some("human".into()),
+            reviewed: true,
+            sources: Vec::new(),
+            supersedes: Vec::new(),
+            superseded_by: Vec::new(),
+            files_changed_since: Vec::new(),
+        };
+        let source = |path: &str, blob: Option<&str>| MemorySource {
+            kind: MemorySourceKind::File,
+            reference: path.to_owned(),
+            repo_id: None,
+            entry_from: None,
+            entry_to: None,
+            blob_oid: blob.map(str::to_owned),
+        };
+        // a: same blob; b: edited; c: deleted; d: appeared; e: absent both times; f: git fails.
+        memory.sources = vec![
+            source("c.rs", Some("c1")),
+            source("a.rs", Some("a1")),
+            source("b.rs", Some("b1")),
+            source("d.rs", None),
+            source("e.rs", None),
+            source("f.rs", Some("f1")),
+            MemorySource {
+                kind: MemorySourceKind::Commit,
+                ..source("0123", Some("x"))
+            },
+        ];
+        let now = |path: &str| match path {
+            "a.rs" => Ok(Some("a1".to_owned())),
+            "b.rs" => Ok(Some("b2".to_owned())),
+            "c.rs" | "e.rs" => Ok(None),
+            "d.rs" => Ok(Some("d1".to_owned())),
+            "f.rs" => Err("git failed".to_owned()),
+            other => panic!("unexpected path {other}"),
+        };
+        let changes = files_changed_since(&memory, &now);
+        let want = vec![
+            FileChange {
+                path: "b.rs".into(),
+                state: FileChangeState::Changed,
+            },
+            FileChange {
+                path: "c.rs".into(),
+                state: FileChangeState::Missing,
+            },
+            FileChange {
+                path: "d.rs".into(),
+                state: FileChangeState::Changed,
+            },
+            FileChange {
+                path: "f.rs".into(),
+                state: FileChangeState::Unknown,
+            },
+        ];
+        assert_eq!(changes, want);
+
+        memory.status = MemoryStatus::Superseded;
+        assert_eq!(files_changed_since(&memory, &now), want, "superseded too");
+
+        memory.status = MemoryStatus::Proposed;
+        assert!(files_changed_since(&memory, &now).is_empty());
     }
 
     #[test]

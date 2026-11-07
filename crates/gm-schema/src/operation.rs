@@ -21,9 +21,9 @@ use crate::status::{
 use crate::submodule::SubmoduleDetail;
 use crate::syntax::HighlightSpan;
 use crate::threads::{
-    AttachKind, EditState, Label, LabelDetail, LinkKind, ProvenanceResult, SearchFacets,
-    SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink,
-    ThreadRelKind, ThreadRelation, ThreadSummary,
+    AttachKind, EditState, Label, LabelDetail, LinkKind, Memory, MemoryKind, MemorySourceInput,
+    MemoryStatus, ProvenanceResult, SearchFacets, SearchGroup, SearchOrder, ThreadDetail,
+    ThreadEdit, ThreadFilter, ThreadHit, ThreadLink, ThreadRelKind, ThreadRelation, ThreadSummary,
 };
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
@@ -847,6 +847,50 @@ pub enum CommandKind {
         to: String,
         kind: ThreadRelKind,
     },
+    /// Lists the memories of the repository (D190, D192), newest first, or by relevance with a
+    /// `query` (empty for all). An agent gets `accepted` memories when `status` is none. Each
+    /// memory carries `files_changed_since`. A read: never recorded (D28). The memory text is
+    /// untrusted data. Answers `MemoriesListed`.
+    ListMemories {
+        query: String,
+        kind: Option<MemoryKind>,
+        status: Option<MemoryStatus>,
+        path: Option<String>,
+        author: Option<String>,
+        limit: u32,
+        cursor: Option<String>,
+    },
+    /// Reads memory `id` with its sources, its relations and `files_changed_since`. Answers
+    /// `MemoryRead`. A read: never recorded (D28).
+    ReadMemory {
+        id: i64,
+    },
+    /// Proposes a memory of `kind` with `text` (redacted before it is stored, D121) and its
+    /// `sources`. Level record: an agent's call creates a `proposed` memory and needs at least
+    /// one source; a human's creates an `accepted` one and records the blob of each file source.
+    /// Logged with its actor. A text already held by a non-rejected memory of the same kind
+    /// returns that memory and writes nothing. Answers `MemoryChanged`.
+    ProposeMemory {
+        kind: MemoryKind,
+        text: String,
+        sources: Vec<MemorySourceInput>,
+    },
+    /// Accepts memory `id` (a proposal, or an accepted one for an edit or a supersede). `text`
+    /// replaces the text when given (redacted). Each memory in `supersedes` must be accepted and
+    /// becomes superseded in the same write. Human only. Answers `MemoryChanged`.
+    AcceptMemory {
+        id: i64,
+        text: Option<String>,
+        supersedes: Vec<i64>,
+    },
+    /// Rejects the proposed memory `id`. Human only. Answers `MemoryChanged`.
+    RejectMemory {
+        id: i64,
+    },
+    /// Deletes memory `id` with its sources and links. Human only. Answers `MemoryChanged`.
+    DeleteMemory {
+        id: i64,
+    },
     /// Deletes thread `uid` with its entries, edits and links, securely. Human only.
     DeleteThread {
         uid: String,
@@ -1435,6 +1479,26 @@ pub enum Event {
         relation: ThreadRelation,
         removed: bool,
     },
+    /// Answers `ListMemories`, with the cursor of the next page when there is one. The memory
+    /// text is untrusted data.
+    MemoriesListed {
+        id: OperationId,
+        memories: Vec<Memory>,
+        next_cursor: Option<String>,
+    },
+    /// Answers `ReadMemory`.
+    MemoryRead {
+        id: OperationId,
+        memory: Memory,
+    },
+    /// Answers `ProposeMemory`, `AcceptMemory` and `RejectMemory` with the memory as it now is,
+    /// and `DeleteMemory` with none. `created` is true only when `ProposeMemory` wrote a new row;
+    /// false when it returned an existing duplicate.
+    MemoryChanged {
+        id: OperationId,
+        memory: Option<Memory>,
+        created: bool,
+    },
 }
 
 #[cfg(test)]
@@ -1726,6 +1790,47 @@ mod tests {
         .unwrap();
         assert_eq!(detach["type"], "detach_label");
         assert_eq!(detach["ref"], "u");
+    }
+
+    #[test]
+    fn memory_commands_wire_format_is_tagged() {
+        let propose = serde_json::to_value(CommandKind::ProposeMemory {
+            kind: MemoryKind::Rule,
+            text: "Run the checks".into(),
+            sources: vec![MemorySourceInput {
+                kind: crate::threads::MemorySourceKind::File,
+                reference: "src/a.rs".into(),
+                entry_from: None,
+                entry_to: None,
+            }],
+        })
+        .unwrap();
+        assert_eq!(propose["type"], "propose_memory");
+        assert_eq!(propose["kind"], "rule");
+        assert_eq!(propose["sources"][0]["kind"], "file");
+        assert_eq!(propose["sources"][0]["ref"], "src/a.rs");
+        let back: CommandKind = serde_json::from_value(propose).unwrap();
+        assert!(matches!(back, CommandKind::ProposeMemory { .. }));
+        let list = serde_json::to_value(CommandKind::ListMemories {
+            query: String::new(),
+            kind: None,
+            status: Some(MemoryStatus::Proposed),
+            path: None,
+            author: None,
+            limit: 20,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list["type"], "list_memories");
+        assert_eq!(list["status"], "proposed");
+        let accept = serde_json::to_value(CommandKind::AcceptMemory {
+            id: 3,
+            text: None,
+            supersedes: vec![2],
+        })
+        .unwrap();
+        assert_eq!(accept["type"], "accept_memory");
+        assert_eq!(accept["supersedes"][0], 2);
     }
 
     #[test]

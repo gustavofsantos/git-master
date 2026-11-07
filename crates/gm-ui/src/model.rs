@@ -1115,6 +1115,10 @@ impl Model {
                 let _ = self.labels.changed();
                 None
             }
+            // The memories are kept by the page that shows them (M3); the model keeps none yet.
+            Event::MemoriesListed { .. } | Event::MemoryRead { .. } | Event::MemoryChanged { .. } => {
+                None
+            }
             Event::ThreadsListed { id, threads, total } => {
                 if self.link_picker.owns(id) {
                     self.link_picker.listed(id, threads);
@@ -1861,6 +1865,9 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::LabelRead { id, .. }
         | Event::LabelsChanged { id, .. }
         | Event::ThreadRelationChanged { id, .. }
+        | Event::MemoriesListed { id, .. }
+        | Event::MemoryRead { id, .. }
+        | Event::MemoryChanged { id, .. }
         | Event::ConflictRead { id, .. }
         | Event::ConflictResolved { id, .. }
         | Event::RecordedResolutionForgotten { id, .. }

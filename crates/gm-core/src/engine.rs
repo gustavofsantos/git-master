@@ -5191,6 +5191,8 @@ impl Engine {
                 | CommandKind::ExportThread { .. }
                 | CommandKind::ListLabels { .. }
                 | CommandKind::ReadLabel { .. }
+                | CommandKind::ListMemories { .. }
+                | CommandKind::ReadMemory { .. }
         ) {
             self.log.push(LogEntry {
                 id: op.id,
