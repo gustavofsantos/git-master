@@ -8,8 +8,9 @@ use gm_schema::{BranchEntry, OperationId};
 
 use crate::fuzzy;
 
-/// The most branches the list shows. The filter narrows the rest; a new name is always offered.
-pub(crate) const SHOWN: usize = 100;
+/// The most branches the list shows, as the worktree dialog does: the dialog does not scroll, and the
+/// filter narrows the rest. A new name is always offered.
+pub(crate) const SHOWN: usize = 8;
 
 /// What the branch list of a repository is, as the dialog shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

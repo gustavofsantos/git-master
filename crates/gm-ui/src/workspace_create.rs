@@ -516,9 +516,13 @@ impl StatusView {
         let Some(dialog) = self.workspace_dialog.as_mut() else {
             return;
         };
+        let list_was_open = dialog.picking.is_some();
         if escape_closes_dialog(&mut dialog.choosing, &mut dialog.picking) {
             self.close_workspace_dialog(window, cx);
         } else {
+            if list_was_open && dialog.picking.is_none() {
+                self.focus_name(window, cx);
+            }
             cx.notify();
         }
     }
@@ -602,15 +606,44 @@ impl StatusView {
         cx.notify();
     }
 
+    /// Gives the focus to the name field. A field that closes with its list must not keep the
+    /// focus: a focused field that is no longer shown takes no key.
+    fn focus_name(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.workspace_dialog.as_ref() {
+            dialog.name.update(cx, |area, cx| area.focus(window, cx));
+        }
+    }
+
+    /// Closes the open branch list, and gives the focus back to the name field.
+    fn close_branch_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.workspace_dialog.as_mut() {
+            dialog.picking = None;
+            dialog.pick = None;
+        }
+        self.focus_name(window, cx);
+        cx.notify();
+    }
+
     /// The repository list of row `index` opens or closes. Only one list is open at a time.
-    pub(crate) fn toggle_repo_chooser(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_repo_chooser(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_picking = self
+            .workspace_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.picking.is_some());
+        if was_picking {
+            self.close_branch_list(window, cx);
+        }
         if let Some(dialog) = self.workspace_dialog.as_mut() {
             dialog.choosing = if dialog.choosing == Some(index) {
                 None
             } else {
                 Some(index)
             };
-            dialog.picking = None;
         }
         cx.notify();
     }
@@ -640,8 +673,7 @@ impl StatusView {
             return;
         };
         if dialog.picking == Some(index) {
-            dialog.picking = None;
-            cx.notify();
+            self.close_branch_list(window, cx);
             return;
         }
         dialog.picking = Some(index);
@@ -690,14 +722,24 @@ impl StatusView {
     }
 
     /// The remove button of row `index`. Both lists close: their rows may have moved.
-    pub(crate) fn remove_repo_row(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn remove_repo_row(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .workspace_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.picking.is_some())
+        {
+            self.close_branch_list(window, cx);
+        }
         if let Some(dialog) = self.workspace_dialog.as_mut() {
             if index < dialog.rows.len() {
                 dialog.rows.remove(index);
             }
             dialog.choosing = None;
-            dialog.picking = None;
-            dialog.pick = None;
         }
         self.on_workspace_field(cx);
     }
@@ -743,21 +785,21 @@ impl StatusView {
         let Some(dialog) = self.workspace_dialog.as_mut() else {
             return false;
         };
-        dialog.pick = move_pick(dialog.pick, count, down);
+        dialog.pick = move_pick(Some(dialog.pick.unwrap_or(0)), count, down);
         cx.notify();
         true
     }
 
     /// Enter: takes the highlighted entry of an open branch list, or else sends the create. While
     /// a list is open Enter never sends the create, so a half-read list cannot create by accident.
-    fn workspace_enter(&mut self, cx: &mut Context<Self>) {
+    fn workspace_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(list) = self.workspace_branch_list(cx) else {
             self.submit_workspace(cx);
             return;
         };
         if let Some(choice) = list.choices.get(list.pick.unwrap_or(0)) {
             let value = choice.fills().to_owned();
-            self.choose_workspace_branch(list.row, value, cx);
+            self.choose_workspace_branch(list.row, value, window, cx);
         }
     }
 
@@ -766,16 +808,16 @@ impl StatusView {
         &mut self,
         index: usize,
         branch: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let Some(dialog) = self.workspace_dialog.as_mut() {
             if let Some(row) = dialog.rows.get_mut(index) {
                 row.branch = branch;
             }
-            dialog.picking = None;
-            dialog.pick = None;
             dialog.error = None;
         }
+        self.close_branch_list(window, cx);
         self.on_workspace_field(cx);
     }
 
@@ -900,8 +942,8 @@ impl StatusView {
                         cx.stop_propagation();
                     }
                 })
-                .capture_action(move |_: &Newline, _, cx| {
-                    let _ = enter.update(cx, StatusView::workspace_enter);
+                .capture_action(move |_: &Newline, window, cx| {
+                    let _ = enter.update(cx, |this, cx| this.workspace_enter(window, cx));
                     cx.stop_propagation();
                 }),
         )
@@ -1147,8 +1189,8 @@ fn member_row(view: RowView<'_>, cx: &Context<StatusView>) -> Div {
                         .child(repo_text)
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                this.toggle_repo_chooser(index, cx);
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                this.toggle_repo_chooser(index, window, cx);
                             }),
                         ),
                 )
@@ -1163,8 +1205,8 @@ fn member_row(view: RowView<'_>, cx: &Context<StatusView>) -> Div {
                         .child("×")
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                this.remove_repo_row(index, cx);
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                this.remove_repo_row(index, window, cx);
                             }),
                         ),
                 ),
@@ -1376,8 +1418,8 @@ fn branch_choice(
         }))
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                this.choose_workspace_branch(index, value.clone(), cx);
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.choose_workspace_branch(index, value.clone(), window, cx);
             }),
         )
 }
@@ -1391,7 +1433,10 @@ fn outcome_line(
 ) -> Option<Div> {
     let line = div().flex().flex_row().items_start().gap_2().text_xs();
     match outcome {
-        Some(Outcome::Plan(plan)) => Some(line.text_color(theme::muted()).child(describe(plan))),
+        Some(Outcome::Plan(plan)) => Some(
+            line.text_color(theme::muted())
+                .child(div().flex_1().min_w(px(0.)).child(describe(plan))),
+        ),
         Some(Outcome::Problem(problem)) => Some(
             line.text_color(theme::error())
                 .child(div().flex_1().min_w(px(0.)).child(problem.message.clone()))
@@ -1402,7 +1447,10 @@ fn outcome_line(
                         .map(|path| go_button(index, path, cx)),
                 ),
         ),
-        None => planning.then(|| line.text_color(theme::muted()).child("Checking…")),
+        None => planning.then(|| {
+            line.text_color(theme::muted())
+                .child(div().flex_1().min_w(px(0.)).child("Checking…"))
+        }),
     }
 }
 
