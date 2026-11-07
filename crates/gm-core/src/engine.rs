@@ -2420,6 +2420,7 @@ impl Engine {
             }
             CommandKind::RecordCombination => self.record_combination(id, actor),
             CommandKind::ListBranches => self.list_branches(id),
+            CommandKind::ListRepoBranches { repo } => self.list_repo_branches(id, repo),
             CommandKind::IndexFiles => {
                 self.start_index(id)?;
                 Ok(Vec::new())
@@ -3572,6 +3573,20 @@ impl Engine {
             id,
             branches,
             user_email,
+        }])
+    }
+
+    /// The branches of the repository at `repo`, read without opening it as the window's repository
+    /// (D195). A read, so nothing is recorded.
+    fn list_repo_branches(&self, id: OperationId, repo: &str) -> Result<Vec<Event>, String> {
+        if repo.trim().is_empty() {
+            return Err("no repository was given".to_owned());
+        }
+        let branches = self.git.branches(Path::new(repo.trim())).map_err(|e| e.0)?;
+        Ok(vec![Event::RepoBranchesLoaded {
+            id,
+            repo: repo.to_owned(),
+            branches,
         }])
     }
 
@@ -5203,6 +5218,7 @@ impl Engine {
                 | CommandKind::LoadReflog { .. }
                 | CommandKind::LoadSubmodule { .. }
                 | CommandKind::ListMembers
+                | CommandKind::ListRepoBranches { .. }
                 | CommandKind::ListWorkspaces { .. }
                 | CommandKind::PlanWorkspace { .. }
                 | CommandKind::InspectWorkspaceRemoval { .. }

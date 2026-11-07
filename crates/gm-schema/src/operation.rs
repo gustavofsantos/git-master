@@ -114,6 +114,11 @@ pub enum CommandKind {
     /// recorded in the command log (D28).
     RecordCombination,
     ListBranches,
+    /// Lists the branches of the repository at `repo` without opening it as the window's
+    /// repository (D195). Answers `RepoBranchesLoaded`. Never recorded in the command log (D28).
+    ListRepoBranches {
+        repo: String,
+    },
     /// Reads the first `HISTORY_PAGE` commits of `scope`, newest first, and
     /// starts the walk the next pages continue. Never recorded in the command
     /// log (D28).
@@ -1087,6 +1092,12 @@ pub enum Event {
         id: OperationId,
         stacks: StackSnapshot,
     },
+    /// Answers `ListRepoBranches`: the branches of `repo`, as `BranchesLoaded` lists them (D195).
+    RepoBranchesLoaded {
+        id: OperationId,
+        repo: String,
+        branches: Vec<BranchEntry>,
+    },
     /// Answers `StartRestackResolution`: the worktree is open, with the conflict.
     RestackResolutionStarted {
         id: OperationId,
@@ -1775,6 +1786,31 @@ mod tests {
         assert_eq!(json["branches"][0]["upstream"], "origin/main");
         assert_eq!(json["branches"][0]["author_email"], "ana@example.com");
         assert_eq!(json["user_email"], "me@example.com");
+    }
+
+    #[test]
+    fn repo_branches_wire_format_is_tagged() {
+        let list = serde_json::to_value(CommandKind::ListRepoBranches {
+            repo: "/home/me/src/billing".into(),
+        })
+        .unwrap();
+        assert_eq!(list["type"], "list_repo_branches");
+        assert_eq!(list["repo"], "/home/me/src/billing");
+        let event = Event::RepoBranchesLoaded {
+            id: OperationId(3),
+            repo: "/home/me/src/billing".into(),
+            branches: vec![BranchEntry {
+                name: "origin/feat".into(),
+                is_remote: true,
+                is_current: false,
+                upstream: None,
+                author_email: None,
+            }],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "repo_branches_loaded");
+        assert_eq!(json["repo"], "/home/me/src/billing");
+        assert_eq!(json["branches"][0]["is_remote"], true);
     }
 
     fn thread_summary(uid: &str) -> ThreadSummary {
