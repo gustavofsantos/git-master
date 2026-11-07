@@ -12,7 +12,7 @@ use gm_schema::{BranchEntry, WorkspaceRow, WorktreeEntry};
 
 use crate::action_registry::{
     Action, ArgKind, Args, Category, Context as ActionContext, NOT_AVAILABLE, OPEN_STASHES, Reason,
-    label_args, stash_args, thread_args,
+    label_args, memory_args, stash_args, thread_args,
 };
 use crate::fuzzy;
 use crate::stashes;
@@ -421,6 +421,12 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
             let state = action.enabled(&args, ctx);
             (Choice::Run { action, args }, state)
         }
+        // A memory is the one the Memories tab has selected; with none, the action says so (D190).
+        ArgKind::Memory => {
+            let args = ctx.selected_memory.map_or(Args::None, memory_args);
+            let state = action.enabled(&args, ctx);
+            (Choice::Run { action, args }, state)
+        }
     };
     // A placeholder says it is not available, whatever its target would be.
     let state = if action.available() {
@@ -621,6 +627,7 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
         | ArgKind::Commit
         | ArgKind::Thread
         | ArgKind::Label
+        | ArgKind::Memory
         | ArgKind::ReviewComment => Vec::new(),
     }
 }
@@ -698,6 +705,7 @@ mod tests {
             code: crate::action_registry::CodeCtx::default(),
             submodules: None,
             selected_label: None,
+            selected_memory: None,
             features: gm_schema::FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             busy: None,

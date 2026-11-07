@@ -23,10 +23,12 @@ use crate::action_registry::{Action, Args, ThreadRef, thread_args};
 use crate::commit_threads;
 use crate::icon::{self, Icon};
 use crate::labels_page;
+use crate::memory_rows;
 use crate::resize::{self};
 use crate::resize_handle::{self, Edge};
 use crate::shell_history::{action_button, now_secs};
 use crate::shell_markdown::{self, MarkdownCache};
+use crate::shell_memories::ThreadsTab;
 use crate::text_area::TextArea;
 use crate::text_search::DEBOUNCE_MS;
 use crate::theme;
@@ -101,6 +103,7 @@ impl StatusView {
     /// Shows the page: the box takes the cursor and the list is read again.
     pub(crate) fn show_threads(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.screen = Screen::Threads;
+        self.threads_tab = ThreadsTab::Threads;
         self.model.commit_stack.close();
         self.model.stash_stack.close();
         self.model.reflog_stack.close();
@@ -226,6 +229,21 @@ impl StatusView {
         if let Some(request) = self.model.threads.select(uid, focus) {
             self.send_threads(request);
         }
+        cx.notify();
+    }
+
+    /// Opens thread `uid` at the entry `from_seq` of a memory's source range (D190). The Threads
+    /// tab shows, with the thread read from that entry on.
+    pub(crate) fn open_thread_from_memory(
+        &mut self,
+        uid: &str,
+        from_seq: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_threads(window, cx);
+        let request = self.model.threads.select_from(uid, from_seq);
+        self.send_threads(request);
         cx.notify();
     }
 
@@ -512,75 +530,52 @@ impl StatusView {
 
     /// The page: a header with the count, the search box and chips, then the list and the thread.
     pub(crate) fn threads_page(&self, cx: &mut Context<Self>) -> Div {
-        let page = &self.model.threads;
-        let count = match page.mode() {
-            Mode::Threads if page.is_loaded() => {
-                threads::count_label(page.threads().len(), page.has_more())
-            }
-            Mode::Results if page.hits_shown() => {
-                threads::hits_label(page.hits().len(), page.hits_more())
-            }
-            _ => String::new(),
+        let memories = self.threads_tab == ThreadsTab::Memories;
+        let count = if memories {
+            self.memories_count_label()
+        } else {
+            self.threads_count_label()
         };
-        let ctx = self.action_context("");
-        let header = div()
-            .h(px(44.))
-            .px_4()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .border_b_1()
-            .border_color(theme::hairline())
-            .child(div().font_weight(FontWeight::MEDIUM).child("Threads"))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
-                    .child(div().text_xs().text_color(theme::muted()).child(count))
-                    .child(action_button(
-                        Action::ThreadsSettings,
-                        "threads-settings",
-                        "Settings…",
-                        &Args::None,
-                        &ctx,
-                        cx,
-                    )),
-            );
-        let toolbar = div()
-            .h(px(40.))
-            .px_4()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .border_b_1()
-            .border_color(theme::hairline())
-            .child(icon::view(
-                Icon::MagnifyingGlass,
-                icon::SMALL,
-                theme::muted(),
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .child(self.threads_view.query.clone()),
-            )
-            .child(self.threads_chip(Chip::Starred, "Starred", "threads-chip-starred", cx))
-            .child(self.threads_chip(Chip::HasEdits, "Has edits", "threads-chip-edits", cx))
-            .children(self.threads_path_chip(cx))
-            .children(self.threads_label_chip(cx));
-        let body = div()
-            .flex_1()
-            .min_h(px(0.))
-            .flex()
-            .flex_row()
-            .child(self.threads_list_column(cx))
-            .child(self.threads_detail(cx));
+        let header = self.threads_header(memories, count, cx);
+        let toolbar = if memories {
+            self.memories_toolbar(cx)
+        } else {
+            div()
+                .h(px(40.))
+                .px_4()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .border_b_1()
+                .border_color(theme::hairline())
+                .child(icon::view(
+                    Icon::MagnifyingGlass,
+                    icon::SMALL,
+                    theme::muted(),
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(self.threads_view.query.clone()),
+                )
+                .child(self.threads_chip(Chip::Starred, "Starred", "threads-chip-starred", cx))
+                .child(self.threads_chip(Chip::HasEdits, "Has edits", "threads-chip-edits", cx))
+                .children(self.threads_path_chip(cx))
+                .children(self.threads_label_chip(cx))
+        };
+        let body = if memories {
+            self.memories_body(cx)
+        } else {
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_row()
+                .child(self.threads_list_column(cx))
+                .child(self.threads_detail(cx))
+        };
         div()
             .flex_1()
             .min_w(px(0.))
@@ -590,11 +585,9 @@ impl StatusView {
             .bg(theme::ground())
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 match event.keystroke.key.as_str() {
-                    "down" => this.step_thread(1, cx),
-                    "up" => this.step_thread(-1, cx),
-                    "escape" if !this.model.threads.query().is_empty() => {
-                        this.clear_threads_search(cx);
-                    }
+                    "down" => this.step_active(1, cx),
+                    "up" => this.step_active(-1, cx),
+                    "escape" => this.clear_active_search(cx),
                     _ => {}
                 }
             }))
@@ -2314,6 +2307,162 @@ const UID_CHARS: usize = 8;
 /// The start of a thread uid, for a link to a thread the list does not hold.
 fn short_uid(uid: &str) -> String {
     uid.chars().take(UID_CHARS).collect()
+}
+
+impl StatusView {
+    /// The count of the list shown on the Threads tab.
+    fn threads_count_label(&self) -> String {
+        let page = &self.model.threads;
+        match page.mode() {
+            Mode::Threads if page.is_loaded() => {
+                threads::count_label(page.threads().len(), page.has_more())
+            }
+            Mode::Results if page.hits_shown() => {
+                threads::hits_label(page.hits().len(), page.hits_more())
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// The header of the Threads page: the tabs, the count, and the actions of the tab shown.
+    fn threads_header(&self, memories: bool, count: String, cx: &mut Context<Self>) -> Div {
+        let ctx = self.action_context("");
+        div()
+            .h(px(44.))
+            .px_4()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .border_b_1()
+            .border_color(theme::hairline())
+            .child(self.threads_tabs(cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(div().text_xs().text_color(theme::muted()).child(count))
+                    .children(memories.then(|| {
+                        action_button(
+                            Action::NewMemory,
+                            "memories-new",
+                            "New Memory",
+                            &Args::None,
+                            &ctx,
+                            cx,
+                        )
+                    }))
+                    .child(action_button(
+                        Action::ThreadsSettings,
+                        "threads-settings",
+                        "Settings…",
+                        &Args::None,
+                        &ctx,
+                        cx,
+                    )),
+            )
+    }
+}
+
+impl StatusView {
+    /// The tab strip of the Threads page: Threads, and Memories with a badge of the proposals
+    /// waiting (D190).
+    fn threads_tabs(&self, cx: &mut Context<Self>) -> Div {
+        let badge = memory_rows::tab_badge(self.model.memories.proposed_count());
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_4()
+            .child(self.threads_tab_button(
+                ThreadsTab::Threads,
+                "Threads",
+                "threads-tab-threads",
+                None,
+                cx,
+            ))
+            .child(self.threads_tab_button(
+                ThreadsTab::Memories,
+                "Memories",
+                "threads-tab-memories",
+                badge,
+                cx,
+            ))
+    }
+
+    /// One tab of the strip: its name, underlined when it is the tab shown.
+    fn threads_tab_button(
+        &self,
+        tab: ThreadsTab,
+        label: &'static str,
+        id: &'static str,
+        badge: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let active = self.threads_tab == tab;
+        div()
+            .id(id)
+            .cursor_pointer()
+            .h(px(44.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .border_b_2()
+            .border_color(if active {
+                theme::accent()
+            } else {
+                theme::panel()
+            })
+            .font_weight(if active {
+                FontWeight::MEDIUM
+            } else {
+                FontWeight::NORMAL
+            })
+            .text_color(if active {
+                theme::text()
+            } else {
+                theme::muted()
+            })
+            .child(label)
+            .children(badge.map(|count| {
+                div()
+                    .px_1p5()
+                    .rounded_full()
+                    .text_xs()
+                    .bg(theme::selection())
+                    .text_color(theme::accent())
+                    .child(count)
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| match tab {
+                    ThreadsTab::Threads => this.show_threads(window, cx),
+                    ThreadsTab::Memories => this.show_memories(window, cx),
+                }),
+            )
+    }
+
+    /// Moves the selection one row on the tab shown (Up and Down).
+    fn step_active(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.threads_tab == ThreadsTab::Memories {
+            self.step_memory(delta, cx);
+        } else {
+            self.step_thread(delta, cx);
+        }
+    }
+
+    /// Clears the search of the tab shown (Esc), when it has one.
+    fn clear_active_search(&mut self, cx: &mut Context<Self>) {
+        if self.threads_tab == ThreadsTab::Memories {
+            self.clear_memories_search(cx);
+        } else if !self.model.threads.query().is_empty() {
+            self.clear_threads_search(cx);
+        }
+    }
 }
 
 /// The link an answer to a link change carries, so the thread shown can be read again.

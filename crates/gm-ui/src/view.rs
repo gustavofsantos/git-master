@@ -20,8 +20,8 @@ use gpui::{
 };
 
 use crate::action_registry::{
-    self, Action, Args, CommentSpot, Context as ActionContext, Effect, LabelRef, MessageCtx,
-    Reason, ReviewCtx, ThreadRef, WorkflowCtx,
+    self, Action, Args, CommentSpot, Context as ActionContext, Effect, LabelRef, MemoryRef,
+    MessageCtx, Reason, ReviewCtx, ThreadRef, WorkflowCtx,
 };
 use crate::app_settings::{self, AppSettings};
 use crate::avatar::Avatars;
@@ -36,6 +36,7 @@ use crate::editor_theme;
 use crate::file_discard::DiscardDialog;
 use crate::hook_convert::{self, CONVERT_TITLE};
 use crate::icon::{self, Icon};
+use crate::memory_dialogs::MemoryDialog;
 use crate::merged_branches::MergedDialog;
 use crate::message_dialog::MessageDialog;
 use crate::model::{CommitPage, Model, Switched};
@@ -55,6 +56,7 @@ use crate::review_composer::ReviewDialog;
 use crate::shell_code::CodeView;
 use crate::shell_history::CommitTexts;
 use crate::shell_labels::{self, LabelsView};
+use crate::shell_memories::{self, MemoriesView, ThreadsTab};
 use crate::shell_search::{self, SearchView};
 use crate::shell_sidebar;
 use crate::shell_threads::{self, ThreadsView};
@@ -186,6 +188,12 @@ pub struct StatusView {
     pub(crate) search_view: SearchView,
     /// The Threads page's search box and list scroll; its state is `model.threads`.
     pub(crate) threads_view: ThreadsView,
+    /// The Memories tab's search box, path box and edit; its state is `model.memories`.
+    pub(crate) memories_view: MemoriesView,
+    /// Which tab of the Threads page shows (D190). Each tab keeps its own state.
+    pub(crate) threads_tab: ThreadsTab,
+    /// The New Memory, Supersedes… or Delete dialog, while it is open (D190).
+    pub(crate) memory_dialog: Option<MemoryDialog>,
     pub(crate) labels_view: LabelsView,
     /// The create-worktree dialog, while it is open.
     pub(crate) worktree_dialog: Option<WorktreeDialog>,
@@ -266,6 +274,15 @@ pub struct StatusView {
     _subscriptions: Vec<Subscription>,
 }
 
+/// Whether the event ends a remote operation (a fetch, a pull or a push) that the model owns.
+fn is_remote_end(event: &Event, model: &Model) -> bool {
+    matches!(
+        event,
+        Event::OperationChanged { id, state, .. }
+            if state.is_terminal() && model.remote.owns(*id)
+    )
+}
+
 impl StatusView {
     /// Opens `path` in the engine. Events are streamed into the view from a
     /// task on the UI thread; the subscription is made before the command so
@@ -325,6 +342,9 @@ impl StatusView {
             TextArea::new("Files to search: src crates/ui !docs  (empty: all)", cx).with_lines(1, 1)
         });
         let threads_query = cx.new(|cx| TextArea::new("Search the threads", cx).with_lines(1, 1));
+        let memories_query = cx.new(|cx| TextArea::new("Search the memories", cx).with_lines(1, 1));
+        let memory_path =
+            cx.new(|cx| TextArea::new("A file path, such as src/lib.rs", cx).with_lines(1, 1));
         let labels_query = cx.new(|cx| TextArea::new("Filter the labels", cx).with_lines(1, 1));
         let sidebar_input = cx.new(|cx| TextArea::new("Find a branch", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
@@ -427,6 +447,7 @@ impl StatusView {
             cx,
         ));
         subscriptions.extend(shell_threads::subscriptions(&threads_query, cx));
+        subscriptions.extend(shell_memories::subscriptions(&memories_query, cx));
         subscriptions.extend(shell_labels::subscriptions(&labels_query, cx));
         subscriptions.extend(shell_sidebar::subscriptions(&sidebar_input, window, cx));
         let mut model = Model::default();
@@ -469,6 +490,9 @@ impl StatusView {
             code_view: CodeView::new(),
             search_view: SearchView::new(search_query, search_paths),
             threads_view: ThreadsView::new(threads_query),
+            memories_view: MemoriesView::new(memories_query, memory_path),
+            threads_tab: ThreadsTab::default(),
+            memory_dialog: None,
             labels_view: LabelsView::new(labels_query),
             worktree_dialog: None,
             removal_dialog: None,
@@ -597,14 +621,11 @@ impl StatusView {
         self.model.transforms.settle_event(&event);
         let workflow_refresh = self.on_workflow_event(&event, cx);
         let workflows_listed = matches!(event, Event::WorkflowsListed { .. });
-        let remote_ended = matches!(
-            &event,
-            Event::OperationChanged { id, state, .. }
-                if state.is_terminal() && self.model.remote.owns(*id)
-        );
+        let remote_ended = is_remote_end(&event, &self.model);
         let head_before = self.head_name();
         let failed_start = self.take_settled_startup(&event);
         let converted = convert_answer(&event);
+        self.follow_memories(&event, cx);
         let shown = self.model.apply(event);
         if moved_by_workflow {
             self.replan_after_workflow_restack(cx);
@@ -1398,6 +1419,7 @@ impl StatusView {
             Ok(Effect::ShowStashes) => self.show_stashes(cx),
             Ok(Effect::ShowReflog) => self.show_reflog(cx),
             Ok(Effect::ShowThreads) => self.show_threads(window, cx),
+            Ok(Effect::Memory(effect)) => self.run_memory_effect(effect, window, cx),
             Ok(Effect::ShowLabels) => self.show_labels(window, cx),
             Ok(Effect::ShowLocalReview) => self.show_local_review(cx),
             Ok(Effect::ShowReviewInDiff { path, line }) => {
@@ -1579,6 +1601,14 @@ impl StatusView {
                 name: &label.name,
                 attachments: label.attachments,
             }),
+            selected_memory: self
+                .model
+                .memories
+                .selected_memory()
+                .map(|memory| MemoryRef {
+                    uid: &memory.uid,
+                    proposed: memory.status == gm_schema::threads::MemoryStatus::Proposed,
+                }),
             code: self.code_ctx(),
             submodules: Some(&self.model.submodules),
             busy: self.busy_reason(),
@@ -1968,6 +1998,7 @@ impl StatusView {
         layers.extend(self.new_branch_layer(window, cx));
         layers.extend(self.stash_layers(window, cx));
         layers.extend(self.thread_layers(window, cx));
+        layers.extend(self.memory_layers(window, cx));
         layers.extend(self.label_layers(window, cx));
         layers.extend(self.threads_settings_layer(window, cx));
         layers.extend(self.review_composer_layer(window, cx));

@@ -9,9 +9,6 @@
 //! The memory text is untrusted data: this module carries it and never reads it as
 //! an instruction.
 
-// The tab is not drawn yet (M3b); the model is exercised by its tests until then.
-#![allow(dead_code)]
-
 use std::collections::BTreeSet;
 
 use gm_schema::threads::{Context, Memory, MemorySourceInput};
@@ -147,6 +144,8 @@ pub struct MemoriesPage {
     detail_pending: Option<(OperationId, String)>,
     contexts: Vec<Context>,
     contexts_pending: Option<OperationId>,
+    /// The id of the open repository, when it has one; the contexts answer gives it (D193 (4)).
+    repo_id: Option<String>,
     /// The writes in flight, each with what it changes.
     writes: Vec<(OperationId, Read)>,
     /// The proposals chosen for a bulk accept.
@@ -183,12 +182,6 @@ impl MemoriesPage {
     #[must_use]
     pub fn scope(&self) -> &Scope {
         &self.scope
-    }
-
-    /// The search text as it is.
-    #[must_use]
-    pub fn query(&self) -> &str {
-        &self.query
     }
 
     /// Whether any filter or the search narrows the list.
@@ -256,6 +249,24 @@ impl MemoriesPage {
     #[must_use]
     pub fn note(&self) -> Option<&str> {
         self.note.as_deref()
+    }
+
+    /// Whether the contexts the list reads could be read (false when the engine says why not).
+    #[must_use]
+    pub fn contexts_read(&self) -> bool {
+        self.contexts_read
+    }
+
+    /// The id of the open repository, when it has one. A source whose repository is another one
+    /// is shown, not opened.
+    #[must_use]
+    pub fn repo_id(&self) -> Option<&str> {
+        self.repo_id.as_deref()
+    }
+
+    /// Keeps the id of the open repository the contexts answer gave.
+    pub fn set_repo_id(&mut self, repo_id: Option<String>) {
+        self.repo_id = repo_id;
     }
 
     /// The contexts the repository belongs to, for the scope filter.

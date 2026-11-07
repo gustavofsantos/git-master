@@ -80,6 +80,8 @@ pub enum ArgKind {
     Thread,
     /// The label the Labels page has selected, or the label a row names (P4).
     Label,
+    /// The memory the Memories tab has selected (D190).
+    Memory,
 }
 
 /// The target of one run. Its kind must match the action's `ArgKind`.
@@ -125,6 +127,11 @@ pub enum Args {
         id: i64,
         name: String,
         attachments: u32,
+    },
+    /// A memory, by its uid, and whether it is a proposal (D190).
+    Memory {
+        uid: String,
+        proposed: bool,
     },
 }
 
@@ -224,6 +231,8 @@ pub enum Effect {
     ShowReflog,
     /// Opens the Threads page and asks the engine for the first page of threads (T5).
     ShowThreads,
+    /// What the Memories tab's actions do (D190).
+    Memory(MemoryEffect),
     /// Opens the Labels page and asks the engine for the labels of the repository (P4).
     ShowLabels,
     /// Opens the Local review page and asks the engine for the review comments (B4d).
@@ -407,6 +416,8 @@ pub struct Context<'a> {
     pub selected_thread: Option<ThreadRef<'a>>,
     /// The label selected on the Labels page, which the label actions take (P4).
     pub selected_label: Option<LabelRef<'a>>,
+    /// The memory the Memories tab has selected, which the memory actions take (D190).
+    pub selected_memory: Option<MemoryRef<'a>>,
     /// The branch stacks and the branch whose parent is being chosen (D138).
     pub stack: StackCtx<'a>,
     /// The text file open in the Code viewer, and the lines picked in it (P4).
@@ -466,8 +477,25 @@ pub struct LabelRef<'a> {
     pub attachments: u32,
 }
 
+/// What a memory action does (D190): shows the tab, opens New Memory, or accepts or rejects a
+/// proposed memory by its uid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemoryEffect {
+    Show,
+    New,
+    Accept(String),
+    Reject(String),
+}
+
+/// The memory the Memories tab has selected: its uid and whether it is a proposal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryRef<'a> {
+    pub uid: &'a str,
+    pub proposed: bool,
+}
+
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 106] = [
+const SPECS: [Spec; 110] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1204,6 +1232,34 @@ const SPECS: [Spec; 106] = [
         ArgKind::File,
         Category::WorkingCopy,
     ),
+    spec(
+        "memories.show",
+        "Show Memories",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "memories.new",
+        "New Memory",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "memories.accept",
+        "Accept Memory",
+        None,
+        ArgKind::Memory,
+        Category::Repository,
+    ),
+    spec(
+        "memories.reject",
+        "Reject Memory",
+        None,
+        ArgKind::Memory,
+        Category::Repository,
+    ),
 ];
 
 const fn spec(
@@ -1339,6 +1395,14 @@ pub enum Action {
     RemoveWorkspace,
     /// Checks out the branch a detached member of a workspace is meant to be on (D183).
     CheckOutMemberBranch,
+    /// Opens the Memories tab of the Threads page (D190).
+    ShowMemories,
+    /// Opens the New Memory dialog (D190).
+    NewMemory,
+    /// Accepts the selected proposed memory as it is (D190).
+    AcceptMemory,
+    /// Rejects the selected proposed memory (D190).
+    RejectMemory,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1382,6 +1446,7 @@ fn navigation_effect(action: Action, args: &Args) -> Effect {
         (Action::ShowStashes, _) => Effect::ShowStashes,
         (Action::ShowReflog, _) => Effect::ShowReflog,
         (Action::ShowThreads, _) => Effect::ShowThreads,
+        (Action::ShowMemories, _) => Effect::Memory(MemoryEffect::Show),
         (Action::ShowLabels, _) => Effect::ShowLabels,
         (Action::ShowLocalReview, _) => Effect::ShowLocalReview,
         _ => Effect::ShowHistory,
@@ -1405,6 +1470,10 @@ fn resolve_conflict_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
 pub(crate) const SELECT_THREAD: Reason = "Select a thread first.";
 /// The reason of a label action when no label is selected.
 pub(crate) const SELECT_LABEL: Reason = "Select a label first.";
+/// The reason of a memory action when no memory is selected (D190).
+pub(crate) const SELECT_MEMORY: Reason = "Select a proposed memory first.";
+/// The reason of Accept or Reject on a memory that is not a proposal (D190).
+const NOT_PROPOSED_MEMORY: Reason = "Only a proposed memory can be accepted or rejected.";
 
 /// The target of a label action: the label the Labels page has selected, or the one a row names.
 #[must_use]
@@ -1413,6 +1482,25 @@ pub(crate) fn label_args(label: LabelRef<'_>) -> Args {
         id: label.id,
         name: label.name.to_owned(),
         attachments: label.attachments,
+    }
+}
+
+/// The target of a memory action: the memory the Memories tab has selected.
+#[must_use]
+pub(crate) fn memory_args(memory: MemoryRef<'_>) -> Args {
+    Args::Memory {
+        uid: memory.uid.to_owned(),
+        proposed: memory.proposed,
+    }
+}
+
+/// The rule of Accept and Reject (D190): a repository is open and a proposed memory is selected.
+fn memory_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+    repository_open(ctx)?;
+    match args {
+        Args::Memory { proposed: true, .. } => Ok(()),
+        Args::Memory { .. } => Err(NOT_PROPOSED_MEMORY),
+        _ => Err(SELECT_MEMORY),
     }
 }
 
@@ -1497,6 +1585,21 @@ fn thread_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
         (Action::ThreadScrub, _) => Effect::OpenScrubDialog,
         (Action::ThreadsSettings, _) => Effect::OpenThreadsSettings,
         (Action::ShowThreadsForFile, Args::File(path)) => Effect::ShowThreadsFor(path.clone()),
+        _ => return Err(NOT_AVAILABLE),
+    })
+}
+
+/// What the memory actions do (D190): they show the tab, open New Memory, or accept or reject the
+/// proposal they name.
+fn memory_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
+    Ok(match (action, args) {
+        (Action::NewMemory, _) => Effect::Memory(MemoryEffect::New),
+        (Action::AcceptMemory, Args::Memory { uid, .. }) => {
+            Effect::Memory(MemoryEffect::Accept(uid.clone()))
+        }
+        (Action::RejectMemory, Args::Memory { uid, .. }) => {
+            Effect::Memory(MemoryEffect::Reject(uid.clone()))
+        }
         _ => return Err(NOT_AVAILABLE),
     })
 }
@@ -1688,7 +1791,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 106] = [
+    pub const ALL: [Action; 110] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1795,6 +1898,10 @@ impl Action {
         Action::RevealWorkspace,
         Action::RemoveWorkspace,
         Action::CheckOutMemberBranch,
+        Action::ShowMemories,
+        Action::NewMemory,
+        Action::AcceptMemory,
+        Action::RejectMemory,
     ];
 
     #[must_use]
@@ -1902,6 +2009,7 @@ impl Action {
                 | Action::ShowStashes
                 | Action::ShowReflog
                 | Action::ShowThreads
+                | Action::ShowMemories
                 | Action::ShowLabels
                 | Action::ShowLocalReview
         )
@@ -2050,6 +2158,7 @@ impl Action {
                 | Action::LabelNew
                 | Action::LabelRename
                 | Action::LabelDelete
+                | Action::NewMemory
         )
     }
 
@@ -2065,14 +2174,8 @@ impl Action {
         if !self.offered(ctx.features) {
             return Err(PREVIEW_OFF);
         }
-        // A thread action run with no thread (the palette, with none selected) says so.
-        if self.spec().args == ArgKind::Thread && matches!(args, Args::None) {
-            return Err(SELECT_THREAD);
-        }
-        // A label action run with no label (the palette, with none selected) says so.
-        if self.spec().args == ArgKind::Label && matches!(args, Args::None) {
-            return Err(SELECT_LABEL);
-        }
+        // A thread, label or memory action run with no target (the palette, with none) says so.
+        self.missing_target(args).map_or(Ok(()), Err)?;
         if !self.takes(args) {
             return Err("No target for this action");
         }
@@ -2161,11 +2264,29 @@ impl Action {
             | Action::ThreadExpandAll
             | Action::ThreadCollapseAll
             | Action::ThreadDelete => thread_rule(args, ctx),
-            Action::ThreadScrub | Action::ShowThreadsForFile => repository_open(ctx),
+            Action::ThreadScrub
+            | Action::ShowThreadsForFile
+            | Action::ShowMemories
+            | Action::NewMemory => repository_open(ctx),
+            Action::AcceptMemory | Action::RejectMemory => memory_rule(args, ctx),
             // The settings and New Workspace dialogs need no repository.
             Action::ThreadsSettings | Action::NewWorkspace => Ok(()),
             // The placeholders, refused above by `available`.
             _ => Err(NOT_AVAILABLE),
+        }
+    }
+
+    /// The reason a thread, label or memory action has no target, when it is run with none (the
+    /// palette, with nothing selected).
+    fn missing_target(self, args: &Args) -> Option<Reason> {
+        if !matches!(args, Args::None) {
+            return None;
+        }
+        match self.spec().args {
+            ArgKind::Thread => Some(SELECT_THREAD),
+            ArgKind::Label => Some(SELECT_LABEL),
+            ArgKind::Memory => Some(SELECT_MEMORY),
+            _ => None,
         }
     }
 
@@ -2264,6 +2385,9 @@ impl Action {
             (action, _) if action.is_workflow_rule() => workflow_effect(action, args, ctx)?,
             (action, _) if action.is_thread_action() => thread_effect(action, args)?,
             (action, _) if action.is_label_action() => label_effect(action, args)?,
+            (Action::NewMemory | Action::AcceptMemory | Action::RejectMemory, _) => {
+                memory_effect(self, args)?
+            }
             // Only reached when `enabled` said Ok, which no placeholder does.
             _ => return Err(NOT_AVAILABLE),
         })
@@ -2296,6 +2420,7 @@ impl Action {
                 | (ArgKind::ReviewComment, Args::ReviewComment(_))
                 | (ArgKind::Thread, Args::Thread { .. })
                 | (ArgKind::Label, Args::Label { .. })
+                | (ArgKind::Memory, Args::Memory { .. })
         )
     }
 }
@@ -3225,6 +3350,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
@@ -3393,6 +3519,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&entries, "")
@@ -3470,6 +3597,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -3529,6 +3657,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -3705,6 +3834,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -3778,6 +3908,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             root: None,
@@ -3813,6 +3944,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             root: None,
@@ -3840,6 +3972,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             root: None,
@@ -3909,6 +4042,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -4105,6 +4239,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -4241,6 +4376,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
@@ -4307,6 +4443,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -4329,6 +4466,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -4355,6 +4493,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -4393,6 +4532,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -4425,6 +4565,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -4442,6 +4583,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -4467,6 +4609,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -4548,6 +4691,7 @@ mod tests {
     fn label_ctx(selected: Option<LabelRef<'_>>) -> Context<'_> {
         Context {
             selected_label: selected,
+            selected_memory: None,
             ..ctx(&[], "")
         }
     }
@@ -4599,6 +4743,130 @@ mod tests {
         };
         assert_eq!(
             Action::LabelNew.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    /// A context with a repository open and the memory given selected, or none.
+    fn memory_ctx(selected: Option<MemoryRef<'_>>) -> Context<'_> {
+        Context {
+            selected_memory: selected,
+            ..ctx(&[], "")
+        }
+    }
+
+    #[test]
+    fn the_memory_actions_have_their_ids_titles_and_targets() {
+        let expected = [
+            (
+                Action::ShowMemories,
+                "memories.show",
+                "Show Memories",
+                ArgKind::None,
+            ),
+            (
+                Action::NewMemory,
+                "memories.new",
+                "New Memory",
+                ArgKind::None,
+            ),
+            (
+                Action::AcceptMemory,
+                "memories.accept",
+                "Accept Memory",
+                ArgKind::Memory,
+            ),
+            (
+                Action::RejectMemory,
+                "memories.reject",
+                "Reject Memory",
+                ArgKind::Memory,
+            ),
+        ];
+        for (action, id, title, args) in expected {
+            assert_eq!(action.id(), id);
+            assert_eq!(action.spec().title, title);
+            assert_eq!(action.spec().args, args);
+            assert_eq!(action.spec().shortcut, None);
+            assert_eq!(Action::from_id(id), Some(action));
+        }
+        assert!(Action::NewMemory.opens_dialog());
+        assert!(!Action::AcceptMemory.opens_dialog());
+    }
+
+    #[test]
+    fn show_and_new_memory_need_an_open_repository_and_plan_the_tab_and_the_dialog() {
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ShowMemories.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::NewMemory.enabled(&Args::None, &closed),
+            Err("No repository is open.")
+        );
+        assert_eq!(
+            Action::ShowMemories.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::Memory(MemoryEffect::Show))
+        );
+        assert_eq!(
+            Action::NewMemory.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::Memory(MemoryEffect::New))
+        );
+    }
+
+    #[test]
+    fn accept_and_reject_act_on_the_selected_proposal_or_say_why_not() {
+        let none = memory_ctx(None);
+        assert_eq!(
+            Action::AcceptMemory.enabled(&Args::None, &none),
+            Err(SELECT_MEMORY)
+        );
+        assert_eq!(
+            Action::RejectMemory.plan(&Args::None, &none),
+            Err(SELECT_MEMORY)
+        );
+        let accepted = memory_ctx(Some(MemoryRef {
+            uid: "m1",
+            proposed: false,
+        }));
+        let accepted_target = memory_args(MemoryRef {
+            uid: "m1",
+            proposed: false,
+        });
+        assert_eq!(
+            Action::RejectMemory.enabled(&accepted_target, &accepted),
+            Err("Only a proposed memory can be accepted or rejected.")
+        );
+        let proposal = memory_ctx(Some(MemoryRef {
+            uid: "m1",
+            proposed: true,
+        }));
+        let target = memory_args(MemoryRef {
+            uid: "m1",
+            proposed: true,
+        });
+        assert_eq!(Action::AcceptMemory.enabled(&target, &proposal), Ok(()));
+        assert_eq!(
+            Action::AcceptMemory.plan(&target, &proposal),
+            Ok(Effect::Memory(MemoryEffect::Accept("m1".into())))
+        );
+        assert_eq!(
+            Action::RejectMemory.plan(&target, &proposal),
+            Ok(Effect::Memory(MemoryEffect::Reject("m1".into())))
+        );
+        let closed = Context {
+            repo_open: false,
+            ..memory_ctx(Some(MemoryRef {
+                uid: "m1",
+                proposed: true,
+            }))
+        };
+        assert_eq!(
+            Action::AcceptMemory.enabled(&target, &closed),
             Err("No repository is open.")
         );
     }
@@ -4714,6 +4982,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
@@ -4837,6 +5106,7 @@ mod tests {
                 selected_file: None,
                 selected_thread: None,
                 selected_label: None,
+                selected_memory: None,
                 features: FeatureSet::all(),
                 stack: crate::action_registry::StackCtx::default(),
                 root: None,
@@ -4942,6 +5212,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -5191,6 +5462,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
@@ -5345,6 +5617,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
@@ -5487,6 +5760,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(lines("a.txt", Some((1, 1))), None)
@@ -5598,6 +5872,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(CommentSpot::Nothing, Some(&listed))
@@ -5651,6 +5926,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
@@ -5720,6 +5996,7 @@ mod tests {
             selected_file: None,
             selected_thread: None,
             selected_label: None,
+            selected_memory: None,
             features: FeatureSet::all(),
             stack: crate::action_registry::StackCtx::default(),
             ..open_ctx(&entries, Some(&current))

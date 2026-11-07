@@ -866,6 +866,21 @@ impl ThreadsPage {
         Some(detail_request(uid, from_seq, ENTRY_PAGE, Place::Replace))
     }
 
+    /// Selects thread `uid` and reads its entries from `seq` on, for a memory's source range
+    /// (D190). The page shown is replaced by the read's answer.
+    pub fn select_from(&mut self, uid: &str, seq: u32) -> Request {
+        self.selected = Some(uid.to_owned());
+        self.clear_selection();
+        self.focus = None;
+        self.refresh_rows();
+        detail_request(
+            uid,
+            seq.saturating_sub(FOCUS_CONTEXT),
+            ENTRY_PAGE,
+            Place::Replace,
+        )
+    }
+
     /// The read that brings the selected thread's first page up to date, after one of its links
     /// changed (D143). It replaces the page shown. None when no thread is selected.
     pub fn plan_reread(&mut self) -> Option<Request> {

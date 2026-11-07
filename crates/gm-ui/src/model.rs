@@ -22,6 +22,7 @@ use crate::icon::Icon;
 use crate::label_curate::LabelWrites;
 use crate::labels_page::LabelsPage;
 use crate::local_review::LocalReview;
+use crate::memories::{MemoriesPage, MemoryPage};
 use crate::merged_branches::Merging;
 use crate::move_file::MoveFile;
 use crate::new_branch::BranchCreate;
@@ -134,6 +135,8 @@ pub struct Model {
     pub submodules: Submodules,
     /// The Threads page: the list, the search, the selected thread and its entries (T5).
     pub threads: ThreadsPage,
+    /// The Memories tab of the Threads page: its memories, filters and detail (D190).
+    pub memories: MemoriesPage,
     /// The threads linked to the commit the history page shows (H3).
     pub commit_threads: CommitThreads,
     /// The Link to Thread picker's threads and choice, while its dialog is open (D143).
@@ -859,6 +862,13 @@ impl Model {
                 self.reflog.ended(id, state, detail);
                 None
             }
+            // A failed read or write of the Memories tab is shown on the tab (D190).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.memories.owns(id) && state.is_terminal() => {
+                self.memories.ended(id, state, detail);
+                None
+            }
             // A failed read of the Threads page is shown on the page (T5).
             Event::OperationChanged {
                 id, state, detail, ..
@@ -1133,8 +1143,43 @@ impl Model {
                 let _ = self.labels.changed();
                 None
             }
-            // The memories are kept by the page that shows them (M3); the model keeps none yet.
-            Event::MemoriesListed { .. } | Event::MemoryRead { .. } | Event::MemoryChanged { .. } => {
+            Event::MemoriesListed {
+                id,
+                memories,
+                next_cursor,
+                contexts_read,
+                note,
+                proposed_total,
+            } => {
+                self.memories.listed(
+                    id,
+                    MemoryPage {
+                        memories,
+                        next_cursor,
+                        contexts_read,
+                        note,
+                        proposed_total,
+                    },
+                );
+                None
+            }
+            Event::MemoryRead { id, memory } => {
+                self.memories.read(id, memory);
+                None
+            }
+            Event::MemoryChanged { id, memory, .. } => {
+                self.memories.changed(id, memory);
+                None
+            }
+            Event::ContextsListed {
+                id,
+                contexts,
+                repo_id,
+                ..
+            } => {
+                if self.memories.contexts_listed(id, contexts) {
+                    self.memories.set_repo_id(repo_id);
+                }
                 None
             }
             Event::ThreadsListed { id, threads, total } => {
@@ -1443,8 +1488,6 @@ impl Model {
             | Event::WorkspaceRemoved { .. }
         // The members of a workspace are read by the agent's tools; the app keeps none (D181).
         | Event::MembersListed { .. }
-        // The contexts are kept by the dialog that shows them (C2); the model keeps none yet.
-        | Event::ContextsListed { .. }
         | Event::ContextsChanged { .. } => None,
             // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
             Event::HunkSuggested { .. } => {
@@ -1593,6 +1636,7 @@ impl Model {
         self.reflog_stack = OpenStack::default();
         self.submodules = Submodules::default();
         self.threads = ThreadsPage::default();
+        self.memories = MemoriesPage::default();
         self.commit_threads = CommitThreads::default();
         self.link_picker = LinkPicker::default();
         self.labels = LabelsPage::default();
