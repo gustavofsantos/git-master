@@ -1333,6 +1333,52 @@ fn a_file_of_another_repository_is_read_at_its_own_head_and_is_unavailable_once_
 }
 
 #[test]
+fn a_file_whose_repository_was_unknown_at_acceptance_stays_unavailable_when_it_becomes_known() {
+    let world = World::new();
+    let mut web = engine_on(&world.path("web"), &world.db);
+    let platform = create(&mut web, "Platform", None).id;
+    join(&mut web, platform, &world.path("web"));
+    join(&mut web, platform, &world.path("portal"));
+    let portal_root = world.path("portal");
+    write_file(&portal_root, "src/lib.rs", "fn one() {}\n");
+    commit_all(&portal_root, "add the lib");
+    let mut portal = engine_on(&portal_root, &world.db);
+    let proposed = memory_of(&propose_at(
+        &mut portal,
+        &agent(),
+        Some("Platform"),
+        "Portal rule",
+    ));
+
+    // Portal leaves every context, so web no longer knows its folder when the human accepts.
+    let portal_id = repo_id_file(&portal_root);
+    let left = send(
+        &mut web,
+        &Actor::Human,
+        CommandKind::RemoveRepoFromContext {
+            context: platform,
+            repo_id: portal_id,
+        },
+    );
+    assert_eq!(state_of(&left), OperationState::Done, "leave: {left:?}");
+    let accepted = accept_as_human(&mut web, &proposed.uid);
+    assert_eq!(state_of(&accepted), OperationState::Done, "{accepted:?}");
+    let gone = read_memory(&mut web, &proposed.uid);
+    assert!(!gone.sources[0].blob_read, "not read at acceptance");
+    let want = vec![FileChange {
+        path: "src/lib.rs".into(),
+        state: FileChangeState::Unavailable,
+    }];
+    assert_eq!(gone.files_changed_since, want);
+
+    // Portal joins a context web sees: its folder is known now, and the file is still unavailable,
+    // never changed, because nothing was read when the memory was accepted.
+    join(&mut web, platform, &portal_root);
+    let known = read_memory(&mut web, &proposed.uid);
+    assert_eq!(known.files_changed_since, want);
+}
+
+#[test]
 fn an_unreadable_contexts_file_leaves_the_repository_memories_and_says_why() {
     let world = World::new();
     populate_with_scopes(&world);

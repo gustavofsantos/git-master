@@ -819,6 +819,9 @@ pub struct MemorySource {
     pub entry_from: Option<i64>,
     pub entry_to: Option<i64>,
     pub blob_oid: Option<String>,
+    /// Whether `blob_oid` was read at acceptance (D193 (9)): false until the memory is accepted, and
+    /// false when the blob could not be read (its folder was not known, or Git did not answer).
+    pub blob_read: bool,
 }
 
 /// Whether a file a memory names has changed since the memory was accepted (D192 (6)).
@@ -831,7 +834,8 @@ pub enum FileChangeState {
     Missing,
     /// Git could not answer for the file; never reported as unchanged.
     Unknown,
-    /// The source's repository is not on this machine, so nothing can be read (D193 (9)).
+    /// Nothing can be read: the source's repository is not on this machine, or the file's blob was
+    /// not read when the memory was accepted (D193 (9)).
     Unavailable,
 }
 

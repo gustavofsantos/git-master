@@ -28,7 +28,7 @@ use super::query::{
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run.
 const MIGRATIONS: &[&str] = &[
-    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7,
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
 ];
 /// The index in `MIGRATIONS` of the schema that repairs stored entries with the cleaner (D133).
 const REPAIR_MIGRATION: usize = 3;
@@ -410,6 +410,15 @@ CREATE TRIGGER memory_fts_au AFTER UPDATE OF text ON memory BEGIN
     INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', old.id, old.text);
     INSERT INTO memory_fts (rowid, text) VALUES (new.id, new.text);
 END;
+";
+
+/// Schema 8 (D193 (9)): a file source records whether its blob was read at acceptance. The rows
+/// accepted under schema 7 were read, so they count as read; a proposal is not read yet.
+const SCHEMA_V8: &str = "
+ALTER TABLE memory_source ADD COLUMN blob_read INTEGER NOT NULL DEFAULT 0;
+UPDATE memory_source SET blob_read = 1
+    WHERE kind = 'file' AND memory_id IN (
+        SELECT id FROM memory WHERE status IN ('accepted','superseded'));
 ";
 
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
@@ -3225,7 +3234,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         assert_eq!(store.total_threads().expect("count"), 1);
     }
 
@@ -4642,7 +4651,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         let hits = store
             .search("ndex", &ThreadFilter::default(), 10)
             .expect("search");
@@ -5143,6 +5152,50 @@ mod tests {
             .expect("version")
     }
 
+    /// Schema 8 (D193 (9)): the file sources of accepted and superseded memories were read when
+    /// they were accepted, so they are marked read; a proposal's file was not read yet, and a
+    /// commit source is not a file.
+    #[test]
+    fn schema_eight_marks_the_file_sources_of_accepted_memories_as_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        legacy_database(
+            dir.path(),
+            7,
+            "INSERT INTO memory (id, uid, kind, text, status, origin, created_at) VALUES
+                (1, 'accepted1', 'rule', 'a', 'accepted', 'human', 1),
+                (2, 'proposed1', 'rule', 'p', 'proposed', 'agent:x', 1),
+                (3, 'superseded1', 'rule', 's', 'superseded', 'human', 1);
+             INSERT INTO memory_source (memory_id, kind, ref, repo_id, blob_oid) VALUES
+                (1, 'file', 'src/a.rs', NULL, 'abc'),
+                (1, 'commit', '0123456', NULL, NULL),
+                (2, 'file', 'src/b.rs', NULL, NULL),
+                (3, 'file', 'src/c.rs', NULL, 'def');",
+        );
+        let store = ThreadStore::open(dir.path()).expect("migrate");
+        assert_eq!(version_of(dir.path()), 8);
+        let mut statement = store
+            .conn
+            .prepare(
+                "SELECT m.uid, s.ref, s.blob_read FROM memory_source s
+                 JOIN memory m ON m.id = s.memory_id ORDER BY m.uid, s.kind, s.ref",
+            )
+            .expect("prepare");
+        let rows: Vec<(String, String, bool)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            vec![
+                ("accepted1".to_owned(), "0123456".to_owned(), false),
+                ("accepted1".to_owned(), "src/a.rs".to_owned(), true),
+                ("proposed1".to_owned(), "src/b.rs".to_owned(), false),
+                ("superseded1".to_owned(), "src/c.rs".to_owned(), true),
+            ]
+        );
+    }
+
     /// Rows of the word and trigram indexes (their `docsize` tables: one row per indexed entry).
     fn index_rows(store: &ThreadStore) -> (i64, i64) {
         store
@@ -5252,7 +5305,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             legacy_database(dir.path(), versions, EVERY_KIND_ROWS);
             let store = ThreadStore::open(dir.path()).expect("migrate");
-            assert_eq!(version_of(dir.path()), 7, "from version {versions}");
+            assert_eq!(version_of(dir.path()), 8, "from version {versions}");
             assert_eq!(index_rows(&store), (2, 2), "from version {versions}");
             assert_eq!(stage_hits(&store, "backoff", "ckof", "bakcoff"), [1, 1, 1]);
             assert_eq!(
@@ -5294,7 +5347,7 @@ mod tests {
 
         let store = ThreadStore::open(dir.path()).expect("migrate");
 
-        assert_eq!(version_of(dir.path()), 7);
+        assert_eq!(version_of(dir.path()), 8);
         let detail = store.read_thread("old1", 0, 10).expect("read");
         assert_eq!(detail.edits.len(), 1);
         assert_eq!(detail.edits[0].path, "src/hexagonal_port.rs");
@@ -5490,7 +5543,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 3, MARKER_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 7);
+        assert_eq!(version_of(dir.path()), 8);
 
         // Slash command as typed, output and bash as notices and a bash prompt, reminders
         // gone, the interruption as a notice; the marker-only prompt is deleted.
@@ -5610,7 +5663,7 @@ mod tests {
             open_for_hook_below(dir.path(), 6).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(dir.path()), 7);
+        assert_eq!(version_of(dir.path()), 8);
 
         // An up-to-date database is opened whatever its size.
         assert!(matches!(
@@ -5623,7 +5676,7 @@ mod tests {
             open_for_hook_below(fresh.path(), 1).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(fresh.path()), 7);
+        assert_eq!(version_of(fresh.path()), 8);
     }
 
     /// A deterministic generator for the benchmark: no randomness crate, same text every run.
@@ -6420,7 +6473,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 4, VERSION_FOUR_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 7);
+        assert_eq!(version_of(dir.path()), 8);
         assert_eq!(
             store.thread_summary("t1uid").expect("t1").tags,
             ["api", "bug"]
@@ -6471,7 +6524,7 @@ mod tests {
         );
         let store = ThreadStore::open(dir.path()).expect("migrate");
         assert_eq!(store.total_threads().expect("count"), 1);
-        assert_eq!(version_of(dir.path()), 7);
+        assert_eq!(version_of(dir.path()), 8);
         let raw = raw_connection(dir.path());
         for name in ["memory", "memory_source", "memory_rel", "memory_fts"] {
             let found: i64 = raw

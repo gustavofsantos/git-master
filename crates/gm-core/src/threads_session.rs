@@ -20,7 +20,7 @@ use gm_schema::{Actor, CommandKind, Event, OperationId};
 use crate::blame::BlameLine;
 use crate::memory_scope::{self, Home, Stores};
 use crate::threads::members;
-use crate::threads::memories::{self, MemoryAction, NewMemory};
+use crate::threads::memories::{self, BlobRead, MemoryAction, NewMemory};
 use crate::threads::provenance::{
     self, COMMIT_LIMIT, CONTEXT, EDIT_LIMIT, EditFact, LABEL_LIMIT, LINK_LIMIT, Owner,
     THREAD_LIMIT, Verdict,
@@ -689,7 +689,7 @@ fn accept_memory(
         .map_err(|e| named(e, MEMORY_MISSING))?
         .status
         == MemoryStatus::Accepted;
-    let blobs: Vec<(String, Option<String>)> = if already_accepted {
+    let blobs: Vec<(String, BlobRead)> = if already_accepted {
         Vec::new()
     } else {
         stores
@@ -785,9 +785,9 @@ pub(crate) fn stored_source(
         source.clone()
     };
     let checked = memories::check_source(&source).map_err(|e| e.to_string())?;
-    let blob_oid = match checked.kind {
+    let read = match checked.kind {
         MemorySourceKind::File if is_human => blob_at_head(ctx, &checked.reference),
-        _ => None,
+        _ => BlobRead::NotRead,
     };
     Ok(MemorySource {
         kind: checked.kind,
@@ -795,16 +795,15 @@ pub(crate) fn stored_source(
         repo_id: None,
         entry_from: checked.entry_from,
         entry_to: checked.entry_to,
-        blob_oid,
+        blob_oid: read.oid().map(str::to_owned),
+        blob_read: read.was_read(),
     })
 }
 
-/// The blob of `path` at `HEAD`; `None` when there is no such file or Git cannot answer.
-fn blob_at_head(ctx: &Context<'_>, path: &str) -> Option<String> {
-    ctx.git
-        .blob_at_commit(ctx.root, "HEAD", path)
-        .ok()
-        .flatten()
+/// The blob of `path` at `HEAD`: absent when there is no such file, not read when Git cannot
+/// answer (D193 (9)).
+fn blob_at_head(ctx: &Context<'_>, path: &str) -> BlobRead {
+    BlobRead::of(ctx.git.blob_at_commit(ctx.root, "HEAD", path))
 }
 
 /// Records the replays of a restack in the threads store (D142, D145), when the repository has

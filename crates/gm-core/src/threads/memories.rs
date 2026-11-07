@@ -196,6 +196,44 @@ pub enum Lookup {
     Failed,
 }
 
+/// What acceptance read of a file source's blob at `HEAD` (D193 (9)). A blob that could not be read
+/// is `NotRead`, never taken for an absent file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlobRead {
+    /// Read: the file is at `HEAD` with this blob.
+    Blob(String),
+    /// Read: the file is not at `HEAD`.
+    Absent,
+    /// Not read: the source's folder is not known, or Git did not answer.
+    NotRead,
+}
+
+impl BlobRead {
+    /// The answer of Git for a file: `Ok(None)` is an absent file, an error is not read.
+    pub fn of<E>(answer: Result<Option<String>, E>) -> Self {
+        match answer {
+            Ok(Some(blob)) => Self::Blob(blob),
+            Ok(None) => Self::Absent,
+            Err(_) => Self::NotRead,
+        }
+    }
+
+    /// The blob to record: `None` when the file is absent or was not read.
+    #[must_use]
+    pub fn oid(&self) -> Option<&str> {
+        match self {
+            Self::Blob(blob) => Some(blob.as_str()),
+            Self::Absent | Self::NotRead => None,
+        }
+    }
+
+    /// Whether the blob was read, the value `blob_read` stores.
+    #[must_use]
+    pub fn was_read(&self) -> bool {
+        !matches!(self, Self::NotRead)
+    }
+}
+
 /// Whether a file a memory names has changed since it was accepted (D192 (6)). `current` gives the
 /// blob of a file source at `HEAD` of the repository the source names: `Ok(None)` when there is no
 /// such file, and an error when the source cannot be read. Only `accepted` and `superseded` memories
@@ -222,13 +260,11 @@ pub fn files_changed_since(
     files
         .into_iter()
         .filter_map(|source| {
-            let state = match (source.blob_oid.as_deref(), current(source)) {
-                (_, Err(Lookup::Unavailable)) => FileChangeState::Unavailable,
-                (_, Err(Lookup::Failed)) => FileChangeState::Unknown,
-                (Some(recorded), Ok(Some(now))) if recorded != now => FileChangeState::Changed,
-                (Some(_), Ok(Some(_))) | (None, Ok(None)) => return None,
-                (Some(_), Ok(None)) => FileChangeState::Missing,
-                (None, Ok(Some(_))) => FileChangeState::Changed,
+            let state = if source.blob_read {
+                changed_state(source, current)?
+            } else {
+                // Never read at acceptance, so there is nothing to compare with: no lookup either.
+                FileChangeState::Unavailable
             };
             Some(FileChange {
                 path: source.reference.clone(),
@@ -236,6 +272,21 @@ pub fn files_changed_since(
             })
         })
         .collect()
+}
+
+/// The state of a file whose blob was read at acceptance; `None` when it is unchanged.
+fn changed_state(
+    source: &MemorySource,
+    current: &dyn Fn(&MemorySource) -> Result<Option<String>, Lookup>,
+) -> Option<FileChangeState> {
+    match (source.blob_oid.as_deref(), current(source)) {
+        (_, Err(Lookup::Unavailable)) => Some(FileChangeState::Unavailable),
+        (_, Err(Lookup::Failed)) => Some(FileChangeState::Unknown),
+        (Some(recorded), Ok(Some(now))) if recorded != now => Some(FileChangeState::Changed),
+        (Some(_), Ok(Some(_))) | (None, Ok(None)) => None,
+        (Some(_), Ok(None)) => Some(FileChangeState::Missing),
+        (None, Ok(Some(_))) => Some(FileChangeState::Changed),
+    }
 }
 
 /// A new uid: the first 16 hex digits of SHA-256 over 16 bytes from the process's random hasher
@@ -417,7 +468,7 @@ pub(crate) fn accept_in(
     id: i64,
     text: Option<&str>,
     supersedes: &[i64],
-    blobs: &[(String, Option<String>)],
+    blobs: &[(String, BlobRead)],
     at: i64,
 ) -> Result<Memory, StoreError> {
     let (kind, stored_text, before) = core_of(conn, id)?;
@@ -443,11 +494,11 @@ pub(crate) fn accept_in(
              WHERE id = ?2",
             params![at, id],
         )?;
-        for (path, blob) in blobs {
+        for (path, read) in blobs {
             conn.execute(
-                "UPDATE memory_source SET blob_oid = ?1
-                 WHERE memory_id = ?2 AND kind = 'file' AND ref = ?3",
-                params![blob, id, path],
+                "UPDATE memory_source SET blob_oid = ?1, blob_read = ?2
+                 WHERE memory_id = ?3 AND kind = 'file' AND ref = ?4",
+                params![read.oid(), read.was_read(), id, path],
             )?;
         }
     }
@@ -614,7 +665,7 @@ impl ThreadStore {
         id: i64,
         text: Option<&str>,
         supersedes: &[i64],
-        blobs: &[(String, Option<String>)],
+        blobs: &[(String, BlobRead)],
         at: i64,
     ) -> Result<Memory, StoreError> {
         let tx = begin(&mut self.conn)?;
@@ -728,6 +779,7 @@ fn checked_source(source: &MemorySource) -> Result<MemorySource, StoreError> {
         entry_from: checked.entry_from,
         entry_to: checked.entry_to,
         blob_oid: source.blob_oid.clone(),
+        blob_read: source.blob_read,
     })
 }
 
@@ -814,8 +866,9 @@ fn insert_sources(conn: &Connection, id: i64, sources: &[MemorySource]) -> Resul
             return Err(invalid("a memory names the same source twice"));
         }
         conn.execute(
-            "INSERT INTO memory_source (memory_id, kind, ref, repo_id, entry_from, entry_to, blob_oid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO memory_source
+                (memory_id, kind, ref, repo_id, entry_from, entry_to, blob_oid, blob_read)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 id,
                 source_kind_text(source.kind),
@@ -824,6 +877,7 @@ fn insert_sources(conn: &Connection, id: i64, sources: &[MemorySource]) -> Resul
                 source.entry_from,
                 source.entry_to,
                 source.blob_oid,
+                source.blob_read,
             ],
         )?;
     }
@@ -884,7 +938,7 @@ fn memory_row(row: &Row<'_>) -> rusqlite::Result<Result<Memory, StoreError>> {
 
 fn sources_of(conn: &Connection, id: i64) -> Result<Vec<MemorySource>, StoreError> {
     let mut statement = conn.prepare(
-        "SELECT kind, ref, repo_id, entry_from, entry_to, blob_oid FROM memory_source
+        "SELECT kind, ref, repo_id, entry_from, entry_to, blob_oid, blob_read FROM memory_source
          WHERE memory_id = ?1 ORDER BY kind, ref",
     )?;
     let rows = statement.query_map(params![id], |row| {
@@ -895,11 +949,12 @@ fn sources_of(conn: &Connection, id: i64) -> Result<Vec<MemorySource>, StoreErro
             row.get::<_, Option<i64>>(3)?,
             row.get::<_, Option<i64>>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, bool>(6)?,
         ))
     })?;
     let mut sources = Vec::new();
     for row in rows {
-        let (kind, reference, repo_id, entry_from, entry_to, blob_oid) = row?;
+        let (kind, reference, repo_id, entry_from, entry_to, blob_oid, blob_read) = row?;
         let kind = parse_source_kind(&kind)
             .ok_or_else(|| invalid("a memory source holds an unknown kind"))?;
         sources.push(MemorySource {
@@ -909,6 +964,7 @@ fn sources_of(conn: &Connection, id: i64) -> Result<Vec<MemorySource>, StoreErro
             entry_from,
             entry_to,
             blob_oid,
+            blob_read,
         });
     }
     Ok(sources)
@@ -1063,6 +1119,7 @@ mod tests {
             entry_from: None,
             entry_to: None,
             blob_oid: None,
+            blob_read: false,
         }
     }
 
@@ -1074,6 +1131,7 @@ mod tests {
             entry_from: None,
             entry_to: None,
             blob_oid: None,
+            blob_read: false,
         }
     }
 
@@ -1301,6 +1359,7 @@ mod tests {
             entry_from: None,
             entry_to: None,
             blob_oid: blob.map(str::to_owned),
+            blob_read: true,
         };
         // a: same blob; b: edited; c: deleted; d: appeared; e: absent both times; f: git fails;
         // g: its repository is not on this machine.
@@ -1356,6 +1415,70 @@ mod tests {
 
         memory.status = MemoryStatus::Proposed;
         assert!(files_changed_since(&memory, &now).is_empty());
+    }
+
+    #[test]
+    fn a_file_whose_blob_was_not_read_at_acceptance_is_unavailable_without_a_lookup() {
+        let mut memory = Memory {
+            id: 1,
+            uid: "u".into(),
+            kind: MemoryKind::Rule,
+            text: "t".into(),
+            status: MemoryStatus::Accepted,
+            origin: "human".into(),
+            proposed_by: None,
+            model: None,
+            created_at: 1,
+            decided_at: Some(2),
+            decided_by: Some("human".into()),
+            reviewed: true,
+            sources: vec![MemorySource {
+                kind: MemorySourceKind::File,
+                reference: "src/lib.rs".into(),
+                repo_id: Some("other".into()),
+                entry_from: None,
+                entry_to: None,
+                blob_oid: None,
+                blob_read: false,
+            }],
+            supersedes: Vec::new(),
+            superseded_by: Vec::new(),
+            files_changed_since: Vec::new(),
+            scope: String::new(),
+        };
+        // The file is at HEAD now, but nothing was read to compare it with: never `Changed`.
+        let lookup = |_: &MemorySource| -> Result<Option<String>, Lookup> {
+            panic!("a source not read at acceptance is not looked up")
+        };
+        let want = vec![FileChange {
+            path: "src/lib.rs".into(),
+            state: FileChangeState::Unavailable,
+        }];
+        assert_eq!(files_changed_since(&memory, &lookup), want);
+        memory.status = MemoryStatus::Superseded;
+        assert_eq!(
+            files_changed_since(&memory, &lookup),
+            want,
+            "superseded too"
+        );
+    }
+
+    #[test]
+    fn blob_read_tells_a_blob_an_absent_file_and_a_failed_read_apart() {
+        assert_eq!(
+            BlobRead::of::<()>(Ok(Some("abc".to_owned()))),
+            BlobRead::Blob("abc".to_owned())
+        );
+        assert_eq!(BlobRead::of::<()>(Ok(None)), BlobRead::Absent);
+        assert_eq!(
+            BlobRead::of(Err::<Option<String>, _>(())),
+            BlobRead::NotRead
+        );
+        assert_eq!(BlobRead::Blob("abc".into()).oid(), Some("abc"));
+        assert_eq!(BlobRead::Absent.oid(), None);
+        assert_eq!(BlobRead::NotRead.oid(), None);
+        assert!(BlobRead::Absent.was_read());
+        assert!(!BlobRead::NotRead.was_read());
     }
 
     #[test]
@@ -1428,6 +1551,7 @@ mod tests {
             repo_id: None,
             entry_from: Some(0),
             entry_to: Some(2),
+            blob_read: false,
             blob_oid: None,
         }];
         let refused =
@@ -1616,24 +1740,29 @@ mod tests {
             &mut store,
             MemoryKind::Rule,
             "Keep the blob",
-            &[file("src/a.rs"), file("src/b.rs")],
+            &[file("src/a.rs"), file("src/b.rs"), file("src/c.rs")],
         );
         let blobs = [
-            ("src/a.rs".to_owned(), Some("abc123".to_owned())),
-            ("src/b.rs".to_owned(), None),
+            ("src/a.rs".to_owned(), BlobRead::Blob("abc123".to_owned())),
+            ("src/b.rs".to_owned(), BlobRead::Absent),
+            ("src/c.rs".to_owned(), BlobRead::NotRead),
         ];
         let accepted = store
             .accept_memory(memory.id, None, &[], &blobs, 20)
             .expect("accept");
-        let blob_of = |path: &str| {
+        let source_of = |path: &str| {
             accepted
                 .sources
                 .iter()
                 .find(|source| source.reference == path)
-                .and_then(|source| source.blob_oid.clone())
+                .expect("the source")
         };
-        assert_eq!(blob_of("src/a.rs").as_deref(), Some("abc123"));
-        assert_eq!(blob_of("src/b.rs"), None);
+        assert_eq!(source_of("src/a.rs").blob_oid.as_deref(), Some("abc123"));
+        assert!(source_of("src/a.rs").blob_read);
+        assert_eq!(source_of("src/b.rs").blob_oid, None);
+        assert!(source_of("src/b.rs").blob_read, "read, and absent");
+        assert_eq!(source_of("src/c.rs").blob_oid, None);
+        assert!(!source_of("src/c.rs").blob_read, "not read");
         assert!(
             accepted.files_changed_since.is_empty(),
             "derived on read, not from the store"
@@ -1649,12 +1778,12 @@ mod tests {
             "Keep the first",
             &[file("src/a.rs")],
         );
-        let first = [("src/a.rs".to_owned(), Some("abc123".to_owned()))];
+        let first = [("src/a.rs".to_owned(), BlobRead::Blob("abc123".to_owned()))];
         let accepted = store
             .accept_memory(memory.id, None, &[], &first, 20)
             .expect("accept");
 
-        let changed = [("src/a.rs".to_owned(), Some("def456".to_owned()))];
+        let changed = [("src/a.rs".to_owned(), BlobRead::Blob("def456".to_owned()))];
         let again = store
             .accept_memory(memory.id, None, &[], &changed, 99)
             .expect("accept again");
@@ -1670,7 +1799,7 @@ mod tests {
     fn accepting_an_accepted_memory_again_with_text_edits_only_the_text() {
         let mut store = ThreadStore::open_memory().expect("open");
         let memory = accepted(&mut store, MemoryKind::Fact, "The first wording");
-        let blobs = [("src/a.rs".to_owned(), Some("abc123".to_owned()))];
+        let blobs = [("src/a.rs".to_owned(), BlobRead::Blob("abc123".to_owned()))];
         let before = store.read_memory(memory.id).expect("read");
         assert!(before.sources[0].blob_oid.is_none());
 

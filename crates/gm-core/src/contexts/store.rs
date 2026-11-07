@@ -9,11 +9,11 @@ use gm_schema::threads::{Context, ContextRepo, Memory, MemoryFilter, MemoryStatu
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::visibility::{self, ContextNode};
-use crate::threads::memories::{self, Carried, Found, NewMemory, Placement};
+use crate::threads::memories::{self, BlobRead, Carried, Found, NewMemory, Placement};
 use crate::threads::store::{BUSY_TIMEOUT, StoreError, begin, create_private, invalid, retry_busy};
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run, so the first is version 1.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
 /// Characters of a context name (D193 (3)).
 const NAME_CHARS: usize = 64;
 
@@ -84,6 +84,15 @@ CREATE TRIGGER memory_fts_au AFTER UPDATE OF text ON memory BEGIN
     INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', old.id, old.text);
     INSERT INTO memory_fts (rowid, text) VALUES (new.id, new.text);
 END;
+";
+
+/// Schema 2 (D193 (9)): a file source records whether its blob was read at acceptance. The rows
+/// accepted under schema 1 were read, so they count as read; a proposal is not read yet.
+const SCHEMA_V2: &str = "
+ALTER TABLE memory_source ADD COLUMN blob_read INTEGER NOT NULL DEFAULT 0;
+UPDATE memory_source SET blob_read = 1
+    WHERE kind = 'file' AND memory_id IN (
+        SELECT id FROM memory WHERE status IN ('accepted','superseded'));
 ";
 
 /// The contexts store: one connection to `contexts.db`.
@@ -438,7 +447,7 @@ impl ContextStore {
         uid: &str,
         text: Option<&str>,
         supersedes: &[String],
-        blobs: &[(String, Option<String>)],
+        blobs: &[(String, BlobRead)],
         at: i64,
     ) -> Result<Memory, StoreError> {
         let tx = begin(&mut self.conn)?;
@@ -798,6 +807,7 @@ mod tests {
             entry_from: None,
             entry_to: None,
             blob_oid: None,
+            blob_read: false,
         }
     }
 
@@ -844,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn the_file_is_migrated_to_version_one_and_reopening_keeps_it() {
+    fn the_file_is_migrated_to_the_latest_version_and_reopening_keeps_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("contexts.db");
         for _ in 0..2 {
@@ -853,8 +863,56 @@ mod tests {
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("version");
-            assert_eq!(version, 1);
+            assert_eq!(version, 2);
         }
+    }
+
+    /// Schema 2 (D193 (9)) from a version 1 file: the file sources of accepted and superseded
+    /// memories were read, a proposal's was not, and a commit source is not a file.
+    #[test]
+    fn version_one_gains_blob_read_and_marks_the_accepted_file_sources_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("contexts.db");
+        {
+            let conn = Connection::open(&path).expect("raw");
+            conn.execute_batch(SCHEMA_V1).expect("schema 1");
+            conn.execute_batch(
+                "INSERT INTO memory (id, uid, kind, text, status, origin, created_at) VALUES
+                    (1, 'accepted1', 'rule', 'a', 'accepted', 'human', 1),
+                    (2, 'proposed1', 'rule', 'p', 'proposed', 'agent:x', 1),
+                    (3, 'superseded1', 'rule', 's', 'superseded', 'human', 1);
+                 INSERT INTO memory_source (memory_id, kind, ref, repo_id, blob_oid) VALUES
+                    (1, 'file', 'src/a.rs', NULL, 'abc'),
+                    (1, 'commit', '0123456', NULL, NULL),
+                    (2, 'file', 'src/b.rs', NULL, NULL),
+                    (3, 'file', 'src/c.rs', NULL, 'def');",
+            )
+            .expect("rows");
+            conn.pragma_update(None, "user_version", 1)
+                .expect("version");
+        }
+        let store = ContextStore::open(&path).expect("migrate");
+        let mut statement = store
+            .conn
+            .prepare(
+                "SELECT m.uid, s.ref, s.blob_read FROM memory_source s
+                 JOIN memory m ON m.id = s.memory_id ORDER BY m.uid, s.kind, s.ref",
+            )
+            .expect("prepare");
+        let rows: Vec<(String, String, bool)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            vec![
+                ("accepted1".to_owned(), "0123456".to_owned(), false),
+                ("accepted1".to_owned(), "src/a.rs".to_owned(), true),
+                ("proposed1".to_owned(), "src/b.rs".to_owned(), false),
+                ("superseded1".to_owned(), "src/c.rs".to_owned(), true),
+            ]
+        );
     }
 
     #[test]
@@ -1227,6 +1285,7 @@ mod tests {
             reviewed: true,
             sources: vec![MemorySource {
                 blob_oid: Some("b1".into()),
+                blob_read: true,
                 ..file("src/lib.rs", Some(REPO))
             }],
             supersedes: Vec::new(),

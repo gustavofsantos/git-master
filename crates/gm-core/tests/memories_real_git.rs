@@ -347,6 +347,7 @@ fn a_human_proposal_is_accepted_and_records_the_blob() {
     assert!(memory.reviewed);
     let blob = git(&repo.root, &["rev-parse", "HEAD:parser.rs"]);
     assert_eq!(memory.sources[0].blob_oid.as_deref(), Some(blob.as_str()));
+    assert!(memory.sources[0].blob_read, "read at acceptance");
 }
 
 #[test]
@@ -409,6 +410,7 @@ fn a_deleted_file_is_missing_and_a_file_added_later_is_changed() {
         vec![file("notes.md")],
     ));
     assert_eq!(note.sources[0].blob_oid, None, "absent when accepted");
+    assert!(note.sources[0].blob_read, "read, and absent");
 
     git(&repo.root, &["rm", "-q", "--", "parser.rs"]);
     std::fs::write(repo.root.join("notes.md"), "notes\n").unwrap();

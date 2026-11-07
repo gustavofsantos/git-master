@@ -16,7 +16,7 @@ use crate::GitPort;
 use crate::contexts::store::ContextStore;
 use crate::contexts::visibility::{self, ContextNode, Scope};
 use crate::contexts_session::{RepoState, repo_identity};
-use crate::threads::memories::{self, Found, Lookup, MemoryAction, NewMemory};
+use crate::threads::memories::{self, BlobRead, Found, Lookup, MemoryAction, NewMemory};
 use crate::threads::store::{StoreError, ThreadStore};
 use crate::threads_session::{
     Context, Proposal, named, now_ms, origin_of, redacted, stored_source,
@@ -644,17 +644,19 @@ pub(crate) fn accept_in_context(
     Ok(changed(id, ctx, &stores.reach, accepted, false, &attached))
 }
 
-/// The blob at `HEAD` of each file source whose folder is known (D193 (9)), as the acceptance
-/// records it.
-fn file_blobs(ctx: &Context<'_>, reach: &Reach, memory: &Memory) -> Vec<(String, Option<String>)> {
+/// The blob at `HEAD` of each file source, as the acceptance records it: not read when the
+/// source's folder is not known (D193 (9)).
+fn file_blobs(ctx: &Context<'_>, reach: &Reach, memory: &Memory) -> Vec<(String, BlobRead)> {
     memory
         .sources
         .iter()
         .filter(|source| source.kind == MemorySourceKind::File)
-        .filter_map(|source| {
-            let root = source_root(ctx, reach, source.repo_id.as_deref()).ok()?;
-            let blob = blob_under(ctx, &root, &source.reference).ok().flatten();
-            Some((source.reference.clone(), blob))
+        .map(|source| {
+            let read = match source_root(ctx, reach, source.repo_id.as_deref()) {
+                Ok(root) => BlobRead::of(blob_under(ctx, &root, &source.reference)),
+                Err(_) => BlobRead::NotRead,
+            };
+            (source.reference.clone(), read)
         })
         .collect()
 }
