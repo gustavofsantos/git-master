@@ -19,6 +19,7 @@ mod files;
 pub mod git;
 pub mod grep;
 mod history;
+mod memory_scope;
 pub mod move_changes;
 mod move_exec;
 mod move_preview;

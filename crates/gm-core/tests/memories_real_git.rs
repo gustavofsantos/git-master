@@ -161,6 +161,7 @@ fn list(engine: &mut Engine, actor: &Actor, status: Option<MemoryStatus>) -> Vec
             status,
             path: None,
             author: None,
+            scope: None,
             limit: 50,
             cursor: None,
         },
@@ -197,6 +198,7 @@ fn propose(
             kind,
             text: text.to_owned(),
             sources,
+            context: None,
         },
     )
 }
@@ -294,29 +296,31 @@ fn an_agent_cannot_accept_reject_or_delete() {
     ));
 
     let requests = [
-        CommandKind::AcceptMemory {
-            uid: proposed.uid.clone(),
-            text: None,
-            supersedes: Vec::new(),
-        },
-        CommandKind::RejectMemory {
-            uid: proposed.uid.clone(),
-        },
-        CommandKind::DeleteMemory {
-            uid: proposed.uid.clone(),
-        },
+        (
+            CommandKind::AcceptMemory {
+                uid: proposed.uid.clone(),
+                text: None,
+                supersedes: Vec::new(),
+            },
+            "only a human can accept a memory",
+        ),
+        (
+            CommandKind::RejectMemory {
+                uid: proposed.uid.clone(),
+            },
+            "only a human can reject a memory",
+        ),
+        (
+            CommandKind::DeleteMemory {
+                uid: proposed.uid.clone(),
+            },
+            "only a human can delete a memory",
+        ),
     ];
-    for request in requests {
+    for (request, refusal) in requests {
         let events = send(&mut engine, &agent(), request.clone());
         assert_eq!(state_of(&events), OperationState::Failed, "{request:?}");
-        assert_eq!(
-            failure(&events).as_deref(),
-            Some("only a human can accept a memory")
-                .or(Some("only a human can reject a memory"))
-                .or(Some("only a human can delete a memory"))
-                .filter(|_| false)
-                .or(failure(&events).as_deref()),
-        );
+        assert_eq!(failure(&events).as_deref(), Some(refusal), "{request:?}");
     }
     let kept = read(&mut engine, &proposed.uid);
     assert_eq!(kept.status, MemoryStatus::Proposed);
@@ -560,12 +564,15 @@ fn a_supersede_marks_the_old_memory_and_links_both_ways() {
     ));
 
     let accepted = memory_of(&accept(&mut engine, &new.uid, None, vec![old.uid.clone()]));
-    assert_eq!(accepted.supersedes, vec![old.id]);
+    assert_eq!(accepted.supersedes, vec![old.uid.clone()]);
     let old_uid = old.uid.clone();
     let old = read(&mut engine, &old_uid);
     assert_eq!(old.status, MemoryStatus::Superseded);
-    assert_eq!(old.superseded_by, vec![new.id]);
-    assert_eq!(read(&mut engine, &new.uid).supersedes, vec![old.id]);
+    assert_eq!(old.superseded_by, vec![new.uid.clone()]);
+    assert_eq!(
+        read(&mut engine, &new.uid).supersedes,
+        vec![old.uid.clone()]
+    );
 }
 
 #[test]

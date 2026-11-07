@@ -10,14 +10,15 @@ use std::sync::atomic::AtomicBool;
 
 use gm_schema::threads::{
     AttachKind, CutBound, EditChange, EditState, EntryKind, Evidence, LabelDetail, LinkKind,
-    LinkOrigin, Memory, MemoryFilter, MemoryKind, MemorySource, MemorySourceInput,
-    MemorySourceKind, MemoryStatus, ProvenanceCommit, ProvenanceCut, ProvenanceEdit,
-    ProvenanceLabel, ProvenanceLink, ProvenanceResult, ProvenanceThread, RelationDirection,
-    ThreadDetail, ThreadEdit, ThreadFilter, ThreadSummary,
+    LinkOrigin, MemoryFilter, MemoryKind, MemorySource, MemorySourceInput, MemorySourceKind,
+    MemoryStatus, ProvenanceCommit, ProvenanceCut, ProvenanceEdit, ProvenanceLabel, ProvenanceLink,
+    ProvenanceResult, ProvenanceThread, RelationDirection, ThreadDetail, ThreadEdit, ThreadFilter,
+    ThreadSummary,
 };
 use gm_schema::{Actor, CommandKind, Event, OperationId};
 
 use crate::blame::BlameLine;
+use crate::memory_scope::{self, Home, Stores};
 use crate::threads::members;
 use crate::threads::memories::{self, MemoryAction, NewMemory};
 use crate::threads::provenance::{
@@ -33,7 +34,7 @@ use crate::{BlameRead, GitPort};
 /// Commit names one Git process reads when a store opens (D145).
 const SNAPSHOT_BATCH: usize = 500;
 const LABEL_MISSING: &str = "Label not found.";
-const MEMORY_MISSING: &str = "Memory not found.";
+use crate::memory_scope::MEMORY_MISSING;
 
 /// The most rows one read returns; a larger `limit` is cut to this.
 pub(crate) const MAX_PAGE: u32 = 500;
@@ -111,6 +112,8 @@ pub(crate) struct Context<'a> {
     pub(crate) root: &'a Path,
     /// A file to read as the global Git configuration; `None` is the user's own. For the tests.
     pub(crate) global_config: Option<&'a Path>,
+    /// The contexts file (`contexts.db`), read by the memory commands; `None` when there is none.
+    pub(crate) contexts_db: Option<&'a Path>,
 }
 
 /// What a thread command needs a human for, or `None` when an agent may run it.
@@ -131,6 +134,9 @@ pub(crate) fn human_only(kind: &CommandKind) -> Option<&'static str> {
         CommandKind::AcceptMemory { .. } => "accept a memory",
         CommandKind::RejectMemory { .. } => "reject a memory",
         CommandKind::DeleteMemory { .. } => "delete a memory",
+        CommandKind::MoveMemoryToContext { .. } => "move a memory to a context",
+        CommandKind::AttachMemory { .. } => "attach a memory to a context",
+        CommandKind::DetachMemory { .. } => "detach a memory from a context",
         CommandKind::ScrubThreads => "scrub the threads",
         _ => return None,
     })
@@ -161,13 +167,23 @@ pub(crate) fn is_threads_command(kind: &CommandKind) -> bool {
             | CommandKind::DeleteLabel { .. }
             | CommandKind::DetachLabel { .. }
             | CommandKind::RemoveThreadRelation { .. }
-            | CommandKind::ListMemories { .. }
+            | CommandKind::ScrubThreads
+    ) || is_memory_command(kind)
+}
+
+/// Whether `kind` is one of the memory commands (D190, D193).
+pub(crate) fn is_memory_command(kind: &CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::ListMemories { .. }
             | CommandKind::ReadMemory { .. }
             | CommandKind::ProposeMemory { .. }
             | CommandKind::AcceptMemory { .. }
             | CommandKind::RejectMemory { .. }
             | CommandKind::DeleteMemory { .. }
-            | CommandKind::ScrubThreads
+            | CommandKind::MoveMemoryToContext { .. }
+            | CommandKind::AttachMemory { .. }
+            | CommandKind::DetachMemory { .. }
     )
 }
 
@@ -216,12 +232,7 @@ pub(crate) fn run(
         | CommandKind::DeleteLabel { .. }
         | CommandKind::DetachLabel { .. }
         | CommandKind::RemoveThreadRelation { .. } => labels_command(id, store, ctx, &origin, kind),
-        CommandKind::ListMemories { .. }
-        | CommandKind::ReadMemory { .. }
-        | CommandKind::ProposeMemory { .. }
-        | CommandKind::AcceptMemory { .. }
-        | CommandKind::RejectMemory { .. }
-        | CommandKind::DeleteMemory { .. } => memories_command(id, store, ctx, actor, kind),
+        _ if is_memory_command(kind) => memories_command(id, store, ctx, actor, kind),
         CommandKind::ListThreads {
             filter,
             before_at,
@@ -449,9 +460,17 @@ fn label_written(id: OperationId, label: Option<gm_schema::threads::Label>) -> V
     vec![Event::LabelsChanged { id, label }, Event::ThreadsChanged]
 }
 
-/// The memory commands (D190, D192). `memories::authorize` checks the actor here as well as in
+/// What a memory proposal says, before the store sees it (D190 (1), D193 (7)).
+pub(crate) struct Proposal<'a> {
+    pub(crate) kind: MemoryKind,
+    pub(crate) text: &'a str,
+    pub(crate) sources: &'a [MemorySourceInput],
+}
+
+/// The memory commands (D190, D192, D193). `memories::authorize` checks the actor here as well as in
 /// `human_only`, and the text is redacted before the store sees it (D121). An agent's proposal is
-/// `proposed`; a human's is `accepted` and records the blob of each file source at `HEAD`.
+/// `proposed`; a human's is `accepted` and records the blob of each file source at `HEAD`. A memory
+/// of a context is found and acted on through `memory_scope`, which reads `contexts.db`.
 fn memories_command(
     id: OperationId,
     store: &mut ThreadStore,
@@ -460,6 +479,7 @@ fn memories_command(
     kind: &CommandKind,
 ) -> Result<Vec<Event>, String> {
     let is_human = matches!(actor, Actor::Human);
+    let mut stores = Stores::new(store, ctx);
     match kind {
         CommandKind::ListMemories {
             query,
@@ -467,6 +487,7 @@ fn memories_command(
             status,
             path,
             author,
+            scope,
             limit,
             cursor,
         } => {
@@ -477,38 +498,99 @@ fn memories_command(
                 path: path.clone(),
                 author: author.clone(),
             };
-            let (mut memories, next_cursor) = store
-                .list_memories(query, &filter, page(*limit)?, cursor.as_deref())
-                .map_err(|e| e.to_string())?;
-            for memory in &mut memories {
-                fill_changes(ctx, memory);
-            }
+            let listed = memory_scope::list_command(
+                &stores,
+                ctx,
+                &memory_scope::Ask {
+                    query,
+                    filter: &filter,
+                    scope: scope.as_deref(),
+                    limit: page(*limit)?,
+                    cursor: cursor.as_deref(),
+                },
+            )?;
             Ok(vec![Event::MemoriesListed {
                 id,
-                memories,
-                next_cursor,
+                memories: listed.memories,
+                next_cursor: listed.next_cursor,
+                contexts_read: listed.contexts_read,
+                note: listed.note,
             }])
         }
         CommandKind::ReadMemory { uid } => {
-            let memory_id = memory_row(store, uid)?;
-            let mut memory = store
-                .read_memory(memory_id)
-                .map_err(|e| named(e, MEMORY_MISSING))?;
-            fill_changes(ctx, &mut memory);
+            let memory = memory_scope::read(&stores, ctx, uid)?;
             Ok(vec![Event::MemoryRead { id, memory }])
         }
         CommandKind::ProposeMemory {
             kind: memory_kind,
             text,
             sources,
-        } => propose_memory(id, store, ctx, actor, *memory_kind, text, sources),
+            context,
+        } => {
+            let proposal = Proposal {
+                kind: *memory_kind,
+                text,
+                sources,
+            };
+            match context {
+                None => propose_memory(id, &mut stores, ctx, actor, &proposal),
+                Some(name) => {
+                    memory_scope::propose_in_context(id, &mut stores, ctx, actor, name, &proposal)
+                }
+            }
+        }
+        CommandKind::AcceptMemory { .. }
+        | CommandKind::RejectMemory { .. }
+        | CommandKind::DeleteMemory { .. } => act_on_memory(id, &mut stores, ctx, is_human, kind),
+        CommandKind::MoveMemoryToContext { uid, context } => {
+            memory_scope::move_to_context(id, &mut stores, ctx, uid, *context)
+        }
+        CommandKind::AttachMemory { uid, context } => {
+            memory_scope::attach(id, &mut stores, ctx, uid, *context)
+        }
+        CommandKind::DetachMemory { uid, context } => {
+            memory_scope::detach(id, &mut stores, ctx, uid, *context)
+        }
+        _ => Err("not a memory command".to_owned()),
+    }
+}
+
+/// Accepts, rejects or deletes a memory, of the repository's store or of a context (D192, D193
+/// (7)). The engine has checked the actor; each action checks it again.
+fn act_on_memory(
+    id: OperationId,
+    stores: &mut Stores<'_>,
+    ctx: &Context<'_>,
+    is_human: bool,
+    kind: &CommandKind,
+) -> Result<Vec<Event>, String> {
+    match kind {
         CommandKind::AcceptMemory {
             uid,
             text,
             supersedes,
-        } => accept_memory(id, store, ctx, is_human, uid, text.as_deref(), supersedes),
-        CommandKind::RejectMemory { uid } => reject_memory(id, store, ctx, is_human, uid),
-        CommandKind::DeleteMemory { uid } => delete_memory(id, store, is_human, uid),
+        } => match memory_scope::home_of(stores, uid)? {
+            Home::Context => memory_scope::accept_in_context(
+                id,
+                stores,
+                ctx,
+                is_human,
+                uid,
+                text.as_deref(),
+                supersedes,
+            ),
+            Home::Repository(_) => {
+                accept_memory(id, stores, ctx, is_human, uid, text.as_deref(), supersedes)
+            }
+        },
+        CommandKind::RejectMemory { uid } => match memory_scope::home_of(stores, uid)? {
+            Home::Context => memory_scope::reject_in_context(id, stores, ctx, is_human, uid),
+            Home::Repository(_) => reject_memory(id, stores, ctx, is_human, uid),
+        },
+        CommandKind::DeleteMemory { uid } => match memory_scope::home_of(stores, uid)? {
+            Home::Context => memory_scope::delete_in_context(id, stores, is_human, uid),
+            Home::Repository(_) => delete_memory(id, stores, is_human, uid),
+        },
         _ => Err("not a memory command".to_owned()),
     }
 }
@@ -520,12 +602,16 @@ fn memory_row(store: &ThreadStore, uid: &str) -> Result<i64, String> {
         .map_err(|e| named(e, MEMORY_MISSING))
 }
 
-/// The row ids of the memories a human supersedes. A uid the repository does not hold is refused
-/// by name: a memory supersedes only memories of its own store (D193 (1)).
-fn supersede_rows(store: &ThreadStore, uids: &[String]) -> Result<Vec<i64>, String> {
+/// The row ids of the memories a human supersedes. A uid of the repository's store is the only one
+/// it may name: a uid of a context is another scope, and a memory supersedes only memories of its
+/// own store (D193 (1)).
+fn supersede_rows(stores: &Stores<'_>, uids: &[String]) -> Result<Vec<i64>, String> {
     uids.iter()
         .map(|uid| {
-            store.memory_id_of(uid).map_err(|e| match e {
+            stores.threads.memory_id_of(uid).map_err(|e| match e {
+                StoreError::NotFound if memory_scope::is_in_contexts(stores, uid) => {
+                    memory_scope::other_scope(uid)
+                }
                 StoreError::NotFound => format!("memory {uid} is not in this repository"),
                 other => other.to_string(),
             })
@@ -533,25 +619,25 @@ fn supersede_rows(store: &ThreadStore, uids: &[String]) -> Result<Vec<i64>, Stri
         .collect()
 }
 
-/// Proposes a memory: an agent's is `proposed`, a human's is `accepted` (D190, D192).
+/// Proposes a memory in the repository's own store: an agent's is `proposed`, a human's is
+/// `accepted` (D190, D192).
 fn propose_memory(
     id: OperationId,
-    store: &mut ThreadStore,
+    stores: &mut Stores<'_>,
     ctx: &Context<'_>,
     actor: &Actor,
-    memory_kind: MemoryKind,
-    text: &str,
-    sources: &[MemorySourceInput],
+    proposal: &Proposal<'_>,
 ) -> Result<Vec<Event>, String> {
     let is_human = matches!(actor, Actor::Human);
     memories::authorize(
         is_human,
         &MemoryAction::Propose {
-            sources: sources.len(),
+            sources: proposal.sources.len(),
         },
     )?;
-    let text = redacted(ctx, text)?;
-    let stored = sources
+    let text = redacted(ctx, proposal.text)?;
+    let kept = proposal
+        .sources
         .iter()
         .map(|source| stored_source(ctx, source, is_human))
         .collect::<Result<Vec<_>, _>>()?;
@@ -560,23 +646,31 @@ fn propose_memory(
     } else {
         MemoryStatus::Proposed
     };
-    let (memory, created) = store
+    let (memory, created) = stores
+        .threads
         .propose_memory(&NewMemory {
-            kind: memory_kind,
+            kind: proposal.kind,
             text: &text,
             status,
             origin: &origin_of(actor),
-            sources: &stored,
+            sources: &kept,
             at: now_ms(),
         })
         .map_err(|e| e.to_string())?;
-    Ok(memory_written(id, ctx, memory, created))
+    Ok(memory_scope::repository_changed(
+        id,
+        ctx,
+        &stores.reach,
+        memory,
+        created,
+    ))
 }
 
-/// Accepts memory `uid`, recording the blob of each file source at `HEAD` (D192).
+/// Accepts memory `uid` of the repository's store, recording the blob of each file source at `HEAD`
+/// (D192).
 fn accept_memory(
     id: OperationId,
-    store: &mut ThreadStore,
+    stores: &mut Stores<'_>,
     ctx: &Context<'_>,
     is_human: bool,
     uid: &str,
@@ -584,12 +678,13 @@ fn accept_memory(
     supersedes: &[String],
 ) -> Result<Vec<Event>, String> {
     memories::authorize(is_human, &MemoryAction::Accept)?;
-    let memory_id = memory_row(store, uid)?;
-    let supersedes = supersede_rows(store, supersedes)?;
+    let memory_id = memory_row(stores.threads, uid)?;
+    let supersedes = supersede_rows(stores, supersedes)?;
     let text = text.map(|text| redacted(ctx, text)).transpose()?;
     // The blobs are read before the write, so the acceptance records what HEAD holds now. An
     // accepted memory keeps the blobs of its first acceptance (D192 (4)), so none are read.
-    let already_accepted = store
+    let already_accepted = stores
+        .threads
         .read_memory(memory_id)
         .map_err(|e| named(e, MEMORY_MISSING))?
         .status
@@ -597,7 +692,8 @@ fn accept_memory(
     let blobs: Vec<(String, Option<String>)> = if already_accepted {
         Vec::new()
     } else {
-        store
+        stores
+            .threads
             .memory_file_sources(memory_id)
             .map_err(|e| named(e, MEMORY_MISSING))?
             .into_iter()
@@ -607,38 +703,53 @@ fn accept_memory(
             })
             .collect()
     };
-    let memory = store
+    let memory = stores
+        .threads
         .accept_memory(memory_id, text.as_deref(), &supersedes, &blobs, now_ms())
         .map_err(|e| named(e, MEMORY_MISSING))?;
-    Ok(memory_written(id, ctx, memory, false))
+    Ok(memory_scope::repository_changed(
+        id,
+        ctx,
+        &stores.reach,
+        memory,
+        false,
+    ))
 }
 
-/// Rejects the proposed memory `uid` (D192).
+/// Rejects the proposed memory `uid` of the repository's store (D192).
 fn reject_memory(
     id: OperationId,
-    store: &mut ThreadStore,
+    stores: &mut Stores<'_>,
     ctx: &Context<'_>,
     is_human: bool,
     uid: &str,
 ) -> Result<Vec<Event>, String> {
     memories::authorize(is_human, &MemoryAction::Reject)?;
-    let memory_id = memory_row(store, uid)?;
-    let memory = store
+    let memory_id = memory_row(stores.threads, uid)?;
+    let memory = stores
+        .threads
         .reject_memory(memory_id, now_ms())
         .map_err(|e| named(e, MEMORY_MISSING))?;
-    Ok(memory_written(id, ctx, memory, false))
+    Ok(memory_scope::repository_changed(
+        id,
+        ctx,
+        &stores.reach,
+        memory,
+        false,
+    ))
 }
 
-/// Deletes memory `uid` with its sources and links (D192).
+/// Deletes memory `uid` of the repository's store with its sources and links (D192).
 fn delete_memory(
     id: OperationId,
-    store: &mut ThreadStore,
+    stores: &mut Stores<'_>,
     is_human: bool,
     uid: &str,
 ) -> Result<Vec<Event>, String> {
     memories::authorize(is_human, &MemoryAction::Delete)?;
-    let memory_id = memory_row(store, uid)?;
-    store
+    let memory_id = memory_row(stores.threads, uid)?;
+    stores
+        .threads
         .delete_memory(memory_id)
         .map_err(|e| named(e, MEMORY_MISSING))?;
     Ok(vec![Event::MemoryChanged {
@@ -648,30 +759,15 @@ fn delete_memory(
     }])
 }
 
-/// The `MemoryChanged` event for a written memory, with its changes filled from `HEAD`.
-fn memory_written(
-    id: OperationId,
-    ctx: &Context<'_>,
-    mut memory: Memory,
-    created: bool,
-) -> Vec<Event> {
-    fill_changes(ctx, &mut memory);
-    vec![Event::MemoryChanged {
-        id,
-        memory: Some(memory),
-        created,
-    }]
-}
-
 /// The text with the repository's redaction patterns applied (D121).
-fn redacted(ctx: &Context<'_>, text: &str) -> Result<String, String> {
+pub(crate) fn redacted(ctx: &Context<'_>, text: &str) -> Result<String, String> {
     Ok(redactor(ctx)?.redact(text).text)
 }
 
 /// A source as the store keeps it. A commit is resolved by Git first, so a short id is stored as
 /// its full id and an unknown one is refused (D192 (5)). A human's file source records its blob at
 /// `HEAD` now (D192 (3)); an agent's does not, since its proposal is not accepted yet.
-fn stored_source(
+pub(crate) fn stored_source(
     ctx: &Context<'_>,
     source: &MemorySourceInput,
     is_human: bool,
@@ -709,16 +805,6 @@ fn blob_at_head(ctx: &Context<'_>, path: &str) -> Option<String> {
         .blob_at_commit(ctx.root, "HEAD", path)
         .ok()
         .flatten()
-}
-
-/// Derives `files_changed_since` of `memory` from `HEAD` now (D192 (6)). Never stored.
-fn fill_changes(ctx: &Context<'_>, memory: &mut Memory) {
-    let current = |path: &str| {
-        ctx.git
-            .blob_at_commit(ctx.root, "HEAD", path)
-            .map_err(|e| e.0)
-    };
-    memory.files_changed_since = memories::files_changed_since(memory, &current);
 }
 
 /// Records the replays of a restack in the threads store (D142, D145), when the repository has
@@ -1201,7 +1287,7 @@ fn write(
 }
 
 /// The message of a store error, where `NotFound` names what was missing.
-fn named(error: StoreError, missing: &str) -> String {
+pub(crate) fn named(error: StoreError, missing: &str) -> String {
     match error {
         StoreError::NotFound => missing.to_owned(),
         other => other.to_string(),
@@ -2396,6 +2482,7 @@ mod tests {
             git,
             root,
             global_config: Some(settings),
+            contexts_db: None,
         }
     }
 

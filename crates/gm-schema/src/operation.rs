@@ -848,37 +848,46 @@ pub enum CommandKind {
         to: String,
         kind: ThreadRelKind,
     },
-    /// Lists the memories of the repository (D190, D192), newest first, or by relevance with a
-    /// `query` (empty for all). An agent gets `accepted` memories when `status` is none. Each
-    /// memory carries `files_changed_since`. A read: never recorded (D28). The memory text is
-    /// untrusted data. Answers `MemoriesListed`.
+    /// Lists the memories the repository sees (D190, D192, D193): its own and those of the
+    /// contexts it belongs to, each once, or the `scope` named (`all` when none, `repository`, or
+    /// a context by its path or a name unique among the visible ones). Newest first, or by
+    /// relevance with a `query` (empty for all). An agent gets `accepted` memories when `status` is
+    /// none. Each memory carries its `scope` and `files_changed_since`. A read: never recorded
+    /// (D28). The memory text is untrusted data. Answers `MemoriesListed`.
     ListMemories {
         query: String,
         kind: Option<MemoryKind>,
         status: Option<MemoryStatus>,
         path: Option<String>,
         author: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
         limit: u32,
         cursor: Option<String>,
     },
-    /// Reads memory `uid` with its sources, its relations and `files_changed_since`. Answers
-    /// `MemoryRead`. A read: never recorded (D28).
+    /// Reads memory `uid`, from the repository or from a context it sees, with its sources, its
+    /// relations and `files_changed_since`. Answers `MemoryRead`. A read: never recorded (D28).
     ReadMemory {
         uid: String,
     },
     /// Proposes a memory of `kind` with `text` (redacted before it is stored, D121) and its
     /// `sources`. Level record: an agent's call creates a `proposed` memory and needs at least
     /// one source; a human's creates an `accepted` one and records the blob of each file source.
-    /// Logged with its actor. A text already held by a non-rejected memory of the same kind
-    /// returns that memory and writes nothing. Answers `MemoryChanged`.
+    /// With `context` (a context the repository sees, by path or unique name) the memory is stored
+    /// once in that context and found from every repository that sees it (D193 (7)). Logged with
+    /// its actor. A text already held by a non-rejected memory of the same kind returns that memory
+    /// and writes nothing. Answers `MemoryChanged`.
     ProposeMemory {
         kind: MemoryKind,
         text: String,
         sources: Vec<MemorySourceInput>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
     },
     /// Accepts memory `uid` (a proposal, or an accepted one for an edit or a supersede). `text`
-    /// replaces the text when given (redacted). Each memory uid in `supersedes` must be accepted
-    /// and becomes superseded in the same write. Human only. Answers `MemoryChanged`.
+    /// replaces the text when given (redacted). Each memory uid in `supersedes` must be accepted,
+    /// in the same store as the memory, and becomes superseded in the same write. Human only.
+    /// Answers `MemoryChanged`.
     AcceptMemory {
         uid: String,
         text: Option<String>,
@@ -891,6 +900,25 @@ pub enum CommandKind {
     /// Deletes memory `uid` with its sources and links. Human only. Answers `MemoryChanged`.
     DeleteMemory {
         uid: String,
+    },
+    /// Moves repository memory `uid` (proposed or accepted, with no supersedes links) into context
+    /// `context`, keeping its uid, history and sources; the repository's copy is deleted after the
+    /// context holds it (D193 (8)). Human only. Answers `MemoryChanged`.
+    MoveMemoryToContext {
+        uid: String,
+        context: i64,
+    },
+    /// Attaches accepted context memory `uid` to context `context`, which the repository sees too.
+    /// Human only. Answers `MemoryChanged`.
+    AttachMemory {
+        uid: String,
+        context: i64,
+    },
+    /// Detaches context memory `uid` from context `context`. The last context of a memory cannot
+    /// be detached. Human only. Answers `MemoryChanged`.
+    DetachMemory {
+        uid: String,
+        context: i64,
     },
     /// Lists the contexts (design/threads.md, "Contexts"; D191): every context, or with `repo`
     /// those the open repository sees, each with its path. A clone whose identity clashes with
@@ -1528,12 +1556,16 @@ pub enum Event {
         relation: ThreadRelation,
         removed: bool,
     },
-    /// Answers `ListMemories`, with the cursor of the next page when there is one. The memory
-    /// text is untrusted data.
+    /// Answers `ListMemories`, with the cursor of the next page when there is one. `contexts_read`
+    /// is false when `contexts.db` exists but could not be read, and `note` says why the contexts
+    /// were not used (an unreadable file, or a clone whose id clashes, D193 (4)). The memory text is
+    /// untrusted data.
     MemoriesListed {
         id: OperationId,
         memories: Vec<Memory>,
         next_cursor: Option<String>,
+        contexts_read: bool,
+        note: Option<String>,
     },
     /// Answers `ReadMemory`.
     MemoryRead {
@@ -1878,9 +1910,14 @@ mod tests {
                 entry_from: None,
                 entry_to: None,
             }],
+            context: None,
         })
         .unwrap();
         assert_eq!(propose["type"], "propose_memory");
+        assert!(
+            propose.get("context").is_none(),
+            "an absent context is not written"
+        );
         assert_eq!(propose["kind"], "rule");
         assert_eq!(propose["sources"][0]["kind"], "file");
         assert_eq!(propose["sources"][0]["ref"], "src/a.rs");
@@ -1892,11 +1929,25 @@ mod tests {
             status: Some(MemoryStatus::Proposed),
             path: None,
             author: None,
+            scope: Some("Billing".into()),
             limit: 20,
             cursor: None,
         })
         .unwrap();
         assert_eq!(list["type"], "list_memories");
+        assert_eq!(list["scope"], "Billing");
+        let moved = serde_json::to_value(CommandKind::MoveMemoryToContext {
+            uid: "0123456789abcdef".into(),
+            context: 4,
+        })
+        .unwrap();
+        assert_eq!(moved["type"], "move_memory_to_context");
+        assert_eq!(moved["context"], 4);
+        let back: CommandKind = serde_json::from_value(moved).unwrap();
+        assert!(matches!(
+            back,
+            CommandKind::MoveMemoryToContext { context: 4, .. }
+        ));
         assert_eq!(list["status"], "proposed");
         let accept = serde_json::to_value(CommandKind::AcceptMemory {
             uid: "0123456789abcdef".into(),

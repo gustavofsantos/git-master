@@ -68,8 +68,8 @@ const CONTEXT_CHARS: usize = 600;
 /// Values a facet lists, and filters a diagnosis names (D147).
 const FACET_TOP: usize = 10;
 const DIAGNOSIS_TOP: usize = 3;
-pub(super) const CURSOR_MALFORMED: &str = "the cursor is not valid";
-pub(super) const CURSOR_MISMATCH: &str =
+pub(crate) const CURSOR_MALFORMED: &str = "the cursor is not valid";
+pub(crate) const CURSOR_MISMATCH: &str =
     "the cursor belongs to another search; start again without a cursor";
 /// Least trigram similarity between a typed word and a word of the text (D131).
 const FUZZY_MIN_SIMILARITY: f32 = 0.5;

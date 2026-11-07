@@ -5,12 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
-use gm_schema::threads::{Context, ContextRepo, Memory, MemoryFilter};
+use gm_schema::threads::{Context, ContextRepo, Memory, MemoryFilter, MemoryStatus};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::visibility::{self, ContextNode};
-use crate::threads::memories::{self, NewMemory, Placement};
-use crate::threads::query::build_fts_query;
+use crate::threads::memories::{self, Carried, Found, NewMemory, Placement};
 use crate::threads::store::{BUSY_TIMEOUT, StoreError, begin, create_private, invalid, retry_busy};
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run, so the first is version 1.
@@ -354,10 +353,57 @@ impl ContextStore {
         contexts: &[i64],
         uid: Option<&str>,
     ) -> Result<(Memory, bool), StoreError> {
+        let checked = memories::check_proposal(new)?;
+        self.store_in_contexts(new, &checked, None, contexts, uid)
+    }
+
+    /// Moves a repository memory into `contexts` (D193 (8)): stored under its own uid, with its
+    /// status, origin, history and sources (the caller has set each source's `repo_id`). The
+    /// duplicate key is looked for as in a proposal. A memory already stored under that uid is
+    /// returned with `false` and nothing is written, so a move interrupted after this write is
+    /// finished by a retry.
+    pub fn move_memory_in(
+        &mut self,
+        memory: &Memory,
+        contexts: &[i64],
+    ) -> Result<(Memory, bool), StoreError> {
+        if !matches!(
+            memory.status,
+            MemoryStatus::Proposed | MemoryStatus::Accepted
+        ) {
+            return Err(invalid("only a proposed or accepted memory can move"));
+        }
+        let new = NewMemory {
+            kind: memory.kind,
+            text: &memory.text,
+            status: memory.status,
+            origin: &memory.origin,
+            sources: &memory.sources,
+            at: memory.created_at,
+        };
+        let checked = memories::check_content(&new)?;
+        let carried = Carried {
+            proposed_by: memory.proposed_by.as_deref(),
+            model: memory.model.as_deref(),
+            created_at: memory.created_at,
+            decided_at: memory.decided_at,
+            decided_by: memory.decided_by.as_deref(),
+        };
+        self.store_in_contexts(&new, &checked, Some(&carried), contexts, Some(&memory.uid))
+    }
+
+    /// Stores a checked memory attached to `contexts`, inside one transaction (D193 (7), (8)).
+    fn store_in_contexts(
+        &mut self,
+        new: &NewMemory<'_>,
+        checked: &memories::Checked,
+        carried: Option<&Carried<'_>>,
+        contexts: &[i64],
+        uid: Option<&str>,
+    ) -> Result<(Memory, bool), StoreError> {
         if contexts.is_empty() {
             return Err(invalid("a memory is proposed at a context"));
         }
-        let checked = memories::check_proposal(new)?;
         if checked
             .sources
             .iter()
@@ -374,7 +420,7 @@ impl ContextStore {
             threads: false,
             among: Some(&among),
         };
-        let (memory, created) = memories::propose_in(&tx, new, &checked, &place, uid)?;
+        let (memory, created) = memories::propose_in(&tx, new, checked, &place, uid, carried)?;
         if created {
             for &context in contexts {
                 attach(&tx, memory.id, context)?;
@@ -479,8 +525,7 @@ impl ContextStore {
     }
 
     /// The memories attached to any of `contexts`, each once, with their `bm25` score (0.0 without a
-    /// query). With a query they are ordered by relevance, otherwise newest first. The caller merges
-    /// them with other scopes and pages the result.
+    /// query), up to `limit`. With a query they are ordered by relevance, otherwise newest first.
     pub fn list_memories_in(
         &self,
         contexts: &[i64],
@@ -488,17 +533,28 @@ impl ContextStore {
         filter: &MemoryFilter,
         limit: u32,
     ) -> Result<Vec<(Memory, f64)>, StoreError> {
+        let found = self.find_memories_in(contexts, query, filter)?;
+        let mut memories = Vec::new();
+        for hit in found
+            .iter()
+            .take(usize::try_from(limit.max(1)).unwrap_or(usize::MAX))
+        {
+            memories.push((memories::memory_by_id(&self.conn, hit.id)?, hit.score));
+        }
+        Ok(memories)
+    }
+
+    /// Every memory attached to any of `contexts` that `query` and `filter` select, each once and
+    /// unpaged, in the order of the list (D193 (6)). The engine merges them with the repository's.
+    pub(crate) fn find_memories_in(
+        &self,
+        contexts: &[i64],
+        query: &str,
+        filter: &MemoryFilter,
+    ) -> Result<Vec<Found>, StoreError> {
         if contexts.is_empty() {
             return Ok(Vec::new());
         }
-        let fts = if query.trim().is_empty() {
-            None
-        } else {
-            let Some(expression) = build_fts_query(query) else {
-                return Ok(Vec::new());
-            };
-            Some(expression)
-        };
         let listed = contexts
             .iter()
             .map(i64::to_string)
@@ -507,19 +563,7 @@ impl ContextStore {
         let within = format!(
             " AND m.id IN (SELECT memory_id FROM memory_context WHERE context_id IN ({listed}))"
         );
-        let found = memories::list_ids(
-            &self.conn,
-            fts.as_deref(),
-            filter,
-            &within,
-            i64::from(limit.max(1)),
-            0,
-        )?;
-        let mut memories = Vec::with_capacity(found.len());
-        for (id, score) in found {
-            memories.push((memories::memory_by_id(&self.conn, id)?, score));
-        }
-        Ok(memories)
+        memories::list_ids(&self.conn, query, filter, &within)
     }
 }
 
@@ -1162,6 +1206,58 @@ mod tests {
 
     fn ids(memories: &[Memory]) -> Vec<i64> {
         memories.iter().map(|memory| memory.id).collect()
+    }
+
+    #[test]
+    fn a_move_interrupted_after_its_insert_is_finished_by_a_retry_with_one_copy() {
+        let mut store = store();
+        let a = root(&mut store, "A");
+        let stored = Memory {
+            id: 7,
+            uid: "abcdef0123456789".into(),
+            kind: MemoryKind::Rule,
+            text: "Use the cache".into(),
+            status: MemoryStatus::Accepted,
+            origin: "human".into(),
+            proposed_by: Some("agent:x".into()),
+            model: Some("model-1".into()),
+            created_at: 5,
+            decided_at: Some(9),
+            decided_by: Some("human".into()),
+            reviewed: true,
+            sources: vec![MemorySource {
+                blob_oid: Some("b1".into()),
+                ..file("src/lib.rs", Some(REPO))
+            }],
+            supersedes: Vec::new(),
+            superseded_by: Vec::new(),
+            files_changed_since: Vec::new(),
+            scope: String::new(),
+        };
+        // The crash: the insert into contexts.db happens, the delete from threads.db does not.
+        let (first, created) = store.move_memory_in(&stored, &[a]).expect("insert");
+        assert!(created);
+        // The retry finds the uid and writes nothing new.
+        let (again, created) = store.move_memory_in(&stored, &[a]).expect("retry");
+        assert!(!created, "the copy is already there");
+        assert_eq!(again.uid, stored.uid);
+        assert_eq!(all(&store, &[a]).len(), 1, "one copy");
+        assert_eq!(first.created_at, 5, "the creation time is kept");
+        assert_eq!(first.decided_at, Some(9));
+        assert_eq!(first.decided_by.as_deref(), Some("human"));
+        assert_eq!(first.proposed_by.as_deref(), Some("agent:x"));
+        assert_eq!(first.model.as_deref(), Some("model-1"));
+        assert_eq!(first.origin, "human");
+        assert_eq!(first.sources[0].blob_oid.as_deref(), Some("b1"));
+        assert_eq!(first.sources[0].repo_id.as_deref(), Some(REPO));
+        let superseded = Memory {
+            status: MemoryStatus::Superseded,
+            ..stored
+        };
+        assert!(
+            store.move_memory_in(&superseded, &[a]).is_err(),
+            "a superseded memory does not move"
+        );
     }
 
     #[test]

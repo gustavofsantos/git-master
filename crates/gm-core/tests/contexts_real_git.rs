@@ -10,7 +10,10 @@ use std::process::Command as Process;
 use gm_core::Engine;
 use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
-use gm_schema::threads::{Context, Memory, MemoryKind, MemorySourceInput, MemorySourceKind};
+use gm_schema::threads::{
+    Context, FileChange, FileChangeState, Memory, MemoryKind, MemorySourceInput, MemorySourceKind,
+    MemoryStatus,
+};
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId, OperationState};
 
 /// The repositories of the fixture, each one folder under the repositories directory.
@@ -600,6 +603,7 @@ fn a_memory_is_proposed_accepted_and_read_by_its_uid() {
                 entry_from: None,
                 entry_to: None,
             }],
+            context: None,
         },
     );
     let proposed = memory_of(&events);
@@ -686,4 +690,692 @@ fn context_reads_are_not_logged_and_writes_are_with_their_actor() {
     assert!(log.iter().any(|entry| {
         entry.actor == Actor::Human && matches!(entry.kind, CommandKind::CreateContext { .. })
     }));
+}
+
+/// What a `ListMemories` answered.
+#[derive(Debug)]
+struct Seen {
+    memories: Vec<Memory>,
+    next: Option<String>,
+    contexts_read: bool,
+    note: Option<String>,
+}
+
+/// Lists the memories `actor` sees from the open repository in `scope`, one page at a time. A
+/// refused request answers its reason.
+fn search(
+    engine: &mut Engine,
+    actor: &Actor,
+    query: &str,
+    scope: Option<&str>,
+    limit: u32,
+    cursor: Option<&str>,
+) -> Result<Seen, String> {
+    let events = send(
+        engine,
+        actor,
+        CommandKind::ListMemories {
+            query: query.to_owned(),
+            kind: None,
+            status: None,
+            path: None,
+            author: None,
+            scope: scope.map(str::to_owned),
+            limit,
+            cursor: cursor.map(str::to_owned),
+        },
+    );
+    if state_of(&events) == OperationState::Failed {
+        return Err(failure(&events).unwrap_or_default());
+    }
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::MemoriesListed {
+                memories,
+                next_cursor,
+                contexts_read,
+                note,
+                ..
+            } => Some(Seen {
+                memories: memories.clone(),
+                next: next_cursor.clone(),
+                contexts_read: *contexts_read,
+                note: note.clone(),
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| "no listing".to_owned())
+}
+
+/// The texts of memories, sorted, for a comparison.
+fn texts(memories: &[Memory]) -> Vec<String> {
+    let mut texts: Vec<String> = memories.iter().map(|m| m.text.clone()).collect();
+    texts.sort();
+    texts
+}
+
+/// Proposes a rule with a source as `actor`, at `context` when one is named (D193 (7)).
+fn propose_at(engine: &mut Engine, actor: &Actor, context: Option<&str>, text: &str) -> Vec<Event> {
+    send(
+        engine,
+        actor,
+        CommandKind::ProposeMemory {
+            kind: MemoryKind::Rule,
+            text: text.to_owned(),
+            sources: vec![MemorySourceInput {
+                kind: MemorySourceKind::File,
+                reference: "src/lib.rs".into(),
+                entry_from: None,
+                entry_to: None,
+            }],
+            context: context.map(str::to_owned),
+        },
+    )
+}
+
+/// Accepts memory `uid` as the human from the open repository.
+fn accept_as_human(engine: &mut Engine, uid: &str) -> Vec<Event> {
+    send(
+        engine,
+        &Actor::Human,
+        CommandKind::AcceptMemory {
+            uid: uid.to_owned(),
+            text: None,
+            supersedes: Vec::new(),
+        },
+    )
+}
+
+/// Reads memory `uid` from the open repository.
+fn read_memory(engine: &mut Engine, uid: &str) -> Memory {
+    let events = send(
+        engine,
+        &Actor::Human,
+        CommandKind::ReadMemory {
+            uid: uid.to_owned(),
+        },
+    );
+    assert_eq!(state_of(&events), OperationState::Done, "read: {events:?}");
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::MemoryRead { memory, .. } => Some(memory.clone()),
+            _ => None,
+        })
+        .expect("a memory read")
+}
+
+fn write_file(root: &Path, path: &str, text: &str) {
+    if let Some(parent) = root.join(path).parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(root.join(path), text).unwrap();
+}
+
+/// Commits every change of the working tree under `message`.
+fn commit_all(root: &Path, message: &str) {
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", message]);
+}
+
+#[test]
+fn a_memory_in_a_context_is_found_from_every_repository_that_sees_the_context() {
+    let world = World::new();
+    populate(&world);
+    let mut web = engine_on(&world.path("web"), &world.db);
+    let stored = memory_of(&propose_at(
+        &mut web,
+        &Actor::Human,
+        Some("Platform"),
+        "Platform rule",
+    ));
+    assert_eq!(stored.scope, "Platform");
+
+    for name in ["api", "web", "billing", "auth", "jobs", "infra", "docs"] {
+        let mut engine = engine_on(&world.path(name), &world.db);
+        let found = search(&mut engine, &agent(), "", None, 50, None).expect("list");
+        assert_eq!(texts(&found.memories), ["Platform rule"], "{name}");
+    }
+    for name in ["portal", "sync"] {
+        let mut engine = engine_on(&world.path(name), &world.db);
+        let found = search(&mut engine, &agent(), "", None, 50, None).expect("list");
+        assert!(found.memories.is_empty(), "{name} does not see Platform");
+    }
+}
+
+#[test]
+fn a_memory_in_billing_is_found_from_billing_and_its_repositories_and_not_from_the_rest_of_platform()
+ {
+    let world = World::new();
+    populate(&world);
+    let mut billing = engine_on(&world.path("billing"), &world.db);
+    assert_eq!(
+        state_of(&propose_at(
+            &mut billing,
+            &Actor::Human,
+            Some("Billing"),
+            "Billing rule"
+        )),
+        OperationState::Done
+    );
+    for name in ["billing", "api", "jobs"] {
+        let mut engine = engine_on(&world.path(name), &world.db);
+        let found = search(&mut engine, &agent(), "", None, 50, None).expect("list");
+        assert_eq!(texts(&found.memories), ["Billing rule"], "{name}");
+    }
+    for name in ["web", "auth", "infra", "docs", "portal", "sync"] {
+        let mut engine = engine_on(&world.path(name), &world.db);
+        let found = search(&mut engine, &agent(), "", None, 50, None).expect("list");
+        assert!(found.memories.is_empty(), "{name} does not see Billing");
+    }
+}
+
+#[test]
+fn a_repository_in_three_contexts_sees_all_three_and_labels_each_result_with_its_scope() {
+    let world = World::new();
+    populate_with_scopes(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let found = search(&mut api, &Actor::Human, "", None, 50, None)
+        .expect("list")
+        .memories;
+    let mut labelled: Vec<(&str, &str)> = found
+        .iter()
+        .map(|memory| (memory.text.as_str(), memory.scope.as_str()))
+        .collect();
+    labelled.sort_unstable();
+    assert_eq!(
+        labelled,
+        [
+            ("Billing rule", "Platform / Billing"),
+            ("Partners rule", "Partners"),
+            ("Platform rule", "Platform"),
+            ("Repository rule", "repository"),
+        ]
+    );
+}
+
+#[test]
+fn the_scope_filter_names_the_repository_or_one_visible_context_and_refuses_the_rest() {
+    let world = World::new();
+    let fixture = populate_with_scopes(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let scoped = |api: &mut Engine, scope: &str| -> Vec<String> {
+        let found = search(api, &Actor::Human, "", Some(scope), 50, None).expect(scope);
+        texts(&found.memories)
+    };
+    assert_eq!(scoped(&mut api, "repository"), ["Repository rule"]);
+    assert_eq!(scoped(&mut api, "Billing"), ["Billing rule"]);
+    assert_eq!(scoped(&mut api, "Platform / Billing"), ["Billing rule"]);
+    assert_eq!(
+        scoped(&mut api, "Platform"),
+        ["Platform rule"],
+        "a context is not its ancestors"
+    );
+    assert_eq!(scoped(&mut api, "all").len(), 4);
+
+    // A second Billing under Partners, joined by api, makes the bare name ambiguous.
+    let second = create(&mut api, "Billing", Some(fixture.partners));
+    join(&mut api, second.id, &world.path("api"));
+    let ambiguous =
+        search(&mut api, &Actor::Human, "", Some("Billing"), 50, None).expect_err("ambiguous");
+    assert!(ambiguous.contains("several"), "{ambiguous}");
+    assert_eq!(
+        scoped(&mut api, "Platform / Billing"),
+        ["Billing rule"],
+        "the path still names one"
+    );
+
+    // A context portal holds alone is not visible from api.
+    let ops = create(&mut api, "Ops", None);
+    join(&mut api, ops.id, &world.path("portal"));
+    let invisible =
+        search(&mut api, &Actor::Human, "", Some("Ops"), 50, None).expect_err("invisible");
+    assert!(invisible.contains("No context named"), "{invisible}");
+}
+
+/// The fixture of `four_scopes`, with the memories of each scope in place, as its own function so
+/// the scope tests can take the fixture ids.
+fn populate_with_scopes(world: &World) -> Fixture {
+    let fixture = populate(world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    propose_at(&mut api, &Actor::Human, None, "Repository rule");
+    for (context, text) in [
+        ("Platform", "Platform rule"),
+        ("Billing", "Billing rule"),
+        ("Partners", "Partners rule"),
+    ] {
+        propose_at(&mut api, &Actor::Human, Some(context), text);
+    }
+    fixture
+}
+
+#[test]
+fn a_repository_memory_ranks_before_an_equally_relevant_context_memory() {
+    let world = World::new();
+    populate(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    // The same text in each store, and nothing else in either, so `bm25` is equal.
+    propose_at(&mut api, &Actor::Human, None, "The widget cache is warm");
+    propose_at(
+        &mut api,
+        &Actor::Human,
+        Some("Platform"),
+        "The widget cache is warm",
+    );
+    let found = search(&mut api, &Actor::Human, "widget", None, 50, None)
+        .expect("list")
+        .memories;
+    let scopes: Vec<&str> = found.iter().map(|memory| memory.scope.as_str()).collect();
+    assert_eq!(scopes, ["repository", "Platform"]);
+}
+
+#[test]
+fn pages_walk_the_merged_list_without_repeats_or_gaps_and_a_cursor_stays_with_its_scope() {
+    let world = World::new();
+    populate(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    propose_at(&mut api, &Actor::Human, None, "alpha note");
+    propose_at(&mut api, &Actor::Human, Some("Platform"), "beta note");
+    propose_at(&mut api, &Actor::Human, Some("Billing"), "gamma note");
+
+    let whole: Vec<String> = search(&mut api, &Actor::Human, "note", None, 50, None)
+        .expect("all")
+        .memories
+        .into_iter()
+        .map(|memory| memory.text)
+        .collect();
+    assert_eq!(whole.len(), 3);
+
+    let mut walked = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut first_cursor = None;
+    loop {
+        let page =
+            search(&mut api, &Actor::Human, "note", None, 1, cursor.as_deref()).expect("page");
+        assert_eq!(page.memories.len(), 1);
+        walked.extend(page.memories.into_iter().map(|memory| memory.text));
+        if first_cursor.is_none() {
+            first_cursor.clone_from(&page.next);
+        }
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(
+        walked, whole,
+        "every memory once, in the order of the whole list"
+    );
+
+    let first_cursor = first_cursor.expect("a second page");
+    let other_scope = search(
+        &mut api,
+        &Actor::Human,
+        "note",
+        Some("repository"),
+        1,
+        Some(&first_cursor),
+    )
+    .expect_err("a cursor of all is not a cursor of repository");
+    assert!(other_scope.contains("another search"), "{other_scope}");
+    let other_query = search(
+        &mut api,
+        &Actor::Human,
+        "alpha",
+        None,
+        1,
+        Some(&first_cursor),
+    )
+    .expect_err("a cursor of another query is refused");
+    assert!(other_query.contains("another search"), "{other_query}");
+}
+
+#[test]
+fn an_agent_proposes_in_a_context_it_belongs_to_and_a_human_makes_it_visible_to_the_others() {
+    let world = World::new();
+    populate(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let mut portal = engine_on(&world.path("portal"), &world.db);
+
+    let refused = propose_at(&mut portal, &agent(), Some("Platform"), "Portal rule");
+    assert_eq!(state_of(&refused), OperationState::Failed);
+    assert!(
+        failure(&refused).is_some_and(|message| message.contains("Platform")),
+        "{refused:?}"
+    );
+
+    let proposed = memory_of(&propose_at(
+        &mut api,
+        &agent(),
+        Some("Platform"),
+        "Shared proposal",
+    ));
+    assert_eq!(proposed.status, MemoryStatus::Proposed);
+    assert_eq!(proposed.scope, "Platform");
+    let mut web = engine_on(&world.path("web"), &world.db);
+    assert!(
+        search(&mut web, &agent(), "", None, 50, None)
+            .expect("list")
+            .memories
+            .is_empty(),
+        "a proposal is not seen by default"
+    );
+    assert_eq!(
+        texts(
+            &search(&mut web, &Actor::Human, "", None, 50, None)
+                .expect("list")
+                .memories
+        ),
+        ["Shared proposal"]
+    );
+
+    let mut billing = engine_on(&world.path("billing"), &world.db);
+    let accepted = memory_of(&accept_as_human(&mut billing, &proposed.uid));
+    assert_eq!(accepted.status, MemoryStatus::Accepted);
+    assert_eq!(
+        texts(
+            &search(&mut api, &agent(), "", None, 50, None)
+                .expect("list")
+                .memories
+        ),
+        ["Shared proposal"],
+        "the accepted memory is seen by agents of every repository in the context"
+    );
+}
+
+#[test]
+fn moving_a_repository_memory_into_a_context_keeps_its_uid_history_and_sources() {
+    let world = World::new();
+    let fixture = populate(&world);
+    let mut billing = engine_on(&world.path("billing"), &world.db);
+    write_file(&world.path("billing"), "rules.md", "retry twice\n");
+    commit_all(&world.path("billing"), "add the rules");
+    let original = memory_of(&send(
+        &mut billing,
+        &Actor::Human,
+        CommandKind::ProposeMemory {
+            kind: MemoryKind::Rule,
+            text: "Retry the upload".into(),
+            sources: vec![MemorySourceInput {
+                kind: MemorySourceKind::File,
+                reference: "rules.md".into(),
+                entry_from: None,
+                entry_to: None,
+            }],
+            context: None,
+        },
+    ));
+    let blob = original.sources[0].blob_oid.clone();
+    assert!(blob.is_some(), "the human's file source records its blob");
+
+    let moved = send(
+        &mut billing,
+        &Actor::Human,
+        CommandKind::MoveMemoryToContext {
+            uid: original.uid.clone(),
+            context: fixture.platform,
+        },
+    );
+    assert_eq!(state_of(&moved), OperationState::Done, "{moved:?}");
+    let moved = memory_of(&moved);
+    assert_eq!(moved.uid, original.uid);
+    assert_eq!(moved.created_at, original.created_at);
+    assert_eq!(moved.status, MemoryStatus::Accepted);
+    assert_eq!(moved.sources.len(), 1);
+    assert_eq!(moved.sources[0].reference, "rules.md");
+    assert_eq!(moved.sources[0].blob_oid, blob, "the blob is kept");
+    assert!(
+        moved.sources[0].repo_id.is_some(),
+        "the source names its repository"
+    );
+    assert_eq!(moved.scope, "Platform");
+
+    // Billing still sees Platform, so the memory is listed there, but not as its own any more.
+    let left = search(
+        &mut billing,
+        &Actor::Human,
+        "",
+        Some("repository"),
+        50,
+        None,
+    )
+    .expect("list");
+    assert!(
+        left.memories
+            .iter()
+            .all(|memory| memory.uid != original.uid),
+        "it left the repository's own list"
+    );
+    let mut web = engine_on(&world.path("web"), &world.db);
+    let found = search(&mut web, &agent(), "", None, 50, None).expect("list");
+    assert_eq!(texts(&found.memories), ["Retry the upload"]);
+    let read = read_memory(&mut web, &original.uid);
+    assert!(
+        read.files_changed_since.is_empty(),
+        "read from web, the file is unchanged: {:?}",
+        read.files_changed_since
+    );
+}
+
+#[test]
+fn moving_onto_a_text_duplicate_in_the_context_is_refused_and_the_original_stays() {
+    let world = World::new();
+    let fixture = populate(&world);
+    let mut web = engine_on(&world.path("web"), &world.db);
+    let duplicate = memory_of(&propose_at(
+        &mut web,
+        &Actor::Human,
+        Some("Platform"),
+        "Retry the upload",
+    ));
+    let mut billing = engine_on(&world.path("billing"), &world.db);
+    let original = memory_of(&propose_at(
+        &mut billing,
+        &Actor::Human,
+        None,
+        "Retry the upload",
+    ));
+
+    let refused = send(
+        &mut billing,
+        &Actor::Human,
+        CommandKind::MoveMemoryToContext {
+            uid: original.uid.clone(),
+            context: fixture.platform,
+        },
+    );
+    assert_eq!(state_of(&refused), OperationState::Failed);
+    assert!(
+        failure(&refused).is_some_and(|message| message.contains(&duplicate.uid)),
+        "{refused:?}"
+    );
+    let kept = search(
+        &mut billing,
+        &Actor::Human,
+        "",
+        Some("repository"),
+        50,
+        None,
+    )
+    .expect("list");
+    assert_eq!(texts(&kept.memories), ["Retry the upload"]);
+    assert_eq!(kept.memories[0].uid, original.uid, "the original stays");
+    let in_platform =
+        search(&mut web, &Actor::Human, "", Some("Platform"), 50, None).expect("list");
+    assert_eq!(in_platform.memories.len(), 1, "one copy in the context");
+    assert_eq!(in_platform.memories[0].uid, duplicate.uid);
+}
+
+#[test]
+fn a_memory_attached_to_a_second_context_is_found_there_and_its_last_context_cannot_be_detached() {
+    let world = World::new();
+    let fixture = populate(&world);
+    let mut billing = engine_on(&world.path("billing"), &world.db);
+    let stored = memory_of(&propose_at(
+        &mut billing,
+        &Actor::Human,
+        Some("Billing"),
+        "Billing only rule",
+    ));
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let refused = send(
+        &mut api,
+        &agent(),
+        CommandKind::AttachMemory {
+            uid: stored.uid.clone(),
+            context: fixture.partners,
+        },
+    );
+    assert_eq!(state_of(&refused), OperationState::Failed);
+    assert!(
+        failure(&refused).is_some_and(|message| message.starts_with("only a human can")),
+        "{refused:?}"
+    );
+    let events = send(
+        &mut api,
+        &Actor::Human,
+        CommandKind::AttachMemory {
+            uid: stored.uid.clone(),
+            context: fixture.partners,
+        },
+    );
+    assert_eq!(state_of(&events), OperationState::Done, "{events:?}");
+
+    let mut portal = engine_on(&world.path("portal"), &world.db);
+    assert_eq!(
+        texts(
+            &search(&mut portal, &agent(), "", None, 50, None)
+                .expect("list")
+                .memories
+        ),
+        ["Billing only rule"]
+    );
+
+    let detached = send(
+        &mut api,
+        &Actor::Human,
+        CommandKind::DetachMemory {
+            uid: stored.uid.clone(),
+            context: fixture.partners,
+        },
+    );
+    assert_eq!(state_of(&detached), OperationState::Done, "{detached:?}");
+    assert!(
+        search(&mut portal, &agent(), "", None, 50, None)
+            .expect("list")
+            .memories
+            .is_empty(),
+        "portal no longer sees it"
+    );
+
+    let last = send(
+        &mut api,
+        &Actor::Human,
+        CommandKind::DetachMemory {
+            uid: stored.uid.clone(),
+            context: fixture.billing,
+        },
+    );
+    assert_eq!(state_of(&last), OperationState::Failed);
+    assert!(
+        failure(&last).is_some_and(|message| message.contains("at least one context")),
+        "{last:?}"
+    );
+}
+
+#[test]
+fn a_file_of_another_repository_is_read_at_its_own_head_and_is_unavailable_once_its_folder_is_gone()
+{
+    let world = World::new();
+    populate(&world);
+    let api_root = world.path("api");
+    write_file(&api_root, "src/lib.rs", "fn one() {}\n");
+    commit_all(&api_root, "add the lib");
+    let mut api = engine_on(&api_root, &world.db);
+    let proposed = memory_of(&propose_at(
+        &mut api,
+        &agent(),
+        Some("Platform"),
+        "Lib rule",
+    ));
+
+    let mut web = engine_on(&world.path("web"), &world.db);
+    let accepted = accept_as_human(&mut web, &proposed.uid);
+    assert_eq!(state_of(&accepted), OperationState::Done, "{accepted:?}");
+    let unchanged = read_memory(&mut web, &proposed.uid);
+    assert!(
+        unchanged.files_changed_since.is_empty(),
+        "api's HEAD is the one accepted: {:?}",
+        unchanged.files_changed_since
+    );
+
+    write_file(&api_root, "src/lib.rs", "fn two() {}\n");
+    commit_all(&api_root, "change the lib");
+    let changed = read_memory(&mut web, &proposed.uid);
+    assert_eq!(
+        changed.files_changed_since,
+        vec![FileChange {
+            path: "src/lib.rs".into(),
+            state: FileChangeState::Changed,
+        }]
+    );
+
+    std::fs::remove_dir_all(&api_root).unwrap();
+    let gone = read_memory(&mut web, &proposed.uid);
+    assert_eq!(
+        gone.files_changed_since,
+        vec![FileChange {
+            path: "src/lib.rs".into(),
+            state: FileChangeState::Unavailable,
+        }]
+    );
+}
+
+#[test]
+fn an_unreadable_contexts_file_leaves_the_repository_memories_and_says_why() {
+    let world = World::new();
+    populate_with_scopes(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    std::fs::write(&world.db, b"this is not a database, only junk bytes").unwrap();
+
+    let listed = search(&mut api, &Actor::Human, "", None, 50, None).expect("still answers");
+    assert_eq!(texts(&listed.memories), ["Repository rule"]);
+    assert!(!listed.contexts_read);
+    assert!(
+        listed
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("could not be read")),
+        "{listed:?}"
+    );
+    let scoped = search(&mut api, &agent(), "", Some("Platform"), 50, None).expect("answers");
+    assert!(scoped.memories.is_empty(), "a context answers nothing");
+    assert!(!scoped.contexts_read);
+}
+
+#[test]
+fn a_copied_clone_with_a_clashing_id_lists_only_its_repository_memories_and_says_why() {
+    let world = World::new();
+    populate(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    propose_at(&mut api, &Actor::Human, None, "Repository rule");
+    let copy = world.repos.join("api-copy");
+    copy_dir(&world.path("api"), &copy);
+
+    let mut clone = engine_on(&copy, &world.db);
+    let listed = search(&mut clone, &Actor::Human, "", None, 50, None).expect("list");
+    assert_eq!(texts(&listed.memories), ["Repository rule"]);
+    assert!(
+        listed.contexts_read,
+        "the file is readable, the clone clashes"
+    );
+    assert!(
+        listed.note.is_some_and(|note| note.contains("clone at")),
+        "the note names the other clone"
+    );
+    assert!(
+        search(&mut clone, &Actor::Human, "", Some("Platform"), 50, None).is_err(),
+        "no context is visible from a clash"
+    );
 }

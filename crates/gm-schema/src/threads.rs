@@ -870,10 +870,10 @@ pub struct Memory {
     /// False while the memory is `proposed`.
     pub reviewed: bool,
     pub sources: Vec<MemorySource>,
-    /// Ids of the memories this one supersedes.
-    pub supersedes: Vec<i64>,
-    /// Ids of the memories that supersede this one.
-    pub superseded_by: Vec<i64>,
+    /// Uids of the memories this one supersedes, in the same store (D193 (1)).
+    pub supersedes: Vec<String>,
+    /// Uids of the memories that supersede this one, in the same store (D193 (1)).
+    pub superseded_by: Vec<String>,
     /// Files named by the memory that changed since acceptance. Always empty from the store.
     pub files_changed_since: Vec<FileChange>,
     /// `repository`, or the path of the nearest visible context the memory is attached to, such as

@@ -186,15 +186,26 @@ pub fn next_status(from: MemoryStatus, transition: Transition) -> Result<MemoryS
     })
 }
 
+/// Why a file source could not be read at `HEAD` (D193 (9)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lookup {
+    /// The source's repository is not on this machine, or its recorded folder is gone: nothing is
+    /// read, and nothing is compared.
+    Unavailable,
+    /// Git could not answer for the file.
+    Failed,
+}
+
 /// Whether a file a memory names has changed since it was accepted (D192 (6)). `current` gives the
-/// blob of a path at `HEAD`: `Ok(None)` when there is no such file, an error when Git cannot answer.
-/// Only `accepted` and `superseded` memories are checked; a proposal has nothing to compare with.
-/// The recorded blob is the one of the last acceptance; a file that was absent then and is there now
-/// has changed. A renamed file is `missing` at its old path: nothing guesses its new name.
+/// blob of a file source at `HEAD` of the repository the source names: `Ok(None)` when there is no
+/// such file, and an error when the source cannot be read. Only `accepted` and `superseded` memories
+/// are checked; a proposal has nothing to compare with. The recorded blob is the one of the last
+/// acceptance; a file that was absent then and is there now has changed. A renamed file is `missing`
+/// at its old path: nothing guesses its new name.
 #[must_use]
 pub fn files_changed_since(
     memory: &Memory,
-    current: &dyn Fn(&str) -> Result<Option<String>, String>,
+    current: &dyn Fn(&MemorySource) -> Result<Option<String>, Lookup>,
 ) -> Vec<FileChange> {
     if !matches!(
         memory.status,
@@ -211,8 +222,9 @@ pub fn files_changed_since(
     files
         .into_iter()
         .filter_map(|source| {
-            let state = match (source.blob_oid.as_deref(), current(&source.reference)) {
-                (_, Err(_)) => FileChangeState::Unknown,
+            let state = match (source.blob_oid.as_deref(), current(source)) {
+                (_, Err(Lookup::Unavailable)) => FileChangeState::Unavailable,
+                (_, Err(Lookup::Failed)) => FileChangeState::Unknown,
                 (Some(recorded), Ok(Some(now))) if recorded != now => FileChangeState::Changed,
                 (Some(_), Ok(Some(_))) | (None, Ok(None)) => return None,
                 (Some(_), Ok(None)) => FileChangeState::Missing,
@@ -276,7 +288,7 @@ pub(crate) struct Checked {
 /// The rules of a proposal that need no store: the text, who may propose and with what status,
 /// the sources and the duplicate key (D192 (1), (2), (3), (5)).
 pub(crate) fn check_proposal(new: &NewMemory<'_>) -> Result<Checked, StoreError> {
-    let text = check_text(new.text)?;
+    check_text(new.text)?;
     let is_human = new.origin == HUMAN;
     authorize(
         is_human,
@@ -291,6 +303,13 @@ pub(crate) fn check_proposal(new: &NewMemory<'_>) -> Result<Checked, StoreError>
     if new.status == MemoryStatus::Accepted && !is_human {
         return Err(invalid("only a human creates an accepted memory"));
     }
+    check_content(new)
+}
+
+/// The rules of a memory's content that need no store: its text, its sources and its duplicate key
+/// (D192 (1), (2), (5)). Who may write it is checked by the caller.
+pub(crate) fn check_content(new: &NewMemory<'_>) -> Result<Checked, StoreError> {
+    let text = check_text(new.text)?;
     let sources = new
         .sources
         .iter()
@@ -300,16 +319,28 @@ pub(crate) fn check_proposal(new: &NewMemory<'_>) -> Result<Checked, StoreError>
     Ok(Checked { text, sources, key })
 }
 
+/// The history a memory keeps when it moves into a context (D193 (8)): its proposer, model, creation
+/// and decision, copied as they are.
+pub(crate) struct Carried<'a> {
+    pub proposed_by: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub created_at: i64,
+    pub decided_at: Option<i64>,
+    pub decided_by: Option<&'a str>,
+}
+
 /// Stores a checked proposal inside the caller's transaction (D192 (2), (3)). A memory with the
 /// given `uid` already in the store is returned with `false`, and so is a non-rejected memory of the
 /// same kind and key among `place.among`; nothing is written then. Otherwise the memory is inserted
-/// under `uid`, or under a new uid, and returned with `true`.
+/// under `uid`, or under a new uid, and returned with `true`. A `carried` history replaces the one a
+/// new memory gets (D193 (8)).
 pub(crate) fn propose_in(
     conn: &Connection,
     new: &NewMemory<'_>,
     checked: &Checked,
     place: &Placement<'_>,
     uid: Option<&str>,
+    carried: Option<&Carried<'_>>,
 ) -> Result<(Memory, bool), StoreError> {
     if let Some(uid) = uid
         && let Some(id) = id_by_uid(conn, uid)?
@@ -333,19 +364,37 @@ pub(crate) fn propose_in(
     }
     let accepted = new.status == MemoryStatus::Accepted;
     let uid = uid.map_or_else(new_uid, str::to_owned);
+    let (proposed_by, model, created_at, decided_at, decided_by) = match carried {
+        Some(kept) => (
+            kept.proposed_by,
+            kept.model,
+            kept.created_at,
+            kept.decided_at,
+            kept.decided_by,
+        ),
+        None => (
+            Some(new.origin),
+            None,
+            new.at,
+            accepted.then_some(new.at),
+            accepted.then_some(HUMAN),
+        ),
+    };
     conn.execute(
-        "INSERT INTO memory (uid, kind, text, status, origin, proposed_by, created_at,
+        "INSERT INTO memory (uid, kind, text, status, origin, proposed_by, model, created_at,
             decided_at, decided_by)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             uid,
             kind_text(new.kind),
             checked.text,
             status_text(new.status),
             new.origin,
-            new.at,
-            accepted.then_some(new.at),
-            accepted.then_some(HUMAN),
+            proposed_by,
+            model,
+            created_at,
+            decided_at,
+            decided_by,
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -478,27 +527,44 @@ pub(crate) fn memory_by_uid(conn: &Connection, uid: &str) -> Result<Memory, Stor
     memory_by_id(conn, id_of_uid(conn, uid)?)
 }
 
-/// The memories that match `fts` (a full-text expression, or `None` for every memory) and `filter`,
-/// restricted to `within` (a SQL condition on `m.id`, or empty), as `(id, bm25)` pairs. With a query
-/// they are ordered by relevance, otherwise newest first; the score is 0.0 without a query. The
-/// caller passes `limit` and `offset`.
+/// A memory a list finds, before its page is read: its row, its uid, its creation time and its
+/// `bm25` score (0.0 without a query).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Found {
+    pub id: i64,
+    pub uid: String,
+    pub created_at: i64,
+    pub score: f64,
+}
+
+/// Every memory that `query` and `filter` select, restricted to `within` (a SQL condition on `m.id`,
+/// or empty), unpaged. With a query they are ordered by relevance (the D128 builder over
+/// `memory_fts`), otherwise newest first; ties are ordered by uid, so every store lists alike (D193
+/// (6)). A query with no searchable word selects nothing.
 pub(crate) fn list_ids(
     conn: &Connection,
-    fts: Option<&str>,
+    query: &str,
     filter: &MemoryFilter,
     within: &str,
-    limit: i64,
-    offset: i64,
-) -> Result<Vec<(i64, f64)>, StoreError> {
+) -> Result<Vec<Found>, StoreError> {
+    let fts = if query.trim().is_empty() {
+        None
+    } else {
+        let Some(expression) = build_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        Some(expression)
+    };
     let sql = match fts {
         Some(_) => format!(
-            "SELECT m.id, bm25(memory_fts) FROM memory m JOIN memory_fts ON memory_fts.rowid = m.id
+            "SELECT m.id, m.uid, m.created_at, bm25(memory_fts) FROM memory m
+             JOIN memory_fts ON memory_fts.rowid = m.id
              WHERE memory_fts MATCH ?1{MEMORY_FILTER_SQL}{within}
-             ORDER BY bm25(memory_fts), m.id LIMIT ?6 OFFSET ?7"
+             ORDER BY bm25(memory_fts), m.uid"
         ),
         None => format!(
-            "SELECT m.id, 0.0 FROM memory m WHERE 1 = 1{MEMORY_FILTER_SQL}{within}
-             ORDER BY m.created_at DESC, m.id DESC LIMIT ?6 OFFSET ?7"
+            "SELECT m.id, m.uid, m.created_at, 0.0 FROM memory m WHERE 1 = 1{MEMORY_FILTER_SQL}{within}
+             ORDER BY m.created_at DESC, m.uid"
         ),
     };
     let kind = filter.kind.map(kind_text);
@@ -507,10 +573,14 @@ pub(crate) fn list_ids(
     let author = filter.author.as_deref().filter(|author| !author.is_empty());
     let mut statement = conn.prepare(&sql)?;
     let rows = statement
-        .query_map(
-            params![fts, kind, status, path, author, limit, offset],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)),
-        )?
+        .query_map(params![fts, kind, status, path, author], |row| {
+            Ok(Found {
+                id: row.get(0)?,
+                uid: row.get(1)?,
+                created_at: row.get(2)?,
+                score: row.get(3)?,
+            })
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -530,6 +600,7 @@ impl ThreadStore {
                 threads: true,
                 among: None,
             },
+            None,
             None,
         )?;
         tx.commit()?;
@@ -599,6 +670,16 @@ impl ThreadStore {
         file_source_paths(&self.conn, id)
     }
 
+    /// Every memory `query` and `filter` select, unpaged, for the engine to merge with the
+    /// memories of the contexts (D193 (6)).
+    pub(crate) fn find_memories(
+        &self,
+        query: &str,
+        filter: &MemoryFilter,
+    ) -> Result<Vec<Found>, StoreError> {
+        list_ids(&self.conn, query, filter, "")
+    }
+
     /// One page of memories. With a query they are ordered by relevance (the D128 builder over
     /// `memory_fts`), otherwise newest first. `filter` narrows them. The cursor is an opaque position
     /// tied to the query and the filter; a cursor from another request is refused (D192 (7)).
@@ -609,34 +690,28 @@ impl ThreadStore {
         limit: u32,
         cursor: Option<&str>,
     ) -> Result<(Vec<Memory>, Option<String>), StoreError> {
-        let fts = if query.trim().is_empty() {
-            None
-        } else {
-            let Some(expression) = build_fts_query(query) else {
-                return Ok((Vec::new(), None));
-            };
-            Some(expression)
-        };
-        let digest = list_digest(query, filter);
+        let digest = list_digest(query, filter, REPOSITORY_SCOPE);
         let offset = match cursor {
             Some(cursor) => decode_offset(cursor, &digest)?,
             None => 0,
         };
-        let page = i64::from(limit.max(1));
-        let mut ids = list_ids(&self.conn, fts.as_deref(), filter, "", page + 1, offset)?;
-        let next = if ids.len() > usize::try_from(page).unwrap_or(usize::MAX) {
-            ids.truncate(usize::try_from(page).unwrap_or(usize::MAX));
-            Some(format!("{digest}.{}", offset + page))
-        } else {
-            None
-        };
-        let mut memories = Vec::with_capacity(ids.len());
-        for (id, _) in ids {
-            memories.push(memory_by_id(&self.conn, id)?);
+        let found = list_ids(&self.conn, query, filter, "")?;
+        let total = found.len();
+        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(total);
+        let end = start
+            .saturating_add(usize::try_from(limit.max(1)).unwrap_or(usize::MAX))
+            .min(total);
+        let next = (end < total).then(|| format!("{digest}.{end}"));
+        let mut memories = Vec::with_capacity(end - start);
+        for hit in &found[start..end] {
+            memories.push(memory_by_id(&self.conn, hit.id)?);
         }
         Ok((memories, next))
     }
 }
+
+/// The scope a cursor of the repository's own memories names (D193 (6)).
+pub(crate) const REPOSITORY_SCOPE: &str = "repository";
 
 /// A source as stored, with its text checked and normalised.
 fn checked_source(source: &MemorySource) -> Result<MemorySource, StoreError> {
@@ -763,16 +838,16 @@ pub(crate) fn memory_by_id(conn: &Connection, id: i64) -> Result<Memory, StoreEr
         .optional()?
         .ok_or(StoreError::NotFound)??;
     memory.sources = sources_of(conn, id)?;
-    memory.supersedes = related_ids(
+    memory.supersedes = related_uids(
         conn,
-        "SELECT to_memory FROM memory_rel WHERE from_memory = ?1 AND kind = 'supersedes'
-         ORDER BY to_memory",
+        "SELECT m.uid FROM memory_rel r JOIN memory m ON m.id = r.to_memory
+         WHERE r.from_memory = ?1 AND r.kind = 'supersedes' ORDER BY m.uid",
         id,
     )?;
-    memory.superseded_by = related_ids(
+    memory.superseded_by = related_uids(
         conn,
-        "SELECT from_memory FROM memory_rel WHERE to_memory = ?1 AND kind = 'supersedes'
-         ORDER BY from_memory",
+        "SELECT m.uid FROM memory_rel r JOIN memory m ON m.id = r.from_memory
+         WHERE r.to_memory = ?1 AND r.kind = 'supersedes' ORDER BY m.uid",
         id,
     )?;
     Ok(memory)
@@ -839,25 +914,27 @@ fn sources_of(conn: &Connection, id: i64) -> Result<Vec<MemorySource>, StoreErro
     Ok(sources)
 }
 
-fn related_ids(conn: &Connection, sql: &str, id: i64) -> Result<Vec<i64>, StoreError> {
+/// The uids a query selects for memory `id` (its supersedes links, either way).
+fn related_uids(conn: &Connection, sql: &str, id: i64) -> Result<Vec<String>, StoreError> {
     let mut statement = conn.prepare(sql)?;
-    let ids = statement
-        .query_map(params![id], |row| row.get::<_, i64>(0))?
+    let uids = statement
+        .query_map(params![id], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(ids)
+    Ok(uids)
 }
 
-/// The digest a cursor carries: the first 16 hex digits of SHA-256 over the query and the filter.
-fn list_digest(query: &str, filter: &MemoryFilter) -> String {
+/// The digest a cursor carries: the first 16 hex digits of SHA-256 over the query, the filter and the
+/// scope the list covers (D193 (6)).
+pub(crate) fn list_digest(query: &str, filter: &MemoryFilter, scope: &str) -> String {
     let material = format!(
-        "{query}\0{:?}\0{:?}\0{:?}\0{:?}",
+        "{query}\0{:?}\0{:?}\0{:?}\0{:?}\0{scope}",
         filter.kind, filter.status, filter.path, filter.author
     );
     hex_prefix(&Sha256::digest(material.as_bytes()))
 }
 
-/// The offset a cursor names, when the cursor was made for this query and filter.
-fn decode_offset(cursor: &str, digest: &str) -> Result<i64, StoreError> {
+/// The offset a cursor names, when the cursor was made for this query, filter and scope.
+pub(crate) fn decode_offset(cursor: &str, digest: &str) -> Result<i64, StoreError> {
     let (found, offset) = cursor
         .split_once('.')
         .ok_or_else(|| invalid(CURSOR_MALFORMED))?;
@@ -1225,7 +1302,8 @@ mod tests {
             entry_to: None,
             blob_oid: blob.map(str::to_owned),
         };
-        // a: same blob; b: edited; c: deleted; d: appeared; e: absent both times; f: git fails.
+        // a: same blob; b: edited; c: deleted; d: appeared; e: absent both times; f: git fails;
+        // g: its repository is not on this machine.
         memory.sources = vec![
             source("c.rs", Some("c1")),
             source("a.rs", Some("a1")),
@@ -1233,17 +1311,19 @@ mod tests {
             source("d.rs", None),
             source("e.rs", None),
             source("f.rs", Some("f1")),
+            source("g.rs", Some("g1")),
             MemorySource {
                 kind: MemorySourceKind::Commit,
                 ..source("0123", Some("x"))
             },
         ];
-        let now = |path: &str| match path {
+        let now = |source: &MemorySource| match source.reference.as_str() {
             "a.rs" => Ok(Some("a1".to_owned())),
             "b.rs" => Ok(Some("b2".to_owned())),
             "c.rs" | "e.rs" => Ok(None),
             "d.rs" => Ok(Some("d1".to_owned())),
-            "f.rs" => Err("git failed".to_owned()),
+            "f.rs" => Err(Lookup::Failed),
+            "g.rs" => Err(Lookup::Unavailable),
             other => panic!("unexpected path {other}"),
         };
         let changes = files_changed_since(&memory, &now);
@@ -1263,6 +1343,10 @@ mod tests {
             FileChange {
                 path: "f.rs".into(),
                 state: FileChangeState::Unknown,
+            },
+            FileChange {
+                path: "g.rs".into(),
+                state: FileChangeState::Unavailable,
             },
         ];
         assert_eq!(changes, want);
@@ -1470,9 +1554,9 @@ mod tests {
             .expect("supersede");
         let old = store.read_memory(old.id).expect("old");
         assert_eq!(old.status, MemoryStatus::Superseded);
-        assert_eq!(old.superseded_by, vec![new.id]);
+        assert_eq!(old.superseded_by, vec![new.uid.clone()]);
         let new = store.read_memory(new.id).expect("new");
-        assert_eq!(new.supersedes, vec![old.id]);
+        assert_eq!(new.supersedes, vec![old.uid.clone()]);
         assert_eq!(new.status, MemoryStatus::Accepted);
     }
 
@@ -1608,7 +1692,7 @@ mod tests {
         let superseded = store
             .accept_memory(new.id, None, &[old.id], &[], 40)
             .expect("supersede");
-        assert_eq!(superseded.supersedes, vec![old.id]);
+        assert_eq!(superseded.supersedes, vec![old.uid.clone()]);
         assert_eq!(superseded.decided_at, Some(20));
         assert_eq!(
             store.read_memory(old.id).expect("old").status,

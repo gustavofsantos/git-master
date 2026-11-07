@@ -2891,6 +2891,7 @@ impl Engine {
             git: self.git.as_ref(),
             root: &root,
             global_config: None,
+            contexts_db: None,
         };
         threads_session::provenance_from_lines(
             store,
@@ -4238,6 +4239,7 @@ impl Engine {
             git: self.git.as_ref(),
             root: &root,
             global_config: None,
+            contexts_db: self.contexts_db.as_deref(),
         };
         threads_session::run(id, store, &ctx, actor, kind)
     }
