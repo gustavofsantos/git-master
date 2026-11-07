@@ -1,7 +1,7 @@
 ---
 title: Workspaces
 description: Group branches of several repositories into one workspace, a Git repository whose submodules are worktrees of your own clones, to change and test them together with an agent.
-status: implemented
+status: partial
 order: 55
 ---
 
