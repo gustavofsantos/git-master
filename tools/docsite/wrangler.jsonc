@@ -1,0 +1,10 @@
+{
+  // Documentation site: static assets only, no Worker code.
+  // The directory is written by `make docs-site` from the pages in docs/.
+  "name": "gitmaster-docs",
+  "compatibility_date": "2026-11-01",
+  "assets": { "directory": "../../build/site" },
+  "routes": [
+    { "pattern": "docs.gitmaster.dev", "custom_domain": true }
+  ]
+}
