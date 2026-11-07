@@ -34,6 +34,7 @@ mod labels_page;
 mod local_review;
 mod lua_language;
 mod markdown;
+mod memories;
 mod merged_branches;
 mod message_dialog;
 mod model;
