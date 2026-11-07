@@ -299,8 +299,17 @@ An agent can mark a thread for you. It creates a label with `label_create`, atta
 
 An agent cannot rename or delete a label, detach one, remove a link, or delete a thread or an entry. The record tools are listed in [MCP tools](../reference/mcp-tools.md#record).
 
+## Summary
+
+> **Planned.** A thread summary is not available yet.
+
+A thread can carry a short summary of what you asked for and what came out of it. An agent writes it when you run `/gitmaster:summarize-thread` in your agent session; GitMaster does not write it. The summary shows under the title, marked **Agent-written**, and you can edit or delete it. See [Agent integration](../agents/agent-integration.md#skills-and-sub-agents).
+
 ## See also
 
 - [Agent integration](../agents/agent-integration.md): install the capture hooks.
+- [Sharing threads](sharing-threads.md): publish threads to a remote and read your teammates'.
+- [Memories](memories.md): keep decisions and rules for later sessions.
+- [Reviewers and gates](../agents/reviewers.md): have an agent review a branch and record what it found.
 - [Trust and safety](../concepts/trust-and-safety.md): what GitMaster records and where.
 - [Configuration](../reference/configuration.md): the `threads` settings and the database file.

@@ -332,6 +332,18 @@ The [agent integration](../agents/agent-integration.md) runs this command from t
 
 The command always exits with status `0` and prints nothing, even when it cannot store the event, so a failure never reaches the agent. A problem is written to `.git/gitmaster/threads.log`. An event that cannot be written at once is kept redacted in `.git/gitmaster/threads-spool/` and stored later.
 
+## Share threads
+
+> **Planned.** These commands are not available yet.
+
+```sh
+gitmaster thread publish [--all | <thread>...]
+gitmaster thread fetch
+gitmaster thread unpublish <thread>...
+```
+
+`publish` pushes the named threads, or with `--all` every thread that is not published, to the remote set in `gitmaster.sharing.remote`. It pushes only the thread refs, never a branch, and asks for confirmation in a terminal; without a terminal it needs `--yes`. `fetch` reads the thread refs of that remote and adds the new threads. `unpublish` deletes the refs of the named threads from the remote and from the repository. All three exit with status `1` when sharing is off or no remote is set, and print why. See [Sharing threads](../guide/sharing-threads.md).
+
 ## Test a redaction pattern
 
 ```sh
