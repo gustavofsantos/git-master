@@ -21,9 +21,10 @@ use crate::status::{
 use crate::submodule::SubmoduleDetail;
 use crate::syntax::HighlightSpan;
 use crate::threads::{
-    AttachKind, EditState, Label, LabelDetail, LinkKind, Memory, MemoryKind, MemorySourceInput,
-    MemoryStatus, ProvenanceResult, SearchFacets, SearchGroup, SearchOrder, ThreadDetail,
-    ThreadEdit, ThreadFilter, ThreadHit, ThreadLink, ThreadRelKind, ThreadRelation, ThreadSummary,
+    AttachKind, Context, EditState, Label, LabelDetail, LinkKind, Memory, MemoryKind,
+    MemorySourceInput, MemoryStatus, ProvenanceResult, SearchFacets, SearchGroup, SearchOrder,
+    ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink, ThreadRelKind, ThreadRelation,
+    ThreadSummary,
 };
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
@@ -860,10 +861,10 @@ pub enum CommandKind {
         limit: u32,
         cursor: Option<String>,
     },
-    /// Reads memory `id` with its sources, its relations and `files_changed_since`. Answers
+    /// Reads memory `uid` with its sources, its relations and `files_changed_since`. Answers
     /// `MemoryRead`. A read: never recorded (D28).
     ReadMemory {
-        id: i64,
+        uid: String,
     },
     /// Proposes a memory of `kind` with `text` (redacted before it is stored, D121) and its
     /// `sources`. Level record: an agent's call creates a `proposed` memory and needs at least
@@ -875,22 +876,70 @@ pub enum CommandKind {
         text: String,
         sources: Vec<MemorySourceInput>,
     },
-    /// Accepts memory `id` (a proposal, or an accepted one for an edit or a supersede). `text`
-    /// replaces the text when given (redacted). Each memory in `supersedes` must be accepted and
-    /// becomes superseded in the same write. Human only. Answers `MemoryChanged`.
+    /// Accepts memory `uid` (a proposal, or an accepted one for an edit or a supersede). `text`
+    /// replaces the text when given (redacted). Each memory uid in `supersedes` must be accepted
+    /// and becomes superseded in the same write. Human only. Answers `MemoryChanged`.
     AcceptMemory {
-        id: i64,
+        uid: String,
         text: Option<String>,
-        supersedes: Vec<i64>,
+        supersedes: Vec<String>,
     },
-    /// Rejects the proposed memory `id`. Human only. Answers `MemoryChanged`.
+    /// Rejects the proposed memory `uid`. Human only. Answers `MemoryChanged`.
     RejectMemory {
-        id: i64,
+        uid: String,
     },
-    /// Deletes memory `id` with its sources and links. Human only. Answers `MemoryChanged`.
+    /// Deletes memory `uid` with its sources and links. Human only. Answers `MemoryChanged`.
     DeleteMemory {
-        id: i64,
+        uid: String,
     },
+    /// Lists the contexts (design/threads.md, "Contexts"; D191): every context, or with `repo`
+    /// those the open repository sees, each with its path. A clone whose identity clashes with
+    /// another clone lists none and names the other one (D193 (4)). With no `contexts.db` the
+    /// list is empty and no file is made. A read: never recorded (D28). Answers `ContextsListed`.
+    ListContexts {
+        repo: bool,
+    },
+    /// Creates context `name` under `parent` (the root when none). Human only. Answers
+    /// `ContextsChanged`.
+    CreateContext {
+        name: String,
+        parent: Option<i64>,
+    },
+    /// Renames context `id` and/or moves it under `parent` (`Some(None)` moves it to the root).
+    /// Refuses a cycle and a sibling with the same name. Human only. Answers `ContextsChanged`.
+    UpdateContext {
+        id: i64,
+        name: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_option"
+        )]
+        parent: Option<Option<i64>>,
+    },
+    /// Deletes context `id`. Refused while it has sub-contexts, and while memories belong to it
+    /// alone unless `delete_memories` is true, which deletes them too. Human only. Answers
+    /// `ContextsChanged` with the number of memories deleted.
+    DeleteContext {
+        id: i64,
+        delete_memories: bool,
+    },
+    /// Adds the repository that holds `path` to context `context`, writing its `repo-id` on the
+    /// first join (D191 (4) (b)). A path that is not a repository is refused. Human only. Answers
+    /// `ContextsChanged`.
+    AddRepoToContext {
+        context: i64,
+        path: String,
+    },
+    /// Removes repository `repo_id` from context `context`; its memories stay. Human only. Answers
+    /// `ContextsChanged`.
+    RemoveRepoFromContext {
+        context: i64,
+        repo_id: String,
+    },
+    /// Gives the open repository a new id, outside every context (D193 (4)), so a copied clone
+    /// can be told apart. Human only. Answers `ContextsChanged` with no context.
+    RenewRepoId,
     /// Deletes thread `uid` with its entries, edits and links, securely. Human only.
     DeleteThread {
         uid: String,
@@ -1499,6 +1548,32 @@ pub enum Event {
         memory: Option<Memory>,
         created: bool,
     },
+    /// Answers `ListContexts`. `repo_id` is the open repository's id when it has one, and `clash`
+    /// is the folder of the other clone when that id is held there (D193 (4)).
+    ContextsListed {
+        id: OperationId,
+        contexts: Vec<Context>,
+        repo_id: Option<String>,
+        clash: Option<String>,
+    },
+    /// Answers the context writes with the context as it now is (none after a delete or a
+    /// `RenewRepoId`), and the number of memories a delete removed.
+    ContextsChanged {
+        id: OperationId,
+        context: Option<Context>,
+        deleted_memories: u32,
+    },
+}
+
+/// Reads a field that is present, `null` included, as `Some`: the inner value of the field is read
+/// as it is, so `"parent": null` is `Some(None)`, a move to the root. An absent field is `None`
+/// through `default`, which leaves the parent as it is.
+fn present_option<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[cfg(test)]
@@ -1824,13 +1899,83 @@ mod tests {
         assert_eq!(list["type"], "list_memories");
         assert_eq!(list["status"], "proposed");
         let accept = serde_json::to_value(CommandKind::AcceptMemory {
-            id: 3,
+            uid: "0123456789abcdef".into(),
             text: None,
-            supersedes: vec![2],
+            supersedes: vec!["fedcba9876543210".into()],
         })
         .unwrap();
         assert_eq!(accept["type"], "accept_memory");
-        assert_eq!(accept["supersedes"][0], 2);
+        assert_eq!(accept["uid"], "0123456789abcdef");
+        assert_eq!(accept["supersedes"][0], "fedcba9876543210");
+        let back: CommandKind = serde_json::from_value(accept).unwrap();
+        assert!(matches!(back, CommandKind::AcceptMemory { .. }));
+        let read = serde_json::to_value(CommandKind::ReadMemory {
+            uid: "0123456789abcdef".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            read,
+            serde_json::json!({ "type": "read_memory", "uid": "0123456789abcdef" })
+        );
+    }
+
+    #[test]
+    fn context_commands_wire_format_is_tagged_and_a_null_parent_is_the_root() {
+        let list = serde_json::to_value(CommandKind::ListContexts { repo: true }).unwrap();
+        assert_eq!(
+            list,
+            serde_json::json!({ "type": "list_contexts", "repo": true })
+        );
+        let create = serde_json::to_value(CommandKind::CreateContext {
+            name: "Billing".into(),
+            parent: Some(3),
+        })
+        .unwrap();
+        assert_eq!(create["type"], "create_context");
+        assert_eq!(create["parent"], 3);
+        assert_eq!(
+            serde_json::to_value(CommandKind::RenewRepoId).unwrap(),
+            serde_json::json!({ "type": "renew_repo_id" })
+        );
+
+        // An absent parent leaves it as it is; a null one moves the context to the root.
+        let absent: CommandKind = serde_json::from_value(
+            serde_json::json!({ "type": "update_context", "id": 2, "name": "X" }),
+        )
+        .unwrap();
+        assert!(matches!(
+            absent,
+            CommandKind::UpdateContext { parent: None, .. }
+        ));
+        let root: CommandKind = serde_json::from_value(
+            serde_json::json!({ "type": "update_context", "id": 2, "parent": null }),
+        )
+        .unwrap();
+        assert!(matches!(
+            root,
+            CommandKind::UpdateContext {
+                parent: Some(None),
+                ..
+            }
+        ));
+        let under: CommandKind = serde_json::from_value(
+            serde_json::json!({ "type": "update_context", "id": 2, "parent": 1 }),
+        )
+        .unwrap();
+        assert!(matches!(
+            under,
+            CommandKind::UpdateContext {
+                parent: Some(Some(1)),
+                ..
+            }
+        ));
+        let kept = serde_json::to_value(CommandKind::UpdateContext {
+            id: 2,
+            name: None,
+            parent: None,
+        })
+        .unwrap();
+        assert!(kept.get("parent").is_none(), "{kept}");
     }
 
     #[test]

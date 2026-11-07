@@ -21,6 +21,7 @@ use crate::combination;
 use crate::commit_detail::{DetailJob, DetailReport};
 use crate::commit_diff::{StackJob, StackReport};
 use crate::conflict::{self, Hunk, Segment};
+use crate::contexts_session;
 use crate::files::{
     Building, FilesSession, HighlightJob, HighlightReport, IndexJob, IndexReport, ReadJob,
     ReadReport, SearchJob, SearchReport, TextJob, TextReport,
@@ -144,6 +145,8 @@ pub struct Engine {
     workflow_user_dir: Option<PathBuf>,
     /// The folder a deleted workflow file is moved to; see `delete_workflow_file`.
     workflow_trash_dir: Option<PathBuf>,
+    /// The contexts file (`contexts.db`); see `set_contexts_db`.
+    contexts_db: Option<PathBuf>,
     /// The home folder a workspace root may start with `~` (D174 (4)), from `HOME` at start.
     workspace_home: Option<PathBuf>,
     /// The global Git configuration the workspace commands' Git calls read; `None` reads the
@@ -357,6 +360,7 @@ impl Engine {
                 .map(PathBuf::from),
             workspace_config: None,
             workflow_trash_dir: crate::paths::data_dir().map(|data| data.join("workflow-trash")),
+            contexts_db: crate::paths::data_dir().map(|data| data.join("contexts.db")),
             script_link: None,
             script: None,
             trust: None,
@@ -386,6 +390,13 @@ impl Engine {
     /// deletes. The default is `workflow-trash` in the app's data directory.
     pub fn set_workflow_trash_dir(&mut self, dir: Option<PathBuf>) {
         self.workflow_trash_dir = dir;
+    }
+
+    /// Sets the contexts file. `None` leaves the contexts unavailable: they read as empty and no
+    /// write is possible. The default is `contexts.db` in the app's data directory; tests set a
+    /// temporary one.
+    pub fn set_contexts_db(&mut self, path: Option<PathBuf>) {
+        self.contexts_db = path;
     }
 
     /// Sets the global Git configuration the workspace commands' Git calls read (D177 (5)). `None`
@@ -2372,11 +2383,7 @@ impl Engine {
     ) -> Result<Vec<Event>, String> {
         match kind {
             CommandKind::OpenRepo { path } => self.open_repo(id, path),
-            CommandKind::RefreshStatus => {
-                let root = self.open_root()?;
-                let status = self.git.status(&root).map_err(|e| e.0)?;
-                self.loaded(id, &root, status)
-            }
+            CommandKind::RefreshStatus => self.refresh_status(id),
             CommandKind::ListWorktrees => self.list_worktrees(id),
             CommandKind::LoadDiff { path, side } => {
                 let root = self.open_root()?;
@@ -2466,6 +2473,9 @@ impl Engine {
             | CommandKind::SaveWorkflowFile { .. }
             | CommandKind::DeleteWorkflowFile { .. } => self.workflow_command(id, actor, kind),
             _ if threads_session::is_threads_command(kind) => self.threads_command(id, actor, kind),
+            _ if contexts_session::is_contexts_command(kind) => {
+                self.contexts_command(id, actor, kind)
+            }
             _ if is_review_command(kind) => self.review_command(id, actor, kind),
             _ if is_workspace_command(kind) => self.workspace_command(id, actor, kind),
             // The worktree and branch commands that `execute` does not list above.
@@ -4232,6 +4242,34 @@ impl Engine {
         threads_session::run(id, store, &ctx, actor, kind)
     }
 
+    /// Reads the status of the open repository again and answers with it.
+    fn refresh_status(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let status = self.git.status(&root).map_err(|e| e.0)?;
+        self.loaded(id, &root, status)
+    }
+
+    /// The context commands (design/threads.md, "Contexts"). The list is open to any actor; the
+    /// writes are human only. Only `ListContexts { repo: true }` and `RenewRepoId` read the open
+    /// repository.
+    fn contexts_command(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        if let Some(what) = contexts_session::human_only(kind) {
+            only_a_human(actor, what)?;
+        }
+        contexts_session::run(
+            id,
+            self.contexts_db.as_deref(),
+            self.git.as_ref(),
+            self.root.as_deref(),
+            kind,
+        )
+    }
+
     /// The review comment commands (B4, D96). The writes are human only; the list
     /// and a snapshot's text are reads.
     fn review_command(
@@ -5193,6 +5231,7 @@ impl Engine {
                 | CommandKind::ReadLabel { .. }
                 | CommandKind::ListMemories { .. }
                 | CommandKind::ReadMemory { .. }
+                | CommandKind::ListContexts { .. }
         ) {
             self.log.push(LogEntry {
                 id: op.id,

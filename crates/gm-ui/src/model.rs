@@ -1424,7 +1424,10 @@ impl Model {
             // The removal's outcome is the settled operation's, which the dialog takes (D183).
             | Event::WorkspaceRemoved { .. }
         // The members of a workspace are read by the agent's tools; the app keeps none (D181).
-        | Event::MembersListed { .. } => None,
+        | Event::MembersListed { .. }
+        // The contexts are kept by the dialog that shows them (C2); the model keeps none yet.
+        | Event::ContextsListed { .. }
+        | Event::ContextsChanged { .. } => None,
             // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
             Event::HunkSuggested { .. } => {
                 if let Some(conflict) = self.conflict.as_mut() {
@@ -1868,6 +1871,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::MemoriesListed { id, .. }
         | Event::MemoryRead { id, .. }
         | Event::MemoryChanged { id, .. }
+        | Event::ContextsListed { id, .. }
+        | Event::ContextsChanged { id, .. }
         | Event::ConflictRead { id, .. }
         | Event::ConflictResolved { id, .. }
         | Event::RecordedResolutionForgotten { id, .. }

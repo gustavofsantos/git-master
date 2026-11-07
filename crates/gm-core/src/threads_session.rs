@@ -96,7 +96,7 @@ pub(crate) fn origin_of(actor: &Actor) -> String {
 }
 
 /// Milliseconds since the Unix epoch, the time of a label or relation row.
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| {
@@ -489,9 +489,10 @@ fn memories_command(
                 next_cursor,
             }])
         }
-        CommandKind::ReadMemory { id: memory_id } => {
+        CommandKind::ReadMemory { uid } => {
+            let memory_id = memory_row(store, uid)?;
             let mut memory = store
-                .read_memory(*memory_id)
+                .read_memory(memory_id)
                 .map_err(|e| named(e, MEMORY_MISSING))?;
             fill_changes(ctx, &mut memory);
             Ok(vec![Event::MemoryRead { id, memory }])
@@ -502,26 +503,34 @@ fn memories_command(
             sources,
         } => propose_memory(id, store, ctx, actor, *memory_kind, text, sources),
         CommandKind::AcceptMemory {
-            id: memory_id,
+            uid,
             text,
             supersedes,
-        } => accept_memory(
-            id,
-            store,
-            ctx,
-            is_human,
-            *memory_id,
-            text.as_deref(),
-            supersedes,
-        ),
-        CommandKind::RejectMemory { id: memory_id } => {
-            reject_memory(id, store, ctx, is_human, *memory_id)
-        }
-        CommandKind::DeleteMemory { id: memory_id } => {
-            delete_memory(id, store, is_human, *memory_id)
-        }
+        } => accept_memory(id, store, ctx, is_human, uid, text.as_deref(), supersedes),
+        CommandKind::RejectMemory { uid } => reject_memory(id, store, ctx, is_human, uid),
+        CommandKind::DeleteMemory { uid } => delete_memory(id, store, is_human, uid),
         _ => Err("not a memory command".to_owned()),
     }
+}
+
+/// The row id of the repository's memory `uid`, or `MEMORY_MISSING`.
+fn memory_row(store: &ThreadStore, uid: &str) -> Result<i64, String> {
+    store
+        .memory_id_of(uid)
+        .map_err(|e| named(e, MEMORY_MISSING))
+}
+
+/// The row ids of the memories a human supersedes. A uid the repository does not hold is refused
+/// by name: a memory supersedes only memories of its own store (D193 (1)).
+fn supersede_rows(store: &ThreadStore, uids: &[String]) -> Result<Vec<i64>, String> {
+    uids.iter()
+        .map(|uid| {
+            store.memory_id_of(uid).map_err(|e| match e {
+                StoreError::NotFound => format!("memory {uid} is not in this repository"),
+                other => other.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Proposes a memory: an agent's is `proposed`, a human's is `accepted` (D190, D192).
@@ -564,17 +573,19 @@ fn propose_memory(
     Ok(memory_written(id, ctx, memory, created))
 }
 
-/// Accepts memory `memory_id`, recording the blob of each file source at `HEAD` (D192).
+/// Accepts memory `uid`, recording the blob of each file source at `HEAD` (D192).
 fn accept_memory(
     id: OperationId,
     store: &mut ThreadStore,
     ctx: &Context<'_>,
     is_human: bool,
-    memory_id: i64,
+    uid: &str,
     text: Option<&str>,
-    supersedes: &[i64],
+    supersedes: &[String],
 ) -> Result<Vec<Event>, String> {
     memories::authorize(is_human, &MemoryAction::Accept)?;
+    let memory_id = memory_row(store, uid)?;
+    let supersedes = supersede_rows(store, supersedes)?;
     let text = text.map(|text| redacted(ctx, text)).transpose()?;
     // The blobs are read before the write, so the acceptance records what HEAD holds now. An
     // accepted memory keeps the blobs of its first acceptance (D192 (4)), so none are read.
@@ -597,34 +608,36 @@ fn accept_memory(
             .collect()
     };
     let memory = store
-        .accept_memory(memory_id, text.as_deref(), supersedes, &blobs, now_ms())
+        .accept_memory(memory_id, text.as_deref(), &supersedes, &blobs, now_ms())
         .map_err(|e| named(e, MEMORY_MISSING))?;
     Ok(memory_written(id, ctx, memory, false))
 }
 
-/// Rejects the proposed memory `memory_id` (D192).
+/// Rejects the proposed memory `uid` (D192).
 fn reject_memory(
     id: OperationId,
     store: &mut ThreadStore,
     ctx: &Context<'_>,
     is_human: bool,
-    memory_id: i64,
+    uid: &str,
 ) -> Result<Vec<Event>, String> {
     memories::authorize(is_human, &MemoryAction::Reject)?;
+    let memory_id = memory_row(store, uid)?;
     let memory = store
         .reject_memory(memory_id, now_ms())
         .map_err(|e| named(e, MEMORY_MISSING))?;
     Ok(memory_written(id, ctx, memory, false))
 }
 
-/// Deletes memory `memory_id` with its sources and links (D192).
+/// Deletes memory `uid` with its sources and links (D192).
 fn delete_memory(
     id: OperationId,
     store: &mut ThreadStore,
     is_human: bool,
-    memory_id: i64,
+    uid: &str,
 ) -> Result<Vec<Event>, String> {
     memories::authorize(is_human, &MemoryAction::Delete)?;
+    let memory_id = memory_row(store, uid)?;
     store
         .delete_memory(memory_id)
         .map_err(|e| named(e, MEMORY_MISSING))?;

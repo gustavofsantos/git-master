@@ -134,8 +134,14 @@ fn memory_of(events: &[Event]) -> Memory {
     changed(events).0.expect("a memory")
 }
 
-fn read(engine: &mut Engine, id: i64) -> Memory {
-    let events = send(engine, &Actor::Human, CommandKind::ReadMemory { id });
+fn read(engine: &mut Engine, uid: &str) -> Memory {
+    let events = send(
+        engine,
+        &Actor::Human,
+        CommandKind::ReadMemory {
+            uid: uid.to_owned(),
+        },
+    );
     events
         .iter()
         .find_map(|event| match event {
@@ -195,12 +201,17 @@ fn propose(
     )
 }
 
-fn accept(engine: &mut Engine, id: i64, text: Option<&str>, supersedes: Vec<i64>) -> Vec<Event> {
+fn accept(
+    engine: &mut Engine,
+    uid: &str,
+    text: Option<&str>,
+    supersedes: Vec<String>,
+) -> Vec<Event> {
     send(
         engine,
         &Actor::Human,
         CommandKind::AcceptMemory {
-            id,
+            uid: uid.to_owned(),
             text: text.map(str::to_owned),
             supersedes,
         },
@@ -216,7 +227,7 @@ fn accepted_about_parser(engine: &mut Engine, text: &str) -> Memory {
         text,
         vec![file("parser.rs")],
     ));
-    memory_of(&accept(engine, proposed.id, None, Vec::new()))
+    memory_of(&accept(engine, &proposed.uid, None, Vec::new()))
 }
 
 #[test]
@@ -284,12 +295,16 @@ fn an_agent_cannot_accept_reject_or_delete() {
 
     let requests = [
         CommandKind::AcceptMemory {
-            id: proposed.id,
+            uid: proposed.uid.clone(),
             text: None,
             supersedes: Vec::new(),
         },
-        CommandKind::RejectMemory { id: proposed.id },
-        CommandKind::DeleteMemory { id: proposed.id },
+        CommandKind::RejectMemory {
+            uid: proposed.uid.clone(),
+        },
+        CommandKind::DeleteMemory {
+            uid: proposed.uid.clone(),
+        },
     ];
     for request in requests {
         let events = send(&mut engine, &agent(), request.clone());
@@ -303,7 +318,7 @@ fn an_agent_cannot_accept_reject_or_delete() {
                 .or(failure(&events).as_deref()),
         );
     }
-    let kept = read(&mut engine, proposed.id);
+    let kept = read(&mut engine, &proposed.uid);
     assert_eq!(kept.status, MemoryStatus::Proposed);
     assert_eq!(kept.text, "The parser is total");
 }
@@ -335,17 +350,23 @@ fn a_changed_file_shows_after_a_commit_and_not_an_uncommitted_edit() {
     let repo = repo();
     let mut engine = engine_on(&repo.root);
     let memory = accepted_about_parser(&mut engine, "Keep the parser total");
-    assert!(read(&mut engine, memory.id).files_changed_since.is_empty());
+    assert!(
+        read(&mut engine, &memory.uid)
+            .files_changed_since
+            .is_empty()
+    );
 
     std::fs::write(repo.root.join("parser.rs"), "fn parse() { 1 }\n").unwrap();
     assert!(
-        read(&mut engine, memory.id).files_changed_since.is_empty(),
+        read(&mut engine, &memory.uid)
+            .files_changed_since
+            .is_empty(),
         "the working tree is not HEAD"
     );
 
     commit_all(&repo.root, "change the parser");
     assert_eq!(
-        read(&mut engine, memory.id).files_changed_since,
+        read(&mut engine, &memory.uid).files_changed_since,
         vec![FileChange {
             path: "parser.rs".into(),
             state: FileChangeState::Changed,
@@ -362,7 +383,7 @@ fn a_renamed_file_is_missing_at_its_old_path() {
     git(&repo.root, &["mv", "parser.rs", "lexer.rs"]);
     commit_all(&repo.root, "rename the parser");
     assert_eq!(
-        read(&mut engine, memory.id).files_changed_since,
+        read(&mut engine, &memory.uid).files_changed_since,
         vec![FileChange {
             path: "parser.rs".into(),
             state: FileChangeState::Missing,
@@ -390,14 +411,14 @@ fn a_deleted_file_is_missing_and_a_file_added_later_is_changed() {
     commit_all(&repo.root, "remove the parser and add notes");
 
     assert_eq!(
-        read(&mut engine, gone.id).files_changed_since,
+        read(&mut engine, &gone.uid).files_changed_since,
         vec![FileChange {
             path: "parser.rs".into(),
             state: FileChangeState::Missing,
         }]
     );
     assert_eq!(
-        read(&mut engine, note.id).files_changed_since,
+        read(&mut engine, &note.uid).files_changed_since,
         vec![FileChange {
             path: "notes.md".into(),
             state: FileChangeState::Changed,
@@ -414,11 +435,11 @@ fn accepting_again_is_idempotent_and_keeps_the_change() {
     std::fs::write(repo.root.join("parser.rs"), "fn parse() { 1 }\n").unwrap();
     commit_all(&repo.root, "change the parser");
 
-    let reaccepted = memory_of(&accept(&mut engine, memory.id, None, Vec::new()));
+    let reaccepted = memory_of(&accept(&mut engine, &memory.uid, None, Vec::new()));
     assert_eq!(reaccepted.status, MemoryStatus::Accepted);
     assert_eq!(reaccepted.decided_at, memory.decided_at);
     assert_eq!(reaccepted.decided_by, memory.decided_by);
-    let read_back = read(&mut engine, memory.id);
+    let read_back = read(&mut engine, &memory.uid);
     assert_eq!(read_back.decided_at, memory.decided_at);
     assert_eq!(
         read_back.files_changed_since,
@@ -448,7 +469,7 @@ fn the_stored_text_is_redacted() {
         memory.text,
         "Set [REDACTED:aws-access-key-id] in the CI config"
     );
-    assert!(!read(&mut engine, memory.id).text.contains(&key));
+    assert!(!read(&mut engine, &memory.uid).text.contains(&key));
 }
 
 #[test]
@@ -509,7 +530,7 @@ fn a_human_edit_on_accept_keeps_who_proposed_it() {
 
     let accepted = memory_of(&accept(
         &mut engine,
-        proposed.id,
+        &proposed.uid,
         Some("  new text  "),
         Vec::new(),
     ));
@@ -538,12 +559,13 @@ fn a_supersede_marks_the_old_memory_and_links_both_ways() {
         vec![file("parser.rs")],
     ));
 
-    let accepted = memory_of(&accept(&mut engine, new.id, None, vec![old.id]));
+    let accepted = memory_of(&accept(&mut engine, &new.uid, None, vec![old.uid.clone()]));
     assert_eq!(accepted.supersedes, vec![old.id]);
-    let old = read(&mut engine, old.id);
+    let old_uid = old.uid.clone();
+    let old = read(&mut engine, &old_uid);
     assert_eq!(old.status, MemoryStatus::Superseded);
     assert_eq!(old.superseded_by, vec![new.id]);
-    assert_eq!(read(&mut engine, new.id).supersedes, vec![old.id]);
+    assert_eq!(read(&mut engine, &new.uid).supersedes, vec![old.id]);
 }
 
 #[test]
@@ -595,12 +617,12 @@ fn memory_reads_are_not_logged_and_writes_are_with_their_actor() {
         vec![file("parser.rs")],
     ));
     list(&mut engine, &agent(), None);
-    read(&mut engine, proposed.id);
+    read(&mut engine, &proposed.uid);
     send(
         &mut engine,
         &Actor::Human,
         CommandKind::AcceptMemory {
-            id: proposed.id,
+            uid: proposed.uid.clone(),
             text: None,
             supersedes: Vec::new(),
         },

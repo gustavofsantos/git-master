@@ -10,6 +10,7 @@ pub mod commit_diff;
 pub mod conflict;
 mod conflict_sides;
 pub mod contexts;
+mod contexts_session;
 pub mod diff;
 mod engine;
 pub mod fake;

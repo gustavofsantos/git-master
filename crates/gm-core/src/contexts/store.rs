@@ -145,6 +145,11 @@ impl ContextStore {
             .collect()
     }
 
+    /// One context with its path, repositories and counts. `NotFound` when it does not exist.
+    pub fn read_context(&self, id: i64) -> Result<Context, StoreError> {
+        context_by_id(&self.conn, id)
+    }
+
     /// Creates a context under `parent` (the root when `None`). The name is trimmed and has 1 to 64
     /// characters, and it is unique among its siblings: a root context is checked in code too,
     /// because SQLite's UNIQUE does not hold for two NULL parents.
