@@ -576,16 +576,26 @@ fn accept_memory(
 ) -> Result<Vec<Event>, String> {
     memories::authorize(is_human, &MemoryAction::Accept)?;
     let text = text.map(|text| redacted(ctx, text)).transpose()?;
-    // The blobs are read before the write, so the acceptance records what HEAD holds now.
-    let blobs: Vec<(String, Option<String>)> = store
-        .memory_file_sources(memory_id)
+    // The blobs are read before the write, so the acceptance records what HEAD holds now. An
+    // accepted memory keeps the blobs of its first acceptance (D192 (4)), so none are read.
+    let already_accepted = store
+        .read_memory(memory_id)
         .map_err(|e| named(e, MEMORY_MISSING))?
-        .into_iter()
-        .map(|path| {
-            let blob = blob_at_head(ctx, &path);
-            (path, blob)
-        })
-        .collect();
+        .status
+        == MemoryStatus::Accepted;
+    let blobs: Vec<(String, Option<String>)> = if already_accepted {
+        Vec::new()
+    } else {
+        store
+            .memory_file_sources(memory_id)
+            .map_err(|e| named(e, MEMORY_MISSING))?
+            .into_iter()
+            .map(|path| {
+                let blob = blob_at_head(ctx, &path);
+                (path, blob)
+            })
+            .collect()
+    };
     let memory = store
         .accept_memory(memory_id, text.as_deref(), supersedes, &blobs, now_ms())
         .map_err(|e| named(e, MEMORY_MISSING))?;

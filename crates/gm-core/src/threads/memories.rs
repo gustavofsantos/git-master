@@ -312,8 +312,11 @@ impl ThreadStore {
     /// acceptance; on an accepted one it is an edit, or a supersede. `text` replaces the text when it
     /// differs (the origin becomes `human`; `proposed_by` stays). `supersedes` must each name an
     /// accepted memory other than this one; they become `superseded` with a `memory_rel` row.
-    /// `blobs` gives the blob of each file source at `HEAD` (`None` when the file is absent). Every
-    /// change is one transaction: a refusal writes nothing.
+    /// `blobs` gives the blob of each file source at `HEAD` (`None` when the file is absent) and is
+    /// recorded only when the memory first becomes accepted: accepting an accepted memory again
+    /// keeps its status, `decided_at`, `decided_by` and the recorded blobs (D192 (4)), so
+    /// "files changed since" still counts from the first acceptance. Every change is one
+    /// transaction: a refusal writes nothing.
     pub fn accept_memory(
         &mut self,
         id: i64,
@@ -337,17 +340,20 @@ impl ThreadStore {
                 )?;
             }
         }
-        tx.execute(
-            "UPDATE memory SET status = 'accepted', decided_at = ?1, decided_by = 'human'
-             WHERE id = ?2",
-            params![at, id],
-        )?;
-        for (path, blob) in blobs {
+        // Accepting an accepted memory again keeps its decision and its recorded blobs (D192 (4)).
+        if before != MemoryStatus::Accepted {
             tx.execute(
-                "UPDATE memory_source SET blob_oid = ?1
-                 WHERE memory_id = ?2 AND kind = 'file' AND ref = ?3",
-                params![blob, id, path],
+                "UPDATE memory SET status = 'accepted', decided_at = ?1, decided_by = 'human'
+                 WHERE id = ?2",
+                params![at, id],
             )?;
+            for (path, blob) in blobs {
+                tx.execute(
+                    "UPDATE memory_source SET blob_oid = ?1
+                     WHERE memory_id = ?2 AND kind = 'file' AND ref = ?3",
+                    params![blob, id, path],
+                )?;
+            }
         }
         for &old in supersedes {
             if old == id {
@@ -1380,6 +1386,66 @@ mod tests {
         assert!(
             accepted.files_changed_since.is_empty(),
             "derived on read, not from the store"
+        );
+    }
+
+    #[test]
+    fn accepting_an_accepted_memory_again_keeps_its_decision_and_blobs() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        let memory = propose(
+            &mut store,
+            MemoryKind::Rule,
+            "Keep the first",
+            &[file("src/a.rs")],
+        );
+        let first = [("src/a.rs".to_owned(), Some("abc123".to_owned()))];
+        let accepted = store
+            .accept_memory(memory.id, None, &[], &first, 20)
+            .expect("accept");
+
+        let changed = [("src/a.rs".to_owned(), Some("def456".to_owned()))];
+        let again = store
+            .accept_memory(memory.id, None, &[], &changed, 99)
+            .expect("accept again");
+        assert_eq!(again.status, MemoryStatus::Accepted);
+        assert_eq!(again.decided_at, Some(20));
+        assert_eq!(again.decided_by.as_deref(), Some("human"));
+        assert_eq!(again.sources[0].blob_oid.as_deref(), Some("abc123"));
+        assert_eq!(again.text, accepted.text);
+        assert_eq!(again.origin, accepted.origin);
+    }
+
+    #[test]
+    fn accepting_an_accepted_memory_again_with_text_edits_only_the_text() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        let memory = accepted(&mut store, MemoryKind::Fact, "The first wording");
+        let blobs = [("src/a.rs".to_owned(), Some("abc123".to_owned()))];
+        let before = store.read_memory(memory.id).expect("read");
+        assert!(before.sources[0].blob_oid.is_none());
+
+        let edited = store
+            .accept_memory(memory.id, Some("The second wording"), &[], &blobs, 99)
+            .expect("edit");
+        assert_eq!(edited.text, "The second wording");
+        assert_eq!(edited.origin, HUMAN);
+        assert_eq!(edited.decided_at, Some(20));
+        assert_eq!(edited.decided_by.as_deref(), Some("human"));
+        assert!(edited.sources[0].blob_oid.is_none());
+    }
+
+    #[test]
+    fn accepting_an_accepted_memory_again_still_supersedes() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        let old = accepted(&mut store, MemoryKind::Decision, "The old one");
+        let new = accepted(&mut store, MemoryKind::Decision, "The new one");
+        let superseded = store
+            .accept_memory(new.id, None, &[old.id], &[], 40)
+            .expect("supersede");
+        assert_eq!(superseded.supersedes, vec![old.id]);
+        assert_eq!(superseded.decided_at, Some(20));
+        assert_eq!(
+            store.read_memory(old.id).expect("old").status,
+            MemoryStatus::Superseded
         );
     }
 

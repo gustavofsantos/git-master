@@ -406,18 +406,27 @@ fn a_deleted_file_is_missing_and_a_file_added_later_is_changed() {
 }
 
 #[test]
-fn accepting_again_records_the_blob_again() {
+fn accepting_again_is_idempotent_and_keeps_the_change() {
     let repo = repo();
     let mut engine = engine_on(&repo.root);
     let memory = accepted_about_parser(&mut engine, "Keep the parser total");
 
     std::fs::write(repo.root.join("parser.rs"), "fn parse() { 1 }\n").unwrap();
     commit_all(&repo.root, "change the parser");
-    assert!(!read(&mut engine, memory.id).files_changed_since.is_empty());
 
     let reaccepted = memory_of(&accept(&mut engine, memory.id, None, Vec::new()));
-    assert!(reaccepted.files_changed_since.is_empty());
-    assert!(read(&mut engine, memory.id).files_changed_since.is_empty());
+    assert_eq!(reaccepted.status, MemoryStatus::Accepted);
+    assert_eq!(reaccepted.decided_at, memory.decided_at);
+    assert_eq!(reaccepted.decided_by, memory.decided_by);
+    let read_back = read(&mut engine, memory.id);
+    assert_eq!(read_back.decided_at, memory.decided_at);
+    assert_eq!(
+        read_back.files_changed_since,
+        vec![FileChange {
+            path: "parser.rs".into(),
+            state: FileChangeState::Changed,
+        }]
+    );
 }
 
 #[test]
