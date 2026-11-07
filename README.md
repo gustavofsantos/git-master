@@ -63,7 +63,7 @@ gitmaster path/to/repo
 **Connect Claude Code** to see its sessions as threads and let it read your review comments:
 
 ```sh
-claude plugin marketplace add gustavofsantos/git-master
+claude plugin marketplace add gustavofsantos/git-master-ai
 claude plugin install gitmaster@gitmaster
 ```
 

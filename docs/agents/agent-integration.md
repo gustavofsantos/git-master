@@ -5,7 +5,7 @@ status: partial
 order: 5
 ---
 
-The agent integration connects your coding agent to GitMaster. It is a plugin that lives in the GitMaster repository, under `plugins/claude-code/`, and Claude Code installs it from the repository's address. The plugin's hooks report each step of a session to GitMaster, which stores it as a [thread](../guide/threads.md). The plugin also carries the MCP server settings and a skill for the agent, so an agent can search your earlier threads.
+The agent integration connects your coding agent to GitMaster. It is a plugin that lives in its own repository, `git-master-ai`, under `plugins/claude-code/`, and Claude Code installs it from that repository's address. The plugin's hooks report each step of a session to GitMaster, which stores it as a [thread](../guide/threads.md). The plugin also carries the MCP server settings and a skill for the agent, so an agent can search your earlier threads.
 
 ## Supported agents
 
@@ -57,16 +57,16 @@ Nothing runs by itself. The hooks only capture. They do not start a model and th
 You need the `claude` command and the `gitmaster` command on your `PATH`. Run these two commands in a terminal:
 
 ```sh
-claude plugin marketplace add gustavofsantos/git-master
+claude plugin marketplace add gustavofsantos/git-master-ai
 claude plugin install gitmaster@gitmaster
 ```
 
-The first command adds the repository as a plugin marketplace, from its `.claude-plugin/marketplace.json`. The second installs the `gitmaster` plugin from it. The name after `@` is the marketplace's name, `gitmaster`.
+The first command adds the `git-master-ai` repository as a plugin marketplace, from its `.claude-plugin/marketplace.json`. The second installs the `gitmaster` plugin from it. The name after `@` is the marketplace's name, `gitmaster`.
 
-To install the plugin from a checkout of the repository instead, for example to test a change to the plugin, give the path of the checkout:
+To install the plugin from a checkout of `git-master-ai` instead, for example to test a change to the plugin, give the path of the checkout:
 
 ```sh
-claude plugin marketplace add /path/to/git-master
+claude plugin marketplace add /path/to/git-master-ai
 claude plugin install gitmaster@gitmaster
 ```
 
@@ -80,7 +80,7 @@ After the install, start a new agent session in a repository. The session appear
 claude plugin update gitmaster@gitmaster
 ```
 
-Run this after you upgrade GitMaster, so that the plugin matches the new version.
+The plugin has its own version, independent of GitMaster, and declares the oldest GitMaster version it works with. Run this to get a newer plugin; upgrade GitMaster first if the plugin asks for a newer version.
 
 ## What the hooks do and do not do
 

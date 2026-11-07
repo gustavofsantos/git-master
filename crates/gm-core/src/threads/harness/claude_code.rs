@@ -6,7 +6,7 @@
 //! missing optional field never fails a payload, unknown fields are ignored, and an unknown
 //! event or record is reported in `unrecognized`, not as an error.
 //!
-//! The plugin is source in this repository, under `plugins/claude-code/` (D150). Its hooks
+//! The plugin is source in the `git-master-ai` repository, the `ai/` submodule here (D150, D194). Its hooks
 //! and MCP settings call `gitmaster` from `PATH`; `crates/gitmaster/tests/claude_plugin.rs`
 //! checks the files against the events and commands this adapter expects.
 

@@ -1152,7 +1152,7 @@ pub fn empty_text(empty: Empty) -> &'static str {
 /// The commands that install the Claude Code plugin, shown under the empty state. The same
 /// commands are in docs/agents/agent-integration.md.
 pub const INSTALL_HINT: [&str; 2] = [
-    "claude plugin marketplace add gustavofsantos/git-master",
+    "claude plugin marketplace add gustavofsantos/git-master-ai",
     "claude plugin install gitmaster@gitmaster",
 ];
 

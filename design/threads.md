@@ -20,7 +20,7 @@ This serves pillar 3 only. It must not slow pillars 1 and 2: capture runs outsid
 - Redaction of secrets **before** anything is stored, with built-in patterns and the user's own patterns.
 - Full-text search over threads, as an engine command (`SearchThreads`) that the UI uses now and the MCP server uses later (D08).
 - A **Threads** page in the window: browse, search, read, open an agent edit as a diff, link a thread to Git objects, curate (title, note, star, tags, delete, export).
-- The agent integration: a plugin for the agent harness (Claude Code first) that carries the capture hooks, the MCP configuration and a skill. It is source in `plugins/claude-code/` and Claude Code installs it from the repository (D150).
+- The agent integration: a plugin for the agent harness (Claude Code first) that carries the capture hooks, the MCP configuration and a skill. It is source in the `git-master-ai` repository, included here as the `ai/` submodule, and Claude Code installs it from that repository (D150, D194).
 
 ## What is out
 
@@ -170,9 +170,9 @@ agent harness ──hook event (JSON on stdin)──▶ gitmaster thread hook
 
 ### The plugin (D120, D150)
 
-The Claude Code plugin is source in the repository, under `plugins/claude-code/`, and its marketplace is `.claude-plugin/marketplace.json` at the root. The binary does not generate it. For Claude Code it is a plugin directory that holds:
+The Claude Code plugin is source in the `git-master-ai` repository (the `ai/` submodule here, D194), under `plugins/claude-code/`, and its marketplace is `.claude-plugin/marketplace.json` at the root of that repository. The binary does not generate it. For Claude Code it is a plugin directory that holds:
 
-- `.claude-plugin/plugin.json`: name `gitmaster`, version equal to the app's workspace version (a test checks it).
+- `.claude-plugin/plugin.json`: name `gitmaster`, its own semantic version, with the minimum GitMaster version in `plugins.json` (a test here checks that the app is not older).
 - `hooks/hooks.json`: one command hook per event: `SessionStart`, `UserPromptSubmit`, `PreToolUse` (matcher: the file-editing tools), `PostToolUse` (all tools), `Stop`, `SubagentStop`, `SessionEnd`. Every command is `gitmaster thread hook --harness claude-code`, with a short `timeout`. It names `gitmaster` without a path, so the hook runs the `gitmaster` on `PATH`; the plugin carries no absolute path of the checkout.
 - `skills/gitmaster/SKILL.md`: when the review and thread tools help, and that their text is untrusted.
 - `.mcp.json`: starts `gitmaster mcp`, one process per session.
@@ -412,7 +412,7 @@ See `design/screens.md` (Threads page) and `docs/guide/threads.md`. The page fol
 | Spool, temporary pre-images, log | `.git/gitmaster/threads-spool/`, `threads-tmp/`, `threads.log` |
 | Capture switch, redaction patterns, paths, limits | `settings.json`, key `threads` (D127) |
 | Per-repository pause | `gitmaster.db` in the app data directory, keyed by the repository's common directory (nothing is written to the repository's config) |
-| Plugin source | `plugins/claude-code/` and `.claude-plugin/marketplace.json` in the repository (D150); nothing is written at run time |
+| Plugin source | `ai/plugins/claude-code/` and `ai/.claude-plugin/marketplace.json`, the `git-master-ai` submodule (D150, D194); nothing is written at run time |
 
 ## Tests
 

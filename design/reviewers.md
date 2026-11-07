@@ -20,10 +20,10 @@ Because the sub-agent run is a session, the capture hooks record it as a thread 
 
 ## Skills and sub-agents
 
-The plugin (D150) is source in `plugins/claude-code/`. It gains:
+The plugin (D150, D194) is source in `ai/plugins/claude-code/`, the `git-master-ai` submodule. It gains:
 
 ```text
-plugins/claude-code/
+ai/plugins/claude-code/
   skills/gitmaster/SKILL.md                existing: when to use the review and thread tools
   skills/summarize-thread/SKILL.md
   skills/propose-memories/SKILL.md

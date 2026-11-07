@@ -8,7 +8,9 @@
 #
 # Needs network access to: the Ubuntu/Debian mirrors, static.rust-lang.org,
 # sh.rustup.rs, index.crates.io, static.crates.io and github.com (see
-# docs/rvw-lessons.md). Set GM_WARM=0 to skip the crate download and build warm-up.
+# docs/rvw-lessons.md); the Claude GitHub app must also have access to the git-master-ai
+# repository, which is a submodule (D194). Set GM_WARM=0 to skip the crate download and
+# build warm-up.
 set -euo pipefail
 
 # The oldest compiler the workspace accepts (`rust-version` in gm-ui). Keep it in step
@@ -55,6 +57,13 @@ for rc in "$HOME/.profile" "$HOME/.bashrc"; do
   touch "$rc"
   grep -qxF "$line" "$rc" || printf '%s\n' "$line" >>"$rc"
 done
+
+# The plugins live in the git-master-ai submodule at ai/ (D194); the contract test reads them.
+# Outside the warm-up block so GM_WARM=0 still gets them.
+if [ -e "$REPO/.git" ]; then
+  say "Initialising submodules in $REPO"
+  git -C "$REPO" submodule update --init --recursive
+fi
 
 if [ "$WARM" = "1" ] && [ -f "$REPO/Cargo.toml" ]; then
   say "Warming the crate cache and the build in $REPO"
