@@ -28,7 +28,7 @@ use super::query::{
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run.
 const MIGRATIONS: &[&str] = &[
-    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7,
 ];
 /// The index in `MIGRATIONS` of the schema that repairs stored entries with the cleaner (D133).
 const REPAIR_MIGRATION: usize = 3;
@@ -68,8 +68,9 @@ const CONTEXT_CHARS: usize = 600;
 /// Values a facet lists, and filters a diagnosis names (D147).
 const FACET_TOP: usize = 10;
 const DIAGNOSIS_TOP: usize = 3;
-const CURSOR_MALFORMED: &str = "the cursor is not valid";
-const CURSOR_MISMATCH: &str = "the cursor belongs to another search; start again without a cursor";
+pub(super) const CURSOR_MALFORMED: &str = "the cursor is not valid";
+pub(super) const CURSOR_MISMATCH: &str =
+    "the cursor belongs to another search; start again without a cursor";
 /// Least trigram similarity between a typed word and a word of the text (D131).
 const FUZZY_MIN_SIMILARITY: f32 = 0.5;
 /// Words of context on each side of the match in a snippet built in Rust.
@@ -361,6 +362,54 @@ CREATE TABLE thread_member (
     head_start TEXT,
     head_end TEXT,
     PRIMARY KEY(thread_id, member));
+";
+
+/// Schema 7 (D190, D192): memories, their sources and their supersedes links. `memory_fts` indexes
+/// the text the way `entry_fts` indexes entries (D128), with the same tokenizer and triggers.
+const SCHEMA_V7: &str = "
+CREATE TABLE memory (
+    id          INTEGER PRIMARY KEY,
+    uid         TEXT UNIQUE NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('decision','rule','lesson','fact')),
+    text        TEXT NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN ('proposed','accepted','rejected','superseded')),
+    origin      TEXT NOT NULL,
+    proposed_by TEXT,
+    model       TEXT,
+    created_at  INTEGER NOT NULL,
+    decided_at  INTEGER,
+    decided_by  TEXT);
+CREATE TABLE memory_source (
+    memory_id  INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('thread','commit','file')),
+    ref        TEXT NOT NULL,
+    repo_id    TEXT,
+    entry_from INTEGER,
+    entry_to   INTEGER,
+    blob_oid   TEXT,
+    PRIMARY KEY(memory_id, kind, ref));
+CREATE TABLE memory_rel (
+    from_memory INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+    to_memory   INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind = 'supersedes'),
+    origin      TEXT NOT NULL,
+    at          INTEGER NOT NULL,
+    PRIMARY KEY(from_memory, to_memory, kind));
+CREATE INDEX memory_status ON memory (status);
+CREATE INDEX memory_source_ref ON memory_source (kind, ref);
+CREATE VIRTUAL TABLE memory_fts USING fts5(
+    text, content='memory', content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2 tokenchars ''_''');
+CREATE TRIGGER memory_fts_ai AFTER INSERT ON memory BEGIN
+    INSERT INTO memory_fts (rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER memory_fts_ad AFTER DELETE ON memory BEGIN
+    INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER memory_fts_au AFTER UPDATE OF text ON memory BEGIN
+    INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    INSERT INTO memory_fts (rowid, text) VALUES (new.id, new.text);
+END;
 ";
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
@@ -3166,7 +3215,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         assert_eq!(store.total_threads().expect("count"), 1);
     }
 
@@ -4583,7 +4632,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         let hits = store
             .search("ndex", &ThreadFilter::default(), 10)
             .expect("search");
@@ -5193,7 +5242,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             legacy_database(dir.path(), versions, EVERY_KIND_ROWS);
             let store = ThreadStore::open(dir.path()).expect("migrate");
-            assert_eq!(version_of(dir.path()), 6, "from version {versions}");
+            assert_eq!(version_of(dir.path()), 7, "from version {versions}");
             assert_eq!(index_rows(&store), (2, 2), "from version {versions}");
             assert_eq!(stage_hits(&store, "backoff", "ckof", "bakcoff"), [1, 1, 1]);
             assert_eq!(
@@ -5235,7 +5284,7 @@ mod tests {
 
         let store = ThreadStore::open(dir.path()).expect("migrate");
 
-        assert_eq!(version_of(dir.path()), 6);
+        assert_eq!(version_of(dir.path()), 7);
         let detail = store.read_thread("old1", 0, 10).expect("read");
         assert_eq!(detail.edits.len(), 1);
         assert_eq!(detail.edits[0].path, "src/hexagonal_port.rs");
@@ -5431,7 +5480,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 3, MARKER_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 6);
+        assert_eq!(version_of(dir.path()), 7);
 
         // Slash command as typed, output and bash as notices and a bash prompt, reminders
         // gone, the interruption as a notice; the marker-only prompt is deleted.
@@ -5551,7 +5600,7 @@ mod tests {
             open_for_hook_below(dir.path(), 6).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(dir.path()), 6);
+        assert_eq!(version_of(dir.path()), 7);
 
         // An up-to-date database is opened whatever its size.
         assert!(matches!(
@@ -5564,7 +5613,7 @@ mod tests {
             open_for_hook_below(fresh.path(), 1).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(fresh.path()), 6);
+        assert_eq!(version_of(fresh.path()), 7);
     }
 
     /// A deterministic generator for the benchmark: no randomness crate, same text every run.
@@ -6361,7 +6410,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 4, VERSION_FOUR_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 6);
+        assert_eq!(version_of(dir.path()), 7);
         assert_eq!(
             store.thread_summary("t1uid").expect("t1").tags,
             ["api", "bug"]
@@ -6399,6 +6448,31 @@ mod tests {
             )
             .expect("master");
         assert_eq!(kept, 0, "thread_tag is dropped");
+    }
+
+    #[test]
+    fn the_migration_to_schema_seven_keeps_threads_and_adds_memories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        legacy_database(
+            dir.path(),
+            6,
+            "INSERT INTO thread (uid, harness, session_id, worktree, title, started_at, last_event_at)
+             VALUES ('old1', 'claude-code', 's1', '/repo', 'old', 1, 1);",
+        );
+        let store = ThreadStore::open(dir.path()).expect("migrate");
+        assert_eq!(store.total_threads().expect("count"), 1);
+        assert_eq!(version_of(dir.path()), 7);
+        let raw = raw_connection(dir.path());
+        for name in ["memory", "memory_source", "memory_rel", "memory_fts"] {
+            let found: i64 = raw
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )
+                .expect("master");
+            assert_eq!(found, 1, "{name} exists");
+        }
     }
 
     #[test]

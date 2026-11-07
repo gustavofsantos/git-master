@@ -58,11 +58,13 @@ pub use submodule::{SUBMODULE_COMMIT_LIMIT, SubmoduleCommit, SubmoduleDetail};
 pub use syntax::{HighlightSpan, SyntaxRole};
 pub use threads::{
     AttachKind, CanonicalEvent, CaptureGap, CutBound, EditChange, EditIntent, EditPhase, EditState,
-    EntryKind, EntryRole, EventHeader, Evidence, HitKind, Label, LabelAttachment, LabelDetail,
-    LineRun, LinkKind, LinkOrigin, ProvenanceCommit, ProvenanceCut, ProvenanceEdit,
-    ProvenanceResult, ProvenanceThread, SearchFacets, SearchGroup, SearchOrder, SessionOrigin,
-    ThreadDetail, ThreadEdit, ThreadEntry, ThreadEntryBrief, ThreadFilter, ThreadHit, ThreadLink,
-    ThreadRelKind, ThreadRelation, ThreadSummary, ToolKind, Unverifiable,
+    EntryKind, EntryRole, EventHeader, Evidence, FileChange, FileChangeState, HitKind, Label,
+    LabelAttachment, LabelDetail, LineRun, LinkKind, LinkOrigin, Memory, MemoryFilter, MemoryKind,
+    MemorySource, MemorySourceInput, MemorySourceKind, MemoryStatus, ProvenanceCommit,
+    ProvenanceCut, ProvenanceEdit, ProvenanceResult, ProvenanceThread, SearchFacets, SearchGroup,
+    SearchOrder, SessionOrigin, ThreadDetail, ThreadEdit, ThreadEntry, ThreadEntryBrief,
+    ThreadFilter, ThreadHit, ThreadLink, ThreadRelKind, ThreadRelation, ThreadSummary, ToolKind,
+    Unverifiable,
 };
 pub use workflow::{
     WorkflowCallRecord, WorkflowDiagnostic, WorkflowDryCall, WorkflowDryRun, WorkflowEnd,
