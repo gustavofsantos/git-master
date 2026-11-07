@@ -1,3 +1,6 @@
 [submodule "ai"]
 	path = ai
 	url = ../git-master-ai.git
+[submodule "website"]
+	path = website
+	url = ../git-master-website.git
