@@ -44,29 +44,29 @@ LOG_BUTTON_X=1300; LOG_BUTTON_Y=837         # "Git log" button, right end of the
 PROJECT_X=139; PROJECT_Y=61                 # project button at the left of the top bar
 RECENT_OTHER_X=150; RECENT_OTHER_Y=185      # second row of the open list: billing-api
 BRANCH_X=140; BRANCH_Y=81                   # branch button, right of the project button
-SIDEBAR_FEATURE_X=160; SIDEBAR_FEATURE_Y=673  # feature/x row in the sidebar (non-current), By stack, Branches open
-SIDEBAR_BRANCHES_X=120; SIDEBAR_BRANCHES_Y=441  # BRANCHES header: folded when a window starts (D184)
-SIDEBAR_WORKTREES_X=120; SIDEBAR_WORKTREES_Y=731  # WORKTREES header once Branches is open: it moves down
+SIDEBAR_FEATURE_X=160; SIDEBAR_FEATURE_Y=656  # feature/x row in the sidebar (non-current), By stack, Branches open (main is at 684)
+SIDEBAR_BRANCHES_X=120; SIDEBAR_BRANCHES_Y=425  # BRANCHES header, Branches folded (D184; all folded: y=425)
+SIDEBAR_WORKTREES_X=120; SIDEBAR_WORKTREES_Y=459  # WORKTREES header, Worktrees folded and Branches folded (all folded: y=459)
 MENU_STAGE_X=470; MENU_STAGE_Y=163          # "Stage File" in the file row's menu, opened at NAME_X, ROW_MOD_Y
 MENU_CHECKOUT_X=190; MENU_CHECKOUT_Y=508    # "Checkout Branch" in the branch menu, opened at SIDEBAR_FEATURE_X/Y
 TITLE_BAR_H=44                              # the title bar: name row over the branch and path row
 TOOLBAR_Y=72; TOOLBAR_FETCH_X=1082; TOOLBAR_RESTACK_X=1322   # Fetch and Restack buttons, right of the title bar
-SECTION_CROP="240x84+0+612"                  # the WORKTREES rows at the sidebar's foot, window-relative
+SECTION_CROP="240x120+0+424"                 # the WORKTREES rows, Worktrees open alone: header y=409, rows from y=440 (window-relative)
 HISTORY_X=120; HISTORY_Y=175                 # "History" row under Repository in the sidebar
 WORKING_COPY_X=120; WORKING_COPY_Y=147       # "Working Copy" row, back from the history page
 HISTORY_ROW_X=420; HISTORY_ROW_TOP_Y=162     # the history list's first row, 48 px rows below it
 DETAIL_PANEL_CROP="360x700+920+88"           # the commit detail panel, window-relative
 COMMIT_FILE_X=1082; COMMIT_FILE_Y=505        # api/new.rs, the first file row of the feat commit
-SPLIT_FILE_X=1082; SPLIT_CALC_Y=449          # src/calc.rs, the file row of the split fixture's commit
+SPLIT_FILE_X=1082; SPLIT_CALC_Y=434          # src/calc.rs, the second file row of the split fixture's commit (rows 409, 434, 460)
 LAYOUT_SPLIT_X=1320; LAYOUT_UNIFIED_X=1257; LAYOUT_Y=196   # "Split" and "Unified" in the diff header
-STACK_A_Y=455; STACK_B_Y=480; STACK_C_Y=506   # a.txt, b.txt, c.txt rows of the stack fixture's commit (H4c)
+STACK_A_Y=440; STACK_B_Y=465; STACK_C_Y=491   # a.txt, b.txt, c.txt rows of the stack fixture's commit (rows 25 px apart, from FILES (3) at y=415)
 STACK_LIST_CROP="1040x520+322+222"           # the stacked diff's list, screen coordinates
 WORK_LAYOUT_SPLIT_X=1320; WORK_LAYOUT_Y=120               # "Split" in the Working Copy diff header
-SPLIT_OLD_CHECK_X=797; SPLIT_NEW_CHECK_X=1107             # gutter checkboxes of the split cells (old, new)
+SPLIT_OLD_CHECK_X=809; SPLIT_NEW_CHECK_X=1120             # gutter checkboxes of the split cells (old, new), split view of the Working Copy
 MOD_ENTRY_Y=217                                           # src/ledger/mod.rs: the -/+ pair row (entry, ledger)
-WF_EDITOR_X=760; WF_EDITOR_Y=400            # unverified: take a screenshot and adjust; a point inside the Script editor
-WF_TAB_RUNS_X=500; WF_TAB_RUNS_Y=180        # unverified: take a screenshot and adjust; the Runs tab of the Workflows page
-WF_FIRST_RUN_X=600; WF_FIRST_RUN_Y=240      # unverified: take a screenshot and adjust; the first row of the Runs list
+WF_EDITOR_X=982; WF_EDITOR_Y=650            # the blank area under the script's last line (window 900,600): a click there puts the caret at the end
+WF_TAB_RUNS_X=500; WF_TAB_RUNS_Y=180        # the Runs tab of the Workflows page (Script tab is the default)
+WF_FIRST_RUN_X=600; WF_FIRST_RUN_Y=240      # the first row of the Runs list
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -195,14 +195,14 @@ stop_app() {
   APP_PID=""
 }
 
-# A window starts with Branches and Worktrees folded (D184). Open them so the
-# coordinates below hold. Branches first: opening it pushes Worktrees down.
-# Branches and Worktrees start folded (D184). Every scenario opens Branches; only the worktree
-# scenarios ($1 = worktrees) open Worktrees too, since the open section shortens the branch list.
+# Branches and Worktrees start folded (D184). Every scenario opens Branches, except
+# the worktree scenarios ($1 = worktrees), which open only Worktrees: an open Branches
+# list shrinks the sidebar and moves the Worktrees rows out of reach.
 open_sidebar_sections() {
-  xdotool mousemove "$SIDEBAR_BRANCHES_X" "$SIDEBAR_BRANCHES_Y" click 1; sleep 1
   if [ "${1:-}" = worktrees ]; then
     xdotool mousemove "$SIDEBAR_WORKTREES_X" "$SIDEBAR_WORKTREES_Y" click 1; sleep 1
+  else
+    xdotool mousemove "$SIDEBAR_BRANCHES_X" "$SIDEBAR_BRANCHES_Y" click 1; sleep 1
   fi
 }
 
@@ -746,9 +746,9 @@ scenario_l() {
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -gt 5000 ] || fail "the branch menu did not open ($differing pixels changed)"
 
-  # The Copy Branch Name row shows its shortcut at the right end, after a label
+  # The Copy Branch Name row (window y 710) shows its shortcut at the right end, after a label
   # that stops well to the left. The strip there is blank without it.
-  convert "$SMOKE_OUT/l-branch-menu-$theme.png" -crop "80x20+300+527" +repage "$RUN_DIR/shortcut.png"
+  convert "$SMOKE_OUT/l-branch-menu-$theme.png" -crop "100x20+330+700" +repage "$RUN_DIR/shortcut.png"
   local ink
   ink="$(convert "$RUN_DIR/shortcut.png" -format '%[fx:standard_deviation]' info:)"
   awk -v m="$ink" 'BEGIN { exit !(m > 0.02) }' || fail "Copy Branch Name shows no shortcut at the row's end (sd=$ink)"
@@ -936,8 +936,8 @@ scenario_t() {
 # nothing goes. Ticking it enables Remove; the removal runs: git no longer lists
 # the worktree and its folder is gone. The row positions are the WORKTREES rows
 # at the sidebar's foot.
-WT_ROW_X=182; WT_ROW_Y=731                  # the feature/x worktree row, right-clicked
-MENU_REMOVE_X=252; MENU_REMOVE_Y=816        # "Remove Worktree" in that row's menu
+WT_ROW_X=182; WT_ROW_Y=518                  # the feature/x worktree row, right-clicked (Worktrees open alone)
+MENU_REMOVE_X=252; MENU_REMOVE_Y=658        # "Remove Worktree" in that row's menu, opened below the row at y=518
 CONFIRM_CHECK_X=486; CONFIRM_CHECK_Y=243  # the confirmation checkbox in the dialog
 REMOVE_BUTTON_X=894; REMOVE_BUTTON_Y=280  # "Remove worktree" in the dialog
 scenario_u() {
@@ -991,10 +991,10 @@ scenario_u() {
 # change. The gone worktree's menu opens the prune dialog, which lists the stale
 # record; Prune removes that record and the folder of the live worktree stays.
 # Row and menu positions are those of the WORKTREES rows at the sidebar's foot.
-WT_FEATURE_X=182; WT_FEATURE_Y=703          # feature/x row, right-clicked
-WT_GONE_X=182; WT_GONE_Y=731                # gone-branch row, right-clicked
-MENU_LOCK_X=242; MENU_LOCK_Y=798            # "Lock Worktree" (or "Unlock Worktree") in feature/x's menu
-MENU_PRUNE_X=250; MENU_PRUNE_Y=798          # "Prune Worktrees" in gone-branch's menu
+WT_FEATURE_X=182; WT_FEATURE_Y=518          # feature/x row (second row, Worktrees open alone), right-clicked
+WT_GONE_X=182; WT_GONE_Y=546                # gone-branch row (third row), right-clicked
+MENU_LOCK_X=242; MENU_LOCK_Y=625            # "Lock Worktree" (or "Unlock Worktree") in feature/x's menu, opened below y=518
+MENU_PRUNE_X=250; MENU_PRUNE_Y=686          # "Prune Worktrees" in gone-branch's menu, opened below y=546
 PRUNE_BUTTON_X=912; PRUNE_BUTTON_Y=325     # "Prune" in the prune dialog
 wt_lock_reason() {
   # Prints "locked" when git lists the worktree at $1 as locked, nothing otherwise.
