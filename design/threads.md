@@ -792,7 +792,7 @@ Rules the engine enforces, not the callers:
 - Text is redacted by the capture pipeline's redactor (D121) and capped at 1,000 characters before it is stored. An exact duplicate (same kind, text normalized for case and whitespace) of a non-rejected memory returns that memory and creates nothing.
 - An agent actor can create only `status = 'proposed'`, and only with at least one `memory_source`. It can never update, accept, reject, supersede or delete. A human actor does all of those.
 - State machine: `proposed → accepted | rejected`; `accepted → superseded` (only by accepting a memory that supersedes it); a human edit of a `proposed` memory sets `origin = 'human'` and keeps `proposed_by`. An accepted memory is edited only by a human, and the edit is logged (D28).
-- On acceptance, each `file` source records `blob_oid` (the blob at `HEAD`, or none when the file is not there). **Files changed since** is derived on read: the source's `blob_oid` differs from the file's current blob at `HEAD`. Never stored, never guessed (D126).
+- When a memory first becomes `accepted`, each `file` source records `blob_oid` (the blob at `HEAD`, or none when the file is not there). Accepting an accepted memory again is idempotent: it records nothing and keeps `decided_at` (D192). **Files changed since** is derived on read: the source's `blob_oid` differs from the file's current blob at `HEAD`. Never stored, never guessed (D126).
 
 ### Commands (D08 table style)
 
@@ -813,7 +813,7 @@ A **Memories** tab on the Threads page (a list on the left, the selected memory 
 
 ### Contexts (D191)
 
-Decided by the author on 2026-11-07 (the points in D191 (1) to (3) and (5)); the storage and the other details below are the agent's choices (D191 (4), Q44). User-facing behavior: `docs/guide/contexts.md` (`Planned`). The author rejected procedures (a structure of linked memories): memories stay flat.
+Decided by the author on 2026-11-07: D191 (1) to (5), including the storage and the other details below, which the agent drafted and the author confirmed (D191 (4), Q44 resolved). User-facing behavior: `docs/guide/contexts.md` (`Planned`). The author rejected procedures (a structure of linked memories): memories stay flat.
 
 A context is a named set of repositories at the user level. A memory attached to a context is stored once and found from every repository that sees the context. Two stores therefore hold memories: a repository's own `threads.db`, and `contexts.db`, and a search reads both.
 
