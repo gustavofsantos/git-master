@@ -159,8 +159,10 @@ IFS=$'\t' read -r _ branch repo < <(my-repos | gitmaster worktree branches --rep
 
 ## Workspaces
 
+> **Planned.** `--ephemeral` is still accepted, the `tsv` and `json` formats of `list` still show a kind, and new workspaces are still marked with `gitmaster.workspace.kind`.
+
 ```sh
-gitmaster workspace create <name> [--root <dir>] [--ephemeral] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
+gitmaster workspace create <name> [--root <dir>] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
 gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none]
 gitmaster workspace list [--format paths|names|tsv|json] [--root <dir>]
 gitmaster workspace path <name> [--root <dir>]
@@ -178,13 +180,13 @@ A workspace is a folder `<root>/<name>` that holds a Git repository. The root co
 | The Git key `gitmaster.workspace.root` | Its value |
 | None | `~/workspaces` |
 
-A leading `~` is the home directory, and a relative root is taken from the current directory. A workspace's repository has the Git key `gitmaster.workspace.kind` set to `durable` or `ephemeral` in its own `.git/config`; a folder without it is not a workspace.
+A leading `~` is the home directory, and a relative root is taken from the current directory. A workspace's repository has the Git key `gitmaster.workspace` set to `true` in its own `.git/config`; a folder without it is not a workspace.
 
 `--workspace <name|dir>` chooses the workspace a command works on. A value with a `/` is a folder; any other value is a name under the root. `--root` chooses the root a name is looked up under, as for `create`. Without it, the command works on the workspace that contains the current directory, from its root or from inside a member.
 
 ### Create a workspace
 
-`create <name>` creates the folder `<root>/<name>`, makes it a Git repository on a branch `main`, marks it as a workspace and prints its path. `--ephemeral` marks it ephemeral; it is durable otherwise. The folder must not exist. A name is a single folder name: it has no `/` and does not start with `.` or `-`.
+`create <name>` creates the folder `<root>/<name>`, makes it a Git repository on a branch `main`, marks it as a workspace and prints its path. The folder must not exist. A name is a single folder name: it has no `/` and does not start with `.` or `-`.
 
 `--branch <branch>` together with `--repos-from <file|->` adds every repository of the list as a member on `<branch>`, the way `add` does. Where a repository does not have the branch yet, it is created, so a workspace for a new change needs no branch made beforehand. The list is read like the one of `gitmaster worktree list`: a folder that is not a repository is skipped, with a note.
 
@@ -213,8 +215,8 @@ Every repository of the list is checked before anything is created. When one of 
 |---|---|
 | `paths` (the default) | The absolute path of the workspace. |
 | `names` | The name of the workspace. |
-| `tsv` | The name, the kind (`durable` or `ephemeral`) and the path, separated by tabs. |
-| `json` | One line with a JSON array that has an object per workspace: `name`, `kind`, `path` and `members`, the number of members. |
+| `tsv` | The name, the number of members and the path, separated by tabs. |
+| `json` | One line with a JSON array that has an object per workspace: `name`, `path` and `members`, the number of members. |
 
 `path <name>` prints the path of the workspace `<name>`. It prints nothing and exits `1` when there is none.
 
