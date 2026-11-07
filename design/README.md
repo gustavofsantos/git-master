@@ -14,7 +14,7 @@ The product is specified in [`docs/`](../docs/README.md): the official documenta
 | [`stacks-restack.md`](stacks-restack.md) | Stack model and the restack algorithm. |
 | [`code-navigation.md`](code-navigation.md) | Engineering design for Quick Open, the viewer and text search: engines, ranking, risks (symbols removed, D163). |
 | [`workflow-scripts.md`](workflow-scripts.md) | Engineering design for script workflows: sandbox, budgets, journal, approvals, tooling. |
-| [`threads.md`](threads.md) | Engineering design for threads: capture, redaction, storage, provenance, labels, sharing through Git refs and memories. |
+| [`threads.md`](threads.md) | Engineering design for threads: capture, redaction, storage, provenance, labels, memories and a deferred sharing design. |
 | [`reviewers.md`](reviewers.md) | Engineering design for reviewers, verdicts, gates and the plugin's skills and sub-agents. |
 | [`hooks-transitional.md`](hooks-transitional.md) | The `prepare-commit` hook that workflows replace. |
 | [`visual-identity.md`](visual-identity.md) | Palette, icon, files in `assets/icons/`. |

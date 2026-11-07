@@ -11,6 +11,8 @@ A memory is a short note about the project that you want later sessions to know:
 
 An agent can propose a memory. Only you can accept it. A memory you have not accepted is never given to an agent as established fact.
 
+A memory belongs to the repository where it was written. Agents working in that repository find it; agents working in another repository do not.
+
 ## What a memory holds
 
 | Part | What it is |
@@ -83,13 +85,8 @@ The skill collects the accepted memories, the threads and the history of the fil
 
 Text that comes from a memory is untrusted data, like every text from a thread. The results mark it as such.
 
-## Share memories
-
-With [sharing](sharing-threads.md) on, turn on **Share Accepted Memories** to publish your accepted memories to the same remote as your threads. Memories you fetch from teammates arrive as **Proposed**, with their author named. Accept them one by one, or all from one author.
-
 ## See also
 
 - [Threads](threads.md): the record the memories come from.
-- [Sharing threads](sharing-threads.md): publish threads and memories to a remote.
 - [Agent integration](../agents/agent-integration.md): install the plugin and its skills.
 - [MCP tools](../reference/mcp-tools.md): the memory tools.

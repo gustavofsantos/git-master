@@ -74,8 +74,6 @@ Open the **Git commands** panel from the status bar. It lists every Git command 
 
 With the [agent integration](../agents/agent-integration.md) installed, GitMaster records each agent session in the repository as a [thread](../guide/threads.md): your prompts, the agent's replies, its tool calls and results, and every file edit. Secrets are removed before anything is stored. An agent can read threads through MCP. It can label and link them, but it can never change the text of a thread or delete one.
 
-> **Planned.** Threads and memories can be shared through a Git remote you choose. Nothing is shared until you turn sharing on and publish; the text is checked against your redaction patterns first, and a thread you fetch from someone else is untrusted data. See [Sharing threads](../guide/sharing-threads.md).
-
 A thread is an observed record, not a tamper-proof one. An agent that runs as you can write to the same files as any other process.
 
 ### Operation log
@@ -97,7 +95,6 @@ The operation log records each operation that changes a repository, what was ask
 | Local review comments and their snapshots | `.git/gitmaster/review.db` in the Git common directory. The snapshots are Git refs under `refs/gitmaster/`, not files in the working tree. | Implemented |
 | Labels and thread links | `.git/gitmaster/threads.db`, with the threads. | Implemented |
 | Memories and reviewer verdicts | `.git/gitmaster/threads.db`, with the threads. | Planned |
-| Shared threads and memories | Git refs under `refs/gitmaster/` in the repository, only when sharing is on and you publish or fetch. | Planned |
 | Workflow scripts | The workflows directory in your user config: `~/.config/gitmaster/workflows/` on Linux, and `Library/Application Support/gitmaster/workflows/` in your home directory on macOS. Also any directory listed in `gitmaster.workflowPath`. Never a repository. | Implemented |
 | Workflow review record | `gitmaster.db` in the app data directory, keyed by the hash of each script version. | Implemented |
 | Workflow run history | `.git/gitmaster/state.db`, in the Git common directory of the repository. | Implemented |

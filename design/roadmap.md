@@ -695,29 +695,29 @@ Decided by the author on 2026-10-31 as proposed decisions D143 to D146, with Q34
 
 **Status (2026-10-31).** S0, P1, P2, P3 and P4 built. P4 gaps are listed in `design/threads.md` (P4: UI) and `design/screens.md`: no attach of a file, commit or label from the app, rewrite states missing in the thread's Commits panel, the narrowest width unchecked, and the viewer menu's reason text overflows. Q34 is open. The Labels page, the New Label dialog and the provenance panel were seen in a window on 2026-11-01.
 
-## Slice 6s: sharing threads (planned 2026-11-07; D187, Q37, Q38)
+## Slice 6s: sharing threads (deferred 2026-11-07; D187, Q37, Q38, Q43; **not in the build order**)
 
-Requested by the author on 2026-11-07, first priority. Opt-in, additive: with sharing off nothing changes. Engineering design in `design/threads.md` ("Sharing"); behavior in `docs/guide/sharing-threads.md` and `docs/reference/configuration.md` (`Planned`).
+The author decided the principles (D187: opt-in, additive, explicit, redaction check, untrusted imports) and then reopened the transport: a session of its own will explore SQLite-based alternatives to Git (Q43) before anything here is built. Until then there is no user documentation for sharing, and the sub-slices below are the Git-ref candidate, kept as a reference. Engineering design in `design/threads.md` ("Sharing").
 
 **Goal.** Publish chosen threads as one Git object each to a remote the user picks, and read the threads teammates published, with a redaction check before anything leaves the machine and ingest redaction on everything that comes in.
 
-**Sub-slices.** SH1 format and checks (pure), SH2 publish and unpublish, SH3 fetch and import, SH4 UI. SH5 (memories on the same channel) waits for M1.
+**Sub-slices (candidate, on hold).** SH1 format and checks (pure), SH2 publish and unpublish, SH3 fetch and import, SH4 UI, SH5 memories on the same channel. SH1 (the format, the hash and the redaction check) is transport-neutral and is the likeliest part to survive Q43.
 
 **Acceptance.** A test against a real bare remote proves: publish, republish (still one object), fetch into a second repository, a tampered blob shown as **Modified**, a refused extra tree entry, unpublish, and that a run with sharing off creates no ref and makes no network call. Measure the size and time of Q38 on the real `threads.db` before SH2 is called done.
 
 **Known gaps to expect.** No automatic publish (Q37); no sync of notes, stars or labels; nothing seen in a window until SH4.
 
-## Slice 6m: memories (planned 2026-11-07; D190, Q41, Q42)
+## Slice 6m: memories (decided 2026-11-07, next in the order; D190, Q41, Q42)
 
-Requested by the author on 2026-11-07, first priority with sharing. Engineering design in `design/threads.md` ("Memories") and `design/reviewers.md` ("Skills and sub-agents"); behavior in `docs/guide/memories.md` (`Planned`). Depends on slice 6t and 6g (threads, labels, provenance).
+Requested by the author on 2026-11-07, first priority. Engineering design in `design/threads.md` ("Memories") and `design/reviewers.md` ("Skills and sub-agents"); behavior in `docs/guide/memories.md` (`Planned`). Depends on slice 6t and 6g (threads, labels, provenance).
 
 **Goal.** Decisions, rules and lessons that agents propose and the human accepts, searchable by later sessions over MCP, with sources and a derived staleness signal.
 
-**Sub-slices.** M1 model and store (pure, no UI), M2 MCP tools (`memories_search`, `memory_get`, `memory_propose`), M3 Memories tab, M4 skills (`propose-memories`, `prepare`; first verify the plugin format, Q42), M5 sharing of memories (with SH5).
+**Sub-slices.** M1 model and store (pure, no UI), M2 MCP tools (`memories_search`, `memory_get`, `memory_propose`), M3 Memories tab, M4 skills (`propose-memories`, `prepare`; first verify the plugin format, Q42). M5, sharing of memories, is deferred with slice 6s. The schema carries `scope` from M1 (D190 (7)); the wider scope for work across many repositories (Q41) is decided before M2 ships the MCP tools, because the search arguments depend on it.
 
 **Acceptance.** An agent actor can only propose, with a source; only a human accepts; an accepted memory's file source shows **Files changed since** after the file changes, in a test with real Git. M4 is checked against a real Claude Code session, and what was and was not seen is stated.
 
-## Slice 8r: reviewers, verdicts and gates (planned 2026-11-07; D188, D189, Q37, Q39, Q40)
+## Slice 8r: reviewers, verdicts and gates (decided 2026-11-07, after slice 6m; D188, D189, Q37, Q39, Q40)
 
 Requested by the author on 2026-11-07. Engineering design in `design/reviewers.md`; behavior in `docs/agents/reviewers.md` (`Planned`). Depends on slice 8 (local review) and slice 7 (MCP record tools); the skills depend on M4's verification of the plugin format.
 

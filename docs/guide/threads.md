@@ -308,7 +308,6 @@ A thread can carry a short summary of what you asked for and what came out of it
 ## See also
 
 - [Agent integration](../agents/agent-integration.md): install the capture hooks.
-- [Sharing threads](sharing-threads.md): publish threads to a remote and read your teammates'.
 - [Memories](memories.md): keep decisions and rules for later sessions.
 - [Reviewers and gates](../agents/reviewers.md): have an agent review a branch and record what it found.
 - [Trust and safety](../concepts/trust-and-safety.md): what GitMaster records and where.

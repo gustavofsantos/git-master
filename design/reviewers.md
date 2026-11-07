@@ -2,7 +2,7 @@
 
 The user-facing behavior is specified in `docs/agents/reviewers.md`, `docs/guide/memories.md` and `docs/agents/agent-integration.md` ("Skills and sub-agents"), all marked `Planned`; this file keeps the engineering rationale and the build plan for D188 and D189.
 
-Last updated: 2026-11-07. Status: planned, nothing built. Open questions: Q37 (automation), Q39 (shape of reviewer definitions), Q40 (terminal pushes), Q42 (plugin format).
+Last updated: 2026-11-07. Status: decided (D188, D189), nothing built. Open questions: Q37 (automation), Q39 (shape of reviewer definitions), Q40 (terminal pushes), Q42 (plugin format).
 
 ## The rule that shapes everything (D188)
 

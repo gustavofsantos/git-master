@@ -666,7 +666,7 @@ Marked **proposed** in `design/decisions.md`; the slice named in brackets waits 
 
 ## Sharing (D187)
 
-Planned 2026-11-07. User-facing behavior: `docs/guide/sharing-threads.md`, marked `Planned`. Open questions: Q37 (automation), Q38 (size and cost). The point of the design is that **with sharing off nothing changes**: no ref, hook, file or network call, and no code path outside the sharing module runs.
+**Deferred 2026-11-07; not in the build order.** The principles are decided (D187); the transport is reopened by the author, who wants a session of its own to explore SQLite-based alternatives to Git (Q43). Everything below that names a ref, a tree or a Git command is therefore **one candidate transport**. The parts that hold for any transport are the format of the shared thread (`thread.json`, `entries.jsonl`, `edits.jsonl`, `links.json`, `content_hash`), the redaction check, the import rules (`source = imported`, ingest redaction, hash verification, untrusted text) and the threat model. There is no user documentation for sharing until the transport is chosen. Open questions: Q37 (automation), Q38 (size and cost), Q43 (transport). The point of the design is that **with sharing off nothing changes**: no ref, hook, file or network call, and no code path outside the sharing module runs.
 
 ### Settings
 
@@ -747,11 +747,11 @@ Pure: serializer determinism (same thread, same bytes, same hash), hash verifica
 - **SH2, publish and unpublish:** the commands, `thread_share`, the CLI.
 - **SH3, fetch and import:** ingest of imported threads, schema change, filters, `untrusted` marking.
 - **SH4, UI:** the Sharing settings, the confirmation dialog, **Publish Threads…**, **Fetch Shared Threads**, author filter, **Modified** badge.
-- **SH5, memories on the same channel:** with M5 below.
+- **SH5, memories on the same channel:** with M5 below. Deferred with the rest of sharing.
 
 ## Memories (D190)
 
-Planned 2026-11-07. User-facing behavior: `docs/guide/memories.md` (marked `Planned`). Open question: Q41 (global memories). The agent-side work (the skills) is in `design/reviewers.md`, "Skills and sub-agents".
+Decided 2026-11-07 (D190), not built. User-facing behavior: `docs/guide/memories.md` (marked `Planned`). Open question: Q41 (scope beyond a repository: workspace, context or global). The agent-side work (the skills) is in `design/reviewers.md`, "Skills and sub-agents".
 
 ### Schema
 
@@ -761,6 +761,8 @@ One migration after sharing's (versions are assigned when the slice starts; D190
 memory(
   id          INTEGER PRIMARY KEY,
   uid         TEXT UNIQUE NOT NULL,       -- first 16 hex of sha256(random 16 bytes)
+  scope       TEXT NOT NULL DEFAULT 'repository',  -- v1: only 'repository'; Q41 may add 'workspace', 'context' or 'global'
+  scope_ref   TEXT,                       -- NULL for 'repository'; the workspace path or the context id otherwise
   kind        TEXT NOT NULL CHECK (kind IN ('decision','rule','lesson','fact')),
   text        TEXT NOT NULL,              -- redacted at ingest, at most 1000 characters
   status      TEXT NOT NULL CHECK (status IN ('proposed','accepted','rejected','superseded')),
@@ -804,15 +806,15 @@ Rules the engine enforces, not the callers:
 | `RejectMemory { id }` | apply | human | |
 | `DeleteMemory { id }` | apply | human | |
 
-Search reuses the query builder of D128. MCP tools: `memories_search`, `memory_get` (read) and `memory_propose` (record); see `docs/reference/mcp-tools.md`. Memories are untrusted text in results, like every text from a thread.
+In v1 every memory has `scope = 'repository'` and a search reads the current repository only. When Q41 adds a wider scope, each result names its scope and where it comes from. Search reuses the query builder of D128. MCP tools: `memories_search`, `memory_get` (read) and `memory_propose` (record); see `docs/reference/mcp-tools.md`. Memories are untrusted text in results, like every text from a thread.
 
 ### UI
 
 A **Memories** tab on the Threads page (a list on the left, the selected memory on the right, as for threads): a count of proposals on the tab, filters, **Accept**, **Edit**, **Reject**, **Supersedes…**, **New Memory**, bulk accept of selected proposals or of an author's. A memory's sources open the thread at the entry range, the commit or the file in the Code page. **Agent-written** shows on every memory with an agent origin.
 
-### Sharing (with D187)
+### Sharing (deferred with D187)
 
-Accepted memories are published at `refs/gitmaster/memories/<author>/<uid>` under the rules of D187: one orphan commit per memory, a tree of `memory.json` (kind, text, sources with entry ranges and file paths, `supersedes` as uids, author) and `content_hash`; the same redaction check; the same fetch limits. A fetched memory is ingested as `proposed` with `origin = 'imported:<author>'` (the importing human approves what enters their own agents' context, D190 (8)), and a memory whose `uid` exists is skipped. Only memories with `status = 'accepted'` and `origin` not imported are published.
+Not in the build order; it waits for the transport of Q43. The text below is the Git-ref candidate and shows the rules that must hold on any transport: only accepted, non-imported memories leave; fetched memories arrive as `proposed`. Accepted memories would be published at `refs/gitmaster/memories/<author>/<uid>` under the rules of D187: one orphan commit per memory, a tree of `memory.json` (kind, text, sources with entry ranges and file paths, `supersedes` as uids, author) and `content_hash`; the same redaction check; the same fetch limits. A fetched memory is ingested as `proposed` with `origin = 'imported:<author>'` (the importing human approves what enters their own agents' context, D190 (8)), and a memory whose `uid` exists is skipped. Only memories with `status = 'accepted'` and `origin` not imported are published.
 
 ### Tests
 
@@ -824,4 +826,4 @@ Pure: the state machine (every illegal transition is refused, an agent actor can
 - **M2, MCP tools:** `memories_search`, `memory_get`, `memory_propose`; with slice 7's tool plumbing.
 - **M3, Memories tab.**
 - **M4, skills:** `/gitmaster:propose-memories` and `/gitmaster:prepare` (design/reviewers.md).
-- **M5, sharing of memories** (with SH5).
+- **M5, sharing of memories** (with SH5): deferred with sharing, not in the build order.
