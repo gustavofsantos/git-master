@@ -2,7 +2,7 @@
 
 The user-facing behavior is specified in `docs/guide/threads.md` and `docs/agents/agent-integration.md`; this file keeps the engineering rationale and the build plan.
 
-Last updated: 2026-10-30. Status: built except T0, T8 and T9 (see `design/roadmap.md`, slice 6t, for status and gaps; D130 for the choices made while building). The text below is the design as planned; where the build differs, D130 and the roadmap win. The author decided the direction on 2026-10-29 (D119 to D121); the details below are **proposed** (D122 to D128) and each one is listed in "To confirm" before the slice that depends on it starts.
+Last updated: 2026-11-07 (sharing, D187, and memories, D190, planned at the end of the file). Status: built except T0, T8 and T9 (see `design/roadmap.md`, slice 6t, for status and gaps; D130 for the choices made while building). The text below is the design as planned; where the build differs, D130 and the roadmap win. The author decided the direction on 2026-10-29 (D119 to D121); the details below are **proposed** (D122 to D128) and each one is listed in "To confirm" before the slice that depends on it starts.
 
 ## Why
 
@@ -663,3 +663,165 @@ Marked **proposed** in `design/decisions.md`; the slice named in brackets waits 
 4. Thinking blocks are not stored (Q31) [T3a].
 5. A separate small hook binary if the full binary's cold start misses the budget (Q25) [T3a].
 6. `gitmaster thread hook` and `gitmaster harness …` as one-shot subcommands are consistent with D02 (D124) [T3a].
+
+## Sharing (D187)
+
+Planned 2026-11-07. User-facing behavior: `docs/guide/sharing-threads.md`, marked `Planned`. Open questions: Q37 (automation), Q38 (size and cost). The point of the design is that **with sharing off nothing changes**: no ref, hook, file or network call, and no code path outside the sharing module runs.
+
+### Settings
+
+Git configuration keys (D173): `gitmaster.sharing.enabled` (default `false`), `gitmaster.sharing.remote` (no default) and `gitmaster.sharing.memories` (default `false`). They are read through `git config`, so `~/.gitconfig` and `.git/config` follow Git's scope rules, and never from a file in the working tree (D73). Every sharing command checks `enabled` and `remote` first and refuses with the reason, before it reads the database.
+
+### Layout in Git
+
+```text
+refs/gitmaster/threads/<author>/<uid>        local and remote: what the user published
+refs/gitmaster/shared/<remote>/<author>/<uid>  local only: what a fetch brought in
+```
+
+- `<uid>` is the thread's `uid` (16 hex, D122). `<author>` is the first 12 hex of the SHA-256 of the lowercased `user.email`, so two people never write one ref, and a thread resumed on two machines by the same person overwrites itself instead of forking. Both are validated as lowercase hex of the exact length when read from a remote; any other ref name is ignored.
+- A ref points at one **orphan commit** (no parent, no history). A publish makes a new orphan commit and moves the ref with a lease on its old value, so a thread is one object, not a chain, and deleting the ref is the whole of unpublishing. The commit is made with `git commit-tree`, and signed with `-S` when `commit.gpgsign` is true or `user.signingkey` is set, so the user's own signing setup applies. The message is `GitMaster thread <uid>`; the author and committer are the user's.
+- The tree has these five blobs and nothing else. A fetched tree with another entry name, a subtree, a symlink or an executable mode is refused.
+
+| Blob | Content |
+|---|---|
+| `thread.json` | `format` (1), `gitmaster` (version), `uid`, `harness`, `harness_version`, `model`, `branch`, `head_start`, `head_end`, `title`, `started_at`, `last_event_at`, `ended_at`, `entry_count`, `edit_count`, `redactions` (counts per pattern, never values), `author` (`name`, `email`), `truncated_entries` |
+| `entries.jsonl` | One JSON object per entry, in `seq` order: `seq`, `turn`, `kind`, `source_id`, `parent_id`, `tool`, `text`, `args_json`, `is_error`, `truncated`, `orig_bytes`, `at` |
+| `edits.jsonl` | One object per edit: `entry_seq`, `path`, `old_path`, `change`, `patch`, `added`, `removed`, `pre_oid`, `post_oid`, `from_input`, `at` |
+| `links.json` | `commits`: `{ id, subject, origin }` with origin `observed` or `human`; `branch`; `files` (the rest is derived on read, D143) |
+| `content_hash` | `sha256:<hex>` of the four blobs above, concatenated in that order with a `0x00` byte between them. Each blob is produced by a serializer with a fixed field order and a trailing newline, so the same thread always gives the same bytes. |
+
+Not exported: `note`, `starred`, labels, `thread_rel`, the spool, the transcript path, the worktree path and the cursor.
+
+### Engine commands (D08 table style)
+
+| Command | Level | Actor | Notes |
+|---|---|---|---|
+| `ReadSharingStatus` | read | any | Whether sharing is on, the remote, and per thread: not published, published and current, published and changed since. |
+| `PublishThreads { threads \| all }` | apply | human | Preflight, build, push. Writes refs and the `thread_share` row. Logged (D28). **No MCP tool and no agent actor**: the apply tools of D137 do not include it. |
+| `FetchSharedThreads` | apply | human | Fetches into `refs/gitmaster/shared/…`, verifies and ingests. Logged. |
+| `UnpublishThreads { threads }` | apply | human | Deletes the ref locally and with a push of the empty ref. Logged. |
+
+The threads are listed by the engine; the UI and `gitmaster thread publish|fetch|unpublish` are two front ends of the same commands (D08).
+
+### Publish
+
+1. **Preflight** (pure, before any write): sharing is on; the remote exists; the user's `user.email` is set; every selected thread is closed or the user confirmed an open one.
+2. **Redaction check** (D187 (5)): serialize the blobs, run the **current** redaction patterns and sensitive paths over them with the same engine used at ingest, in check mode that returns matches and rewrites nothing. A match stops that thread, names it and the pattern, and publishes the others. This is the only place sharing touches redaction. It is a check because D121 forbids a second redaction at export; the stored text is never altered by publishing.
+3. **Size check** (Q38): a thread over the limit (starting value 20 MiB of blobs) is refused with its size. Measure first.
+4. **Build**: `git hash-object -w` for the blobs, `git mktree`, `git commit-tree` (signed when configured). Not touching the index or the working tree.
+5. **Push**: `git push --porcelain <remote> <ref>:<ref>` for the batch, each with `--force-with-lease=<ref>:<old>` where `<old>` is the commit recorded in `thread_share` (or the empty value for a first publish). A rejected lease means someone else wrote that ref (it should not happen, the author is in the name); the thread is reported, not forced.
+6. **Record**: `thread_share(thread_id, remote, ref, commit_id, content_hash, published_at)`. A thread is **changed since** when its current hash differs.
+
+Everything runs as `git` subprocesses with a timeout and cancellation (the reads-and-cancel rule of `AGENTS.md`); a cancelled publish leaves the local refs and writes no `thread_share` row for the threads not pushed.
+
+### Fetch and import
+
+1. `git fetch <remote> '+refs/gitmaster/threads/*:refs/gitmaster/shared/<remote>/*'`. Only this refspec; never `--tags`, never a branch.
+2. For each fetched ref with a valid name: read the five blobs with a size limit, parse with a streaming parser with depth and length limits, check `format`, recompute `content_hash`.
+3. **Ingest** through the capture pipeline's redact → cap → upsert (not a copy): the local patterns apply again, caps apply, and the counts are added to `thread_redaction`. A thread whose `uid` already exists locally with `source = 'local'` is skipped. An imported thread whose hash does not verify is stored with `modified = 1` and shown as **Modified**.
+4. Imported threads have `source = 'imported'`, `author_name`, `author_email` and `shared_ref`. They are not captured into, not exportable by Publish (an imported thread is never republished: the author published it), and `UpdateThread` may change only `note`, `starred` and labels on them; entries cannot be deleted one by one, only the thread.
+
+Schema change (one migration, tested from the previous version): `thread` gains `source TEXT NOT NULL DEFAULT 'local'`, `author_name`, `author_email`, `shared_ref`, `modified INTEGER NOT NULL DEFAULT 0`; new table `thread_share`. `ListThreads` and `SearchThreads` gain an `author` and a `source` filter; `thread_get` returns `source`, `author` and `modified`; `threads_search` and `thread_read` mark imported text `untrusted: true` (it always is) and `origin: "imported:<author>"`.
+
+### Threat model
+
+| Threat | Mitigation |
+|---|---|
+| A thread leaves the machine with a secret that a pattern added later would have caught | Redaction check at publish (fail closed), confirmation naming the remote |
+| The remote is public by accident | No default remote; the confirmation says who can read it; the docs recommend a separate repository |
+| A teammate's thread carries instructions aimed at the reader's agent | Imported text is untrusted data in the UI and over MCP (D144 rules); ingest redaction applies again; the apply tools of D137 still ask |
+| A hostile remote sends oversize, deeply nested or odd-shaped data | Name, mode, size and parse limits on fetch; refs outside the exact name shape ignored |
+| A hostile ref name or tree path escapes the layout | Names are validated as hex of an exact length; the tree has five fixed names |
+| Tampering in transit or on the host | `content_hash` and, when used, the commit signature (the signature proves who, the hash proves what); not a defense against a host that rewrites both |
+| "Delete" is believed to erase | The docs and the unpublish confirmation say it is not erasure |
+| Sharing changes what `git push` does | It does not: no hook, no push of anything but the thread refs, only on the user's command |
+
+### Tests
+
+Pure: serializer determinism (same thread, same bytes, same hash), hash verification, ref-name validation, redaction check (a pattern added after capture is caught; the stored text is unchanged), schema limits. Real Git: a temporary repository and a temporary **bare remote** (`crates/gm-core/tests/threads_sharing_real_git.rs`): publish, re-publish (still one object), fetch into a second repository, a tampered blob marked **Modified**, a refused extra tree entry, unpublish, a signed commit when a test key is configured, and a run with sharing off that proves no ref and no network call is made. A property test that a fetched ref name outside the shape is never read.
+
+### Sub-slices
+
+- **SH1, format and checks (pure):** serializer, hash, ref names, redaction check, the `gitmaster.sharing.*` keys.
+- **SH2, publish and unpublish:** the commands, `thread_share`, the CLI.
+- **SH3, fetch and import:** ingest of imported threads, schema change, filters, `untrusted` marking.
+- **SH4, UI:** the Sharing settings, the confirmation dialog, **Publish Threads…**, **Fetch Shared Threads**, author filter, **Modified** badge.
+- **SH5, memories on the same channel:** with M5 below.
+
+## Memories (D190)
+
+Planned 2026-11-07. User-facing behavior: `docs/guide/memories.md` (marked `Planned`). Open question: Q41 (global memories). The agent-side work (the skills) is in `design/reviewers.md`, "Skills and sub-agents".
+
+### Schema
+
+One migration after sharing's (versions are assigned when the slice starts; D190 says v6 as of writing).
+
+```text
+memory(
+  id          INTEGER PRIMARY KEY,
+  uid         TEXT UNIQUE NOT NULL,       -- first 16 hex of sha256(random 16 bytes)
+  kind        TEXT NOT NULL CHECK (kind IN ('decision','rule','lesson','fact')),
+  text        TEXT NOT NULL,              -- redacted at ingest, at most 1000 characters
+  status      TEXT NOT NULL CHECK (status IN ('proposed','accepted','rejected','superseded')),
+  origin      TEXT NOT NULL,              -- 'human' | 'agent:<client>' | 'imported:<author>'
+  proposed_by TEXT,                       -- origin at creation; 'origin' becomes 'human' when the human edits the text
+  model       TEXT,                       -- when the harness reports it
+  created_at  INTEGER NOT NULL,
+  decided_at  INTEGER,                    -- accepted, rejected or superseded
+  decided_by  TEXT)                       -- 'human'
+memory_source(
+  memory_id INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+  kind      TEXT NOT NULL CHECK (kind IN ('thread','commit','file')),
+  ref       TEXT NOT NULL,                -- thread uid | commit id | repo-relative path
+  entry_from INTEGER, entry_to INTEGER,   -- kind 'thread': seq range
+  blob_oid  TEXT,                         -- kind 'file': the blob at acceptance, for 'files changed since'
+  PRIMARY KEY(memory_id, kind, ref))
+memory_rel(
+  from_memory INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+  to_memory   INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind = 'supersedes'),
+  origin TEXT NOT NULL, at INTEGER NOT NULL,
+  PRIMARY KEY(from_memory, to_memory, kind))
+memory_fts  -- FTS5 over memory(text), built the way entry_fts is (D128)
+```
+
+Rules the engine enforces, not the callers:
+
+- Text is redacted by the capture pipeline's redactor (D121) and capped at 1,000 characters before it is stored. An exact duplicate (same kind, text normalized for case and whitespace) of a non-rejected memory returns that memory and creates nothing.
+- An agent actor can create only `status = 'proposed'`, and only with at least one `memory_source`. It can never update, accept, reject, supersede or delete. A human actor does all of those.
+- State machine: `proposed → accepted | rejected`; `accepted → superseded` (only by accepting a memory that supersedes it); a human edit of a `proposed` memory sets `origin = 'human'` and keeps `proposed_by`. An accepted memory is edited only by a human, and the edit is logged (D28).
+- On acceptance, each `file` source records `blob_oid` (the blob at `HEAD`, or none when the file is not there). **Files changed since** is derived on read: the source's `blob_oid` differs from the file's current blob at `HEAD`. Never stored, never guessed (D126).
+
+### Commands (D08 table style)
+
+| Command | Level | Actor | Notes |
+|---|---|---|---|
+| `ListMemories { query, kind, status, path, author, limit, cursor }` | read | any | Agents get `accepted` by default; other statuses are returned marked `reviewed: false`. |
+| `ReadMemory { id }` | read | any | The memory, its sources and relations, and the derived `files_changed_since`. |
+| `ProposeMemory { kind, text, sources }` | record | agent or human | An agent's call creates `proposed`; a human's creates `accepted`. |
+| `AcceptMemory { id, text?, supersedes? }` | apply | human | Optionally edits the text, and supersedes one or more memories in the same transaction. |
+| `RejectMemory { id }` | apply | human | |
+| `DeleteMemory { id }` | apply | human | |
+
+Search reuses the query builder of D128. MCP tools: `memories_search`, `memory_get` (read) and `memory_propose` (record); see `docs/reference/mcp-tools.md`. Memories are untrusted text in results, like every text from a thread.
+
+### UI
+
+A **Memories** tab on the Threads page (a list on the left, the selected memory on the right, as for threads): a count of proposals on the tab, filters, **Accept**, **Edit**, **Reject**, **Supersedes…**, **New Memory**, bulk accept of selected proposals or of an author's. A memory's sources open the thread at the entry range, the commit or the file in the Code page. **Agent-written** shows on every memory with an agent origin.
+
+### Sharing (with D187)
+
+Accepted memories are published at `refs/gitmaster/memories/<author>/<uid>` under the rules of D187: one orphan commit per memory, a tree of `memory.json` (kind, text, sources with entry ranges and file paths, `supersedes` as uids, author) and `content_hash`; the same redaction check; the same fetch limits. A fetched memory is ingested as `proposed` with `origin = 'imported:<author>'` (the importing human approves what enters their own agents' context, D190 (8)), and a memory whose `uid` exists is skipped. Only memories with `status = 'accepted'` and `origin` not imported are published.
+
+### Tests
+
+Pure: the state machine (every illegal transition is refused, an agent actor cannot do anything but propose), redaction and cap, duplicate detection, derivation of **files changed since** against a temporary repository, FTS search. Real Git: file blob changes after acceptance, a file renamed after acceptance (shown as changed, no guess), and the sharing round trip with a bare remote.
+
+### Sub-slices
+
+- **M1, model and store (pure):** schema, state machine, commands, search; no UI.
+- **M2, MCP tools:** `memories_search`, `memory_get`, `memory_propose`; with slice 7's tool plumbing.
+- **M3, Memories tab.**
+- **M4, skills:** `/gitmaster:propose-memories` and `/gitmaster:prepare` (design/reviewers.md).
+- **M5, sharing of memories** (with SH5).

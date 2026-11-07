@@ -35,6 +35,23 @@ GitMaster never changes the agent's settings files by itself: the agent's own `c
 
 The hooks and the MCP settings run `gitmaster` from your `PATH`, so the `gitmaster` command must be on your `PATH` (see [Installation](../getting-started/installation.md)). The plugin never writes a file into a repository or into the app data directory.
 
+## Skills and sub-agents
+
+> **Planned.** The skills and sub-agents below are not part of the plugin yet.
+
+The plugin adds skills you start yourself. Each one hands its work to a sub-agent that uses the cheapest model that is good enough and only the tools the job needs: it reads through GitMaster and records one kind of result. A sub-agent has no shell, cannot edit files and cannot reach the network. The tokens it uses are yours, in your own agent session, and the skill says what it will read before it starts.
+
+| Skill | What it does |
+|---|---|
+| `/gitmaster:summarize-thread` | Reads a thread and records a short summary on it. |
+| `/gitmaster:propose-memories` | Reads threads and proposes [memories](../guide/memories.md) with their sources. You accept them. |
+| `/gitmaster:prepare` | For a task you describe, gathers the accepted memories, the related threads and the history of the files, and returns a brief. |
+| `/gitmaster:review` | Runs [reviewers](reviewers.md) on a branch and records their verdicts and findings. |
+| `/gitmaster:tune-reviewers` | Proposes better instructions for your reviewers from the project's docs and history. |
+| `/gitmaster:dispatch` | Writes a Markdown update of the agent work of a period, from your threads. |
+
+Nothing runs by itself. The hooks only capture. They do not start a model and they do not add text to your prompts. Text an agent writes shows in the app as **Agent-written**.
+
 ## Install the plugin
 
 You need the `claude` command and the `gitmaster` command on your `PATH`. Run these two commands in a terminal:

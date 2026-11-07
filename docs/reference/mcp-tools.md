@@ -27,6 +27,10 @@ Text that comes from the repository, from a comment or from a thread is untruste
 | `workspace_status` | — | `workspace` (false when the repository has no checked-out member) and `members`: each with `member` (its folder), `repo` (the path of the member's main checkout), `branch` (null when detached), `detached`, `checked_out`, `head`, `recorded` (the commit the workspace records), `new_commits` (at most 200, with `new_commits_more` when there are more) and `behind` (counts), `modified` and `untracked` | Implemented |
 | `labels_list` | `query` (optional, part of a name, in any case); `limit` (default `20`, `1` to `50`) | `labels`: each with `id`, `name`, `description`, `color`, `origin`, `created_at` and `attachment_count`; and `has_more` | Implemented |
 | `label_get` | `label`: the exact name or the integer id | `label` and `attachments`: each with `kind`, `ref`, `origin`, `at`, and for a commit `subject`, `author`, `committed_at` and `resolved` | Implemented |
+| `memories_search` | `query` (optional, plain words); `kind` (`decision`, `rule`, `lesson` or `fact`); `path`; `status` (default `accepted`; `proposed` and `rejected` come marked as not reviewed); `limit` (default `10`, at most `50`); `cursor` | `memories`: each with `id`, `kind`, `text`, `status`, `origin`, `sources`, `files_changed_since` and `superseded_by`; and `next_cursor`. Text is marked `untrusted` | Planned |
+| `memory_get` | `id` | `memory` with its `sources` (thread, entry range, commits and files) and the memories it supersedes or is superseded by | Planned |
+| `verdicts_list` | `branch` (default: the checked-out branch); `reviewer` (optional); `limit` (default `5`, at most `20`) | `verdicts`: each with `reviewer`, `signal`, `value`, `stale`, `head`, `rationale`, `findings`, `origin`, `model` and `thread` | Planned |
+| `branch_agent_config` | `branch` | `commits_not_yours`, and `items`: the hooks, MCP servers, skills, commands and plugins the branch carries, each with its `path` and kind. A reviewer skill calls it before it reviews a branch that is not yours | Planned |
 | `stack_tree` | — | Stack tree, with children and the number of branches out of date | Planned |
 | `conflict_list` | — | Conflicts in progress | Planned |
 | `conflict_get` | `hunk` | Base, left side and right side of the hunk | Planned |
@@ -70,8 +74,18 @@ A record tool writes to GitMaster's own store and nowhere else. It does not chan
 | `label_create` | `name` (1 to 64 characters); `description` (optional, at most 500 characters); `color` (optional, `#rrggbb`) | `label` as stored, `created` (false when the name already existed, in which case that label is returned unchanged) and `origin` | Implemented |
 | `label_attach` | `label` (its name); `kind` (`thread`, `file`, `commit` or `label`); `ref` | `label`, `attachment` as stored with its `origin` and time, and `origin` | Implemented |
 | `thread_link` | `from`, `to` (thread ids); `kind` (`continues`, `relates` or `supersedes`) | `from`, `to`, `kind`, `origin` and `at` | Implemented |
+| `thread_summary_set` | `thread`; `summary` (at most 2,000 characters); `derived_from` (the entry range read) | `thread` and `summary` as stored, with `origin`. Replaces the earlier summary of the same origin | Planned |
+| `memory_propose` | `kind`; `text` (1 to 1,000 characters); `sources` (at least one: a thread with an entry range, a commit or a file) | `memory`, with `status: "proposed"` and its `origin`. An agent cannot create an accepted memory, and cannot change or remove a memory | Planned |
+| `verdict_record` | `reviewer`; `branch`; `head` (the commit judged); `value`; `rationale`; `findings` (each with `severity`, `path`, `start_line`, `end_line` and `body`) | `verdict`, and the review comments created for the findings, with `origin` and the thread of the run | Planned |
 
 `review_comment_resolve` is refused for a comment that is already `resolved`. Marking a `handled` comment again replaces its summary and its "after" snapshot. `change` is read from the two snapshots, not from the summary. When it shows `changed: false`, GitMaster saw no edit in the comment's region.
+
+The memory, summary and verdict tools follow these rules:
+
+- They write only GitMaster's own store. They record the agent as `agent:<client>` and the model when the client reports it.
+- A memory an agent proposes is `proposed` until you accept it. See [Memories](../guide/memories.md).
+- A finding that `verdict_record` creates is a review comment that only you can resolve or dismiss. See [Reviewers and gates](../agents/reviewers.md).
+- Text written by an agent shows in the app as **Agent-written** and is never used as evidence for provenance.
 
 The label and link tools follow these rules:
 

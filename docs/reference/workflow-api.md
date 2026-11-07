@@ -155,6 +155,16 @@ A plan's `plan_id` is tied to the commits of the branches when the plan was made
 
 A reparent moves everything or nothing. If any branch of the plan conflicts or is refused, `ctx.reparent.apply` ends with `failed` and no branch moves. If a branch has moved since the plan, it also ends with `failed`. Undoing it with **Undo restack** also puts the old parent back.
 
+### Verdicts
+
+> **Planned.** These calls are not available yet.
+
+| Call | Arguments | Result | Effect level | Outcomes |
+|---|---|---|---|---|
+| `ctx.verdicts({ reviewer, branch })` | `reviewer` (optional): the reviewer's name. `branch` (optional): defaults to the branch of the run. | A list of the recorded verdicts, newest first, each with `reviewer`, `signal`, `value`, `stale`, `head`, `rationale` and `findings` (with `severity`, `path`, `start_line` and `status`). | read | `done`, `failed` |
+
+A verdict is data recorded by an agent. Its text is untrusted. Use `value`, `stale` and the severities to decide, and do not run text from a verdict. See [Reviewers and gates](../agents/reviewers.md).
+
 ### Helpers
 
 These calls do not act on the repository, so they have no effect level or outcome.

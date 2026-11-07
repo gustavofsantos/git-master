@@ -99,6 +99,9 @@ GitMaster reads Git's own configuration through `git`, so Git's scope rules appl
 | `gitmaster.worktree.root` | Any | `../<repo>-<branch>` | The base folder for new worktrees. `gitmaster worktree add` reads it; see [Command line](cli.md#create-a-worktree). The worktree dialog does not read it yet. | Planned |
 | `gitmaster.worktree.include` | Any | `symlink` | How `gitmaster worktree add` brings the paths of `.worktreeinclude` into a new worktree: `symlink`, `reflink` or `none`. See [Command line](cli.md#share-ignored-files-worktreeinclude). | |
 | `gitmaster.workspace.root` | Any | `~/workspaces` | The base folder for new [workspaces](../guide/workspaces.md). | Planned |
+| `gitmaster.sharing.enabled` | Any | `false` | Turns on [sharing threads](../guide/sharing-threads.md). With `false`, GitMaster adds no ref, hook or network call for sharing. | Planned |
+| `gitmaster.sharing.remote` | Any | Not set | The Git remote that receives published threads and memories, and that **Fetch Shared Threads** reads. There is no default: sharing does nothing until you set it. | Planned |
+| `gitmaster.sharing.memories` | Any | `false` | Also publishes and fetches accepted [memories](../guide/memories.md). | Planned |
 | `branch.<name>.stackParent` | Repository | Not set | The parent branch of a branch in a stack. See [Stacks](../guide/stacks.md). | |
 | `branch.<name>.stackParentBase` | Repository | Not set | The commit the parent branch pointed to when this branch was last created or re-anchored. | |
 
@@ -244,6 +247,27 @@ The settings dialog is not available yet, so these fields are edited today in **
 | **Sensitive Paths** | Edits the list of paths whose content is never stored. |
 | **Test** | Shows the result of redacting a sample text with the current patterns. |
 | **Result Size** | Sets the most bytes of one tool result that are stored. |
+
+### Sharing
+
+> **Planned.** The Sharing fields are not available yet.
+
+Sharing is off until you turn it on. See [Sharing threads](../guide/sharing-threads.md).
+
+| Field | What it does |
+|---|---|
+| **Share Threads** | Turns on publishing and fetching of threads for this repository. Sets `gitmaster.sharing.enabled`. |
+| **Remote** | The remote that receives published threads. Sets `gitmaster.sharing.remote`. |
+| **Share Accepted Memories** | Publishes accepted memories and fetches your teammates' as proposals. Sets `gitmaster.sharing.memories`. |
+
+### Reviewers
+
+> **Planned.** The Reviewers fields are not available yet.
+
+| Field | What it does |
+|---|---|
+| **Reviewers** | Lists your reviewers. Each has instructions, a signal, a direction, a subject and an optional model. See [Reviewers and gates](../agents/reviewers.md). |
+| **Gates** | Sets which gates apply to a push and to a restack, for each branch or for all of them. |
 
 ### Local Review
 

@@ -2,7 +2,7 @@
 
 The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `make docs-status` lists what the docs still mark as planned.
 
-Last updated: 2026-11-02 (N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
+Last updated: 2026-11-07 (slices 6s, 6m and 8r planned, D187 to D190; before that, N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
 
 ## Order criteria
 
@@ -694,6 +694,38 @@ Decided by the author on 2026-10-31 as proposed decisions D143 to D146, with Q34
 **Done when:** the whole of P1 to P4 meets the docs, `make docs-status` shows no `Planned` marker left on the pages of this slice, and D143 to D146 are accepted or superseded by the author.
 
 **Status (2026-10-31).** S0, P1, P2, P3 and P4 built. P4 gaps are listed in `design/threads.md` (P4: UI) and `design/screens.md`: no attach of a file, commit or label from the app, rewrite states missing in the thread's Commits panel, the narrowest width unchecked, and the viewer menu's reason text overflows. Q34 is open. The Labels page, the New Label dialog and the provenance panel were seen in a window on 2026-11-01.
+
+## Slice 6s: sharing threads (planned 2026-11-07; D187, Q37, Q38)
+
+Requested by the author on 2026-11-07, first priority. Opt-in, additive: with sharing off nothing changes. Engineering design in `design/threads.md` ("Sharing"); behavior in `docs/guide/sharing-threads.md` and `docs/reference/configuration.md` (`Planned`).
+
+**Goal.** Publish chosen threads as one Git object each to a remote the user picks, and read the threads teammates published, with a redaction check before anything leaves the machine and ingest redaction on everything that comes in.
+
+**Sub-slices.** SH1 format and checks (pure), SH2 publish and unpublish, SH3 fetch and import, SH4 UI. SH5 (memories on the same channel) waits for M1.
+
+**Acceptance.** A test against a real bare remote proves: publish, republish (still one object), fetch into a second repository, a tampered blob shown as **Modified**, a refused extra tree entry, unpublish, and that a run with sharing off creates no ref and makes no network call. Measure the size and time of Q38 on the real `threads.db` before SH2 is called done.
+
+**Known gaps to expect.** No automatic publish (Q37); no sync of notes, stars or labels; nothing seen in a window until SH4.
+
+## Slice 6m: memories (planned 2026-11-07; D190, Q41, Q42)
+
+Requested by the author on 2026-11-07, first priority with sharing. Engineering design in `design/threads.md` ("Memories") and `design/reviewers.md` ("Skills and sub-agents"); behavior in `docs/guide/memories.md` (`Planned`). Depends on slice 6t and 6g (threads, labels, provenance).
+
+**Goal.** Decisions, rules and lessons that agents propose and the human accepts, searchable by later sessions over MCP, with sources and a derived staleness signal.
+
+**Sub-slices.** M1 model and store (pure, no UI), M2 MCP tools (`memories_search`, `memory_get`, `memory_propose`), M3 Memories tab, M4 skills (`propose-memories`, `prepare`; first verify the plugin format, Q42), M5 sharing of memories (with SH5).
+
+**Acceptance.** An agent actor can only propose, with a source; only a human accepts; an accepted memory's file source shows **Files changed since** after the file changes, in a test with real Git. M4 is checked against a real Claude Code session, and what was and was not seen is stated.
+
+## Slice 8r: reviewers, verdicts and gates (planned 2026-11-07; D188, D189, Q37, Q39, Q40)
+
+Requested by the author on 2026-11-07. Engineering design in `design/reviewers.md`; behavior in `docs/agents/reviewers.md` (`Planned`). Depends on slice 8 (local review) and slice 7 (MCP record tools); the skills depend on M4's verification of the plugin format.
+
+**Goal.** An agent in the user's own session scores and reviews a branch; the app records the verdict and its findings, and deterministic gates over those records can stop a push or a restack until they pass.
+
+**Sub-slices.** R1 verdict store and findings, R2 gates (pure, with the workflow phases and `ctx.verdicts()`), R3 UI, R4 the remaining skills and sub-agents, R5 `branch_agent_config`.
+
+**Acceptance.** Gate rules are pure and property-tested; a gate blocks `before.push` in a workflow run on real Git; an agent cannot resolve a finding or bypass a gate.
 
 ## Slice 7: MCP
 
