@@ -755,7 +755,7 @@ Decided 2026-11-07 (D190), not built. User-facing behavior: `docs/guide/memories
 
 ### Schema
 
-One migration after sharing's (versions are assigned when the slice starts; D190 says v6 as of writing).
+One migration, the next free schema version of `threads.db` (v7: v6 is the workspace migration of D180). Sharing no longer comes first, so nothing precedes it.
 
 ```text
 memory(
