@@ -1005,6 +1005,8 @@ fn folder_line(form: &Form, root: Option<&str>) -> Div {
         .child(div().text_xs().text_color(theme::muted()).child("FOLDER"))
         .child(
             div()
+                .w_full()
+                .min_w(px(0.))
                 .font_family(theme::code_font())
                 .text_xs()
                 .text_color(theme::text())
@@ -1241,12 +1243,12 @@ fn outcome_line(
     planning: bool,
     cx: &Context<StatusView>,
 ) -> Option<Div> {
-    let line = div().flex().flex_row().items_center().gap_2().text_xs();
+    let line = div().flex().flex_row().items_start().gap_2().text_xs();
     match outcome {
         Some(Outcome::Plan(plan)) => Some(line.text_color(theme::muted()).child(describe(plan))),
         Some(Outcome::Problem(problem)) => Some(
             line.text_color(theme::error())
-                .child(problem.message.clone())
+                .child(div().flex_1().min_w(px(0.)).child(problem.message.clone()))
                 .children(
                     problem
                         .path
@@ -1263,11 +1265,11 @@ fn problem_line(problem: &WorkspaceProblem, cx: &Context<StatusView>) -> Div {
     let line = div()
         .flex()
         .flex_row()
-        .items_center()
+        .items_start()
         .gap_2()
         .text_sm()
         .text_color(theme::error())
-        .child(problem.message.clone());
+        .child(div().flex_1().min_w(px(0.)).child(problem.message.clone()));
     match problem.path.as_deref() {
         Some(path) => line.child(go_to_button(path, cx)),
         None => line,
@@ -1279,6 +1281,7 @@ fn go_button(index: usize, path: &str, cx: &Context<StatusView>) -> Stateful<Div
     let target = path.to_owned();
     div()
         .id(SharedString::from(format!("workspace-go-{index}")))
+        .flex_none()
         .px_2()
         .h(px(22.))
         .flex()
@@ -1303,6 +1306,7 @@ fn go_to_button(path: &str, cx: &Context<StatusView>) -> Stateful<Div> {
     let target = path.to_owned();
     div()
         .id(id)
+        .flex_none()
         .px_2()
         .h(px(22.))
         .flex()
