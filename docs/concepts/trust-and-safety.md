@@ -94,7 +94,8 @@ The operation log records each operation that changes a repository, what was ask
 | Threads | `.git/gitmaster/threads.db` in the Git common directory, readable only by you. | Implemented |
 | Local review comments and their snapshots | `.git/gitmaster/review.db` in the Git common directory. The snapshots are Git refs under `refs/gitmaster/`, not files in the working tree. | Implemented |
 | Labels and thread links | `.git/gitmaster/threads.db`, with the threads. | Implemented |
-| Memories and reviewer verdicts | `.git/gitmaster/threads.db`, with the threads. | Planned |
+| Memories of a repository and reviewer verdicts | `.git/gitmaster/threads.db`, with the threads. | Planned |
+| Contexts and the memories attached to them | `contexts.db` in the app data directory, readable only by you. Never in a repository. | Planned |
 | Workflow scripts | The workflows directory in your user config: `~/.config/gitmaster/workflows/` on Linux, and `Library/Application Support/gitmaster/workflows/` in your home directory on macOS. Also any directory listed in `gitmaster.workflowPath`. Never a repository. | Implemented |
 | Workflow review record | `gitmaster.db` in the app data directory, keyed by the hash of each script version. | Implemented |
 | Workflow run history | `.git/gitmaster/state.db`, in the Git common directory of the repository. | Implemented |

@@ -707,13 +707,13 @@ The author decided the principles (D187: opt-in, additive, explicit, redaction c
 
 **Known gaps to expect.** No automatic publish (Q37); no sync of notes, stars or labels; nothing seen in a window until SH4.
 
-## Slice 6m: memories (decided 2026-11-07, next in the order; D190, Q41, Q42)
+## Slice 6m: memories (decided 2026-11-07, next in the order; D190, D191, Q42, Q44)
 
 Requested by the author on 2026-11-07, first priority. Engineering design in `design/threads.md` ("Memories") and `design/reviewers.md` ("Skills and sub-agents"); behavior in `docs/guide/memories.md` (`Planned`). Depends on slice 6t and 6g (threads, labels, provenance).
 
 **Goal.** Decisions, rules and lessons that agents propose and the human accepts, searchable by later sessions over MCP, with sources and a derived staleness signal.
 
-**Sub-slices.** M1 model and store (pure, no UI), M2 MCP tools (`memories_search`, `memory_get`, `memory_propose`), M3 Memories tab, M4 skills (`propose-memories`, `prepare`; first verify the plugin format, Q42). M5, sharing of memories, is deferred with slice 6s. The schema carries `scope` from M1 (D190 (7)); the wider scope for work across many repositories (Q41) is decided before M2 ships the MCP tools, because the search arguments depend on it.
+**Sub-slices.** M1 model and store (pure, no UI), M2 MCP tools (`memories_search`, `memory_get`, `memory_propose`), M3 Memories tab, M4 skills (`propose-memories`, `prepare`; first verify the plugin format, Q42). M5, sharing of memories, is deferred with slice 6s. **Contexts (D191, Q44)** answer work across many repositories: C1 builds `contexts.db`, `repo-id`, membership, nesting and the merged search, after M1 and before M2 (the MCP search arguments carry the scope); C2 is the Manage Contexts… dialog with the scope chip and filter, built with M3. Order: M1, C1, M2, M3 with C2, M4.
 
 **Acceptance.** An agent actor can only propose, with a source; only a human accepts; an accepted memory's file source shows **Files changed since** after the file changes, in a test with real Git. M4 is checked against a real Claude Code session, and what was and was not seen is stated.
 

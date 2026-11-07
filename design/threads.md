@@ -751,7 +751,7 @@ Pure: serializer determinism (same thread, same bytes, same hash), hash verifica
 
 ## Memories (D190)
 
-Decided 2026-11-07 (D190), not built. User-facing behavior: `docs/guide/memories.md` (marked `Planned`). Open question: Q41 (scope beyond a repository: workspace, context or global). The agent-side work (the skills) is in `design/reviewers.md`, "Skills and sub-agents".
+Decided 2026-11-07 (D190), not built. User-facing behavior: `docs/guide/memories.md` (marked `Planned`). Wider scope: contexts, D191 (details in Q44). The agent-side work (the skills) is in `design/reviewers.md`, "Skills and sub-agents".
 
 ### Schema
 
@@ -761,8 +761,6 @@ One migration after sharing's (versions are assigned when the slice starts; D190
 memory(
   id          INTEGER PRIMARY KEY,
   uid         TEXT UNIQUE NOT NULL,       -- first 16 hex of sha256(random 16 bytes)
-  scope       TEXT NOT NULL DEFAULT 'repository',  -- v1: only 'repository'; Q41 may add 'workspace', 'context' or 'global'
-  scope_ref   TEXT,                       -- NULL for 'repository'; the workspace path or the context id otherwise
   kind        TEXT NOT NULL CHECK (kind IN ('decision','rule','lesson','fact')),
   text        TEXT NOT NULL,              -- redacted at ingest, at most 1000 characters
   status      TEXT NOT NULL CHECK (status IN ('proposed','accepted','rejected','superseded')),
@@ -776,6 +774,7 @@ memory_source(
   memory_id INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
   kind      TEXT NOT NULL CHECK (kind IN ('thread','commit','file')),
   ref       TEXT NOT NULL,                -- thread uid | commit id | repo-relative path
+  repo_id   TEXT,                         -- NULL: the memory's own repository; else the repository (D191)
   entry_from INTEGER, entry_to INTEGER,   -- kind 'thread': seq range
   blob_oid  TEXT,                         -- kind 'file': the blob at acceptance, for 'files changed since'
   PRIMARY KEY(memory_id, kind, ref))
@@ -806,11 +805,90 @@ Rules the engine enforces, not the callers:
 | `RejectMemory { id }` | apply | human | |
 | `DeleteMemory { id }` | apply | human | |
 
-In v1 every memory has `scope = 'repository'` and a search reads the current repository only. When Q41 adds a wider scope, each result names its scope and where it comes from. Search reuses the query builder of D128. MCP tools: `memories_search`, `memory_get` (read) and `memory_propose` (record); see `docs/reference/mcp-tools.md`. Memories are untrusted text in results, like every text from a thread.
+This table set is the repository's own store; memories attached to contexts live in `contexts.db` and a search reads both (D191, "Contexts" below). Search reuses the query builder of D128. MCP tools: `memories_search`, `memory_get` (read) and `memory_propose` (record); see `docs/reference/mcp-tools.md`. Memories are untrusted text in results, like every text from a thread.
 
 ### UI
 
 A **Memories** tab on the Threads page (a list on the left, the selected memory on the right, as for threads): a count of proposals on the tab, filters, **Accept**, **Edit**, **Reject**, **Supersedes…**, **New Memory**, bulk accept of selected proposals or of an author's. A memory's sources open the thread at the entry range, the commit or the file in the Code page. **Agent-written** shows on every memory with an agent origin.
+
+### Contexts (D191)
+
+Decided by the author on 2026-11-07 (the points in D191 (1) to (3) and (5)); the storage and the other details below are the agent's choices (D191 (4), Q44). User-facing behavior: `docs/guide/contexts.md` (`Planned`). The author rejected procedures (a structure of linked memories): memories stay flat.
+
+A context is a named set of repositories at the user level. A memory attached to a context is stored once and found from every repository that sees the context. Two stores therefore hold memories: a repository's own `threads.db`, and `contexts.db`, and a search reads both.
+
+#### `contexts.db`
+
+In the app data directory (`~/.local/share/gitmaster/contexts.db`, `Library/Application Support/gitmaster/contexts.db` on macOS), mode `0600`, WAL, `secure_delete`, its own schema version (the app and every `gitmaster mcp` process open it).
+
+```text
+context(
+  id INTEGER PRIMARY KEY, uid TEXT UNIQUE NOT NULL,       -- 16 hex, random
+  name TEXT NOT NULL, parent_id INTEGER REFERENCES context(id) ON DELETE RESTRICT,
+  created_at INTEGER NOT NULL,
+  UNIQUE(parent_id, name))                                -- a name is unique among siblings
+context_repo(
+  context_id INTEGER NOT NULL REFERENCES context(id) ON DELETE CASCADE,
+  repo_id TEXT NOT NULL,                                  -- the content of .git/gitmaster/repo-id
+  path TEXT NOT NULL,                                     -- last known common directory, to find the clone and to show it
+  name TEXT NOT NULL,                                     -- display name, the folder name when joined
+  added_at INTEGER NOT NULL,
+  PRIMARY KEY(context_id, repo_id))
+memory, memory_source, memory_rel, memory_fts             -- the same shapes as in threads.db (above)
+memory_context(
+  memory_id INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+  context_id INTEGER NOT NULL REFERENCES context(id) ON DELETE CASCADE,
+  PRIMARY KEY(memory_id, context_id))
+```
+
+`memory_source` gains `repo_id TEXT NULL` in both stores: null means the memory's own repository (in `contexts.db` a source always names its `repo_id`). A source whose `repo_id` has no known path on this machine reads as unavailable; nothing resolves it by guessing.
+
+#### Repository identity
+
+`.git/gitmaster/repo-id` holds 32 hex characters, written by GitMaster (mode `0600`, atomic) the first time the repository joins a context. It is inside `.git`, so the working tree stays untouched. A `.git` directory copied to another folder carries the same id; the app compares the id's recorded `path` with the real one when it opens a repository and, on a clash, asks which clone keeps the id and gives the other a new one (Q44 (b)).
+
+#### Visibility (pure)
+
+```text
+visible_contexts(repo_id) = ancestors_inclusive( { c : (c, repo_id) in context_repo } )
+```
+
+`ancestors_inclusive` follows `parent_id` to the root. It has a cycle guard, and `UpdateContext { parent }` refuses a parent that would make a cycle. The function is pure over the rows and is tested without a database file. The scopes a search reads are the repository store plus the memories in `memory_context` for those context ids.
+
+#### Commands (D08 table style)
+
+| Command | Level | Actor | Notes |
+|---|---|---|---|
+| `ListContexts { repo? }` | read | any | Contexts, their nesting, repositories and counts; with `repo`, those the repository belongs to (this is MCP `contexts_list`). |
+| `CreateContext { name, parent? }` | apply | human | |
+| `UpdateContext { id, name?, parent? }` | apply | human | Refuses a cycle and a duplicate sibling name. |
+| `DeleteContext { id }` | apply | human | Refused while it has sub-contexts. Memories attached to no other context are listed with their count and deleted on confirmation. |
+| `AddRepoToContext { context, repo }` / `RemoveRepoFromContext` | apply | human | Writes `repo-id` on first join. Removing leaves the memories whose sources are in the repository. |
+| `MoveMemoryToContext { memory, context }` | apply | human | Moves a repository memory into `contexts.db` (insert, then delete from `threads.db`, in that order, so a crash duplicates and never loses) and keeps its sources. |
+| `AttachMemory { memory, context }` / `DetachMemory` | apply | human | A context memory in more than one context; it stays one row. Detaching the last context is refused (move or delete the memory instead). |
+
+`ProposeMemory` (above) takes an optional `context`: it must be in `visible_contexts` of the calling repository's `repo_id` (a context the repository belongs to or an ancestor of one), and the memory is created `proposed`. A call naming another context is refused.
+
+Search takes a `scope` (`all`, `repository` or a context name) and queries the repository store and the allowed context rows, merges by relevance and uses the nearer scope as a tie-break. Each result carries `scope` as a context path (`Platform / Billing`) or `repository`. `contexts.db` missing, locked for too long or unreadable never fails a search: the repository scope answers, and the result says the contexts were not read.
+
+#### Threat model
+
+| Threat | Mitigation |
+|---|---|
+| A transcript in one repository plants a rule that steers agents in every repository of a context | An agent can only propose; only a human accepts; the default search returns accepted memories only (D190 (2)) |
+| One agent writes into a context its repository does not belong to | `ProposeMemory` checks the context against the repository's own `repo_id` |
+| Two clones share an id after a copy | Path comparison on open; the user chooses (Q44 (b)) |
+| A memory outlives the repository it was about | The source reads as unavailable; the memory stays until the human removes it |
+| Concurrent writers (the app and several MCP processes) | WAL, a busy timeout, short transactions, and idempotent proposals by `derived_from` |
+
+#### Tests
+
+Pure: `visible_contexts` over trees and repositories in several contexts, cycle refusal, the scope filter, merge and tie-break ordering. Real files: `contexts.db` opened by two processes at once, a repository joining two contexts and seeing both, a sub-context memory not visible from its parent's other repositories, `MoveMemoryToContext` interrupted between its two writes, a copied `.git` with a clashing id, and a search with `contexts.db` removed.
+
+#### Sub-slices
+
+- **C1, contexts store and visibility (pure plus files):** `contexts.db`, `repo-id`, the commands, `visible_contexts`, the merged search. Comes after M1 and before M2.
+- **C2, Manage Contexts… dialog and the scope chip and filter** (with M3).
 
 ### Sharing (deferred with D187)
 
@@ -823,7 +901,7 @@ Pure: the state machine (every illegal transition is refused, an agent actor can
 ### Sub-slices
 
 - **M1, model and store (pure):** schema, state machine, commands, search; no UI.
-- **M2, MCP tools:** `memories_search`, `memory_get`, `memory_propose`; with slice 7's tool plumbing.
-- **M3, Memories tab.**
+- **M2, MCP tools:** `memories_search`, `memory_get`, `memory_propose`, `contexts_list`; with slice 7's tool plumbing. After C1, because the search arguments carry the scope.
+- **M3, Memories tab** (with C2: the scope chip and filter).
 - **M4, skills:** `/gitmaster:propose-memories` and `/gitmaster:prepare` (design/reviewers.md).
 - **M5, sharing of memories** (with SH5): deferred with sharing, not in the build order.

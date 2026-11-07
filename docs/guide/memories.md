@@ -11,7 +11,7 @@ A memory is a short note about the project that you want later sessions to know:
 
 An agent can propose a memory. Only you can accept it. A memory you have not accepted is never given to an agent as established fact.
 
-A memory belongs to the repository where it was written. Agents working in that repository find it; agents working in another repository do not.
+A memory belongs to the repository where it was written, or to one or more [contexts](contexts.md): named sets of repositories that share knowledge. Agents working in a repository find its memories and those of every context it belongs to.
 
 ## What a memory holds
 
@@ -22,17 +22,18 @@ A memory belongs to the repository where it was written. Agents working in that 
 | Status | **Proposed**, **Accepted**, **Rejected** or **Superseded**. |
 | Source | The thread and entries, the commits and the files it comes from. A memory an agent proposes always has at least one source. A memory you write yourself may have none. |
 | Origin | You, or the agent that proposed it. |
+| Scope | The repository, or the contexts it is attached to. Shown as a chip on the memory. |
 
 ## Open the Memories tab
 
 Choose **Threads** in the sidebar, then the **Memories** tab. The list shows the text, the kind, the status and the origin. **Proposed** memories come first and carry a count in the tab, so a new proposal does not wait unseen.
 
-Filter the list by kind, by status, by file or by author. Search finds a memory by its words.
+Filter the list by kind, by status, by file, by author or by scope: this repository, one context, or everything the repository sees. Search finds a memory by its words.
 
 ## Write a memory
 
 1. Choose **New Memory** on the **Memories** tab.
-2. Pick the kind and write the text.
+2. Pick the kind and the scope, and write the text.
 3. Add sources if you want: a thread, a commit or a file.
 4. Choose **Save**. A memory you write is accepted at once.
 
@@ -70,7 +71,8 @@ A memory that names files shows **Files changed since** when one of those files 
 
 Agents read memories over [MCP](../reference/mcp-tools.md):
 
-- `memories_search` finds accepted memories by their words, by kind or by file.
+- `memories_search` finds accepted memories by their words, by kind, by file or by scope. It searches the repository and every context it belongs to.
+- `contexts_list` lists the contexts the repository belongs to.
 - `memory_get` reads one memory with its sources.
 
 By default an agent sees only accepted memories. It can ask for proposed ones, which come marked as not reviewed.
@@ -87,6 +89,7 @@ Text that comes from a memory is untrusted data, like every text from a thread. 
 
 ## See also
 
+- [Contexts](contexts.md): share memories across the repositories that belong together.
 - [Threads](threads.md): the record the memories come from.
 - [Agent integration](../agents/agent-integration.md): install the plugin and its skills.
 - [MCP tools](../reference/mcp-tools.md): the memory tools.
