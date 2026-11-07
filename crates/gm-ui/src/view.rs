@@ -195,8 +195,6 @@ pub struct StatusView {
     pub(crate) workspace_dialog: Option<WorkspaceDialog>,
     /// The Remove Workspace dialog while it is open (D183).
     pub(crate) workspace_removal_dialog: Option<RemoveWorkspaceDialog>,
-    /// The focus of the close dialog of an ephemeral workspace, while it is open (D185).
-    pub(crate) close_focus: FocusHandle,
     /// The prune dialog, while it is open.
     pub(crate) prune_dialog: Option<PruneDialog>,
     /// The new-branch dialog, while it is open.
@@ -476,7 +474,6 @@ impl StatusView {
             removal_dialog: None,
             workspace_dialog: None,
             workspace_removal_dialog: None,
-            close_focus: cx.focus_handle(),
             prune_dialog: None,
             new_branch_dialog: None,
             stack_subject: None,
@@ -745,7 +742,6 @@ impl StatusView {
         if let Some(outcome) = self.model.workspace_removal.take_outcome() {
             self.on_workspace_removal_settled(outcome, window, cx);
         }
-        self.settle_workspace_close(window, cx);
         if let Some(outcome) = self.model.pruning.take_outcome() {
             self.on_worktrees_pruned(outcome, window, cx);
         }
@@ -1451,7 +1447,6 @@ impl StatusView {
         if action == Action::Refresh {
             self.request_branch_list();
             self.request_hook_sections();
-            self.read_workspace_kind();
         }
         for kind in kinds {
             // While a restack conflict is open, the resolver's events carry its worktree; a
@@ -1966,9 +1961,6 @@ impl StatusView {
         }
         if self.workspace_removal_dialog.is_some() {
             layers.push(self.workspace_removal_layer(window, cx));
-        }
-        if self.model.workspace_close.dialog().is_some() {
-            layers.push(self.workspace_close_layer(window, cx));
         }
         if self.prune_dialog.is_some() {
             layers.push(self.prune_layer(window, cx));

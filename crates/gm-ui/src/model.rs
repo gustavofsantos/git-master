@@ -44,7 +44,6 @@ use crate::threads::{HitPage, MarkdownCopy, ThreadsPage};
 use crate::transform_run::Transforms;
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
-use crate::workspace_close::WorkspaceClose;
 use crate::workspace_create::{Answer, Making, Planning};
 use crate::workspace_list::WorkspaceList;
 use crate::workspace_remove::WorkspaceRemoval;
@@ -170,8 +169,6 @@ pub struct Model {
     pub workspace_making: Making,
     /// The Remove Workspace dialog's inspection, removal in flight and outcome (D183).
     pub workspace_removal: WorkspaceRemoval,
-    /// The exit check of a window on an ephemeral workspace (D185).
-    pub workspace_close: WorkspaceClose,
     /// The prune dialog's listing, prune in flight and outcome.
     pub pruning: Pruning,
     /// The new-branch dialog's create in flight, and its outcome.
@@ -646,8 +643,6 @@ impl Model {
     #[must_use]
     #[allow(clippy::too_many_lines)] // one arm per event; the create's arm adds one more
     pub fn apply(&mut self, event: Event) -> Option<Diffs> {
-        // The exit check reads every answer it waits for, before the floor below drops old ones.
-        self.workspace_close.answer(&event);
         if self
             .floor
             .is_some_and(|floor| event_id(&event).is_some_and(|id| id < floor))
@@ -1425,8 +1420,6 @@ impl Model {
             // The removal's outcome is the settled operation's, which the dialog takes (D183).
             | Event::WorkspaceRemoved { .. }
         // The members of a workspace are read by the agent's tools; the app keeps none (D181).
-        // The exit check of the window reads the kind (D185).
-        | Event::WorkspaceKindRead { .. }
         | Event::MembersListed { .. } => None,
             // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
             Event::HunkSuggested { .. } => {
@@ -1803,8 +1796,7 @@ fn checkout_message(detail: Option<&str>) -> String {
 /// belongs to the run, not to an operation.
 fn event_id(event: &Event) -> Option<OperationId> {
     match event {
-        Event::WorkspaceKindRead { id, .. }
-        | Event::StatusLoaded { id, .. }
+        Event::StatusLoaded { id, .. }
         | Event::OperationChanged { id, .. }
         | Event::GateStarted { id, .. }
         | Event::DiffLoaded { id, .. }
@@ -3931,14 +3923,12 @@ mod submodule_tests {
 mod workspace_tests {
     use super::*;
     use gm_schema::{
-        Actor, BranchHow, MemberPlan, RemovalBlocker, RemovalBlockerKind, WorkspaceKind,
-        WorkspaceRow,
+        Actor, BranchHow, MemberPlan, RemovalBlocker, RemovalBlockerKind, WorkspaceRow,
     };
 
     fn row(name: &str) -> WorkspaceRow {
         WorkspaceRow {
             name: name.to_owned(),
-            kind: WorkspaceKind::Durable,
             path: format!("/w/{name}"),
             members: 1,
         }

@@ -684,9 +684,45 @@ fn new_workspace_button(cx: &Context<StatusView>) -> Stateful<Div> {
 /// the same dialog as the menu. Its click does not reach the row, so a double
 /// click on it does not open the worktree.
 fn remove_button(path: &str, group: SharedString, cx: &Context<StatusView>) -> Stateful<Div> {
-    let target = path.to_owned();
+    remove_control(
+        SharedString::from(format!("worktree-remove-{path}")),
+        "Remove Worktree",
+        Action::RemoveWorktree,
+        Args::Worktree(path.to_owned()),
+        group,
+        cx,
+    )
+}
+
+/// The "×" of a workspace row, which shows on its hover, the window's own row included
+/// (D186 (3)). It runs Remove Workspace, as the menu does.
+fn workspace_remove_button(
+    path: &str,
+    group: SharedString,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    remove_control(
+        SharedString::from(format!("workspace-remove-{path}")),
+        "Remove Workspace",
+        Action::RemoveWorkspace,
+        Args::Workspace(path.to_owned()),
+        group,
+        cx,
+    )
+}
+
+/// The "×" of a row: it shows while the row is hovered and runs `action` on `args`, with its
+/// click stopped so that the row does not see it.
+fn remove_control(
+    id: SharedString,
+    hint: &'static str,
+    action: Action,
+    args: Args,
+    group: SharedString,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
     div()
-        .id(SharedString::from(format!("worktree-remove-{path}")))
+        .id(id)
         .w(px(16.))
         .h(px(16.))
         .flex_none()
@@ -699,13 +735,12 @@ fn remove_button(path: &str, group: SharedString, cx: &Context<StatusView>) -> S
         .group_hover(group, gpui::Styled::visible)
         .hover(|style| style.bg(theme::selected_row()))
         .child(icon::view(Icon::Close, icon::SMALL, theme::muted()))
-        .tooltip(window_chrome::hint("Remove Worktree"))
+        .tooltip(window_chrome::hint(hint))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
-                let args = Args::Worktree(target.clone());
-                this.run_action(Action::RemoveWorktree, &args, window, cx);
+                this.run_action(action, &args, window, cx);
             }),
         )
 }
@@ -1102,8 +1137,8 @@ fn worktree_row(
     move_file::accept_drops(row_div, Some(zone), cx)
 }
 
-/// One workspace: its name, the tags that say it is the window's own or that it is ephemeral.
-/// A click opens the others in a window of their own; the right-click menu has the rest.
+/// One workspace: its name, the tag that says it is the window's own, and the × that removes it on
+/// hover. A click opens the others in a window of their own; the right-click menu has the rest.
 fn workspace_row(row: &workspace_list::Row<'_>, cx: &Context<StatusView>) -> Stateful<Div> {
     let name = row.workspace.name.clone();
     let menu_path = row.workspace.path.clone();
@@ -1111,11 +1146,14 @@ fn workspace_row(row: &workspace_list::Row<'_>, cx: &Context<StatusView>) -> Sta
         WorkspaceOpen::Nothing => None,
         WorkspaceOpen::Path(path) => Some(path.to_owned()),
     };
+    let group = SharedString::from(format!("workspace-row-{}", row.workspace.path));
+    let remove = workspace_remove_button(workspace_list::remove_target(row), group.clone(), cx);
     div()
         .id(SharedString::from(format!(
             "sidebar-workspace-{}",
             row.workspace.path
         )))
+        .group(group)
         .h(px(ROW_HEIGHT))
         .px_2()
         .gap_2()
@@ -1136,10 +1174,6 @@ fn workspace_row(row: &workspace_list::Row<'_>, cx: &Context<StatusView>) -> Sta
             row.here
                 .then(|| tag("here", theme::on_accent(), theme::accent())),
         )
-        .children(
-            row.ephemeral
-                .then(|| tag("ephemeral", theme::muted(), theme::selected_row())),
-        )
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -1151,6 +1185,7 @@ fn workspace_row(row: &workspace_list::Row<'_>, cx: &Context<StatusView>) -> Sta
                 this.open_worktree(&path, cx);
             }))
         })
+        .child(remove)
 }
 
 /// A small window glyph in the worktree's colour: an outline with a title bar.

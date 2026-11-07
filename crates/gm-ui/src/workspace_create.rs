@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use gm_schema::{
     Actor, BranchEntry, BranchHow, CommandKind, MemberPlan, MemberRequest, OperationId,
-    OperationState, WorkspaceKind, WorkspaceProblem,
+    OperationState, WorkspaceProblem,
 };
 use gpui::{
     App, Context, Div, Entity, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions,
@@ -52,16 +52,14 @@ pub(crate) struct Member {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Form {
     pub(crate) name: String,
-    pub(crate) kind: WorkspaceKind,
     pub(crate) members: Vec<Member>,
 }
 
 impl Default for Form {
-    /// A durable workspace with no name and no member.
+    /// A form with no name and no member.
     fn default() -> Self {
         Self {
             name: String::new(),
-            kind: WorkspaceKind::Durable,
             members: Vec::new(),
         }
     }
@@ -401,7 +399,6 @@ pub(crate) struct MemberRow {
 /// The dialog while it is open: its fields, the rows, the open choosers and the error it shows.
 pub(crate) struct WorkspaceDialog {
     pub(crate) name: Entity<TextArea>,
-    pub(crate) kind: WorkspaceKind,
     pub(crate) branch_all: Entity<TextArea>,
     pub(crate) rows: Vec<MemberRow>,
     /// The row whose repository list is open.
@@ -422,7 +419,6 @@ impl WorkspaceDialog {
     pub(crate) fn form(&self, cx: &App) -> Form {
         Form {
             name: self.name.read(cx).text().to_owned(),
-            kind: self.kind,
             members: self
                 .rows
                 .iter()
@@ -478,7 +474,6 @@ impl StatusView {
         let first = Self::new_member_row(first_repo, &head, window, cx);
         let mut dialog = WorkspaceDialog {
             name,
-            kind: WorkspaceKind::Durable,
             branch_all,
             rows: vec![first],
             choosing: None,
@@ -616,7 +611,6 @@ impl StatusView {
             Actor::Human,
             CommandKind::PlanWorkspace {
                 name: form.name.trim().to_owned(),
-                kind: form.kind,
                 members: form.requests(),
                 base: None,
                 root: None,
@@ -624,14 +618,6 @@ impl StatusView {
         );
         self.model.workspace_plan.sent(id);
         cx.notify();
-    }
-
-    /// The kind switch: Durable or Ephemeral.
-    pub(crate) fn set_workspace_kind(&mut self, kind: WorkspaceKind, cx: &mut Context<Self>) {
-        if let Some(dialog) = self.workspace_dialog.as_mut() {
-            dialog.kind = kind;
-        }
-        self.on_workspace_field(cx);
     }
 
     /// The repository list of row `index` opens or closes.
@@ -766,7 +752,6 @@ impl StatusView {
             Actor::Human,
             CommandKind::CreateWorkspace {
                 name: form.name.trim().to_owned(),
-                kind: form.kind,
                 members: form.requests(),
                 base: None,
                 root: None,
@@ -898,7 +883,6 @@ impl StatusView {
                     .child("New workspace"),
             )
             .child(focus_field_row("NAME", dialog.name.clone(), cx))
-            .child(kind_switch(dialog.kind, cx))
             .child(self.workspace_members(dialog, cx))
             .child(focus_field_row(
                 "BRANCH FOR ALL",
@@ -1056,43 +1040,6 @@ fn pick_repo_folder(index: usize, cx: &mut Context<StatusView>) {
         }
     })
     .detach();
-}
-
-/// The Durable and Ephemeral switch.
-fn kind_switch(kind: WorkspaceKind, cx: &Context<StatusView>) -> Div {
-    let segment = |label: &'static str, target: WorkspaceKind| {
-        let selected = kind == target;
-        div()
-            .id(label)
-            .px_3()
-            .h(px(24.))
-            .flex()
-            .items_center()
-            .rounded_md()
-            .cursor_pointer()
-            .text_sm()
-            .when(selected, |this| {
-                this.bg(theme::accent()).text_color(theme::on_accent())
-            })
-            .when(!selected, |this| this.text_color(theme::text()))
-            .child(label)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                    this.set_workspace_kind(target, cx);
-                }),
-            )
-    };
-    div()
-        .flex()
-        .flex_row()
-        .gap_1()
-        .p_1()
-        .rounded_md()
-        .bg(theme::ground())
-        .w(px(200.))
-        .child(segment("Durable", WorkspaceKind::Durable))
-        .child(segment("Ephemeral", WorkspaceKind::Ephemeral))
 }
 
 /// What one row of the dialog shows: its place, its field, the plan or problem of its branch,
@@ -1458,7 +1405,6 @@ mod tests {
         Form {
             name: name.to_owned(),
             members,
-            ..Form::default()
         }
     }
 

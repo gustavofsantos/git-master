@@ -69,6 +69,6 @@ pub use workflow::{
     WorkflowInfo, WorkflowInput, WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,
 };
 pub use workspace::{
-    BranchHow, MemberPlan, MemberRequest, RemovalBlocker, RemovalBlockerKind, WorkspaceKind,
-    WorkspaceProblem, WorkspaceRow,
+    BranchHow, MemberPlan, MemberRequest, RemovalBlocker, RemovalBlockerKind, WorkspaceProblem,
+    WorkspaceRow,
 };

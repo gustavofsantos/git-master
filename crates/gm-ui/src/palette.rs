@@ -1547,18 +1547,16 @@ mod tests {
     }
 
     #[test]
-    fn remove_workspace_is_picked_from_the_listed_workspaces_and_the_window_s_own_is_refused() {
+    fn remove_workspace_is_picked_from_the_listed_workspaces_the_window_s_own_included() {
         let entries: [StatusEntry; 0] = [];
         let rows = [
             gm_schema::WorkspaceRow {
                 name: "billing".into(),
-                kind: gm_schema::WorkspaceKind::Durable,
                 path: "/w/billing".into(),
                 members: 2,
             },
             gm_schema::WorkspaceRow {
                 name: "checkout".into(),
-                kind: gm_schema::WorkspaceKind::Ephemeral,
                 path: "/w/checkout".into(),
                 members: 2,
             },
@@ -1575,7 +1573,7 @@ mod tests {
         let pick = build(Stage::Pick(Action::RemoveWorkspace), "", &context, &[]);
         assert!(pick.iter().all(|c| c.section == Section::Workspaces));
         assert_eq!(find(&pick, "billing").state, Ok(()));
-        assert_eq!(find(&pick, "checkout").state, Err("Open in this window."));
+        assert_eq!(find(&pick, "checkout").state, Ok(()));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 ---
 title: Workspaces
 description: Group branches of several repositories into one workspace, a Git repository whose submodules are worktrees of your own clones, to change and test them together with an agent.
-status: partial
+status: implemented
 order: 55
 ---
 
@@ -92,5 +92,3 @@ A workspace stays until you remove it. Remove it from wherever you are:
 When nothing would be lost, the dialog asks once and **Remove workspace** removes it. Otherwise the dialog lists what would be lost, following the rules of [removing a worktree](worktrees.md) for each member: a member with changes that are not committed, a member on a detached HEAD with commits that no local or remote branch holds, or changes of the workspace repository's own. Tick the confirmation checkbox, which names what will be discarded, to enable **Remove workspace**.
 
 GitMaster removes each member's worktree from your clone, then the workspace folder. Commits on a member's branch are never lost: the branches stay in your clones.
-
-> **Planned.** The **×** on a row and **Remove Workspace** in the workspace's own window are not available yet.

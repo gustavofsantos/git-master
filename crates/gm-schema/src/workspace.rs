@@ -1,34 +1,15 @@
-//! Workspaces (D174, D183): what the engine's workspace commands ask for and answer with, and the
+//! Workspaces (D174, D183, D186): what the engine's workspace commands ask for and answer with, and the
 //! rows `gitmaster workspace` prints. docs/guide/workspaces.md, "Create a workspace" and "Remove a
 //! workspace"; docs/reference/cli.md, "Workspaces".
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Whether a workspace is kept or removed when the app closes (D174 (3)).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceKind {
-    Durable,
-    Ephemeral,
-}
-
-impl WorkspaceKind {
-    /// The word the Git key `gitmaster.workspace.kind` holds for this kind.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Durable => "durable",
-            Self::Ephemeral => "ephemeral",
-        }
-    }
-}
-
 /// One workspace under the root, as `gitmaster workspace list` prints it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceRow {
     /// The folder name, which is the name the commands take.
     pub name: String,
-    pub kind: WorkspaceKind,
     /// The absolute path of the workspace folder.
     pub path: String,
     /// How many members the workspace's `.gitmodules` lists.

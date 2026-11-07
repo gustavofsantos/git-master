@@ -1,8 +1,8 @@
 //! Workspaces (docs/reference/cli.md, "Workspaces"; docs/guide/workspaces.md; D174, D177, D178,
 //! D180, D183 (1)): a folder `<root>/<name>` holding a Git repository whose members are submodules,
 //! each a linked worktree of a clone the user already has. The workspace is found from its own
-//! repository's `gitmaster.workspace.kind` key, and the members from its `.gitmodules`; there is no
-//! store of its own (D177 (1)).
+//! repository's `gitmaster.workspace` key, and the members from its `.gitmodules`; there is no
+//! store of its own (D177 (1), D186 (2)).
 //!
 //! The functions return data and write nothing to a terminal: `gitmaster workspace` prints the
 //! results, and the engine answers its commands with them. The member worktrees go through
@@ -15,7 +15,7 @@ use std::process::Command;
 
 use gm_schema::{
     BranchEntry, BranchHow, MemberPlan, MemberRequest, RemovalBlocker, RemovalBlockerKind,
-    StatusEntry, WorkspaceKind, WorkspaceProblem, WorkspaceRow, WorktreeEntry, WorktreeMode,
+    StatusEntry, WorkspaceProblem, WorkspaceRow, WorktreeEntry, WorktreeMode,
 };
 use serde::Serialize;
 
@@ -23,8 +23,11 @@ use crate::worktree_cli;
 use crate::worktree_include::Mode;
 use crate::{GitError, GitPort, workspace_pointer};
 
-/// The Git key that marks a repository as a workspace, `durable` or `ephemeral` (D177 (1)).
-const KIND_KEY: &str = "gitmaster.workspace.kind";
+/// The Git key that marks a repository as a workspace: `true` (D186 (2)).
+const MARKER_KEY: &str = "gitmaster.workspace";
+/// The key workspaces made before D186 carry, with `durable` or `ephemeral` as its value. It still
+/// marks a workspace; nothing rewrites it.
+const OLD_KIND_KEY: &str = "gitmaster.workspace.kind";
 /// The Git key that sets the folder workspaces are created under.
 const ROOT_KEY: &str = "gitmaster.workspace.root";
 /// The mode Git records for a submodule: a gitlink.
@@ -152,13 +155,12 @@ impl MemberState {
     }
 }
 
-/// What a new workspace holds: its name, kind and members, and the rules D178 gives it.
+/// What a new workspace holds: its name and members, and the rules D178 gives it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateRequest {
     pub name: String,
     /// The root the folder `<root>/<name>` goes under.
     pub root: PathBuf,
-    pub kind: WorkspaceKind,
     pub members: Vec<MemberRequest>,
     /// The `--base` rev that a new branch starts from, in every member.
     pub base: Option<String>,
@@ -255,7 +257,6 @@ struct Plan {
 pub struct CreatePlan {
     /// The folder the workspace would have.
     pub path: PathBuf,
-    pub kind: WorkspaceKind,
     /// The members that can be added, in the order they were asked for.
     pub members: Vec<MemberPlan>,
     /// Why the workspace cannot be created as planned. Any problem refuses the whole creation.
@@ -446,20 +447,23 @@ impl<'a> Workspaces<'a> {
             .filter(|value| !value.is_empty())
     }
 
-    /// The kind of the workspace at `dir`, or `None` when `dir` is not one: a folder with its own
-    /// `.git` folder whose configuration sets `gitmaster.workspace.kind`.
-    pub fn kind_of(&self, dir: &Path) -> Option<WorkspaceKind> {
+    /// Whether `dir` is a workspace: a folder with its own `.git` folder whose repository has
+    /// `gitmaster.workspace = true` in its local configuration, or the key
+    /// `gitmaster.workspace.kind` that workspaces made before D186 carry, whatever its value
+    /// (D186 (2)).
+    pub fn is_workspace(&self, dir: &Path) -> bool {
         if !dir.join(".git").is_dir() {
-            return None;
+            return false;
         }
-        let value = self
+        let marked = self
             .sub
-            .text_if(dir, &["config", "--local", "--get", KIND_KEY])?;
-        match value.trim() {
-            "durable" => Some(WorkspaceKind::Durable),
-            "ephemeral" => Some(WorkspaceKind::Ephemeral),
-            _ => None,
-        }
+            .text_if(dir, &["config", "--local", "--bool", "--get", MARKER_KEY])
+            .is_some_and(|value| value.trim() == "true");
+        marked
+            || self
+                .sub
+                .text_if(dir, &["config", "--local", "--get", OLD_KIND_KEY])
+                .is_some()
     }
 
     /// The workspace `name` under `root`, when there is one.
@@ -468,7 +472,7 @@ impl<'a> Workspaces<'a> {
             return None;
         }
         let dir = root.join(name);
-        self.kind_of(&dir).map(|_| dir)
+        self.is_workspace(&dir).then_some(dir)
     }
 
     /// The workspace that contains `cwd`, from its root or from inside a member.
@@ -476,7 +480,7 @@ impl<'a> Workspaces<'a> {
         let start = canonical(cwd);
         start
             .ancestors()
-            .find(|dir| self.kind_of(dir).is_some())
+            .find(|dir| self.is_workspace(dir))
             .map(Path::to_path_buf)
     }
 
@@ -493,15 +497,14 @@ impl<'a> Workspaces<'a> {
         dirs.sort();
         let mut rows = Vec::new();
         for dir in dirs {
-            let Some(kind) = self.kind_of(&dir) else {
+            if !self.is_workspace(&dir) {
                 continue;
-            };
+            }
             let name = dir
                 .file_name()
                 .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
             rows.push(WorkspaceRow {
                 name,
-                kind,
                 path: dir.to_string_lossy().into_owned(),
                 members: self.members(&dir)?.len(),
             });
@@ -710,7 +713,6 @@ impl<'a> Workspaces<'a> {
             .collect();
         Ok(CreatePlan {
             path: dir,
-            kind: request.kind,
             members,
             problems,
             notes,
@@ -718,8 +720,8 @@ impl<'a> Workspaces<'a> {
         })
     }
 
-    /// Creates the workspace of `plan`: its folder, its repository on `main`, its kind, and each
-    /// member (D174, D177). Refuses a plan with problems before anything is written. A member that
+    /// Creates the workspace of `plan`: its folder, its repository on `main`, its marker, and each
+    /// member (D174, D177, D186 (2)). Refuses a plan with problems before anything is written. A member that
     /// fails is reported in the result and the workspace is kept, as the members before it are.
     pub fn create(&self, plan: CreatePlan) -> Result<Created, Error> {
         if !plan.problems.is_empty() {
@@ -727,16 +729,14 @@ impl<'a> Workspaces<'a> {
                 "no workspace was created: the plan has problems".into(),
             ));
         }
-        let CreatePlan {
-            path, kind, plans, ..
-        } = plan;
+        let CreatePlan { path, plans, .. } = plan;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::create_dir(&path)?;
         self.sub.text(&path, &["init", "-q", "-b", "main"])?;
         self.sub
-            .text(&path, &["config", "--local", KIND_KEY, kind.as_str()])?;
+            .text(&path, &["config", "--local", MARKER_KEY, "true"])?;
         let added = plans
             .iter()
             .map(|plan| self.add_member(&path, plan))
@@ -1005,7 +1005,7 @@ impl<'a> Workspaces<'a> {
         here: &Path,
         closing: bool,
     ) -> Result<RemovalInspection, Error> {
-        if self.kind_of(ws).is_none() {
+        if !self.is_workspace(ws) {
             return Err(Error::Run(format!("'{}' is not a workspace", ws.display())));
         }
         let mut blockers = Vec::new();

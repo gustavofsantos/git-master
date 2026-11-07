@@ -29,9 +29,7 @@ use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
     WorkflowRunStatus, WorkflowRunSummary,
 };
-use crate::workspace::{
-    MemberPlan, MemberRequest, RemovalBlocker, WorkspaceKind, WorkspaceProblem, WorkspaceRow,
-};
+use crate::workspace::{MemberPlan, MemberRequest, RemovalBlocker, WorkspaceProblem, WorkspaceRow};
 
 /// The refusal of `DeleteMergedBranches` when the merged list no longer matches
 /// the one the human confirmed. The UI matches it to list the branches again.
@@ -166,13 +164,12 @@ pub enum CommandKind {
     ListWorkspaces {
         root: Option<String>,
     },
-    /// Checks the workspace `name` of `kind` with `members` before anything is written (D178):
+    /// Checks the workspace `name` with `members` before anything is written (D178):
     /// the branch of each member and any problem. `base` is the `--base` rev of the members'
     /// new branches; `root` as for `ListWorkspaces`. Answers `WorkspacePlanned`. Writes nothing,
     /// so it is not recorded in the command log (D28).
     PlanWorkspace {
         name: String,
-        kind: WorkspaceKind,
         members: Vec<MemberRequest>,
         base: Option<String>,
         root: Option<String>,
@@ -183,7 +180,6 @@ pub enum CommandKind {
     /// command log (D28). Answers `WorkspaceCreated`.
     CreateWorkspace {
         name: String,
-        kind: WorkspaceKind,
         members: Vec<MemberRequest>,
         base: Option<String>,
         root: Option<String>,
@@ -207,9 +203,6 @@ pub enum CommandKind {
         #[serde(default)]
         closing: bool,
     },
-    /// Reads the kind of the open repository: `None` when it is not a workspace (D185). Answers
-    /// `WorkspaceKindRead`. Never recorded in the command log (D28).
-    ReadWorkspaceKind,
     /// Checks out the branch the workspace's `.gitmodules` names for the member at `path`,
     /// relative to the open repository, which is the workspace (D183). Refused when the member
     /// has no branch or when another worktree holds it. Human only, and recorded in the command
@@ -1049,12 +1042,6 @@ pub enum Event {
     WorkspaceRemoved {
         id: OperationId,
         path: String,
-    },
-    /// Answers `ReadWorkspaceKind`: the kind of the open repository, `None` when it is not a
-    /// workspace.
-    WorkspaceKindRead {
-        id: OperationId,
-        kind: Option<WorkspaceKind>,
     },
     /// Answers `SearchFiles`.
     FilesFound {

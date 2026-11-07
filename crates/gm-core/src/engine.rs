@@ -11,8 +11,7 @@ use gm_schema::{
     ConflictSite, DirListing, Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED,
     MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE, RestackBlock,
     RestackPlan, RestackResolution, ReviewChange, ReviewComment, ReviewStatus, STASH_LIST_CHANGED,
-    SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorkspaceKind, WorktreeEntry,
-    WorktreeInspection,
+    SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -4028,7 +4027,6 @@ impl Engine {
             }
             CommandKind::PlanWorkspace {
                 name,
-                kind,
                 members,
                 base,
                 root,
@@ -4036,7 +4034,7 @@ impl Engine {
                 let request = self.workspace_request(
                     &ws,
                     &here,
-                    (name, *kind, members, base.as_deref(), root.as_deref()),
+                    (name, members, base.as_deref(), root.as_deref()),
                 )?;
                 let plan = ws.plan(&request).map_err(|e| e.to_string())?;
                 Ok(vec![Event::WorkspacePlanned {
@@ -4048,7 +4046,6 @@ impl Engine {
             }
             CommandKind::CreateWorkspace {
                 name,
-                kind,
                 members,
                 base,
                 root,
@@ -4057,7 +4054,7 @@ impl Engine {
                 let request = self.workspace_request(
                     &ws,
                     &here,
-                    (name, *kind, members, base.as_deref(), root.as_deref()),
+                    (name, members, base.as_deref(), root.as_deref()),
                 )?;
                 self.create_workspace(id, &ws, &request)
             }
@@ -4093,10 +4090,6 @@ impl Engine {
                     path: path.clone(),
                 });
                 Ok(events)
-            }
-            CommandKind::ReadWorkspaceKind => {
-                let kind = self.root.as_deref().and_then(|root| ws.kind_of(root));
-                Ok(vec![Event::WorkspaceKindRead { id, kind }])
             }
             CommandKind::CheckOutMemberBranch { path } => {
                 only_a_human(actor, "check out a member's branch")?;
@@ -4159,22 +4152,15 @@ impl Engine {
         &self,
         ws: &Workspaces,
         here: &Path,
-        asked: (
-            &str,
-            WorkspaceKind,
-            &[MemberRequest],
-            Option<&str>,
-            Option<&str>,
-        ),
+        asked: (&str, &[MemberRequest], Option<&str>, Option<&str>),
     ) -> Result<CreateRequest, String> {
-        let (name, kind, members, base, root) = asked;
+        let (name, members, base, root) = asked;
         let root = ws
             .root(root, here, self.workspace_home.as_deref())
             .map_err(|e| e.to_string())?;
         Ok(CreateRequest {
             name: name.to_owned(),
             root,
-            kind,
             members: members.to_vec(),
             base: base.map(str::to_owned),
             existing: false,
@@ -5180,7 +5166,6 @@ impl Engine {
                 | CommandKind::ListWorkspaces { .. }
                 | CommandKind::PlanWorkspace { .. }
                 | CommandKind::InspectWorkspaceRemoval { .. }
-                | CommandKind::ReadWorkspaceKind
                 | CommandKind::ListWorkflowRuns { .. }
                 | CommandKind::LoadWorkflowRun { .. }
                 | CommandKind::DryRunWorkflow { .. }
@@ -5362,7 +5347,6 @@ fn is_workspace_command(kind: &CommandKind) -> bool {
             | CommandKind::CreateWorkspace { .. }
             | CommandKind::InspectWorkspaceRemoval { .. }
             | CommandKind::RemoveWorkspace { .. }
-            | CommandKind::ReadWorkspaceKind
             | CommandKind::CheckOutMemberBranch { .. }
     )
 }

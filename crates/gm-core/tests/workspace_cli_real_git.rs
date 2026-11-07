@@ -181,19 +181,27 @@ fn origin_of(s: &Scratch, repo: &Path, name: &str) -> PathBuf {
 }
 
 #[test]
-fn create_makes_a_folder_that_is_a_workspace_with_its_kind() {
+fn create_makes_a_folder_marked_as_a_workspace() {
     let s = Scratch::new();
     let dir = s.create("checkout");
     assert!(dir.join(".git").is_dir());
     assert_eq!(
-        git_in(&dir, &["config", "--local", "gitmaster.workspace.kind"]),
-        "durable"
+        git_in(&dir, &["config", "--local", "gitmaster.workspace"]),
+        "true"
+    );
+    assert_eq!(
+        git_in(&dir, &["config", "--local", "--list"])
+            .lines()
+            .filter(|line| line.starts_with("gitmaster.workspace.kind="))
+            .count(),
+        0,
+        "a new workspace writes no kind key"
     );
     assert_eq!(git_in(&dir, &["symbolic-ref", "--short", "HEAD"]), "main");
 }
 
 #[test]
-fn create_ephemeral_marks_the_kind() {
+fn ephemeral_is_an_unknown_option_and_creates_nothing() {
     let s = Scratch::new();
     let root = s.root();
     let (code, _, err) = s.run(&[
@@ -203,13 +211,61 @@ fn create_ephemeral_marks_the_kind() {
         root.to_str().unwrap(),
         "--ephemeral",
     ]);
-    assert_eq!(code, 0, "{err}");
-    assert_eq!(
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("unknown option '--ephemeral'"), "{err}");
+    assert!(!root.join("scratch").exists());
+}
+
+#[test]
+fn a_workspace_marked_only_with_the_old_kind_key_is_listed_and_removable() {
+    for kind in ["ephemeral", "durable"] {
+        let s = Scratch::new();
+        let root = s.root();
+        let root_arg = root.to_str().unwrap();
+        let dir = s.create("old");
         git_in(
-            &root.join("scratch"),
-            &["config", "--local", "gitmaster.workspace.kind"]
-        ),
+            &dir,
+            &["config", "--local", "--unset", "gitmaster.workspace"],
+        );
+        git_in(
+            &dir,
+            &["config", "--local", "gitmaster.workspace.kind", kind],
+        );
+
+        let (_, out, _) = s.run(&["list", "--root", root_arg, "--format", "names"]);
+        assert_eq!(lines(&out), ["old"], "{kind}");
+        let (code, out, _) = s.run(&["path", "old", "--root", root_arg]);
+        assert_eq!(code, 0, "{kind}");
+        assert_eq!(out.trim(), dir.display().to_string());
+
+        let (code, _, err) = s.run(&["remove", "old", "--root", root_arg]);
+        assert_eq!(code, 0, "{kind}: {err}");
+        assert!(!dir.exists(), "{kind}");
+    }
+}
+
+#[test]
+fn a_workspace_with_the_old_kind_key_is_not_rewritten_when_listed() {
+    let s = Scratch::new();
+    let root = s.root();
+    let dir = s.create("old");
+    git_in(
+        &dir,
+        &["config", "--local", "--unset", "gitmaster.workspace"],
+    );
+    git_in(
+        &dir,
+        &["config", "--local", "gitmaster.workspace.kind", "ephemeral"],
+    );
+    s.run(&["list", "--root", root.to_str().unwrap()]);
+    assert_eq!(
+        git_in(&dir, &["config", "--local", "gitmaster.workspace.kind"]),
         "ephemeral"
+    );
+    assert!(
+        git_in(&dir, &["config", "--local", "--list"])
+            .lines()
+            .all(|line| !line.starts_with("gitmaster.workspace="))
     );
 }
 
@@ -729,7 +785,7 @@ fn list_prints_the_workspaces_in_every_format() {
     let root = s.root();
     let root_arg = root.to_str().unwrap();
     let w = s.create("alpha");
-    s.run(&["create", "beta", "--root", root_arg, "--ephemeral"]);
+    s.run(&["create", "beta", "--root", root_arg]);
     s.add(&w, &repo, "feat/x");
     let beta = root.join("beta");
     let alpha_path = w.display().to_string();
@@ -746,22 +802,22 @@ fn list_prints_the_workspaces_in_every_format() {
     assert_eq!(
         lines(&out),
         [
-            format!("alpha\tdurable\t{alpha_path}"),
-            format!("beta\tephemeral\t{beta_path}"),
+            format!("alpha\t1\t{alpha_path}"),
+            format!("beta\t0\t{beta_path}"),
         ]
     );
 
     let (_, out, _) = s.run(&["list", "--root", root_arg, "--format", "json"]);
     let json: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(json[0]["name"], "alpha");
-    assert_eq!(json[0]["kind"], "durable");
+    assert!(json[0].get("kind").is_none());
     assert_eq!(json[0]["path"], alpha_path.as_str());
     assert_eq!(json[0]["members"], 1);
     assert_eq!(json[1]["members"], 0);
 }
 
 #[test]
-fn a_folder_without_the_kind_key_is_not_listed() {
+fn a_folder_without_the_marker_is_not_listed() {
     let s = Scratch::new();
     let root = s.root();
     std::fs::create_dir_all(root.join("plain")).unwrap();

@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use gm_schema::{OperationId, WorkspaceKind, WorkspaceRow};
+use gm_schema::{OperationId, WorkspaceRow};
 
 use crate::worktree_list::same_path;
 
@@ -13,8 +13,6 @@ pub struct Row<'a> {
     pub workspace: &'a WorkspaceRow,
     /// The workspace this window shows.
     pub here: bool,
-    /// Removed when it is closed, so the row carries the **ephemeral** badge.
-    pub ephemeral: bool,
 }
 
 /// The rows for `workspaces`, by name, for a window showing the folder `here`.
@@ -24,8 +22,7 @@ pub fn rows<'a>(workspaces: &'a [WorkspaceRow], here: Option<&str>) -> Vec<Row<'
         .iter()
         .map(|workspace| Row {
             workspace,
-            here: here.is_some_and(|root| same_path(root, &workspace.path)),
-            ephemeral: workspace.kind == WorkspaceKind::Ephemeral,
+            here: is_own_window(&workspace.path, here),
         })
         .collect();
     rows.sort_by(|a, b| a.workspace.name.cmp(&b.workspace.name));
@@ -48,6 +45,38 @@ pub fn open_target<'a>(row: &Row<'a>) -> Open<'a> {
         Open::Nothing
     } else {
         Open::Path(&row.workspace.path)
+    }
+}
+
+/// The folder the × and the menu of `row` remove. The window's own workspace has one too: its
+/// removal closes the window afterwards (D186 (3)).
+#[must_use]
+pub fn remove_target<'a>(row: &Row<'a>) -> &'a str {
+    &row.workspace.path
+}
+
+/// Whether the workspace at `path` is the one the window shows (`here`), so that removing it is
+/// the window's own removal and runs with `closing` (D186 (3)).
+#[must_use]
+pub fn is_own_window(path: &str, here: Option<&str>) -> bool {
+    here.is_some_and(|root| same_path(root, path))
+}
+
+/// What the window does once a removal has settled.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AfterRemoval {
+    KeepWindow,
+    CloseWindow,
+}
+
+/// The window closes when its own workspace was removed, since its repository went with the
+/// folder. Another workspace's removal keeps the window open (D186 (3)).
+#[must_use]
+pub fn after_removal(removed: &str, here: Option<&str>) -> AfterRemoval {
+    if is_own_window(removed, here) {
+        AfterRemoval::CloseWindow
+    } else {
+        AfterRemoval::KeepWindow
     }
 }
 
@@ -111,10 +140,9 @@ impl WorkspaceList {
 mod tests {
     use super::*;
 
-    fn row(name: &str, path: &str, kind: WorkspaceKind) -> WorkspaceRow {
+    fn row(name: &str, path: &str) -> WorkspaceRow {
         WorkspaceRow {
             name: name.to_owned(),
-            kind,
             path: path.to_owned(),
             members: 2,
         }
@@ -123,8 +151,8 @@ mod tests {
     #[test]
     fn the_rows_are_listed_by_name() {
         let all = [
-            row("checkout-v2", "/w/checkout-v2", WorkspaceKind::Durable),
-            row("billing", "/w/billing", WorkspaceKind::Durable),
+            row("checkout-v2", "/w/checkout-v2"),
+            row("billing", "/w/billing"),
         ];
         let names: Vec<&str> = rows(&all, None)
             .iter()
@@ -135,10 +163,7 @@ mod tests {
 
     #[test]
     fn only_the_workspace_the_window_shows_is_here() {
-        let all = [
-            row("billing", "/w/billing", WorkspaceKind::Durable),
-            row("checkout", "/w/checkout", WorkspaceKind::Durable),
-        ];
+        let all = [row("billing", "/w/billing"), row("checkout", "/w/checkout")];
         let here: Vec<bool> = rows(&all, Some("/w/checkout/"))
             .iter()
             .map(|row| row.here)
@@ -148,36 +173,44 @@ mod tests {
 
     #[test]
     fn nothing_is_here_without_a_window_root() {
-        let all = [row("billing", "/w/billing", WorkspaceKind::Durable)];
+        let all = [row("billing", "/w/billing")];
         assert!(!rows(&all, None)[0].here);
     }
 
     #[test]
-    fn an_ephemeral_workspace_carries_the_badge_and_a_durable_one_does_not() {
-        let all = [
-            row("scratch", "/w/scratch", WorkspaceKind::Ephemeral),
-            row("billing", "/w/billing", WorkspaceKind::Durable),
-        ];
-        let shown = rows(&all, None);
-        let ephemeral = |name: &str| {
-            shown
-                .iter()
-                .find(|row| row.workspace.name == name)
-                .is_some_and(|row| row.ephemeral)
-        };
-        assert!(ephemeral("scratch"));
-        assert!(!ephemeral("billing"));
-    }
-
-    #[test]
     fn a_click_opens_the_folder_except_on_the_window_s_own_row() {
-        let all = [
-            row("billing", "/w/billing", WorkspaceKind::Durable),
-            row("checkout", "/w/checkout", WorkspaceKind::Durable),
-        ];
+        let all = [row("billing", "/w/billing"), row("checkout", "/w/checkout")];
         let shown = rows(&all, Some("/w/checkout"));
         assert_eq!(open_target(&shown[0]), Open::Path("/w/billing"));
         assert_eq!(open_target(&shown[1]), Open::Nothing);
+    }
+
+    #[test]
+    fn the_remove_button_of_every_row_targets_its_own_folder_the_window_s_included() {
+        let all = [row("billing", "/w/billing"), row("checkout", "/w/checkout")];
+        let shown = rows(&all, Some("/w/checkout"));
+        assert_eq!(remove_target(&shown[0]), "/w/billing");
+        assert_eq!(remove_target(&shown[1]), "/w/checkout");
+    }
+
+    #[test]
+    fn removing_the_window_s_own_workspace_is_the_window_s_removal() {
+        assert!(is_own_window("/w/checkout", Some("/w/checkout/")));
+        assert!(!is_own_window("/w/billing", Some("/w/checkout")));
+        assert!(!is_own_window("/w/checkout", None));
+    }
+
+    #[test]
+    fn the_window_closes_when_its_own_workspace_is_removed_and_stays_for_another() {
+        assert_eq!(
+            after_removal("/w/checkout", Some("/w/checkout/")),
+            AfterRemoval::CloseWindow
+        );
+        assert_eq!(
+            after_removal("/w/billing", Some("/w/checkout")),
+            AfterRemoval::KeepWindow
+        );
+        assert_eq!(after_removal("/w/checkout", None), AfterRemoval::KeepWindow);
     }
 
     #[test]
@@ -197,7 +230,7 @@ mod tests {
         let mut list = WorkspaceList::default();
         list.request(OperationId(1));
         list.request(OperationId(2));
-        let answer = vec![row("billing", "/w/billing", WorkspaceKind::Durable)];
+        let answer = vec![row("billing", "/w/billing")];
         assert!(!list.listed(OperationId(1), answer.clone(), "/w".into()));
         assert!(list.workspaces().is_empty());
         assert!(list.listed(OperationId(2), answer, "/w".into()));

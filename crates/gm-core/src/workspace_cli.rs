@@ -8,13 +8,13 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use gm_schema::{MemberRequest, WorkspaceKind};
+use gm_schema::MemberRequest;
 
 use crate::GitPort;
 use crate::workspace::{self, AddRequest, CreateRequest, Workspaces};
 use crate::worktree_cli::{self, Args, Env, Failure};
 
-const USAGE: &str = "usage: gitmaster workspace create <name> [--root <dir>] [--ephemeral] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
+const USAGE: &str = "usage: gitmaster workspace create <name> [--root <dir>] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
        gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none]
        gitmaster workspace list [--format paths|names|tsv|json] [--root <dir>]
        gitmaster workspace path <name> [--root <dir>]
@@ -129,8 +129,8 @@ fn target(ctx: &Ctx, spec: Option<&str>, root: Option<&str>) -> Result<PathBuf, 
                 .cwd
                 .join(worktree_cli::expand(spec, ctx.env.home.as_deref()));
             ctx.ws
-                .kind_of(&dir)
-                .map(|_| dir)
+                .is_workspace(&dir)
+                .then_some(dir)
                 .ok_or_else(|| Failure::Run(format!("'{spec}' is not a workspace")))
         }
         Some(name) => {
@@ -162,7 +162,7 @@ fn create(
     let args = Args::parse(
         words,
         &["root", "branch", "repos-from", "base"],
-        &["ephemeral", "existing"],
+        &["existing"],
     )?;
     args.exactly(1, "a workspace name")?;
     let name = args.positional[0].as_str();
@@ -183,11 +183,6 @@ fn create(
     }
     let root = root_for(ctx, args.option("root"))?;
     workspace::ensure_absent(&root.join(name))?;
-    let kind = if args.switch("ephemeral") {
-        WorkspaceKind::Ephemeral
-    } else {
-        WorkspaceKind::Durable
-    };
     // The list is read and planned before anything is created, so a bad list leaves nothing behind.
     let mut members = Vec::new();
     if let Some(branch) = args.option("branch") {
@@ -210,7 +205,6 @@ fn create(
     let request = CreateRequest {
         name: name.to_owned(),
         root,
-        kind,
         members,
         base: args.option("base").map(str::to_owned),
         existing: args.switch("existing"),
@@ -313,7 +307,7 @@ fn list(words: &[String], ctx: &Ctx, out: &mut dyn Write) -> Result<(), Failure>
         }
         "tsv" => {
             for row in &rows {
-                writeln!(out, "{}\t{}\t{}", row.name, row.kind.as_str(), row.path)?;
+                writeln!(out, "{}\t{}\t{}", row.name, row.members, row.path)?;
             }
         }
         _ => {

@@ -9,8 +9,7 @@ use gm_core::Engine;
 use gm_core::git::SubprocessGit;
 use gm_schema::{
     Actor, BranchHow, Command, CommandKind, Event, MemberPlan, MemberRequest, OperationId,
-    OperationState, RemovalBlocker, RemovalBlockerKind, WorkspaceKind, WorkspaceProblem,
-    WorkspaceRow,
+    OperationState, RemovalBlocker, RemovalBlockerKind, WorkspaceProblem, WorkspaceRow,
 };
 
 fn git_in(dir: &Path, args: &[&str]) -> String {
@@ -147,7 +146,6 @@ fn refusal(events: &[Event]) -> Option<String> {
 fn create(name: &str, members: &[(&Path, &str)], root: &Path) -> CommandKind {
     CommandKind::CreateWorkspace {
         name: name.into(),
-        kind: WorkspaceKind::Durable,
         members: members
             .iter()
             .map(|(repo, branch)| MemberRequest {
@@ -164,13 +162,11 @@ fn plan(name: &str, members: &[(&Path, &str)], root: &Path) -> CommandKind {
     match create(name, members, root) {
         CommandKind::CreateWorkspace {
             name,
-            kind,
             members,
             base,
             root,
         } => CommandKind::PlanWorkspace {
             name,
-            kind,
             members,
             base,
             root,
@@ -241,7 +237,6 @@ fn list_shows_the_workspaces_under_the_root_and_skips_other_folders() {
     let rows = listed(&events).expect("the listing");
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].name, "one");
-    assert_eq!(rows[0].kind, WorkspaceKind::Durable);
     assert_eq!(rows[0].members, 2);
     assert_eq!(rows[0].path, text(&scratch.ws("one")));
 }
@@ -319,8 +314,8 @@ fn create_writes_the_folder_its_members_and_their_pointer_files() {
         Event::WorkspaceCreated { path, .. } if *path == text(&ws)
     )));
     assert_eq!(
-        git_in(&ws, &["config", "--local", "gitmaster.workspace.kind"]),
-        "durable"
+        git_in(&ws, &["config", "--local", "gitmaster.workspace"]),
+        "true"
     );
     let gitmodules = std::fs::read_to_string(ws.join(".gitmodules")).unwrap();
     assert!(gitmodules.contains("path = b"), "{gitmodules}");
@@ -647,48 +642,13 @@ fn an_agent_cannot_write_a_workspace_but_can_read_one() {
     );
 }
 
-/// The create command of an ephemeral workspace (D185).
-fn ephemeral(name: &str, members: &[(&Path, &str)], root: &Path) -> CommandKind {
-    match create(name, members, root) {
-        CommandKind::CreateWorkspace {
-            name,
-            members,
-            base,
-            root,
-            ..
-        } => CommandKind::CreateWorkspace {
-            name,
-            kind: WorkspaceKind::Ephemeral,
-            members,
-            base,
-            root,
-        },
-        _ => unreachable!(),
-    }
-}
-
-/// The kind the read answers, when it answers a workspace.
-fn kind_read(events: &[Event]) -> Option<WorkspaceKind> {
-    events.iter().find_map(|event| match event {
-        Event::WorkspaceKindRead { kind, .. } => *kind,
-        _ => None,
-    })
-}
-
-/// Whether the read answers at all.
-fn kind_answered(events: &[Event]) -> bool {
-    events
-        .iter()
-        .any(|event| matches!(event, Event::WorkspaceKindRead { .. }))
-}
-
 #[test]
-fn closing_removes_the_window_own_ephemeral_workspace_when_nothing_would_be_lost() {
+fn closing_removes_the_window_own_workspace_when_nothing_would_be_lost() {
     let scratch = Scratch::new();
     let c = scratch.repo("c");
     let mut harness = Harness::new(&scratch);
     harness.open(&c);
-    assert!(done(&harness.human(ephemeral(
+    assert!(done(&harness.human(create(
         "shut",
         &[(&c, "feat/c")],
         &scratch.root()
@@ -740,7 +700,7 @@ fn closing_still_refuses_a_dirty_member_without_force() {
     let c = scratch.repo("c");
     let mut harness = Harness::new(&scratch);
     harness.open(&c);
-    assert!(done(&harness.human(ephemeral(
+    assert!(done(&harness.human(create(
         "dirty-shut",
         &[(&c, "feat/c")],
         &scratch.root()
@@ -780,45 +740,53 @@ fn closing_still_refuses_a_dirty_member_without_force() {
 }
 
 #[test]
-fn read_workspace_kind_names_the_kind_of_an_open_workspace_and_none_for_a_repository() {
+fn a_workspace_marked_with_the_old_kind_key_is_listed_and_removed_from_its_window() {
     let scratch = Scratch::new();
     let c = scratch.repo("c");
     let mut harness = Harness::new(&scratch);
     harness.open(&c);
-    assert!(done(&harness.human(ephemeral(
-        "kinds-eph",
+    assert!(done(&harness.human(create(
+        "old",
         &[(&c, "feat/c")],
         &scratch.root()
     ))));
-    assert!(done(&harness.human(create(
-        "kinds-dur",
-        &[(&c, "feat/d")],
-        &scratch.root()
-    ))));
-
-    let plain = harness.human(CommandKind::ReadWorkspaceKind);
-    assert!(kind_answered(&plain), "{plain:?}");
-    assert_eq!(kind_read(&plain), None, "a repository is not a workspace");
-
-    harness.open(&scratch.ws("kinds-eph"));
-    let ephemeral_read = harness.human(CommandKind::ReadWorkspaceKind);
-    assert_eq!(
-        kind_read(&ephemeral_read),
-        Some(WorkspaceKind::Ephemeral),
-        "{ephemeral_read:?}"
+    let ws = scratch.ws("old");
+    git_in(
+        &ws,
+        &["config", "--local", "--unset", "gitmaster.workspace"],
+    );
+    git_in(
+        &ws,
+        &["config", "--local", "gitmaster.workspace.kind", "ephemeral"],
     );
 
-    harness.open(&scratch.ws("kinds-dur"));
-    let durable_read = harness.human(CommandKind::ReadWorkspaceKind);
-    assert_eq!(
-        kind_read(&durable_read),
-        Some(WorkspaceKind::Durable),
-        "{durable_read:?}"
-    );
+    let events = harness.human(CommandKind::ListWorkspaces {
+        root: Some(text(&scratch.root())),
+    });
+    let rows = listed(&events).expect("the listing");
+    let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+    assert_eq!(names, ["old"], "{rows:?}");
+
+    harness.open(&ws);
+    let path = text(&ws);
+    let blockers = inspected(&harness.human(CommandKind::InspectWorkspaceRemoval {
+        path: path.clone(),
+        closing: true,
+    }))
+    .expect("the inspection");
+    assert!(blockers.is_empty(), "{blockers:?}");
+
+    let removed = harness.human(CommandKind::RemoveWorkspace {
+        path,
+        force: false,
+        closing: true,
+    });
+    assert!(done(&removed), "removal failed: {removed:?}");
+    assert!(!ws.exists());
     assert!(
         harness.engine.log().iter().all(|entry| !matches!(
             entry.kind,
-            CommandKind::ReadWorkspaceKind | CommandKind::InspectWorkspaceRemoval { .. }
+            CommandKind::ListWorkspaces { .. } | CommandKind::InspectWorkspaceRemoval { .. }
         )),
         "reads are not logged"
     );

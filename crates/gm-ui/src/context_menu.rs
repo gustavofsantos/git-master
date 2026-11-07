@@ -1365,10 +1365,9 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_menu_opens_reveals_then_removes_and_says_why_remove_is_off_here() {
+    fn a_workspace_menu_opens_reveals_then_removes_the_window_s_own_included() {
         let rows = [gm_schema::WorkspaceRow {
             name: "checkout".into(),
-            kind: gm_schema::WorkspaceKind::Durable,
             path: "/w/checkout".into(),
             members: 2,
         }];
@@ -1388,9 +1387,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            find(&items, Action::RemoveWorkspace).state,
+            find(&items, Action::OpenWorkspace).state,
             Err("Open in this window.")
         );
+        assert_eq!(find(&items, Action::RemoveWorkspace).state, Ok(()));
         assert_eq!(find(&items, Action::RevealWorkspace).state, Ok(()));
         assert!(find(&items, Action::RemoveWorkspace).destructive());
         assert_eq!(sections(&items).len(), 3);

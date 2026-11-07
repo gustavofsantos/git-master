@@ -1626,8 +1626,9 @@ fn workspace_entry<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorkspaceRo
     }
 }
 
-/// Open and Remove refuse the workspace this window shows: a window cannot remove its own folder
-/// (D183 (4)). Reveal has no such limit. Check Out Branch takes a member, so it has its own rule.
+/// Open refuses the workspace this window shows: it is already open (D183). Remove runs on it too
+/// and closes the window once it is removed (D186 (3)). Reveal has no limit. Check Out Branch takes
+/// a member, so it has its own rule.
 fn workspace_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
     if action == Action::CheckOutMemberBranch {
         return check_out_member_rule(args, ctx);
@@ -1637,7 +1638,7 @@ fn workspace_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), 
         .root
         .is_some_and(|root| root.trim_end_matches('/') == row.path.trim_end_matches('/'));
     match action {
-        Action::OpenWorkspace | Action::RemoveWorkspace if here => Err(IN_THIS_WINDOW),
+        Action::OpenWorkspace if here => Err(IN_THIS_WINDOW),
         _ => Ok(()),
     }
 }
@@ -6753,7 +6754,6 @@ mod tests {
     fn workspace_listed(name: &str, path: &str) -> gm_schema::WorkspaceRow {
         gm_schema::WorkspaceRow {
             name: name.into(),
-            kind: gm_schema::WorkspaceKind::Durable,
             path: path.into(),
             members: 2,
         }
@@ -6814,15 +6814,16 @@ mod tests {
         let here = Args::Workspace("/w/checkout".into());
         let other = Args::Workspace("/w/billing".into());
         assert_eq!(
-            Action::RemoveWorkspace.enabled(&here, &context),
-            Err("Open in this window.")
-        );
-        assert_eq!(
             Action::OpenWorkspace.enabled(&here, &context),
             Err("Open in this window.")
         );
         assert_eq!(Action::RevealWorkspace.enabled(&here, &context), Ok(()));
+        assert_eq!(Action::RemoveWorkspace.enabled(&here, &context), Ok(()));
         assert_eq!(Action::RemoveWorkspace.enabled(&other, &context), Ok(()));
+        assert_eq!(
+            Action::RemoveWorkspace.plan(&here, &context),
+            Ok(Effect::OpenRemoveWorkspaceDialog("/w/checkout".into()))
+        );
         assert_eq!(
             Action::RemoveWorkspace.plan(&other, &context),
             Ok(Effect::OpenRemoveWorkspaceDialog("/w/billing".into()))

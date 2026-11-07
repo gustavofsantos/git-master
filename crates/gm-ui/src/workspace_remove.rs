@@ -18,6 +18,7 @@ use crate::FocusPrev;
 use crate::icon::{self, Icon};
 use crate::theme;
 use crate::view::StatusView;
+use crate::workspace_list::{self, AfterRemoval};
 
 const WIDTH: f32 = 520.;
 /// The dialog hangs this far below the top of the window.
@@ -179,6 +180,9 @@ impl WorkspaceRemoval {
 /// carries the keys, and the error it shows.
 pub(crate) struct RemoveWorkspaceDialog {
     pub(crate) path: String,
+    /// The window shows this workspace: the removal runs with `closing` and closes the window
+    /// (D186 (3)).
+    pub(crate) closing: bool,
     pub(crate) confirmed: bool,
     pub(crate) focus: FocusHandle,
     pub(crate) error: Option<String>,
@@ -192,11 +196,15 @@ impl StatusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let closing = workspace_list::is_own_window(
+            path,
+            self.model.status().map(|status| status.root.as_str()),
+        );
         let id = self.engine.dispatch(
             Actor::Human,
             CommandKind::InspectWorkspaceRemoval {
                 path: path.to_owned(),
-                closing: false,
+                closing,
             },
         );
         self.model
@@ -206,6 +214,7 @@ impl StatusView {
         focus.focus(window);
         self.workspace_removal_dialog = Some(RemoveWorkspaceDialog {
             path: path.to_owned(),
+            closing,
             confirmed: false,
             focus,
             error: None,
@@ -251,6 +260,7 @@ impl StatusView {
             return;
         };
         let confirmed = dialog.confirmed;
+        let closing = dialog.closing;
         let path = dialog.path.clone();
         let Some(blockers) = self.model.workspace_removal.inspection(&path) else {
             dialog.error = Some(CHECKING.to_owned());
@@ -269,7 +279,7 @@ impl StatusView {
             CommandKind::RemoveWorkspace {
                 path,
                 force: confirmed,
-                closing: false,
+                closing,
             },
         );
         self.model.workspace_removal.begin_remove(id);
@@ -286,6 +296,13 @@ impl StatusView {
     ) {
         match outcome {
             Ok(path) => {
+                // The window's own repository went with its folder: the window closes, and the
+                // last window quits the app (D186 (3)). Another workspace keeps the window open.
+                let here = self.model.status().map(|status| status.root.as_str());
+                if workspace_list::after_removal(&path, here) == AfterRemoval::CloseWindow {
+                    window.remove_window();
+                    return;
+                }
                 self.workspace_removal_dialog = None;
                 self.list_focus.focus(window);
                 self.request_workspaces();
@@ -372,15 +389,7 @@ impl StatusView {
                 body.into_iter()
                     .map(|line| div().text_sm().text_color(theme::text()).child(line)),
             )
-            .children(forced.then(|| {
-                confirm_row(
-                    "workspace-remove-confirm-check",
-                    dialog.confirmed,
-                    label,
-                    Self::toggle_workspace_confirmation,
-                    cx,
-                )
-            }))
+            .children(forced.then(|| confirm_row(dialog.confirmed, label, cx)))
             .children(
                 dialog
                     .error
@@ -392,22 +401,15 @@ impl StatusView {
     }
 }
 
-/// The checkbox that confirms a forced removal, shared with the close dialog (D185). Space and a
-/// click tick it through `toggle`.
-pub(crate) fn confirm_row(
-    id: &'static str,
-    confirmed: bool,
-    label: String,
-    toggle: fn(&mut StatusView, &mut Context<StatusView>),
-    cx: &Context<StatusView>,
-) -> Stateful<Div> {
+/// The checkbox that confirms a forced removal. Space and a click tick it.
+fn confirm_row(confirmed: bool, label: String, cx: &Context<StatusView>) -> Stateful<Div> {
     let mark = if confirmed {
         icon::filled(Icon::CheckSquare, icon::SMALL, theme::accent())
     } else {
         icon::view(Icon::Square, icon::SMALL, theme::muted())
     };
     div()
-        .id(id)
+        .id("workspace-remove-confirm-check")
         .flex()
         .flex_row()
         .items_center()
@@ -415,7 +417,9 @@ pub(crate) fn confirm_row(
         .cursor_pointer()
         .child(mark)
         .child(div().text_sm().text_color(theme::text()).child(label))
-        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| toggle(this, cx)))
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.toggle_workspace_confirmation(cx);
+        }))
 }
 
 /// Cancel, and the destructive remove button, enabled only when the rules allow.

@@ -159,8 +159,6 @@ IFS=$'\t' read -r _ branch repo < <(my-repos | gitmaster worktree branches --rep
 
 ## Workspaces
 
-> **Planned.** `--ephemeral` is still accepted, the `tsv` and `json` formats of `list` still show a kind, and new workspaces are still marked with `gitmaster.workspace.kind`.
-
 ```sh
 gitmaster workspace create <name> [--root <dir>] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
 gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none]
