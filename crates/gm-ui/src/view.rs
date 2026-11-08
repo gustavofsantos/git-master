@@ -350,6 +350,8 @@ impl StatusView {
         let memories_query = cx.new(|cx| TextArea::new("Search the memories", cx).with_lines(1, 1));
         let memory_path =
             cx.new(|cx| TextArea::new("A file path, such as src/lib.rs", cx).with_lines(1, 1));
+        let memory_mark_reason =
+            cx.new(|cx| TextArea::new("Why, in one line (optional)", cx).with_lines(1, 1));
         let labels_query = cx.new(|cx| TextArea::new("Filter the labels", cx).with_lines(1, 1));
         let sidebar_input = cx.new(|cx| TextArea::new("Find a branch", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
@@ -495,7 +497,7 @@ impl StatusView {
             code_view: CodeView::new(),
             search_view: SearchView::new(search_query, search_paths),
             threads_view: ThreadsView::new(threads_query),
-            memories_view: MemoriesView::new(memories_query, memory_path),
+            memories_view: MemoriesView::new(memories_query, memory_path, memory_mark_reason),
             threads_tab: ThreadsTab::default(),
             memory_dialog: None,
             contexts_dialog: None,

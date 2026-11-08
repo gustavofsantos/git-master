@@ -94,7 +94,13 @@ A memory whose latest mark from anyone is **Wrong** shows a note that asks to ch
 
 ### Marks you make in the app
 
-> **Planned.** You cannot mark a memory in the app yet, and the Memories tab does not show marks yet. Both are next.
+Select an accepted memory on the **Memories** tab. Its detail has two buttons, **Useful** and **Wrong**. The button of your current mark is highlighted. Choosing the other button changes your mark; choosing the one you already have does nothing. Before you choose, you can type an optional reason in the **Reason** box, in one line of at most 200 characters. The reason is kept with that mark, and the box empties once the mark is saved.
+
+The detail lists the latest mark of each actor, you and each agent, with the time and the reason of each. It then lists every mark the memory has, oldest first. When your latest mark and an agent's latest mark differ, the detail shows **Disagreement**. A memory whose latest mark from anyone is **Wrong** shows a **Marked wrong** chip in the list and in the detail.
+
+A proposed, rejected or superseded memory cannot be marked. Its two buttons are muted, and a click says why.
+
+You can also choose **Mark Memory Useful** or **Mark Memory Wrong** in the [command palette](command-palette.md) for the selected memory. The palette marks it without a reason.
 
 ## How agents use memories
 

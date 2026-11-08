@@ -11,7 +11,9 @@
 
 use std::collections::BTreeSet;
 
-use gm_schema::threads::{Context, Memory, MemoryBasis, MemoryContext, MemorySourceInput};
+use gm_schema::threads::{
+    Context, Memory, MemoryBasis, MemoryContext, MemoryMark, MemoryMarkSummary, MemorySourceInput,
+};
 use gm_schema::{
     CommandKind, FileChange, FileChangeState, MemoryKind, MemoryStatus, OperationId, OperationState,
 };
@@ -54,6 +56,13 @@ const NOT_ACCEPTED_TO_ATTACH: &str = "Only an accepted memory can be attached to
 const NO_CONTEXT_OF_ITS_OWN: &str =
     "This memory is in this repository only, so it has no context to detach from.";
 const NOT_ATTACHED_TO_IT: &str = "The memory is not attached to that context.";
+const NOT_ACCEPTED_TO_MARK: &str = "Only an accepted memory can be marked.";
+const REASON_LINE: &str = "A reason is one line.";
+const REASON_TOO_LONG: &str = "A reason holds at most 200 characters.";
+/// The longest reason a mark carries, in characters (D202 (1)).
+pub const REASON_CHARS: usize = 200;
+/// The actor of a mark the person makes in the app.
+pub const HUMAN_ACTOR: &str = "human";
 
 /// Which memories the list shows by scope (D193 (5)).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -167,6 +176,8 @@ pub struct MemoriesPage {
     writes: Vec<(OperationId, Read)>,
     /// The proposals chosen for a bulk accept.
     chosen: BTreeSet<String>,
+    /// The mark history of the memory `uid`, read with its detail (D202 (2)).
+    history: Option<(String, Vec<MemoryMarkSummary>)>,
     failure: Option<String>,
 }
 
@@ -312,6 +323,13 @@ impl MemoriesPage {
         self.detail
             .as_ref()
             .filter(|detail| Some(detail.uid.as_str()) == self.selected.as_deref())
+    }
+
+    /// The full mark history of the selected memory, oldest first, once its detail is read (D202 (2)).
+    #[must_use]
+    pub fn mark_history(&self) -> Option<&[MemoryMarkSummary]> {
+        let (uid, history) = self.history.as_ref()?;
+        (Some(uid.as_str()) == self.selected.as_deref()).then_some(history.as_slice())
     }
 
     /// The memory `uid` as the page holds it: its detail, or its row in the list.
@@ -495,6 +513,7 @@ impl MemoriesPage {
         self.selected = None;
         self.detail = None;
         self.detail_pending = None;
+        self.history = None;
     }
 
     /// Chooses or unchooses a proposal for a bulk accept. Only a proposed memory can be chosen.
@@ -571,7 +590,12 @@ impl MemoriesPage {
 
     /// Applies the detail of memory `uid` answered by `id`, when it is the one selected and read
     /// in flight. The memory's row is updated too. Returns false for any other answer.
-    pub fn read(&mut self, id: OperationId, memory: Memory) -> bool {
+    pub fn read(
+        &mut self,
+        id: OperationId,
+        memory: Memory,
+        history: Vec<MemoryMarkSummary>,
+    ) -> bool {
         let Some((pending, uid)) = self.detail_pending.clone() else {
             return false;
         };
@@ -580,6 +604,7 @@ impl MemoriesPage {
         }
         self.detail_pending = None;
         self.upsert(memory.clone());
+        self.history = Some((uid, history));
         self.detail = Some(memory);
         true
     }
@@ -765,6 +790,34 @@ impl MemoriesPage {
                 removes: true,
             },
         })
+    }
+
+    /// Records the person's `mark` on memory `uid` (D202 (1), (2)). Refused unless `uid` is loaded and
+    /// accepted, or when the reason is not one line of at most 200 characters. `Ok(None)` when the
+    /// person's latest mark already is `mark`: nothing is sent. A blank reason is none.
+    pub fn plan_mark(
+        &self,
+        uid: &str,
+        mark: MemoryMark,
+        reason: &str,
+    ) -> Result<Option<Request>, &'static str> {
+        let memory = self.find(uid).ok_or(NOT_SHOWN)?;
+        check_mark(Placement::of(memory))?;
+        let reason = checked_reason(reason)?;
+        if own_mark(&memory.marks) == Some(mark) {
+            return Ok(None);
+        }
+        Ok(Some(Request {
+            kind: CommandKind::MarkMemory {
+                uid: uid.to_owned(),
+                mark,
+                reason,
+            },
+            read: Read::Change {
+                uid: Some(uid.to_owned()),
+                removes: false,
+            },
+        }))
     }
 
     /// Accepts proposal `uid` and marks the accepted memories `supersedes` as superseded in the
@@ -1014,6 +1067,65 @@ pub fn check_detach(place: Placement) -> Result<(), &'static str> {
         Ok(())
     } else {
         Err(NO_CONTEXT_OF_ITS_OWN)
+    }
+}
+
+/// Whether a memory can take a mark: only an accepted one (D202 (1)). The engine refuses the rest.
+pub fn check_mark(place: Placement) -> Result<(), &'static str> {
+    if place.status == MemoryStatus::Accepted {
+        Ok(())
+    } else {
+        Err(NOT_ACCEPTED_TO_MARK)
+    }
+}
+
+/// The reason a mark carries: trimmed, none when blank, one line and at most 200 characters.
+pub fn checked_reason(text: &str) -> Result<Option<String>, &'static str> {
+    let reason = text.trim();
+    if reason.is_empty() {
+        Ok(None)
+    } else if reason.lines().count() > 1 {
+        Err(REASON_LINE)
+    } else if reason.chars().count() > REASON_CHARS {
+        Err(REASON_TOO_LONG)
+    } else {
+        Ok(Some(reason.to_owned()))
+    }
+}
+
+/// The person's latest mark of a memory, if she has marked it (D202 (2)).
+#[must_use]
+pub fn own_mark(marks: &[MemoryMarkSummary]) -> Option<MemoryMark> {
+    marks
+        .iter()
+        .find(|mark| mark.actor == HUMAN_ACTOR)
+        .map(|mark| mark.mark)
+}
+
+/// Whether a mark's actor is an agent (`agent:<client>`).
+#[must_use]
+pub fn is_agent_actor(actor: &str) -> bool {
+    actor.starts_with(AGENT_ORIGIN)
+}
+
+/// The name of a mark's actor in the marks: "You", or "Agent <client>" for an agent.
+#[must_use]
+pub fn actor_label(actor: &str) -> String {
+    if actor == HUMAN_ACTOR {
+        "You".to_owned()
+    } else if let Some(client) = actor.strip_prefix(AGENT_ORIGIN) {
+        format!("Agent {client}")
+    } else {
+        actor.to_owned()
+    }
+}
+
+/// The word of a mark on its line: "Useful" or "Wrong".
+#[must_use]
+pub fn mark_label(mark: MemoryMark) -> &'static str {
+    match mark {
+        MemoryMark::Useful => "Useful",
+        MemoryMark::Wrong => "Wrong",
     }
 }
 
@@ -1589,18 +1701,145 @@ mod tests {
         tab.sent(&other.read, OperationId(6));
         assert!(!tab.read(
             OperationId(5),
-            memory("p1", MemoryStatus::Proposed, "agent:x", "one")
+            memory("p1", MemoryStatus::Proposed, "agent:x", "one"),
+            Vec::new(),
         ));
         assert!(tab.detail().is_none());
         assert!(tab.read(
             OperationId(6),
-            memory("a", MemoryStatus::Accepted, "human", "first")
+            memory("a", MemoryStatus::Accepted, "human", "first"),
+            vec![mark_summary("human", MemoryMark::Useful, 1_000, None)],
         ));
+        assert_eq!(tab.mark_history().map(<[_]>::len), Some(1));
         assert_eq!(tab.detail().map(|m| m.uid.as_str()), Some("a"));
         assert_eq!(
             tab.selected_memory().map(|m| m.text.as_str()),
             Some("first")
         );
+    }
+
+    fn mark_summary(
+        actor: &str,
+        mark: MemoryMark,
+        at: i64,
+        reason: Option<&str>,
+    ) -> MemoryMarkSummary {
+        MemoryMarkSummary {
+            actor: actor.to_owned(),
+            mark,
+            at,
+            reason: reason.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_mark_history_is_kept_for_the_selected_memory_only() {
+        let mut tab = loaded();
+        let request = tab.select("a");
+        tab.sent(&request.read, OperationId(5));
+        assert!(tab.read(
+            OperationId(5),
+            memory("a", MemoryStatus::Accepted, "human", "first"),
+            vec![mark_summary("human", MemoryMark::Wrong, 9, None)],
+        ));
+        assert_eq!(tab.mark_history().map(<[_]>::len), Some(1));
+        let other = tab.select("b");
+        tab.sent(&other.read, OperationId(6));
+        assert_eq!(tab.mark_history(), None);
+        tab.deselect();
+        assert_eq!(tab.mark_history(), None);
+    }
+
+    #[test]
+    fn a_mark_is_planned_only_for_a_loaded_accepted_memory() {
+        let tab = loaded();
+        let request = tab
+            .plan_mark("a", MemoryMark::Wrong, "  it misled me  ")
+            .expect("an accepted memory takes a mark")
+            .expect("a mark the person does not have yet");
+        assert!(matches!(
+            kind_of(&request),
+            CommandKind::MarkMemory { uid, mark: MemoryMark::Wrong, reason: Some(reason) }
+                if uid == "a" && reason == "it misled me"
+        ));
+        assert_eq!(
+            request.read,
+            Read::Change {
+                uid: Some("a".to_owned()),
+                removes: false
+            }
+        );
+        let blank = tab
+            .plan_mark("a", MemoryMark::Useful, "   ")
+            .expect("a blank reason is none")
+            .expect("a request");
+        assert!(matches!(
+            kind_of(&blank),
+            CommandKind::MarkMemory { reason: None, .. }
+        ));
+        assert_eq!(
+            tab.plan_mark("p1", MemoryMark::Useful, "").err(),
+            Some("Only an accepted memory can be marked.")
+        );
+        assert_eq!(
+            tab.plan_mark("nope", MemoryMark::Useful, "").err(),
+            Some(NOT_SHOWN)
+        );
+    }
+
+    #[test]
+    fn a_mark_the_person_already_has_sends_nothing() {
+        let mut tab = MemoriesPage::default();
+        let read = tab.plan_list();
+        tab.sent(&read.read, OperationId(1));
+        let mut marked = memory("a", MemoryStatus::Accepted, "human", "first");
+        marked.marks = vec![
+            mark_summary("agent:claude-code", MemoryMark::Wrong, 1, None),
+            mark_summary("human", MemoryMark::Useful, 2, None),
+        ];
+        tab.listed(OperationId(1), page(vec![marked], None));
+        let same = tab
+            .plan_mark("a", MemoryMark::Useful, "")
+            .expect("not refused");
+        assert!(same.is_none(), "the person's own latest mark sends nothing");
+        let other = tab
+            .plan_mark("a", MemoryMark::Wrong, "")
+            .expect("not refused");
+        assert!(other.is_some());
+    }
+
+    #[test]
+    fn a_reason_is_one_line_of_at_most_200_characters_or_none() {
+        assert_eq!(checked_reason(" \t "), Ok(None));
+        assert_eq!(checked_reason(" why "), Ok(Some("why".to_owned())));
+        assert_eq!(checked_reason("one\ntwo"), Err(REASON_LINE));
+        assert_eq!(
+            checked_reason(&"x".repeat(REASON_CHARS)).map(|r| r.is_some()),
+            Ok(true)
+        );
+        assert_eq!(
+            checked_reason(&"x".repeat(REASON_CHARS + 1)),
+            Err(REASON_TOO_LONG)
+        );
+        let tab = loaded();
+        assert_eq!(
+            tab.plan_mark("a", MemoryMark::Wrong, "one\ntwo").err(),
+            Some(REASON_LINE)
+        );
+    }
+
+    #[test]
+    fn the_person_is_named_and_an_agent_is_named_by_its_client() {
+        assert_eq!(actor_label("human"), "You");
+        assert_eq!(actor_label("agent:claude-code"), "Agent claude-code");
+        assert_eq!(mark_label(MemoryMark::Useful), "Useful");
+        assert_eq!(mark_label(MemoryMark::Wrong), "Wrong");
+        let marks = [
+            mark_summary("human", MemoryMark::Useful, 1, None),
+            mark_summary("agent:claude-code", MemoryMark::Wrong, 1, None),
+        ];
+        assert_eq!(own_mark(&marks), Some(MemoryMark::Useful));
+        assert_eq!(own_mark(&marks[1..]), None);
     }
 
     #[test]

@@ -6,7 +6,8 @@
 use std::collections::BTreeSet;
 
 use gm_schema::threads::{
-    Context, Memory, MemoryBasis, MemoryKind, MemorySource, MemorySourceKind, MemoryStatus,
+    Context, Memory, MemoryBasis, MemoryKind, MemoryMark, MemoryMarkSummary, MemorySource,
+    MemorySourceKind, MemoryStatus,
 };
 
 use crate::memories::{self, Scope, TEXT_CHARS};
@@ -273,6 +274,46 @@ pub fn basis_chip(basis: MemoryBasis) -> Option<&'static str> {
         MemoryBasis::Observed => None,
         MemoryBasis::Tested | MemoryBasis::Unconfirmed => Some(memories::basis_label(basis)),
     }
+}
+
+/// The chip of a memory whose latest mark from any actor is wrong (D202 (3)): the one mark a row
+/// shows. A useful mark is not a row chip; it is in the detail.
+#[must_use]
+pub fn mark_chip(marks: &[MemoryMarkSummary]) -> Option<&'static str> {
+    marks
+        .iter()
+        .any(|mark| mark.mark == MemoryMark::Wrong)
+        .then_some("Marked wrong")
+}
+
+/// Whether the person and an agent disagree on a memory: the person has marked it and an agent's
+/// latest mark is the other one. The detail says so; the row does not (D202).
+#[must_use]
+pub fn disagreement(marks: &[MemoryMarkSummary]) -> bool {
+    let Some(own) = memories::own_mark(marks) else {
+        return false;
+    };
+    marks
+        .iter()
+        .any(|mark| memories::is_agent_actor(&mark.actor) && mark.mark != own)
+}
+
+/// One line about a mark: "<actor>: <Useful or Wrong>, <relative time>", with ", <reason>" after
+/// it when the actor gave one. The reason is plain text, from an agent or the person (untrusted).
+#[must_use]
+pub fn mark_line(mark: &MemoryMarkSummary, now_secs: i64) -> String {
+    let when = crate::threads::relative(now_secs, mark.at);
+    let reason = mark
+        .reason
+        .as_deref()
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| format!(", {reason}"))
+        .unwrap_or_default();
+    format!(
+        "{}: {}, {when}{reason}",
+        memories::actor_label(&mark.actor),
+        memories::mark_label(mark.mark)
+    )
 }
 
 /// Whether a memory names a file that changed since it was accepted (D192 (6)).
@@ -602,6 +643,75 @@ mod tests {
             state: gm_schema::threads::FileChangeState::Changed,
         }];
         assert!(is_stale(&stale));
+    }
+
+    fn mark_of(actor: &str, mark: MemoryMark, at: i64, reason: Option<&str>) -> MemoryMarkSummary {
+        MemoryMarkSummary {
+            actor: actor.to_owned(),
+            mark,
+            at,
+            reason: reason.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_row_chip_says_marked_wrong_when_any_actor_marks_it_wrong_and_never_useful() {
+        assert_eq!(mark_chip(&[]), None);
+        assert_eq!(
+            mark_chip(&[mark_of("human", MemoryMark::Useful, 1, None)]),
+            None
+        );
+        assert_eq!(
+            mark_chip(&[
+                mark_of("human", MemoryMark::Useful, 1, None),
+                mark_of("agent:claude-code", MemoryMark::Wrong, 2, None),
+            ]),
+            Some("Marked wrong")
+        );
+    }
+
+    #[test]
+    fn a_disagreement_needs_the_person_and_an_agent_with_other_marks() {
+        assert!(!disagreement(&[]));
+        let agree = [
+            mark_of("human", MemoryMark::Useful, 1, None),
+            mark_of("agent:claude-code", MemoryMark::Useful, 2, None),
+        ];
+        assert!(!disagreement(&agree));
+        let differ = [
+            mark_of("human", MemoryMark::Useful, 1, None),
+            mark_of("agent:claude-code", MemoryMark::Wrong, 2, None),
+        ];
+        assert!(disagreement(&differ));
+        let agent_only = [mark_of("agent:claude-code", MemoryMark::Wrong, 2, None)];
+        assert!(!disagreement(&agent_only));
+    }
+
+    #[test]
+    fn a_mark_line_names_the_actor_the_mark_its_time_and_its_reason() {
+        let now = 10_000;
+        let at = (now - 7_200) * 1_000;
+        assert_eq!(
+            mark_line(
+                &mark_of("agent:claude-code", MemoryMark::Wrong, at, None),
+                now
+            ),
+            format!(
+                "Agent claude-code: Wrong, {}",
+                crate::threads::relative(now, at)
+            )
+        );
+        let with_reason = mark_line(
+            &mark_of("human", MemoryMark::Useful, at, Some("it saved a retry")),
+            now,
+        );
+        assert_eq!(
+            with_reason,
+            format!(
+                "You: Useful, {}, it saved a retry",
+                crate::threads::relative(now, at)
+            )
+        );
     }
 
     #[test]

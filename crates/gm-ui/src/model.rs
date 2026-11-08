@@ -1177,8 +1177,12 @@ impl Model {
                 );
                 None
             }
-            Event::MemoryRead { id, memory, .. } => {
-                self.memories.read(id, memory);
+            Event::MemoryRead {
+                id,
+                memory,
+                mark_history,
+            } => {
+                self.memories.read(id, memory, mark_history);
                 None
             }
             Event::MemoryChanged { id, memory, .. } => {

@@ -7,7 +7,7 @@
 use std::ops::Range;
 use std::time::Duration;
 
-use gm_schema::threads::{Memory, MemoryBasis, MemoryStatus};
+use gm_schema::threads::{Memory, MemoryBasis, MemoryMark, MemoryStatus};
 use gm_schema::{Actor, Event, OperationId, OperationState};
 use gpui::{
     AnyElement, ClickEvent, Context, Div, Entity, Hsla, IntoElement, MouseButton, MouseDownEvent,
@@ -49,11 +49,15 @@ pub(crate) enum ThreadsTab {
 pub(crate) struct MemoriesView {
     pub(crate) query: Entity<TextArea>,
     pub(crate) path: Entity<TextArea>,
+    /// The reason box of the detail's marks: one line, optional (D202).
+    pub(crate) mark_reason: Entity<TextArea>,
     /// Whether the file box is shown under the chips.
     pub(crate) path_open: bool,
     pub(crate) list: UniformListScrollHandle,
     /// The proposal whose text is edited in the detail pane, while it is.
     pub(crate) edit: Option<MemoryEdit>,
+    /// The mark writes sent and not answered yet: each answer re-reads the detail's history.
+    pub(crate) marks_pending: Vec<OperationId>,
     /// Why the last action was not done, as the model planned it.
     pub(crate) notice: Option<String>,
 }
@@ -68,13 +72,19 @@ pub(crate) struct MemoryEdit {
 }
 
 impl MemoriesView {
-    pub(crate) fn new(query: Entity<TextArea>, path: Entity<TextArea>) -> Self {
+    pub(crate) fn new(
+        query: Entity<TextArea>,
+        path: Entity<TextArea>,
+        mark_reason: Entity<TextArea>,
+    ) -> Self {
         Self {
             query,
             path,
+            mark_reason,
             path_open: false,
             list: UniformListScrollHandle::new(),
             edit: None,
+            marks_pending: Vec::new(),
             notice: None,
         }
     }
@@ -101,6 +111,9 @@ impl StatusView {
             MemoryEffect::New => self.open_new_memory_dialog(window, cx),
             MemoryEffect::Accept(uid) => self.accept_memory(&uid, cx),
             MemoryEffect::Reject(uid) => self.reject_memory(&uid, cx),
+            MemoryEffect::Mark { uid, mark } => {
+                self.mark_memory(&uid, mark, "", cx);
+            }
             MemoryEffect::ManageContexts => self.open_contexts_dialog(window, cx),
             MemoryEffect::MoveToContext(uid) => {
                 self.open_place_dialog(&uid, PlaceAction::Move, window, cx);
@@ -134,6 +147,7 @@ impl StatusView {
             self.request_memories_refresh();
         }
         self.follow_memory_write(event, cx);
+        self.follow_memory_mark(event, cx);
     }
 
     /// Follows the answers to the writes of the Memories tab: a saved edit leaves the detail pane,
@@ -167,6 +181,35 @@ impl StatusView {
             _ => {}
         }
         self.follow_memory_dialog_write(event, cx);
+    }
+
+    /// Follows the answers to the mark writes: a saved mark reads the memory again, so the history
+    /// shows it; a write that ended without an answer is left to the tab's failure line.
+    fn follow_memory_mark(&mut self, event: &Event, cx: &mut Context<Self>) {
+        match event {
+            Event::MemoryChanged { id, memory, .. }
+                if self.memories_view.marks_pending.contains(id) =>
+            {
+                self.memories_view
+                    .marks_pending
+                    .retain(|pending| pending != id);
+                if let Some(uid) = memory.as_ref().map(|memory| memory.uid.clone())
+                    && self.model.memories.selected() == Some(uid.as_str())
+                {
+                    self.send_memories(MemoriesPage::plan_read(&uid));
+                }
+                cx.notify();
+            }
+            Event::OperationChanged { id, state, .. }
+                if state.is_terminal() && self.memories_view.marks_pending.contains(id) =>
+            {
+                self.memories_view
+                    .marks_pending
+                    .retain(|pending| pending != id);
+                cx.notify();
+            }
+            _ => {}
+        }
     }
 
     /// Sends a planned read or write and records which one the answer belongs to. Returns the
@@ -332,7 +375,8 @@ impl StatusView {
         self.apply_memory_filter(changed, cx);
     }
 
-    /// Selects memory `uid` and reads its detail. An edit of another memory is dropped.
+    /// Selects memory `uid` and reads its detail. An edit of another memory is dropped, and so is
+    /// a mark reason typed for the memory before.
     pub(crate) fn choose_memory(&mut self, uid: &str, cx: &mut Context<Self>) {
         if self
             .memories_view
@@ -341,6 +385,11 @@ impl StatusView {
             .is_some_and(|edit| edit.uid != uid)
         {
             self.memories_view.edit = None;
+        }
+        if self.model.memories.selected() != Some(uid) {
+            self.memories_view
+                .mark_reason
+                .update(cx, |area, cx| area.set_text("", cx));
         }
         let request = self.model.memories.select(uid);
         self.send_memories(request);
@@ -402,6 +451,47 @@ impl StatusView {
     pub(crate) fn reject_memory(&mut self, uid: &str, cx: &mut Context<Self>) {
         let planned = self.model.memories.plan_reject(uid);
         self.send_planned_memory(planned, cx);
+    }
+
+    /// Records the person's `mark` on memory `uid` with `reason`, as the model plans it. The registry's
+    /// actions pass no reason; the detail's buttons pass the reason box. Returns whether a mark was
+    /// sent: a mark the person already has is not sent.
+    pub(crate) fn mark_memory(
+        &mut self,
+        uid: &str,
+        mark: MemoryMark,
+        reason: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let sent = match self.model.memories.plan_mark(uid, mark, reason) {
+            Ok(Some(request)) => {
+                self.memories_view.notice = None;
+                let id = self.send_memories(request);
+                self.memories_view.marks_pending.push(id);
+                true
+            }
+            Ok(None) => false,
+            Err(refusal) => {
+                self.memories_view.notice = Some(refusal.to_owned());
+                false
+            }
+        };
+        cx.notify();
+        sent
+    }
+
+    /// The detail's Useful or Wrong button: marks the selected memory with the reason box's text, and
+    /// empties the box once the mark is sent.
+    fn mark_selected_memory(&mut self, mark: MemoryMark, cx: &mut Context<Self>) {
+        let Some(uid) = self.model.memories.selected().map(str::to_owned) else {
+            return;
+        };
+        let reason = self.memories_view.mark_reason.read(cx).text().to_owned();
+        if self.mark_memory(&uid, mark, &reason, cx) {
+            self.memories_view
+                .mark_reason
+                .update(cx, |area, cx| area.set_text("", cx));
+        }
     }
 
     /// Accepts every chosen proposal, one write each.
@@ -858,6 +948,7 @@ impl StatusView {
             .child(text)
             .children(stale_lines(memory))
             .child(retrieval_text(memory))
+            .child(self.memory_marks(memory, cx))
             .children(loading)
             .child(self.memory_sources(memory, cx))
             .children(self.relation_section(
@@ -872,6 +963,70 @@ impl StatusView {
                 "memory-superseded-by-row",
                 cx,
             ))
+    }
+
+    /// The marks of a memory in its detail (D202): the Useful and Wrong buttons, the reason box, the
+    /// latest mark of each actor and the history of every mark, oldest first. A memory that cannot
+    /// take a mark shows its buttons muted; a click says why.
+    fn memory_marks(&self, memory: &Memory, cx: &mut Context<Self>) -> Div {
+        let now = now_secs();
+        let own = memories::own_mark(&memory.marks);
+        let accepted = memory.status == MemoryStatus::Accepted;
+        let buttons = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(mark_button(
+                "memory-mark-useful",
+                MemoryMark::Useful,
+                own == Some(MemoryMark::Useful),
+                accepted,
+                cx,
+            ))
+            .child(mark_button(
+                "memory-mark-wrong",
+                MemoryMark::Wrong,
+                own == Some(MemoryMark::Wrong),
+                accepted,
+                cx,
+            ));
+        let reason = div()
+            .child(field_row(
+                "Reason (optional)",
+                self.memories_view.mark_reason.clone(),
+            ))
+            .capture_action(|_: &Newline, _, cx| cx.stop_propagation());
+        let latest: Vec<Div> = memory
+            .marks
+            .iter()
+            .map(|mark| mark_text(memory_rows::mark_line(mark, now)))
+            .collect();
+        let history = self
+            .model
+            .memories
+            .mark_history()
+            .filter(|history| !history.is_empty())
+            .map(|history| {
+                let lines: Vec<Div> = history
+                    .iter()
+                    .map(|mark| mark_text(memory_rows::mark_line(mark, now)))
+                    .collect();
+                section("History", lines, None)
+            });
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(buttons)
+            .child(reason)
+            .child(section(
+                "Marks",
+                latest,
+                memory.marks.is_empty().then_some("No marks yet."),
+            ))
+            .children(history)
     }
 
     /// The actions the memory shown offers, as its state gives them (D190).
@@ -1148,6 +1303,7 @@ fn memory_row(
                 .then(|| tag("Agent-written", theme::selected_row())),
         )
         .children(basis_tag(memory.basis))
+        .children(memory_rows::mark_chip(&memory.marks).map(|text| tag(text, theme::warn_bg())))
         .child(tag(
             &memories::scope_chip(&memory.scope),
             theme::selected_row(),
@@ -1196,11 +1352,65 @@ fn memory_header(memory: &Memory) -> Div {
                         .then(|| tag("Agent-written", theme::selected_row())),
                 )
                 .children(basis_tag(memory.basis))
+                .children(
+                    memory_rows::mark_chip(&memory.marks).map(|text| tag(text, theme::warn_bg())),
+                )
+                .children(
+                    memory_rows::disagreement(&memory.marks)
+                        .then(|| tag("Disagreement", theme::selected_row())),
+                )
                 .child(tag(
                     &memories::scope_chip(&memory.scope),
                     theme::selected_row(),
                 )),
         )
+}
+
+/// A mark button of the detail (D202): outlined, and filled when it is the person's own mark. Its
+/// label is muted when the memory cannot take a mark.
+fn mark_button(
+    id: &'static str,
+    mark: MemoryMark,
+    current: bool,
+    accepted: bool,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .cursor_pointer()
+        .flex_none()
+        .px_2()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .border_1()
+        .text_xs()
+        .when(current, |button| {
+            button
+                .bg(theme::selection())
+                .border_color(theme::accent())
+                .text_color(theme::accent())
+        })
+        .when(!current, |button| {
+            button
+                .border_color(theme::button_border())
+                .text_color(if accepted {
+                    theme::text()
+                } else {
+                    theme::muted()
+                })
+        })
+        .child(memories::mark_label(mark))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| this.mark_selected_memory(mark, cx)),
+        )
+}
+
+/// One line of a memory's marks, in the detail's text colour. The reason in it is plain text.
+fn mark_text(line: String) -> Div {
+    div().text_sm().text_color(theme::text()).child(line)
 }
 
 /// The chip of a memory's basis, when it shows one (D201 (1)): a tested memory on the selection

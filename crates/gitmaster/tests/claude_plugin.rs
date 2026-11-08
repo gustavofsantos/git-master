@@ -226,6 +226,19 @@ fn field<'a>(front: &'a [(String, String)], key: &str) -> &'a str {
     value.as_str()
 }
 
+/// Where `needle` first appears in `text`; a missing needle is a failure that names it.
+fn position(text: &str, needle: &str) -> usize {
+    text.find(needle)
+        .unwrap_or_else(|| panic!("the text does not say {needle}"))
+}
+
+/// The text after the line that opens a list, up to its first blank line.
+fn list_after<'a>(text: &'a str, opener: &str) -> &'a str {
+    let start = position(text, opener) + opener.len();
+    let rest = &text[start..];
+    rest.split("\n\n").next().expect("a list")
+}
+
 /// The two sub-agents that read `GitMaster` for a skill (D201 (2), (3)). Each is `haiku`, has only
 /// `GitMaster` tools (no shell, no write) and can propose a memory, which is the only write it makes.
 #[test]
@@ -277,10 +290,11 @@ fn prepare_caps_its_memories_in_count_and_size() {
     assert!(prepare.contains("`limit` `10`"));
 }
 
-/// The plugin orders nothing by use: retrieval counts are not in any result and no skill or
-/// agent asks for an order by them (slice 6q, Q3, as amended).
+/// The plugin orders nothing by use and shows no retrieval count: counts are not in any result,
+/// and no skill or agent asks for an order by them (D202 (4), D204 (4), slice 6q, Q3, as amended).
+/// Marks are the relevance signal now, so the plugin talks about marks, not about use.
 #[test]
-fn no_plugin_file_orders_by_use() {
+fn no_plugin_file_orders_by_use_or_shows_retrieval_counts() {
     let mut files = Vec::new();
     files_under(&plugin_dir(), &mut files);
     for path in files {
@@ -291,8 +305,121 @@ fn no_plugin_file_orders_by_use() {
             "most-used",
             "most used",
             "used often",
+            "retrieval count",
+            "retrieval_count",
+            "last_retrieved",
+            "times retrieved",
         ] {
             assert!(!text.contains(banned), "{} says {banned}", path.display());
         }
     }
+}
+
+/// `prepare` names `memory_mark` and marks after the work, only the memories it used (D202).
+#[test]
+fn prepare_marks_the_memories_it_used_after_the_work() {
+    let prepare = read_text(&plugin_dir().join("skills/prepare/SKILL.md"));
+    assert!(
+        prepare.contains("`memory_mark`"),
+        "prepare does not name memory_mark"
+    );
+    assert!(prepare.contains("After the work is done"));
+    assert!(prepare.contains("`useful` for a memory that helped the work"));
+    assert!(prepare.contains("`wrong` for a memory that misled it"));
+    assert!(prepare.contains("at most 200 characters"));
+    assert!(prepare.contains("Mark only the memories you actually used"));
+    assert!(
+        prepare.contains("Building the brief records nothing"),
+        "prepare must say that the brief itself writes nothing"
+    );
+}
+
+/// A memory with a `wrong` mark is unverified in the brief, whoever marked it (D202 (3)).
+#[test]
+fn prepare_treats_a_wrong_mark_as_unverified() {
+    let prepare = read_text(&plugin_dir().join("skills/prepare/SKILL.md"));
+    assert!(prepare.contains("A memory with a `wrong` mark from any actor is unverified"));
+    assert!(prepare.contains("Marked wrong by <actor>; check before relying on it"));
+    assert!(prepare.contains("do not present it as established"));
+    assert!(prepare.contains("At most 10 memories and about 2,000 characters"));
+}
+
+/// The `gitmaster` skill says why to mark, and that a mark can be revised (D202 (2)).
+#[test]
+fn the_gitmaster_skill_teaches_honest_marking_and_names_memory_mark() {
+    let skill = read_text(&plugin_dir().join("skills/gitmaster/SKILL.md"));
+    assert!(
+        skill.contains("`memory_mark`"),
+        "the skill does not name memory_mark"
+    );
+    assert!(skill.contains("A mark can change"));
+    assert!(skill.contains("mark it `wrong` with the reason"));
+}
+
+/// The consolidator starts with the `wrong` marks, then the changed files, the unconfirmed
+/// memories and the oldest (D202 (3)). The order is read from the list under "Where to start".
+#[test]
+fn the_consolidator_starts_with_wrong_marks_then_changed_files_then_unconfirmed_then_oldest() {
+    let consolidator = read_text(&plugin_dir().join("agents/memory-consolidator.md"));
+    let list = list_after(&consolidator, "Where to start, in this order:\n\n");
+    let first = list.lines().next().expect("the first item");
+    assert!(
+        first.starts_with("- Memories with a `wrong` mark first"),
+        "the first item is: {first}"
+    );
+
+    let order = [
+        "- Memories with a `wrong` mark first",
+        "- Then the memories whose files changed",
+        "- Then the `unconfirmed` memories",
+        "- Then the oldest accepted memories",
+    ];
+    let positions: Vec<usize> = order.iter().map(|item| position(list, item)).collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "the priority is out of order: {positions:?}"
+    );
+}
+
+/// A disagreement between actors is a reason to check, never a count to settle (D202 (3)).
+#[test]
+fn the_consolidator_treats_a_disagreement_as_a_reason_to_check() {
+    let consolidator = read_text(&plugin_dir().join("agents/memory-consolidator.md"));
+    assert!(consolidator.contains("A disagreement is a reason to check"));
+    assert!(
+        consolidator.contains("one actor marked a memory `useful` and another marked it `wrong`")
+    );
+    assert!(consolidator.contains("Never settle a disagreement by counting marks"));
+}
+
+/// The consolidator proposes; it does not judge usefulness, so it holds no `memory_mark` (D202 (3)).
+#[test]
+fn the_consolidator_holds_no_memory_mark_tool() {
+    let text = read_text(&plugin_dir().join("agents/memory-consolidator.md"));
+    let front = front_matter(&text);
+    let tools: Vec<&str> = field(&front, "tools").split(", ").collect();
+    assert!(
+        !tools.iter().any(|tool| tool.ends_with("__memory_mark")),
+        "the consolidator must not hold memory_mark: {tools:?}"
+    );
+}
+
+/// The `consolidate` skill passes the same order on to the sub-agent.
+#[test]
+fn the_consolidate_skill_passes_the_wrong_marks_first() {
+    let consolidate = read_text(&plugin_dir().join("skills/consolidate/SKILL.md"));
+    let order = [
+        "with a `wrong` mark",
+        "whose files changed",
+        "the unconfirmed ones",
+        "then the oldest",
+    ];
+    let positions: Vec<usize> = order
+        .iter()
+        .map(|needle| position(&consolidate, needle))
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "the consolidate priority is out of order: {positions:?}"
+    );
 }

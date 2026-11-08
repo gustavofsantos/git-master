@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use gm_schema::threads::MemoryMark;
 use gm_schema::{
     BranchEntry, CommandKind, ConflictSite, DiffSide, Feature, FeatureSet, HunkId, ReviewComment,
     ReviewStatus, StageTarget, StashEntry, StatusEntry, WorkflowInfo, WorkflowInput, WorkspaceRow,
@@ -488,6 +489,12 @@ pub enum MemoryEffect {
     Reject(String),
     /// Opens the Manage Contexts dialog (D191).
     ManageContexts,
+    /// Records the person's `mark` on the memory `uid`, with no reason (D202). The palette sends
+    /// it; the detail pane sends its own reason.
+    Mark {
+        uid: String,
+        mark: MemoryMark,
+    },
     /// Opens the picker of the contexts the memory moves into (D193 (8)).
     MoveToContext(String),
     /// Opens the picker of the contexts the memory is attached to.
@@ -507,7 +514,7 @@ pub struct MemoryRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 114] = [
+const SPECS: [Spec; 116] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1273,6 +1280,20 @@ const SPECS: [Spec; 114] = [
         Category::Repository,
     ),
     spec(
+        "memories.mark_useful",
+        "Mark Memory Useful",
+        None,
+        ArgKind::Memory,
+        Category::Repository,
+    ),
+    spec(
+        "memories.mark_wrong",
+        "Mark Memory Wrong",
+        None,
+        ArgKind::Memory,
+        Category::Repository,
+    ),
+    spec(
         "contexts.manage",
         "Manage Contexts…",
         None,
@@ -1443,6 +1464,10 @@ pub enum Action {
     AcceptMemory,
     /// Rejects the selected proposed memory (D190).
     RejectMemory,
+    /// Records the person's useful mark on the selected accepted memory (D202).
+    MarkMemoryUseful,
+    /// Records the person's wrong mark on the selected accepted memory (D202).
+    MarkMemoryWrong,
     /// Opens the Manage Contexts dialog: the contexts, their repositories and their memories (D191).
     ManageContexts,
     /// Moves the selected repository memory into a context (D193 (8)).
@@ -1564,6 +1589,9 @@ fn memory_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Rea
         return Err(SELECT_MEMORY);
     };
     match action {
+        Action::MarkMemoryUseful | Action::MarkMemoryWrong => {
+            memories::check_mark(memory.placement)
+        }
         Action::MoveMemoryToContext => memories::check_move(memory.placement),
         Action::AttachMemoryToContext => memories::check_attach(memory.placement),
         _ => memories::check_detach(memory.placement),
@@ -1667,6 +1695,16 @@ fn memory_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
         (Action::RejectMemory, Args::Memory { uid, .. }) => {
             Effect::Memory(MemoryEffect::Reject(uid.clone()))
         }
+        (Action::MarkMemoryUseful, Args::Memory { uid, .. }) => {
+            Effect::Memory(MemoryEffect::Mark {
+                uid: uid.clone(),
+                mark: MemoryMark::Useful,
+            })
+        }
+        (Action::MarkMemoryWrong, Args::Memory { uid, .. }) => Effect::Memory(MemoryEffect::Mark {
+            uid: uid.clone(),
+            mark: MemoryMark::Wrong,
+        }),
         (Action::MoveMemoryToContext, Args::Memory { uid, .. }) => {
             Effect::Memory(MemoryEffect::MoveToContext(uid.clone()))
         }
@@ -1867,7 +1905,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 114] = [
+    pub const ALL: [Action; 116] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1978,6 +2016,8 @@ impl Action {
         Action::NewMemory,
         Action::AcceptMemory,
         Action::RejectMemory,
+        Action::MarkMemoryUseful,
+        Action::MarkMemoryWrong,
         Action::ManageContexts,
         Action::MoveMemoryToContext,
         Action::AttachMemoryToContext,
@@ -2181,6 +2221,8 @@ impl Action {
             Action::NewMemory
                 | Action::AcceptMemory
                 | Action::RejectMemory
+                | Action::MarkMemoryUseful
+                | Action::MarkMemoryWrong
                 | Action::ManageContexts
                 | Action::MoveMemoryToContext
                 | Action::AttachMemoryToContext
@@ -2194,6 +2236,8 @@ impl Action {
             self,
             Action::AcceptMemory
                 | Action::RejectMemory
+                | Action::MarkMemoryUseful
+                | Action::MarkMemoryWrong
                 | Action::MoveMemoryToContext
                 | Action::AttachMemoryToContext
                 | Action::DetachMemoryFromContext
@@ -4892,6 +4936,18 @@ mod tests {
                 ArgKind::Memory,
             ),
             (
+                Action::MarkMemoryUseful,
+                "memories.mark_useful",
+                "Mark Memory Useful",
+                ArgKind::Memory,
+            ),
+            (
+                Action::MarkMemoryWrong,
+                "memories.mark_wrong",
+                "Mark Memory Wrong",
+                ArgKind::Memory,
+            ),
+            (
                 Action::ManageContexts,
                 "contexts.manage",
                 "Manage Contexts…",
@@ -4925,6 +4981,63 @@ mod tests {
         }
         assert!(Action::NewMemory.opens_dialog());
         assert!(!Action::AcceptMemory.opens_dialog());
+    }
+
+    #[test]
+    fn a_mark_is_planned_only_for_the_selected_accepted_memory() {
+        let none = memory_ctx(None);
+        assert_eq!(
+            Action::MarkMemoryUseful.enabled(&Args::None, &none),
+            Err(SELECT_MEMORY)
+        );
+        let proposal = memory_ctx(Some(MemoryRef {
+            uid: "m1",
+            proposed: true,
+            placement: own(gm_schema::threads::MemoryStatus::Proposed),
+        }));
+        let proposed_target = memory_args(MemoryRef {
+            uid: "m1",
+            proposed: true,
+            placement: own(gm_schema::threads::MemoryStatus::Proposed),
+        });
+        assert_eq!(
+            Action::MarkMemoryWrong.enabled(&proposed_target, &proposal),
+            Err("Only an accepted memory can be marked.")
+        );
+        let accepted = memory_ctx(Some(MemoryRef {
+            uid: "m1",
+            proposed: false,
+            placement: own(gm_schema::threads::MemoryStatus::Accepted),
+        }));
+        let target = memory_args(MemoryRef {
+            uid: "m1",
+            proposed: false,
+            placement: own(gm_schema::threads::MemoryStatus::Accepted),
+        });
+        assert_eq!(Action::MarkMemoryUseful.enabled(&target, &accepted), Ok(()));
+        assert_eq!(
+            Action::MarkMemoryUseful.plan(&target, &accepted),
+            Ok(Effect::Memory(MemoryEffect::Mark {
+                uid: "m1".into(),
+                mark: MemoryMark::Useful,
+            }))
+        );
+        assert_eq!(
+            Action::MarkMemoryWrong.plan(&target, &accepted),
+            Ok(Effect::Memory(MemoryEffect::Mark {
+                uid: "m1".into(),
+                mark: MemoryMark::Wrong,
+            }))
+        );
+        let other = memory_args(MemoryRef {
+            uid: "m2",
+            proposed: false,
+            placement: own(gm_schema::threads::MemoryStatus::Accepted),
+        });
+        assert_eq!(
+            Action::MarkMemoryWrong.enabled(&other, &accepted),
+            Err(SELECT_MEMORY)
+        );
     }
 
     #[test]
