@@ -225,6 +225,8 @@ pub enum DiffPaneEvent {
         action: Action,
         args: Args,
     },
+    /// **Reply** on a card: the shell opens the composer on the thread (D198).
+    ReplyTo(i64),
     /// Stage or unstage of selected lines (D24), sent to the engine as is.
     Stage(StageTarget),
     Unstage(StageTarget),
@@ -288,6 +290,8 @@ pub struct DiffPane {
     /// The resolved comments the list shows in full, and whether the outdated strip is open.
     opened: BTreeSet<i64>,
     outdated_open: bool,
+    /// The comments whose threads show all their replies (D198).
+    threads: BTreeSet<i64>,
     /// The comment whose delete waits for its second click.
     delete_arm: DeleteArm,
     /// The line to show once the diff of its file is here (B4d).
@@ -357,6 +361,7 @@ impl DiffPane {
             notes: Notes::default(),
             opened: BTreeSet::new(),
             outdated_open: false,
+            threads: BTreeSet::new(),
             delete_arm: DeleteArm::default(),
             reveal: None,
         }
@@ -629,6 +634,7 @@ impl DiffPane {
         let opened = Opened {
             outdated: self.outdated_open,
             comments: &self.opened,
+            threads: &self.threads,
         };
         self.notes = review::notes(
             &self.rows,
@@ -754,6 +760,15 @@ impl DiffPane {
                 self.opened.insert(id);
             }
             None => self.outdated_open = !self.outdated_open,
+        }
+        self.rebuild_notes();
+        cx.notify();
+    }
+
+    /// Shows all of a thread's replies, or folds the earlier ones again (D198).
+    fn toggle_thread(&mut self, id: i64, cx: &mut Context<Self>) {
+        if !self.threads.remove(&id) {
+            self.threads.insert(id);
         }
         self.rebuild_notes();
         cx.notify();
@@ -885,7 +900,8 @@ impl DiffPane {
                 badge: Badge::Resolved,
                 ..
             }
-            | Part::Folded(_) => theme::muted(),
+            | Part::Folded(_)
+            | Part::Reply { agent: false, .. } => theme::muted(),
             _ => theme::accent(),
         };
         let content = match part {
@@ -893,7 +909,20 @@ impl DiffPane {
                 badge,
                 lines,
                 created_at,
-            } => self.card_head(ix, id, *badge, lines, *created_at, cx),
+                replyable,
+            } => {
+                let meta = format!("{lines} · {}", review::made_label(now_secs(), *created_at));
+                self.card_head(ix, id, *badge, &meta, *replyable, cx)
+            }
+            Part::Reply {
+                agent,
+                author,
+                created_at,
+            } => reply_head_row(*agent, author, *created_at),
+            Part::Toggle(toggle) => div()
+                .text_color(theme::accent())
+                .child(toggle.label())
+                .into_any_element(),
             Part::Text(text) => div()
                 .flex_1()
                 .min_w(px(0.))
@@ -911,6 +940,7 @@ impl DiffPane {
                 .into_any_element(),
         };
         let folded = matches!(part, Part::Folded(_));
+        let toggle = matches!(part, Part::Toggle(_));
         div()
             .id(("review-card", ix))
             .h(px(ROW_HEIGHT))
@@ -919,7 +949,7 @@ impl DiffPane {
             .flex_row()
             .items_center()
             .bg(theme::panel())
-            .when(folded, gpui::Styled::cursor_pointer)
+            .when(folded || toggle, gpui::Styled::cursor_pointer)
             .child(div().w(px(3.)).h_full().flex_none().bg(bar))
             .child(
                 div()
@@ -938,18 +968,24 @@ impl DiffPane {
                     this.toggle_opened(Some(id), cx);
                 }))
             })
+            .when(toggle, |row| {
+                row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.toggle_thread(id, cx);
+                }))
+            })
             .into_any_element()
     }
 
     /// The head row of a card: the badge, the range, when it was made, and the
-    /// buttons. Delete asks once, inline; a resolved card can be folded again.
+    /// buttons. Delete asks once, inline; a resolved card can be folded again, and
+    /// a card that can take a reply offers **Reply** (D198).
     fn card_head(
         &self,
         ix: usize,
         id: i64,
         badge: Badge,
-        lines: &str,
-        created_at: i64,
+        meta: &str,
+        replyable: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (label, colour) = match badge {
@@ -987,10 +1023,12 @@ impl DiffPane {
                     .font_weight(FontWeight::MEDIUM)
                     .child(label),
             )
-            .child(div().flex_none().text_color(theme::muted()).child(format!(
-                "{lines} · {}",
-                review::made_label(now_secs(), created_at)
-            )))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(theme::muted())
+                    .child(meta.to_owned()),
+            )
             .child(div().flex_1())
             .child(
                 chunk_button(("review-resolve", ix), resolve_label, true, theme::text()).on_click(
@@ -1003,6 +1041,13 @@ impl DiffPane {
                 chunk_button(("review-fold", ix), "Hide", true, theme::muted()).on_click(
                     cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.toggle_opened(Some(id), cx);
+                    }),
+                )
+            }))
+            .children(replyable.then(|| {
+                chunk_button(("review-reply", ix), "Reply", true, theme::text()).on_click(
+                    cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.emit(DiffPaneEvent::ReplyTo(id));
                     }),
                 )
             }))
@@ -1932,6 +1977,23 @@ fn comment_button(cx: &Context<DiffPane>) -> Stateful<Div> {
             this.comment_at_selection(cx);
         },
     ))
+}
+
+/// The top row of a reply (D198): the Agent-written flag when an agent wrote it, then
+/// its author and time. The reply's body follows as plain text rows.
+fn reply_head_row(agent: bool, author: &str, created_at: i64) -> AnyElement {
+    div()
+        .flex_1()
+        .min_w(px(0.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .text_xs()
+        .text_color(theme::muted())
+        .children(agent.then(|| crate::shell_memories::tag("Agent-written", theme::selected_row())))
+        .child(review::reply_head(author, created_at, now_secs()))
+        .into_any_element()
 }
 
 /// A heading of the file's strip (B4c): the outdated comments, which open and

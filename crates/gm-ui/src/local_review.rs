@@ -3,6 +3,7 @@
 //! its two texts is shown, the reads of those texts, and the lines that differ
 //! between them. The page draws what this module says.
 
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use gm_schema::{OperationId, ReviewChange, ReviewComment, ReviewStatus};
@@ -279,6 +280,8 @@ pub struct LocalReview {
     before: Read,
     after: Read,
     delete: DeleteArm,
+    /// The comments whose threads show all their replies (D198).
+    threads: BTreeSet<i64>,
 }
 
 impl LocalReview {
@@ -289,6 +292,19 @@ impl LocalReview {
 
     pub fn set_filter(&mut self, filter: Filter) {
         self.filter = filter;
+    }
+
+    /// Whether the thread of comment `id` shows all its replies.
+    #[must_use]
+    pub fn thread_open(&self, id: i64) -> bool {
+        self.threads.contains(&id)
+    }
+
+    /// Shows all of a thread's replies, or folds the earlier ones again.
+    pub fn toggle_thread(&mut self, id: i64) {
+        if !self.threads.remove(&id) {
+            self.threads.insert(id);
+        }
     }
 
     #[must_use]

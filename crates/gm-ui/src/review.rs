@@ -6,7 +6,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use gm_schema::{OperationId, OperationState, ReviewComment, ReviewLocation, ReviewStatus};
+use gm_schema::{
+    CommandKind, OperationId, OperationState, ReviewComment, ReviewLocation, ReviewReply,
+    ReviewStatus,
+};
 
 use crate::diff_rows::{Diffs, Row, SplitRows};
 use crate::shell_history::relative_time;
@@ -21,6 +24,12 @@ const SUMMARY_COLUMNS: usize = 60;
 const NO_MESSAGE: &str = "The comments could not be read.";
 /// Git's message when a failed write gave none.
 const NOT_SAVED: &str = "The comment was not saved.";
+/// A thread with more replies than this shows its latest reply, and a toggle for the rest (D198).
+pub const FOLD_ABOVE: usize = 2;
+/// The author of a reply the person wrote.
+const HUMAN: &str = "human";
+/// The prefix of an agent's author: `agent:<client>`.
+const AGENT_PREFIX: &str = "agent:";
 
 /// The comments of the open repository and the read that will replace them.
 /// Ids follow dispatch order, so an answer older than the one shown, or than the
@@ -236,6 +245,106 @@ pub fn wrap(body: &str, columns: usize) -> Vec<String> {
     out
 }
 
+/// Whether a reply can be written on a comment with this status: an open or handled
+/// thread, never a resolved one, which only a reopen makes replyable again (D198).
+#[must_use]
+pub fn can_reply(status: ReviewStatus) -> bool {
+    status != ReviewStatus::Resolved
+}
+
+/// The write a reply sends for comment `id`, with the body trimmed. None when the body
+/// is blank: nothing is sent.
+#[must_use]
+pub fn reply_command(id: i64, text: &str) -> Option<CommandKind> {
+    let body = text.trim();
+    (!body.is_empty()).then(|| CommandKind::ReplyToReviewComment {
+        id,
+        body: body.to_owned(),
+    })
+}
+
+/// Who wrote a reply, as a thread shows it: "You", or "Agent: <client>" for an agent.
+#[must_use]
+pub fn author_label(author: &str) -> String {
+    if author == HUMAN {
+        "You".to_owned()
+    } else if let Some(client) = author.strip_prefix(AGENT_PREFIX) {
+        format!("Agent: {client}")
+    } else {
+        author.to_owned()
+    }
+}
+
+/// Whether a reply is an agent's: it gets the Agent-written flag.
+#[must_use]
+pub fn is_agent_reply(reply: &ReviewReply) -> bool {
+    reply.author.starts_with(AGENT_PREFIX)
+}
+
+/// The line over a reply: its author, then how long ago it was written.
+#[must_use]
+pub fn reply_head(author: &str, created_at: i64, now_secs: i64) -> String {
+    format!(
+        "{} · {}",
+        author_label(author),
+        made_label(now_secs, created_at)
+    )
+}
+
+/// What a thread offers in place of the replies it does not show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Toggle {
+    /// This many earlier replies are folded; the toggle shows them.
+    Earlier(usize),
+    /// Every reply is shown; the toggle folds the earlier ones again.
+    Hide,
+}
+
+impl Toggle {
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Toggle::Earlier(1) => "1 earlier reply".to_owned(),
+            Toggle::Earlier(count) => format!("{count} earlier replies"),
+            Toggle::Hide => "Hide earlier replies".to_owned(),
+        }
+    }
+}
+
+/// The replies a thread shows, oldest first, and the toggle that shows or folds the rest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Thread<'a> {
+    pub shown: Vec<&'a ReviewReply>,
+    pub toggle: Option<Toggle>,
+}
+
+/// The replies of a thread as they show: all of them up to `FOLD_ABOVE`; above that, the
+/// latest one with `Earlier`, or all of them with `Hide` once the thread is expanded. The
+/// order is by time, then id, whatever order the list came in.
+#[must_use]
+pub fn thread(replies: &[ReviewReply], expanded: bool) -> Thread<'_> {
+    let mut ordered: Vec<&ReviewReply> = replies.iter().collect();
+    ordered.sort_by_key(|reply| (reply.created_at, reply.id));
+    if ordered.len() <= FOLD_ABOVE {
+        return Thread {
+            shown: ordered,
+            toggle: None,
+        };
+    }
+    if expanded {
+        return Thread {
+            shown: ordered,
+            toggle: Some(Toggle::Hide),
+        };
+    }
+    let earlier = ordered.len() - 1;
+    let latest: Vec<&ReviewReply> = ordered.last().copied().into_iter().collect();
+    Thread {
+        shown: latest,
+        toggle: Some(Toggle::Earlier(earlier)),
+    }
+}
+
 /// The one line a folded resolved card shows: its range, then the first line of
 /// the body, cut to `SUMMARY_COLUMNS` with an ellipsis.
 #[must_use]
@@ -277,17 +386,28 @@ pub enum Part {
         badge: Badge,
         lines: String,
         created_at: i64,
+        /// Whether the **Reply** button is offered (D198).
+        replyable: bool,
     },
     /// One wrapped line of the body.
     Text(String),
     /// A resolved comment, shown as one line until it is opened.
     Folded(String),
+    /// The top row of a reply: whose it is and when, and whether an agent wrote it.
+    Reply {
+        agent: bool,
+        author: String,
+        created_at: i64,
+    },
+    /// The toggle above a thread's replies, which folds or shows the earlier ones.
+    Toggle(Toggle),
 }
 
 /// The card rows of one comment: a folded line when it is resolved and not
-/// opened, else its head and its wrapped body.
+/// opened, else its head, its wrapped body and its thread (D198). `expanded` is
+/// whether the thread shows all its replies.
 #[must_use]
-pub fn card_entries(comment: &ReviewComment, opened: bool) -> Vec<Entry> {
+pub fn card_entries(comment: &ReviewComment, opened: bool, expanded: bool) -> Vec<Entry> {
     let id = comment.id;
     if comment.status == ReviewStatus::Resolved && !opened {
         return vec![Entry::Card {
@@ -302,8 +422,32 @@ pub fn card_entries(comment: &ReviewComment, opened: bool) -> Vec<Entry> {
             badge: badge(comment),
             lines: range_label(start, end),
             created_at: comment.created_at,
+            replyable: can_reply(comment.status),
         },
     };
+    let thread = thread(&comment.replies, expanded);
+    let toggle = thread.toggle.map(|toggle| Entry::Card {
+        id,
+        part: Part::Toggle(toggle),
+    });
+    let replies = thread.shown.into_iter().flat_map(|reply| {
+        std::iter::once(Entry::Card {
+            id,
+            part: Part::Reply {
+                agent: is_agent_reply(reply),
+                author: reply.author.clone(),
+                created_at: reply.created_at,
+            },
+        })
+        .chain(
+            wrap(&reply.body, WRAP_COLUMNS)
+                .into_iter()
+                .map(move |line| Entry::Card {
+                    id,
+                    part: Part::Text(line),
+                }),
+        )
+    });
     std::iter::once(head)
         .chain(
             wrap(&comment.body, WRAP_COLUMNS)
@@ -313,6 +457,8 @@ pub fn card_entries(comment: &ReviewComment, opened: bool) -> Vec<Entry> {
                     part: Part::Text(line),
                 }),
         )
+        .chain(toggle)
+        .chain(replies)
         .collect()
 }
 
@@ -354,6 +500,8 @@ pub struct Notes {
 pub struct Opened<'a> {
     pub outdated: bool,
     pub comments: &'a BTreeSet<i64>,
+    /// The comments whose threads show all their replies.
+    pub threads: &'a BTreeSet<i64>,
 }
 
 /// The number of a diff row's line on the new side: a working-tree line on the
@@ -416,6 +564,7 @@ pub fn notes(
     let mut marked = BTreeSet::new();
     for comment in mine {
         let opened_card = opened.comments.contains(&comment.id);
+        let expanded = opened.threads.contains(&comment.id);
         let Some(location) = comment.location else {
             outdated.push(comment);
             continue;
@@ -427,7 +576,7 @@ pub fn notes(
             outside.push(comment);
             continue;
         };
-        let card = card_entries(comment, opened_card);
+        let card = card_entries(comment, opened_card, expanded);
         if let Some(slot) = unified_after.get_mut(row) {
             slot.extend(card.iter().cloned());
         }
@@ -444,20 +593,24 @@ pub fn notes(
             open: opened.outdated,
         }));
         if opened.outdated {
-            top.extend(
-                outdated.iter().flat_map(|comment| {
-                    card_entries(comment, opened.comments.contains(&comment.id))
-                }),
-            );
+            top.extend(outdated.iter().flat_map(|comment| {
+                card_entries(
+                    comment,
+                    opened.comments.contains(&comment.id),
+                    opened.threads.contains(&comment.id),
+                )
+            }));
         }
     }
     if !outside.is_empty() {
         top.push(Entry::Heading(Heading::Outside));
-        top.extend(
-            outside
-                .iter()
-                .flat_map(|comment| card_entries(comment, opened.comments.contains(&comment.id))),
-        );
+        top.extend(outside.iter().flat_map(|comment| {
+            card_entries(
+                comment,
+                opened.comments.contains(&comment.id),
+                opened.threads.contains(&comment.id),
+            )
+        }));
     }
     Notes {
         unified: listing(rows.len(), &unified_after, &top),
@@ -760,6 +913,7 @@ mod tests {
             Opened {
                 outdated: false,
                 comments: &none(),
+                threads: &none(),
             },
         );
         let card: Vec<&Entry> = notes
@@ -792,6 +946,7 @@ mod tests {
             Opened {
                 outdated: false,
                 comments: &none(),
+                threads: &none(),
             },
         );
         let listing = &notes.unified;
@@ -823,6 +978,7 @@ mod tests {
             Opened {
                 outdated: false,
                 comments: &none(),
+                threads: &none(),
             },
         );
         let listing = &notes.split;
@@ -858,6 +1014,7 @@ mod tests {
             Opened {
                 outdated: false,
                 comments: &none(),
+                threads: &none(),
             },
         );
         assert_eq!(notes.unified.at, (0..rows.len()).collect::<Vec<_>>());
@@ -884,6 +1041,7 @@ mod tests {
             Opened {
                 outdated: false,
                 comments: &none(),
+                threads: &none(),
             },
         );
         assert!(notes.marked.is_empty());
@@ -903,6 +1061,7 @@ mod tests {
             Opened {
                 outdated: false,
                 comments: &none(),
+                threads: &none(),
             },
         );
         assert_eq!(
@@ -922,6 +1081,7 @@ mod tests {
             Opened {
                 outdated: true,
                 comments: &none(),
+                threads: &none(),
             },
         );
         assert_eq!(
@@ -965,6 +1125,7 @@ mod tests {
             Opened {
                 outdated: false,
                 comments: &none(),
+                threads: &none(),
             },
         );
         assert_eq!(notes.unified.entries[0], Entry::Heading(Heading::Outside));
@@ -989,6 +1150,7 @@ mod tests {
             Opened {
                 outdated: false,
                 comments: &none(),
+                threads: &none(),
             },
         );
         assert_eq!(notes.marked, BTreeSet::from([2, 3]));
@@ -1007,6 +1169,7 @@ mod tests {
             Opened {
                 outdated: false,
                 comments: &none(),
+                threads: &none(),
             },
         );
         let cards: Vec<&Entry> = folded
@@ -1029,6 +1192,7 @@ mod tests {
             Opened {
                 outdated: false,
                 comments: &opened,
+                threads: &none(),
             },
         );
         assert!(matches!(
@@ -1254,6 +1418,185 @@ mod tests {
         assert_eq!(made_label(1_000_000, (1_000_000 - 7_200) * 1000), "2 h ago");
     }
 
+    fn reply(id: i64, author: &str, body: &str, created_at: i64) -> ReviewReply {
+        ReviewReply {
+            id,
+            author: author.into(),
+            body: body.into(),
+            created_at,
+        }
+    }
+
+    fn with_replies(mut value: ReviewComment, replies: Vec<ReviewReply>) -> ReviewComment {
+        value.replies = replies;
+        value
+    }
+
+    #[test]
+    fn a_reply_is_by_you_or_by_the_agent_client_and_only_the_agent_is_flagged() {
+        assert_eq!(author_label("human"), "You");
+        assert_eq!(author_label("agent:claude-code"), "Agent: claude-code");
+        assert_eq!(author_label("other"), "other");
+        assert!(is_agent_reply(&reply(1, "agent:claude-code", "x", 0)));
+        assert!(!is_agent_reply(&reply(1, "human", "x", 0)));
+    }
+
+    #[test]
+    fn a_reply_head_names_the_author_and_the_time() {
+        // `now` is in seconds, `created_at` in milliseconds, as the engine gives them.
+        let now = 1_000;
+        assert_eq!(
+            reply_head("agent:claude-code", 940_000, now),
+            "Agent: claude-code · 1 min ago"
+        );
+        assert_eq!(reply_head("human", 999_000, now), "You · just now");
+    }
+
+    #[test]
+    fn a_thread_is_ordered_by_time_then_id_whatever_order_it_came_in() {
+        let replies = [
+            reply(3, "human", "c", 30),
+            reply(1, "agent:x", "a", 10),
+            reply(2, "human", "b", 10),
+        ];
+        let view = thread(&replies, true);
+        let ids: Vec<i64> = view.shown.iter().map(|reply| reply.id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_thread_of_one_or_two_replies_shows_them_all_without_a_toggle() {
+        let one = [reply(1, "human", "a", 1)];
+        let view = thread(&one, false);
+        assert_eq!(view.shown.len(), 1);
+        assert_eq!(view.toggle, None);
+        let two = [reply(1, "human", "a", 1), reply(2, "agent:x", "b", 2)];
+        let view = thread(&two, false);
+        assert_eq!(view.shown.len(), 2);
+        assert_eq!(view.toggle, None);
+    }
+
+    #[test]
+    fn a_long_thread_folds_to_its_latest_reply_with_the_earlier_ones_counted() {
+        let five: Vec<ReviewReply> = (1..=5).map(|i| reply(i, "human", "x", i)).collect();
+        let folded = thread(&five, false);
+        assert_eq!(folded.shown.len(), 1);
+        assert_eq!(folded.shown[0].id, 5);
+        assert_eq!(folded.toggle, Some(Toggle::Earlier(4)));
+        assert_eq!(Toggle::Earlier(4).label(), "4 earlier replies");
+        let open = thread(&five, true);
+        assert_eq!(open.shown.len(), 5);
+        assert_eq!(open.toggle, Some(Toggle::Hide));
+        assert_eq!(Toggle::Hide.label(), "Hide earlier replies");
+    }
+
+    #[test]
+    fn three_replies_fold_to_the_latest_and_say_two_earlier() {
+        let three: Vec<ReviewReply> = (1..=3).map(|i| reply(i, "human", "x", i)).collect();
+        let view = thread(&three, false);
+        assert_eq!(view.shown.len(), 1);
+        assert_eq!(view.toggle, Some(Toggle::Earlier(2)));
+        assert_eq!(Toggle::Earlier(1).label(), "1 earlier reply");
+    }
+
+    #[test]
+    fn a_reply_can_be_written_on_an_open_or_handled_comment_only() {
+        assert!(can_reply(ReviewStatus::Open));
+        assert!(can_reply(ReviewStatus::Handled));
+        assert!(!can_reply(ReviewStatus::Resolved));
+    }
+
+    #[test]
+    fn a_blank_reply_is_not_sent_and_the_rest_is_trimmed() {
+        assert_eq!(reply_command(7, " \n\t "), None);
+        assert_eq!(reply_command(7, ""), None);
+        assert_eq!(
+            reply_command(7, "  Use ParseError.\n"),
+            Some(CommandKind::ReplyToReviewComment {
+                id: 7,
+                body: "Use ParseError.".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_refusal_of_the_engine_reaches_the_reader_as_it_came() {
+        let mut write = ReviewWrite::default();
+        write.start(OperationId(4));
+        write.settle(
+            OperationState::Failed,
+            Some("the comment is already resolved".into()),
+        );
+        assert_eq!(
+            write.take(),
+            Some(Err("the comment is already resolved".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_card_lists_its_replies_after_its_body_with_the_toggle_above_them() {
+        let base = with_replies(
+            comment(1, "a.txt", Some((1, 1)), "x"),
+            (1..=4).map(|i| reply(i, "human", "r", i)).collect(),
+        );
+        let folded = card_entries(&base, false, false);
+        // Head, one body line, the toggle, then the latest reply's head and body line.
+        assert!(matches!(
+            folded[2],
+            Entry::Card {
+                part: Part::Toggle(Toggle::Earlier(3)),
+                ..
+            }
+        ));
+        assert!(matches!(
+            folded[3],
+            Entry::Card {
+                part: Part::Reply { agent: false, .. },
+                ..
+            }
+        ));
+        assert_eq!(folded.len(), 5);
+        let open = card_entries(&base, false, true);
+        assert_eq!(open.len(), 2 + 1 + 4 * 2);
+        assert!(matches!(
+            folded[0],
+            Entry::Card {
+                part: Part::Head {
+                    replyable: true,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_resolved_card_folds_its_replies_away_until_it_is_opened() {
+        let base = with_replies(
+            resolved(comment(1, "a.txt", Some((1, 1)), "x")),
+            vec![reply(1, "agent:x", "done", 2)],
+        );
+        assert_eq!(card_entries(&base, false, false).len(), 1);
+        let opened = card_entries(&base, true, false);
+        assert!(matches!(
+            opened[0],
+            Entry::Card {
+                part: Part::Head {
+                    replyable: false,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(opened.iter().any(|entry| matches!(
+            entry,
+            Entry::Card {
+                part: Part::Reply { agent: true, .. },
+                ..
+            }
+        )));
+    }
+
     proptest! {
         #[test]
         fn wrapped_lines_fit_the_columns_and_keep_every_character(
@@ -1274,7 +1617,7 @@ mod tests {
         ) {
             let mut note = comment(1, "a.txt", Some((1, 1)), "x");
             note.body = body.clone();
-            let entries = card_entries(&note, false);
+            let entries = card_entries(&note, false, false);
             prop_assert_eq!(entries.len(), 1 + wrap(&body, WRAP_COLUMNS).len());
         }
     }

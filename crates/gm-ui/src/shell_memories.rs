@@ -1230,7 +1230,7 @@ fn status_line(text: &str, colour: Hsla) -> Div {
 }
 
 /// A small chip: a label on the selection colour, or a flag on another.
-fn tag(text: &str, background: Hsla) -> Div {
+pub(crate) fn tag(text: &str, background: Hsla) -> Div {
     div()
         .flex_none()
         .px_1()

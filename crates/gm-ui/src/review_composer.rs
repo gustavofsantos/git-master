@@ -21,8 +21,8 @@ use crate::view::{Screen, StatusView};
 
 actions!(gitmaster_review, [SaveReviewComment]);
 
-/// The key context the save key is bound under.
-const KEY_CONTEXT: &str = "ReviewComposer";
+/// The key context the save key is bound under. The inline reply box uses it too.
+pub(crate) const KEY_CONTEXT: &str = "ReviewComposer";
 const WIDTH: f32 = 560.;
 /// The dialog hangs this far below the top of the window.
 const TOP: f32 = 96.;
@@ -45,6 +45,13 @@ pub(crate) enum ReviewTarget {
         start_line: u32,
         end_line: u32,
     },
+    /// A reply on the thread of comment `id`, whose lines are shown with it (D198).
+    Reply {
+        id: i64,
+        path: String,
+        start_line: u32,
+        end_line: u32,
+    },
 }
 
 impl ReviewTarget {
@@ -52,7 +59,8 @@ impl ReviewTarget {
         match self {
             ReviewTarget::New { path, .. }
             | ReviewTarget::NewByText { path, .. }
-            | ReviewTarget::Edit { path, .. } => path,
+            | ReviewTarget::Edit { path, .. }
+            | ReviewTarget::Reply { path, .. } => path,
         }
     }
 
@@ -69,6 +77,11 @@ impl ReviewTarget {
                 ..
             }
             | ReviewTarget::Edit {
+                start_line,
+                end_line,
+                ..
+            }
+            | ReviewTarget::Reply {
                 start_line,
                 end_line,
                 ..
@@ -112,6 +125,7 @@ pub(crate) fn command(target: &ReviewTarget, text: &str) -> Option<CommandKind> 
             body,
         },
         ReviewTarget::Edit { id, .. } => CommandKind::EditReviewComment { id: *id, body },
+        ReviewTarget::Reply { id, .. } => CommandKind::ReplyToReviewComment { id: *id, body },
     })
 }
 
@@ -127,6 +141,7 @@ pub(crate) fn title(target: &ReviewTarget) -> String {
     match target {
         ReviewTarget::New { .. } | ReviewTarget::NewByText { .. } => format!("Comment on {range}"),
         ReviewTarget::Edit { .. } => format!("Edit comment on {range}"),
+        ReviewTarget::Reply { .. } => format!("Reply on {range}"),
     }
 }
 
@@ -136,6 +151,7 @@ pub(crate) fn save_label(target: &ReviewTarget) -> &'static str {
     match target {
         ReviewTarget::New { .. } | ReviewTarget::NewByText { .. } => "Comment",
         ReviewTarget::Edit { .. } => "Save",
+        ReviewTarget::Reply { .. } => "Reply",
     }
 }
 
@@ -167,6 +183,17 @@ pub(crate) fn focus_return(diff_had_focus: bool) -> FocusReturn {
     } else {
         FocusReturn::List
     }
+}
+
+/// The inline Reply box under a thread on the Local review page (D198): the comment it
+/// answers, its body field, the refusal of the last try, and whether its write is in flight.
+pub(crate) struct InlineReply {
+    pub(crate) id: i64,
+    pub(crate) body: Entity<TextArea>,
+    pub(crate) error: Option<String>,
+    /// Whether the box sent the write in flight, so that write's outcome is the box's.
+    pub(crate) sent: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 /// The dialog while it is open: what it writes, the body field and the error it shows.
@@ -204,7 +231,9 @@ impl StatusView {
                 .comment(*id)
                 .map(|comment| comment.body.clone())
                 .unwrap_or_default(),
-            ReviewTarget::New { .. } | ReviewTarget::NewByText { .. } => String::new(),
+            ReviewTarget::New { .. }
+            | ReviewTarget::NewByText { .. }
+            | ReviewTarget::Reply { .. } => String::new(),
         };
         let body = cx.new(|cx| TextArea::new("Comment", cx).with_lines(4, 12));
         body.update(cx, |area, cx| area.set_text(&initial, cx));
@@ -253,6 +282,96 @@ impl StatusView {
         }
     }
 
+    /// Reply on a thread from the diff: the composer on the comment's lines (D198).
+    pub(crate) fn open_review_reply(
+        &mut self,
+        id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match self.model.review.comment(id) {
+            Some(comment) if review::can_reply(comment.status) => {
+                let (start_line, end_line) = review::shown_range(comment);
+                ReviewTarget::Reply {
+                    id,
+                    path: comment.path.clone(),
+                    start_line,
+                    end_line,
+                }
+            }
+            Some(_) => {
+                self.notify_user("This comment is resolved. Reopen it to reply.", cx);
+                return;
+            }
+            None => {
+                self.notify_user("This comment is no longer listed.", cx);
+                return;
+            }
+        };
+        self.open_review_composer(target, window, cx);
+    }
+
+    /// Opens the inline Reply box under a thread on the Local review page (D198). Nothing
+    /// opens on a resolved comment or one not listed.
+    pub(crate) fn open_inline_reply(
+        &mut self,
+        id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .model
+            .review
+            .comment(id)
+            .is_some_and(|comment| review::can_reply(comment.status))
+        {
+            return;
+        }
+        let body = cx.new(|cx| TextArea::new("Reply", cx).with_lines(2, 8));
+        let subscriptions =
+            vec![
+                cx.subscribe_in(&body, window, |this, _, event: &TextAreaEvent, _, cx| {
+                    if *event == TextAreaEvent::Cancel {
+                        this.close_inline_reply(cx);
+                    }
+                }),
+            ];
+        body.update(cx, |area, cx| area.focus(window, cx));
+        self.review_reply = Some(InlineReply {
+            id,
+            body,
+            error: None,
+            sent: false,
+            _subscriptions: subscriptions,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn close_inline_reply(&mut self, cx: &mut Context<Self>) {
+        self.review_reply = None;
+        cx.notify();
+    }
+
+    /// Reply or Ctrl+Enter in the inline box: sends the reply with `Actor::Human`. A blank
+    /// body sends nothing.
+    pub(crate) fn submit_inline_reply(&mut self, cx: &mut Context<Self>) {
+        if self.model.review_write.is_pending() {
+            return;
+        }
+        let Some(reply) = self.review_reply.as_mut() else {
+            return;
+        };
+        let text = reply.body.read(cx).text().to_owned();
+        let Some(kind) = review::reply_command(reply.id, &text) else {
+            return;
+        };
+        reply.error = None;
+        reply.sent = true;
+        let id = self.engine.dispatch(Actor::Human, kind);
+        self.model.review_write.start(id);
+        cx.notify();
+    }
+
     /// The text changed: the error of the last try goes, since it may be about the old text.
     fn on_review_text(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.review_dialog.as_mut() else {
@@ -296,6 +415,18 @@ impl StatusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The inline box's write: success clears the box, a refusal stays in it.
+        if let Some(reply) = self.review_reply.as_mut().filter(|reply| reply.sent) {
+            match outcome {
+                Ok(()) => self.review_reply = None,
+                Err(message) => {
+                    reply.sent = false;
+                    reply.error = Some(message);
+                }
+            }
+            cx.notify();
+            return;
+        }
         match outcome {
             Ok(()) => {
                 if let Some(dialog) = self.review_dialog.take() {

@@ -55,15 +55,14 @@ The app shows each comment with one of these badges:
 
 ## Replies
 
-> **Planned.** The app does not show replies or offer the **Reply** box yet; agents already read and write replies through MCP.
-
 A thread is a comment and the replies to it. The comment is the **root** of the thread. Its replies follow it in order, oldest first, directly below it in the diff and on the **Local review** page. Each reply has an author, a body and a time. The author is **You** or the agent that wrote the reply, which is shown as **Agent-written**. A reply is plain text: GitMaster shows it as written, does not render markup in it and runs nothing in it.
 
 - A thread is one level deep. A reply to a reply belongs to the thread of the root, so a thread never nests.
 - The status, the anchor, the **Outdated** flag and the Before and After snapshots belong to the root. A reply has none of them.
 - The agent's summary is a reply. When the agent marks a comment handled, its summary becomes a reply by the agent on the thread. Marking it handled again adds another reply, so the thread keeps every answer, and the "after" snapshot is replaced as before.
 - The agent can ask you a question without changing the status. It answers with a reply, which leaves the comment as it is.
-- You reply in the **Reply** box under the thread. Your reply on a handled comment reopens it: it becomes **Open** again, its "after" snapshot is discarded, and the agent sees it the next time it lists the open comments. Your reply on an open comment leaves its status as it is.
+- A thread of more than two replies shows its latest reply and a toggle, **N earlier replies**, that shows the others; **Hide earlier replies** folds them again.
+- You reply in the **Reply** box under the thread on the **Local review** page, or with **Reply** on the card in the diff, which opens the comment box on the thread. Your reply on a handled comment reopens it: it becomes **Open** again, its "after" snapshot is discarded, and the agent sees it the next time it lists the open comments. Your reply on an open comment leaves its status as it is.
 - Nobody replies to a resolved comment. The agent is refused, and the **Reply** box is not offered until you choose **Reopen Comment**.
 - A reply cannot be edited, resolved, handled or deleted on its own. Deleting a comment deletes its replies too.
 

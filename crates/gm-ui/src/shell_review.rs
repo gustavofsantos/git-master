@@ -7,16 +7,18 @@
 use std::ops::Range;
 use std::time::Instant;
 
-use gm_schema::{Actor, CommandKind, ReviewComment, ReviewStatus};
+use gm_schema::{Actor, CommandKind, ReviewComment, ReviewReply, ReviewStatus};
 use gpui::{
     AnyElement, Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div,
     prelude::*, px, uniform_list,
 };
 
-use crate::action_registry::{Action, Args};
+use crate::action_registry::{Action, Args, shortcut_text};
 use crate::local_review::{self, Counts, Filter, Row, Version};
 use crate::review::{self, Badge, DELETE_CONFIRM, Delete};
+use crate::review_composer::{self, KEY_CONTEXT, SaveReviewComment};
 use crate::shell_history::{action_button, now_secs};
+use crate::shell_memories::tag;
 use crate::theme;
 use crate::view::{Screen, StatusView};
 
@@ -180,9 +182,147 @@ impl StatusView {
             .gap_3()
             .child(head)
             .child(body)
+            .child(self.thread_block(comment, cx))
+            .child(self.reply_area(comment, cx))
             .child(self.comment_actions(comment, cx))
             .child(version_toggle(version, cx))
             .child(self.version_text(comment, version))
+    }
+
+    /// The replies under the comment body (D198): the thread as the model shows it, and
+    /// the toggle that shows or folds the earlier replies above them.
+    fn thread_block(&self, comment: &ReviewComment, cx: &mut Context<Self>) -> Div {
+        let id = comment.id;
+        let expanded = self.model.local_review.thread_open(id);
+        let thread = review::thread(&comment.replies, expanded);
+        let now = now_secs();
+        let toggle = thread.toggle.map(|toggle| {
+            div()
+                .id((
+                    "review-thread-toggle",
+                    u64::try_from(id).unwrap_or_default(),
+                ))
+                .text_xs()
+                .text_color(theme::accent())
+                .cursor_pointer()
+                .child(toggle.label())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.model.local_review.toggle_thread(id);
+                        cx.notify();
+                    }),
+                )
+        });
+        div().flex().flex_col().gap_2().children(toggle).children(
+            thread
+                .shown
+                .into_iter()
+                .map(|reply| reply_block(reply, now)),
+        )
+    }
+
+    /// The Reply box under the thread (D198) while it is open for this comment, else the
+    /// Reply button. Nothing on a resolved comment: its Reopen comes first.
+    fn reply_area(&self, comment: &ReviewComment, cx: &mut Context<Self>) -> Div {
+        let id = comment.id;
+        if !review::can_reply(comment.status) {
+            return div();
+        }
+        let Some(reply) = self.review_reply.as_ref().filter(|reply| reply.id == id) else {
+            let button = div()
+                .id(("review-reply-open", u64::try_from(id).unwrap_or_default()))
+                .flex_none()
+                .px_2()
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .border_1()
+                .border_color(theme::button_border())
+                .text_xs()
+                .text_color(theme::text())
+                .cursor_pointer()
+                .child("Reply")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.open_inline_reply(id, window, cx);
+                    }),
+                );
+            return div().flex().flex_row().child(button);
+        };
+        let pending = self.model.review_write.is_pending();
+        let text = reply.body.read(cx).text().to_owned();
+        let can_send = review_composer::may_save(pending, &text);
+        let send = div()
+            .id("review-reply-send")
+            .px_3()
+            .h(px(26.))
+            .flex()
+            .items_center()
+            .rounded_md()
+            .bg(theme::accent())
+            .text_color(theme::on_accent())
+            .font_weight(FontWeight::MEDIUM)
+            .when(!can_send, |this| this.opacity(0.5))
+            .when(can_send, gpui::Styled::cursor_pointer)
+            .child(if pending { "Sending…" } else { "Reply" })
+            .when(can_send, |this| {
+                this.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.submit_inline_reply(cx);
+                    }),
+                )
+            });
+        let cancel = div()
+            .id("review-reply-cancel")
+            .px_3()
+            .h(px(26.))
+            .flex()
+            .items_center()
+            .rounded_md()
+            .cursor_pointer()
+            .text_color(theme::text())
+            .child("Cancel")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.close_inline_reply(cx);
+                }),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &SaveReviewComment, _, cx| {
+                this.submit_inline_reply(cx);
+            }))
+            .child(reply.body.clone())
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .child(format!("{} sends · Escape cancels", shortcut_text("⌘↵"))),
+            )
+            .children(reply.error.as_ref().map(|error| {
+                div()
+                    .text_sm()
+                    .text_color(theme::error())
+                    .child(error.clone())
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .items_center()
+                    .gap_2()
+                    .child(cancel)
+                    .child(send),
+            )
     }
 
     /// The buttons of the selected comment, each run through the registry: the same
@@ -327,6 +467,14 @@ impl StatusView {
         let Some(comment) = self.model.review.comment(id) else {
             return;
         };
+        // A reply box typed under another comment does not follow the selection.
+        if self
+            .review_reply
+            .as_ref()
+            .is_some_and(|reply| reply.id != id)
+        {
+            self.review_reply = None;
+        }
         if self.model.local_review.select(comment) {
             self.request_review_texts();
         }
@@ -384,6 +532,47 @@ impl StatusView {
         self.load_selected(cx);
         cx.notify();
     }
+}
+
+/// One reply of a thread (D198): its author and time over its plain-text body. An agent's
+/// reply carries the Agent-written flag and an accent bar; the person's a plain one.
+fn reply_block(reply: &ReviewReply, now: i64) -> Div {
+    let agent = review::is_agent_reply(reply);
+    let bar = if agent {
+        theme::accent()
+    } else {
+        theme::hairline()
+    };
+    let head = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .text_xs()
+        .text_color(theme::muted())
+        .children(agent.then(|| tag("Agent-written", theme::selected_row())))
+        .child(review::reply_head(&reply.author, reply.created_at, now));
+    let body = div()
+        .flex()
+        .flex_col()
+        .text_sm()
+        .text_color(theme::text())
+        .children(reply.body.lines().map(|line| {
+            div().min_h(px(16.)).child(if line.is_empty() {
+                " ".to_owned()
+            } else {
+                line.to_owned()
+            })
+        }));
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .pl_3()
+        .border_l_2()
+        .border_color(bar)
+        .child(head)
+        .child(body)
 }
 
 /// The filter chips, each with its count once the listing is read.

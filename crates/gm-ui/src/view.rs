@@ -53,7 +53,7 @@ use crate::recent::{self, Recents};
 use crate::reflog;
 use crate::resize;
 use crate::restack_dialog::{RestackDialog, Transition};
-use crate::review_composer::ReviewDialog;
+use crate::review_composer::{InlineReply, ReviewDialog};
 use crate::shell_code::CodeView;
 use crate::shell_history::CommitTexts;
 use crate::shell_labels::{self, LabelsView};
@@ -218,6 +218,8 @@ pub struct StatusView {
     pub(crate) new_stash_dialog: Option<NewStashDialog>,
     /// The review comment composer, while it is open (B4c).
     pub(crate) review_dialog: Option<ReviewDialog>,
+    /// The inline Reply box under a thread on the Local review page (D198).
+    pub(crate) review_reply: Option<InlineReply>,
     /// The inputs dialog of a workflow that declares inputs, while it is open.
     pub(crate) workflow_inputs_dialog: Option<WorkflowInputsDialog>,
     /// The "Run this version?" dialog, while the engine waits for a review of a script.
@@ -508,6 +510,7 @@ impl StatusView {
             history_scope_menu: false,
             new_stash_dialog: None,
             review_dialog: None,
+            review_reply: None,
             workflow_inputs_dialog: None,
             workflow_review_dialog: None,
             workflow_source,
@@ -1261,6 +1264,7 @@ impl StatusView {
             ),
             DiffPaneEvent::LeaveCommit => self.close_commit_file(cx),
             DiffPaneEvent::Review { action, args } => self.run_action(*action, args, window, cx),
+            DiffPaneEvent::ReplyTo(id) => self.open_review_reply(*id, window, cx),
             // One layout for both diffs: the other pane follows, and the choice is saved (D40).
             DiffPaneEvent::LayoutChosen(layout) => {
                 self.diff_pane
