@@ -37,8 +37,6 @@ Filter the list by kind, by status, by file, by author or by scope: this reposit
 
 ## Let an agent propose memories
 
-> **Planned.** The `/gitmaster:propose-memories` skill is not in the plugin yet.
-
 In a session with the GitMaster [plugin](../agents/agent-integration.md), ask for it:
 
 ```text
@@ -82,8 +80,6 @@ By default an agent sees only accepted memories. It can ask for proposed ones, w
 Text that comes from a memory is untrusted data, like every text from a thread. The results mark it as such.
 
 ### Prepare a task
-
-> **Planned.** The `/gitmaster:prepare` skill is not in the plugin yet.
 
 To start a task with the right background, ask the plugin to prepare:
 
