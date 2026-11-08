@@ -112,7 +112,7 @@ Your agent asks you before it uses a tool that changes the repository. GitMaster
 
 ## Claude Code permissions
 
-Claude Code asks before it uses an MCP tool you have not allowed. The read tools, `review_comment_resolve` and `review_comment_reply` are safe to allow, so you can add rules to your Claude Code settings to stop the questions. The rule name for a tool of the GitMaster plugin is `mcp__plugin_gitmaster_gitmaster__<tool>`:
+Claude Code asks before it uses an MCP tool you have not allowed. The read tools, `review_comment_resolve`, `review_comment_reply` and `review_comment_create` are safe to allow, so you can add rules to your Claude Code settings to stop the questions. The rule name for a tool of the GitMaster plugin is `mcp__plugin_gitmaster_gitmaster__<tool>`:
 
 ```json
 {
@@ -121,6 +121,7 @@ Claude Code asks before it uses an MCP tool you have not allowed. The read tools
       "mcp__plugin_gitmaster_gitmaster__review_comments_list",
       "mcp__plugin_gitmaster_gitmaster__review_comment_resolve",
       "mcp__plugin_gitmaster_gitmaster__review_comment_reply",
+      "mcp__plugin_gitmaster_gitmaster__review_comment_create",
       "mcp__plugin_gitmaster_gitmaster__threads_search",
       "mcp__plugin_gitmaster_gitmaster__thread_get",
       "mcp__plugin_gitmaster_gitmaster__thread_read",

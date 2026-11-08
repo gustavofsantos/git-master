@@ -125,6 +125,7 @@ fn the_handshake_lists_only_the_tools_the_agent_does_not_have() {
             "review_comments_list",
             "review_comment_resolve",
             "review_comment_reply",
+            "review_comment_create",
             "threads_search",
             "thread_get",
             "thread_read",
@@ -329,6 +330,275 @@ fn errors_are_answered_not_fatal() {
     assert_eq!(replies[3]["result"]["isError"], true);
     assert_eq!(replies[4]["error"]["code"], -32601);
     assert_eq!(replies[5]["result"], json!({}));
+}
+
+/// A reply as the person writes it: through the engine, as the person (D200).
+fn reply_as_person(dir: &Path, id: i64, body: &str) {
+    let mut engine = gm_core::Engine::new(Box::new(gm_core::git::SubprocessGit::default()));
+    let human = |kind| Command {
+        actor: Actor::Human,
+        kind,
+    };
+    engine.handle(
+        OperationId(1),
+        &human(CommandKind::OpenRepo {
+            path: dir.to_string_lossy().into_owned(),
+        }),
+    );
+    engine.handle(
+        OperationId(2),
+        &human(CommandKind::ReplyToReviewComment {
+            id,
+            body: body.into(),
+        }),
+    );
+}
+
+#[test]
+fn an_agent_starts_a_note_a_question_and_a_flag_and_the_list_shows_them() {
+    let dir = repo();
+    comment(dir.path(), 3, "check c");
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "a", "kind": "note", "body": "a is read once" }),
+            ),
+            call(
+                3,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "b", "kind": "question", "body": "is b a bee?" }),
+            ),
+            call(
+                4,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "c", "kind": "flag", "severity": "high", "body": "c may be stale" }),
+            ),
+            call(5, "review_comments_list", &json!({ "author": "agent" })),
+            call(6, "review_comments_list", &json!({ "author": "any" })),
+            call(7, "review_comments_list", &json!({})),
+        ],
+    );
+    let note = result(&replies[1]);
+    assert_eq!(note["id"], 2);
+    assert_eq!(note["author"], "agent:test-client");
+    assert_eq!(note["kind"], "note");
+    assert_eq!(note["status"], "open");
+    assert_eq!(note["needs_answer"], false);
+    assert_eq!(note["start_line"], 1);
+    assert_eq!(note["anchor_text"], "a");
+    assert_eq!(note["untrusted"], true);
+    assert!(note.get("severity").is_none(), "{note}");
+    assert!(note["replies"].as_array().unwrap().is_empty());
+
+    let question = result(&replies[2]);
+    assert_eq!(question["kind"], "question");
+    assert_eq!(question["needs_answer"], true);
+    assert!(question.get("severity").is_none(), "{question}");
+
+    let flag = result(&replies[3]);
+    assert_eq!(flag["kind"], "flag");
+    assert_eq!(flag["severity"], "high");
+    assert_eq!(flag["needs_answer"], false);
+
+    let agents = result(&replies[4])["comments"].as_array().unwrap().clone();
+    let ids: Vec<i64> = agents
+        .iter()
+        .map(|comment| comment["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [2, 3, 4]);
+
+    let all = result(&replies[5])["comments"].as_array().unwrap().clone();
+    assert_eq!(all.len(), 4);
+
+    // The default list is the person's threads, as before the agent could start one.
+    let own = result(&replies[6])["comments"].as_array().unwrap().clone();
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0]["author"], "human");
+    assert!(own[0].get("kind").is_none(), "{}", own[0]);
+    assert_eq!(own[0]["needs_answer"], false);
+}
+
+#[test]
+fn an_agents_question_stays_out_of_the_default_list_until_the_person_replies() {
+    let dir = repo();
+    let first = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "b", "kind": "question", "body": "is b a bee?" }),
+            ),
+            call(3, "review_comments_list", &json!({})),
+        ],
+    );
+    assert_eq!(result(&first[1])["id"], 1);
+    assert!(result(&first[2])["comments"].as_array().unwrap().is_empty());
+
+    reply_as_person(dir.path(), 1, "yes, keep the name");
+
+    let second = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(2, "review_comments_list", &json!({})),
+            call(3, "review_comments_list", &json!({ "author": "agent" })),
+        ],
+    );
+    for reply in [&second[1], &second[2]] {
+        let comments = result(reply)["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1, "{reply}");
+        assert_eq!(comments[0]["kind"], "question");
+        assert_eq!(comments[0]["needs_answer"], false);
+        assert_eq!(comments[0]["replies"][0]["author"], "human");
+        assert_eq!(comments[0]["replies"][0]["body"], "yes, keep the name");
+    }
+}
+
+#[test]
+fn the_engine_refusals_come_back_as_errors_and_the_server_keeps_answering() {
+    let dir = repo();
+    std::fs::write(dir.path().join("f.txt"), "a\nx\nx\nd\n").unwrap();
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "x", "kind": "note", "body": "twice" }),
+            ),
+            call(
+                3,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "nothing like this", "kind": "note", "body": "gone" }),
+            ),
+            call(
+                4,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "a", "kind": "flag", "body": "no severity" }),
+            ),
+            call(
+                5,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "a", "kind": "note", "severity": "low", "body": "severity on a note" }),
+            ),
+            call(
+                6,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "a", "kind": "praise", "body": "x" }),
+            ),
+            call(
+                7,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "a", "kind": "flag", "severity": "extreme", "body": "x" }),
+            ),
+            call(8, "review_comments_list", &json!({ "author": "everyone" })),
+            call(
+                9,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "a", "kind": "note", "body": "the server still answers" }),
+            ),
+            json!({ "jsonrpc": "2.0", "id": 10, "method": "ping" }),
+        ],
+    );
+    refused_with(&replies[1], "appears more than once");
+    refused_with(&replies[2], "is not in the file as it is now");
+    refused_with(&replies[3], "a flag needs a severity");
+    refused_with(&replies[4], "only a flag takes a severity");
+    refused_with(&replies[5], "kind must be note, question or flag");
+    refused_with(&replies[6], "severity must be low, medium or high");
+    refused_with(&replies[7], "author must be human, agent or any");
+    assert_eq!(result(&replies[8])["id"], 1);
+    assert_eq!(replies[9]["result"], json!({}));
+}
+
+#[test]
+fn a_file_holds_five_open_agent_threads_and_a_sixth_is_refused() {
+    let dir = repo();
+    std::fs::write(dir.path().join("f.txt"), "a\nb\nc\nd\ne\nf\n").unwrap();
+    let lines = ["a", "b", "c", "d", "e", "f"];
+    let mut requests = vec![initialize()];
+    requests.extend((2..).zip(lines).map(|(id, line)| {
+        call(
+            id,
+            "review_comment_create",
+            &json!({ "path": "f.txt", "anchor_text": line, "kind": "note", "body": format!("note on {line}") }),
+        )
+    }));
+    let replies = session(dir.path(), &requests);
+    for reply in &replies[1..6] {
+        result(reply);
+    }
+    refused_with(&replies[6], "this file already has 5 open agent threads");
+}
+
+#[test]
+fn an_agent_cannot_resolve_its_own_thread() {
+    let dir = repo();
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "review_comment_create",
+                &json!({ "path": "f.txt", "anchor_text": "a", "kind": "flag", "severity": "medium", "body": "a guess" }),
+            ),
+            call(
+                3,
+                "review_comment_resolve",
+                &json!({ "id": 1, "summary": "checked it" }),
+            ),
+            call(4, "review_comments_list", &json!({ "author": "agent" })),
+        ],
+    );
+    refused_with(&replies[2], "an agent cannot hand off a thread it started");
+    assert_eq!(result(&replies[3])["comments"][0]["status"], "open");
+}
+
+#[test]
+fn the_create_tool_declares_its_arguments_and_is_not_read_only() {
+    let dir = repo();
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        ],
+    );
+    let tools = replies[1]["result"]["tools"].as_array().unwrap();
+    let create = tools
+        .iter()
+        .find(|tool| tool["name"] == "review_comment_create")
+        .expect("review_comment_create is listed");
+    assert_eq!(create["annotations"]["readOnlyHint"], false);
+    assert_eq!(create["annotations"]["destructiveHint"], false);
+    assert_eq!(create["inputSchema"]["additionalProperties"], false);
+    assert_eq!(
+        create["inputSchema"]["required"],
+        json!(["path", "anchor_text", "kind", "body"])
+    );
+    assert_eq!(
+        create["inputSchema"]["properties"]["kind"]["enum"],
+        json!(["note", "question", "flag"])
+    );
+    assert_eq!(
+        create["inputSchema"]["properties"]["severity"]["enum"],
+        json!(["low", "medium", "high"])
+    );
+    assert_eq!(
+        tools
+            .iter()
+            .find(|tool| tool["name"] == "review_comments_list")
+            .unwrap()["inputSchema"]["properties"]["author"]["enum"],
+        json!(["human", "agent", "any"])
+    );
 }
 
 #[test]

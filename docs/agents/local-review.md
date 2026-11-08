@@ -92,7 +92,7 @@ review_comments_list(status="open")
 
 ## Notes, questions and flags from the agent
 
-> **Planned.** An agent cannot start a thread yet.
+> **Planned.** The app does not yet show the kind chips, the **Needs answer** badge or the **Agent-written** label; the MCP tools already return them.
 
 The agent can start a thread of its own on any text in the working tree, with `review_comment_create`. Each one has a kind:
 
