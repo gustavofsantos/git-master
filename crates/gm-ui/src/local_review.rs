@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use gm_schema::{OperationId, ReviewChange, ReviewComment, ReviewStatus};
 
-use crate::review::{self, Badge, Delete, DeleteArm};
+use crate::review::{self, Badge, Chips, Delete, DeleteArm};
 
 const NO_SNAPSHOT: &str = "No snapshot was taken for this comment.";
 const NOT_IN_SNAPSHOT: &str = "The commented text is not in the snapshot.";
@@ -25,15 +25,21 @@ pub enum Filter {
     Resolved,
     /// The comments whose text is not in the file now, whatever their status.
     Outdated,
+    /// The questions an agent asked that no person has answered yet (D200).
+    NeedsAnswer,
+    /// The threads an agent started (D200), whatever their status.
+    Agent,
 }
 
 impl Filter {
     /// The filters, in the order their chips show.
-    pub const ALL: [Filter; 4] = [
+    pub const ALL: [Filter; 6] = [
         Filter::All,
         Filter::Open,
         Filter::Resolved,
         Filter::Outdated,
+        Filter::NeedsAnswer,
+        Filter::Agent,
     ];
 
     #[must_use]
@@ -43,6 +49,8 @@ impl Filter {
             Filter::Open => "Open",
             Filter::Resolved => "Resolved",
             Filter::Outdated => "Outdated",
+            Filter::NeedsAnswer => review::NEEDS_ANSWER,
+            Filter::Agent => "Agent",
         }
     }
 
@@ -56,6 +64,8 @@ impl Filter {
             Filter::Open => comment.status != ReviewStatus::Resolved,
             Filter::Resolved => comment.status == ReviewStatus::Resolved,
             Filter::Outdated => is_outdated(comment),
+            Filter::NeedsAnswer => comment.needs_answer,
+            Filter::Agent => review::is_agent_root(comment),
         }
     }
 }
@@ -73,6 +83,8 @@ pub struct Counts {
     pub open: usize,
     pub resolved: usize,
     pub outdated: usize,
+    pub needs_answer: usize,
+    pub agent: usize,
 }
 
 impl Counts {
@@ -83,6 +95,8 @@ impl Counts {
             Filter::Open => self.open,
             Filter::Resolved => self.resolved,
             Filter::Outdated => self.outdated,
+            Filter::NeedsAnswer => self.needs_answer,
+            Filter::Agent => self.agent,
         }
     }
 }
@@ -100,14 +114,20 @@ pub fn counts(comments: &[ReviewComment]) -> Counts {
         open: kept(Filter::Open),
         resolved: kept(Filter::Resolved),
         outdated: kept(Filter::Outdated),
+        needs_answer: kept(Filter::NeedsAnswer),
+        agent: kept(Filter::Agent),
     }
 }
 
-/// The count on the sidebar's Local review row: the open comments, and no pill at all
-/// while there are none or the listing is not read yet.
+/// The count on the sidebar's Local review row: the open comments the person started,
+/// and no pill at all while there are none or the listing is not read yet. An agent's
+/// note or flag is not work waiting for the agent, so it is not counted (D200).
 #[must_use]
 pub fn open_pill(comments: Option<&[ReviewComment]>) -> Option<String> {
-    let open = counts(comments?).open;
+    let open = comments?
+        .iter()
+        .filter(|comment| !review::is_agent_root(comment) && Filter::Open.keeps(comment))
+        .count();
     (open > 0).then(|| open.to_string())
 }
 
@@ -123,6 +143,7 @@ pub enum Row {
         lines: String,
         summary: String,
         badge: Badge,
+        chips: Chips,
         created_at: i64,
     },
 }
@@ -155,6 +176,7 @@ fn comment_row(comment: &ReviewComment) -> Row {
         lines: review::range_label(start, end),
         summary: summary(&comment.body),
         badge: review::badge(comment),
+        chips: review::chips(comment),
         created_at: comment.created_at,
     }
 }
@@ -515,7 +537,7 @@ pub fn changed_lines(before: &[String], after: &[String]) -> (Vec<bool>, Vec<boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_schema::{ReviewAnchor, ReviewLocation};
+    use gm_schema::{ReviewAnchor, ReviewKind, ReviewLocation, ReviewSeverity};
     use proptest::prelude::*;
 
     fn comment(id: i64, path: &str, status: ReviewStatus, line: Option<u32>) -> ReviewComment {
@@ -586,6 +608,8 @@ mod tests {
                 open: 2,
                 resolved: 2,
                 outdated: 2,
+                needs_answer: 0,
+                agent: 0,
             }
         );
         assert_eq!(counted.of(Filter::Resolved), 2);
@@ -662,6 +686,7 @@ mod tests {
                 lines: "lines 12–15".into(),
                 summary: "rename this".into(),
                 badge: Badge::Open,
+                chips: Chips::default(),
                 created_at: 7_000,
             }
         );
@@ -996,10 +1021,87 @@ mod tests {
         );
     }
 
+    fn agent_comment(id: i64, kind: ReviewKind, line: Option<u32>) -> ReviewComment {
+        let mut agent = comment(id, "a", ReviewStatus::Open, line);
+        agent.author = Some("agent:claude-code".into());
+        agent.kind = Some(kind);
+        agent
+    }
+
+    #[test]
+    fn the_needs_answer_and_agent_filters_keep_their_threads() {
+        let mut question = agent_comment(1, ReviewKind::Question, Some(1));
+        question.needs_answer = true;
+        let note = agent_comment(2, ReviewKind::Note, Some(2));
+        let person = comment(3, "a", ReviewStatus::Open, Some(3));
+        assert!(Filter::NeedsAnswer.keeps(&question));
+        assert!(!Filter::NeedsAnswer.keeps(&note));
+        assert!(!Filter::NeedsAnswer.keeps(&person));
+        assert!(Filter::Agent.keeps(&question));
+        assert!(Filter::Agent.keeps(&note));
+        assert!(!Filter::Agent.keeps(&person));
+        assert!(Filter::All.keeps(&person));
+    }
+
+    #[test]
+    fn counts_say_how_many_need_an_answer_and_how_many_an_agent_started() {
+        let mut question = agent_comment(1, ReviewKind::Question, Some(1));
+        question.needs_answer = true;
+        let all = [
+            question,
+            agent_comment(2, ReviewKind::Note, Some(2)),
+            comment(3, "a", ReviewStatus::Open, Some(3)),
+        ];
+        let counted = counts(&all);
+        assert_eq!(counted.needs_answer, 1);
+        assert_eq!(counted.agent, 2);
+        assert_eq!(counted.of(Filter::NeedsAnswer), 1);
+        assert_eq!(counted.of(Filter::Agent), 2);
+        assert_eq!(
+            counted.open, 3,
+            "the Open filter still keeps every open thread"
+        );
+    }
+
+    #[test]
+    fn the_pill_counts_the_open_comments_a_person_started_only() {
+        let all = [
+            comment(1, "a", ReviewStatus::Open, Some(1)),
+            agent_comment(2, ReviewKind::Note, Some(2)),
+            agent_comment(3, ReviewKind::Flag, Some(3)),
+            agent_comment(4, ReviewKind::Question, Some(4)),
+        ];
+        assert_eq!(open_pill(Some(&all)), Some("1".to_owned()));
+        let agent_only = [agent_comment(2, ReviewKind::Note, Some(2))];
+        assert_eq!(open_pill(Some(&agent_only)), None);
+    }
+
+    #[test]
+    fn a_row_of_an_agent_root_carries_its_chips() {
+        let mut flag = agent_comment(5, ReviewKind::Flag, Some(2));
+        flag.severity = Some(ReviewSeverity::High);
+        let listed = rows(&[flag], Filter::Agent);
+        let Row::Comment { chips, .. } = &listed[1] else {
+            panic!("the second row is the comment");
+        };
+        assert_eq!(chips.kind, ["Flag", "high"]);
+        assert!(chips.agent);
+    }
+
     #[test]
     fn the_filter_labels_and_the_version_captions_are_the_page_words() {
         let labels: Vec<&str> = Filter::ALL.into_iter().map(Filter::label).collect();
-        assert_eq!(labels, ["All", "Open", "Resolved", "Outdated"]);
+        assert_eq!(
+            labels,
+            [
+                "All",
+                "Open",
+                "Resolved",
+                "Outdated",
+                "Needs answer",
+                "Agent"
+            ]
+        );
         assert_eq!(Version::Before.label(), "Before");
         assert_eq!(Version::After.caption(), "Now");
     }

@@ -31,6 +31,7 @@ use crate::review::{
 };
 use crate::shell_history::{change_color, file_counts, now_secs, path_label};
 use crate::shell_list::change_letter;
+use crate::shell_review::chips_row;
 use crate::theme;
 
 /// The key context the pane's bindings are scoped to.
@@ -905,15 +906,7 @@ impl DiffPane {
             _ => theme::accent(),
         };
         let content = match part {
-            Part::Head {
-                badge,
-                lines,
-                created_at,
-                replyable,
-            } => {
-                let meta = format!("{lines} · {}", review::made_label(now_secs(), *created_at));
-                self.card_head(ix, id, *badge, &meta, *replyable, cx)
-            }
+            Part::Head { .. } => self.card_head(ix, id, part, cx),
             Part::Reply {
                 agent,
                 author,
@@ -976,18 +969,22 @@ impl DiffPane {
             .into_any_element()
     }
 
-    /// The head row of a card: the badge, the range, when it was made, and the
-    /// buttons. Delete asks once, inline; a resolved card can be folded again, and
-    /// a card that can take a reply offers **Reply** (D198).
-    fn card_head(
-        &self,
-        ix: usize,
-        id: i64,
-        badge: Badge,
-        meta: &str,
-        replyable: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// The head row of a card: the badge and the agent's chips, the range, when it was
+    /// made, and the buttons. Delete asks once, inline; a resolved card can be folded
+    /// again, and a card that can take a reply offers **Reply** (D198).
+    fn card_head(&self, ix: usize, id: i64, part: &Part, cx: &mut Context<Self>) -> AnyElement {
+        let Part::Head {
+            badge,
+            lines,
+            created_at,
+            replyable,
+            chips,
+        } = part
+        else {
+            return div().into_any_element();
+        };
+        let (badge, replyable) = (*badge, *replyable);
+        let meta = format!("{lines} · {}", review::made_label(now_secs(), *created_at));
         let (label, colour) = match badge {
             Badge::Open => ("Open", theme::accent()),
             Badge::Handled => ("Handled", theme::accent()),
@@ -1001,7 +998,7 @@ impl DiffPane {
         } else {
             "Delete"
         };
-        let resolve_label = if resolved { "Reopen" } else { "Resolve" };
+        let resolve_label = review::resolve_label(resolved, chips.note);
         let resolve_action = if resolved {
             Action::ReopenReviewComment
         } else {
@@ -1023,12 +1020,8 @@ impl DiffPane {
                     .font_weight(FontWeight::MEDIUM)
                     .child(label),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(theme::muted())
-                    .child(meta.to_owned()),
-            )
+            .child(chips_row(chips))
+            .child(div().flex_none().text_color(theme::muted()).child(meta))
             .child(div().flex_1())
             .child(
                 chunk_button(("review-resolve", ix), resolve_label, true, theme::text()).on_click(
@@ -1991,7 +1984,9 @@ fn reply_head_row(agent: bool, author: &str, created_at: i64) -> AnyElement {
         .gap_2()
         .text_xs()
         .text_color(theme::muted())
-        .children(agent.then(|| crate::shell_memories::tag("Agent-written", theme::selected_row())))
+        .children(
+            agent.then(|| crate::shell_memories::tag(review::AGENT_WRITTEN, theme::selected_row())),
+        )
         .child(review::reply_head(author, created_at, now_secs()))
         .into_any_element()
 }

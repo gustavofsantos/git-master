@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use gm_schema::{
-    CommandKind, OperationId, OperationState, ReviewComment, ReviewLocation, ReviewReply,
-    ReviewStatus,
+    CommandKind, OperationId, OperationState, ReviewComment, ReviewKind, ReviewLocation,
+    ReviewReply, ReviewSeverity, ReviewStatus,
 };
 
 use crate::diff_rows::{Diffs, Row, SplitRows};
@@ -281,6 +281,113 @@ pub fn is_agent_reply(reply: &ReviewReply) -> bool {
     reply.author.starts_with(AGENT_PREFIX)
 }
 
+/// The flag on a reply or a root that an agent wrote (D198, D200).
+pub const AGENT_WRITTEN: &str = "Agent-written";
+/// The badge of a question that waits for the person's answer (D200).
+pub const NEEDS_ANSWER: &str = "Needs answer";
+/// The Resolve button of a note: it dismisses the note (D200).
+const DISMISS: &str = "Dismiss";
+
+/// Whether an agent started the thread (D200): its root's author is `agent:<client>`.
+#[must_use]
+pub fn is_agent_root(comment: &ReviewComment) -> bool {
+    comment
+        .author
+        .as_deref()
+        .is_some_and(|author| author.starts_with(AGENT_PREFIX))
+}
+
+/// Whether the root is an agent's note (D200). A note asks nothing, so its Resolve
+/// button dismisses it.
+#[must_use]
+pub fn is_note(comment: &ReviewComment) -> bool {
+    comment.kind == Some(ReviewKind::Note)
+}
+
+/// The word of a kind chip: Note, Question or Flag.
+#[must_use]
+pub fn kind_word(kind: ReviewKind) -> &'static str {
+    match kind {
+        ReviewKind::Note => "Note",
+        ReviewKind::Question => "Question",
+        ReviewKind::Flag => "Flag",
+    }
+}
+
+/// The word of a severity chip: low, medium or high.
+#[must_use]
+pub fn severity_word(severity: ReviewSeverity) -> &'static str {
+    match severity {
+        ReviewSeverity::Low => "low",
+        ReviewSeverity::Medium => "medium",
+        ReviewSeverity::High => "high",
+    }
+}
+
+/// The kind chips of a root: its kind, and for a flag its severity after it. Empty for
+/// a comment with no kind, which is the person's.
+#[must_use]
+pub fn kind_chips(comment: &ReviewComment) -> Vec<&'static str> {
+    let Some(kind) = comment.kind else {
+        return Vec::new();
+    };
+    let mut chips = vec![kind_word(kind)];
+    if kind == ReviewKind::Flag {
+        chips.extend(comment.severity.map(severity_word));
+    }
+    chips
+}
+
+/// The colour family of a root's kind chips (D200): a flag is a warning to look at, the
+/// other kinds are plain.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tone {
+    #[default]
+    Plain,
+    Warning,
+}
+
+/// What a root card shows beside its status (D200): whether an agent wrote it, its kind
+/// chips and their tone, whether it needs an answer, and whether its Resolve button reads
+/// Dismiss.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Chips {
+    pub agent: bool,
+    pub kind: Vec<&'static str>,
+    pub tone: Tone,
+    pub needs_answer: bool,
+    pub note: bool,
+}
+
+/// The chips of `comment`, as its card shows them.
+#[must_use]
+pub fn chips(comment: &ReviewComment) -> Chips {
+    Chips {
+        agent: is_agent_root(comment),
+        kind: kind_chips(comment),
+        tone: if comment.kind == Some(ReviewKind::Flag) {
+            Tone::Warning
+        } else {
+            Tone::Plain
+        },
+        needs_answer: comment.needs_answer,
+        note: is_note(comment),
+    }
+}
+
+/// The label of the Resolve button: Reopen on a resolved root, Dismiss on a note, else
+/// Resolve.
+#[must_use]
+pub fn resolve_label(resolved: bool, note: bool) -> &'static str {
+    if resolved {
+        "Reopen"
+    } else if note {
+        DISMISS
+    } else {
+        "Resolve"
+    }
+}
+
 /// The line over a reply: its author, then how long ago it was written.
 #[must_use]
 pub fn reply_head(author: &str, created_at: i64, now_secs: i64) -> String {
@@ -388,6 +495,8 @@ pub enum Part {
         created_at: i64,
         /// Whether the **Reply** button is offered (D198).
         replyable: bool,
+        /// The agent's chips and badges beside the status (D200).
+        chips: Chips,
     },
     /// One wrapped line of the body.
     Text(String),
@@ -423,6 +532,7 @@ pub fn card_entries(comment: &ReviewComment, opened: bool, expanded: bool) -> Ve
             lines: range_label(start, end),
             created_at: comment.created_at,
             replyable: can_reply(comment.status),
+            chips: chips(comment),
         },
     };
     let thread = thread(&comment.replies, expanded);
@@ -1501,6 +1611,110 @@ mod tests {
         assert_eq!(view.shown.len(), 1);
         assert_eq!(view.toggle, Some(Toggle::Earlier(2)));
         assert_eq!(Toggle::Earlier(1).label(), "1 earlier reply");
+    }
+
+    fn agent_root(kind: ReviewKind, severity: Option<ReviewSeverity>) -> ReviewComment {
+        let mut value = comment(1, "a.rs", Some((1, 1)), "unsafe here");
+        value.author = Some("agent:claude-code".into());
+        value.kind = Some(kind);
+        value.severity = severity;
+        value
+    }
+
+    #[test]
+    fn a_note_question_or_flag_is_chipped_by_its_kind_and_a_flag_by_its_severity() {
+        assert_eq!(kind_chips(&agent_root(ReviewKind::Note, None)), ["Note"]);
+        assert_eq!(
+            kind_chips(&agent_root(ReviewKind::Question, None)),
+            ["Question"]
+        );
+        assert_eq!(
+            kind_chips(&agent_root(ReviewKind::Flag, Some(ReviewSeverity::Low))),
+            ["Flag", "low"]
+        );
+        assert_eq!(
+            kind_chips(&agent_root(ReviewKind::Flag, Some(ReviewSeverity::Medium))),
+            ["Flag", "medium"]
+        );
+        assert_eq!(
+            kind_chips(&agent_root(ReviewKind::Flag, Some(ReviewSeverity::High))),
+            ["Flag", "high"]
+        );
+    }
+
+    #[test]
+    fn a_person_comment_has_no_kind_chip_and_no_agent_flag() {
+        let person = comment(1, "a.rs", Some((1, 1)), "rename");
+        assert!(kind_chips(&person).is_empty());
+        assert_eq!(chips(&person), Chips::default());
+        assert!(!is_agent_root(&person));
+    }
+
+    #[test]
+    fn an_agent_root_carries_the_agent_flag_and_its_chips() {
+        let flag = agent_root(ReviewKind::Flag, Some(ReviewSeverity::High));
+        assert_eq!(
+            chips(&flag),
+            Chips {
+                agent: true,
+                kind: vec!["Flag", "high"],
+                tone: Tone::Warning,
+                needs_answer: false,
+                note: false,
+            }
+        );
+        assert_eq!(AGENT_WRITTEN, "Agent-written");
+        assert_eq!(
+            chips(&flag).tone,
+            Tone::Warning,
+            "a flag takes the warning tone"
+        );
+        assert_eq!(chips(&agent_root(ReviewKind::Note, None)).tone, Tone::Plain);
+    }
+
+    #[test]
+    fn a_question_that_needs_an_answer_carries_the_needs_answer_badge() {
+        let mut question = agent_root(ReviewKind::Question, None);
+        question.needs_answer = true;
+        let shown = chips(&question);
+        assert!(shown.needs_answer);
+        assert_eq!(NEEDS_ANSWER, "Needs answer");
+        question.needs_answer = false;
+        assert!(!chips(&question).needs_answer);
+    }
+
+    #[test]
+    fn the_resolve_button_of_a_note_reads_dismiss_and_the_others_resolve_or_reopen() {
+        let note = agent_root(ReviewKind::Note, None);
+        assert!(is_note(&note));
+        assert_eq!(resolve_label(false, is_note(&note)), "Dismiss");
+        assert_eq!(resolve_label(false, false), "Resolve");
+        assert_eq!(resolve_label(true, false), "Reopen");
+        assert_eq!(resolve_label(true, true), "Reopen");
+        let question = agent_root(ReviewKind::Question, None);
+        assert!(!is_note(&question));
+        assert_eq!(resolve_label(false, is_note(&question)), "Resolve");
+    }
+
+    #[test]
+    fn an_agent_note_card_shows_its_chips_and_dismiss_and_still_takes_a_reply() {
+        let note = agent_root(ReviewKind::Note, None);
+        let entries = card_entries(&note, false, false);
+        assert!(matches!(
+            &entries[0],
+            Entry::Card {
+                part: Part::Head {
+                    replyable: true,
+                    chips: Chips {
+                        agent: true,
+                        note: true,
+                        ..
+                    },
+                    ..
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

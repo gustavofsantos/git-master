@@ -92,8 +92,6 @@ review_comments_list(status="open")
 
 ## Notes, questions and flags from the agent
 
-> **Planned.** The app does not yet show the kind chips, the **Needs answer** badge or the **Agent-written** label; the MCP tools already return them.
-
 The agent can start a thread of its own on any text in the working tree, with `review_comment_create`. Each one has a kind:
 
 | Kind | Use |
@@ -102,7 +100,9 @@ The agent can start a thread of its own on any text in the working tree, with `r
 | **Question** | The agent needs your answer. It shows **Needs answer** until you reply. |
 | **Flag** | A risk or a guess you should look at, with a severity of low, medium or high. |
 
-An agent thread is anchored, snapshotted, shown inline and marked **Outdated** like yours, and its root is labelled **Agent-written**. You answer in the same **Reply** box. The agent does not receive your answer by itself: it reads it the next time it lists its threads, for example when you run `/gitmaster:inbox`. Only you close a thread; **Resolve** on a note dismisses it. An agent has at most 20 open threads in a repository and 5 on one file, and a further one is refused.
+An agent thread is anchored, snapshotted, shown inline and marked **Outdated** like yours, and its root is labelled **Agent-written**. Its root also shows its kind as a chip: **Note**, **Question** or **Flag**. A flag shows its severity after the kind, as **low**, **medium** or **high**. A question that no one has answered shows the **Needs answer** badge. You answer in the same **Reply** box. The agent does not receive your answer by itself: it reads it the next time it lists its threads, for example when you run `/gitmaster:inbox`. Only you close a thread. On a note the button reads **Dismiss** instead of **Resolve**. An agent has at most 20 open threads in a repository and 5 on one file, and a further one is refused.
+
+The **Local review** page has two filters for these threads: **Needs answer**, the questions waiting for your answer, and **Agent**, every thread an agent started, whatever its status. The count on the sidebar's **Local review** row counts only the open threads you started. An agent's note or flag is not work waiting for the agent, so it is not counted there.
 
 `review_comments_list` returns the threads you started by default, so the agent's own notes are not handed back to it as work. A question you have answered is returned, so the agent sees the answer.
 

@@ -151,6 +151,7 @@ impl StatusView {
                     .items_center()
                     .gap_2()
                     .child(div().flex_none().text_color(colour).child(label))
+                    .child(chips_row(&review::chips(comment)))
                     .child(div().text_xs().text_color(theme::muted()).child(format!(
                         "{} · {}",
                         review::range_label(start, end),
@@ -330,11 +331,13 @@ impl StatusView {
     fn comment_actions(&self, comment: &ReviewComment, cx: &mut Context<Self>) -> Div {
         let target = Args::ReviewComment(comment.id);
         let ctx = self.action_context("");
-        let (resolve, resolve_label) = if comment.status == ReviewStatus::Resolved {
-            (Action::ReopenReviewComment, "Reopen")
+        let resolved = comment.status == ReviewStatus::Resolved;
+        let resolve = if resolved {
+            Action::ReopenReviewComment
         } else {
-            (Action::ResolveReviewComment, "Resolve")
+            Action::ResolveReviewComment
         };
+        let resolve_label = review::resolve_label(resolved, review::is_note(comment));
         div()
             .flex()
             .flex_row()
@@ -550,7 +553,7 @@ fn reply_block(reply: &ReviewReply, now: i64) -> Div {
         .gap_2()
         .text_xs()
         .text_color(theme::muted())
-        .children(agent.then(|| tag("Agent-written", theme::selected_row())))
+        .children(agent.then(|| tag(review::AGENT_WRITTEN, theme::selected_row())))
         .child(review::reply_head(&reply.author, reply.created_at, now));
     let body = div()
         .flex()
@@ -699,6 +702,7 @@ fn review_row(
             lines,
             summary,
             badge,
+            chips,
             created_at,
         } => {
             let id = *id;
@@ -731,6 +735,7 @@ fn review_row(
                         .gap_2()
                         .min_w(px(0.))
                         .child(div().flex_none().text_xs().text_color(colour).child(label))
+                        .child(chips_row(chips))
                         .child(
                             div()
                                 .min_w(px(0.))
@@ -842,6 +847,37 @@ fn region_lines(lines: &[String], first: u32, marks: &[bool], highlight: Hsla) -
                         }),
                 )
         }))
+}
+
+/// The chips of a root beside its status (D200): the Agent-written flag, the kind and
+/// the severity words, and the Needs answer badge in the accent colour.
+pub(crate) fn chips_row(chips: &review::Chips) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .text_color(theme::muted())
+        .children(
+            chips
+                .agent
+                .then(|| tag(review::AGENT_WRITTEN, theme::selected_row())),
+        )
+        .children(chips.kind.iter().map(|word| {
+            let (background, colour) = if chips.tone == review::Tone::Warning {
+                (theme::warn_bg(), theme::warn_fg())
+            } else {
+                (theme::selected_row(), theme::muted())
+            };
+            tag(word, background).text_color(colour)
+        }))
+        .children(
+            chips
+                .needs_answer
+                .then(|| tag(review::NEEDS_ANSWER, theme::selection()).text_color(theme::accent())),
+        )
 }
 
 fn badge_text(badge: Badge) -> (&'static str, Hsla) {
