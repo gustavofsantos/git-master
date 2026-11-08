@@ -89,6 +89,7 @@ The memory, summary and verdict tools follow these rules:
 
 - They write only GitMaster's own store. They record the agent as `agent:<client>` and the model when the client reports it.
 - A memory an agent proposes is `proposed` until you accept it. See [Memories](../guide/memories.md).
+- `memories_search` and `memory_get` count, on your machine only, each memory they return. The count and its time are shown in the app and are in no result here; they are never sent to a model.
 - `basis` says how the memory is known: `observed` (seen in a thread or a file; the default), `tested` (checked by running something) or `unconfirmed` (a belief). Any other value is refused. An `unconfirmed` memory carries `note`: `Unconfirmed: a belief, not established fact`. Read it as a belief, never as a fact.
 - `files_changed_since` lists each file source that is not as it was when the memory was accepted, with its `path` and `state`: `changed`, `missing` (not at `HEAD`, as after a rename or a delete), `unknown` (Git did not answer) or `unavailable` (the file's repository is not on this computer, or its file could not be read when the memory was accepted). An empty list means every file is as it was.
 - `scope` takes `all`, `repository`, a context's path such as `Platform / Billing`, or a context name that only one of the repository's contexts has. A name several contexts share is refused with their paths.

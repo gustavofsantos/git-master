@@ -5350,6 +5350,7 @@ impl Engine {
                 | CommandKind::ReadLabel { .. }
                 | CommandKind::ListMemories { .. }
                 | CommandKind::ReadMemory { .. }
+                | CommandKind::RecordMemoryRetrieval { .. }
                 | CommandKind::ListContexts { .. }
                 | CommandKind::PreviewDeleteContext { .. }
         ) {

@@ -1160,6 +1160,8 @@ impl Model {
                 contexts_read,
                 note,
                 proposed_total,
+                accepted_total,
+                accepted_characters,
             } => {
                 self.memories.listed(
                     id,
@@ -1169,6 +1171,8 @@ impl Model {
                         contexts_read,
                         note,
                         proposed_total,
+                        accepted_total,
+                        accepted_characters,
                     },
                 );
                 None

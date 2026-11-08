@@ -33,7 +33,8 @@ static UID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The columns of a memory row, in the order `memory_row` reads them.
 const MEMORY_COLUMNS: &str = "m.id, m.uid, m.kind, m.text, m.status, m.origin, m.proposed_by,
-    m.model, m.created_at, m.decided_at, m.decided_by, m.basis";
+    m.model, m.created_at, m.decided_at, m.decided_by, m.basis, m.retrieval_count,
+    m.last_retrieved_at";
 
 /// The list filters as SQL. Parameters 2 to 5 are always bound (NULL means no restriction).
 const MEMORY_FILTER_SQL: &str = " AND (?2 IS NULL OR m.kind = ?2)
@@ -407,6 +408,9 @@ pub(crate) struct Carried<'a> {
     pub created_at: i64,
     pub decided_at: Option<i64>,
     pub decided_by: Option<&'a str>,
+    /// The retrieval count and time it has so far (D201 (4)): a moved memory is the same memory.
+    pub retrieval_count: u32,
+    pub last_retrieved_at: Option<i64>,
 }
 
 /// Stores a checked proposal inside the caller's transaction (D192 (2), (3)). A memory with the
@@ -444,13 +448,14 @@ pub(crate) fn propose_in(
     }
     let accepted = new.status == MemoryStatus::Accepted;
     let uid = uid.map_or_else(new_uid, str::to_owned);
-    let (proposed_by, model, created_at, decided_at, decided_by) = match carried {
+    let (proposed_by, model, created_at, decided_at, decided_by, retrieval) = match carried {
         Some(kept) => (
             kept.proposed_by,
             kept.model,
             kept.created_at,
             kept.decided_at,
             kept.decided_by,
+            (kept.retrieval_count, kept.last_retrieved_at),
         ),
         None => (
             Some(new.origin),
@@ -458,12 +463,13 @@ pub(crate) fn propose_in(
             new.at,
             accepted.then_some(new.at),
             accepted.then_some(HUMAN),
+            (0, None),
         ),
     };
     conn.execute(
         "INSERT INTO memory (uid, kind, text, basis, status, origin, proposed_by, model, created_at,
-            decided_at, decided_by)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            decided_at, decided_by, retrieval_count, last_retrieved_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             uid,
             kind_text(new.kind),
@@ -476,6 +482,8 @@ pub(crate) fn propose_in(
             created_at,
             decided_at,
             decided_by,
+            i64::from(retrieval.0),
+            retrieval.1,
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -688,6 +696,52 @@ pub(crate) fn proposed_uids(conn: &Connection, within: &str) -> Result<Vec<Strin
     Ok(uids)
 }
 
+/// Counts one retrieval of memory `uid`, at `at` (D201 (4)): one UPDATE. `false` when no memory of
+/// that uid is stored here. Not a command of its own: the caller decides what may be counted.
+pub(crate) fn count_retrieval(conn: &Connection, uid: &str, at: i64) -> Result<bool, StoreError> {
+    let changed = conn.execute(
+        "UPDATE memory SET retrieval_count = retrieval_count + 1, last_retrieved_at = ?2
+         WHERE uid = ?1",
+        params![uid, at],
+    )?;
+    Ok(changed > 0)
+}
+
+/// The uid and the characters of the text of each accepted memory inside `within` (see
+/// `count_proposed`). `length` counts characters, not bytes, as the size line does (D201 (5)).
+pub(crate) fn accepted_text(
+    conn: &Connection,
+    within: &str,
+) -> Result<Vec<(String, u64)>, StoreError> {
+    let sql = format!("SELECT m.uid, length(m.text) FROM memory m WHERE m.status = ?1{within}");
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement
+        .query_map(params![status_text(MemoryStatus::Accepted)], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|(uid, characters)| (uid, u64::try_from(characters).unwrap_or(0)))
+        .collect())
+}
+
+/// The size of accepted memories given as `(uid, characters)`: how many there are and the
+/// characters of their text together. A memory that two stores hold is counted once (D201 (5)).
+#[must_use]
+pub fn accepted_size(rows: impl IntoIterator<Item = (String, u64)>) -> (u32, u64) {
+    let mut seen = HashSet::new();
+    let mut count = 0_u32;
+    let mut characters = 0_u64;
+    for (uid, length) in rows {
+        if seen.insert(uid) {
+            count = count.saturating_add(1);
+            characters = characters.saturating_add(length);
+        }
+    }
+    (count, characters)
+}
+
 /// How many of `uids` are proposed memories. Chunked, so a long list stays under SQLite's
 /// parameter limit.
 pub(crate) fn count_proposed_among(conn: &Connection, uids: &[String]) -> Result<u32, StoreError> {
@@ -809,6 +863,16 @@ impl ThreadStore {
     /// How many proposed memories this store holds (see `count_proposed`).
     pub(crate) fn count_proposed(&self) -> Result<u32, StoreError> {
         count_proposed(&self.conn, "")
+    }
+
+    /// Counts one retrieval of memory `uid` now (see `count_retrieval`).
+    pub(crate) fn count_retrieval(&self, uid: &str, at: i64) -> Result<bool, StoreError> {
+        count_retrieval(&self.conn, uid, at)
+    }
+
+    /// The accepted memories of this store as `(uid, characters)` (see `accepted_text`).
+    pub(crate) fn accepted_text(&self) -> Result<Vec<(String, u64)>, StoreError> {
+        accepted_text(&self.conn, "")
     }
 
     /// How many of `uids` are proposed memories of this store.
@@ -998,6 +1062,7 @@ fn memory_row(row: &Row<'_>) -> rusqlite::Result<Result<Memory, StoreError>> {
     let kind: String = row.get(2)?;
     let status: String = row.get(4)?;
     let basis: String = row.get(11)?;
+    let retrieval_count: i64 = row.get(12)?;
     let (Some(kind), Some(status), Some(basis)) = (
         parse_kind(&kind),
         parse_status(&status),
@@ -1027,6 +1092,8 @@ fn memory_row(row: &Row<'_>) -> rusqlite::Result<Result<Memory, StoreError>> {
         files_changed_since: Vec::new(),
         scope: String::new(),
         contexts: Vec::new(),
+        retrieval_count: u32::try_from(retrieval_count).unwrap_or(0),
+        last_retrieved_at: row.get(13)?,
     }))
 }
 
@@ -1303,6 +1370,18 @@ mod tests {
     }
 
     #[test]
+    fn accepted_size_counts_each_memory_once_and_its_characters_together() {
+        assert_eq!(accepted_size(Vec::new()), (0, 0));
+        let rows = vec![
+            ("a".to_owned(), 10),
+            ("b".to_owned(), 5),
+            // The same memory from the other store: counted once.
+            ("a".to_owned(), 10),
+        ];
+        assert_eq!(accepted_size(rows), (2, 15));
+    }
+
+    #[test]
     fn a_basis_is_one_of_three_exact_words_and_any_other_is_refused_naming_them() {
         for (basis, word) in [
             (MemoryBasis::Observed, "observed"),
@@ -1468,6 +1547,8 @@ mod tests {
             files_changed_since: Vec::new(),
             scope: String::new(),
             contexts: Vec::new(),
+            retrieval_count: 0,
+            last_retrieved_at: None,
         };
         let source = |path: &str, blob: Option<&str>| MemorySource {
             kind: MemorySourceKind::File,
@@ -1564,6 +1645,8 @@ mod tests {
             files_changed_since: Vec::new(),
             scope: String::new(),
             contexts: Vec::new(),
+            retrieval_count: 0,
+            last_retrieved_at: None,
         };
         // The file is at HEAD now, but nothing was read to compare it with: never `Changed`.
         let lookup = |_: &MemorySource| -> Result<Option<String>, Lookup> {

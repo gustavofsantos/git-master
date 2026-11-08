@@ -22,7 +22,7 @@ use crate::memory_dialogs::PlaceAction;
 use crate::memory_rows::{self, DetailAction, SourceTarget};
 use crate::resize::{self};
 use crate::resize_handle::{self, Edge};
-use crate::shell_history::action_button;
+use crate::shell_history::{action_button, now_secs};
 use crate::text_area::{Newline, TextArea};
 use crate::text_search::DEBOUNCE_MS;
 use crate::theme;
@@ -672,6 +672,9 @@ impl StatusView {
         if page.is_loading_list() && page.is_loaded() {
             notes.push(status_line("Updating…", theme::muted()));
         }
+        if let Some(line) = page.size_line() {
+            notes.insert(0, status_line(&line, theme::muted()));
+        }
         if let Some(text) = page.note() {
             notes.push(status_line(text, theme::warn_fg()));
         }
@@ -854,6 +857,7 @@ impl StatusView {
             .child(self.detail_buttons(memory, cx))
             .child(text)
             .children(stale_lines(memory))
+            .child(retrieval_text(memory))
             .children(loading)
             .child(self.memory_sources(memory, cx))
             .children(self.relation_section(
@@ -1340,6 +1344,18 @@ fn plain_text(text: &str) -> Div {
             text.lines()
                 .map(|line| div().min_h(px(22.)).child(line.to_owned())),
         )
+}
+
+/// The line that says how often agents retrieved the memory and when, in the detail (D201 (4)).
+fn retrieval_text(memory: &Memory) -> Div {
+    div()
+        .text_sm()
+        .text_color(theme::muted())
+        .child(memories::retrieval_line(
+            memory.retrieval_count,
+            memory.last_retrieved_at,
+            now_secs(),
+        ))
 }
 
 /// The lines saying which files a memory names changed since it was accepted. They are coloured as

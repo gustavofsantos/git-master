@@ -1026,3 +1026,173 @@ fn a_basis_outside_the_three_words_does_not_parse_as_a_proposal() {
         "a basis that is not a known word is refused"
     );
 }
+
+/// Counts one retrieval now of each of `uids`, as the MCP reads do after they answer (D201 (4)).
+fn retrieved(engine: &mut Engine, actor: &Actor, uids: &[&str]) -> Vec<Event> {
+    send(
+        engine,
+        actor,
+        CommandKind::RecordMemoryRetrieval {
+            uids: uids.iter().map(|uid| (*uid).to_owned()).collect(),
+        },
+    )
+}
+
+/// The size an accepted-memories listing reported: its `accepted_total` and `accepted_characters`.
+fn size_of(events: &[Event]) -> (u32, u64) {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::MemoriesListed {
+                accepted_total,
+                accepted_characters,
+                ..
+            } => Some((*accepted_total, *accepted_characters)),
+            _ => None,
+        })
+        .expect("memories listed")
+}
+
+/// A listing with the query and status given, the rest as an app's tab asks for it.
+fn listing_with(
+    engine: &mut Engine,
+    actor: &Actor,
+    query: &str,
+    status: Option<MemoryStatus>,
+) -> Vec<Event> {
+    send(
+        engine,
+        actor,
+        CommandKind::ListMemories {
+            query: query.to_owned(),
+            kind: None,
+            status,
+            path: None,
+            author: None,
+            scope: None,
+            limit: 50,
+            cursor: None,
+        },
+    )
+}
+
+#[test]
+fn a_retrieval_counts_the_memories_named_and_only_those_the_repository_sees() {
+    let repo = repo();
+    let mut engine = engine_on(&repo.root);
+    let first = memory_of(&propose(
+        &mut engine,
+        &Actor::Human,
+        MemoryKind::Rule,
+        "Run the release checks",
+        vec![file("parser.rs")],
+    ));
+    let second = memory_of(&propose(
+        &mut engine,
+        &Actor::Human,
+        MemoryKind::Fact,
+        "The parser is small",
+        vec![file("parser.rs")],
+    ));
+    // Listing and reading are not retrievals: the app reads the same way.
+    list(&mut engine, &agent(), None);
+    read(&mut engine, &first.uid);
+    assert_eq!(read(&mut engine, &first.uid).retrieval_count, 0);
+
+    let events = retrieved(&mut engine, &agent(), &[&first.uid, "0000000000000000"]);
+    assert_eq!(state_of(&events), OperationState::Done, "{events:?}");
+    let counted = read(&mut engine, &first.uid);
+    assert_eq!(counted.retrieval_count, 1);
+    assert!(counted.last_retrieved_at.is_some());
+    assert_eq!(read(&mut engine, &second.uid).retrieval_count, 0);
+    let listed = list(&mut engine, &Actor::Human, None);
+    assert_eq!(
+        listed
+            .iter()
+            .find(|memory| memory.uid == first.uid)
+            .expect("listed")
+            .retrieval_count,
+        1,
+        "the list the app shows carries the count"
+    );
+
+    retrieved(&mut engine, &agent(), &[&first.uid]);
+    assert_eq!(read(&mut engine, &first.uid).retrieval_count, 2);
+}
+
+#[test]
+fn a_retrieval_is_not_in_the_command_log() {
+    let repo = repo();
+    let mut engine = engine_on(&repo.root);
+    let memory = memory_of(&propose(
+        &mut engine,
+        &Actor::Human,
+        MemoryKind::Rule,
+        "Run the release checks",
+        vec![file("parser.rs")],
+    ));
+    retrieved(&mut engine, &agent(), &[&memory.uid]);
+
+    let log = engine.log();
+    assert!(
+        log.iter()
+            .all(|entry| !matches!(entry.kind, CommandKind::RecordMemoryRetrieval { .. })),
+        "a retrieval is a read, so it is not logged (D28)"
+    );
+    assert!(
+        log.iter()
+            .any(|entry| matches!(entry.kind, CommandKind::ProposeMemory { .. })),
+        "the write that made the memory is logged"
+    );
+}
+
+#[test]
+fn the_size_line_counts_accepted_memories_and_their_characters_whatever_the_request() {
+    let repo = repo();
+    let mut engine = engine_on(&repo.root);
+    let characters = |text: &str| u64::try_from(text.chars().count()).expect("a count");
+    let accented = "Cálculo é rápido";
+    let plain = "Run the release checks";
+    propose(
+        &mut engine,
+        &Actor::Human,
+        MemoryKind::Fact,
+        accented,
+        vec![file("parser.rs")],
+    );
+    propose(
+        &mut engine,
+        &Actor::Human,
+        MemoryKind::Rule,
+        plain,
+        vec![file("parser.rs")],
+    );
+    propose(
+        &mut engine,
+        &agent(),
+        MemoryKind::Lesson,
+        "A proposal is not accepted",
+        vec![file("parser.rs")],
+    );
+    let expected = (2, characters(accented) + characters(plain));
+
+    assert_eq!(
+        size_of(&listing_with(&mut engine, &Actor::Human, "", None)),
+        expected
+    );
+    // The query and the status of the request play no part.
+    assert_eq!(
+        size_of(&listing_with(
+            &mut engine,
+            &Actor::Human,
+            "release",
+            Some(MemoryStatus::Proposed)
+        )),
+        expected
+    );
+    assert_eq!(
+        size_of(&listing_with(&mut engine, &agent(), "", None)),
+        expected,
+        "an agent sees the same accepted memories"
+    );
+}

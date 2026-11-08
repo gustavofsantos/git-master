@@ -904,6 +904,13 @@ pub enum CommandKind {
     ReadMemory {
         uid: String,
     },
+    /// Counts one retrieval, now, of each memory in `uids` that the repository sees (D201 (4)). The
+    /// MCP reads send it after they answer, with the memories they returned; the app never does.
+    /// It is a bookkeeping write on a read, so it is not logged (D28), and a uid the repository does
+    /// not see is skipped. It answers with no event of its own.
+    RecordMemoryRetrieval {
+        uids: Vec<String>,
+    },
     /// Proposes a memory of `kind` with `text` (redacted before it is stored, D121) and its
     /// `sources`. Level record: an agent's call creates a `proposed` memory and needs at least
     /// one source; a human's creates an `accepted` one and records the blob of each file source.
@@ -1620,6 +1627,12 @@ pub enum Event {
         note: Option<String>,
         #[serde(default)]
         proposed_total: u32,
+        /// The accepted memories in the scope the request names, whatever its filters, query and page,
+        /// and the characters of their text together (D201 (5)): the size line of the tab.
+        #[serde(default)]
+        accepted_total: u32,
+        #[serde(default)]
+        accepted_characters: u64,
     },
     /// Answers `ReadMemory`.
     MemoryRead {
@@ -2037,10 +2050,14 @@ mod tests {
             contexts_read: true,
             note: None,
             proposed_total: 4,
+            accepted_total: 3,
+            accepted_characters: 3_100,
         };
         let json = serde_json::to_value(&listed).unwrap();
         assert_eq!(json["type"], "memories_listed");
         assert_eq!(json["proposed_total"], 4);
+        assert_eq!(json["accepted_total"], 3);
+        assert_eq!(json["accepted_characters"], 3_100);
         let back: Event = serde_json::from_value(json).unwrap();
         assert_eq!(back, listed);
 

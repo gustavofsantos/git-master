@@ -149,6 +149,10 @@ pub(crate) fn memories_search(session: &mut Session, args: &Value) -> Result<Val
             _ => None,
         })
         .ok_or("the search returned no answer")?;
+    count_retrievals(
+        session,
+        memories.iter().map(|memory| memory.uid.clone()).collect(),
+    );
     let mut result = json!({
         "memories": memories.iter().map(memory_json).collect::<Vec<_>>(),
         "next_cursor": next_cursor,
@@ -179,12 +183,26 @@ pub(crate) fn memory_get(session: &mut Session, args: &Value) -> Result<Value, S
             _ => None,
         })
         .ok_or("the read returned no answer")?;
+    count_retrievals(session, vec![memory.uid.clone()]);
     let mut detail = memory_json(&memory);
     detail["supersedes"] = json!(memory.supersedes);
     detail["created_at"] = json!(memory.created_at);
     detail["decided_at"] = json!(memory.decided_at);
     detail["proposed_by"] = json!(memory.proposed_by);
     Ok(json!({ "memory": detail }))
+}
+
+/// Counts the retrieval of the memories a read has just answered (D201 (4)), locally. It is sent
+/// after the answer is known, so the read never waits for it or fails with it: a failed count is
+/// written to stderr and the read still answers. Nothing about the count goes into a result.
+fn count_retrievals(session: &mut Session, uids: Vec<String>) {
+    if uids.is_empty() {
+        return;
+    }
+    let count = uids.len();
+    if let Err(error) = session.run(CommandKind::RecordMemoryRetrieval { uids }) {
+        eprintln!("gitmaster mcp: could not count the retrieval of {count} memories: {error}");
+    }
 }
 
 /// `contexts_list`: the contexts the open repository sees. `clash` is there only when another

@@ -184,6 +184,7 @@ pub(crate) fn is_memory_command(kind: &CommandKind) -> bool {
             | CommandKind::MoveMemoryToContext { .. }
             | CommandKind::AttachMemory { .. }
             | CommandKind::DetachMemory { .. }
+            | CommandKind::RecordMemoryRetrieval { .. }
     )
 }
 
@@ -517,11 +518,17 @@ fn memories_command(
                 contexts_read: listed.contexts_read,
                 note: listed.note,
                 proposed_total: listed.proposed_total,
+                accepted_total: listed.accepted_total,
+                accepted_characters: listed.accepted_characters,
             }])
         }
         CommandKind::ReadMemory { uid } => {
             let memory = memory_scope::read(&stores, ctx, uid)?;
             Ok(vec![Event::MemoryRead { id, memory }])
+        }
+        CommandKind::RecordMemoryRetrieval { uids } => {
+            memory_scope::count_retrievals(&mut stores, uids, now_ms())?;
+            Ok(Vec::new())
         }
         CommandKind::ProposeMemory {
             kind: memory_kind,

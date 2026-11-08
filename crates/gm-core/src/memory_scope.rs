@@ -391,6 +391,9 @@ pub(crate) struct Listed {
     pub(crate) contexts_read: bool,
     pub(crate) note: Option<String>,
     pub(crate) proposed_total: u32,
+    /// The accepted memories in the scope, and the characters of their text (D201 (5)).
+    pub(crate) accepted_total: u32,
+    pub(crate) accepted_characters: u64,
 }
 
 /// `ListMemories` (D193 (5), (6)): the repository's memories and those of the contexts it sees,
@@ -412,6 +415,8 @@ pub(crate) fn list_command(
                 contexts_read,
                 note,
                 proposed_total: count_proposed_visible(stores)?,
+                accepted_total: 0,
+                accepted_characters: 0,
             });
         }
         Err(message) => return Err(message),
@@ -421,13 +426,60 @@ pub(crate) fn list_command(
         fill_changes(ctx, reach, memory);
     }
     let proposed_total = count_proposed_visible(stores)?;
+    let (accepted_total, accepted_characters) = accepted_size(stores, scope)?;
     Ok(Listed {
         memories,
         next_cursor,
         contexts_read,
         note,
         proposed_total,
+        accepted_total,
+        accepted_characters,
     })
+}
+
+/// The accepted memories of the scope `scope` covers, and the characters of their text together,
+/// each memory once (D201 (5)). The filters, the query and the page play no part.
+fn accepted_size(stores: &Stores<'_>, scope: Scope) -> Result<(u32, u64), String> {
+    let mut rows = Vec::new();
+    if matches!(scope, Scope::All | Scope::Repository) {
+        rows.extend(stores.threads.accepted_text().map_err(|e| e.to_string())?);
+    }
+    if let Some(contexts) = stores.reach.store().filter(|_| scope != Scope::Repository) {
+        let ids = stores.reach.scope_ids(scope);
+        rows.extend(contexts.accepted_text_in(&ids).map_err(|e| e.to_string())?);
+    }
+    Ok(memories::accepted_size(rows))
+}
+
+/// Counts one retrieval, at `at`, of each memory of `uids` the repository sees (D201 (4)): in the
+/// repository's store, or in `contexts.db` for a memory of a context. A uid it does not see is
+/// skipped. Every uid is tried even when a write fails; the first failure is returned, for the
+/// caller to log, and the read that named the memories has already answered.
+pub(crate) fn count_retrievals(
+    stores: &mut Stores<'_>,
+    uids: &[String],
+    at: i64,
+) -> Result<(), String> {
+    let mut first_error = None;
+    for uid in uids {
+        let counted = match home_of(stores, uid) {
+            Ok(Home::Repository(_)) => stores
+                .threads
+                .count_retrieval(uid, at)
+                .map_err(|e| e.to_string()),
+            Ok(Home::Context) => match stores.reach.store() {
+                Some(contexts) => contexts.count_retrieval(uid, at).map_err(|e| e.to_string()),
+                None => Ok(false),
+            },
+            Err(error) if error == MEMORY_MISSING => Ok(false),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = counted {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// How many proposed memories the repository sees (D193 (6)): its own store and every visible

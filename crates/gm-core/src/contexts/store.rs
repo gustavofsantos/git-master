@@ -13,7 +13,7 @@ use crate::threads::memories::{self, BlobRead, Carried, Found, NewMemory, Placem
 use crate::threads::store::{BUSY_TIMEOUT, StoreError, begin, create_private, invalid, retry_busy};
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run, so the first is version 1.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
 /// Characters of a context name (D193 (3)).
 const NAME_CHARS: usize = 64;
 
@@ -100,6 +100,13 @@ UPDATE memory_source SET blob_read = 1
 const SCHEMA_V3: &str = "
 ALTER TABLE memory ADD COLUMN basis TEXT NOT NULL DEFAULT 'observed'
     CHECK (basis IN ('observed','tested','unconfirmed'));
+";
+
+/// Schema 4 (D201 (4)): the retrieval count and time of a memory, as in `threads.db` schema 11. The
+/// rows written before it have never been retrieved.
+const SCHEMA_V4: &str = "
+ALTER TABLE memory ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory ADD COLUMN last_retrieved_at INTEGER;
 ";
 
 /// The contexts store: one connection to `contexts.db`.
@@ -428,6 +435,8 @@ impl ContextStore {
             created_at: memory.created_at,
             decided_at: memory.decided_at,
             decided_by: memory.decided_by.as_deref(),
+            retrieval_count: memory.retrieval_count,
+            last_retrieved_at: memory.last_retrieved_at,
         };
         self.store_in_contexts(&new, &checked, Some(&carried), contexts, Some(&memory.uid))
     }
@@ -613,6 +622,24 @@ impl ContextStore {
             return Ok(Vec::new());
         }
         memories::proposed_uids(&self.conn, &Self::within_contexts(contexts))
+    }
+
+    /// Counts one retrieval of memory `uid` now (see `memories::count_retrieval`). Counted in this
+    /// file, where the memory is stored, so a memory of a context counts as any other (D201 (4)).
+    pub(crate) fn count_retrieval(&self, uid: &str, at: i64) -> Result<bool, StoreError> {
+        memories::count_retrieval(&self.conn, uid, at)
+    }
+
+    /// The accepted memories attached to any of `contexts`, as `(uid, characters)` (see
+    /// `memories::accepted_text`). Empty when no context is named.
+    pub(crate) fn accepted_text_in(
+        &self,
+        contexts: &[i64],
+    ) -> Result<Vec<(String, u64)>, StoreError> {
+        if contexts.is_empty() {
+            return Ok(Vec::new());
+        }
+        memories::accepted_text(&self.conn, &Self::within_contexts(contexts))
     }
 
     /// The SQL restricting a memory to those attached to `contexts`.
@@ -927,7 +954,7 @@ mod tests {
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("version");
-            assert_eq!(version, 3);
+            assert_eq!(version, 4);
         }
     }
 
@@ -952,6 +979,36 @@ mod tests {
         assert_eq!(
             store.read_memory_by_uid("oldmemory1").expect("read").basis,
             MemoryBasis::Observed
+        );
+    }
+
+    /// Schema 4 (D201 (4)) on a version 3 file: a memory stored before it has never been retrieved,
+    /// and a retrieval counted afterwards is kept with its time.
+    #[test]
+    fn version_three_gives_the_stored_memories_no_retrievals() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("contexts.db");
+        {
+            let conn = Connection::open(&path).expect("raw");
+            conn.execute_batch(SCHEMA_V1).expect("schema 1");
+            conn.execute_batch(SCHEMA_V2).expect("schema 2");
+            conn.execute_batch(SCHEMA_V3).expect("schema 3");
+            conn.execute_batch(
+                "INSERT INTO memory (id, uid, kind, text, status, origin, created_at) VALUES
+                    (1, 'oldmemory1', 'rule', 'An old rule.', 'accepted', 'human', 1);",
+            )
+            .expect("rows");
+            conn.pragma_update(None, "user_version", 3)
+                .expect("version");
+        }
+        let store = ContextStore::open(&path).expect("migrate");
+        let old = store.read_memory_by_uid("oldmemory1").expect("read");
+        assert_eq!((old.retrieval_count, old.last_retrieved_at), (0, None));
+        assert!(store.count_retrieval("oldmemory1", 5).expect("count"));
+        let counted = store.read_memory_by_uid("oldmemory1").expect("read");
+        assert_eq!(
+            (counted.retrieval_count, counted.last_retrieved_at),
+            (1, Some(5))
         );
     }
 
@@ -1382,6 +1439,8 @@ mod tests {
             files_changed_since: Vec::new(),
             scope: String::new(),
             contexts: Vec::new(),
+            retrieval_count: 0,
+            last_retrieved_at: None,
         };
         // The crash: the insert into contexts.db happens, the delete from threads.db does not.
         let (first, created) = store.move_memory_in(&stored, &[a]).expect("insert");

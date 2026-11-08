@@ -66,7 +66,7 @@ When a decision changes, select the proposed memory that replaces the old one an
 
 ## Keep memories true
 
-> **Planned.** The `/gitmaster:consolidate` skill, retrieval counts and the size line below are not built yet.
+> **Planned.** The `/gitmaster:consolidate` skill below is not built yet.
 
 A memory is for what nobody can see again by looking: the reason for a choice, a rule, a lesson, a failed attempt. What the code, `git log` or a command shows does not belong in one, and the proposing skill leaves it out.
 
@@ -78,7 +78,9 @@ In a session with the GitMaster [plugin](../agents/agent-integration.md), ask:
 
 A cheap sub-agent checks accepted memories against their sources, the files as they are now and the threads, starting with the ones that changed under them and the ones agents retrieve most. It proposes a correction, a merge or a replacement. Each proposal is **Proposed** and names the memory it replaces. You accept it or not; nothing is replaced without you.
 
-GitMaster counts on your machine how often each memory is retrieved and when. The counts are never shared and never sent to a model. The tab shows how many accepted memories there are and how much text they hold, so a store that grows without use is visible.
+GitMaster counts on your machine how often each memory is retrieved and when. An agent's search counts each memory it returns, and an agent's read counts the memory it reads. The counts are never shared, never sent to a model and never in an agent's results. The detail of a memory says **Retrieved 3 times, last 2 h ago**, or **Never retrieved**.
+
+The line above the list gives the size of the scope you chose: how many accepted memories it holds and how many characters of text they hold, such as **12 accepted, 3.1k characters**. Search and the other filters do not change it. A store that grows without use is then visible.
 
 ## When a memory goes stale
 

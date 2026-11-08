@@ -112,6 +112,10 @@ pub struct MemoryPage {
     /// The exact number of proposed memories the repository sees, whatever the request's filters,
     /// scope, status, query and page (the engine's `proposed_total`).
     pub proposed_total: u32,
+    /// The accepted memories of the scope and the characters of their text (the engine's
+    /// `accepted_total` and `accepted_characters`): the size line (D201 (5)).
+    pub accepted_total: u32,
+    pub accepted_characters: u64,
 }
 
 /// A memory the human writes. It is accepted at once (D190).
@@ -148,6 +152,8 @@ pub struct MemoriesPage {
     /// The engine's exact count of proposed memories, from the last list applied, moved by the
     /// writes that change a loaded proposal; `None` before a list is applied.
     proposed_total: Option<u32>,
+    /// The size of the accepted memories of the scope, from the last list applied (D201 (5)).
+    accepted: Option<(u32, u64)>,
     /// The list read in flight: its id, whether it appends, and the generation it was sent under.
     list_pending: Option<(OperationId, bool, u64)>,
     selected: Option<String>,
@@ -224,6 +230,14 @@ impl MemoriesPage {
                 .filter(|memory| memory.status == MemoryStatus::Proposed)
                 .count(),
         }
+    }
+
+    /// The size line of the tab: the accepted memories of the scope and their text (D201 (5)). `None`
+    /// before a list is applied.
+    #[must_use]
+    pub fn size_line(&self) -> Option<String> {
+        self.accepted
+            .map(|(total, characters)| size_line(total, characters))
     }
 
     /// Whether a list has been applied at least once.
@@ -549,6 +563,7 @@ impl MemoriesPage {
         self.contexts_read = page.contexts_read;
         self.note = page.note;
         self.proposed_total = Some(page.proposed_total);
+        self.accepted = Some((page.accepted_total, page.accepted_characters));
         self.listed = true;
         self.prune_chosen();
         true
@@ -1116,6 +1131,39 @@ pub fn basis_label(basis: MemoryBasis) -> &'static str {
     }
 }
 
+/// The size line of the tab (D201 (5)): "12 accepted, 3.1k characters".
+#[must_use]
+pub fn size_line(accepted: u32, characters: u64) -> String {
+    format!("{accepted} accepted, {}", characters_text(characters))
+}
+
+/// The characters of the memories' text, as the size line says them: a count below a thousand, then
+/// thousands with one decimal, cut rather than rounded ("3.1k characters").
+#[must_use]
+pub fn characters_text(characters: u64) -> String {
+    match characters {
+        1 => "1 character".to_owned(),
+        0..=999 => format!("{characters} characters"),
+        _ => format!(
+            "{}.{}k characters",
+            characters / 1_000,
+            characters / 100 % 10
+        ),
+    }
+}
+
+/// The line about a memory's retrieval in its detail (D201 (4)): "Never retrieved", or how often it
+/// was and when last, such as "Retrieved 3 times, last 2 h ago". Only the app shows it.
+#[must_use]
+pub fn retrieval_line(count: u32, last_at_ms: Option<i64>, now_secs: i64) -> String {
+    let when = last_at_ms.map(|at| format!(", last {}", crate::threads::relative(now_secs, at)));
+    match (count, when) {
+        (0, _) => "Never retrieved".to_owned(),
+        (1, when) => format!("Retrieved 1 time{}", when.unwrap_or_default()),
+        (n, when) => format!("Retrieved {n} times{}", when.unwrap_or_default()),
+    }
+}
+
 /// The label of a memory's status on its row.
 #[must_use]
 pub fn status_label(status: MemoryStatus) -> &'static str {
@@ -1262,6 +1310,8 @@ mod tests {
             scope: REPOSITORY.to_owned(),
             contexts: Vec::new(),
             basis: MemoryBasis::Observed,
+            retrieval_count: 0,
+            last_retrieved_at: None,
         }
     }
 
@@ -1279,6 +1329,8 @@ mod tests {
             contexts_read: true,
             note: None,
             proposed_total,
+            accepted_total: 0,
+            accepted_characters: 0,
         }
     }
 
@@ -1747,6 +1799,55 @@ mod tests {
         assert_eq!(basis_label(MemoryBasis::Observed), "Observed");
         assert_eq!(basis_label(MemoryBasis::Tested), "Tested");
         assert_eq!(basis_label(MemoryBasis::Unconfirmed), "Unconfirmed");
+    }
+
+    #[test]
+    fn the_size_line_says_how_many_are_accepted_and_how_much_text_they_hold() {
+        assert_eq!(size_line(12, 3_100), "12 accepted, 3.1k characters");
+        assert_eq!(size_line(0, 0), "0 accepted, 0 characters");
+        assert_eq!(size_line(1, 1), "1 accepted, 1 character");
+        assert_eq!(characters_text(999), "999 characters");
+        assert_eq!(characters_text(1_000), "1.0k characters");
+        assert_eq!(
+            characters_text(12_345),
+            "12.3k characters",
+            "cut, not rounded"
+        );
+    }
+
+    #[test]
+    fn the_size_line_follows_the_page_and_is_absent_before_a_list() {
+        let mut tab = MemoriesPage::default();
+        assert_eq!(tab.size_line(), None);
+        let read = tab.plan_list();
+        tab.sent(&read.read, OperationId(1));
+        tab.listed(
+            OperationId(1),
+            MemoryPage {
+                accepted_total: 2,
+                accepted_characters: 1_500,
+                ..page(Vec::new(), None)
+            },
+        );
+        assert_eq!(
+            tab.size_line().as_deref(),
+            Some("2 accepted, 1.5k characters")
+        );
+    }
+
+    #[test]
+    fn the_retrieval_line_says_never_or_how_often_and_when_last() {
+        let now = 10_000;
+        assert_eq!(retrieval_line(0, None, now), "Never retrieved");
+        assert_eq!(
+            retrieval_line(1, Some(now * 1_000), now),
+            "Retrieved 1 time, last just now"
+        );
+        assert_eq!(
+            retrieval_line(3, Some((now - 7_200) * 1_000), now),
+            "Retrieved 3 times, last 2 h ago"
+        );
+        assert_eq!(retrieval_line(2, None, now), "Retrieved 2 times");
     }
 
     #[test]

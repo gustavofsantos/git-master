@@ -319,6 +319,8 @@ mod tests {
             scope: "repository".to_owned(),
             contexts: Vec::new(),
             basis: MemoryBasis::Observed,
+            retrieval_count: 0,
+            last_retrieved_at: None,
         }
     }
 

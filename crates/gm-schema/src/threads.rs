@@ -930,6 +930,13 @@ pub struct Memory {
     /// memories and omitted from the wire then. Set by the engine; empty from the store.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contexts: Vec<MemoryContext>,
+    /// How many times agents retrieved the memory on this machine (D201 (4)). Only the app shows it:
+    /// no MCP result carries it, and it is never exported. Zero when the store has none.
+    #[serde(default)]
+    pub retrieval_count: u32,
+    /// When the memory was last retrieved, in milliseconds (D201 (4)); `None` while it never was.
+    #[serde(default)]
+    pub last_retrieved_at: Option<i64>,
 }
 
 /// A context: a named set of repositories at the user level, with its nesting (design/threads.md,
@@ -1148,6 +1155,8 @@ mod tests {
             files_changed_since: Vec::new(),
             scope: "repository".to_owned(),
             contexts: Vec::new(),
+            retrieval_count: 0,
+            last_retrieved_at: None,
         };
         let json = serde_json::to_value(&memory).expect("serialize");
         assert!(

@@ -650,3 +650,182 @@ fn an_unconfirmed_memory_is_marked_in_search_and_get_and_every_basis_is_shown() 
     assert_eq!(read["note"], UNCONFIRMED_NOTE);
     assert_eq!(read["untrusted"], true);
 }
+
+/// The retrieval count the app shows for memory `uid`, read as the person (D201 (4)).
+fn retrieval_count(engine: &mut Engine, uid: &str) -> u32 {
+    let events = send(
+        engine,
+        &Actor::Human,
+        CommandKind::ReadMemory {
+            uid: uid.to_owned(),
+        },
+    );
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::MemoryRead { memory, .. } => Some(memory.retrieval_count),
+            _ => None,
+        })
+        .expect("a memory read")
+}
+
+#[test]
+fn a_search_counts_only_the_memories_it_returns() {
+    let (_tmp, repo, db) = fixture();
+    let mut human = engine_on(&repo, &db);
+    let first = propose_as_human(&mut human, "Keep the ledger append-only.", "f.txt", None);
+    let second = propose_as_human(&mut human, "Prefer rebase over merge.", "f.txt", None);
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(2, "memories_search", &json!({ "limit": 1 })),
+        ],
+    );
+    let page = result(&replies[1]);
+    let returned = page["memories"][0]["id"].as_str().unwrap().to_owned();
+    let other = if returned == first { &second } else { &first };
+    assert_eq!(page["memories"].as_array().unwrap().len(), 1, "{page}");
+    assert_eq!(retrieval_count(&mut human, &returned), 1);
+    assert_eq!(retrieval_count(&mut human, other), 0);
+}
+
+#[test]
+fn a_get_counts_the_memory_it_reads_each_time() {
+    let (_tmp, repo, db) = fixture();
+    let mut human = engine_on(&repo, &db);
+    let uid = propose_as_human(&mut human, "Keep the ledger append-only.", "f.txt", None);
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(2, "memory_get", &json!({ "id": uid })),
+            call(3, "memory_get", &json!({ "id": uid })),
+        ],
+    );
+    assert_eq!(result(&replies[1])["memory"]["id"], uid);
+    assert_eq!(result(&replies[2])["memory"]["id"], uid);
+    assert_eq!(retrieval_count(&mut human, &uid), 2);
+}
+
+#[test]
+fn the_counts_are_in_no_mcp_result() {
+    let (_tmp, repo, db) = fixture();
+    let mut human = engine_on(&repo, &db);
+    let uid = propose_as_human(&mut human, "Keep the ledger append-only.", "f.txt", None);
+    session(
+        &repo,
+        &db,
+        &[initialize(), call(2, "memory_get", &json!({ "id": uid }))],
+    );
+    assert_eq!(retrieval_count(&mut human, &uid), 1);
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(2, "memories_search", &json!({})),
+            call(3, "memory_get", &json!({ "id": uid })),
+            call(
+                4,
+                "memory_propose",
+                &json!({
+                    "kind": "rule",
+                    "text": "Count nothing in results.",
+                    "sources": [{ "kind": "file", "ref": "f.txt" }]
+                }),
+            ),
+            call(5, "contexts_list", &json!({})),
+        ],
+    );
+    for reply in &replies[1..] {
+        let text = reply.to_string();
+        assert!(!text.contains("retrieval_count"), "{text}");
+        assert!(!text.contains("last_retrieved"), "{text}");
+    }
+}
+
+#[test]
+fn a_memory_of_a_context_is_counted_in_contexts_db_and_a_search_counts_it_too() {
+    let (_tmp, repo, db) = fixture();
+    let mut human = engine_on(&repo, &db);
+    let context = create_context(&mut human, "Platform");
+    join(&mut human, context, &repo);
+    let uid = propose_as_human(
+        &mut human,
+        "The billing ledger is append-only.",
+        "f.txt",
+        Some("Platform"),
+    );
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(2, "memory_get", &json!({ "id": uid })),
+            call(3, "memories_search", &json!({ "scope": "Platform" })),
+        ],
+    );
+    assert_eq!(result(&replies[1])["memory"]["scope"], "Platform");
+    assert_eq!(result(&replies[2])["memories"][0]["id"], uid);
+    assert_eq!(retrieval_count(&mut human, &uid), 2);
+}
+
+#[test]
+fn a_moved_memory_keeps_its_count() {
+    let (_tmp, repo, db) = fixture();
+    let mut human = engine_on(&repo, &db);
+    let uid = propose_as_human(&mut human, "Keep the ledger append-only.", "f.txt", None);
+    session(
+        &repo,
+        &db,
+        &[initialize(), call(2, "memory_get", &json!({ "id": uid }))],
+    );
+    let context = create_context(&mut human, "Platform");
+    join(&mut human, context, &repo);
+    let events = send(
+        &mut human,
+        &Actor::Human,
+        CommandKind::MoveMemoryToContext {
+            uid: uid.clone(),
+            context,
+        },
+    );
+    assert_eq!(ended(&events), OperationState::Done, "move: {events:?}");
+
+    assert_eq!(retrieval_count(&mut human, &uid), 1);
+}
+
+#[test]
+fn a_failing_count_does_not_fail_the_read() {
+    let (_tmp, repo, db) = fixture();
+    let mut human = engine_on(&repo, &db);
+    let uid = propose_as_human(&mut human, "Keep the ledger append-only.", "f.txt", None);
+    // Every write that counts a retrieval is refused; the reads must still answer.
+    let refused = rusqlite::Connection::open(repo.join(".git/gitmaster/threads.db")).unwrap();
+    refused
+        .execute_batch(
+            "CREATE TRIGGER refuse_count BEFORE UPDATE OF retrieval_count ON memory
+             BEGIN SELECT RAISE(ABORT, 'the counter is refused in this test'); END;",
+        )
+        .unwrap();
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(2, "memory_get", &json!({ "id": uid })),
+            call(3, "memories_search", &json!({})),
+        ],
+    );
+    assert_eq!(result(&replies[1])["memory"]["id"], uid);
+    assert_eq!(result(&replies[2])["memories"][0]["id"], uid);
+    assert_eq!(retrieval_count(&mut human, &uid), 0);
+}
