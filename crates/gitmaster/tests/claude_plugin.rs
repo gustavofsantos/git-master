@@ -25,9 +25,10 @@ const EVENTS: [&str; 7] = [
 ];
 
 /// The tools the skill names. Each one is served by `gitmaster mcp` (docs/agents/mcp-server.md).
-const SKILL_TOOLS: [&str; 5] = [
+const SKILL_TOOLS: [&str; 6] = [
     "review_comments_list",
     "review_comment_resolve",
+    "review_comment_reply",
     "threads_search",
     "thread_get",
     "thread_read",
