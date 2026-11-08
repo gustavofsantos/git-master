@@ -55,10 +55,6 @@ The brief asked for a `ui/redesign` branch. AGENTS.md forbids feature branches a
 - General undo: only a restack can be undone; undoing a commit would add Git behavior.
 - A pre-existing random failure of `gm-core` proptest `grep::tests::a_shaped_line_is_valid_text_with_marks_inside_it` (Unicode case folding in the search highlight, e.g. query "up"). The saved regression file was removed so the suite runs as it did at HEAD; the bug itself is not fixed.
 
-## Open questions for Gustavo
+## Settled with Gustavo
 
-1. Undo: should ⌘Z also undo a commit (`reset --soft`), or stay on restack only?
-2. Amend: add it to the composer (a new Git operation for the app)?
-3. Labels: keep them as a tab of Agents (current), or drop the page and manage labels only from chips?
-4. Viewed marks: keep them per window, or store them (in `.git/gitmaster/` or the app data directory)?
-5. Without topics, the brief's questions on the name "topic" and on the Branches fold following the selected member no longer apply; the composer is on top.
+All decisions of the redesign are Decided: D206 to D210, and D211 for the questions that were open here. Undo stays on restack, the composer has no Amend, Labels stay a tab of Agents, and Viewed marks last with the window. Slice 5 is dropped, so the brief's questions on the name "topic" and on the Branches fold no longer apply; the composer is on top.
