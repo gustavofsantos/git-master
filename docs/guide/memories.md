@@ -66,8 +66,6 @@ When a decision changes, select the proposed memory that replaces the old one an
 
 ## Keep memories true
 
-> **Planned.** The `/gitmaster:consolidate` skill below is not built yet.
-
 A memory is for what nobody can see again by looking: the reason for a choice, a rule, a lesson, a failed attempt. What the code, `git log` or a command shows does not belong in one, and the proposing skill leaves it out.
 
 In a session with the GitMaster [plugin](../agents/agent-integration.md), ask:
@@ -76,7 +74,7 @@ In a session with the GitMaster [plugin](../agents/agent-integration.md), ask:
 /gitmaster:consolidate
 ```
 
-A cheap sub-agent checks accepted memories against their sources, the files as they are now and the threads, starting with the ones that changed under them and the ones agents retrieve most. It proposes a correction, a merge or a replacement. Each proposal is **Proposed** and names the memory it replaces. You accept it or not; nothing is replaced without you.
+A cheap sub-agent checks accepted memories against their sources, the files they name, which changed since you accepted them, and the threads they cite. It starts with the memories whose files changed, then the ones marked unconfirmed, then the oldest accepted ones. It proposes a correction, a merge or a replacement. Each proposal is **Proposed**; one that replaces a memory begins by naming it, and when you accept it you choose **Supersedes…** to replace the old one. You accept it or not; nothing is replaced without you. The sub-agent reads the memory and its sources but not the current text of the files, so a memory that a file change does not touch can still be wrong.
 
 GitMaster counts on your machine how often each memory is retrieved and when. An agent's search counts each memory it returns, and an agent's read counts the memory it reads. The counts are never shared, never sent to a model and never in an agent's results. The detail of a memory says **Retrieved 3 times, last 2 h ago**, or **Never retrieved**.
 
