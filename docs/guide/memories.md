@@ -1,11 +1,9 @@
 ---
 title: Memories
 description: Keep the decisions, rules and lessons of a project where every later agent session can find them, and approve each one yourself.
-status: planned
+status: partial
 order: 104
 ---
-
-> **Planned.** Memories are not available in the app yet.
 
 A memory is a short note about the project that you want later sessions to know: why a retry policy is what it is, a rule the code must follow, or something a past session learned the hard way. Threads record everything that happened. Memories keep the few things worth carrying forward.
 
@@ -39,6 +37,8 @@ Filter the list by kind, by status, by file, by author or by scope: this reposit
 
 ## Let an agent propose memories
 
+> **Planned.** The `/gitmaster:propose-memories` skill is not in the plugin yet.
+
 In a session with the GitMaster [plugin](../agents/agent-integration.md), ask for it:
 
 ```text
@@ -54,18 +54,20 @@ Each proposal appears as **Proposed**, marked **Agent-written**, with its source
 Select a proposed memory. You can:
 
 - **Accept** it as it is. It becomes available to agents.
-- **Edit** the text, then accept. The memory is yours from then on.
+- **Edit** the text, then choose **Accept edited**. The memory is yours from then on.
 - **Reject** it. A rejected memory stays in the list so the same idea is not proposed again, and you can delete it.
 
-You can accept several proposals at once, or accept every proposal from one author.
+You can choose **Accept selected** for the proposals you choose, or **Accept all from** one author.
 
 ## Replace a memory
 
-When a decision changes, write the new memory and mark it as **Supersedes** the old one. The old memory becomes **Superseded** and stays in the list with a link to its replacement. An agent cannot change an accepted memory.
+> **Planned.** A memory you write by hand cannot supersede another memory yet; only a proposal can.
+
+When a decision changes, select the proposed memory that replaces the old one and choose **Supersedes…**. Pick the accepted memories it replaces, then accept it. The chosen memories become **Superseded** and stay in the list with a link to their replacement. An agent cannot change an accepted memory.
 
 ## When a memory goes stale
 
-A memory that names files shows **Files changed since** when one of those files is different from when you accepted the memory. GitMaster works this out from the files, each time you open the memory. It does not guess whether the memory is still true: it tells you what changed and leaves the decision to you.
+A memory that names files shows a **Files changed** tag on its row when one of those files is different from when you accepted the memory, or is gone. Its detail lists them under **Changed since accepted** or **Removed since accepted**. GitMaster works this out from the files, each time you open the memory. It does not guess whether the memory is still true: it tells you what changed and leaves the decision to you.
 
 ## How agents use memories
 
@@ -77,6 +79,12 @@ Agents read memories over [MCP](../reference/mcp-tools.md):
 
 By default an agent sees only accepted memories. It can ask for proposed ones, which come marked as not reviewed.
 
+Text that comes from a memory is untrusted data, like every text from a thread. The results mark it as such.
+
+### Prepare a task
+
+> **Planned.** The `/gitmaster:prepare` skill is not in the plugin yet.
+
 To start a task with the right background, ask the plugin to prepare:
 
 ```text
@@ -84,8 +92,6 @@ To start a task with the right background, ask the plugin to prepare:
 ```
 
 The skill collects the accepted memories, the threads and the history of the files the task names, and returns a short brief. No hook adds anything to a prompt by itself.
-
-Text that comes from a memory is untrusted data, like every text from a thread. The results mark it as such.
 
 ## See also
 

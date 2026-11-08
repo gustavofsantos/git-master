@@ -2,7 +2,7 @@
 
 The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `make docs-status` lists what the docs still mark as planned.
 
-Last updated: 2026-11-07 (slices 6s, 6m and 8r planned, D187 to D190; before that, N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
+Last updated: 2026-11-07 (M1 to M3 of slice 6m done, path unification done (D197), review reply threads (D198) and sub-agent threads (D199) recorded; before that, slices 6s, 6m and 8r planned, D187 to D190; before that, N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
 
 ## Order criteria
 
@@ -707,13 +707,13 @@ The author decided the principles (D187: opt-in, additive, explicit, redaction c
 
 **Known gaps to expect.** No automatic publish (Q37); no sync of notes, stars or labels; nothing seen in a window until SH4.
 
-## Slice 6m: memories (decided 2026-11-07, next in the order; D190, D191, Q42, Q44)
+## Slice 6m: memories (M1 to M3 done 2026-11-07, M4 next; D190, D191, Q42, Q44)
 
 Requested by the author on 2026-11-07, first priority. Engineering design in `design/threads.md` ("Memories") and `design/reviewers.md` ("Skills and sub-agents"); behavior in `docs/guide/memories.md` (`Planned`). Depends on slice 6t and 6g (threads, labels, provenance).
 
 **Goal.** Decisions, rules and lessons that agents propose and the human accepts, searchable by later sessions over MCP, with sources and a derived staleness signal.
 
-**Sub-slices.** M1 model and store (pure, no UI), M2 MCP tools (`memories_search`, `memory_get`, `memory_propose`), M3 Memories tab, M4 skills (`propose-memories`, `prepare`; first verify the plugin format, Q42). M5, sharing of memories, is deferred with slice 6s. **Contexts (D191, Q44)** answer work across many repositories: C1 builds `contexts.db`, `repo-id`, membership, nesting and the merged search, after M1 and before M2 (the MCP search arguments carry the scope); C2 is the Manage Contexts… dialog with the scope chip and filter, built with M3. Order: M1, C1, M2, M3 with C2, M4.
+**Sub-slices.** M1 model and store (pure, no UI), M2 MCP tools (`memories_search`, `memory_get`, `memory_propose`), M3 Memories tab, M4 skills (`propose-memories`, `prepare`; first verify the plugin format, Q42). M5, sharing of memories, is deferred with slice 6s. **Contexts (D191, Q44)** answer work across many repositories: C1 builds `contexts.db`, `repo-id`, membership, nesting and the merged search, after M1 and before M2 (the MCP search arguments carry the scope); C2 is the Manage Contexts… dialog with the scope chip and filter, built with M3 (as M3c). Order: M1, C1, M2, M3 with C2, M4; M1 to M3 are done, M4 is next.
 
 **M1, model and store** (done 2026-11-07, with gaps; D192). Schema v7 of `threads.db` (`memory`, `memory_source` with a nullable `repo_id`, `memory_rel`, `memory_fts`); the pure rules in `threads/memories.rs` (text, duplicate key, sources, actor, state machine, **Files changed since**); the engine commands `ListMemories`, `ReadMemory`, `ProposeMemory`, `AcceptMemory`, `RejectMemory` and `DeleteMemory`, with accept, reject and delete human only and the reads kept out of the command log. Tests: pure unit tests in the module and `crates/gm-core/tests/memories_real_git.rs` (changed, renamed, deleted and added files, redaction, commit resolution, actor rules, the log). Known gaps: no MCP tool and no UI (M2, M3), so the docs pages stay `Planned`; the `model` column stays empty until M2 passes it; `ProposeMemory` has no `context` yet (C1); the duplicate check scans the memories of one kind on each write, which suits hundreds of memories, not tens of thousands; **Files changed since** runs one Git process per file source per result; a workspace member store still at v6 is skipped by the workspace thread listing until a writer opens it, as for every migration under D180. Nothing was seen in a window.
 
@@ -721,7 +721,20 @@ Requested by the author on 2026-11-07, first priority. Engineering design in `de
 
 **M2, MCP tools** (done 2026-11-07, with gaps). `memories_search`, `memory_get`, `contexts_list` (read) and `memory_propose` (record) in `crates/gm-mcp/src/memory_tools.rs`; they translate JSON to the engine commands, which enforce the rules. Memory objects are marked `untrusted`; `docs/reference/mcp-tools.md` lists them as implemented. Tests: `crates/gm-mcp/tests/memories_mcp_real_git.rs` over JSON-RPC on real repositories, with a temporary `contexts.db` (proposal and duplicate, a refusal that leaves the server answering, accepted-only by default, a read with a file changed since acceptance, two repositories joined by a context, paging). Known gaps: the `model` column stays empty, because the MCP handshake names the client and its version but no model; context names in `contexts_list` are not marked untrusted, since only the person writes them; the tools were driven by the tests, not by a live agent session. Nothing was seen in a window.
 
+**M3, Memories tab** (done 2026-11-07, with gaps; split as the commits show). **M3a, view model** (432e20a): the pure `MemoriesPage` in `crates/gm-ui/src/memories.rs`, with filters and scope, proposed-first ordering, paging with late answers dropped by `OperationId`, the human action planners, and the Files changed since display; no GPUI. **M3b, the tab** (f2c9efb, with 87c3413 and 5ffb47c): the tab strip with the proposed badge, a virtualized list with filters and search, a detail pane with sources and Files changed since, accept, edit, reject, delete and supersede, bulk accept, New Memory, four palette actions, the scope chip and filter, and memory text shown as plain text. The proposed count on the badge is unfiltered (5ffb47c). **M3c, C2** (f84dd16): the Manage Contexts… dialog with its tree, a repository pane, adding and removing a repository from the recent ones or the open one, rename, move and delete from the ⋯ menu, and a clash prompt with a new id; the read command `PreviewDeleteContext` (D196), used by the delete confirmation; Move, Attach and Detach for memories in the detail pane and the palette. Known gaps: nothing seen in a window and no smoke scenario ran. `Memory.contexts` (the contexts the repository sees, by path) lets Detach list every attached context; it is also in the MCP `memories_search` and `memory_get` results. An agent proposing into a context has no UI beyond the generic accept. `docs/guide/memories.md` and `docs/guide/contexts.md` are `partial`, with the gaps marked there.
+
 **Acceptance.** An agent actor can only propose, with a source; only a human accepts; an accepted memory's file source shows **Files changed since** after the file changes, in a test with real Git. M4 is checked against a real Claude Code session, and what was and was not seen is stated.
+
+## Path unification (D197): one config and data path (done 2026-11-07, commit fec4253)
+
+Settings, workflows, the recent list and the trust store use one resolver, `gm_core::paths`, with the XDG layout on Linux and macOS: `$XDG_CONFIG_HOME/gitmaster` and `$XDG_DATA_HOME/gitmaster`, with the home-directory defaults. The earlier macOS locations are not migrated, since the app has no users before go-live (D197 (3)).
+
+## Sub-agent threads (D199; S1 done, S2 blocked on Q45, S3 and S4 not started)
+
+- **S1, storage and model** (done, f84dd16): schema v9 of `threads.db` with `parent_thread` and `parent_call`; the thread list hides sub-agent threads; `thread_get` and `thread_read` report the parent; deleting a parent deletes its sub-agent threads.
+- **S2, capture** (blocked): waits for the real `SubagentStop` and `PostToolUse` payloads and the sub-agent transcript files, which must be captured with the T0 method first (Q45).
+- **S3, Threads page** (not started): the nested row, its expansion, **Open Thread** and the depth cap.
+- **S4, search and MCP** (not started): `parent` on search hits and on the thread reads, and the `Planned` markers in `docs/guide/threads.md` and `docs/reference/mcp-tools.md` removed as each part ships.
 
 ## Slice 8r: reviewers, verdicts and gates (decided 2026-11-07, after slice 6m; D188, D189, Q37, Q39, Q40)
 
@@ -789,6 +802,10 @@ Several repositories in one workspace: a superproject whose submodules are linke
 - Tools `review_comments_list` and `review_comment_resolve`.
 - Inline comment on the diff, with Before/After.
 - Confirm D11 and Q3 before starting.
+
+## Review reply threads (D198: done 2026-11-07, with gaps)
+
+A reply is a review comment with a parent, and the agent's summary is its reply (review store v4 migrates the existing summaries). The MCP tool `review_comment_reply` writes a reply, and the app shows each thread under its comment on the Local review page and in the Working Copy diff, with a Reply box on the Local review page. Known gaps: in the diff, Reply opens the composer dialog, not an inline box, because a diff row cannot hold a growing text area; no palette action; `scripts/ui-smoke.sh` does not cover replies; the `ai/` plugin skill does not name `review_comment_reply` yet. Nothing was seen in a window.
 
 ## Slice 9: premium polish
 
