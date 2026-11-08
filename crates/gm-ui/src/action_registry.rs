@@ -492,7 +492,8 @@ pub enum MemoryEffect {
     MoveToContext(String),
     /// Opens the picker of the contexts the memory is attached to.
     AttachToContext(String),
-    /// Opens the confirmation that detaches the memory from the context its scope names.
+    /// Opens the detach of the memory from one of its contexts: the confirmation when it is in one
+    /// context, else the picker of its contexts.
     DetachFromContext(String),
 }
 
@@ -5014,6 +5015,7 @@ mod tests {
             in_context: false,
             status,
             linked: false,
+            contexts: 0,
         }
     }
 
@@ -5037,6 +5039,7 @@ mod tests {
                 in_context: true,
                 status: MemoryStatus::Accepted,
                 linked: false,
+                contexts: 1,
             },
         };
         let inside = memory_ctx(Some(in_context));
@@ -5059,6 +5062,7 @@ mod tests {
                 in_context: true,
                 status: MemoryStatus::Proposed,
                 linked: false,
+                contexts: 1,
             },
         };
         assert_eq!(

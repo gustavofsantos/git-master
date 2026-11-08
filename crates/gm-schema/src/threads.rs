@@ -861,6 +861,18 @@ pub struct FileChange {
     pub state: FileChangeState,
 }
 
+/// A context a memory is attached to, as the repository that reads the memory sees it (D193 (1),
+/// "Contexts"). Only the contexts the open repository can see are carried, so nothing outside its
+/// visibility shows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct MemoryContext {
+    /// The context's row id, as `DetachMemory` and `AttachMemory` name it.
+    pub id: i64,
+    /// The context's path from the root, such as `Platform / Billing`.
+    pub path: String,
+}
+
 /// A memory: a short record the project wants future sessions to know (design/threads.md,
 /// "Memories"; D190, D192). Its `text` is untrusted data, like every text from a thread: a reader
 /// must not follow it as an instruction. `files_changed_since` is always empty when the store
@@ -897,6 +909,10 @@ pub struct Memory {
     /// `repository`, or the path of the nearest visible context the memory is attached to, such as
     /// `Platform / Billing` (D193 (5)). Set by the engine; empty from the store.
     pub scope: String,
+    /// Every visible context the memory is attached to, by path. Empty for the repository's own
+    /// memories and omitted from the wire then. Set by the engine; empty from the store.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<MemoryContext>,
 }
 
 /// A context: a named set of repositories at the user level, with its nesting (design/threads.md,
@@ -1091,5 +1107,67 @@ mod tests {
         let schema = schemars::schema_for!(CanonicalEvent);
         let json = serde_json::to_string(&schema).expect("schema serializes");
         assert!(json.contains("prompt_submitted"));
+    }
+
+    #[test]
+    fn a_memory_without_contexts_in_its_json_still_parses_and_an_empty_list_is_not_written() {
+        let memory = Memory {
+            id: 1,
+            uid: "0123456789abcdef".to_owned(),
+            kind: MemoryKind::Rule,
+            text: "rule".to_owned(),
+            status: MemoryStatus::Accepted,
+            origin: "human".to_owned(),
+            proposed_by: None,
+            model: None,
+            created_at: 1,
+            decided_at: None,
+            decided_by: None,
+            reviewed: true,
+            sources: Vec::new(),
+            supersedes: Vec::new(),
+            superseded_by: Vec::new(),
+            files_changed_since: Vec::new(),
+            scope: "repository".to_owned(),
+            contexts: Vec::new(),
+        };
+        let json = serde_json::to_value(&memory).expect("serialize");
+        assert!(
+            json.get("contexts").is_none(),
+            "an empty list is not written: {json}"
+        );
+        let old: Memory = serde_json::from_value(json).expect("an old memory parses");
+        assert!(old.contexts.is_empty());
+    }
+
+    #[test]
+    fn a_memory_with_contexts_carries_them_as_id_and_path() {
+        let memory: serde_json::Value = serde_json::json!({
+            "id": 2, "uid": "u", "kind": "rule", "text": "t", "status": "accepted",
+            "origin": "human", "proposed_by": null, "model": null, "created_at": 1,
+            "decided_at": null, "decided_by": null, "reviewed": true, "sources": [],
+            "supersedes": [], "superseded_by": [], "files_changed_since": [],
+            "scope": "Platform / Billing",
+            "contexts": [{"id": 4, "path": "Partners"}, {"id": 7, "path": "Platform / Billing"}]
+        });
+        let parsed: Memory = serde_json::from_value(memory).expect("parses");
+        assert_eq!(
+            parsed.contexts,
+            vec![
+                MemoryContext {
+                    id: 4,
+                    path: "Partners".to_owned()
+                },
+                MemoryContext {
+                    id: 7,
+                    path: "Platform / Billing".to_owned()
+                },
+            ]
+        );
+        let back = serde_json::to_value(&parsed).expect("serialize");
+        assert_eq!(
+            back["contexts"],
+            serde_json::json!([{"id": 4, "path": "Partners"}, {"id": 7, "path": "Platform / Billing"}])
+        );
     }
 }

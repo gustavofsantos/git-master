@@ -5,7 +5,9 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use gm_schema::threads::{Memory, MemoryKind, MemorySourceInput, MemorySourceKind, MemoryStatus};
+use gm_schema::threads::{
+    Memory, MemoryContext, MemoryKind, MemorySourceInput, MemorySourceKind, MemoryStatus,
+};
 use gm_schema::{Event, OperationId, OperationState};
 use gpui::{
     Context, Div, Entity, FontWeight, MouseButton, MouseDownEvent, Stateful, Subscription, Window,
@@ -13,7 +15,7 @@ use gpui::{
 };
 
 use crate::contexts_model;
-use crate::memories::{self, MemoriesPage, Request, Scope};
+use crate::memories::{self, DetachStart, MemoriesPage, Request, Scope};
 use crate::memory_form::{self, SourceDraft};
 use crate::memory_rows;
 use crate::shell_memories::{NO_WRITE, button, pick_chip};
@@ -56,8 +58,13 @@ pub(crate) enum DialogForm {
         action: PlaceAction,
         filter: Entity<TextArea>,
     },
-    /// Detaches context memory `uid` from `context`, the context its scope names.
-    Detach { uid: String, context: String },
+    /// Detaches context memory `uid` from `context`, its only context.
+    Detach { uid: String, context: MemoryContext },
+    /// Detaches context memory `uid` from the context the picker chooses among `contexts`.
+    DetachPick {
+        uid: String,
+        contexts: Vec<MemoryContext>,
+    },
 }
 
 /// The two ways a memory joins a context from the picker (D193 (8)).
@@ -356,22 +363,46 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Opens the confirmation that detaches memory `uid` from the context its scope names.
+    /// Opens the detach of memory `uid` from its contexts: the confirmation when it is in one
+    /// visible context, the picker of them when it is in several (D193 (1)).
     pub(crate) fn open_detach_dialog(&mut self, uid: &str, cx: &mut Context<Self>) {
-        let Some(memory) = self.model.memories.find(uid) else {
-            return;
+        let start = match self.model.memories.find(uid) {
+            Some(memory) => memories::detach_start(memory),
+            None => return,
         };
-        let context = memory.scope.clone();
-        self.memory_dialog = Some(MemoryDialog {
-            form: DialogForm::Detach {
+        let form = match start {
+            DetachStart::Nothing => return,
+            DetachStart::Confirm(context) => DialogForm::Detach {
                 uid: uid.to_owned(),
                 context,
             },
+            DetachStart::Pick(contexts) => DialogForm::DetachPick {
+                uid: uid.to_owned(),
+                contexts,
+            },
+        };
+        self.memory_dialog = Some(MemoryDialog {
+            form,
             error: None,
             pending: None,
             _subscriptions: Vec::new(),
         });
         cx.notify();
+    }
+
+    /// A context chosen in the detach picker: the detach it plans is sent.
+    fn choose_detach_context(&mut self, context: i64, cx: &mut Context<Self>) {
+        let Some(dialog) = self.memory_dialog.as_ref() else {
+            return;
+        };
+        if dialog.pending.is_some() {
+            return;
+        }
+        let DialogForm::DetachPick { uid, .. } = &dialog.form else {
+            return;
+        };
+        let planned = self.model.memories.plan_detach(uid, context);
+        self.send_planned_dialog(planned, cx);
     }
 
     /// A context chosen in the picker: the move or attach it plans is sent.
@@ -400,10 +431,10 @@ impl StatusView {
         if dialog.pending.is_some() {
             return;
         }
-        let DialogForm::Detach { uid, .. } = &dialog.form else {
+        let DialogForm::Detach { uid, context } = &dialog.form else {
             return;
         };
-        let planned = self.model.memories.plan_detach(uid);
+        let planned = self.model.memories.plan_detach(uid, context.id);
         self.send_planned_dialog(planned, cx);
     }
 
@@ -448,7 +479,9 @@ impl StatusView {
                         action: PlaceAction::Attach,
                         ..
                     }) => "Memory attached to the context.",
-                    Some(DialogForm::Detach { .. }) => "Memory detached from the context.",
+                    Some(DialogForm::Detach { .. } | DialogForm::DetachPick { .. }) => {
+                        "Memory detached from the context."
+                    }
                     None => "",
                 };
                 self.memory_dialog = None;
@@ -489,7 +522,10 @@ impl StatusView {
                 self.place_panel(dialog, *action, filter, left, cx)
             }
             DialogForm::Detach { context, .. } => {
-                Self::memory_detach_panel(dialog, context, left, cx)
+                Self::memory_detach_panel(dialog, &context.path, left, cx)
+            }
+            DialogForm::DetachPick { contexts, .. } => {
+                Self::memory_detach_pick_panel(dialog, contexts, left, cx)
             }
         };
         vec![div().absolute().inset_0().child(outside).child(panel)]
@@ -806,6 +842,63 @@ impl StatusView {
             .children(error_lines(dialog.error.as_deref()))
             .child(button(
                 "memory-place-cancel",
+                "Cancel",
+                cx,
+                StatusView::close_memory_dialog,
+            ))
+    }
+
+    /// The detach picker: the contexts the memory is attached to, one row each by path. A row is
+    /// sent at once, and a refusal stays in the dialog.
+    fn memory_detach_pick_panel(
+        dialog: &MemoryDialog,
+        contexts: &[MemoryContext],
+        left: f32,
+        cx: &Context<Self>,
+    ) -> Div {
+        let rows: Vec<Stateful<Div>> = contexts
+            .iter()
+            .enumerate()
+            .map(|(index, context)| {
+                let id = context.id;
+                div()
+                    .id(("memory-detach-row", index))
+                    .cursor_pointer()
+                    .py_1()
+                    .text_sm()
+                    .text_color(theme::text())
+                    .child(context.path.clone())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            this.choose_detach_context(id, cx);
+                        }),
+                    )
+            })
+            .collect();
+        panel_base(left)
+            .child(
+                div()
+                    .text_color(theme::text())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Detach from Context"),
+            )
+            .child(div().text_sm().text_color(theme::text()).child(
+                "Choose the context the memory leaves. It stays in the others it belongs to; \
+                     the last context of a memory cannot be detached.",
+            ))
+            .child(
+                div()
+                    .id("memory-detach-list")
+                    .max_h(px(PICK_HEIGHT))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .children(rows),
+            )
+            .children(error_lines(dialog.error.as_deref()))
+            .child(button(
+                "memory-detach-cancel",
                 "Cancel",
                 cx,
                 StatusView::close_memory_dialog,

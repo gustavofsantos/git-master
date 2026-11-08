@@ -1345,6 +1345,7 @@ mod tests {
             superseded_by: Vec::new(),
             files_changed_since: Vec::new(),
             scope: String::new(),
+            contexts: Vec::new(),
         };
         // The crash: the insert into contexts.db happens, the delete from threads.db does not.
         let (first, created) = store.move_memory_in(&stored, &[a]).expect("insert");

@@ -1694,3 +1694,131 @@ fn the_preview_counts_sub_contexts_and_caps_the_list_at_fifty_with_the_full_tota
     assert_eq!(partners.total, 51);
     assert_eq!(partners.memories.len(), 50);
 }
+
+/// The contexts a memory carries, as (id, path) pairs in the order the engine gives them.
+fn contexts_of(memory: &Memory) -> Vec<(i64, String)> {
+    memory
+        .contexts
+        .iter()
+        .map(|context| (context.id, context.path.clone()))
+        .collect()
+}
+
+#[test]
+fn a_memory_lists_every_visible_context_it_is_attached_to_by_path() {
+    let world = World::new();
+    let fixture = populate(&world);
+    let mut billing = engine_on(&world.path("billing"), &world.db);
+    let stored = memory_of(&propose_at(
+        &mut billing,
+        &Actor::Human,
+        Some("Billing"),
+        "Billing and partners rule",
+    ));
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let attached = send(
+        &mut api,
+        &Actor::Human,
+        CommandKind::AttachMemory {
+            uid: stored.uid.clone(),
+            context: fixture.partners,
+        },
+    );
+    assert_eq!(state_of(&attached), OperationState::Done, "{attached:?}");
+
+    let expected = vec![
+        (fixture.partners, "Partners".to_owned()),
+        (fixture.billing, "Platform / Billing".to_owned()),
+    ];
+    assert_eq!(contexts_of(&read_memory(&mut api, &stored.uid)), expected);
+    let seen = search(&mut api, &agent(), "", None, 50, None).expect("list");
+    let listed = seen
+        .memories
+        .iter()
+        .find(|memory| memory.uid == stored.uid)
+        .expect("listed");
+    assert_eq!(contexts_of(listed), expected);
+    assert_eq!(
+        listed.scope, "Platform / Billing",
+        "scope keeps its meaning"
+    );
+}
+
+#[test]
+fn a_context_the_repository_cannot_see_is_not_listed_on_a_memory() {
+    let world = World::new();
+    let fixture = populate(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let stored = memory_of(&propose_at(
+        &mut api,
+        &Actor::Human,
+        Some("Platform"),
+        "Platform rule, also in partners",
+    ));
+    let attached = send(
+        &mut api,
+        &Actor::Human,
+        CommandKind::AttachMemory {
+            uid: stored.uid.clone(),
+            context: fixture.partners,
+        },
+    );
+    assert_eq!(state_of(&attached), OperationState::Done, "{attached:?}");
+
+    // web belongs to Platform only: Partners is not visible from it, so it is not listed.
+    let mut web = engine_on(&world.path("web"), &world.db);
+    let expected = vec![(fixture.platform, "Platform".to_owned())];
+    assert_eq!(contexts_of(&read_memory(&mut web, &stored.uid)), expected);
+    let seen = search(&mut web, &agent(), "", None, 50, None).expect("list");
+    let listed = seen
+        .memories
+        .iter()
+        .find(|memory| memory.uid == stored.uid)
+        .expect("listed from platform");
+    assert_eq!(contexts_of(listed), expected);
+    assert_eq!(listed.scope, "Platform");
+}
+
+#[test]
+fn detaching_from_one_context_leaves_the_other_listed() {
+    let world = World::new();
+    let fixture = populate(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let stored = memory_of(&propose_at(
+        &mut api,
+        &Actor::Human,
+        Some("Platform"),
+        "Shared platform rule",
+    ));
+    let attached = send(
+        &mut api,
+        &Actor::Human,
+        CommandKind::AttachMemory {
+            uid: stored.uid.clone(),
+            context: fixture.partners,
+        },
+    );
+    assert_eq!(state_of(&attached), OperationState::Done, "{attached:?}");
+
+    let detached = send(
+        &mut api,
+        &Actor::Human,
+        CommandKind::DetachMemory {
+            uid: stored.uid.clone(),
+            context: fixture.partners,
+        },
+    );
+    assert_eq!(state_of(&detached), OperationState::Done, "{detached:?}");
+    assert_eq!(
+        contexts_of(&read_memory(&mut api, &stored.uid)),
+        vec![(fixture.platform, "Platform".to_owned())]
+    );
+    let mut portal = engine_on(&world.path("portal"), &world.db);
+    assert!(
+        search(&mut portal, &agent(), "", None, 50, None)
+            .expect("list")
+            .memories
+            .is_empty(),
+        "portal no longer sees it"
+    );
+}

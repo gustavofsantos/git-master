@@ -1,11 +1,9 @@
 ---
 title: Contexts
 description: Group repositories that share one context, so a memory about work that touches several of them is found from each of them.
-status: planned
+status: implemented
 order: 106
 ---
-
-> **Planned.** Contexts are not available in the app yet.
 
 Some work does not belong to one repository: a rule about how services call each other, a decision about a shared data format, a lesson from a change that went through four repositories. A context is a named set of repositories that share such knowledge. A [memory](memories.md) attached to a context is stored once and found from every repository that belongs to it.
 
@@ -31,11 +29,11 @@ A memory attached to **Platform** is found from all seven repositories, includin
 
 Choose **Manage Contexts…** on the **Memories** tab of the Threads page, or from the command palette.
 
-1. Choose **New Context** and give it a name. To make a sub-context, select its parent first.
+1. Choose **New Context** and give it a name. When a context is selected, the name box also asks whether the new one is a sub-context of it: choose **As a sub-context of** to switch between yes and no.
 2. Choose **Add Repository** and pick from your recent repositories, or add the repository that is open.
-3. Rename, move or delete a context from its **⋯** menu.
+3. Choose **⋯** on a context, then **Rename**, **Move…** or **Delete**.
 
-When a repository first joins a context, GitMaster gives that clone an id, in its `.git` folder, so the membership still holds if you move the folder. Nothing is written into the working tree.
+When a repository first joins a context, GitMaster gives that clone an id, in its `.git` folder, so the membership still holds if you move the folder. Nothing is written into the working tree. If another clone already holds that id, the dialog says so and offers **Give this clone a new id**. After that the clone belongs to no context, so add it to the contexts again.
 
 A context cannot be deleted while it has sub-contexts. Deleting one lists the memories that belong to no other context and asks before it removes them.
 
@@ -49,13 +47,17 @@ Choose **New Memory** and pick the scope. A memory you write is accepted at once
 
 ### Move a memory into a context
 
-A memory written in one repository can turn out to matter to others. Select it, choose **Move to Context…** and pick the context. The memory moves, with its sources, and leaves the repository's own list. To make a context memory also belong to another context, choose **Attach to Context…**. It stays one memory, not a copy. To take a context memory out of a context, choose **Detach from Context…**; a memory always keeps at least one context.
+A memory written in one repository can turn out to matter to others. Select it, choose **Move to Context…** and pick the context. The memory moves, with its sources, and leaves the repository's own list. To make a context memory also belong to another context, choose **Attach to Context…**. It stays one memory, not a copy.
+
+### Detach a memory
+
+To take a context memory out of a context, choose **Detach from Context…**. A memory attached to several contexts lists them, and you pick the one to leave; a memory always keeps at least one context.
 
 ### Let an agent propose a memory in a context
 
 An agent working in a repository that belongs to a context can propose a memory in that context, and it names the context when it does. The proposal is **Proposed** like any other, and no other repository's agent sees it as established until you accept it. Accept it from any repository that belongs to the context.
 
-A memory's sources can be threads, commits and files of different repositories. A source in a repository that is not on this computer shows as unavailable.
+A memory's sources can be threads, commits and files of different repositories. A source in another repository shows **In another repository** and cannot be opened from this one.
 
 ## What agents see
 

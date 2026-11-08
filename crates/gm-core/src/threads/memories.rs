@@ -988,6 +988,7 @@ fn memory_row(row: &Row<'_>) -> rusqlite::Result<Result<Memory, StoreError>> {
         superseded_by: Vec::new(),
         files_changed_since: Vec::new(),
         scope: String::new(),
+        contexts: Vec::new(),
     }))
 }
 
@@ -1406,6 +1407,7 @@ mod tests {
             superseded_by: Vec::new(),
             files_changed_since: Vec::new(),
             scope: String::new(),
+            contexts: Vec::new(),
         };
         let source = |path: &str, blob: Option<&str>| MemorySource {
             kind: MemorySourceKind::File,
@@ -1500,6 +1502,7 @@ mod tests {
             superseded_by: Vec::new(),
             files_changed_since: Vec::new(),
             scope: String::new(),
+            contexts: Vec::new(),
         };
         // The file is at HEAD now, but nothing was read to compare it with: never `Changed`.
         let lookup = |_: &MemorySource| -> Result<Option<String>, Lookup> {

@@ -307,6 +307,7 @@ mod tests {
             superseded_by: Vec::new(),
             files_changed_since: Vec::new(),
             scope: "repository".to_owned(),
+            contexts: Vec::new(),
         }
     }
 
@@ -524,10 +525,19 @@ mod tests {
         );
     }
 
+    /// A context of the memory, as the engine lists it (D193 (1)).
+    fn attached_to(id: i64, path: &str) -> gm_schema::threads::MemoryContext {
+        gm_schema::threads::MemoryContext {
+            id,
+            path: path.to_owned(),
+        }
+    }
+
     #[test]
-    fn a_context_memory_offers_attach_only_when_accepted_and_always_detach() {
+    fn a_context_memory_offers_attach_only_when_accepted_and_detach_when_it_has_a_context() {
         let mut proposal = memory("p", MemoryStatus::Proposed, "agent:x", "t");
         proposal.scope = "Platform".to_owned();
+        proposal.contexts = vec![attached_to(7, "Platform")];
         assert_eq!(
             detail_actions(Some(&proposal)),
             vec![
@@ -541,6 +551,7 @@ mod tests {
         );
         let mut accepted = memory("a", MemoryStatus::Accepted, "human", "t");
         accepted.scope = "Platform".to_owned();
+        accepted.contexts = vec![attached_to(7, "Platform"), attached_to(9, "Partners")];
         assert_eq!(
             detail_actions(Some(&accepted)),
             vec![
@@ -548,6 +559,16 @@ mod tests {
                 DetailAction::DetachFromContext,
                 DetailAction::Delete,
             ]
+        );
+    }
+
+    #[test]
+    fn a_context_memory_with_no_visible_context_is_not_offered_a_detach() {
+        let mut accepted = memory("a", MemoryStatus::Accepted, "human", "t");
+        accepted.scope = "Platform".to_owned();
+        assert_eq!(
+            detail_actions(Some(&accepted)),
+            vec![DetailAction::AttachToContext, DetailAction::Delete]
         );
     }
 

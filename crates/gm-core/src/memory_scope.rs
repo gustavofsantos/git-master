@@ -9,7 +9,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use gm_schema::threads::{Memory, MemoryFilter, MemorySource, MemorySourceKind, MemoryStatus};
+use gm_schema::threads::{
+    Memory, MemoryContext, MemoryFilter, MemorySource, MemorySourceKind, MemoryStatus,
+};
 use gm_schema::{Actor, Event, OperationId};
 
 use crate::GitPort;
@@ -185,6 +187,22 @@ impl Reach {
             })
     }
 
+    /// The visible contexts among `attached`, by path: the contexts a memory answer carries
+    /// (D193 (1)). A context the repository cannot see is left out, so it does not leak.
+    fn attached_contexts(&self, attached: &[i64]) -> Vec<MemoryContext> {
+        let mut contexts: Vec<MemoryContext> = self
+            .visible
+            .iter()
+            .filter(|(id, _)| attached.contains(id))
+            .map(|&(id, _)| MemoryContext {
+                id,
+                path: visibility::context_path(&self.nodes, id),
+            })
+            .collect();
+        contexts.sort_by(|a, b| a.path.cmp(&b.path).then(a.id.cmp(&b.id)));
+        contexts
+    }
+
     /// The scope a request names, `None` meaning every scope (D193 (5)).
     fn scope(&self, text: Option<&str>) -> Result<Scope, String> {
         match text {
@@ -295,6 +313,7 @@ fn finish(ctx: &Context<'_>, reach: &Reach, memory: &mut Memory, attached: &[i64
     } else {
         reach.label_of(attached)
     };
+    memory.contexts = reach.attached_contexts(attached);
     fill_changes(ctx, reach, memory);
 }
 
@@ -542,6 +561,7 @@ fn list(
         } else {
             REPOSITORY.to_owned()
         };
+        memory.contexts = stores.reach.attached_contexts(&entry.attached);
         memories.push(memory);
     }
     Ok((memories, next))

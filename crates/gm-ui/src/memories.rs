@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use gm_schema::threads::{Context, Memory, MemorySourceInput};
+use gm_schema::threads::{Context, Memory, MemoryContext, MemorySourceInput};
 use gm_schema::{
     CommandKind, FileChange, FileChangeState, MemoryKind, MemoryStatus, OperationId, OperationState,
 };
@@ -53,6 +53,7 @@ const MOVE_FIRST: &str = "This memory is in this repository only: move it to a c
 const NOT_ACCEPTED_TO_ATTACH: &str = "Only an accepted memory can be attached to another context.";
 const NO_CONTEXT_OF_ITS_OWN: &str =
     "This memory is in this repository only, so it has no context to detach from.";
+const NOT_ATTACHED_TO_IT: &str = "The memory is not attached to that context.";
 
 /// Which memories the list shows by scope (D193 (5)).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -896,18 +897,19 @@ impl MemoriesPage {
         ))
     }
 
-    /// Detaches the context memory `uid` from the context its scope names. The scope shows one of
-    /// the contexts a memory is attached to, so this is the one the dialog can name; the engine
-    /// refuses the last context of a memory, and that reason is shown as it comes.
-    pub fn plan_detach(&self, uid: &str) -> Result<Request, &'static str> {
+    /// Detaches the context memory `uid` from `context`, one of the contexts the memory is attached
+    /// to (`detach_choices`). The engine refuses the last context of a memory, and that reason is
+    /// shown as it comes.
+    pub fn plan_detach(&self, uid: &str, context: i64) -> Result<Request, &'static str> {
         let memory = self.find(uid).ok_or(NOT_SHOWN)?;
         check_detach(Placement::of(memory))?;
-        let context = self
+        if !memory
             .contexts
             .iter()
-            .find(|context| context.path == memory.scope)
-            .ok_or(NOT_VISIBLE)?
-            .id;
+            .any(|attached| attached.id == context)
+        {
+            return Err(NOT_ATTACHED_TO_IT);
+        }
         Ok(place(
             CommandKind::DetachMemory {
                 uid: uid.to_owned(),
@@ -943,6 +945,8 @@ pub struct Placement {
     pub status: MemoryStatus,
     /// The memory has a supersedes link in either direction.
     pub linked: bool,
+    /// How many visible contexts the memory is attached to (D193 (1)).
+    pub contexts: usize,
 }
 
 impl Placement {
@@ -953,6 +957,7 @@ impl Placement {
             in_context: memory.scope != REPOSITORY,
             status: memory.status,
             linked: !memory.supersedes.is_empty() || !memory.superseded_by.is_empty(),
+            contexts: memory.contexts.len(),
         }
     }
 }
@@ -984,12 +989,44 @@ pub fn check_attach(place: Placement) -> Result<(), &'static str> {
     }
 }
 
-/// Whether a memory can be detached from a context: only a context memory has one.
+/// Whether a memory can be detached from a context: only a memory attached to at least one visible
+/// context has one to leave.
 pub fn check_detach(place: Placement) -> Result<(), &'static str> {
-    if place.in_context {
+    if place.contexts > 0 {
         Ok(())
     } else {
         Err(NO_CONTEXT_OF_ITS_OWN)
+    }
+}
+
+/// The contexts the detach picker lists for a memory, one row each, by path (D193 (1)). Empty when
+/// the memory is in no visible context, which `check_detach` refuses.
+#[must_use]
+pub fn detach_choices(memory: &Memory) -> Vec<MemoryContext> {
+    let mut choices = memory.contexts.clone();
+    choices.sort_by(|a, b| a.path.cmp(&b.path).then(a.id.cmp(&b.id)));
+    choices
+}
+
+/// How a detach starts from the memory shown: nothing when it is offered no detach, the one-step
+/// confirmation when it is in exactly one visible context, else the picker of its contexts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DetachStart {
+    Nothing,
+    Confirm(MemoryContext),
+    Pick(Vec<MemoryContext>),
+}
+
+/// The detach a memory starts with (D193 (1)).
+#[must_use]
+pub fn detach_start(memory: &Memory) -> DetachStart {
+    if check_detach(Placement::of(memory)).is_err() {
+        return DetachStart::Nothing;
+    }
+    let choices = detach_choices(memory);
+    match choices.as_slice() {
+        [only] => DetachStart::Confirm(only.clone()),
+        _ => DetachStart::Pick(choices),
     }
 }
 
@@ -1210,6 +1247,7 @@ mod tests {
             superseded_by: Vec::new(),
             files_changed_since: Vec::new(),
             scope: REPOSITORY.to_owned(),
+            contexts: Vec::new(),
         }
     }
 
@@ -1937,12 +1975,76 @@ mod tests {
         assert_eq!(check_attach(own), Err(MOVE_FIRST));
     }
 
+    /// A context a memory is attached to, as the engine lists it.
+    fn attached(id: i64, path: &str) -> MemoryContext {
+        MemoryContext {
+            id,
+            path: path.to_owned(),
+        }
+    }
+
+    /// A memory of a context, attached to every context of `contexts`.
+    fn attached_in(uid: &str, status: MemoryStatus, contexts: &[(i64, &str)]) -> Memory {
+        let mut memory = in_context(uid, status, contexts[0].1);
+        memory.contexts = contexts
+            .iter()
+            .map(|&(id, path)| attached(id, path))
+            .collect();
+        memory
+    }
+
     #[test]
-    fn detach_needs_a_context_memory_of_any_status() {
-        let proposed = Placement::of(&in_context("p", MemoryStatus::Proposed, "Platform"));
+    fn detach_needs_a_memory_attached_to_a_visible_context_of_any_status() {
+        let proposed = Placement::of(&attached_in(
+            "p",
+            MemoryStatus::Proposed,
+            &[(7, "Platform")],
+        ));
         assert_eq!(check_detach(proposed), Ok(()));
         let own = Placement::of(&memory("a", MemoryStatus::Accepted, "human", "x"));
         assert_eq!(check_detach(own), Err(NO_CONTEXT_OF_ITS_OWN));
+        let unattached = Placement::of(&in_context("u", MemoryStatus::Accepted, "Platform"));
+        assert_eq!(check_detach(unattached), Err(NO_CONTEXT_OF_ITS_OWN));
+    }
+
+    #[test]
+    fn the_picker_lists_every_attached_context_once_by_path() {
+        let memory = attached_in(
+            "c",
+            MemoryStatus::Accepted,
+            &[(9, "Platform / Billing"), (7, "Partners"), (4, "Platform")],
+        );
+        assert_eq!(
+            detach_choices(&memory),
+            vec![
+                attached(7, "Partners"),
+                attached(4, "Platform"),
+                attached(9, "Platform / Billing"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_detach_is_confirmed_for_one_context_and_picked_for_several_or_refused() {
+        let one = attached_in("o", MemoryStatus::Accepted, &[(7, "Platform")]);
+        assert_eq!(
+            detach_start(&one),
+            DetachStart::Confirm(attached(7, "Platform"))
+        );
+        let two = attached_in(
+            "t",
+            MemoryStatus::Accepted,
+            &[(9, "Platform / Billing"), (7, "Platform")],
+        );
+        assert_eq!(
+            detach_start(&two),
+            DetachStart::Pick(vec![
+                attached(7, "Platform"),
+                attached(9, "Platform / Billing")
+            ])
+        );
+        let own = memory("a", MemoryStatus::Accepted, "human", "x");
+        assert_eq!(detach_start(&own), DetachStart::Nothing);
     }
 
     #[test]
@@ -1990,10 +2092,10 @@ mod tests {
     }
 
     #[test]
-    fn a_detach_names_the_context_the_scope_shows_and_is_refused_for_a_repository_memory() {
+    fn a_detach_names_an_attached_context_and_is_refused_for_a_repository_memory() {
         let tab = with_contexts(
             vec![
-                in_context("c", MemoryStatus::Accepted, "Platform / Billing"),
+                attached_in("c", MemoryStatus::Accepted, &[(9, "Platform / Billing")]),
                 memory("a", MemoryStatus::Accepted, "human", "own"),
             ],
             vec![
@@ -2002,18 +2104,32 @@ mod tests {
             ],
         );
         assert_eq!(
-            kind_of(&tab.plan_detach("c").expect("planned")),
+            kind_of(&tab.plan_detach("c", 9).expect("planned")),
             &CommandKind::DetachMemory {
                 uid: "c".to_owned(),
                 context: 9,
             }
         );
-        assert_eq!(tab.plan_detach("a").err(), Some(NO_CONTEXT_OF_ITS_OWN));
-        let unseen = with_contexts(
-            vec![in_context("c", MemoryStatus::Accepted, "Gone")],
-            vec![context_at(7, "Platform")],
+        assert_eq!(tab.plan_detach("a", 9).err(), Some(NO_CONTEXT_OF_ITS_OWN));
+        assert_eq!(tab.plan_detach("c", 7).err(), Some(NOT_ATTACHED_TO_IT));
+        let two = with_contexts(
+            vec![attached_in(
+                "t",
+                MemoryStatus::Accepted,
+                &[(7, "Platform"), (9, "Platform / Billing")],
+            )],
+            vec![
+                context_at(7, "Platform"),
+                context_at(9, "Platform / Billing"),
+            ],
         );
-        assert_eq!(unseen.plan_detach("c").err(), Some(NOT_VISIBLE));
+        assert_eq!(
+            kind_of(&two.plan_detach("t", 7).expect("planned")),
+            &CommandKind::DetachMemory {
+                uid: "t".to_owned(),
+                context: 7,
+            }
+        );
     }
 
     #[test]
