@@ -9,7 +9,15 @@ The Working Copy shows the changes in your repository that are not committed yet
 
 ## Changed files
 
-The header reads **Working Copy** and shows how many files changed, for example **6 changed**. Each changed file takes one row, with a state letter and its full path:
+The header reads **Working Copy** and shows how many files changed, for example **6 changed**. The list groups the changed files under their folder:
+
+- A folder takes one row, with its path, such as `src/ui/`, in a muted color. The row has a box, described in [Folders](#folders).
+- The files of a folder follow its row, indented. Each file shows its name, not its full path.
+- A file at the root of the repository has no folder row. Such files come first in the list.
+
+Only the direct parent folder is a group. A file in `src/ui/widgets/` is listed under the folder row `src/ui/widgets/`, and not under `src/ui/`. Each folder has its own row.
+
+Each file has a state letter and a box in front of its name:
 
 | Letter | State |
 | --- | --- |
@@ -18,9 +26,26 @@ The header reads **Working Copy** and shows how many files changed, for example 
 | `D` | Deleted |
 | `?` | Untracked: a new file that Git does not track yet |
 
-A subtle mark next to the letter shows that the file has something staged.
+The box shows what goes into the next commit:
 
-Select a file to see its diff. The diff is described in [Diff and staging](diff-and-staging.md).
+| Box | Meaning |
+| --- | --- |
+| Checked | All of the file's change is staged. The whole file goes into the commit. |
+| Mixed, a dash | Part of the file's change is staged. |
+| Unchecked | Nothing of the file is staged. |
+
+A conflicted file has no box. Resolve it first; see [Resolving conflicts](conflicts.md).
+
+Select a file to see its diff. The diff is described in [Diff and staging](diff-and-staging.md). The arrow keys, and `j` and `k`, move from one file to the next and skip the folder rows.
+
+## Folders
+
+Each folder row has a box that works on the files of that folder. It is checked when all of its files are fully staged, unchecked when none of them has anything staged, and mixed otherwise.
+
+- Clicking the box of an unchecked or mixed folder runs **Stage Folder**. It stages every file of the folder that has unstaged changes.
+- Clicking the box of a checked folder runs **Unstage Folder**. It unstages every staged file of the folder.
+
+Files in sub-folders are not part of the folder. Each sub-folder has its own row and its own box. Conflicted files and submodules are left out of both actions.
 
 ## Submodules
 
@@ -41,8 +66,10 @@ In a [workspace](workspaces.md), each member is a submodule, so the Working Copy
 
 Staged changes go into the next commit. Stage a whole file when all of its changes belong in the commit:
 
-1. Select the file in the list.
+1. Click the box in front of the file's name, or select the file in the list.
 2. Press `Space` to stage it. On a staged file, `Space` unstages it.
+
+Clicking the box of a checked file runs **Unstage File**. Clicking the box of an unchecked or mixed file runs **Stage File**.
 
 You can also right-click the file, or select it and press `Shift+F10`, and choose from the file menu. The menu lists:
 
@@ -65,11 +92,13 @@ To stage part of a file, see [Diff and staging](diff-and-staging.md).
 
 ## Commit
 
-The composer sits at the bottom of the Working Copy. It holds the commit message and the **Commit on <branch>** button, where `<branch>` is the branch you are on.
+The composer sits at the top of the left column, above the list of changed files. It holds the commit message and the **Commit on <branch>** button, where `<branch>` is the branch you are on.
+
+The first line of the message is the subject. A character counter shows the length of the subject, and it turns red when the subject is longer than 72 characters. Drag the bottom edge of the composer to make it taller or shorter. Double-click that edge to reset its height.
 
 1. Stage the changes you want in the commit. Only staged changes are committed.
 2. Type the commit message in the composer.
-3. Click **Commit on <branch>**, for example **Commit on main**.
+3. Click **Commit on <branch>**, for example **Commit on main**, or press `Ctrl+Enter` (`⌘↵` on macOS) in the message box.
 
 Git's own hooks run during the commit, such as `pre-commit`. If a hook stops the commit, its output appears as the error of the commit. The same output is recorded in the Git commands panel, described below.
 

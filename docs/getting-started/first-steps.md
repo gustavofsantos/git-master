@@ -133,10 +133,10 @@ GITMASTER_THEME=light gitmaster ~/src/my-project
 This walkthrough commits one changed file.
 
 1. Open a repository and change a file in it with your editor.
-2. Open **Changes**. The file appears in the list with a state letter and its path: `M` for modified, `A` for added, `D` for deleted and `?` for new. The header shows the count, such as "1 changed".
+2. Open **Changes**. The file appears in the list, under the row of its folder, with a state letter and its name: `M` for modified, `A` for added, `D` for deleted and `?` for new. The header shows the count, such as "1 changed".
 3. Select the file to see its diff. The diff header shows the path and the number of added and removed lines, such as `+5 −1`.
-4. Stage the file. Select it and press `Space`, or right-click it and choose **Stage File**. A small mark appears next to the state letter once the file has staged changes.
-5. Type a message in the composer at the bottom of the column.
+4. Stage the file. Click its box, select it and press `Space`, or right-click it and choose **Stage File**. The box becomes checked once the whole file is staged. A dash means only part of it is staged.
+5. Type a message in the composer at the top of the column, above the file list.
 6. Click the commit button, labelled **Commit on** followed by the branch name, for example **Commit on main**.
 
 The commit runs your repository's Git hooks, such as `pre-commit`, as `git commit` does. The commit then appears in the Git commands panel. Open [History](../guide/history.md) to see it at the top of the list.

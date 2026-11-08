@@ -14,7 +14,7 @@ The **Staged | Unstaged** selector in the diff header chooses the side you look 
 - **Staged** shows the changes already staged for the next commit.
 - **Unstaged** shows the changes you have not staged yet.
 
-The header shows the file path and the change count, such as `+5 −1`. Below it, a summary line gives the totals, for example `2 chunks, 3 insertions, 4 deletions`.
+The header is one row. It shows the file path, then the totals, such as `+5 −1 · 2 chunks`. On the right it has the comment button, the **Staged | Unstaged** selector and the **Unified | Split** selector.
 
 ## Stage and unstage chunks
 
@@ -41,7 +41,7 @@ On the Staged side, press `Ctrl+Shift+I` (`⇧⌘I` on macOS) to unstage the sel
 
 ### Half-staged pairs
 
-A removed line and the added line that replaces it form a pair. If you stage only one side of a pair, the index can end up without the old line and without the new one, and the file may not compile. When your selection splits a pair, the view shows the warning **Half-staged −/+ pair: the index would lose both the old and the new line, and may not compile.** Select the other side too, or stage the whole chunk.
+A removed line and the added line that replaces it form a pair. If you stage only one side of a pair, the index can end up without the old line and without the new one, and the file may not compile. When your selection splits a pair, the view shows the warning **Half-staged −/+ pair: the index would lose both the old and the new line, and may not compile.** The warning has a **Select the pair** button. It adds the missing side of every split pair to your selection, so the staging takes whole pairs. To stage the selection as it is, press the same key a second time: `Ctrl+Shift+S` (`⇧⌘S` on macOS) to stage, or `Ctrl+Shift+I` (`⇧⌘I` on macOS) to unstage.
 
 ## Staging uses the exact diff
 
