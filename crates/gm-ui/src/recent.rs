@@ -81,35 +81,14 @@ impl Recents {
 /// `XDG_DATA_HOME` is ignored, as the XDG spec asks. Without a home directory
 /// there is no file.
 #[must_use]
-pub fn data_file(
-    xdg_data_home: Option<OsString>,
-    home: Option<OsString>,
-    macos: bool,
-) -> Option<PathBuf> {
-    let absolute = |value: Option<OsString>| {
-        value
-            .map(PathBuf::from)
-            .filter(|path| !path.as_os_str().is_empty() && path.is_absolute())
-    };
-    let base = if macos {
-        absolute(home)?.join("Library/Application Support")
-    } else {
-        match absolute(xdg_data_home) {
-            Some(base) => base,
-            None => absolute(home)?.join(".local/share"),
-        }
-    };
-    Some(base.join("gitmaster").join("recent.json"))
+pub fn data_file(xdg_data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    gm_core::paths::data_dir_under(xdg_data_home, home).map(|dir| dir.join("recent.json"))
 }
 
 /// The file for this process, from the real environment.
 #[must_use]
 pub fn default_file() -> Option<PathBuf> {
-    data_file(
-        std::env::var_os("XDG_DATA_HOME"),
-        std::env::var_os("HOME"),
-        cfg!(target_os = "macos"),
-    )
+    data_file(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
 }
 
 /// The list's file. Saves are written in the order they were asked for: a
@@ -239,11 +218,11 @@ mod tests {
     fn data_file_follows_xdg_then_home() {
         let xdg = Some(OsString::from("/data"));
         assert_eq!(
-            data_file(xdg, Some("/home/u".into()), false),
+            data_file(xdg, Some("/home/u".into())),
             Some(PathBuf::from("/data/gitmaster/recent.json"))
         );
         assert_eq!(
-            data_file(None, Some("/home/u".into()), false),
+            data_file(None, Some("/home/u".into())),
             Some(PathBuf::from("/home/u/.local/share/gitmaster/recent.json"))
         );
     }
@@ -252,26 +231,27 @@ mod tests {
     fn a_relative_or_empty_xdg_value_is_ignored() {
         for bad in ["relative/dir", ""] {
             assert_eq!(
-                data_file(Some(bad.into()), Some("/home/u".into()), false),
+                data_file(Some(bad.into()), Some("/home/u".into())),
                 Some(PathBuf::from("/home/u/.local/share/gitmaster/recent.json"))
             );
         }
     }
 
     #[test]
-    fn macos_uses_application_support() {
+    fn the_same_layout_on_a_mac_home() {
         assert_eq!(
-            data_file(Some("/data".into()), Some("/Users/u".into()), true),
-            Some(PathBuf::from(
-                "/Users/u/Library/Application Support/gitmaster/recent.json"
-            ))
+            data_file(None, Some("/Users/u".into())),
+            Some(PathBuf::from("/Users/u/.local/share/gitmaster/recent.json"))
+        );
+        assert_eq!(
+            data_file(Some("/data".into()), Some("/Users/u".into())),
+            Some(PathBuf::from("/data/gitmaster/recent.json"))
         );
     }
 
     #[test]
     fn no_home_means_no_file() {
-        assert_eq!(data_file(None, None, false), None);
-        assert_eq!(data_file(None, None, true), None);
+        assert_eq!(data_file(None, None), None);
     }
 
     #[test]

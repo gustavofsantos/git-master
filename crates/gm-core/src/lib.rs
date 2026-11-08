@@ -24,7 +24,7 @@ pub mod move_changes;
 mod move_exec;
 mod move_preview;
 pub mod path_match;
-mod paths;
+pub mod paths;
 mod port;
 mod reflog;
 pub mod remote;

@@ -116,7 +116,7 @@ rm -f ~/.local/share/applications/gitmaster.desktop
 find ~/.local/share/icons/hicolor -name gitmaster.png -delete
 ```
 
-Removing the program does not remove your settings or app data. They are in `~/.config/gitmaster` and `~/.local/share/gitmaster`. Delete those folders yourself if you want to remove them too.
+Removing the program does not remove your settings or app data. On Linux and macOS alike they are in `~/.config/gitmaster` and `~/.local/share/gitmaster`, or under `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME` when those are set. Delete those folders yourself if you want to remove them too.
 
 ## Build from source
 

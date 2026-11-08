@@ -22,7 +22,7 @@ What does not change: the workflow only composes `Command`s of the engine (D60).
 
 ## Format and location (D98, revises D61)
 
-- One workflow per `.lua` file, in `~/.config/gitmaster/workflows/` (macOS: `Library/Application Support/gitmaster/workflows/`) and in the directories of `gitmaster.workflowPath`. Nothing is read from a repository, and nothing is written to the working tree (D73 still holds).
+- One workflow per `.lua` file, in `~/.config/gitmaster/workflows/` (under `$XDG_CONFIG_HOME` when set; the same on macOS) and in the directories of `gitmaster.workflowPath`. Nothing is read from a repository, and nothing is written to the working tree (D73 still holds).
 - Directories whose names start with a dot (such as `.api/`, below) are not read as workflows.
 - The module returns a table with `meta` and `execute`:
 

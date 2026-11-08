@@ -9,7 +9,7 @@ An AI coding agent with access to your files can write a workflow script. GitMas
 
 ## Where the agent writes
 
-- Put the file in your workflows directory: `~/.config/gitmaster/workflows/` on Linux, or `~/Library/Application Support/gitmaster/workflows/` on macOS. Folders listed in `gitmaster.workflowPath` are read too. See [Writing workflows](writing-workflows.md).
+- Put the file in your workflows directory, `~/.config/gitmaster/workflows/`. Folders listed in `gitmaster.workflowPath` are read too. See [Writing workflows](writing-workflows.md).
 - One workflow is one `.lua` file that returns a module with `meta` and `execute`.
 - A `.toml` file in the workflows directory is ignored, and GitMaster shows a warning for it.
 - A folder whose name starts with a dot is not read as a workflow source.

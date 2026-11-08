@@ -2,6 +2,7 @@
 //! Parsing is lenient: a missing or mistyped field takes its default, so a bad value never stops
 //! capture by itself. Only `load` touches the file system.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -151,26 +152,19 @@ fn strings(items: &[Value]) -> Vec<String> {
 /// directory is known.
 #[must_use]
 pub fn settings_path() -> Option<PathBuf> {
-    settings_path_from(|name| std::env::var_os(name).map(PathBuf::from))
+    settings_path_from(|name| std::env::var_os(name))
 }
 
 /// `settings_path` with the environment passed in, so the lookup is testable without
 /// changing the process environment.
-fn settings_path_from(env: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
-    let home = || env("HOME").filter(|p| !p.as_os_str().is_empty());
-    if cfg!(target_os = "macos") {
-        return Some(home()?.join("Library/Application Support/gitmaster/settings.json"));
-    }
-    // Linux and other Unix systems: the XDG location when it is set to an absolute path.
-    let xdg = env("XDG_CONFIG_HOME").filter(|p| p.is_absolute() && !p.as_os_str().is_empty());
-    match xdg {
-        Some(dir) => Some(dir.join("gitmaster/settings.json")),
-        None => Some(home()?.join(".config/gitmaster/settings.json")),
-    }
+fn settings_path_from(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    crate::paths::config_dir_under(env("XDG_CONFIG_HOME"), env("HOME"))
+        .map(|dir| dir.join("settings.json"))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::path::PathBuf;
 
     use serde_json::json;
@@ -330,13 +324,10 @@ mod tests {
     #[test]
     fn settings_path_uses_xdg_when_absolute() {
         let env = |name: &str| match name {
-            "XDG_CONFIG_HOME" => Some(PathBuf::from("/cfg")),
-            "HOME" => Some(PathBuf::from("/home/u")),
+            "XDG_CONFIG_HOME" => Some(OsString::from("/cfg")),
+            "HOME" => Some(OsString::from("/home/u")),
             _ => None,
         };
-        if cfg!(target_os = "macos") {
-            return;
-        }
         assert_eq!(
             settings_path_from(env),
             Some(PathBuf::from("/cfg/gitmaster/settings.json"))
@@ -346,27 +337,35 @@ mod tests {
     #[test]
     fn settings_path_falls_back_to_home() {
         let home_only = |name: &str| match name {
-            "HOME" => Some(PathBuf::from("/home/u")),
+            "HOME" => Some(OsString::from("/home/u")),
             _ => None,
         };
         let relative_xdg = |name: &str| match name {
-            "XDG_CONFIG_HOME" => Some(PathBuf::from("relative")),
-            "HOME" => Some(PathBuf::from("/home/u")),
+            "XDG_CONFIG_HOME" => Some(OsString::from("relative")),
+            "HOME" => Some(OsString::from("/home/u")),
             _ => None,
         };
         let empty_xdg = |name: &str| match name {
-            "XDG_CONFIG_HOME" => Some(PathBuf::new()),
-            "HOME" => Some(PathBuf::from("/home/u")),
+            "XDG_CONFIG_HOME" => Some(OsString::new()),
+            "HOME" => Some(OsString::from("/home/u")),
             _ => None,
         };
-        let expected = if cfg!(target_os = "macos") {
-            PathBuf::from("/home/u/Library/Application Support/gitmaster/settings.json")
-        } else {
-            PathBuf::from("/home/u/.config/gitmaster/settings.json")
+        let expected = Some(PathBuf::from("/home/u/.config/gitmaster/settings.json"));
+        assert_eq!(settings_path_from(home_only), expected);
+        assert_eq!(settings_path_from(relative_xdg), expected);
+        assert_eq!(settings_path_from(empty_xdg), expected);
+    }
+
+    #[test]
+    fn settings_path_is_the_same_on_a_mac_home() {
+        let env = |name: &str| match name {
+            "HOME" => Some(OsString::from("/Users/u")),
+            _ => None,
         };
-        assert_eq!(settings_path_from(home_only), Some(expected.clone()));
-        assert_eq!(settings_path_from(relative_xdg), Some(expected.clone()));
-        assert_eq!(settings_path_from(empty_xdg), Some(expected));
+        assert_eq!(
+            settings_path_from(env),
+            Some(PathBuf::from("/Users/u/.config/gitmaster/settings.json"))
+        );
     }
 
     #[test]

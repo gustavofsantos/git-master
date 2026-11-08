@@ -15,16 +15,16 @@ GitMaster keeps its files in three places: your user config directory, your user
 
 | Path | What it holds | Status |
 |---|---|---|
-| `~/.config/gitmaster/workflows/` (Linux), `~/Library/Application Support/gitmaster/workflows/` (macOS) | Your workflow files. A workflow file holds only its definition, never run state. | |
+| `~/.config/gitmaster/workflows/` | Your workflow files. A workflow file holds only its definition, never run state. | |
 
 ### User data directory
 
 | Path | What it holds | Status |
 |---|---|---|
-| `~/.local/share/gitmaster/recent.json` (Linux), `~/Library/Application Support/gitmaster/recent.json` (macOS) | The recently opened repositories, newest first, up to 10. |  |
-| `~/.local/share/gitmaster/gitmaster.db` (Linux), `~/Library/Application Support/gitmaster/gitmaster.db` (macOS) | Which versions of a workflow script you reviewed, and your automatic approvals. Each is tied to the hash of the script text. | |
-| `~/.local/share/gitmaster/workflow-trash/` (Linux), `~/Library/Application Support/gitmaster/workflow-trash/` (macOS) | Workflow files you delete. They are moved here instead of being removed. | |
-| `~/.local/share/gitmaster/contexts.db` (Linux), `~/Library/Application Support/gitmaster/contexts.db` (macOS) | Your [contexts](../guide/contexts.md): their names, nesting and repositories, and the memories attached to them, with a search index. Readable only by you. | Planned |
+| `~/.local/share/gitmaster/recent.json` | The recently opened repositories, newest first, up to 10. |  |
+| `~/.local/share/gitmaster/gitmaster.db` | Which versions of a workflow script you reviewed, and your automatic approvals. Each is tied to the hash of the script text. | |
+| `~/.local/share/gitmaster/workflow-trash/` | Workflow files you delete. They are moved here instead of being removed. | |
+| `~/.local/share/gitmaster/contexts.db` | Your [contexts](../guide/contexts.md): their names, nesting and repositories, and the memories attached to them, with a search index. Readable only by you. | Planned |
 
 A repository whose folder no longer exists is dropped from the recent list.
 
@@ -112,9 +112,9 @@ The `branch.<name>.` keys belong to stacks, which is a preview feature. See [Pre
 |---|---|---|
 | `GITMASTER_THEME` | `dark`, `light`, `system` | Sets the theme when the app starts. The value is not case sensitive. When it is unset, or set to any other value, the theme is `system`, which follows the appearance of your operating system. |
 | `SHELL` | Path to a shell | The shell that GitMaster asks for the PATH. See below. |
-| `XDG_CONFIG_HOME` | Absolute path | The base of the user config directory on Linux. Defaults to `~/.config`. A relative or empty value is ignored. |
-| `XDG_DATA_HOME` | Absolute path | The base of the user data directory on Linux. Defaults to `~/.local/share`. A relative or empty value is ignored. |
-| `HOME` | Absolute path | The base of the default folders when the XDG variables are not set. On macOS, the folders are always under `Library/Application Support` in your home directory. |
+| `XDG_CONFIG_HOME` | Absolute path | The base of the user config directory. Defaults to `~/.config`. A relative or empty value is ignored. |
+| `XDG_DATA_HOME` | Absolute path | The base of the user data directory. Defaults to `~/.local/share`. A relative or empty value is ignored. |
+| `HOME` | Absolute path | The base of the default folders when the XDG variables are not set. The same folders are used on macOS and Linux. |
 | `GITMASTER_ENABLE_STACKS` | `1`, `0`, or unset | Turns the stacks preview feature on or off. See [Preview features](#preview-features). |
 | `GITMASTER_ENABLE_CONFLICT_RESOLVER` | `1`, `0`, or unset | Turns the conflict resolver preview feature on or off. See [Preview features](#preview-features). |
 

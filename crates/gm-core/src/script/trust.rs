@@ -70,21 +70,13 @@ pub struct TrustStore {
 /// `<data dir>/gitmaster/gitmaster.db` (see `paths`), or `None` without a home.
 #[must_use]
 pub fn default_file() -> Option<PathBuf> {
-    data_file(
-        std::env::var_os("XDG_DATA_HOME"),
-        std::env::var_os("HOME"),
-        cfg!(target_os = "macos"),
-    )
+    data_file(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
 }
 
 /// The database under the given environment values.
 #[must_use]
-pub fn data_file(
-    xdg_data_home: Option<OsString>,
-    home: Option<OsString>,
-    macos: bool,
-) -> Option<PathBuf> {
-    crate::paths::data_dir_under(xdg_data_home, home, macos).map(|dir| dir.join(FILE_NAME))
+pub fn data_file(xdg_data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    crate::paths::data_dir_under(xdg_data_home, home).map(|dir| dir.join(FILE_NAME))
 }
 
 impl TrustStore {
@@ -275,20 +267,24 @@ mod tests {
     #[test]
     fn data_file_follows_xdg_then_home() {
         assert_eq!(
-            data_file(Some("/x".into()), Some("/h".into()), false),
+            data_file(Some("/x".into()), Some("/h".into())),
             Some(PathBuf::from("/x/gitmaster/gitmaster.db"))
         );
         assert_eq!(
-            data_file(Some("rel".into()), Some("/h".into()), false),
+            data_file(Some("rel".into()), Some("/h".into())),
             Some(PathBuf::from("/h/.local/share/gitmaster/gitmaster.db"))
         );
+        assert_eq!(data_file(None, None), None);
+    }
+
+    #[test]
+    fn data_file_is_the_same_on_a_mac_home() {
         assert_eq!(
-            data_file(None, Some("/h".into()), true),
+            data_file(None, Some("/Users/u".into())),
             Some(PathBuf::from(
-                "/h/Library/Application Support/gitmaster/gitmaster.db"
+                "/Users/u/.local/share/gitmaster/gitmaster.db"
             ))
         );
-        assert_eq!(data_file(None, None, false), None);
     }
 
     #[test]

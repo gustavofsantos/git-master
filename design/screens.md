@@ -94,7 +94,7 @@ Planned for slice 9 (premium finish), the settings screen is a modal that gather
 - **Access**: `⌘,` on macOS, `Ctrl+,` on Linux and Windows. The registered action is `open_settings` in `action_registry.rs`. It also appears in the command palette as `Open Settings`, and as a gear button in the footer. It closes with `Esc`, a click outside it, or the close button.
 - **Persistence without a Save button (Principle 5)**: each change is saved at once, when the value changes or the text field loses focus. Writes stay within these boundaries:
   - Git config: written with `git config`, to `~/.gitconfig` (global scope) or `.git/config` (repository scope).
-  - App settings: written to `settings.json` in the user's config directory (`~/.config/gitmaster/` on Linux).
+  - App settings: written to `settings.json` in the user's config directory (`~/.config/gitmaster/`, or under `$XDG_CONFIG_HOME`).
   - Security: written to `hook-approvals.json` in the user's data directory (`~/.local/share/gitmaster/`).
   - Nothing is written inside the repository working tree.
 - **Sections**: General, Git & Identity, Worktrees (D31), Diff & Files, Hooks & Security (D17, D29, D30), Stacks & Restack, Conflict Resolver, MCP & Agents, and Local Review.

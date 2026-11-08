@@ -61,7 +61,7 @@ Agent sessions are captured into `.git/gitmaster/threads.db`. Full design in `de
 
 ## Persistence
 
-- Workflow files: outside the repository, in `~/.config/gitmaster/workflows/` (macOS: `Library/Application Support/gitmaster/workflows/`) and in the directories of `gitmaster.workflowPath`. Nothing is read or written in the working tree (D61, revised by D98). The file holds only the definition (D79): nothing about execution, such as `enabled`, last run or approvals.
+- Workflow files: outside the repository, in `~/.config/gitmaster/workflows/` (under `$XDG_CONFIG_HOME` when set) and in the directories of `gitmaster.workflowPath`. Nothing is read or written in the working tree (D61, revised by D98). The file holds only the definition (D79): nothing about execution, such as `enabled`, last run or approvals.
 - Per repository, in `state.db` (in the Git common directory): runs, their journal (one entry per `ctx` call, plus outputs), and the retention rules below. It follows the repository and works with worktrees. The journal is history for the Runs view. It is not a recovery mechanism (D100).
 - Per user, in `~/.local/share/gitmaster/gitmaster.db` (the app data directory): the review of each script version by its hash, with the automatic approval flag that WF3 uses. Enabling a workflow per repository is not stored yet (WF3).
 - SQLite via `rusqlite` with bundled SQLite: compiled into the binary, no external dependency.

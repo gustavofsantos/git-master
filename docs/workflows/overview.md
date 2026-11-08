@@ -38,8 +38,7 @@ GitMaster reads workflow files from these places:
 
 | Location | Path |
 |---|---|
-| Your configuration directory | `~/.config/gitmaster/workflows/` |
-| On macOS | `~/Library/Application Support/gitmaster/workflows/` |
+| Your configuration directory | `~/.config/gitmaster/workflows/`, or under `$XDG_CONFIG_HOME` when that is set |
 | Extra directories | Each folder listed in the Git config key `gitmaster.workflowPath` |
 
 To add an extra folder, for example a folder of dotfiles, run:

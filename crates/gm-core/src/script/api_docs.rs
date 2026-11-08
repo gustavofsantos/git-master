@@ -934,7 +934,7 @@ fn skill_md() -> String {
     out.push_str("description: Write, check and test GitMaster workflow scripts (Lua files in the workflows folder). Use when asked to create or change a GitMaster workflow.\n");
     out.push_str("---\n\n");
     out.push_str("# Writing GitMaster workflows\n\n");
-    out.push_str("- Write one `.lua` file in the workflows folder, the folder that holds this `.api/` folder: `~/.config/gitmaster/workflows/` on Linux, `Library/Application Support/gitmaster/workflows/` in your home folder on macOS. Do not write into a repository.\n");
+    out.push_str("- Write one `.lua` file in the workflows folder, the folder that holds this `.api/` folder: `~/.config/gitmaster/workflows/` (under `$XDG_CONFIG_HOME` when that is set). Do not write into a repository.\n");
     out.push_str("- `.api/ctx.d.luau` has the `ctx` signatures as Luau types, for an editor.\n");
     out.push_str("- Read `.api/API.md` first. It lists every `ctx` function with its arguments, effect level and outcomes, and the shape of `M.meta`.\n");
     out.push_str("- Check, dry-run and test, and repeat until each passes:\n");

@@ -56,31 +56,11 @@ impl From<&AppSettings> for Settings {
     }
 }
 
-/// The file the settings are kept in, under the given environment values.
-/// Pure, so both platforms' layouts can be tested on any host. On Linux it is
-/// `$XDG_CONFIG_HOME/gitmaster/settings.json` (D38), or `~/.config` when that is
-/// unset, empty or relative. On macOS it is under `Library/Application Support`,
-/// as the other app files are. Without a home directory there is no file.
+/// The file the settings are kept in, under the given environment values: `settings.json` in the
+/// config directory (D38, `gm_core::paths`). Without a home directory there is no file.
 #[must_use]
-pub fn settings_file(
-    xdg_config_home: Option<OsString>,
-    home: Option<OsString>,
-    macos: bool,
-) -> Option<PathBuf> {
-    let absolute = |value: Option<OsString>| {
-        value
-            .map(PathBuf::from)
-            .filter(|path| !path.as_os_str().is_empty() && path.is_absolute())
-    };
-    let base = if macos {
-        absolute(home)?.join("Library/Application Support")
-    } else {
-        match absolute(xdg_config_home) {
-            Some(base) => base,
-            None => absolute(home)?.join(".config"),
-        }
-    };
-    Some(base.join("gitmaster").join("settings.json"))
+pub fn settings_file(xdg_config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    gm_core::paths::config_dir_under(xdg_config_home, home).map(|dir| dir.join("settings.json"))
 }
 
 /// The file for this process, from the real environment.
@@ -89,7 +69,6 @@ pub fn default_file() -> Option<PathBuf> {
     settings_file(
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
-        cfg!(target_os = "macos"),
     )
 }
 
@@ -162,7 +141,7 @@ mod tests {
     #[test]
     fn settings_file_follows_xdg_config_then_home() {
         let path = |xdg: Option<&str>, home: Option<&str>| {
-            settings_file(xdg.map(OsString::from), home.map(OsString::from), false)
+            settings_file(xdg.map(OsString::from), home.map(OsString::from))
         };
         assert_eq!(
             path(Some("/xdg"), Some("/home/u")),
@@ -176,13 +155,8 @@ mod tests {
 
     #[test]
     fn a_relative_or_empty_xdg_config_value_is_ignored() {
-        let path = |xdg: &str| {
-            settings_file(
-                Some(OsString::from(xdg)),
-                Some(OsString::from("/home/u")),
-                false,
-            )
-        };
+        let path =
+            |xdg: &str| settings_file(Some(OsString::from(xdg)), Some(OsString::from("/home/u")));
         assert_eq!(
             path("relative"),
             Some(PathBuf::from("/home/u/.config/gitmaster/settings.json"))
@@ -194,18 +168,16 @@ mod tests {
     }
 
     #[test]
-    fn macos_uses_application_support() {
+    fn the_same_layout_on_a_mac_home() {
         assert_eq!(
-            settings_file(None, Some(OsString::from("/Users/u")), true),
-            Some(PathBuf::from(
-                "/Users/u/Library/Application Support/gitmaster/settings.json"
-            ))
+            settings_file(None, Some(OsString::from("/Users/u"))),
+            Some(PathBuf::from("/Users/u/.config/gitmaster/settings.json"))
         );
     }
 
     #[test]
     fn no_home_means_no_file() {
-        assert_eq!(settings_file(None, None, false), None);
+        assert_eq!(settings_file(None, None), None);
     }
 
     struct Scratch {

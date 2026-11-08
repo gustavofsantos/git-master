@@ -51,28 +51,13 @@ const IGNORED_IN_REPO: &str =
 
 const TOML_IGNORED: &str = ".toml workflows are no longer supported; rewrite it as a .lua script";
 
-/// `$XDG_CONFIG_HOME/gitmaster/workflows` (else `~/.config/...`) on Linux,
-/// `~/Library/Application Support/gitmaster/workflows` on macOS. A relative `XDG_CONFIG_HOME` is
-/// ignored; no home, no directory.
+/// `$XDG_CONFIG_HOME/gitmaster/workflows`, or `~/.config/gitmaster/workflows` (`paths`). A
+/// relative `XDG_CONFIG_HOME` is ignored; no home, no directory.
 pub fn user_dir(
     xdg_config_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
-    macos: bool,
 ) -> Option<PathBuf> {
-    let absolute = |value: Option<std::ffi::OsString>| {
-        value
-            .map(PathBuf::from)
-            .filter(|path| !path.as_os_str().is_empty() && path.is_absolute())
-    };
-    let base = if macos {
-        absolute(home)?.join("Library/Application Support")
-    } else {
-        match absolute(xdg_config_home) {
-            Some(base) => base,
-            None => absolute(home)?.join(".config"),
-        }
-    };
-    Some(base.join("gitmaster").join("workflows"))
+    crate::paths::config_dir_under(xdg_config_home, home).map(|dir| dir.join("workflows"))
 }
 
 /// `user_dir` with this process's environment.
@@ -80,7 +65,6 @@ pub fn default_user_dir() -> Option<PathBuf> {
     user_dir(
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
-        cfg!(target_os = "macos"),
     )
 }
 
@@ -602,35 +586,30 @@ return M
     #[test]
     fn user_dir_follows_xdg_config_home_then_home() {
         assert_eq!(
-            user_dir(Some("/x".into()), Some("/h".into()), false),
+            user_dir(Some("/x".into()), Some("/h".into())),
             Some(PathBuf::from("/x/gitmaster/workflows"))
         );
         assert_eq!(
-            user_dir(Some("rel".into()), Some("/h".into()), false),
+            user_dir(Some("rel".into()), Some("/h".into())),
             Some(PathBuf::from("/h/.config/gitmaster/workflows"))
         );
         assert_eq!(
-            user_dir(None, Some("/h".into()), false),
+            user_dir(None, Some("/h".into())),
             Some(PathBuf::from("/h/.config/gitmaster/workflows"))
         );
-        assert_eq!(user_dir(None, None, false), None);
-        assert_eq!(user_dir(Some("rel".into()), None, false), None);
+        assert_eq!(user_dir(None, None), None);
+        assert_eq!(user_dir(Some("rel".into()), None), None);
     }
 
     #[test]
-    fn user_dir_on_macos_uses_application_support() {
+    fn user_dir_is_the_same_on_a_mac_home() {
         assert_eq!(
-            user_dir(None, Some("/h".into()), true),
-            Some(PathBuf::from(
-                "/h/Library/Application Support/gitmaster/workflows"
-            ))
+            user_dir(None, Some("/Users/u".into())),
+            Some(PathBuf::from("/Users/u/.config/gitmaster/workflows"))
         );
         assert_eq!(
-            user_dir(Some("/x".into()), Some("/h".into()), true),
-            Some(PathBuf::from(
-                "/h/Library/Application Support/gitmaster/workflows"
-            ))
+            user_dir(Some("/x".into()), Some("/Users/u".into())),
+            Some(PathBuf::from("/x/gitmaster/workflows"))
         );
-        assert_eq!(user_dir(Some("/x".into()), None, true), None);
     }
 }
