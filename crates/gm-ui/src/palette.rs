@@ -380,7 +380,10 @@ impl Palette {
             .collect();
         for group in rows.chunk_by(|a, b| a.0 == b.0) {
             let section = group[0].0;
-            lines.push(Line::Header(section));
+            // A scoped palette's only section repeats its title, so it has no header.
+            if self.scope.is_none() {
+                lines.push(Line::Header(section));
+            }
             let mut hidden = 0;
             for &(_, disabled, position) in group {
                 if disabled && !self.show_disabled {
@@ -425,6 +428,16 @@ pub(crate) fn build(
     match stage {
         Stage::Actions => top_level(query, ctx, branches),
         Stage::Pick(action) => pick(action, ctx, branches),
+    }
+}
+
+/// The placeholder of the palette's input. A scoped palette only filters the
+/// actions of its selection, so it says so; the whole palette searches all.
+#[must_use]
+pub(crate) fn filter_placeholder(scope_title: Option<&str>) -> &'static str {
+    match scope_title {
+        Some(_) => "Filter actions",
+        None => "Type a command, branch or file",
     }
 }
 
@@ -1977,5 +1990,38 @@ mod tests {
         palette.open();
         assert_eq!(palette.scope_title(), None);
         assert!(palette.scope().is_none());
+    }
+
+    #[test]
+    fn a_scoped_palette_lists_its_rows_without_a_section_header() {
+        let entries = [
+            entry("a.txt", None, Some(Change::Modified)),
+            entry("c.txt", None, Some(Change::Modified)),
+        ];
+        let ctx = ctx_with(&entries, "");
+        let items = vec![
+            (Action::StageFile, Args::File("a.txt".into())),
+            (Action::StageFile, Args::File("c.txt".into())),
+        ];
+        let mut palette = Palette::default();
+        palette.open_scoped("Actions for a.txt".into(), items.clone());
+        shown(&mut palette, build_scoped(&items, &ctx));
+        let headers = palette
+            .lines()
+            .iter()
+            .filter(|line| matches!(line, Line::Header(_)))
+            .count();
+        assert_eq!(headers, 0);
+        assert_eq!(shape(&palette), ["row 0", "row 1"]);
+        assert_eq!(palette.highlight_line(), Some(0));
+    }
+
+    #[test]
+    fn the_filter_placeholder_names_the_actions_only_when_scoped() {
+        assert_eq!(
+            filter_placeholder(Some("Actions for a.txt")),
+            "Filter actions"
+        );
+        assert_eq!(filter_placeholder(None), "Type a command, branch or file");
     }
 }

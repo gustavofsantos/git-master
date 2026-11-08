@@ -173,6 +173,14 @@ impl TextArea {
         self.set_text("", cx);
     }
 
+    /// Changes the text shown while the area is empty.
+    pub fn set_placeholder(&mut self, placeholder: &str, cx: &mut Context<Self>) {
+        if self.placeholder.as_ref() != placeholder {
+            self.placeholder = placeholder.to_owned().into();
+            cx.notify();
+        }
+    }
+
     /// Focuses the area and starts its caret blinking.
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);

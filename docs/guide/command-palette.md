@@ -56,7 +56,7 @@ The same rule applies to the keyboard shortcut and to the menu item for the acti
 
 ## Actions for the selection
 
-When you select a file, a commit, a thread or another item, the top bar shows up to three of its actions. See [Top bar](../getting-started/first-steps.md#top-bar). The **⋯** button opens the command palette with only the actions of that selection, under the title **Actions for** followed by the name of the item. The button shows the palette shortcut, `Ctrl+K` (`⌘K` on macOS). The actions are the ones of the item's context menu, in the same order.
+When you select a file, a commit, a thread or another item, the top bar shows up to three of its actions. See [Top bar](../getting-started/first-steps.md#top-bar). The **⋯** button opens the command palette with only the actions of that selection, under the title **Actions for** followed by the name of the item. The button shows the palette shortcut, `Ctrl+K` (`⌘K` on macOS). The actions are the ones of the item's context menu, in the same order. The palette lists only these actions, without a section header, and its input reads **Filter actions**.
 
 ## Context menus
 

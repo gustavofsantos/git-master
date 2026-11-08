@@ -101,9 +101,11 @@ impl StatusView {
         self.branch_menu.open = false;
         self.context_menu.open = None;
         start(&mut self.palette);
-        self.palette_view
-            .filter
-            .update(cx, |area, cx| area.set_text("", cx));
+        let placeholder = palette::filter_placeholder(self.palette.scope_title());
+        self.palette_view.filter.update(cx, |area, cx| {
+            area.set_placeholder(placeholder, cx);
+            area.set_text("", cx);
+        });
         self.palette_view
             .filter
             .update(cx, |area, cx| area.focus(window, cx));
@@ -502,6 +504,7 @@ fn line_element(
 ) -> AnyElement {
     match *line {
         Line::Header(section) => div()
+            .w_full()
             .h(px(ROW_HEIGHT))
             .px_3()
             .flex()
@@ -534,6 +537,7 @@ fn more_element(
 ) -> Stateful<Div> {
     div()
         .id(("palette-more", index))
+        .w_full()
         .h(px(ROW_HEIGHT))
         .px_3()
         .flex()
@@ -578,6 +582,7 @@ fn row_element(
     let full = candidate.label.clone();
     div()
         .id(("palette-row", index))
+        .w_full()
         .h(px(ROW_HEIGHT))
         .px_3()
         .flex()
