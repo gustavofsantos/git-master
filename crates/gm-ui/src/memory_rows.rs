@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 
 use gm_schema::threads::{
-    Context, Memory, MemoryKind, MemorySource, MemorySourceKind, MemoryStatus,
+    Context, Memory, MemoryBasis, MemoryKind, MemorySource, MemorySourceKind, MemoryStatus,
 };
 
 use crate::memories::{self, Scope, TEXT_CHARS};
@@ -265,6 +265,16 @@ pub fn detail_actions(memory: Option<&Memory>) -> Vec<DetailAction> {
     actions
 }
 
+/// The chip a memory's basis shows (D201 (1)). An observed memory, the default, shows none, so the
+/// list is not noisier; a tested or an unconfirmed memory is named.
+#[must_use]
+pub fn basis_chip(basis: MemoryBasis) -> Option<&'static str> {
+    match basis {
+        MemoryBasis::Observed => None,
+        MemoryBasis::Tested | MemoryBasis::Unconfirmed => Some(memories::basis_label(basis)),
+    }
+}
+
 /// Whether a memory names a file that changed since it was accepted (D192 (6)).
 #[must_use]
 pub fn is_stale(memory: &Memory) -> bool {
@@ -308,6 +318,7 @@ mod tests {
             files_changed_since: Vec::new(),
             scope: "repository".to_owned(),
             contexts: Vec::new(),
+            basis: MemoryBasis::Observed,
         }
     }
 
@@ -338,6 +349,13 @@ mod tests {
             accepted_memories: 0,
             sub_contexts: 0,
         }
+    }
+
+    #[test]
+    fn only_a_tested_or_an_unconfirmed_memory_shows_its_basis() {
+        assert_eq!(basis_chip(MemoryBasis::Observed), None);
+        assert_eq!(basis_chip(MemoryBasis::Tested), Some("Tested"));
+        assert_eq!(basis_chip(MemoryBasis::Unconfirmed), Some("Unconfirmed"));
     }
 
     #[test]

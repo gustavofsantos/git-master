@@ -7,7 +7,7 @@
 use std::ops::Range;
 use std::time::Duration;
 
-use gm_schema::threads::{Memory, MemoryStatus};
+use gm_schema::threads::{Memory, MemoryBasis, MemoryStatus};
 use gm_schema::{Actor, Event, OperationId, OperationState};
 use gpui::{
     AnyElement, ClickEvent, Context, Div, Entity, Hsla, IntoElement, MouseButton, MouseDownEvent,
@@ -1143,6 +1143,7 @@ fn memory_row(
             memories::agent_written(&memory.origin)
                 .then(|| tag("Agent-written", theme::selected_row())),
         )
+        .children(basis_tag(memory.basis))
         .child(tag(
             &memories::scope_chip(&memory.scope),
             theme::selected_row(),
@@ -1190,11 +1191,24 @@ fn memory_header(memory: &Memory) -> Div {
                     memories::agent_written(&memory.origin)
                         .then(|| tag("Agent-written", theme::selected_row())),
                 )
+                .children(basis_tag(memory.basis))
                 .child(tag(
                     &memories::scope_chip(&memory.scope),
                     theme::selected_row(),
                 )),
         )
+}
+
+/// The chip of a memory's basis, when it shows one (D201 (1)): a tested memory on the selection
+/// colour, an unconfirmed one flagged in the warning colour, as a changed file is.
+fn basis_tag(basis: MemoryBasis) -> Option<Div> {
+    let text = memory_rows::basis_chip(basis)?;
+    let background = if basis == MemoryBasis::Unconfirmed {
+        theme::warn_bg()
+    } else {
+        theme::selected_row()
+    };
+    Some(tag(text, background))
 }
 
 /// The text the empty list says, by why it is empty.

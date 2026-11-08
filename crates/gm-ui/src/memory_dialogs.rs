@@ -6,7 +6,8 @@
 use std::collections::{BTreeSet, HashSet};
 
 use gm_schema::threads::{
-    Memory, MemoryContext, MemoryKind, MemorySourceInput, MemorySourceKind, MemoryStatus,
+    Memory, MemoryBasis, MemoryContext, MemoryKind, MemorySourceInput, MemorySourceKind,
+    MemoryStatus,
 };
 use gm_schema::{Event, OperationId, OperationState};
 use gpui::{
@@ -76,10 +77,11 @@ pub(crate) enum PlaceAction {
     Attach,
 }
 
-/// The New Memory form as typed: its kind, its scope, the sources added so far, and the boxes
-/// of the text and of the source being typed.
+/// The New Memory form as typed: its kind, its basis, its scope, the sources added so far, and the
+/// boxes of the text and of the source being typed.
 pub(crate) struct NewForm {
     pub(crate) kind: MemoryKind,
+    pub(crate) basis: MemoryBasis,
     pub(crate) scope: Scope,
     pub(crate) source_kind: MemorySourceKind,
     pub(crate) sources: Vec<MemorySourceInput>,
@@ -114,6 +116,7 @@ impl StatusView {
         ];
         let form = NewForm {
             kind: MemoryKind::Decision,
+            basis: MemoryBasis::Observed,
             scope: Scope::Repository,
             source_kind: MemorySourceKind::Thread,
             sources: Vec::new(),
@@ -166,6 +169,13 @@ impl StatusView {
     pub(crate) fn set_new_kind(&mut self, kind: MemoryKind, cx: &mut Context<Self>) {
         if let Some(form) = self.new_form_mut() {
             form.kind = kind;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_new_basis(&mut self, basis: MemoryBasis, cx: &mut Context<Self>) {
+        if let Some(form) = self.new_form_mut() {
+            form.basis = basis;
         }
         cx.notify();
     }
@@ -232,8 +242,13 @@ impl StatusView {
             return;
         };
         let text = form.text.read(cx).text().to_owned();
-        let planned =
-            memory_form::save_request(form.kind, form.scope.clone(), &text, &form.sources);
+        let planned = memory_form::save_request(
+            form.kind,
+            form.scope.clone(),
+            &text,
+            &form.sources,
+            form.basis,
+        );
         self.send_planned_dialog(planned, cx);
     }
 
@@ -551,6 +566,8 @@ impl StatusView {
             )
             .child(section_label("Kind"))
             .child(kind_chips(form, cx))
+            .child(section_label("Basis"))
+            .child(basis_chips(form, cx))
             .child(section_label("Scope"))
             .child(self.scope_chips(form, cx))
             .child(field_row("Text", form.text.clone()))
@@ -954,6 +971,35 @@ fn kind_chips(form: &NewForm, cx: &Context<StatusView>) -> Div {
         })
         .collect();
     div().flex().flex_row().gap_1().children(chips)
+}
+
+/// The bases of the form, one chip each, and under them what the chosen one means.
+fn basis_chips(form: &NewForm, cx: &Context<StatusView>) -> Div {
+    let chips: Vec<Stateful<Div>> = memory_form::BASIS_CHOICES
+        .iter()
+        .enumerate()
+        .map(|(index, basis)| {
+            let basis = *basis;
+            pick_chip(
+                ("memory-new-basis", index),
+                memories::basis_label(basis).to_owned(),
+                form.basis == basis,
+                cx,
+                move |this, cx| this.set_new_basis(basis, cx),
+            )
+        })
+        .collect();
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().flex().flex_row().gap_1().children(chips))
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(memory_form::basis_hint(form.basis)),
+        )
 }
 
 /// The kinds of source a form names, one chip each.

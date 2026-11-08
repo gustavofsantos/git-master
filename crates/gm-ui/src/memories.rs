@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use gm_schema::threads::{Context, Memory, MemoryContext, MemorySourceInput};
+use gm_schema::threads::{Context, Memory, MemoryBasis, MemoryContext, MemorySourceInput};
 use gm_schema::{
     CommandKind, FileChange, FileChangeState, MemoryKind, MemoryStatus, OperationId, OperationState,
 };
@@ -123,6 +123,8 @@ pub struct NewMemory {
     pub text: String,
     /// Optional sources: a thread range, a commit or a file.
     pub sources: Vec<MemorySourceInput>,
+    /// How the memory is known (D201 (1)). The form starts at `observed`.
+    pub basis: MemoryBasis,
 }
 
 /// The state of the Memories tab: the list, its filters, the memory selected and its detail.
@@ -858,6 +860,7 @@ impl MemoriesPage {
                 text,
                 sources,
                 context,
+                basis: new.basis,
             },
             read: Read::Change {
                 uid: None,
@@ -1103,6 +1106,16 @@ pub fn kind_label(kind: MemoryKind) -> &'static str {
     }
 }
 
+/// The label of a memory's basis: how it is known (D201 (1)).
+#[must_use]
+pub fn basis_label(basis: MemoryBasis) -> &'static str {
+    match basis {
+        MemoryBasis::Observed => "Observed",
+        MemoryBasis::Tested => "Tested",
+        MemoryBasis::Unconfirmed => "Unconfirmed",
+    }
+}
+
 /// The label of a memory's status on its row.
 #[must_use]
 pub fn status_label(status: MemoryStatus) -> &'static str {
@@ -1248,6 +1261,7 @@ mod tests {
             files_changed_since: Vec::new(),
             scope: REPOSITORY.to_owned(),
             contexts: Vec::new(),
+            basis: MemoryBasis::Observed,
         }
     }
 
@@ -1705,7 +1719,34 @@ mod tests {
             scope,
             text: text.to_owned(),
             sources: Vec::new(),
+            basis: MemoryBasis::Observed,
         }
+    }
+
+    #[test]
+    fn a_new_memory_sends_the_basis_the_form_chose() {
+        for basis in [
+            MemoryBasis::Observed,
+            MemoryBasis::Tested,
+            MemoryBasis::Unconfirmed,
+        ] {
+            let request = MemoriesPage::plan_new(&NewMemory {
+                basis,
+                ..new_memory("A belief.", Scope::Repository)
+            })
+            .expect("a memory with text and a scope is planned");
+            assert!(matches!(
+                request.kind,
+                CommandKind::ProposeMemory { basis: sent, .. } if sent == basis
+            ));
+        }
+    }
+
+    #[test]
+    fn a_basis_has_a_plain_label() {
+        assert_eq!(basis_label(MemoryBasis::Observed), "Observed");
+        assert_eq!(basis_label(MemoryBasis::Tested), "Tested");
+        assert_eq!(basis_label(MemoryBasis::Unconfirmed), "Unconfirmed");
     }
 
     #[test]

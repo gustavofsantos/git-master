@@ -638,6 +638,7 @@ pub(crate) fn propose_in_context(
             &NewMemory {
                 kind: proposal.kind,
                 text: &text,
+                basis: proposal.basis,
                 status,
                 origin: &origin,
                 sources: &sources,

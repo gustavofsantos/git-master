@@ -10,10 +10,10 @@ use std::sync::atomic::AtomicBool;
 
 use gm_schema::threads::{
     AttachKind, CutBound, EditChange, EditState, EntryKind, Evidence, LabelDetail, LinkKind,
-    LinkOrigin, MemoryFilter, MemoryKind, MemorySource, MemorySourceInput, MemorySourceKind,
-    MemoryStatus, ProvenanceCommit, ProvenanceCut, ProvenanceEdit, ProvenanceLabel, ProvenanceLink,
-    ProvenanceResult, ProvenanceThread, RelationDirection, ThreadDetail, ThreadEdit, ThreadFilter,
-    ThreadSummary,
+    LinkOrigin, MemoryBasis, MemoryFilter, MemoryKind, MemorySource, MemorySourceInput,
+    MemorySourceKind, MemoryStatus, ProvenanceCommit, ProvenanceCut, ProvenanceEdit,
+    ProvenanceLabel, ProvenanceLink, ProvenanceResult, ProvenanceThread, RelationDirection,
+    ThreadDetail, ThreadEdit, ThreadFilter, ThreadSummary,
 };
 use gm_schema::{Actor, CommandKind, Event, OperationId};
 
@@ -465,6 +465,7 @@ pub(crate) struct Proposal<'a> {
     pub(crate) kind: MemoryKind,
     pub(crate) text: &'a str,
     pub(crate) sources: &'a [MemorySourceInput],
+    pub(crate) basis: MemoryBasis,
 }
 
 /// The memory commands (D190, D192, D193). `memories::authorize` checks the actor here as well as in
@@ -527,11 +528,13 @@ fn memories_command(
             text,
             sources,
             context,
+            basis,
         } => {
             let proposal = Proposal {
                 kind: *memory_kind,
                 text,
                 sources,
+                basis: *basis,
             };
             match context {
                 None => propose_memory(id, &mut stores, ctx, actor, &proposal),
@@ -652,6 +655,7 @@ fn propose_memory(
         .propose_memory(&NewMemory {
             kind: proposal.kind,
             text: &text,
+            basis: proposal.basis,
             status,
             origin: &origin_of(actor),
             sources: &kept,

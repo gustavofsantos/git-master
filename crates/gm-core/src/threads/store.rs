@@ -29,7 +29,7 @@ use super::query::{
 /// Migrations in order; `PRAGMA user_version` counts how many have run.
 const MIGRATIONS: &[&str] = &[
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
-    SCHEMA_V9,
+    SCHEMA_V9, SCHEMA_V10,
 ];
 /// The index in `MIGRATIONS` of the schema that repairs stored entries with the cleaner (D133).
 const REPAIR_MIGRATION: usize = 3;
@@ -428,6 +428,13 @@ const SCHEMA_V9: &str = "
 ALTER TABLE thread ADD COLUMN parent_thread INTEGER REFERENCES thread(id) ON DELETE CASCADE;
 ALTER TABLE thread ADD COLUMN parent_call TEXT;
 CREATE INDEX thread_parent ON thread(parent_thread);
+";
+
+/// Schema 10 (D201 (1)): a memory records how it is known. The rows written before it are
+/// `observed`, the default a proposal without a basis gets.
+const SCHEMA_V10: &str = "
+ALTER TABLE memory ADD COLUMN basis TEXT NOT NULL DEFAULT 'observed'
+    CHECK (basis IN ('observed','tested','unconfirmed'));
 ";
 
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
@@ -3363,7 +3370,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         assert_eq!(store.total_threads().expect("count"), 1);
     }
 
@@ -4299,6 +4306,42 @@ mod tests {
         assert!(parent_link(Some("0123456789abcdef"), Some("")).is_err());
     }
 
+    /// Schema 10 (D201 (1)) on a version 9 file: a memory stored before it reads as `observed`, and
+    /// the basis a memory is given afterwards is kept.
+    #[test]
+    fn schema_ten_gives_a_version_nine_memory_the_observed_basis() {
+        use crate::threads::memories::NewMemory;
+        use gm_schema::threads::{MemoryBasis, MemoryKind, MemoryStatus};
+        let dir = tempfile::tempdir().expect("tempdir");
+        legacy_database(
+            dir.path(),
+            9,
+            "INSERT INTO memory (id, uid, kind, text, status, origin, created_at) VALUES
+                (1, 'oldmemory1', 'rule', 'An old rule.', 'accepted', 'human', 1);",
+        );
+        let mut store = ThreadStore::open(dir.path()).expect("migrate");
+        assert_eq!(version_of(dir.path()), 10);
+        let old = store.read_memory_by_uid("oldmemory1").expect("read");
+        assert_eq!(old.basis, MemoryBasis::Observed);
+        let (kept, created) = store
+            .propose_memory(&NewMemory {
+                kind: MemoryKind::Fact,
+                text: "A tested fact.",
+                basis: MemoryBasis::Tested,
+                status: MemoryStatus::Accepted,
+                origin: "human",
+                sources: &[],
+                at: 2,
+            })
+            .expect("propose");
+        assert!(created);
+        assert_eq!(kept.basis, MemoryBasis::Tested);
+        assert_eq!(
+            store.read_memory_by_uid(&kept.uid).expect("read").basis,
+            MemoryBasis::Tested
+        );
+    }
+
     /// Schema 9 (D199 (2)) on a version 8 file: the columns are added, nothing is linked, and a
     /// sub-agent stored afterwards reads back its parent and the `seq` of the parent's call.
     #[test]
@@ -4315,7 +4358,7 @@ mod tests {
         );
         legacy_database(dir.path(), 8, &rows);
         let mut store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 9);
+        assert_eq!(version_of(dir.path()), 10);
         assert_eq!(
             store.read_thread(&uid("s1"), 0, 10).expect("read").parent,
             None
@@ -5029,7 +5072,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         let hits = store
             .search("ndex", &ThreadFilter::default(), 10)
             .expect("search");
@@ -5550,7 +5593,7 @@ mod tests {
                 (3, 'file', 'src/c.rs', NULL, 'def');",
         );
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 9);
+        assert_eq!(version_of(dir.path()), 10);
         let mut statement = store
             .conn
             .prepare(
@@ -5683,7 +5726,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             legacy_database(dir.path(), versions, EVERY_KIND_ROWS);
             let store = ThreadStore::open(dir.path()).expect("migrate");
-            assert_eq!(version_of(dir.path()), 9, "from version {versions}");
+            assert_eq!(version_of(dir.path()), 10, "from version {versions}");
             assert_eq!(index_rows(&store), (2, 2), "from version {versions}");
             assert_eq!(stage_hits(&store, "backoff", "ckof", "bakcoff"), [1, 1, 1]);
             assert_eq!(
@@ -5725,7 +5768,7 @@ mod tests {
 
         let store = ThreadStore::open(dir.path()).expect("migrate");
 
-        assert_eq!(version_of(dir.path()), 9);
+        assert_eq!(version_of(dir.path()), 10);
         let detail = store.read_thread("old1", 0, 10).expect("read");
         assert_eq!(detail.edits.len(), 1);
         assert_eq!(detail.edits[0].path, "src/hexagonal_port.rs");
@@ -5921,7 +5964,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 3, MARKER_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 9);
+        assert_eq!(version_of(dir.path()), 10);
 
         // Slash command as typed, output and bash as notices and a bash prompt, reminders
         // gone, the interruption as a notice; the marker-only prompt is deleted.
@@ -6041,7 +6084,7 @@ mod tests {
             open_for_hook_below(dir.path(), 6).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(dir.path()), 9);
+        assert_eq!(version_of(dir.path()), 10);
 
         // An up-to-date database is opened whatever its size.
         assert!(matches!(
@@ -6054,7 +6097,7 @@ mod tests {
             open_for_hook_below(fresh.path(), 1).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(fresh.path()), 9);
+        assert_eq!(version_of(fresh.path()), 10);
     }
 
     /// A deterministic generator for the benchmark: no randomness crate, same text every run.
@@ -6851,7 +6894,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 4, VERSION_FOUR_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 9);
+        assert_eq!(version_of(dir.path()), 10);
         assert_eq!(
             store.thread_summary("t1uid").expect("t1").tags,
             ["api", "bug"]
@@ -6902,7 +6945,7 @@ mod tests {
         );
         let store = ThreadStore::open(dir.path()).expect("migrate");
         assert_eq!(store.total_threads().expect("count"), 1);
-        assert_eq!(version_of(dir.path()), 9);
+        assert_eq!(version_of(dir.path()), 10);
         let raw = raw_connection(dir.path());
         for name in ["memory", "memory_source", "memory_rel", "memory_fts"] {
             let found: i64 = raw

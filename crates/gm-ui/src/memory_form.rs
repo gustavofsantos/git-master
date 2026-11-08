@@ -4,7 +4,7 @@
 //! form's own words for what the person typed (an entry that is not a number, a range that runs
 //! backwards, a source with entries that is not a thread).
 
-use gm_schema::threads::{MemoryKind, MemorySourceInput, MemorySourceKind};
+use gm_schema::threads::{MemoryBasis, MemoryKind, MemorySourceInput, MemorySourceKind};
 
 use crate::memories::{MemoriesPage, NewMemory, Request, Scope};
 
@@ -21,6 +21,25 @@ pub const KIND_CHOICES: [MemoryKind; 4] = [
     MemoryKind::Lesson,
     MemoryKind::Fact,
 ];
+
+/// The bases a memory can take, in the order the form shows them. Observed is the default (D201 (1)).
+pub const BASIS_CHOICES: [MemoryBasis; 3] = [
+    MemoryBasis::Observed,
+    MemoryBasis::Tested,
+    MemoryBasis::Unconfirmed,
+];
+
+/// What a basis means, under its chip in the form: one short line, in the form's own words.
+#[must_use]
+pub fn basis_hint(basis: MemoryBasis) -> &'static str {
+    match basis {
+        MemoryBasis::Observed => "Seen in a thread or a file.",
+        MemoryBasis::Tested => "Checked by running something.",
+        MemoryBasis::Unconfirmed => {
+            "A belief nothing has confirmed. It is marked, and never taken as fact."
+        }
+    }
+}
 
 /// The kinds of source a memory can name, in the order the form shows them.
 pub const SOURCE_CHOICES: [MemorySourceKind; 3] = [
@@ -81,19 +100,22 @@ fn entry(text: &str) -> Result<Option<i64>, &'static str> {
     }
 }
 
-/// The request that saves the New Memory form: a memory of the human's, accepted at once (D190).
-/// Refused with the reason the model gives for the text, the scope or a source.
+/// The request that saves the New Memory form: a memory of the human's, accepted at once (D190),
+/// with the basis the form chose (D201 (1)). Refused with the reason the model gives for the text,
+/// the scope or a source.
 pub fn save_request(
     kind: MemoryKind,
     scope: Scope,
     text: &str,
     sources: &[MemorySourceInput],
+    basis: MemoryBasis,
 ) -> Result<Request, &'static str> {
     MemoriesPage::plan_new(&NewMemory {
         kind,
         scope,
         text: text.to_owned(),
         sources: sources.to_vec(),
+        basis,
     })
 }
 
@@ -164,6 +186,7 @@ mod tests {
             Scope::Repository,
             "  Keep retries bounded. ",
             std::slice::from_ref(&source),
+            MemoryBasis::Tested,
         )
         .unwrap();
         match request.kind {
@@ -172,11 +195,13 @@ mod tests {
                 text,
                 sources,
                 context,
+                basis,
             } => {
                 assert_eq!(kind, MemoryKind::Rule);
                 assert_eq!(text, "Keep retries bounded.");
                 assert_eq!(sources, vec![source.clone()]);
                 assert_eq!(context, None);
+                assert_eq!(basis, MemoryBasis::Tested);
             }
             other => panic!("not a proposal: {other:?}"),
         }
@@ -185,6 +210,7 @@ mod tests {
             Scope::Context("Platform / Billing".to_owned()),
             "A fact.",
             &[],
+            MemoryBasis::Observed,
         )
         .unwrap();
         assert!(matches!(
@@ -194,18 +220,56 @@ mod tests {
     }
 
     #[test]
+    fn the_form_offers_three_bases_observed_first_and_each_has_a_hint() {
+        assert_eq!(
+            BASIS_CHOICES,
+            [
+                MemoryBasis::Observed,
+                MemoryBasis::Tested,
+                MemoryBasis::Unconfirmed
+            ]
+        );
+        assert_eq!(MemoryBasis::default(), BASIS_CHOICES[0]);
+        for basis in BASIS_CHOICES {
+            assert!(!basis_hint(basis).is_empty());
+        }
+        assert!(basis_hint(MemoryBasis::Unconfirmed).contains("never taken as fact"));
+    }
+
+    #[test]
     fn saving_refuses_an_empty_or_long_text_and_no_scope_to_write_to() {
         assert_eq!(
-            save_request(MemoryKind::Fact, Scope::Repository, "  ", &[]).err(),
+            save_request(
+                MemoryKind::Fact,
+                Scope::Repository,
+                "  ",
+                &[],
+                MemoryBasis::Observed
+            )
+            .err(),
             Some("A memory needs some text.")
         );
         let long = "x".repeat(1001);
         assert_eq!(
-            save_request(MemoryKind::Fact, Scope::Repository, &long, &[]).err(),
+            save_request(
+                MemoryKind::Fact,
+                Scope::Repository,
+                &long,
+                &[],
+                MemoryBasis::Observed
+            )
+            .err(),
             Some("A memory holds at most 1,000 characters.")
         );
         assert_eq!(
-            save_request(MemoryKind::Fact, Scope::Everything, "text", &[]).err(),
+            save_request(
+                MemoryKind::Fact,
+                Scope::Everything,
+                "text",
+                &[],
+                MemoryBasis::Observed
+            )
+            .err(),
             Some("Choose this repository or a context for the memory.")
         );
     }

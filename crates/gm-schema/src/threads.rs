@@ -795,6 +795,20 @@ pub enum MemoryStatus {
     Superseded,
 }
 
+/// How a memory is known (D201 (1)). `unconfirmed` is a belief: the results mark it, so it is never
+/// presented as established fact. A memory with no basis given is `observed`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryBasis {
+    /// Seen in a thread or a file.
+    #[default]
+    Observed,
+    /// Checked by running something.
+    Tested,
+    /// A belief that nothing has confirmed.
+    Unconfirmed,
+}
+
 /// The kind of a memory's source: a thread (with an entry range), a commit or a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -885,6 +899,9 @@ pub struct Memory {
     pub kind: MemoryKind,
     /// Redacted at capture, at most 1,000 characters. Untrusted text.
     pub text: String,
+    /// How the memory is known (D201 (1)). Absent from older JSON, which reads as `observed`.
+    #[serde(default)]
+    pub basis: MemoryBasis,
     pub status: MemoryStatus,
     /// `human`, `agent:<client>` or `imported:<author>`. Becomes `human` when a human edits the text.
     pub origin: String,
@@ -1116,6 +1133,7 @@ mod tests {
             uid: "0123456789abcdef".to_owned(),
             kind: MemoryKind::Rule,
             text: "rule".to_owned(),
+            basis: MemoryBasis::Observed,
             status: MemoryStatus::Accepted,
             origin: "human".to_owned(),
             proposed_by: None,
@@ -1138,6 +1156,36 @@ mod tests {
         );
         let old: Memory = serde_json::from_value(json).expect("an old memory parses");
         assert!(old.contexts.is_empty());
+    }
+
+    #[test]
+    fn a_memory_without_a_basis_in_its_json_is_observed_and_the_basis_round_trips() {
+        let mut json = serde_json::json!({
+            "id": 3, "uid": "u", "kind": "fact", "text": "t", "status": "accepted",
+            "origin": "human", "proposed_by": null, "model": null, "created_at": 1,
+            "decided_at": null, "decided_by": null, "reviewed": true, "sources": [],
+            "supersedes": [], "superseded_by": [], "files_changed_since": [], "scope": "repository"
+        });
+        let old: Memory = serde_json::from_value(json.clone()).expect("an old memory parses");
+        assert_eq!(old.basis, MemoryBasis::Observed);
+        json["basis"] = serde_json::json!("unconfirmed");
+        let parsed: Memory = serde_json::from_value(json).expect("parses");
+        assert_eq!(parsed.basis, MemoryBasis::Unconfirmed);
+        let back = serde_json::to_value(&parsed).expect("serialize");
+        assert_eq!(back["basis"], "unconfirmed");
+    }
+
+    #[test]
+    fn a_memory_basis_is_one_of_three_snake_case_words() {
+        for (basis, word) in [
+            (MemoryBasis::Observed, "observed"),
+            (MemoryBasis::Tested, "tested"),
+            (MemoryBasis::Unconfirmed, "unconfirmed"),
+        ] {
+            assert_eq!(serde_json::to_value(basis).expect("serialize"), word);
+        }
+        assert!(serde_json::from_value::<MemoryBasis>(serde_json::json!("guessed")).is_err());
+        assert_eq!(MemoryBasis::default(), MemoryBasis::Observed);
     }
 
     #[test]

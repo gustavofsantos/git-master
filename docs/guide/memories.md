@@ -25,14 +25,14 @@ A memory belongs to the repository where it was written, or to one or more [cont
 
 ## Open the Memories tab
 
-Choose **Threads** in the sidebar, then the **Memories** tab. The list shows the text, the kind, the status and the origin. **Proposed** memories come first and carry a count in the tab, so a new proposal does not wait unseen.
+Choose **Threads** in the sidebar, then the **Memories** tab. The list shows the text, the kind, the status and the origin. A memory that is **Tested** or **Unconfirmed** also shows its basis as a chip; an **Observed** memory shows none. An **Unconfirmed** chip is flagged, as a changed file is. **Proposed** memories come first and carry a count in the tab, so a new proposal does not wait unseen.
 
 Filter the list by kind, by status, by file, by author or by scope: this repository, one context, or everything the repository sees. Search finds a memory by its words.
 
 ## Write a memory
 
 1. Choose **New Memory** on the **Memories** tab.
-2. Pick the kind and the scope, and write the text.
+2. Pick the kind, the basis and the scope, and write the text. The basis starts at **Observed**; choose **Tested** if you checked it by running something, or **Unconfirmed** if it is a belief.
 3. Add sources if you want: a thread, a commit or a file.
 4. Choose **Save**. A memory you write is accepted at once.
 
@@ -66,7 +66,7 @@ When a decision changes, select the proposed memory that replaces the old one an
 
 ## Keep memories true
 
-> **Planned.** The `basis` of a memory, the `/gitmaster:consolidate` skill, retrieval counts and the size line below are not built yet.
+> **Planned.** The `/gitmaster:consolidate` skill, retrieval counts and the size line below are not built yet.
 
 A memory is for what nobody can see again by looking: the reason for a choice, a rule, a lesson, a failed attempt. What the code, `git log` or a command shows does not belong in one, and the proposing skill leaves it out.
 

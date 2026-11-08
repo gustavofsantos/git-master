@@ -10,6 +10,7 @@ use std::process::Command as Process;
 use gm_core::Engine;
 use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
+use gm_schema::threads::MemoryBasis;
 use gm_schema::threads::{
     Context, FileChange, FileChangeState, Memory, MemoryKind, MemorySourceInput, MemorySourceKind,
     MemoryStatus,
@@ -604,6 +605,7 @@ fn a_memory_is_proposed_accepted_and_read_by_its_uid() {
                 entry_to: None,
             }],
             context: None,
+            basis: MemoryBasis::Observed,
         },
     );
     let proposed = memory_of(&events);
@@ -773,6 +775,7 @@ fn propose_at(engine: &mut Engine, actor: &Actor, context: Option<&str>, text: &
                 entry_to: None,
             }],
             context: context.map(str::to_owned),
+            basis: MemoryBasis::Observed,
         },
     )
 }
@@ -1107,6 +1110,7 @@ fn moving_a_repository_memory_into_a_context_keeps_its_uid_history_and_sources()
                 entry_to: None,
             }],
             context: None,
+            basis: MemoryBasis::Tested,
         },
     ));
     let blob = original.sources[0].blob_oid.clone();
@@ -1124,6 +1128,8 @@ fn moving_a_repository_memory_into_a_context_keeps_its_uid_history_and_sources()
     let moved = memory_of(&moved);
     assert_eq!(moved.uid, original.uid);
     assert_eq!(moved.created_at, original.created_at);
+    assert_eq!(original.basis, MemoryBasis::Tested);
+    assert_eq!(moved.basis, MemoryBasis::Tested, "the move keeps the basis");
     assert_eq!(moved.status, MemoryStatus::Accepted);
     assert_eq!(moved.sources.len(), 1);
     assert_eq!(moved.sources[0].reference, "rules.md");

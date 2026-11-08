@@ -10,8 +10,8 @@ use gm_core::Engine;
 use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
 use gm_schema::threads::{
-    FileChange, FileChangeState, Memory, MemoryKind, MemorySourceInput, MemorySourceKind,
-    MemoryStatus,
+    FileChange, FileChangeState, Memory, MemoryBasis, MemoryKind, MemorySourceInput,
+    MemorySourceKind, MemoryStatus,
 };
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId, OperationState};
 
@@ -199,6 +199,7 @@ fn propose(
             text: text.to_owned(),
             sources,
             context: None,
+            basis: MemoryBasis::Observed,
         },
     )
 }
@@ -931,4 +932,97 @@ fn the_proposed_total_ignores_the_kind_author_and_path_of_the_request() {
         Some("agent:claude-code"),
     );
     assert_eq!(total, 3);
+}
+
+/// A proposal as a client sends it: the JSON of `propose_memory`, with `basis` only when given.
+fn propose_json(engine: &mut Engine, actor: &Actor, text: &str, basis: Option<&str>) -> Vec<Event> {
+    let mut command = serde_json::json!({
+        "type": "propose_memory",
+        "kind": "rule",
+        "text": text,
+        "sources": [{ "kind": "file", "ref": "parser.rs" }],
+    });
+    if let Some(basis) = basis {
+        command["basis"] = serde_json::json!(basis);
+    }
+    let kind: CommandKind = serde_json::from_value(command).expect("a proposal parses");
+    send(engine, actor, kind)
+}
+
+#[test]
+fn a_memory_records_its_basis_and_a_proposal_without_one_is_observed() {
+    let repo = repo();
+    let mut engine = engine_on(&repo.root);
+
+    let observed = memory_of(&propose_json(
+        &mut engine,
+        &agent(),
+        "Keep the lock order.",
+        None,
+    ));
+    let tested = memory_of(&propose_json(
+        &mut engine,
+        &agent(),
+        "The parser fuzzer finds nothing new.",
+        Some("tested"),
+    ));
+    let unconfirmed = memory_of(&propose_json(
+        &mut engine,
+        &agent(),
+        "The cache is warm at start.",
+        Some("unconfirmed"),
+    ));
+    assert_eq!(observed.basis, MemoryBasis::Observed);
+    assert_eq!(tested.basis, MemoryBasis::Tested);
+    assert_eq!(unconfirmed.basis, MemoryBasis::Unconfirmed);
+
+    for (uid, basis) in [
+        (&observed.uid, MemoryBasis::Observed),
+        (&tested.uid, MemoryBasis::Tested),
+        (&unconfirmed.uid, MemoryBasis::Unconfirmed),
+    ] {
+        assert_eq!(read(&mut engine, uid).basis, basis);
+    }
+
+    // Accepting keeps the basis; a person's proposal with no basis is observed too.
+    let events = accept(&mut engine, &unconfirmed.uid, None, Vec::new());
+    assert_eq!(
+        state_of(&events),
+        OperationState::Done,
+        "accept: {events:?}"
+    );
+    assert_eq!(memory_of(&events).basis, MemoryBasis::Unconfirmed);
+    let person = memory_of(&propose_json(
+        &mut engine,
+        &Actor::Human,
+        "Ship on Fridays never.",
+        None,
+    ));
+    assert_eq!(person.basis, MemoryBasis::Observed);
+    assert_eq!(person.status, MemoryStatus::Accepted);
+
+    let accepted = list(&mut engine, &Actor::Human, Some(MemoryStatus::Accepted));
+    let basis_of = |uid: &str| {
+        accepted
+            .iter()
+            .find(|memory| memory.uid == uid)
+            .map(|memory| memory.basis)
+    };
+    assert_eq!(basis_of(&unconfirmed.uid), Some(MemoryBasis::Unconfirmed));
+    assert_eq!(basis_of(&person.uid), Some(MemoryBasis::Observed));
+}
+
+#[test]
+fn a_basis_outside_the_three_words_does_not_parse_as_a_proposal() {
+    let parsed = serde_json::from_value::<CommandKind>(serde_json::json!({
+        "type": "propose_memory",
+        "kind": "rule",
+        "text": "Guessed.",
+        "sources": [{ "kind": "file", "ref": "parser.rs" }],
+        "basis": "guessed",
+    }));
+    assert!(
+        parsed.is_err(),
+        "a basis that is not a known word is refused"
+    );
 }

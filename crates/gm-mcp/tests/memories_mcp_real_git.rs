@@ -9,7 +9,7 @@ use std::process::Command as Process;
 use gm_core::Engine;
 use gm_core::git::SubprocessGit;
 use gm_mcp::Session;
-use gm_schema::threads::{MemoryKind, MemorySourceInput, MemorySourceKind};
+use gm_schema::threads::{MemoryBasis, MemoryKind, MemorySourceInput, MemorySourceKind};
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId, OperationState};
 use serde_json::{Value, json};
 
@@ -165,6 +165,7 @@ fn propose(
             text: text.into(),
             sources: vec![file_source(path)],
             context: context.map(str::to_owned),
+            basis: MemoryBasis::Observed,
         },
     );
     assert_eq!(ended(&events), OperationState::Done, "propose: {events:?}");
@@ -528,4 +529,124 @@ fn pages_of_memories_follow_the_cursor_to_the_end_without_repeats() {
     for uid in &uids {
         assert!(seen.contains(uid), "{uid} is missing from {seen:?}");
     }
+}
+
+/// The note an unconfirmed memory carries in every result (D201 (1)).
+const UNCONFIRMED_NOTE: &str = "Unconfirmed: a belief, not established fact";
+
+/// Proposes a memory of `basis` as an agent and returns its uid.
+fn propose_with_basis(engine: &mut Engine, text: &str, basis: MemoryBasis) -> String {
+    let events = send(
+        engine,
+        &agent(),
+        CommandKind::ProposeMemory {
+            kind: MemoryKind::Rule,
+            text: text.into(),
+            sources: vec![file_source("f.txt")],
+            context: None,
+            basis,
+        },
+    );
+    assert_eq!(ended(&events), OperationState::Done, "propose: {events:?}");
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::MemoryChanged {
+                memory: Some(memory),
+                ..
+            } => Some(memory.uid.clone()),
+            _ => None,
+        })
+        .expect("a memory")
+}
+
+#[test]
+fn a_proposal_records_its_basis_and_a_bad_one_is_refused_and_the_server_answers() {
+    let (_tmp, repo, db) = fixture();
+    let source = json!([{ "kind": "file", "ref": "f.txt" }]);
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(
+                2,
+                "memory_propose",
+                &json!({ "kind": "rule", "text": "Observed by default.", "sources": source }),
+            ),
+            call(
+                3,
+                "memory_propose",
+                &json!({ "kind": "rule", "text": "Checked by a run.", "basis": "tested", "sources": source }),
+            ),
+            call(
+                4,
+                "memory_propose",
+                &json!({ "kind": "rule", "text": "A belief.", "basis": "unconfirmed", "sources": source }),
+            ),
+            call(
+                5,
+                "memory_propose",
+                &json!({ "kind": "rule", "text": "Guessed.", "basis": "guessed", "sources": source }),
+            ),
+            call(6, "contexts_list", &json!({})),
+        ],
+    );
+    assert_eq!(replies.len(), 6, "{replies:?}");
+
+    assert_eq!(result(&replies[1])["memory"]["basis"], "observed");
+    assert!(result(&replies[1])["memory"].get("note").is_none());
+    assert_eq!(result(&replies[2])["memory"]["basis"], "tested");
+    assert!(result(&replies[2])["memory"].get("note").is_none());
+    let belief = result(&replies[3]);
+    assert_eq!(belief["memory"]["basis"], "unconfirmed");
+    assert_eq!(belief["memory"]["note"], UNCONFIRMED_NOTE);
+
+    assert_eq!(replies[4]["result"]["isError"], true, "{}", replies[4]);
+    assert!(
+        replies[4]["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("basis must be observed, tested or unconfirmed")),
+        "{}",
+        replies[4]
+    );
+    assert_eq!(replies[5]["result"]["isError"], false, "{}", replies[5]);
+}
+
+#[test]
+fn an_unconfirmed_memory_is_marked_in_search_and_get_and_every_basis_is_shown() {
+    let (_tmp, repo, db) = fixture();
+    let mut human = engine_on(&repo, &db);
+    let tested = propose_with_basis(&mut human, "Checked by a run.", MemoryBasis::Tested);
+    let belief = propose_with_basis(&mut human, "A belief.", MemoryBasis::Unconfirmed);
+    accept(&mut human, &tested, Vec::new());
+    accept(&mut human, &belief, Vec::new());
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(2, "memories_search", &json!({})),
+            call(3, "memory_get", &json!({ "id": belief })),
+        ],
+    );
+
+    let listed = result(&replies[1])["memories"].as_array().unwrap().clone();
+    let find = |id: &str| {
+        listed
+            .iter()
+            .find(|memory| memory["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is listed: {listed:?}"))
+    };
+    assert_eq!(find(&tested)["basis"], "tested");
+    assert!(find(&tested).get("note").is_none(), "{}", find(&tested));
+    assert_eq!(find(&belief)["basis"], "unconfirmed");
+    assert_eq!(find(&belief)["note"], UNCONFIRMED_NOTE);
+
+    let read = &result(&replies[2])["memory"];
+    assert_eq!(read["id"], belief);
+    assert_eq!(read["basis"], "unconfirmed");
+    assert_eq!(read["note"], UNCONFIRMED_NOTE);
+    assert_eq!(read["untrusted"], true);
 }

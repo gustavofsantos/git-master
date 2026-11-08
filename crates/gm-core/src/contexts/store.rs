@@ -13,7 +13,7 @@ use crate::threads::memories::{self, BlobRead, Carried, Found, NewMemory, Placem
 use crate::threads::store::{BUSY_TIMEOUT, StoreError, begin, create_private, invalid, retry_busy};
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run, so the first is version 1.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
 /// Characters of a context name (D193 (3)).
 const NAME_CHARS: usize = 64;
 
@@ -93,6 +93,13 @@ ALTER TABLE memory_source ADD COLUMN blob_read INTEGER NOT NULL DEFAULT 0;
 UPDATE memory_source SET blob_read = 1
     WHERE kind = 'file' AND memory_id IN (
         SELECT id FROM memory WHERE status IN ('accepted','superseded'));
+";
+
+/// Schema 3 (D201 (1)): a memory records how it is known, as in `threads.db` schema 10. The rows
+/// written before it are `observed`.
+const SCHEMA_V3: &str = "
+ALTER TABLE memory ADD COLUMN basis TEXT NOT NULL DEFAULT 'observed'
+    CHECK (basis IN ('observed','tested','unconfirmed'));
 ";
 
 /// The contexts store: one connection to `contexts.db`.
@@ -408,6 +415,7 @@ impl ContextStore {
         let new = NewMemory {
             kind: memory.kind,
             text: &memory.text,
+            basis: memory.basis,
             status: memory.status,
             origin: &memory.origin,
             sources: &memory.sources,
@@ -848,7 +856,9 @@ fn attach(conn: &Connection, memory: i64, context: i64) -> Result<(), StoreError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_schema::threads::{MemoryKind, MemorySource, MemorySourceKind, MemoryStatus};
+    use gm_schema::threads::{
+        MemoryBasis, MemoryKind, MemorySource, MemorySourceKind, MemoryStatus,
+    };
 
     const REPO: &str = "0123456789abcdef0123456789abcdef";
 
@@ -869,6 +879,7 @@ mod tests {
         NewMemory {
             kind: MemoryKind::Rule,
             text,
+            basis: MemoryBasis::Observed,
             status: MemoryStatus::Proposed,
             origin: "agent:x",
             sources,
@@ -916,8 +927,32 @@ mod tests {
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("version");
-            assert_eq!(version, 2);
+            assert_eq!(version, 3);
         }
+    }
+
+    /// Schema 3 (D201 (1)) on a version 2 file: a memory stored before it reads as `observed`.
+    #[test]
+    fn version_two_gives_the_stored_memories_the_observed_basis() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("contexts.db");
+        {
+            let conn = Connection::open(&path).expect("raw");
+            conn.execute_batch(SCHEMA_V1).expect("schema 1");
+            conn.execute_batch(SCHEMA_V2).expect("schema 2");
+            conn.execute_batch(
+                "INSERT INTO memory (id, uid, kind, text, status, origin, created_at) VALUES
+                    (1, 'oldmemory1', 'rule', 'An old rule.', 'accepted', 'human', 1);",
+            )
+            .expect("rows");
+            conn.pragma_update(None, "user_version", 2)
+                .expect("version");
+        }
+        let store = ContextStore::open(&path).expect("migrate");
+        assert_eq!(
+            store.read_memory_by_uid("oldmemory1").expect("read").basis,
+            MemoryBasis::Observed
+        );
     }
 
     /// Schema 2 (D193 (9)) from a version 1 file: the file sources of accepted and superseded
@@ -1328,6 +1363,7 @@ mod tests {
             uid: "abcdef0123456789".into(),
             kind: MemoryKind::Rule,
             text: "Use the cache".into(),
+            basis: MemoryBasis::Observed,
             status: MemoryStatus::Accepted,
             origin: "human".into(),
             proposed_by: Some("agent:x".into()),

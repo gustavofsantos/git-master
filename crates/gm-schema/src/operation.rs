@@ -21,7 +21,7 @@ use crate::status::{
 use crate::submodule::SubmoduleDetail;
 use crate::syntax::HighlightSpan;
 use crate::threads::{
-    AttachKind, Context, EditState, Label, LabelDetail, LinkKind, Memory, MemoryKind,
+    AttachKind, Context, EditState, Label, LabelDetail, LinkKind, Memory, MemoryBasis, MemoryKind,
     MemorySourceInput, MemoryStatus, ProvenanceResult, SearchFacets, SearchGroup, SearchOrder,
     ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink, ThreadRelKind, ThreadRelation,
     ThreadSummary,
@@ -910,13 +910,16 @@ pub enum CommandKind {
     /// With `context` (a context the repository sees, by path or unique name) the memory is stored
     /// once in that context and found from every repository that sees it (D193 (7)). Logged with
     /// its actor. A text already held by a non-rejected memory of the same kind returns that memory
-    /// and writes nothing. Answers `MemoryChanged`.
+    /// and writes nothing. `basis` says how the memory is known (D201 (1)); absent, it is `observed`.
+    /// Answers `MemoryChanged`.
     ProposeMemory {
         kind: MemoryKind,
         text: String,
         sources: Vec<MemorySourceInput>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<String>,
+        #[serde(default)]
+        basis: MemoryBasis,
     },
     /// Accepts memory `uid` (a proposal, or an accepted one for an edit or a supersede). `text`
     /// replaces the text when given (redacted). Each memory uid in `supersedes` must be accepted,
@@ -2090,6 +2093,7 @@ mod tests {
                 entry_to: None,
             }],
             context: None,
+            basis: MemoryBasis::Tested,
         })
         .unwrap();
         assert_eq!(propose["type"], "propose_memory");
@@ -2098,10 +2102,27 @@ mod tests {
             "an absent context is not written"
         );
         assert_eq!(propose["kind"], "rule");
+        assert_eq!(propose["basis"], "tested");
         assert_eq!(propose["sources"][0]["kind"], "file");
         assert_eq!(propose["sources"][0]["ref"], "src/a.rs");
-        let back: CommandKind = serde_json::from_value(propose).unwrap();
-        assert!(matches!(back, CommandKind::ProposeMemory { .. }));
+        let back: CommandKind = serde_json::from_value(propose.clone()).unwrap();
+        assert!(matches!(
+            back,
+            CommandKind::ProposeMemory {
+                basis: MemoryBasis::Tested,
+                ..
+            }
+        ));
+        let mut old = propose;
+        old.as_object_mut().unwrap().remove("basis");
+        let old: CommandKind = serde_json::from_value(old).unwrap();
+        assert!(matches!(
+            old,
+            CommandKind::ProposeMemory {
+                basis: MemoryBasis::Observed,
+                ..
+            }
+        ));
         let list = serde_json::to_value(CommandKind::ListMemories {
             query: String::new(),
             kind: None,

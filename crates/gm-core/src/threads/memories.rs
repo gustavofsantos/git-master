@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gm_schema::threads::{
-    FileChange, FileChangeState, Memory, MemoryFilter, MemoryKind, MemorySource, MemorySourceInput,
-    MemorySourceKind, MemoryStatus,
+    FileChange, FileChangeState, Memory, MemoryBasis, MemoryFilter, MemoryKind, MemorySource,
+    MemorySourceInput, MemorySourceKind, MemoryStatus,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use sha2::{Digest, Sha256};
@@ -33,7 +33,7 @@ static UID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The columns of a memory row, in the order `memory_row` reads them.
 const MEMORY_COLUMNS: &str = "m.id, m.uid, m.kind, m.text, m.status, m.origin, m.proposed_by,
-    m.model, m.created_at, m.decided_at, m.decided_by";
+    m.model, m.created_at, m.decided_at, m.decided_by, m.basis";
 
 /// The list filters as SQL. Parameters 2 to 5 are always bound (NULL means no restriction).
 const MEMORY_FILTER_SQL: &str = " AND (?2 IS NULL OR m.kind = ?2)
@@ -46,6 +46,8 @@ const MEMORY_FILTER_SQL: &str = " AND (?2 IS NULL OR m.kind = ?2)
 pub struct NewMemory<'a> {
     pub kind: MemoryKind,
     pub text: &'a str,
+    /// How the memory is known (D201 (1)).
+    pub basis: MemoryBasis,
     /// `Proposed` for an agent's call; `Accepted` for a human's (D192 (3)).
     pub status: MemoryStatus,
     pub origin: &'a str,
@@ -98,6 +100,33 @@ pub fn dedup_key(kind: MemoryKind, text: &str) -> String {
         .join(" ")
         .to_lowercase();
     format!("{}\0{folded}", kind_text(kind))
+}
+
+/// The word a basis is stored and sent as (D201 (1)).
+#[must_use]
+pub fn basis_text(basis: MemoryBasis) -> &'static str {
+    match basis {
+        MemoryBasis::Observed => "observed",
+        MemoryBasis::Tested => "tested",
+        MemoryBasis::Unconfirmed => "unconfirmed",
+    }
+}
+
+/// The basis a word names: `observed`, `tested` or `unconfirmed`. Any other word is refused, and the
+/// message names the words that are allowed (D201 (1)).
+pub fn check_basis(text: &str) -> Result<MemoryBasis, String> {
+    parse_basis(text)
+        .ok_or_else(|| format!("basis must be observed, tested or unconfirmed, not {text:?}"))
+}
+
+/// A memory's basis when the word is a known one.
+fn parse_basis(text: &str) -> Option<MemoryBasis> {
+    match text {
+        "observed" => Some(MemoryBasis::Observed),
+        "tested" => Some(MemoryBasis::Tested),
+        "unconfirmed" => Some(MemoryBasis::Unconfirmed),
+        _ => None,
+    }
 }
 
 /// A source as stored: a thread names a stored thread's uid and may carry an entry range (`from`
@@ -432,13 +461,14 @@ pub(crate) fn propose_in(
         ),
     };
     conn.execute(
-        "INSERT INTO memory (uid, kind, text, status, origin, proposed_by, model, created_at,
+        "INSERT INTO memory (uid, kind, text, basis, status, origin, proposed_by, model, created_at,
             decided_at, decided_by)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             uid,
             kind_text(new.kind),
             checked.text,
+            basis_text(new.basis),
             status_text(new.status),
             new.origin,
             proposed_by,
@@ -967,14 +997,22 @@ pub(crate) fn memory_by_id(conn: &Connection, id: i64) -> Result<Memory, StoreEr
 fn memory_row(row: &Row<'_>) -> rusqlite::Result<Result<Memory, StoreError>> {
     let kind: String = row.get(2)?;
     let status: String = row.get(4)?;
-    let (Some(kind), Some(status)) = (parse_kind(&kind), parse_status(&status)) else {
-        return Ok(Err(invalid("a memory holds an unknown kind or status")));
+    let basis: String = row.get(11)?;
+    let (Some(kind), Some(status), Some(basis)) = (
+        parse_kind(&kind),
+        parse_status(&status),
+        parse_basis(&basis),
+    ) else {
+        return Ok(Err(invalid(
+            "a memory holds an unknown kind, status or basis",
+        )));
     };
     Ok(Ok(Memory {
         id: row.get(0)?,
         uid: row.get(1)?,
         kind,
         text: row.get(3)?,
+        basis,
         status,
         origin: row.get(5)?,
         proposed_by: row.get(6)?,
@@ -1200,6 +1238,7 @@ mod tests {
         NewMemory {
             kind,
             text,
+            basis: MemoryBasis::Observed,
             status: MemoryStatus::Proposed,
             origin: "agent:x",
             sources,
@@ -1230,6 +1269,7 @@ mod tests {
         let new = NewMemory {
             kind,
             text,
+            basis: MemoryBasis::Observed,
             status: MemoryStatus::Accepted,
             origin: HUMAN,
             sources,
@@ -1260,6 +1300,25 @@ mod tests {
             .conn
             .query_row(sql, [], |row| row.get(0))
             .expect("count")
+    }
+
+    #[test]
+    fn a_basis_is_one_of_three_exact_words_and_any_other_is_refused_naming_them() {
+        for (basis, word) in [
+            (MemoryBasis::Observed, "observed"),
+            (MemoryBasis::Tested, "tested"),
+            (MemoryBasis::Unconfirmed, "unconfirmed"),
+        ] {
+            assert_eq!(basis_text(basis), word);
+            assert_eq!(check_basis(word), Ok(basis));
+        }
+        for bad in ["", "guessed", "Observed", " tested", "belief"] {
+            let error = check_basis(bad).expect_err("refused");
+            assert!(
+                error.starts_with("basis must be observed, tested or unconfirmed"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -1394,6 +1453,7 @@ mod tests {
             uid: "u".into(),
             kind: MemoryKind::Rule,
             text: "t".into(),
+            basis: MemoryBasis::Observed,
             status: MemoryStatus::Accepted,
             origin: "human".into(),
             proposed_by: None,
@@ -1481,6 +1541,7 @@ mod tests {
             uid: "u".into(),
             kind: MemoryKind::Rule,
             text: "t".into(),
+            basis: MemoryBasis::Observed,
             status: MemoryStatus::Accepted,
             origin: "human".into(),
             proposed_by: None,
@@ -1646,6 +1707,7 @@ mod tests {
         let accepted_by_agent = NewMemory {
             kind: MemoryKind::Rule,
             text: "Agents accept",
+            basis: MemoryBasis::Observed,
             status: MemoryStatus::Accepted,
             origin: "agent:x",
             sources: &[file("a")],
@@ -1973,6 +2035,7 @@ mod tests {
         let new = NewMemory {
             kind: MemoryKind::Lesson,
             text: "The rebase helper drops the stash on conflict",
+            basis: MemoryBasis::Observed,
             status: MemoryStatus::Proposed,
             origin: "agent:y",
             sources: &sources,
