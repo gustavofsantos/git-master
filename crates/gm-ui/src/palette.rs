@@ -296,6 +296,11 @@ impl Palette {
         }
     }
 
+    /// Whether Tab would open an argument step for the highlighted row.
+    pub(crate) fn highlight_picks_argument(&self) -> bool {
+        tab_picks_argument(self.highlighted().map(|candidate| &candidate.choice))
+    }
+
     /// Whether the highlight is on a `MoreDisabled` line, which Enter expands.
     pub(crate) fn highlighted_more(&self) -> bool {
         matches!(
@@ -483,6 +488,13 @@ fn top_level(query: &str, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> 
         }));
     }
     candidates
+}
+
+/// Whether Tab picks an argument for a row: only a `Choice::Pick` row opens an
+/// argument step. An action whose argument the palette fills in itself, or that
+/// is listed disabled, is a `Choice::Run` row, and Tab does nothing on it.
+pub(crate) fn tab_picks_argument(choice: Option<&Choice>) -> bool {
+    matches!(choice, Some(Choice::Pick(_)))
 }
 
 fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Candidate {
@@ -844,6 +856,25 @@ mod tests {
     use gm_schema::{Change, StashEntry, StatusEntry, WorktreeEntry};
 
     use super::*;
+
+    #[test]
+    fn tab_is_offered_only_for_a_row_that_picks_its_argument() {
+        let pick = Choice::Pick(Action::CheckoutBranch);
+        // An action with no argument, and one whose argument the palette fills in or
+        // lists disabled, are runs: Tab does nothing on them.
+        let plain = Choice::Run {
+            action: Action::Commit,
+            args: Args::None,
+        };
+        let disabled = Choice::Run {
+            action: Action::OpenReviewComment,
+            args: Args::None,
+        };
+        assert!(tab_picks_argument(Some(&pick)));
+        assert!(!tab_picks_argument(Some(&plain)));
+        assert!(!tab_picks_argument(Some(&disabled)));
+        assert!(!tab_picks_argument(None));
+    }
 
     fn entry(path: &str, staged: Option<Change>, unstaged: Option<Change>) -> StatusEntry {
         StatusEntry {

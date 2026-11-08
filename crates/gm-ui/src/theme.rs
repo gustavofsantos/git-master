@@ -58,7 +58,7 @@ pub struct Palette {
     pub button_border: u32,
     /// Background of a selected file row.
     pub selected_row: u32,
-    /// Background of the row under the diff cursor.
+    /// Background of the row under the diff cursor, and of a palette row under the pointer.
     pub cursor_row: u32,
     /// Background of a hunk header row in the diff pane.
     pub hunk_header_bg: u32,

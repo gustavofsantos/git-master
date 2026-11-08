@@ -340,12 +340,16 @@ impl StatusView {
         match self.palette.stage() {
             Stage::Actions => (
                 self.palette.scope_title().map(str::to_owned),
-                &[
-                    "↑↓ Navigate",
-                    "Enter Run",
-                    "Tab Choose argument",
-                    "Esc Close",
-                ],
+                if self.palette.highlight_picks_argument() {
+                    &[
+                        "↑↓ Navigate",
+                        "Enter Run",
+                        "Tab Choose argument",
+                        "Esc Close",
+                    ]
+                } else {
+                    &["↑↓ Navigate", "Enter Run", "Esc Close"]
+                },
             ),
             Stage::Pick(action) => {
                 let what = match action.spec().args {
@@ -547,7 +551,9 @@ fn more_element(
         .text_color(theme::muted())
         .cursor_pointer()
         .when(highlighted, |row| row.bg(theme::selected_row()))
-        .hover(|style| style.bg(theme::selected_row()))
+        .when(!highlighted, |row| {
+            row.hover(|style| style.bg(theme::cursor_row()))
+        })
         .child(format!("{count} unavailable — show"))
         .on_mouse_down(
             MouseButton::Left,
@@ -592,9 +598,9 @@ fn row_element(
         .gap_4()
         .text_color(colour)
         .when(highlighted, |row| row.bg(theme::selected_row()))
-        .when(enabled, |row| {
-            row.cursor_pointer()
-                .hover(|style| style.bg(theme::selected_row()))
+        .when(enabled, Styled::cursor_pointer)
+        .when(enabled && !highlighted, |row| {
+            row.hover(|style| style.bg(theme::cursor_row()))
         })
         .when(name_fit::needs_hover(&full), |row| {
             row.tooltip(window_chrome::hint(full))
