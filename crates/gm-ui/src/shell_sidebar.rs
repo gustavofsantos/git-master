@@ -119,7 +119,7 @@ impl StatusView {
     fn page_items(&self, cx: &mut Context<Self>) -> Div {
         let current = Page::of(self.screen);
         let counts = sidebar_nav::Counts {
-            inbox: None,
+            inbox: Some(crate::inbox::badge_count(&self.inbox_items())),
             changed: self.model.entry_count(),
             open_comments: local_review::open_pill(self.model.review.comments())
                 .and_then(|pill| pill.parse().ok()),

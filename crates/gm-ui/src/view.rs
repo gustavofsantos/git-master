@@ -212,6 +212,8 @@ pub struct StatusView {
     pub(crate) new_branch_dialog: Option<NewBranchDialog>,
     /// The branch Set Parent… was run on, while the palette picks its parent.
     pub(crate) stack_subject: Option<String>,
+    /// The Inbox item selected, by its key (UI redesign, slice 6).
+    pub(crate) inbox_selected: Option<String>,
     /// The History scope pill's menu is open.
     pub(crate) history_scope_menu: bool,
     /// The stash dialog, while it is open (B2).
@@ -509,6 +511,7 @@ impl StatusView {
             prune_dialog: None,
             new_branch_dialog: None,
             stack_subject: None,
+            inbox_selected: None,
             history_scope_menu: false,
             new_stash_dialog: None,
             review_dialog: None,
@@ -869,7 +872,7 @@ impl StatusView {
                     },
                 )
             }))
-            .children((self.screen == Screen::Inbox).then(Self::inbox_page))
+            .children((self.screen == Screen::Inbox).then(|| self.inbox_page(cx)))
             .children((self.screen == Screen::History).then(|| self.history_page(cx)))
             .children((self.screen == Screen::Workflows).then(|| self.workflows_page(cx)))
             .children((self.screen == Screen::Code).then(|| self.code_page(cx)))
@@ -1169,8 +1172,11 @@ impl StatusView {
         self.model.suggestion.drop_suggestion();
     }
 
+    /// Shows the Inbox. Its items come from the state the window holds; the review comments
+    /// are read again, since only the Review page reads them otherwise.
     pub(crate) fn show_inbox(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::Inbox;
+        self.request_review_list();
         cx.notify();
     }
 

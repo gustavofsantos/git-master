@@ -61,6 +61,9 @@ impl StatusView {
 
     /// What is selected on the page on screen, with its context menu read from the registry.
     pub(crate) fn context_actions(&self) -> Option<ContextActions> {
+        if self.screen == Screen::Inbox {
+            return self.inbox_context_actions();
+        }
         let (kind, target) = self.selection_target()?;
         let subject = match &target {
             Target::Commit { oid, subject } => {
@@ -76,6 +79,26 @@ impl StatusView {
         };
         let items = self.menu_items(&target);
         Some(context_actions::for_items(kind, subject, &items))
+    }
+
+    /// The Inbox item selected, with its own actions ranked as a menu's are (slice 6).
+    fn inbox_context_actions(&self) -> Option<ContextActions> {
+        let item = self.inbox_selected_item()?;
+        let ctx = self.action_context("");
+        let ranked = item
+            .actions
+            .iter()
+            .filter(|(action, args)| action.enabled(args, &ctx).is_ok())
+            .filter(|(action, _)| !action.destructive() && !action.asks_first())
+            .take(context_actions::SHOWN)
+            .map(|(action, args)| (*action, args.clone(), action.spec().title))
+            .collect();
+        Some(ContextActions {
+            kind: "Item",
+            subject: item.what.clone(),
+            ranked,
+            all: item.actions,
+        })
     }
 
     /// The selection of the page on screen as a menu target, with the kind the top bar names.
