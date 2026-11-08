@@ -52,8 +52,8 @@ The sidebar lists the pages of the repository, then its stacks, branches, worktr
 | **Changes** | Changed files, the diff of a file, and the commit composer. The badge shows the number of changed files. The page also hosts the conflict resolver. See [Working Copy](../guide/working-copy.md). | Implemented |
 | **Review** | Review comments on your local changes, for an agent to handle. The badge shows the number of open comments, and it is hidden when there are none. See [Local review](../agents/local-review.md). | Implemented |
 | **History** | The commit history of the current branch. See [History](../guide/history.md). | Implemented |
-| **Code** | The Code page: a folder tree and a read-only file viewer. The page also holds the text search, the **Search** page. See [Code navigation](../guide/code-navigation.md). | Implemented |
-| **Agents** | Your agent threads and the labels of the repository: the **Threads** page and the **Labels** page. The badge shows the number of threads. See [Threads](../guide/threads.md). | Implemented |
+| **Code** | The Code page, with two tabs: **Files**, a folder tree and a read-only file viewer, and **Search**, the text search. See [Code navigation](../guide/code-navigation.md). | Implemented |
+| **Agents** | Your agent threads, memories and the labels of the repository, in the **Threads**, **Memories** and **Labels** tabs. The badge shows the number of threads. See [Threads](../guide/threads.md) and [Memories](../guide/memories.md). | Implemented |
 
 > **Planned.** The **Inbox** page is not available yet.
 

@@ -17,7 +17,7 @@ Resolving conflicts by hand is a preview feature. See [Resolving conflicts](guid
 
 ### A workspace for working with code
 
-You can move around a repository without leaving the app. **Quick Open** (`Ctrl+P`, `⌘P` on macOS) finds a file by name in the active worktree. The **Code** page shows the folder tree and a read-only file viewer. The **Search** page runs a text search with case, whole word and regular expression options, and groups the matches by file.
+You can move around a repository without leaving the app. **Quick Open** (`Ctrl+P`, `⌘P` on macOS) finds a file by name in the active worktree. The **Code** page shows the folder tree and a read-only file viewer on its **Files** tab. Its **Search** tab runs a text search with case, whole word and regular expression options, and groups the matches by file.
 
 ### Agents under human accountability
 

@@ -27,9 +27,13 @@ A thread belongs to the repository where the agent ran. A session started in a l
 
 ## Open the Threads page
 
-Open **Agents** in the sidebar, which shows the **Threads** page, or run **Show Threads** from the command palette. The list is on the left and the selected thread is on the right.
+Open **Agents** in the sidebar, or run **Show Threads** from the command palette. The **Agents** page has three tabs: **Threads**, **Memories** and **Labels**. The **Threads** tab shows the list on the left and the selected thread on the right.
 
-Each row of the list shows the title, the agent, the branch, how long ago the last event was, and how many edits the thread made. A dot marks a session that is still open. A **redacted** mark shows when GitMaster removed a secret from the thread.
+Each row of the list shows the title, the agent, the branch, how long ago the last event was, and how many edits the thread made. A dot marks a session that is still open. A **redacted** mark shows when GitMaster removed a secret from the thread. The label chips of a thread show on its row.
+
+The list is grouped by day. A day line before the first thread of each day reads **Today**, **Yesterday** or the date, such as `2026-11-06`, and the threads last active on that day follow it, newest first. Days are counted in UTC.
+
+Click the agent chip on a row to show only that agent's threads. An **Agent: <name>** chip appears in the toolbar above the list; click it to show the threads of every agent again. The agent filter works together with the **Starred**, **Has edits** and **Label: <name>** chips.
 
 The title comes from your first prompt, as plain text: the first non-empty line, with the Markdown markers, emphasis and links removed. A title is cut at 80 characters. You can rename it.
 
@@ -108,9 +112,9 @@ Words shorter than three characters are matched at the start of a word only, so 
 
 Each thread appears once, with its best match: a snippet around the match, the agent, the branch, when the thread started and how many edits it made. The results load a page at a time as you scroll. When a search with a filter finds nothing, GitMaster says which filter, removed, would bring matches back. Select a result to open the thread at that entry.
 
-Narrow the list with the **Starred** and **Has edits** chips. To list the threads that edited one file, choose **Show Threads for File** on that file in the Working Copy. A removable chip shows the file.
+Narrow the list with the **Starred**, **Has edits** and **Label: <name>** chips, and with the agent filter described under [Open the Threads page](#open-the-threads-page). To list the threads that edited one file, choose **Show Threads for File** on that file in the Working Copy. A removable chip shows the file.
 
-> **Planned.** Filters for the agent, the branch and the dates are not available in the app yet.
+> **Planned.** Filters for the branch and the dates are not available in the app yet.
 
 Search runs on your machine over the prompts, replies and edited file names stored for each thread, and its indexes are kept in the same local database. Nothing is sent anywhere.
 
@@ -215,7 +219,7 @@ You can attach a label to:
 - a commit, which keeps the label through a rewrite as a commit link does (see [After a rewrite](#after-a-rewrite));
 - another label.
 
-Open **Agents** in the sidebar and choose **Labels**, or run **Show Labels** from the command palette, to see every label. Choose one to list everything attached to it: threads, files, commits and other labels. Use **Rename Label…** and **Delete** in a label's menu. Deleting a label removes its attachments too.
+Open **Agents** in the sidebar and choose the **Labels** tab, or run **Show Labels** from the command palette, to see every label. Choose one to list everything attached to it: threads, files, commits and other labels. Use **Rename Label…** and **Delete** in a label's menu. Deleting a label removes its attachments too.
 
 You create labels, attach them and remove attachments. Only you can rename or delete a label. An agent connected through MCP can create a label and attach it; the label and each attachment it made show the agent's name, and you can remove them.
 

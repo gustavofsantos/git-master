@@ -5,7 +5,7 @@ status: partial
 order: 60
 ---
 
-GitMaster lets you find a file, read it and search the text of the project without leaving the app. Quick Open finds files by name, the **Code** page shows the folder tree with a read-only viewer, and the **Search** page finds text across the files. Everything runs on your machine, against the files on disk and the data Git already keeps, so there is no network to wait for.
+GitMaster lets you find a file, read it and search the text of the project without leaving the app. Quick Open finds files by name, the **Code** page shows the folder tree with a read-only viewer on its **Files** tab, and the **Search** tab of the same page finds text across the files. Everything runs on your machine, against the files on disk and the data Git already keeps, so there is no network to wait for.
 
 ## Why navigate in GitMaster
 
@@ -39,7 +39,7 @@ Quick Open is the file finder. Press `Ctrl+P` (`⌘P` on macOS), or choose **Qui
 
 1. Press `Ctrl+P` (`⌘P` on macOS). A box opens over the window.
 2. Type part of the file name or of its path. You do not need the whole name.
-3. Press Enter, or click a result, to open the file in the **Code** page.
+3. Press Enter, or click a result, to open the file on the **Files** tab of the **Code** page.
 
 The results update as you type. Each result shows the file name, with the letters you typed highlighted, and its folder in a quieter style. Up to 50 results are listed and 10 are visible at a time. Scroll the list to see the rest.
 
@@ -73,7 +73,11 @@ The list is read again each time you open Quick Open or the **Code** page. New f
 
 ## The Code page
 
-Open the **Code** page from the sidebar, or choose **Show Code** in the command palette. The page has two panes: the folder tree on the left and the viewer on the right. Opening a file from Quick Open opens the folders above it in the tree and scrolls the tree to the file.
+Open the **Code** page from the sidebar, or choose **Show Code** in the command palette. The page has two tabs, **Files** and **Search**. **Show Code** opens the **Files** tab, and **Search Text…** opens the **Search** tab.
+
+### Files tab
+
+The **Files** tab has two panes: the folder tree on the left and the viewer on the right. Opening a file from Quick Open opens the folders above it in the tree and scrolls the tree to the file.
 
 ### Folder tree
 
@@ -152,7 +156,7 @@ The file tree is navigated with the keyboard, not only with the mouse.
 
 ## View File
 
-**View File** opens a file in the viewer on the **Code** page. It is available in two places.
+**View File** opens a file in the viewer on the **Files** tab of the **Code** page. It is available in two places.
 
 From the Working Copy:
 
@@ -167,7 +171,7 @@ From the command palette:
 
 ## Search text
 
-The **Search** page finds text in the files of the active worktree. It sits in the **Code** entry of the sidebar, beside the Code page. Press `Ctrl+Shift+F` (`⇧⌘F` on macOS), or choose **Search Text…** in the command palette.
+The **Search** tab of the **Code** page finds text in the files of the active worktree. Press `Ctrl+Shift+F` (`⇧⌘F` on macOS), or choose **Search Text…** in the command palette, to open it. Choose the **Files** tab to return to the folder tree and the viewer.
 
 ### Start a search
 
@@ -188,11 +192,11 @@ The search starts 250 ms after you stop typing. Press Enter to start it at once.
 
 ### Example: find every use of a name
 
-1. Press `Ctrl+Shift+F` (`⇧⌘F` on macOS) to open the **Search** page.
+1. Press `Ctrl+Shift+F` (`⇧⌘F` on macOS) to open the **Search** tab.
 2. Type `parse_config` in the search box.
 3. Turn on **ab**, so that `parse_config_file` is not matched.
 4. Wait for the summary to show the number of matches, or press Enter to start at once.
-5. Click a line in the results. The file opens in the **Code** page at that line.
+5. Click a line in the results. The file opens on the **Files** tab at that line.
 
 ### Limit the files
 
@@ -205,7 +209,7 @@ A word that names a submodule's folder, or a path inside it, such as `service-a/
 - Results are grouped by file. Each group shows the file name, its folder, and the number of matches.
 - Each matching line is shown with the matched text highlighted.
 - Click a file header to fold or unfold its lines.
-- Click a line to open the file at that line in the **Code** page.
+- Click a line to open the file at that line on the **Files** tab.
 - The summary line above the results shows the state of the search. While it runs, it says **Searching…**. When it ends, it gives the number of matches and of files. If Git reports an error, for example for an invalid regular expression or pathspec, the summary shows Git's message as it is.
 
 ### Limits and order

@@ -27,7 +27,7 @@ A memory attached to **Platform** is found from all seven repositories, includin
 
 ## Manage contexts
 
-Choose **Manage Contexts…** on the **Memories** tab of the Threads page, or from the command palette.
+Choose **Manage Contexts…** on the **Memories** tab of the **Agents** page, or from the command palette.
 
 1. Choose **New Context** and give it a name. When a context is selected, the name box also asks whether the new one is a sub-context of it: choose **As a sub-context of** to switch between yes and no.
 2. Choose **Add Repository** and pick from your recent repositories, or add the repository that is open.
