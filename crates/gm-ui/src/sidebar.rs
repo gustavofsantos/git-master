@@ -1,9 +1,10 @@
-//! The rows of the sidebar's branch tree. Pure: the view draws what this lists.
+//! The rows of the sidebar's branch trees. Pure: the view draws what this lists.
 //!
-//! "By stack" shows the local branches as trees of recorded parents under
-//! "Stacks", each parent before its children and indented by depth, then the
-//! local branches in no tree under "No stack" (D138). "By name" is the classic
-//! view: local, then remote, grouped by the prefix before the first slash.
+//! The Stack section shows the local branches that are in a stack as trees of recorded
+//! parents, each parent before its children and indented by depth (D138). The Branches
+//! section is the classic view: local, then remote, grouped by the prefix before the first
+//! slash. `rows` still builds both groupings, with "No stack" for the local branches in no
+//! tree, so a filter can be tested on either.
 
 use gm_schema::{BranchEntry, Feature, FeatureSet, StackBranch};
 
@@ -12,15 +13,17 @@ use crate::stacks::Stacks;
 /// A section of the sidebar that folds away under its header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
-    Repository,
+    /// The topic's stack tree (UI redesign, slice 1): the stacks of the repository until
+    /// topics exist.
+    Stack,
     Branches,
     Worktrees,
+    /// The workspaces under the root (D183). It becomes a topic action in slice 5.
     Workspaces,
 }
 
-/// Which sections are folded. When a window starts, Repository is open and
-/// Branches, Worktrees and Workspaces are folded (D184); the choice is kept for
-/// the window only.
+/// Which sections are folded. When a window starts, Stack is open and the others are folded
+/// (D184, UI redesign); the choice is kept for the window only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Folded {
     /// Indexed by `Section::index`.
@@ -28,7 +31,7 @@ pub struct Folded {
 }
 
 impl Default for Folded {
-    /// The state a new window starts in: Repository open, the others folded.
+    /// The state a new window starts in: Stack open, the others folded.
     fn default() -> Self {
         Self {
             folded: [false, true, true, true],
@@ -39,7 +42,7 @@ impl Default for Folded {
 impl Section {
     fn index(self) -> usize {
         match self {
-            Section::Repository => 0,
+            Section::Stack => 0,
             Section::Branches => 1,
             Section::Worktrees => 2,
             Section::Workspaces => 3,
@@ -59,22 +62,13 @@ impl Folded {
     }
 }
 
-/// How the branch tree is organised.
+/// How a tree is organised: the stack tree of the Stack section, or the classic tree of the
+/// Branches section.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Grouping {
     #[default]
     ByStack,
     ByName,
-}
-
-impl Grouping {
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ByStack => "By stack",
-            Self::ByName => "By name",
-        }
-    }
 }
 
 /// One row of the tree. Every row is drawn at the same height.
@@ -98,23 +92,39 @@ pub enum Row<'a> {
     },
 }
 
-/// The grouping the tree shows: the saved one while the Stacks preview is on, and By name
-/// otherwise, since By stack needs stacks (D169).
+/// Whether the hint that says how to set a parent shows under the sidebar. It describes the
+/// drag in the stack tree, so it shows only while that tree is drawn: the Stacks preview on and
+/// the Stack section open.
 #[must_use]
-pub fn effective_grouping(saved: Grouping, features: FeatureSet) -> Grouping {
-    if features.is_enabled(Feature::Stacks) {
-        saved
-    } else {
-        Grouping::ByName
-    }
+pub fn drag_hint_shown(features: FeatureSet, folded: Folded) -> bool {
+    features.is_enabled(Feature::Stacks) && !folded.is_folded(Section::Stack)
 }
 
-/// Whether the hint that says how to set a parent shows under the sidebar. It describes the
-/// drag in the branch tree, so it shows only while that tree is drawn: By stack, with the
-/// Branches section open.
+/// The rows of the Stack section: each stack's branches, parents first and indented by depth,
+/// then the branches of a parent loop, with no section header (the section has its own). A note stands in while the first
+/// snapshot is read and when there is no stack.
 #[must_use]
-pub fn drag_hint_shown(grouping: Grouping, folded: Folded) -> bool {
-    grouping == Grouping::ByStack && !folded.is_folded(Section::Branches)
+pub fn stack_rows<'a>(branches: &[&'a BranchEntry], stacks: &'a Stacks) -> Vec<Row<'a>> {
+    let mut rows = rows(branches, Grouping::ByStack, stacks);
+    if let Some(end) = rows.iter().position(|row| *row == Row::Header("No stack")) {
+        // The branches of a parent loop stay, after the trees, with their loop mark.
+        let looped: Vec<Row<'a>> = rows
+            .drain(end..)
+            .filter(|row| matches!(row, Row::Branch { looped: true, .. }))
+            .collect();
+        rows.extend(looped);
+    }
+    if rows.first() == Some(&Row::Header("Stacks")) {
+        rows.remove(0);
+    }
+    if rows.is_empty() {
+        rows.push(Row::Note(if stacks.calculating() {
+            "Calculating…"
+        } else {
+            "No stacks yet"
+        }));
+    }
+    rows
 }
 
 /// The tree's rows for `branches` under `grouping`: the branches the filter
@@ -239,55 +249,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn by_stack_is_shown_only_while_the_stacks_preview_is_on() {
-        assert_eq!(
-            effective_grouping(Grouping::ByStack, FeatureSet::all()),
-            Grouping::ByStack
-        );
-        assert_eq!(
-            effective_grouping(Grouping::ByName, FeatureSet::all()),
-            Grouping::ByName
-        );
-        assert_eq!(
-            effective_grouping(Grouping::ByStack, FeatureSet::none()),
-            Grouping::ByName
-        );
-        assert_eq!(
-            effective_grouping(Grouping::ByName, FeatureSet::none()),
-            Grouping::ByName
-        );
-    }
-
-    #[test]
-    fn the_drag_hint_shows_only_in_the_open_by_stack_tree() {
+    fn the_drag_hint_shows_only_in_the_open_stack_section_with_stacks_on() {
         let mut folded = Folded::default();
-        // A new window folds Branches, so the hint is hidden even though By stack is saved.
-        assert!(!drag_hint_shown(Grouping::ByStack, folded));
-        folded.toggle(Section::Branches);
-        assert!(drag_hint_shown(Grouping::ByStack, folded));
-        assert!(!drag_hint_shown(Grouping::ByName, folded));
-        folded.toggle(Section::Branches);
-        assert!(!drag_hint_shown(Grouping::ByStack, folded));
+        assert!(drag_hint_shown(FeatureSet::all(), folded));
+        assert!(!drag_hint_shown(FeatureSet::none(), folded));
+        folded.toggle(Section::Stack);
+        assert!(!drag_hint_shown(FeatureSet::all(), folded));
     }
 
     #[test]
-    fn a_new_window_starts_with_repository_open_and_the_others_folded() {
+    fn a_new_window_starts_with_the_stack_open_and_the_folds_folded() {
         let folded = Folded::default();
-        assert!(!folded.is_folded(Section::Repository));
+        assert!(!folded.is_folded(Section::Stack));
         assert!(folded.is_folded(Section::Branches));
         assert!(folded.is_folded(Section::Worktrees));
-        assert!(folded.is_folded(Section::Workspaces));
-    }
-
-    #[test]
-    fn the_workspaces_section_folds_on_its_own() {
-        let mut folded = Folded::default();
-        folded.toggle(Section::Workspaces);
-        assert!(!folded.is_folded(Section::Workspaces));
-        assert!(folded.is_folded(Section::Worktrees));
-        assert!(folded.is_folded(Section::Branches));
-        folded.toggle(Section::Workspaces);
-        assert!(folded.is_folded(Section::Workspaces));
     }
 
     #[test]
@@ -296,20 +271,34 @@ mod tests {
         folded.toggle(Section::Branches);
         assert!(!folded.is_folded(Section::Branches));
         assert!(folded.is_folded(Section::Worktrees));
-        assert!(!folded.is_folded(Section::Repository));
+        assert!(!folded.is_folded(Section::Stack));
         folded.toggle(Section::Branches);
         assert!(folded.is_folded(Section::Branches));
-
-        folded.toggle(Section::Repository);
-        assert!(folded.is_folded(Section::Repository));
-        assert!(folded.is_folded(Section::Branches));
-        assert!(folded.is_folded(Section::Worktrees));
-        folded.toggle(Section::Repository);
-        assert!(!folded.is_folded(Section::Repository));
-
         folded.toggle(Section::Worktrees);
         assert!(!folded.is_folded(Section::Worktrees));
         assert!(folded.is_folded(Section::Branches));
+    }
+
+    #[test]
+    fn the_stack_section_lists_only_the_stacked_branches() {
+        let all = [
+            branch("main", false),
+            branch("ledger-base", false),
+            branch("ledger-ui", false),
+            branch("lonely", false),
+            branch("a", false),
+        ];
+        let stacks = ledger();
+        let shown = texts(&stack_rows(&refs(&all), &stacks));
+        assert!(shown.iter().all(|row| !row.contains("lonely")), "{shown:?}");
+        assert!(
+            shown.iter().all(|row| !row.contains("No stack")),
+            "{shown:?}"
+        );
+        assert!(!shown.is_empty());
+        assert!(shown.iter().any(|row| row == "a"), "{shown:?}");
+        let none = texts(&stack_rows(&refs(&all), &Stacks::default()));
+        assert_eq!(none, ["~ No stacks yet"]);
     }
 
     fn branch(name: &str, remote: bool) -> BranchEntry {

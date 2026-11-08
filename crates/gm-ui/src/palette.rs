@@ -96,11 +96,21 @@ pub(crate) struct Hit {
     pub(crate) ranges: Vec<Range<usize>>,
 }
 
-/// One line of the list: a section's header, or a row by its position in the hits.
+/// One line of the list: a section's header, a row by its position in the hits,
+/// or the line that stands for a section's hidden disabled rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Line {
     Header(Section),
-    Row { hit: usize, highlighted: bool },
+    Row {
+        hit: usize,
+        highlighted: bool,
+    },
+    /// `count` disabled rows of `section` are hidden; Enter lists them.
+    MoreDisabled {
+        section: Section,
+        count: usize,
+        highlighted: bool,
+    },
 }
 
 /// A ranking to run off the UI thread.
@@ -141,17 +151,45 @@ pub(crate) struct Palette {
     /// The candidates and hits on screen. A hit indexes into `shown`.
     shown: Arc<Vec<Candidate>>,
     hits: Vec<Hit>,
-    /// Position among `hits` of the row Enter would choose.
+    /// Position of the line Enter would choose, among the choosable lines: the
+    /// rows on screen and the `MoreDisabled` lines (see `choosable`).
     highlight: usize,
+    /// Whether the disabled rows are listed. Until then each section's disabled
+    /// rows stand behind one `MoreDisabled` line.
+    show_disabled: bool,
+    /// The actions a scoped palette offers, in order; `None` for the whole palette.
+    scope: Option<Vec<(Action, Args)>>,
+    /// The title a scoped palette shows as its prompt.
+    scope_title: Option<String>,
 }
 
 impl Palette {
-    /// Opens the top level with an empty query.
+    /// Opens the top level with an empty query, the whole palette and no scope.
     pub(crate) fn open(&mut self) {
         self.open = true;
         self.stage = Stage::Actions;
         self.query.clear();
         self.highlight = 0;
+        self.show_disabled = false;
+        self.scope = None;
+        self.scope_title = None;
+    }
+
+    /// Opens the top level over `items` only, titled `title`.
+    pub(crate) fn open_scoped(&mut self, title: String, items: Vec<(Action, Args)>) {
+        self.open();
+        self.scope = Some(items);
+        self.scope_title = Some(title);
+    }
+
+    /// The actions of a scoped palette, if one is open.
+    pub(crate) fn scope(&self) -> Option<&[(Action, Args)]> {
+        self.scope.as_deref()
+    }
+
+    /// The title of a scoped palette, if one is open.
+    pub(crate) fn scope_title(&self) -> Option<&str> {
+        self.scope_title.as_deref()
     }
 
     pub(crate) fn close(&mut self) {
@@ -172,6 +210,8 @@ impl Palette {
         if first != self.query {
             first.clone_into(&mut self.query);
             self.highlight = 0;
+            // A new query collapses the disabled rows again.
+            self.show_disabled = false;
         }
     }
 
@@ -181,6 +221,7 @@ impl Palette {
         self.stage = Stage::Pick(action);
         self.query.clear();
         self.highlight = 0;
+        self.show_disabled = false;
     }
 
     /// Goes back from an argument step to the top level. Returns whether there
@@ -190,6 +231,7 @@ impl Palette {
             self.stage = Stage::Actions;
             self.query.clear();
             self.highlight = 0;
+            self.show_disabled = false;
             true
         } else {
             false
@@ -214,18 +256,18 @@ impl Palette {
         }
         self.shown = ranked.candidates;
         self.hits = ranked.hits;
-        self.highlight = self.highlight.min(self.hits.len().saturating_sub(1));
+        self.highlight = self.highlight.min(self.choosable().len().saturating_sub(1));
         true
     }
 
-    /// The number of rows on screen.
+    /// The number of matching results, disabled ones included, whether listed or not.
     pub(crate) fn count(&self) -> usize {
         self.hits.len()
     }
 
-    /// Up and down: moves the highlight and stops at both ends.
+    /// Up and down: moves the highlight over the choosable lines and stops at both ends.
     pub(crate) fn move_highlight(&mut self, down: bool) {
-        let count = self.hits.len();
+        let count = self.choosable().len();
         if count == 0 {
             self.highlight = 0;
             return;
@@ -238,55 +280,134 @@ impl Palette {
         };
     }
 
-    /// Makes the row at `position` the highlighted one.
+    /// Makes the choosable line at `position` the highlighted one.
     pub(crate) fn select(&mut self, position: usize) {
-        if position < self.hits.len() {
+        if position < self.choosable().len() {
             self.highlight = position;
         }
     }
 
-    /// The candidate Enter would act on.
+    /// The candidate Enter would act on. `None` when the highlight is on a
+    /// `MoreDisabled` line, or on nothing.
     pub(crate) fn highlighted(&self) -> Option<&Candidate> {
-        let hit = self.hits.get(self.highlight)?;
-        self.shown.get(hit.index)
+        match self.choosable().get(self.highlight)? {
+            Line::Row { hit, .. } => self.row(*hit).map(|(candidate, _)| candidate),
+            Line::Header(_) | Line::MoreDisabled { .. } => None,
+        }
     }
 
-    /// The candidate and the hit of the row at `position`.
+    /// Whether the highlight is on a `MoreDisabled` line, which Enter expands.
+    pub(crate) fn highlighted_more(&self) -> bool {
+        matches!(
+            self.choosable().get(self.highlight),
+            Some(Line::MoreDisabled { .. })
+        )
+    }
+
+    /// Lists the disabled rows that were hidden. The highlight stays on the first
+    /// of them when it was on the `MoreDisabled` line that hid them.
+    pub(crate) fn expand_disabled(&mut self) {
+        let target = match self.choosable().get(self.highlight).copied() {
+            Some(Line::Row { hit, .. }) => Some(hit),
+            Some(Line::MoreDisabled { section, .. }) => self.first_hidden(section),
+            Some(Line::Header(_)) | None => None,
+        };
+        self.show_disabled = true;
+        if let Some(hit) = target {
+            let position = self
+                .choosable()
+                .iter()
+                .position(|line| matches!(line, Line::Row { hit: row, .. } if *row == hit));
+            if let Some(position) = position {
+                self.highlight = position;
+            }
+        }
+    }
+
+    /// The hit position of the first disabled row of `section`.
+    fn first_hidden(&self, section: Section) -> Option<usize> {
+        self.hits.iter().position(|hit| {
+            self.shown
+                .get(hit.index)
+                .is_some_and(|candidate| candidate.section == section && candidate.state.is_err())
+        })
+    }
+
+    /// The candidate and the hit of the row at `position` (a position among the hits).
     pub(crate) fn row(&self, position: usize) -> Option<(&Candidate, &Hit)> {
         let hit = self.hits.get(position)?;
         Some((self.shown.get(hit.index)?, hit))
     }
 
-    /// The list as drawn: a header before each section, then its rows.
+    /// The list as drawn: a header before each section, then its rows, then one
+    /// `MoreDisabled` line for the disabled rows that are hidden.
     pub(crate) fn lines(&self) -> Vec<Line> {
-        let mut lines = Vec::with_capacity(self.hits.len() + 3);
-        let mut section = None;
-        for (position, hit) in self.hits.iter().enumerate() {
-            let Some(candidate) = self.shown.get(hit.index) else {
-                continue;
-            };
-            if section != Some(candidate.section) {
-                section = Some(candidate.section);
-                lines.push(Line::Header(candidate.section));
+        let mut choosable = 0;
+        let mut lines = self.plain_lines();
+        for line in &mut lines {
+            match line {
+                Line::Header(_) => {}
+                Line::Row { highlighted, .. } | Line::MoreDisabled { highlighted, .. } => {
+                    *highlighted = choosable == self.highlight;
+                    choosable += 1;
+                }
             }
-            lines.push(Line::Row {
-                hit: position,
-                highlighted: position == self.highlight,
-            });
         }
         lines
     }
 
-    /// The index in `lines()` of the highlighted row, for scrolling it into view.
-    pub(crate) fn highlight_line(&self) -> Option<usize> {
-        self.lines().iter().position(|line| {
-            matches!(
-                line,
-                Line::Row {
-                    highlighted: true,
-                    ..
+    /// The lines a person can choose, in list order: the rows on screen and the
+    /// `MoreDisabled` lines. The highlight is an index into these.
+    fn choosable(&self) -> Vec<Line> {
+        self.plain_lines()
+            .into_iter()
+            .filter(|line| !matches!(line, Line::Header(_)))
+            .collect()
+    }
+
+    /// The list without its highlight. Hits are grouped by section, and within a
+    /// section the enabled rows come first, so the disabled ones are the tail.
+    fn plain_lines(&self) -> Vec<Line> {
+        let mut lines = Vec::with_capacity(self.hits.len() + 3);
+        let rows: Vec<(Section, bool, usize)> = self
+            .hits
+            .iter()
+            .enumerate()
+            .filter_map(|(position, hit)| {
+                let candidate = self.shown.get(hit.index)?;
+                Some((candidate.section, candidate.state.is_err(), position))
+            })
+            .collect();
+        for group in rows.chunk_by(|a, b| a.0 == b.0) {
+            let section = group[0].0;
+            lines.push(Line::Header(section));
+            let mut hidden = 0;
+            for &(_, disabled, position) in group {
+                if disabled && !self.show_disabled {
+                    hidden += 1;
+                } else {
+                    lines.push(Line::Row {
+                        hit: position,
+                        highlighted: false,
+                    });
                 }
-            )
+            }
+            if hidden > 0 {
+                lines.push(Line::MoreDisabled {
+                    section,
+                    count: hidden,
+                    highlighted: false,
+                });
+            }
+        }
+        lines
+    }
+
+    /// The index in `lines()` of the highlighted line, for scrolling it into view.
+    pub(crate) fn highlight_line(&self) -> Option<usize> {
+        self.lines().iter().position(|line| match line {
+            Line::Row { highlighted, .. } | Line::MoreDisabled { highlighted, .. } => *highlighted,
+            Line::Header(_) => false,
         })
     }
 }
@@ -305,6 +426,25 @@ pub(crate) fn build(
         Stage::Actions => top_level(query, ctx, branches),
         Stage::Pick(action) => pick(action, ctx, branches),
     }
+}
+
+/// The candidates of a scoped palette's top level: exactly `items`, in their order,
+/// each a row that runs its action on its args with the registry's state.
+#[must_use]
+pub(crate) fn build_scoped(items: &[(Action, Args)], ctx: &ActionContext<'_>) -> Vec<Candidate> {
+    items
+        .iter()
+        .map(|(action, args)| Candidate {
+            section: Section::Actions,
+            label: action.spec().title.to_owned(),
+            shortcut: action.shortcut_label(),
+            choice: Choice::Run {
+                action: *action,
+                args: args.clone(),
+            },
+            state: action.enabled(args, ctx),
+        })
+        .collect()
 }
 
 fn top_level(query: &str, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Vec<Candidate> {
@@ -649,22 +789,39 @@ fn target_row(
     }
 }
 
-/// The hits for `query`, best first within each section, sections in their
-/// order. Equal scores keep the order of the candidates.
+/// A candidate that matched, as `rank` sorts it: section, disabled, score, index
+/// among the candidates, and the matched parts of its label.
+type Scored = (Section, bool, i64, usize, Vec<Range<usize>>);
+
+/// The hits for `query`, sections in their order. Within a section the enabled
+/// candidates come first, then the disabled ones; each group is best first. Equal
+/// scores keep the order of the candidates.
 #[must_use]
 pub(crate) fn rank(query: &str, candidates: &[Candidate]) -> Vec<Hit> {
-    let mut scored: Vec<(Section, i64, usize, Vec<Range<usize>>)> = candidates
+    let mut scored: Vec<Scored> = candidates
         .iter()
         .enumerate()
         .filter_map(|(index, candidate)| {
-            fuzzy::fuzzy_match(query, &candidate.label)
-                .map(|found| (candidate.section, found.score, index, found.ranges))
+            fuzzy::fuzzy_match(query, &candidate.label).map(|found| {
+                (
+                    candidate.section,
+                    candidate.state.is_err(),
+                    found.score,
+                    index,
+                    found.ranges,
+                )
+            })
         })
         .collect();
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(b.2.cmp(&a.2))
+            .then(a.3.cmp(&b.3))
+    });
     scored
         .into_iter()
-        .map(|(_, _, index, ranges)| Hit { index, ranges })
+        .map(|(_, _, _, index, ranges)| Hit { index, ranges })
         .collect()
 }
 
@@ -722,6 +879,7 @@ mod tests {
             remote_running: false,
             stashes: None,
             review: crate::action_registry::ReviewCtx::default(),
+            undoable: None,
         }
     }
 
@@ -984,7 +1142,8 @@ mod tests {
         assert!(sections.windows(2).all(|pair| pair[0] <= pair[1]));
         assert_eq!(sections.last(), Some(&Section::Branches));
         let top = &candidates[hits[0].index];
-        assert_eq!(top.label, "Stage File");
+        assert_eq!(top.section, Section::Actions);
+        assert_eq!(top.state, Ok(()), "an enabled action leads the matches");
     }
 
     #[test]
@@ -1009,7 +1168,12 @@ mod tests {
         let candidates = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
         let hits = rank("", &candidates);
         assert_eq!(hits.len(), candidates.len());
-        assert_eq!(candidates[hits[0].index].label, "Stage File");
+        // Enabled rows lead their section, so the first is the first enabled action.
+        let first_enabled = candidates
+            .iter()
+            .find(|c| c.section == Section::Actions && c.state.is_ok())
+            .expect("an enabled action");
+        assert_eq!(candidates[hits[0].index].label, first_enabled.label);
         assert!(hits.iter().all(|hit| hit.ranges.is_empty()));
     }
 
@@ -1042,20 +1206,33 @@ mod tests {
         palette.open();
         let candidates = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
         let count = candidates.len();
+        let first_enabled = candidates
+            .iter()
+            .find(|c| c.section == Section::Actions && c.state.is_ok())
+            .map(|c| c.label.clone());
         shown(&mut palette, candidates);
+        // The count is every match; the highlight moves over the choosable lines.
         assert_eq!(palette.count(), count);
+        let choosable = palette
+            .lines()
+            .iter()
+            .filter(|line| !matches!(line, Line::Header(_)))
+            .count();
+        assert!(choosable < count, "the disabled rows are collapsed");
         assert_eq!(
-            palette.highlighted().map(|c| c.label.as_str()),
-            Some("Stage File")
+            palette.highlighted().map(|c| c.label.clone()),
+            first_enabled
         );
         palette.move_highlight(false);
         assert_eq!(palette.highlight, 0);
         for _ in 0..count + 2 {
             palette.move_highlight(true);
         }
-        assert_eq!(palette.highlight, count - 1);
+        assert_eq!(palette.highlight, choosable - 1);
         palette.select(0);
         assert_eq!(palette.highlight, 0);
+        palette.select(choosable);
+        assert_eq!(palette.highlight, 0, "a position past the list is ignored");
     }
 
     #[test]
@@ -1068,10 +1245,10 @@ mod tests {
         let second = palette.begin(build(Stage::Actions, "com", &ctx_with(&entries, ""), &[]));
         assert!(!palette.apply(first.run()));
         assert!(palette.apply(second.run()));
-        assert_eq!(
-            palette.highlighted().map(|c| c.label.as_str()),
-            Some("Commit")
-        );
+        // Commit is disabled here, so it is hidden behind the section's MoreDisabled line.
+        let top = palette.highlighted().expect("an enabled match");
+        assert!(top.state.is_ok());
+        assert_ne!(top.label, "Commit");
     }
 
     #[test]
@@ -1592,5 +1769,212 @@ mod tests {
             find(&top, "Remove Workspace").state,
             Err("No workspace to choose from.")
         );
+    }
+
+    /// The rows of the list as (section, label-less kind) pairs, for the shape tests.
+    fn shape(palette: &Palette) -> Vec<String> {
+        palette
+            .lines()
+            .iter()
+            .map(|line| match line {
+                Line::Header(section) => format!("header {}", section.title()),
+                Line::Row { hit, .. } => format!("row {hit}"),
+                Line::MoreDisabled { section, count, .. } => {
+                    format!("more {} {count}", section.title())
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn enabled_rows_rank_before_disabled_rows_within_a_section() {
+        let entries: [StatusEntry; 0] = [];
+        let candidates = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
+        let hits = rank("", &candidates);
+        let actions: Vec<bool> = hits
+            .iter()
+            .map(|hit| &candidates[hit.index])
+            .filter(|c| c.section == Section::Actions)
+            .map(|c| c.state.is_ok())
+            .collect();
+        let first_disabled = actions
+            .iter()
+            .position(|ok| !ok)
+            .expect("some action is disabled");
+        assert!(first_disabled > 0, "some action is enabled");
+        assert!(actions[first_disabled..].iter().all(|ok| !ok));
+    }
+
+    #[test]
+    fn disabled_rows_are_hidden_behind_one_more_line_per_section() {
+        let entries: [StatusEntry; 0] = [];
+        let candidates = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
+        let mut palette = Palette::default();
+        palette.open();
+        shown(&mut palette, candidates.clone());
+        let lines = palette.lines();
+        let rows = lines
+            .iter()
+            .filter(|line| matches!(line, Line::Row { .. }))
+            .count();
+        let hidden: usize = lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::MoreDisabled { count, .. } => Some(*count),
+                _ => None,
+            })
+            .sum();
+        let enabled = candidates.iter().filter(|c| c.state.is_ok()).count();
+        assert_eq!(rows, enabled);
+        assert_eq!(hidden, candidates.len() - enabled);
+        let more_actions = lines.iter().any(|line| {
+            matches!(
+                line,
+                Line::MoreDisabled {
+                    section: Section::Actions,
+                    count,
+                    ..
+                } if *count == candidates.iter().filter(|c| {
+                    c.section == Section::Actions && c.state.is_err()
+                }).count()
+            )
+        });
+        assert!(more_actions, "the Actions disabled rows are counted");
+        // The MoreDisabled line sits after the section's enabled rows.
+        let more = lines
+            .iter()
+            .position(|line| matches!(line, Line::MoreDisabled { .. }))
+            .expect("a MoreDisabled line");
+        assert!(matches!(lines[more - 1], Line::Row { .. }));
+    }
+
+    #[test]
+    fn a_section_with_only_disabled_rows_keeps_its_header_and_gets_a_more_line() {
+        let entries: [StatusEntry; 0] = [];
+        let worktrees = [worktree("/r", "main", true)];
+        let ctx = ctx_with_worktrees(&entries, &worktrees);
+        let mut palette = Palette::default();
+        palette.open();
+        palette.enter_pick(Action::RemoveWorktree);
+        shown(
+            &mut palette,
+            build(Stage::Pick(Action::RemoveWorktree), "", &ctx, &[]),
+        );
+        assert_eq!(shape(&palette), ["header Worktrees", "more Worktrees 1"]);
+        assert_eq!(
+            palette.highlighted(),
+            None,
+            "the highlight starts on the More line"
+        );
+        assert!(palette.highlighted_more());
+    }
+
+    #[test]
+    fn the_highlight_can_land_on_the_more_line_and_expanding_keeps_it_on_the_first_hidden_row() {
+        let entries: [StatusEntry; 0] = [];
+        let candidates = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
+        let enabled_actions = candidates
+            .iter()
+            .filter(|c| c.section == Section::Actions && c.state.is_ok())
+            .count();
+        let mut palette = Palette::default();
+        palette.open();
+        shown(&mut palette, candidates);
+        // The Actions rows come first, so the Actions More line is the next choosable line.
+        for _ in 0..enabled_actions {
+            palette.move_highlight(true);
+        }
+        assert!(palette.highlighted_more());
+        assert!(palette.highlighted().is_none());
+        assert!(matches!(
+            palette.lines()[palette.highlight_line().expect("highlighted")],
+            Line::MoreDisabled {
+                section: Section::Actions,
+                highlighted: true,
+                ..
+            }
+        ));
+
+        palette.expand_disabled();
+        assert!(!palette.highlighted_more());
+        let first = palette.highlighted().expect("the first hidden row");
+        assert!(first.state.is_err());
+        assert!(
+            palette.lines().iter().all(|line| !matches!(
+                line,
+                Line::MoreDisabled {
+                    section: Section::Actions,
+                    ..
+                }
+            )),
+            "the section's disabled rows are all listed now"
+        );
+        assert!(palette.highlight_line().is_some());
+    }
+
+    #[test]
+    fn a_new_query_collapses_the_disabled_rows_again() {
+        let entries: [StatusEntry; 0] = [];
+        let mut palette = Palette::default();
+        palette.open();
+        shown(
+            &mut palette,
+            build(Stage::Actions, "", &ctx_with(&entries, ""), &[]),
+        );
+        palette.expand_disabled();
+        assert!(
+            palette
+                .lines()
+                .iter()
+                .all(|line| !matches!(line, Line::MoreDisabled { .. }))
+        );
+        palette.set_query("com");
+        shown(
+            &mut palette,
+            build(Stage::Actions, "com", &ctx_with(&entries, ""), &[]),
+        );
+        assert!(
+            palette
+                .lines()
+                .iter()
+                .any(|line| matches!(line, Line::MoreDisabled { .. })),
+            "the disabled rows are collapsed for the new query"
+        );
+    }
+
+    #[test]
+    fn a_scoped_palette_lists_only_its_items_with_their_registry_state() {
+        let entries = [
+            entry("a.txt", None, Some(Change::Modified)),
+            entry("b.txt", Some(Change::Added), None),
+        ];
+        let ctx = ctx_with(&entries, "");
+        let items = vec![
+            (Action::StageFile, Args::File("a.txt".into())),
+            (Action::StageFile, Args::File("b.txt".into())),
+        ];
+        let candidates = build_scoped(&items, &ctx);
+        let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Stage File", "Stage File"]);
+        assert_eq!(candidates[0].state, Ok(()));
+        assert_eq!(candidates[1].state, Err("Nothing unstaged in this file"));
+        assert_eq!(
+            candidates[0].choice,
+            Choice::Run {
+                action: Action::StageFile,
+                args: Args::File("a.txt".into()),
+            }
+        );
+
+        let mut palette = Palette::default();
+        palette.open_scoped("Actions for a.txt".into(), items);
+        assert_eq!(palette.scope_title(), Some("Actions for a.txt"));
+        assert_eq!(palette.scope().map(<[_]>::len), Some(2));
+        shown(&mut palette, candidates);
+        assert_eq!(palette.count(), 2);
+        // Opening the palette again, unscoped, clears the scope.
+        palette.open();
+        assert_eq!(palette.scope_title(), None);
+        assert!(palette.scope().is_none());
     }
 }

@@ -36,13 +36,12 @@ use crate::diff_rows::Layout;
 use crate::editor_theme;
 use crate::file_discard::DiscardDialog;
 use crate::hook_convert::{self, CONVERT_TITLE};
-use crate::icon::{self, Icon};
+use crate::icon;
 use crate::memory_dialogs::MemoryDialog;
 use crate::merged_branches::MergedDialog;
 use crate::message_dialog::MessageDialog;
 use crate::model::{CommitPage, Model, Switched};
 use crate::move_file::MovePopover;
-use crate::name_fit::name_label;
 use crate::new_branch::NewBranchDialog;
 use crate::new_stash::NewStashDialog;
 use crate::palette::Palette;
@@ -61,11 +60,12 @@ use crate::shell_memories::{self, MemoriesView, ThreadsTab};
 use crate::shell_search::{self, SearchView};
 use crate::shell_sidebar;
 use crate::shell_threads::{self, ThreadsView};
-use crate::sidebar::{Folded, Grouping};
+use crate::sidebar::Folded;
 use crate::stash_apply;
 use crate::stash_drop::DropStashDialog;
 use crate::stashes;
 use crate::suggestion::Fill;
+use crate::sync_state;
 use crate::text_area::{TextArea, TextAreaEvent, TextStyle};
 use crate::theme;
 use crate::thread_dialogs::{ConfirmDialog, FieldDialog, LinkDialog};
@@ -86,7 +86,7 @@ use crate::worktree_prune::PruneDialog;
 use crate::worktree_remove::RemoveDialog;
 use crate::{
     CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, OpenQuickOpen, OpenSearch,
-    RunWorkflowKey, StartPath,
+    RunWorkflowKey, StartPath, UndoLastOperation,
 };
 use gpui_component::input::InputState;
 
@@ -111,6 +111,8 @@ const WATCH_LIMITED: &str = "Watching is limited; refreshing when the window gai
 pub(crate) enum Screen {
     #[default]
     WorkingCopy,
+    /// What needs the person: derived items in sections (UI redesign, slice 6).
+    Inbox,
     History,
     Workflows,
     /// The folder tree and the file viewer (N2).
@@ -158,8 +160,6 @@ pub struct StatusView {
     pub(crate) thread_list_width: f32,
     /// The commit message box's height, in logical pixels, as dragged.
     pub(crate) commit_height: f32,
-    /// How the sidebar's branch tree is grouped.
-    pub(crate) sidebar_grouping: Grouping,
     /// The preview features that are on (D169); a feature that is off has no surface here.
     pub(crate) features: FeatureSet,
     /// Which sidebar sections are folded.
@@ -317,6 +317,7 @@ impl StatusView {
         .detach();
         Self::follow_command_log(&command_log, cx);
         Self::follow_watch(notices, cx);
+        Self::follow_background_fetch(cx);
         let may_fall_back = !start.from_argument;
         // The preferences are read where the window starts, so a repository's own `gitmaster.*`
         // keys override the global ones for it.
@@ -481,7 +482,6 @@ impl StatusView {
             workflow_list_width: resize::WORKFLOW_LIST_DEFAULT,
             thread_list_width: resize::THREAD_LIST_DEFAULT,
             commit_height: resize::COMMIT_DEFAULT,
-            sidebar_grouping: Grouping::default(),
             features,
             sidebar_folded: Folded::default(),
             sidebar_filter: BranchFilter::default(),
@@ -546,6 +546,33 @@ impl StatusView {
             watch,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Fetches in the background every `BACKGROUND_FETCH` while a branch with an upstream is
+    /// open and nothing remote runs (UI redesign, slice 1). Its end is not shown; a failure is
+    /// in the Git log.
+    fn follow_background_fetch(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(sync_state::BACKGROUND_FETCH)
+                    .await;
+                if this.update(cx, StatusView::background_fetch).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn background_fetch(&mut self, cx: &mut Context<Self>) {
+        let due = sync_state::background_fetch_due(self.standing(), self.model.status().is_some());
+        if !due || self.busy_reason().is_some() {
+            return;
+        }
+        let id = self.engine.dispatch(Actor::Human, CommandKind::Fetch);
+        self.model.remote.begin_quiet(id);
+        cx.notify();
     }
 
     /// Applies the watcher's notices on the UI thread: the refresh indicator
@@ -842,6 +869,7 @@ impl StatusView {
                     },
                 )
             }))
+            .children((self.screen == Screen::Inbox).then(Self::inbox_page))
             .children((self.screen == Screen::History).then(|| self.history_page(cx)))
             .children((self.screen == Screen::Workflows).then(|| self.workflows_page(cx)))
             .children((self.screen == Screen::Code).then(|| self.code_page(cx)))
@@ -1133,6 +1161,18 @@ impl StatusView {
         cx.notify();
     }
 
+    /// Replaces the composer text with the suggestion, which is then dropped.
+    fn use_suggestion(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.set_text(text, cx));
+        self.model.suggestion.drop_suggestion();
+    }
+
+    pub(crate) fn show_inbox(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::Inbox;
+        cx.notify();
+    }
+
     /// Asks for the first page of the scope to read now (D139). A list already
     /// shown stays until the answer comes.
     pub(crate) fn refresh_history(&mut self) {
@@ -1394,11 +1434,7 @@ impl StatusView {
                 self.open_workflow_inputs_dialog(&workflow, &inputs, window, cx);
             }
             Ok(Effect::FocusCommitMessage) => self.focus_commit_message(window, cx),
-            Ok(Effect::UseSuggestion(text)) => {
-                self.composer
-                    .update(cx, |composer, cx| composer.set_text(&text, cx));
-                self.model.suggestion.drop_suggestion();
-            }
+            Ok(Effect::UseSuggestion(text)) => self.use_suggestion(&text, cx),
             Ok(Effect::DiscardSuggestion) => self.model.suggestion.drop_suggestion(),
             Ok(Effect::OpenWorktreeDialog { branch }) => {
                 self.open_worktree_dialog(branch.as_deref(), window, cx);
@@ -1433,6 +1469,8 @@ impl StatusView {
             Ok(Effect::Memory(effect)) => self.run_memory_effect(effect, window, cx),
             Ok(Effect::ShowLabels) => self.show_labels(window, cx),
             Ok(Effect::ShowLocalReview) => self.show_local_review(cx),
+            Ok(Effect::ShowInbox) => self.show_inbox(cx),
+            Ok(Effect::UndoLastOperation) => self.submit_restack_undo(cx),
             Ok(Effect::ShowReviewInDiff { path, line }) => {
                 self.show_review_in_diff(&path, line, cx);
             }
@@ -1593,6 +1631,12 @@ impl StatusView {
         ActionContext {
             repo_open: self.model.status().is_some(),
             features: self.features,
+            undoable: self
+                .model
+                .restacking
+                .record()
+                .is_some()
+                .then_some("Undo restack"),
             selected_file: self.model.selected_path(),
             stack: crate::action_registry::StackCtx {
                 stacks: Some(&self.model.stacks),
@@ -1735,15 +1779,6 @@ impl StatusView {
     }
 
     fn top_bar(&self, window: &Window, cx: &Context<Self>) -> Div {
-        let muted = theme::muted();
-        let (upstream, ahead, behind) = match self.model.status() {
-            Some(status) => (
-                status.branch.upstream.clone().unwrap_or_default(),
-                status.branch.ahead,
-                status.branch.behind,
-            ),
-            None => (String::new(), 0, 0),
-        };
         let loading = if self.model.loading {
             "Loading…"
         } else if self.model.updating() {
@@ -1754,29 +1789,11 @@ impl StatusView {
         window_chrome::header_bar(window)
             .h(title_bar::HEIGHT)
             .child(window_chrome::no_drag_shrinking(self.title_block(cx)))
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .text_color(muted)
-                    .child(icon::view(Icon::ArrowUp, icon::SMALL, muted).flex_none())
-                    .child(ahead.to_string())
-                    .child(icon::view(Icon::ArrowDown, icon::SMALL, muted).flex_none())
-                    .child(behind.to_string()),
-            )
-            .child(
-                div()
-                    .flex_shrink()
-                    .min_w(px(0.))
-                    .max_w(px(title_bar::UPSTREAM_MAX_WIDTH))
-                    .text_color(muted)
-                    .child(name_label(&upstream, &[])),
-            )
-            .child(div().flex_1())
-            .child(div().text_color(muted).child(loading))
+            .child(match self.context_zone(cx) {
+                Some(zone) => window_chrome::no_drag_shrinking(zone).flex_1(),
+                None => div().flex_1(),
+            })
+            .child(div().flex_none().text_color(theme::muted()).child(loading))
             .child(window_chrome::no_drag(self.toolbar(cx)))
             .children(
                 window_chrome::draws_frame(window).then(|| window_chrome::window_controls(window)),
@@ -1786,16 +1803,6 @@ impl StatusView {
     fn status_bar(&self, window: &Window, cx: &Context<Self>) -> Div {
         let muted = theme::muted();
         let corners = window_chrome::inner_radii(window);
-        let root = self
-            .model
-            .status()
-            .map(|status| status.root.clone())
-            .unwrap_or_default();
-        let summary = self.model.summary();
-        let counts = format!(
-            "{} staged · {} unstaged · {} untracked",
-            summary.staged, summary.unstaged, summary.untracked
-        );
         let drag_status = self
             .drag_status_text()
             .or_else(|| self.branch_drag_status());
@@ -1826,18 +1833,6 @@ impl StatusView {
             .bg(theme::panel())
             .border_t_1()
             .border_color(theme::hairline())
-            // The path gives way first, cut at its end, so a notice keeps its width.
-            .child(
-                div()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .font_family(theme::code_font())
-                    .text_color(theme::faint())
-                    .child(root),
-            )
-            .child(div().flex_none().text_color(muted).child(counts))
             .child(div().flex_1())
             // A long message is cut at the end, so the log button stays on the bar.
             .child(
@@ -1864,11 +1859,50 @@ impl StatusView {
                     .children(offer)
                     .children(self.gate_review_link(cx)),
             )
+            .children(self.undo_button(cx))
             .child(self.command_log_button(cx))
     }
 }
 
 impl StatusView {
+    /// "Undo ⌘Z" on the status bar, while the operation log's last undoable operation can be
+    /// undone. A registry action, so the key and the palette run the same rule.
+    fn undo_button(&self, cx: &Context<Self>) -> Option<gpui::Stateful<Div>> {
+        let ctx = self.action_context("");
+        let title = ctx.undoable?.to_owned();
+        let reason = Action::UndoLastOperation.enabled(&Args::None, &ctx).err();
+        let shortcut = Action::UndoLastOperation
+            .shortcut_label()
+            .unwrap_or_default();
+        let button = div()
+            .id("undo-last-operation")
+            .flex_none()
+            .px_2()
+            .rounded_sm()
+            .flex()
+            .flex_row()
+            .gap_1()
+            .text_color(if reason.is_some() {
+                theme::faint()
+            } else {
+                theme::text()
+            })
+            .child(title)
+            .child(div().text_color(theme::muted()).child(shortcut));
+        Some(match reason {
+            Some(reason) => button.tooltip(window_chrome::hint(reason)),
+            None => button
+                .cursor_pointer()
+                .hover(|style| style.bg(theme::selected_row()))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
+                        this.run_action(Action::UndoLastOperation, &Args::None, window, cx);
+                    }),
+                ),
+        })
+    }
+
     /// The stored sizes of the sidebar, the left column and the commit area,
     /// clamped again at each frame: a window resized after a drag may have moved
     /// the limits. The left column is fitted beside the sidebar's clamped width,
@@ -1939,6 +1973,9 @@ impl Render for StatusView {
                     window,
                     cx,
                 );
+            }))
+            .on_action(cx.listener(|this, _: &UndoLastOperation, window, cx| {
+                this.run_action(Action::UndoLastOperation, &Args::None, window, cx);
             }))
             .on_action(cx.listener(|this, _: &CopyCurrentBranch, window, cx| {
                 this.copy_current_branch(window, cx);

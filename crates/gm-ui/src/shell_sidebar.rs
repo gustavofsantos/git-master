@@ -23,6 +23,7 @@ use crate::name_fit::{self, name_label};
 use crate::resize::{self, SIDEBAR};
 use crate::resize_handle::{self, Edge};
 use crate::sidebar::{self, Grouping, Row, Section};
+use crate::sidebar_nav::{self, Footer, Page};
 use crate::stacks;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
@@ -62,7 +63,19 @@ impl StatusView {
             |this: &mut StatusView, _| this.sidebar_width = resize::SIDEBAR_DEFAULT,
             cx,
         );
+        let stacks_on = self.features.is_enabled(Feature::Stacks);
+        let stack_open = stacks_on && !self.sidebar_folded.is_folded(Section::Stack);
         let branches_open = !self.sidebar_folded.is_folded(Section::Branches);
+        let repo = self
+            .model
+            .status()
+            .map(|status| crate::project_menu::folder_name(std::path::Path::new(&status.root)))
+            .unwrap_or_default();
+        let branches_title = if repo.is_empty() {
+            "Branches".to_owned()
+        } else {
+            format!("Branches · {repo}")
+        };
         div()
             .id("sidebar-column")
             .relative()
@@ -76,25 +89,119 @@ impl StatusView {
             .bg(theme::ground())
             .border_r_1()
             .border_color(theme::hairline())
-            .child(self.section_header(Section::Repository, "Repository", None, cx))
-            .children(
-                (!self.sidebar_folded.is_folded(Section::Repository))
-                    .then(|| self.repository_items(cx)),
-            )
+            .child(self.page_items(cx))
+            .children(stacks_on.then(|| self.section_header(Section::Stack, "Stack", None, cx)))
+            .children(stack_open.then(|| self.stack_tree(cx)))
             .child(self.section_header(
                 Section::Branches,
-                "Branches",
+                &branches_title,
                 Some(new_branch_button(cx)),
                 cx,
             ))
-            .children(branches_open.then(|| self.branch_controls(cx)))
+            .children(
+                branches_open
+                    .then(|| self.has_branches().then(|| self.branch_filter_bar(cx)))
+                    .flatten(),
+            )
             .children(branches_open.then(|| self.branch_tree(cx)))
             .child(self.worktrees_section(cx))
             .child(self.workspaces_section(cx))
+            .child(div().flex_1())
             .children(
-                sidebar::drag_hint_shown(self.grouping(), self.sidebar_folded).then(footer_hint),
+                sidebar::drag_hint_shown(self.features, self.sidebar_folded).then(footer_hint),
             )
+            .child(self.footer_items(cx))
             .child(width_strip)
+    }
+
+    /// The pages at the top: Inbox, Changes, Review, History, Code and Agents, each with its
+    /// count when it has one.
+    fn page_items(&self, cx: &mut Context<Self>) -> Div {
+        let current = Page::of(self.screen);
+        let counts = sidebar_nav::Counts {
+            inbox: None,
+            changed: self.model.entry_count(),
+            open_comments: local_review::open_pill(self.model.review.comments())
+                .and_then(|pill| pill.parse().ok()),
+            threads: self.model.threads.total().map(|total| total as usize),
+        };
+        div()
+            .flex_none()
+            .px_2()
+            .pt_2()
+            .pb_1()
+            .flex()
+            .flex_col()
+            .children(Page::ALL.into_iter().map(|page| {
+                item_row(page.label(), current == Some(page))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            match page.action() {
+                                Some(action) => this.run_action(action, &Args::None, window, cx),
+                                None => this.show_working_copy(cx),
+                            }
+                        }),
+                    )
+                    .children(sidebar_nav::badge(page, &counts).map(count_pill))
+            }))
+    }
+
+    /// The footer: Stashes, Reflog, Workflows and Settings. Settings is planned, so it shows
+    /// disabled with the registry's reason.
+    fn footer_items(&self, cx: &mut Context<Self>) -> Div {
+        let current = Footer::of(self.screen);
+        let ctx = self.action_context("");
+        div()
+            .flex_none()
+            .px_2()
+            .py_1()
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(theme::hairline())
+            .children(Footer::ALL.into_iter().map(|entry| {
+                let action = entry.action();
+                let row = item_row(entry.label(), current == Some(entry));
+                let row = match action.enabled(&Args::None, &ctx) {
+                    Ok(()) => row.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            this.run_action(action, &Args::None, window, cx);
+                        }),
+                    ),
+                    Err(reason) => row
+                        .text_color(theme::faint())
+                        .tooltip(window_chrome::hint(reason)),
+                };
+                let count = (entry == Footer::Stashes)
+                    .then(|| self.model.stashes.count())
+                    .flatten()
+                    .map(|count| count_pill(count.to_string()));
+                row.children(count)
+            }))
+    }
+
+    /// The Stack section's tree: the stacks of the repository, with their marks. A local
+    /// branch row is dragged onto another to set its parent, and takes a dragged file.
+    fn stack_tree(&self, cx: &mut Context<Self>) -> Div {
+        let local: Vec<&BranchEntry> = self.model.branches.known().iter().collect();
+        let rows = sidebar::stack_rows(&local, &self.model.stacks);
+        let head = self.head_name();
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .children(rows.iter().enumerate().map(|(index, row)| {
+                let zone = drop_target_of(&rows, index).map(|target| self.drop_zone(target));
+                let branch_zone = match row {
+                    Row::Branch { branch, .. } if !branch.is_remote => {
+                        Some(self.branch_zone(&branch.name))
+                    }
+                    _ => None,
+                };
+                tree_row(row, index, head.as_deref(), zone, branch_zone, cx)
+            }))
     }
 
     /// The WORKTREES section: its header with the New Worktree control, then the
@@ -174,13 +281,13 @@ impl StatusView {
     fn section_header(
         &self,
         section: Section,
-        title: &'static str,
+        title: &str,
         control: Option<Stateful<Div>>,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let folded = self.sidebar_folded.is_folded(section);
         div()
-            .id(title)
+            .id(SharedString::from(format!("section-{section:?}")))
             .px_4()
             .pt_1()
             .pb_1()
@@ -217,178 +324,6 @@ impl StatusView {
                     }
                     cx.notify();
                 }),
-            )
-    }
-
-    /// What the Branches section holds above the tree while it is open: the grouping switch and
-    /// the search. Each keeps its height; the tree below takes the rest of the column.
-    fn branch_controls(&self, cx: &mut Context<Self>) -> Div {
-        div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .children(
-                self.features
-                    .is_enabled(Feature::Stacks)
-                    .then(|| self.grouping_switch(cx)),
-            )
-            .children(self.has_branches().then(|| self.branch_filter_bar(cx)))
-    }
-
-    /// The Threads line of the Repository section, with its count once it is known (T5).
-    fn threads_item(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        item_row("Threads", self.screen == Screen::Threads)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                    this.run_action(Action::ShowThreads, &Args::None, window, cx);
-                }),
-            )
-            .children(
-                self.model
-                    .threads
-                    .total()
-                    .map(|count| count_pill(count.to_string())),
-            )
-    }
-
-    fn repository_items(&self, cx: &mut Context<Self>) -> Div {
-        let count = self.model.entry_count();
-        let working = self.screen == Screen::WorkingCopy;
-        div()
-            .flex_none()
-            .px_2()
-            .flex()
-            .flex_col()
-            .child(
-                item_row("Working Copy", working)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            this.show_working_copy(cx);
-                        }),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .px_2()
-                            .rounded_full()
-                            .bg(theme::selection())
-                            .text_color(theme::accent())
-                            .text_xs()
-                            .child(count.to_string()),
-                    ),
-            )
-            .child(
-                item_row("History", self.screen == Screen::History).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        this.run_action(Action::ShowHistory, &Args::None, window, cx);
-                    }),
-                ),
-            )
-            .child(item_row("Code", self.screen == Screen::Code).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                    this.run_action(Action::ShowCode, &Args::None, window, cx);
-                }),
-            ))
-            .child(
-                item_row("Search", self.screen == Screen::Search).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        this.run_action(Action::SearchText, &Args::None, window, cx);
-                    }),
-                ),
-            )
-            .child(
-                item_row("Workflows", self.screen == Screen::Workflows).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        this.run_action(Action::ShowWorkflows, &Args::None, window, cx);
-                    }),
-                ),
-            )
-            .child(
-                item_row("Stashes", self.screen == Screen::Stashes)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                            this.run_action(Action::ShowStashes, &Args::None, window, cx);
-                        }),
-                    )
-                    .children(
-                        self.model
-                            .stashes
-                            .count()
-                            .map(|count| count_pill(count.to_string())),
-                    ),
-            )
-            .child(
-                item_row("Reflog", self.screen == Screen::Reflog).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        this.run_action(Action::ShowReflog, &Args::None, window, cx);
-                    }),
-                ),
-            )
-            .child(self.threads_item(cx))
-            .child(
-                item_row("Labels", self.screen == Screen::Labels).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        this.run_action(Action::ShowLabels, &Args::None, window, cx);
-                    }),
-                ),
-            )
-            .child(
-                item_row("Local review", self.screen == Screen::LocalReview)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                            this.run_action(Action::ShowLocalReview, &Args::None, window, cx);
-                        }),
-                    )
-                    .children(
-                        local_review::open_pill(self.model.review.comments()).map(count_pill),
-                    ),
-            )
-    }
-
-    /// The grouping the tree shows now: the saved one, or By name while Stacks is off (D169).
-    fn grouping(&self) -> Grouping {
-        sidebar::effective_grouping(self.sidebar_grouping, self.features)
-    }
-
-    /// The two-way switch between "By stack" and "By name".
-    fn grouping_switch(&self, cx: &mut Context<Self>) -> Div {
-        let segment_for = |grouping: Grouping| {
-            segment(grouping.label(), self.grouping() == grouping).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                    this.sidebar_grouping = grouping;
-                    cx.notify();
-                }),
-            )
-        };
-        div()
-            .px_3()
-            .py_3()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .p(px(2.))
-                    .flex()
-                    .flex_row()
-                    .rounded_md()
-                    .bg(theme::selected_row())
-                    .child(segment_for(Grouping::ByStack))
-                    .child(segment_for(Grouping::ByName)),
             )
     }
 
@@ -497,7 +432,7 @@ impl StatusView {
                 .flex_col()
                 .child(no_match_state(cx));
         }
-        let count = sidebar::rows(&visible, self.grouping(), &self.model.stacks).len();
+        let count = sidebar::rows(&visible, Grouping::ByName, &self.model.stacks).len();
         div()
             .flex_1()
             .min_h(px(BRANCH_LIST_MIN_H))
@@ -513,12 +448,12 @@ impl StatusView {
                          _window: &mut Window,
                          cx: &mut Context<StatusView>| {
                             let visible = this.visible_branches();
-                            let rows = sidebar::rows(&visible, this.grouping(), &this.model.stacks);
+                            let rows =
+                                sidebar::rows(&visible, Grouping::ByName, &this.model.stacks);
                             let head = this
                                 .model
                                 .status()
                                 .and_then(|status| status.branch.head.clone());
-                            let by_stack = this.grouping() == Grouping::ByStack;
                             rows.get(range.clone())
                                 .unwrap_or_default()
                                 .iter()
@@ -526,16 +461,7 @@ impl StatusView {
                                 .map(|(row, index)| {
                                     let zone = drop_target_of(&rows, index)
                                         .map(|target| this.drop_zone(target));
-                                    // In By stack, a local branch row is dragged and takes a branch.
-                                    let branch_zone = match row {
-                                        Row::Branch { branch, .. }
-                                            if by_stack && !branch.is_remote =>
-                                        {
-                                            Some(this.branch_zone(&branch.name))
-                                        }
-                                        _ => None,
-                                    };
-                                    tree_row(row, index, head.as_deref(), zone, branch_zone, cx)
+                                    tree_row(row, index, head.as_deref(), zone, None, cx)
                                 })
                                 .collect()
                         },
@@ -756,29 +682,6 @@ fn section_title(text: &'static str) -> Div {
 }
 
 /// One segment of a two-way switch. `active` is the one shown as chosen.
-fn segment(label: &'static str, active: bool) -> Stateful<Div> {
-    segment_with_id(label, label, active)
-}
-
-fn segment_with_id(id: impl Into<ElementId>, label: &'static str, active: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_1()
-        .h(px(24.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_sm()
-        .cursor_pointer()
-        .when(active, |this| {
-            this.bg(theme::panel())
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::text())
-        })
-        .when(!active, |this| this.text_color(theme::muted()))
-        .child(label)
-}
-
 /// A Repository section row; `selected` is the screen being shown.
 fn item_row(label: &'static str, selected: bool) -> Stateful<Div> {
     div()

@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::FocusNext;
-use crate::action_registry::{Action, ArgKind};
+use crate::action_registry::{Action, ArgKind, Args};
 use crate::icon::{self, Icon};
 use crate::name_fit::{self, name_label};
 use crate::palette::{self, Candidate, Choice, Hit, Line, Palette, Stage};
@@ -76,10 +76,31 @@ impl StatusView {
 
     /// Opens the top level, with the other menus closed and the branches asked for.
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_palette(Palette::open, window, cx);
+    }
+
+    /// Opens the palette over `items` only, titled `title`, as `open_palette` opens it.
+    pub(crate) fn open_palette_scoped(
+        &mut self,
+        title: String,
+        items: Vec<(Action, Args)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_palette(move |palette| palette.open_scoped(title, items), window, cx);
+    }
+
+    /// Closes the other menus, starts the palette with `start` and focuses its input.
+    fn show_palette(
+        &mut self,
+        start: impl FnOnce(&mut Palette),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.project_menu.open = false;
         self.branch_menu.open = false;
         self.context_menu.open = None;
-        self.palette.open();
+        start(&mut self.palette);
         self.palette_view
             .filter
             .update(cx, |area, cx| area.set_text("", cx));
@@ -106,12 +127,15 @@ impl StatusView {
         let candidates = {
             let spot = self.comment_spot(cx);
             let ctx = self.action_context_with(&message, spot);
-            palette::build(
-                self.palette.stage(),
-                self.palette.query(),
-                &ctx,
-                self.model.branches.known(),
-            )
+            match (self.palette.stage(), self.palette.scope()) {
+                (Stage::Actions, Some(items)) => palette::build_scoped(items, &ctx),
+                (stage, _) => palette::build(
+                    stage,
+                    self.palette.query(),
+                    &ctx,
+                    self.model.branches.known(),
+                ),
+            }
         };
         let job = self.palette.begin(candidates);
         cx.spawn(async move |this, cx| {
@@ -158,12 +182,28 @@ impl StatusView {
         self.enter_palette_pick(action, cx);
     }
 
-    /// Enter or a click on the highlighted row.
+    /// Enter or a click on the highlighted line. On the line that hides disabled
+    /// rows, it lists them.
     fn choose_palette_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.highlighted_more() {
+            self.expand_palette_disabled(cx);
+            return;
+        }
         let Some(candidate) = self.palette.highlighted().cloned() else {
             return;
         };
         self.choose_candidate(candidate, window, cx);
+    }
+
+    /// Lists the disabled rows the palette hid, and keeps the highlight on screen.
+    fn expand_palette_disabled(&mut self, cx: &mut Context<Self>) {
+        self.palette.expand_disabled();
+        if let Some(line) = self.palette.highlight_line() {
+            self.palette_view
+                .scroll
+                .scroll_to_item(line, ScrollStrategy::Top);
+        }
+        cx.notify();
     }
 
     fn choose_candidate(
@@ -297,7 +337,7 @@ impl StatusView {
     fn palette_step(&self) -> (Option<String>, &'static [&'static str]) {
         match self.palette.stage() {
             Stage::Actions => (
-                None,
+                self.palette.scope_title().map(str::to_owned),
                 &[
                     "↑↓ Navigate",
                     "Enter Run",
@@ -351,12 +391,25 @@ impl StatusView {
                      _window: &mut Window,
                      cx: &mut Context<StatusView>| {
                         let lines = this.palette.lines();
+                        // A line's choice position counts the lines Enter can choose before it.
+                        let mut choice = lines
+                            .get(..range.start)
+                            .unwrap_or_default()
+                            .iter()
+                            .filter(|line| !matches!(line, Line::Header(_)))
+                            .count();
                         lines
                             .get(range.clone())
                             .unwrap_or_default()
                             .iter()
                             .zip(range)
-                            .map(|(line, index)| line_element(&this.palette, line, index, cx))
+                            .map(|(line, index)| {
+                                let position = choice;
+                                if !matches!(line, Line::Header(_)) {
+                                    choice += 1;
+                                }
+                                line_element(&this.palette, line, index, position, cx)
+                            })
                             .collect()
                     },
                 ),
@@ -437,11 +490,14 @@ impl StatusView {
     }
 }
 
-/// One line of the list: a section's header, or a row.
+/// One line of the list: a section's header, a row, or the line that lists the
+/// hidden disabled rows. `choice` is the line's position among the lines Enter
+/// can choose; a click selects it.
 fn line_element(
     palette: &Palette,
     line: &Line,
     index: usize,
+    choice: usize,
     cx: &Context<StatusView>,
 ) -> AnyElement {
     match *line {
@@ -457,11 +513,45 @@ fn line_element(
             .into_any_element(),
         Line::Row { hit, highlighted } => match palette.row(hit) {
             Some((candidate, found)) => {
-                row_element(candidate, found, hit, highlighted, index, cx).into_any_element()
+                row_element(candidate, found, highlighted, choice, index, cx).into_any_element()
             }
             None => div().into_any_element(),
         },
+        Line::MoreDisabled {
+            count, highlighted, ..
+        } => more_element(count, highlighted, choice, index, cx).into_any_element(),
     }
+}
+
+/// The line that stands for `count` hidden disabled rows: muted, the same height
+/// as a row. A click, or Enter on it, lists them.
+fn more_element(
+    count: usize,
+    highlighted: bool,
+    choice: usize,
+    index: usize,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    div()
+        .id(("palette-more", index))
+        .h(px(ROW_HEIGHT))
+        .px_3()
+        .flex()
+        .flex_row()
+        .items_center()
+        .text_xs()
+        .text_color(theme::muted())
+        .cursor_pointer()
+        .when(highlighted, |row| row.bg(theme::selected_row()))
+        .hover(|style| style.bg(theme::selected_row()))
+        .child(format!("{count} unavailable — show"))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.palette.select(choice);
+                this.choose_palette_row(window, cx);
+            }),
+        )
 }
 
 /// A row: its label with the matched parts in the accent colour, then its
@@ -470,8 +560,8 @@ fn line_element(
 fn row_element(
     candidate: &Candidate,
     found: &Hit,
-    position: usize,
     highlighted: bool,
+    choice: usize,
     index: usize,
     cx: &Context<StatusView>,
 ) -> Stateful<Div> {
@@ -516,7 +606,7 @@ fn row_element(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                this.palette.select(position);
+                this.palette.select(choice);
                 this.choose_palette_row(window, cx);
             }),
         )

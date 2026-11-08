@@ -21,12 +21,22 @@ pub enum Outcome {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RemoteOp {
     in_flight: Option<(OperationId, Action)>,
+    /// The operation in flight is the background fetch: its end shows nothing (UI redesign).
+    quiet: bool,
 }
 
 impl RemoteOp {
     /// Records that `action` was sent as command `id`, which is now in flight.
     pub fn begin(&mut self, id: OperationId, action: Action) {
         self.in_flight = Some((id, action));
+        self.quiet = false;
+    }
+
+    /// Records the background fetch `id`: in flight like any fetch, but its end, done or
+    /// failed, is not shown. A failure is in the Git log.
+    pub fn begin_quiet(&mut self, id: OperationId) {
+        self.in_flight = Some((id, Action::Fetch));
+        self.quiet = true;
     }
 
     /// The action in flight, if any.
@@ -53,6 +63,9 @@ impl RemoteOp {
             return None;
         }
         self.in_flight = None;
+        if std::mem::take(&mut self.quiet) {
+            return None;
+        }
         Some(if state == OperationState::Done {
             Outcome::Done(detail.unwrap_or_default())
         } else {
@@ -64,6 +77,27 @@ impl RemoteOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_background_fetch_runs_like_a_fetch_and_ends_without_a_word() {
+        let mut remote = RemoteOp::default();
+        remote.begin_quiet(OperationId(7));
+        assert_eq!(remote.in_flight(), Some(Action::Fetch));
+        assert_eq!(
+            remote.settle(
+                OperationId(7),
+                OperationState::Failed,
+                Some("offline".into())
+            ),
+            None
+        );
+        assert_eq!(remote.in_flight(), None);
+        remote.begin(OperationId(8), Action::Fetch);
+        assert_eq!(
+            remote.settle(OperationId(8), OperationState::Done, Some("Fetched".into())),
+            Some(Outcome::Done("Fetched".into()))
+        );
+    }
 
     #[test]
     fn the_operation_is_in_flight_from_its_command_until_its_end() {

@@ -239,6 +239,10 @@ pub enum Effect {
     ShowLabels,
     /// Opens the Local review page and asks the engine for the review comments (B4d).
     ShowLocalReview,
+    /// Opens the Inbox page (UI redesign, slice 1).
+    ShowInbox,
+    /// Undoes the last operation that can be undone; today the last restack.
+    UndoLastOperation,
     /// Opens the Working Copy on the unstaged side of `path`, with the cursor on
     /// working-tree line `line` (B4d).
     ShowReviewInDiff {
@@ -428,6 +432,9 @@ pub struct Context<'a> {
     pub submodules: Option<&'a Submodules>,
     /// The preview features that are on (D169): an action of a feature that is off is hidden.
     pub features: FeatureSet,
+    /// The last operation of the operation log that can be undone, as the Undo button names it;
+    /// `None` when there is none. Today only a restack records an undo.
+    pub undoable: Option<&'a str>,
 }
 
 /// What the Code viewer shows, for the rules: the text file on screen and the lines picked in it.
@@ -514,7 +521,7 @@ pub struct MemoryRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 116] = [
+const SPECS: [Spec; 119] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1321,6 +1328,27 @@ const SPECS: [Spec; 116] = [
         ArgKind::Memory,
         Category::Repository,
     ),
+    spec(
+        "inbox.show",
+        "Show Inbox",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "app.settings",
+        "Open Settings",
+        Some("⌘,"),
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "operation.undo",
+        "Undo Last Operation",
+        Some("⌘Z"),
+        ArgKind::None,
+        Category::Repository,
+    ),
 ];
 
 const fn spec(
@@ -1476,6 +1504,12 @@ pub enum Action {
     AttachMemoryToContext,
     /// Detaches the selected context memory from the context its scope names (D193 (8)).
     DetachMemoryFromContext,
+    /// Opens the Inbox page (UI redesign, slice 1).
+    ShowInbox,
+    /// Opens the settings dialog (D38). Planned: listed disabled until its slice lands.
+    OpenSettings,
+    /// Undoes the last operation of the operation log that can be undone (UI redesign, slice 1).
+    UndoLastOperation,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1522,7 +1556,20 @@ fn navigation_effect(action: Action, args: &Args) -> Effect {
         (Action::ShowMemories, _) => Effect::Memory(MemoryEffect::Show),
         (Action::ShowLabels, _) => Effect::ShowLabels,
         (Action::ShowLocalReview, _) => Effect::ShowLocalReview,
+        (Action::ShowInbox, _) => Effect::ShowInbox,
         _ => Effect::ShowHistory,
+    }
+}
+
+/// The rule of Undo Last Operation: an open, idle repository whose operation log has an
+/// operation that can be undone.
+fn undo_rule(ctx: &Context<'_>) -> Result<(), Reason> {
+    repository_open(ctx)?;
+    idle(ctx)?;
+    if ctx.undoable.is_some() {
+        Ok(())
+    } else {
+        Err("Nothing to undo.")
     }
 }
 
@@ -1905,7 +1952,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 116] = [
+    pub const ALL: [Action; 119] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -2022,6 +2069,9 @@ impl Action {
         Action::MoveMemoryToContext,
         Action::AttachMemoryToContext,
         Action::DetachMemoryFromContext,
+        Action::ShowInbox,
+        Action::OpenSettings,
+        Action::UndoLastOperation,
     ];
 
     #[must_use]
@@ -2044,7 +2094,7 @@ impl Action {
     /// listed disabled with `NOT_AVAILABLE` wherever it appears.
     #[must_use]
     pub fn available(self) -> bool {
-        !matches!(self, Action::RenameBranch)
+        !matches!(self, Action::RenameBranch | Action::OpenSettings)
     }
 
     /// The actions that make or change a stack's metadata (D138).
@@ -2132,6 +2182,7 @@ impl Action {
                 | Action::ShowMemories
                 | Action::ShowLabels
                 | Action::ShowLocalReview
+                | Action::ShowInbox
         )
     }
 
@@ -2272,6 +2323,15 @@ impl Action {
         )
     }
 
+    /// Whether `thread_rule` decides the action: the actions on one selected thread.
+    fn is_thread_rule(self) -> bool {
+        self.is_thread_action()
+            && !matches!(
+                self,
+                Action::ThreadScrub | Action::ShowThreadsForFile | Action::ThreadsSettings
+            )
+    }
+
     /// Whether the action opens its own dialog, which asks before anything runs.
     /// A menu then does not ask a second time.
     #[must_use]
@@ -2356,7 +2416,9 @@ impl Action {
             | Action::ShowReflog
             | Action::ShowThreads
             | Action::ShowLabels
-            | Action::ShowLocalReview => repository_open(ctx),
+            | Action::ShowLocalReview
+            | Action::ShowInbox => repository_open(ctx),
+            Action::UndoLastOperation => undo_rule(ctx),
             Action::LabelNew => label_new_rule(ctx),
             Action::LabelRename | Action::LabelDelete => label_rule(args, ctx),
             Action::CheckoutBranch => {
@@ -2407,17 +2469,7 @@ impl Action {
             | Action::EditReviewComment => review_entry_rule(self, args, ctx),
             Action::OpenReviewComment => open_target(args, ctx).map(|_| ()),
             Action::ResolveConflict => resolve_conflict_rule(args, ctx),
-            Action::ThreadStar
-            | Action::ThreadRename
-            | Action::ThreadNote
-            | Action::ThreadTags
-            | Action::ThreadLinkCommit
-            | Action::ThreadLinkThread
-            | Action::ThreadExport
-            | Action::ThreadCopyMarkdown
-            | Action::ThreadExpandAll
-            | Action::ThreadCollapseAll
-            | Action::ThreadDelete => thread_rule(args, ctx),
+            _ if self.is_thread_rule() => thread_rule(args, ctx),
             Action::ThreadScrub
             | Action::ShowThreadsForFile
             | Action::ShowMemories
@@ -2537,6 +2589,7 @@ impl Action {
                 message_effect(self, ctx)?
             }
             (Action::ConvertHooks, _) => Effect::Send(vec![CommandKind::ConvertHooksToWorkflows]),
+            (Action::UndoLastOperation, _) => Effect::UndoLastOperation,
             (action, _) if action.is_workflow_rule() => workflow_effect(action, args, ctx)?,
             (action, _) if action.is_thread_action() => thread_effect(action, args)?,
             (action, _) if action.is_label_action() => label_effect(action, args)?,
@@ -3505,6 +3558,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
@@ -3674,6 +3728,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&entries, "")
         };
@@ -3752,6 +3807,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3812,6 +3868,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -3989,6 +4046,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4063,6 +4121,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&entries, "")
@@ -4099,6 +4158,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&entries, "")
@@ -4127,6 +4187,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&[], "")
@@ -4197,6 +4258,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4394,6 +4456,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4531,6 +4594,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
         };
@@ -4598,6 +4662,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4621,6 +4686,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4648,6 +4714,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4687,6 +4754,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4720,6 +4788,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4738,6 +4807,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4764,6 +4834,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -5333,6 +5404,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
         };
@@ -5457,6 +5529,7 @@ mod tests {
                 selected_label: None,
                 selected_memory: None,
                 features: FeatureSet::all(),
+                undoable: None,
                 stack: crate::action_registry::StackCtx::default(),
                 root: None,
                 ..with_stashes(&stashes)
@@ -5563,6 +5636,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -5813,6 +5887,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
         };
@@ -5968,6 +6043,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
         };
@@ -6115,6 +6191,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(lines("a.txt", Some((1, 1))), None)
         };
@@ -6227,6 +6304,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(CommentSpot::Nothing, Some(&listed))
         };
@@ -6281,6 +6359,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -6351,6 +6430,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             ..open_ctx(&entries, Some(&current))
         };
@@ -6946,6 +7026,7 @@ mod tests {
         let remotes = [remote_entry("origin/main")];
         let context = Context {
             features: FeatureSet::all(),
+            undoable: None,
             stack: StackCtx {
                 branches: &remotes,
                 ..StackCtx::default()
@@ -6971,6 +7052,7 @@ mod tests {
         let stacks = stack_snapshot(gm_schema::StackState::Stale);
         let known = Context {
             features: FeatureSet::all(),
+            undoable: None,
             stack: StackCtx {
                 stacks: Some(&stacks),
                 subject: None,
@@ -7012,6 +7094,7 @@ mod tests {
         );
         let picking = |subject| Context {
             features: FeatureSet::all(),
+            undoable: None,
             stack: StackCtx {
                 stacks: Some(&stacks),
                 subject: Some(subject),
@@ -7044,6 +7127,7 @@ mod tests {
         let merged = stack_snapshot(gm_schema::StackState::ParentMerged);
         let with = |stacks| Context {
             features: FeatureSet::all(),
+            undoable: None,
             stack: StackCtx {
                 stacks: Some(stacks),
                 ..StackCtx::default()

@@ -17,6 +17,7 @@ mod command_panel;
 mod commit_threads;
 mod composer;
 mod conflict_resolver;
+mod context_actions;
 mod context_menu;
 mod contexts_dialog;
 mod contexts_model;
@@ -67,6 +68,7 @@ mod shell_code;
 mod shell_commit;
 mod shell_conflicts;
 mod shell_history;
+mod shell_inbox;
 mod shell_labels;
 mod shell_list;
 mod shell_markdown;
@@ -81,12 +83,14 @@ mod shell_submodule;
 mod shell_threads;
 mod shell_workflows;
 mod sidebar;
+mod sidebar_nav;
 mod stacks;
 mod stash_apply;
 mod stash_drop;
 mod stashes;
 mod submodule;
 mod suggestion;
+mod sync_state;
 mod text_area;
 mod text_area_element;
 mod text_area_math;
@@ -145,6 +149,7 @@ actions!(
         OpenSearch,
         CopyCurrentBranch,
         SaveWorkflow,
+        UndoLastOperation,
     ]
 );
 
@@ -273,6 +278,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-f10", OpenContextMenu, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", CloseContextMenu, Some(KEY_CONTEXT)),
         KeyBinding::new("r", Refresh, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-z", UndoLastOperation, Some(KEY_CONTEXT)),
         KeyBinding::new("tab", FocusNext, None),
         KeyBinding::new("shift-tab", FocusPrev, None),
         KeyBinding::new("tab", FocusNext, Some(ROOT_CONTEXT)),

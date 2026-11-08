@@ -67,6 +67,20 @@ pub(crate) enum Target {
         path: String,
         lines: Option<(u32, u32)>,
     },
+    /// The commit the History page shows, by its id and subject (UI redesign, slice 1).
+    Commit {
+        oid: String,
+        subject: String,
+    },
+    /// A review comment of the Local review page, by its id and the place it names.
+    ReviewComment {
+        id: i64,
+        place: String,
+    },
+    /// The menu of the top bar's sync button, on the checked-out branch (UI redesign, slice 1).
+    Sync {
+        head: Option<String>,
+    },
 }
 
 impl Target {
@@ -82,6 +96,9 @@ impl Target {
             Self::ReflogEntry { index, .. } => reflog::label(*index),
             Self::Thread { title, .. } | Self::ThreadMore { title, .. } => title.clone(),
             Self::CodeViewer { path, .. } => path.clone(),
+            Self::Commit { subject, .. } => subject.clone(),
+            Self::ReviewComment { place, .. } => place.clone(),
+            Self::Sync { head } => head.clone().unwrap_or_default(),
         }
     }
 }
@@ -298,6 +315,37 @@ pub(crate) fn reflog_items(oid: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         item(Action::NewBranchFromCommit, 0),
         item(Action::CopyCommitHash, 1),
     ]
+}
+
+/// The actions on the commit the History page shows: check it out detached, branch from it,
+/// copy its hash. The same as a Reflog row's menu, since both name one commit.
+pub(crate) fn commit_items(oid: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
+    reflog_items(oid, ctx)
+}
+
+/// The actions on a review comment of the Local review page: open it in the diff, resolve or
+/// reopen it, edit it, then delete it in red.
+pub(crate) fn review_comment_items(id: i64, ctx: &ActionContext<'_>) -> Vec<Item> {
+    let target = Args::ReviewComment(id);
+    let item = |action, group| Item::new(action, target.clone(), group, ctx);
+    vec![
+        item(Action::OpenReviewComment, 0),
+        item(Action::ResolveReviewComment, 0),
+        item(Action::ReopenReviewComment, 0),
+        item(Action::EditReviewComment, 1),
+        item(Action::DeleteReviewComment, 2),
+    ]
+}
+
+/// The menu of the sync button: Fetch, Pull, Push with lease, on the checked-out branch.
+pub(crate) fn sync_items(head: Option<&str>, ctx: &ActionContext<'_>) -> Vec<Item> {
+    crate::sync_state::MENU
+        .into_iter()
+        .map(|action| {
+            let args = crate::title_bar::toolbar_args(action, head);
+            Item::new(action, args, 0, ctx)
+        })
+        .collect()
 }
 
 /// The linked worktree, not the main checkout, that has `name` checked out.
@@ -562,7 +610,12 @@ impl StatusView {
         }
     }
 
-    fn open_menu(&mut self, target: Target, position: Point<Pixels>, cx: &mut Context<Self>) {
+    pub(crate) fn open_menu(
+        &mut self,
+        target: Target,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         self.project_menu.open = false;
         self.branch_menu.open = false;
         self.context_menu.open = Some(Open {
@@ -603,7 +656,7 @@ impl StatusView {
     }
 
     /// The items of the open menu, read from the registry now.
-    fn menu_items(&self, target: &Target) -> Vec<Item> {
+    pub(crate) fn menu_items(&self, target: &Target) -> Vec<Item> {
         let mut ctx = self.action_context("");
         if let Target::CodeViewer { path, lines } = target {
             ctx.code = CodeCtx {
@@ -626,6 +679,9 @@ impl StatusView {
                 attachments,
             } => label_items(*id, name, *attachments, &ctx),
             Target::CodeViewer { .. } => code_items(&ctx),
+            Target::Commit { oid, .. } => commit_items(oid, &ctx),
+            Target::ReviewComment { id, .. } => review_comment_items(*id, &ctx),
+            Target::Sync { head } => sync_items(head.as_deref(), &ctx),
         }
     }
 
@@ -840,6 +896,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: gm_schema::FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
@@ -1240,6 +1297,7 @@ mod tests {
             selected_label: None,
             selected_memory: None,
             features: gm_schema::FeatureSet::all(),
+            undoable: None,
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&[])
