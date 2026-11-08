@@ -10,8 +10,9 @@ use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
     ConflictSite, DirListing, Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED,
     MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE, RestackBlock,
-    RestackPlan, RestackResolution, ReviewChange, ReviewComment, ReviewStatus, STASH_LIST_CHANGED,
-    SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
+    RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewStatus,
+    STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry,
+    WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -37,7 +38,7 @@ use crate::restack_resolutions::{self, Resolution};
 use crate::restack_session;
 use crate::review;
 use crate::review_session::{self, ReviewSession};
-use crate::review_store::{Reply, ReviewStore};
+use crate::review_store::{AgentThread, Reply, ReviewStore};
 use crate::script::builtins;
 use crate::script::dry;
 use crate::script::hook_convert;
@@ -4296,9 +4297,27 @@ impl Engine {
         kind: &CommandKind,
     ) -> Result<Vec<Event>, String> {
         match kind {
-            CommandKind::ListReviewComments => {
+            CommandKind::ListReviewComments { author } => {
                 let root = self.open_root()?;
-                self.review_listed(id, &root)
+                self.review_listed_by(id, &root, *author)
+            }
+            CommandKind::CreateAgentReviewComment {
+                path,
+                anchor_text,
+                kind,
+                body,
+                severity,
+            } => {
+                let author = agent_author(actor)?;
+                let body = review_body(body)?;
+                review::check_kind_and_severity(*kind, *severity)?;
+                let thread = AgentThread {
+                    author: &author,
+                    kind: *kind,
+                    severity: *severity,
+                    body,
+                };
+                self.create_agent_review_comment(id, path, anchor_text, &thread)
             }
             CommandKind::LoadReviewSnapshotText { id: comment } => {
                 self.load_review_snapshot(id, *comment)
@@ -4364,14 +4383,30 @@ impl Engine {
         let anchor = review::anchor_for(&text, start_line, end_line)?;
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
         let comment = store.add(path, body, &anchor, now_ms()).map_err(|e| e.0)?;
-        let snapshot = self.git.snapshot_worktree_for(&root, path).and_then(|oid| {
-            self.git
-                .set_review_ref(&root, comment, ReviewSide::Before, &oid)?;
-            Ok(oid)
-        });
-        if let Ok(oid) = snapshot {
-            store.set_snapshot(comment, &oid).map_err(|e| e.0)?;
-        }
+        snapshot_before(self.git.as_ref(), store, &root, comment, path)?;
+        self.review_listed(id, &root)
+    }
+
+    /// Starts an agent's thread on the text `anchor_text` of `path` (D200). The text is found
+    /// as a person's comment finds it (D141): exactly once in the file now, or the thread is
+    /// refused and nothing is written. The store checks the limits in the same write, and the
+    /// "before" snapshot is taken as for a person's comment (D140).
+    fn create_agent_review_comment(
+        &mut self,
+        id: OperationId,
+        path: &str,
+        anchor_text: &str,
+        thread: &AgentThread,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let file = review_session::read_text(&root, path)?;
+        let place = review::lines_of_text(&file, anchor_text)?;
+        let anchor = review::anchor_for(&file, place.start_line, place.end_line)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let comment = store
+            .add_agent(path, thread, &anchor, now_ms())
+            .map_err(|e| e.0)?;
+        snapshot_before(self.git.as_ref(), store, &root, comment, path)?;
         self.review_listed(id, &root)
     }
 
@@ -4452,6 +4487,11 @@ impl Engine {
         let root = self.open_root()?;
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
         let current = find_review(store, comment)?;
+        if matches!(actor, Actor::Agent { .. }) && review::is_agent_started(&current) {
+            return Err(
+                "an agent cannot hand off a thread it started: only a person closes it".to_owned(),
+            );
+        }
         let (earlier, path) = (current.after_snapshot, current.path);
         if !store
             .handle(comment, &origin_of(actor), summary, now_ms())
@@ -4660,10 +4700,24 @@ impl Engine {
         ))
     }
 
-    /// Every comment with its location in the file now, as the front-ends list them.
+    /// Every comment with its location in the file now, as the front-ends list them after a
+    /// write: all threads, whoever started them, so that no write hides one.
     fn review_listed(&mut self, id: OperationId, root: &Path) -> Result<Vec<Event>, String> {
+        self.review_listed_by(id, root, ReviewAuthorFilter::Any)
+    }
+
+    /// The comments that `author` asks for (D200), with their locations in the file now.
+    fn review_listed_by(
+        &mut self,
+        id: OperationId,
+        root: &Path,
+        author: ReviewAuthorFilter,
+    ) -> Result<Vec<Event>, String> {
         let store = review_store(&mut self.review, self.git.as_ref(), root)?;
-        let comments = review_session::listed(store, root)?;
+        let comments = review_session::listed(store, root)?
+            .into_iter()
+            .filter(|comment| review::listed_for(comment, author))
+            .collect();
         Ok(vec![Event::ReviewCommentsListed { id, comments }])
     }
 
@@ -5279,7 +5333,7 @@ impl Engine {
                 | CommandKind::SaveWorkflowFile { .. }
                 | CommandKind::DeleteWorkflowFile { .. }
                 | CommandKind::DismissWorkflowRequest { .. }
-                | CommandKind::ListReviewComments
+                | CommandKind::ListReviewComments { .. }
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }
                 | CommandKind::LoadReviewChange { .. }
@@ -5427,6 +5481,35 @@ fn review_store<'a>(
     }
 }
 
+/// Records the "before" snapshot of `path` for comment `comment`, as a person's comment has it
+/// (D140): the private ref and the row that names it. A snapshot that fails leaves the comment
+/// without one.
+fn snapshot_before(
+    git: &dyn GitPort,
+    store: &ReviewStore,
+    root: &Path,
+    comment: i64,
+    path: &str,
+) -> Result<(), String> {
+    let snapshot = git.snapshot_worktree_for(root, path).and_then(|oid| {
+        git.set_review_ref(root, comment, ReviewSide::Before, &oid)?;
+        Ok(oid)
+    });
+    if let Ok(oid) = snapshot {
+        store.set_snapshot(comment, &oid).map_err(|e| e.0)?;
+    }
+    Ok(())
+}
+
+/// The author of a thread an agent starts (D200): `agent:<client>`. Refused for a person.
+fn agent_author(actor: &Actor) -> Result<String, String> {
+    if matches!(actor, Actor::Agent { .. }) {
+        Ok(origin_of(actor))
+    } else {
+        Err("only an agent can start a note, question or flag".to_owned())
+    }
+}
+
 /// The comment `comment` as the store holds it; refused when there is none.
 fn find_review(store: &ReviewStore, comment: i64) -> Result<ReviewComment, String> {
     store
@@ -5464,7 +5547,8 @@ fn is_review_command(kind: &CommandKind) -> bool {
         kind,
         CommandKind::AddReviewComment { .. }
             | CommandKind::AddReviewCommentByText { .. }
-            | CommandKind::ListReviewComments
+            | CommandKind::ListReviewComments { .. }
+            | CommandKind::CreateAgentReviewComment { .. }
             | CommandKind::EditReviewComment { .. }
             | CommandKind::ResolveReviewComment { .. }
             | CommandKind::HandleReviewComment { .. }

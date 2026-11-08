@@ -48,7 +48,8 @@ pub use restack::{
     RestackRecord, RestackResolution,
 };
 pub use review::{
-    ReviewAnchor, ReviewChange, ReviewComment, ReviewLocation, ReviewReply, ReviewStatus,
+    ReviewAnchor, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewKind, ReviewLocation,
+    ReviewReply, ReviewSeverity, ReviewStatus,
 };
 pub use stack::{OWN_COMMITS_LIMIT, Stack, StackBranch, StackSnapshot, StackState};
 pub use stash::StashEntry;

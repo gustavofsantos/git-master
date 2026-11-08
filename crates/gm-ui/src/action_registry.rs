@@ -5955,6 +5955,10 @@ mod tests {
             resolved_at: None,
             snapshot: None,
             after_snapshot: None,
+            author: None,
+            kind: None,
+            severity: None,
+            needs_answer: false,
             location: Some(gm_schema::ReviewLocation {
                 start_line: 1,
                 end_line: 1,

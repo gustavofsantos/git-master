@@ -5,12 +5,82 @@
 
 use std::ops::Range;
 
-use gm_schema::{ReviewAnchor, ReviewChange, ReviewLocation};
+use gm_schema::{
+    ReviewAnchor, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewKind, ReviewLocation,
+    ReviewSeverity, ReviewStatus,
+};
 
 /// The most lines one comment may cover.
 pub const MAX_SELECTION: usize = 200;
 /// The lines kept above and below the selection, for display.
 pub const CONTEXT_LINES: usize = 3;
+/// The most open threads an agent may have in one repository (D200).
+pub const AGENT_THREADS_PER_REPOSITORY: usize = 20;
+/// The most open threads an agent may have on one file (D200).
+pub const AGENT_THREADS_PER_FILE: usize = 5;
+
+/// Whether an agent started `comment`: its author is `agent:<client>` (D200). A person's
+/// comment has no author.
+pub fn is_agent_started(comment: &ReviewComment) -> bool {
+    comment
+        .author
+        .as_deref()
+        .is_some_and(|author| author.starts_with("agent:"))
+}
+
+/// Whether the person replied to `comment` (D200): a reply whose author is `human`.
+pub fn has_human_reply(comment: &ReviewComment) -> bool {
+    comment.replies.iter().any(|reply| reply.author == "human")
+}
+
+/// Whether `comment` waits for the person's answer (D200): a question that is not resolved
+/// and that no person has replied to.
+pub fn needs_answer(comment: &ReviewComment) -> bool {
+    comment.kind == Some(ReviewKind::Question)
+        && comment.status != ReviewStatus::Resolved
+        && !has_human_reply(comment)
+}
+
+/// Whether a list that asks for `filter` returns `comment` (D200): by default the threads a
+/// person started, and the agent's threads that hold a reply from the person.
+pub fn listed_for(comment: &ReviewComment, filter: ReviewAuthorFilter) -> bool {
+    match filter {
+        ReviewAuthorFilter::Human => !is_agent_started(comment) || has_human_reply(comment),
+        ReviewAuthorFilter::Agent => is_agent_started(comment),
+        ReviewAuthorFilter::Any => true,
+    }
+}
+
+/// Whether an agent may start one more thread, given how many of its threads are open in the
+/// repository and on the file (D200). Refused with the limit that is reached.
+pub fn check_agent_limits(open_in_repository: usize, open_on_file: usize) -> Result<(), String> {
+    if open_in_repository >= AGENT_THREADS_PER_REPOSITORY {
+        return Err(format!(
+            "the repository already has {AGENT_THREADS_PER_REPOSITORY} open agent threads, \
+             the limit per repository; resolve some first"
+        ));
+    }
+    if open_on_file >= AGENT_THREADS_PER_FILE {
+        return Err(format!(
+            "this file already has {AGENT_THREADS_PER_FILE} open agent threads, \
+             the limit per file; resolve some first"
+        ));
+    }
+    Ok(())
+}
+
+/// Checks the severity of an agent's thread against its kind (D200): a flag needs one, and
+/// no other kind takes one.
+pub fn check_kind_and_severity(
+    kind: ReviewKind,
+    severity: Option<ReviewSeverity>,
+) -> Result<(), String> {
+    match (kind, severity) {
+        (ReviewKind::Flag, None) => Err("a flag needs a severity: low, medium or high".to_owned()),
+        (ReviewKind::Flag, Some(_)) | (_, None) => Ok(()),
+        (_, Some(_)) => Err("only a flag takes a severity".to_owned()),
+    }
+}
 
 /// The lines of `text`, without their line endings. A final line break does
 /// not start another line, so `"a\n"` is one line, and a CRLF file reads the
@@ -296,6 +366,7 @@ fn line_number(at: usize) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gm_schema::ReviewReply;
     use proptest::prelude::*;
 
     fn file(lines: &[&str]) -> String {
@@ -354,6 +425,124 @@ mod tests {
         assert!(anchor_for(&text, 2, 3).is_err());
         assert!(anchor_for(&text, 2, 2).is_err());
         assert!(anchor_for(&text, 1, 3).is_ok());
+    }
+
+    fn thread(
+        author: Option<&str>,
+        kind: Option<ReviewKind>,
+        status: ReviewStatus,
+    ) -> ReviewComment {
+        ReviewComment {
+            id: 1,
+            path: "a.rs".to_owned(),
+            body: "text".to_owned(),
+            status,
+            anchor: ReviewAnchor {
+                text: "x".to_owned(),
+                before: Vec::new(),
+                after: Vec::new(),
+                start_line: 1,
+            },
+            created_at: 1,
+            resolved_at: None,
+            snapshot: None,
+            after_snapshot: None,
+            location: None,
+            outdated: false,
+            replies: Vec::new(),
+            author: author.map(str::to_owned),
+            kind,
+            severity: None,
+            needs_answer: false,
+        }
+    }
+
+    fn reply_by(author: &str) -> ReviewReply {
+        ReviewReply {
+            id: 2,
+            author: author.to_owned(),
+            body: "answer".to_owned(),
+            created_at: 2,
+        }
+    }
+
+    #[test]
+    fn a_question_needs_an_answer_until_a_person_replies() {
+        let mut question = thread(
+            Some("agent:claude-code"),
+            Some(ReviewKind::Question),
+            ReviewStatus::Open,
+        );
+        assert!(needs_answer(&question));
+        question.replies.push(reply_by("agent:claude-code"));
+        assert!(needs_answer(&question), "an agent's reply is not an answer");
+        question.replies.push(reply_by("human"));
+        assert!(!needs_answer(&question));
+    }
+
+    #[test]
+    fn only_an_open_question_needs_an_answer() {
+        let note = thread(Some("agent:x"), Some(ReviewKind::Note), ReviewStatus::Open);
+        assert!(!needs_answer(&note));
+        let flag = thread(Some("agent:x"), Some(ReviewKind::Flag), ReviewStatus::Open);
+        assert!(!needs_answer(&flag));
+        let resolved = thread(
+            Some("agent:x"),
+            Some(ReviewKind::Question),
+            ReviewStatus::Resolved,
+        );
+        assert!(!needs_answer(&resolved));
+        let person = thread(None, None, ReviewStatus::Open);
+        assert!(!needs_answer(&person));
+    }
+
+    #[test]
+    fn the_default_list_holds_the_person_threads_and_answered_agent_threads() {
+        let person = thread(None, None, ReviewStatus::Open);
+        let mut agent = thread(Some("agent:x"), Some(ReviewKind::Note), ReviewStatus::Open);
+        assert!(listed_for(&person, ReviewAuthorFilter::Human));
+        assert!(!listed_for(&agent, ReviewAuthorFilter::Human));
+        assert!(listed_for(&agent, ReviewAuthorFilter::Agent));
+        assert!(listed_for(&agent, ReviewAuthorFilter::Any));
+        assert!(!listed_for(&person, ReviewAuthorFilter::Agent));
+        agent.replies.push(reply_by("agent:x"));
+        assert!(!listed_for(&agent, ReviewAuthorFilter::Human));
+        agent.replies.push(reply_by("human"));
+        assert!(listed_for(&agent, ReviewAuthorFilter::Human));
+    }
+
+    #[test]
+    fn the_agent_limits_are_checked_per_repository_then_per_file() {
+        assert!(check_agent_limits(0, 0).is_ok());
+        assert!(check_agent_limits(19, 4).is_ok());
+        let file = check_agent_limits(19, 5).expect_err("file limit");
+        assert!(file.contains("this file already has 5"), "{file}");
+        let repo = check_agent_limits(20, 0).expect_err("repository limit");
+        assert!(repo.contains("the repository already has 20"), "{repo}");
+        assert!(
+            check_agent_limits(20, 5)
+                .expect_err("both")
+                .contains("repository")
+        );
+    }
+
+    #[test]
+    fn a_flag_needs_a_severity_and_no_other_kind_takes_one() {
+        assert!(check_kind_and_severity(ReviewKind::Flag, Some(ReviewSeverity::High)).is_ok());
+        assert!(check_kind_and_severity(ReviewKind::Flag, None).is_err());
+        assert!(check_kind_and_severity(ReviewKind::Note, None).is_ok());
+        assert!(check_kind_and_severity(ReviewKind::Question, None).is_ok());
+        assert!(check_kind_and_severity(ReviewKind::Note, Some(ReviewSeverity::Low)).is_err());
+    }
+
+    #[test]
+    fn agent_started_is_an_agent_author_on_the_root() {
+        assert!(is_agent_started(&thread(
+            Some("agent:claude-code"),
+            None,
+            ReviewStatus::Open
+        )));
+        assert!(!is_agent_started(&thread(None, None, ReviewStatus::Open)));
     }
 
     #[test]

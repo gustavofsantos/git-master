@@ -10,8 +10,8 @@ use gm_core::command_log::CommandLog;
 use gm_core::git::SubprocessGit;
 use gm_core::{Engine, GitPort, ReviewSide};
 use gm_schema::{
-    Actor, Command, CommandKind, Event, OperationId, OperationState, ReviewChange, ReviewComment,
-    ReviewLocation, ReviewStatus,
+    Actor, Command, CommandKind, Event, OperationId, OperationState, ReviewAuthorFilter,
+    ReviewChange, ReviewComment, ReviewKind, ReviewLocation, ReviewSeverity, ReviewStatus,
 };
 
 fn git_output(dir: &Path, args: &[&str]) -> std::process::Output {
@@ -166,7 +166,12 @@ fn current_text(events: &[Event]) -> (String, Vec<String>) {
 
 /// Lists the comments through the engine: the list is a read, not a write.
 fn list(engine: &mut Engine) -> Vec<ReviewComment> {
-    let events = engine.handle(OperationId(900), &human(CommandKind::ListReviewComments));
+    let events = engine.handle(
+        OperationId(900),
+        &human(CommandKind::ListReviewComments {
+            author: ReviewAuthorFilter::Any,
+        }),
+    );
     assert!(done(&events));
     listed(&events)
 }
@@ -736,7 +741,12 @@ fn an_agent_is_refused_every_write_and_can_still_list() {
         assert_eq!(failure(&events), message);
     }
 
-    let events = engine.handle(OperationId(30), &agent(CommandKind::ListReviewComments));
+    let events = engine.handle(
+        OperationId(30),
+        &agent(CommandKind::ListReviewComments {
+            author: ReviewAuthorFilter::Any,
+        }),
+    );
     assert!(done(&events));
     assert_eq!(listed(&events), vec![before]);
 }
@@ -1715,4 +1725,326 @@ fn a_reply_is_a_logged_write_and_a_listing_is_not() {
         states.contains(&OperationState::Done),
         "the reply is in the command log: {states:?}"
     );
+}
+
+fn agent_comment(path: &str, anchor_text: &str, kind: ReviewKind) -> CommandKind {
+    CommandKind::CreateAgentReviewComment {
+        path: path.to_owned(),
+        anchor_text: anchor_text.to_owned(),
+        kind,
+        body: format!("{kind:?} on {anchor_text}"),
+        severity: None,
+    }
+}
+
+/// The comments the list asks for, through the engine: a read, as `list` is.
+fn list_as(engine: &mut Engine, author: ReviewAuthorFilter) -> Vec<ReviewComment> {
+    let events = engine.handle(
+        OperationId(905),
+        &human(CommandKind::ListReviewComments { author }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    listed(&events)
+}
+
+fn reply_as(engine: &mut Engine, actor: Actor, id: i64, body: &str) -> Vec<Event> {
+    engine.handle(
+        OperationId(906),
+        &Command {
+            actor,
+            kind: CommandKind::ReplyToReviewComment {
+                id,
+                body: body.to_owned(),
+            },
+        },
+    )
+}
+
+#[test]
+fn an_agent_starts_a_thread_on_a_unique_anchor_with_a_before_snapshot() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    let events = engine.handle(
+        OperationId(10),
+        &agent(CommandKind::CreateAgentReviewComment {
+            path: "f.txt".to_owned(),
+            anchor_text: "c".to_owned(),
+            kind: ReviewKind::Flag,
+            body: "a guess".to_owned(),
+            severity: Some(ReviewSeverity::Medium),
+        }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    let comment = only_any(&mut engine);
+    assert_eq!(comment.author.as_deref(), Some("agent:test-agent"));
+    assert_eq!(comment.kind, Some(ReviewKind::Flag));
+    assert_eq!(comment.severity, Some(ReviewSeverity::Medium));
+    assert_eq!(comment.status, ReviewStatus::Open);
+    assert_eq!(comment.location, Some(location(3, 3)));
+    assert!(
+        comment.snapshot.is_some(),
+        "a before snapshot, as for a person"
+    );
+    assert_eq!(private_refs(dir.path()).len(), 1);
+    assert!(!comment.needs_answer);
+
+    let person = engine.handle(OperationId(11), &human(add("f.txt", 1, 1, "mine")));
+    assert!(done(&person), "{}", failure(&person));
+    let refused = engine.handle(
+        OperationId(12),
+        &human(agent_comment("f.txt", "d", ReviewKind::Note)),
+    );
+    assert_eq!(
+        failure(&refused),
+        "only an agent can start a note, question or flag"
+    );
+}
+
+/// The only comment of the Any listing.
+fn only_any(engine: &mut Engine) -> ReviewComment {
+    let mut comments = list_as(engine, ReviewAuthorFilter::Any);
+    assert_eq!(comments.len(), 1, "one comment: {comments:?}");
+    comments.remove(0)
+}
+
+#[test]
+fn a_missing_or_ambiguous_anchor_is_refused_and_writes_nothing() {
+    let dir = repo();
+    write(dir.path(), "dup.txt", "x\ny\nx\n");
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+
+    let missing = engine.handle(
+        OperationId(10),
+        &agent(agent_comment("f.txt", "not in the file", ReviewKind::Note)),
+    );
+    assert_eq!(
+        failure(&missing),
+        "that text is not in the file as it is now"
+    );
+    let ambiguous = engine.handle(
+        OperationId(11),
+        &agent(agent_comment("dup.txt", "x", ReviewKind::Note)),
+    );
+    assert_eq!(
+        failure(&ambiguous),
+        "that text appears more than once in the file as it is now"
+    );
+    let no_file = engine.handle(
+        OperationId(12),
+        &agent(agent_comment("nope.txt", "x", ReviewKind::Note)),
+    );
+    assert!(
+        failure(&no_file).contains("nope.txt"),
+        "{}",
+        failure(&no_file)
+    );
+
+    assert!(list_as(&mut engine, ReviewAuthorFilter::Any).is_empty());
+    assert!(private_refs(dir.path()).is_empty());
+    let written = engine
+        .log()
+        .iter()
+        .filter(|entry| entry.state == OperationState::Done)
+        .filter(|entry| matches!(entry.kind, CommandKind::CreateAgentReviewComment { .. }))
+        .count();
+    assert_eq!(written, 0, "no refused thread is logged as done");
+}
+
+#[test]
+fn an_agent_thread_is_limited_to_five_per_file_and_twenty_per_repository() {
+    let dir = repo();
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+        let text = (1..=6).fold(String::new(), |text, n| {
+            text + &format!("{name} line {n}\n")
+        });
+        write(dir.path(), name, &text);
+    }
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+
+    let severity_missing = engine.handle(
+        OperationId(10),
+        &agent(agent_comment("a.txt", "a.txt line 1", ReviewKind::Flag)),
+    );
+    assert!(failure(&severity_missing).contains("a flag needs a severity"));
+
+    for n in 1..=5 {
+        let events = engine.handle(
+            OperationId(20 + n),
+            &agent(agent_comment(
+                "a.txt",
+                &format!("a.txt line {n}"),
+                ReviewKind::Note,
+            )),
+        );
+        assert!(done(&events), "{}", failure(&events));
+    }
+    let file_full = engine.handle(
+        OperationId(30),
+        &agent(agent_comment("a.txt", "a.txt line 6", ReviewKind::Note)),
+    );
+    assert!(
+        failure(&file_full).contains("this file already has 5 open agent threads"),
+        "{}",
+        failure(&file_full)
+    );
+
+    for name in ["b.txt", "c.txt", "d.txt"] {
+        for n in 1..=5 {
+            let events = engine.handle(
+                OperationId(40),
+                &agent(agent_comment(
+                    name,
+                    &format!("{name} line {n}"),
+                    ReviewKind::Note,
+                )),
+            );
+            assert!(done(&events), "{}", failure(&events));
+        }
+    }
+    let repo_full = engine.handle(
+        OperationId(50),
+        &agent(agent_comment("e.txt", "e.txt line 1", ReviewKind::Note)),
+    );
+    assert!(
+        failure(&repo_full).contains("the repository already has 20 open agent threads"),
+        "{}",
+        failure(&repo_full)
+    );
+    assert_eq!(list_as(&mut engine, ReviewAuthorFilter::Agent).len(), 20);
+}
+
+#[test]
+fn an_agent_cannot_hand_off_resolve_or_reopen_its_own_thread_but_a_person_can() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(
+        OperationId(10),
+        &agent(agent_comment("f.txt", "b", ReviewKind::Note)),
+    );
+    let id = only_any(&mut engine).id;
+
+    let handed = engine.handle(
+        OperationId(11),
+        &agent(CommandKind::HandleReviewComment {
+            id,
+            summary: "done".to_owned(),
+        }),
+    );
+    assert_eq!(
+        failure(&handed),
+        "an agent cannot hand off a thread it started: only a person closes it"
+    );
+    let resolved = engine.handle(
+        OperationId(12),
+        &agent(CommandKind::ResolveReviewComment { id }),
+    );
+    assert_eq!(
+        failure(&resolved),
+        "only a human can resolve a review comment"
+    );
+    let reopened = engine.handle(
+        OperationId(13),
+        &agent(CommandKind::ReopenReviewComment { id }),
+    );
+    assert_eq!(
+        failure(&reopened),
+        "only a human can reopen a review comment"
+    );
+    assert_eq!(only_any(&mut engine).status, ReviewStatus::Open);
+
+    let closed = engine.handle(
+        OperationId(14),
+        &human(CommandKind::ResolveReviewComment { id }),
+    );
+    assert!(done(&closed), "{}", failure(&closed));
+    assert_eq!(only_any(&mut engine).status, ReviewStatus::Resolved);
+    let reopened = engine.handle(
+        OperationId(15),
+        &human(CommandKind::ReopenReviewComment { id }),
+    );
+    assert!(done(&reopened), "{}", failure(&reopened));
+    assert_eq!(only_any(&mut engine).status, ReviewStatus::Open);
+}
+
+#[test]
+fn a_question_needs_an_answer_until_a_person_replies() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(
+        OperationId(10),
+        &agent(agent_comment("f.txt", "c", ReviewKind::Question)),
+    );
+    let id = only_any(&mut engine).id;
+    assert!(only_any(&mut engine).needs_answer);
+
+    let events = reply_as(
+        &mut engine,
+        Actor::Agent {
+            name: "test-agent".to_owned(),
+        },
+        id,
+        "ping",
+    );
+    assert!(done(&events), "{}", failure(&events));
+    assert!(
+        only_any(&mut engine).needs_answer,
+        "an agent's reply is not an answer"
+    );
+
+    let events = reply_as(&mut engine, Actor::Human, id, "use b");
+    assert!(done(&events), "{}", failure(&events));
+    assert!(!only_any(&mut engine).needs_answer);
+}
+
+#[test]
+fn the_default_list_hides_an_agent_thread_until_a_person_replies() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 1, 1, "mine")));
+    engine.handle(
+        OperationId(11),
+        &agent(agent_comment("f.txt", "c", ReviewKind::Note)),
+    );
+    let person = list_as(&mut engine, ReviewAuthorFilter::Human);
+    assert_eq!(person.len(), 1, "the agent thread is hidden: {person:?}");
+    assert_eq!(person[0].author, None);
+
+    let agent_id = list_as(&mut engine, ReviewAuthorFilter::Agent)[0].id;
+    assert_eq!(list_as(&mut engine, ReviewAuthorFilter::Agent).len(), 1);
+    assert_eq!(list_as(&mut engine, ReviewAuthorFilter::Any).len(), 2);
+
+    let events = reply_as(&mut engine, Actor::Human, agent_id, "thanks");
+    assert!(done(&events), "{}", failure(&events));
+    let shown = list_as(&mut engine, ReviewAuthorFilter::Human);
+    assert_eq!(shown.len(), 2, "answered, it is shown: {shown:?}");
+    assert!(shown.iter().any(|comment| comment.id == agent_id));
+}
+
+#[test]
+fn an_agent_thread_is_a_logged_write() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    let events = engine.handle(
+        OperationId(60),
+        &agent(agent_comment("f.txt", "e", ReviewKind::Note)),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    let logged: Vec<OperationState> = engine
+        .log()
+        .iter()
+        .filter(|entry| matches!(entry.kind, CommandKind::CreateAgentReviewComment { .. }))
+        .filter(|entry| entry.id == OperationId(60))
+        .map(|entry| entry.state)
+        .collect();
+    assert!(logged.contains(&OperationState::Done), "{logged:?}");
+    let before = engine.log().len();
+    list_as(&mut engine, ReviewAuthorFilter::Any);
+    assert_eq!(engine.log().len(), before, "a listing leaves no entry");
 }

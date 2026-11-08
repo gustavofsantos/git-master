@@ -535,6 +535,10 @@ mod tests {
             replies: Vec::new(),
             snapshot: Some("abc".into()),
             after_snapshot: None,
+            author: None,
+            kind: None,
+            severity: None,
+            needs_answer: false,
             location: line.map(|start_line| ReviewLocation {
                 start_line,
                 end_line: start_line,

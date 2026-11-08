@@ -68,8 +68,9 @@ pub(crate) fn read_text(root: &Path, path: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8 text"))
 }
 
-/// Every comment of `store`, with its location in the file now. Each distinct
-/// file is read once; a file that cannot be read makes its comments outdated.
+/// Every comment of `store`, with its location in the file now and whether it waits for an
+/// answer (D200). Each distinct file is read once; a file that cannot be read makes its
+/// comments outdated.
 pub(crate) fn listed(store: &ReviewStore, root: &Path) -> Result<Vec<ReviewComment>, String> {
     let comments = store.list().map_err(|e| e.0)?;
     let mut texts: BTreeMap<String, Option<String>> = BTreeMap::new();
@@ -84,6 +85,7 @@ pub(crate) fn listed(store: &ReviewStore, root: &Path) -> Result<Vec<ReviewComme
                 .and_then(|text| review::locate(text, &comment.anchor));
             comment.outdated = location.is_none();
             comment.location = location;
+            comment.needs_answer = review::needs_answer(&comment);
             comment
         })
         .collect())

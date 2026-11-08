@@ -4,7 +4,7 @@
 //! Enter adds a line, Ctrl+Enter saves, Escape cancels. A refused write shows
 //! the engine's message in the dialog.
 
-use gm_schema::{Actor, CommandKind};
+use gm_schema::{Actor, CommandKind, ReviewAuthorFilter};
 use gpui::{
     App, Context, Div, Entity, FontWeight, KeyBinding, MouseButton, MouseDownEvent, Stateful,
     Subscription, Window, actions, div, prelude::*, px,
@@ -686,9 +686,12 @@ impl StatusView {
         if self.model.status().is_none() || self.model.is_opening() {
             return;
         }
-        let id = self
-            .engine
-            .dispatch(Actor::Human, CommandKind::ListReviewComments);
+        let id = self.engine.dispatch(
+            Actor::Human,
+            CommandKind::ListReviewComments {
+                author: ReviewAuthorFilter::Any,
+            },
+        );
         self.model.review.request(id);
     }
 }

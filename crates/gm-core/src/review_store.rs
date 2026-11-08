@@ -12,11 +12,15 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use gm_schema::{ReviewAnchor, ReviewComment, ReviewReply, ReviewStatus};
+use gm_schema::{
+    ReviewAnchor, ReviewComment, ReviewKind, ReviewReply, ReviewSeverity, ReviewStatus,
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
+use crate::review;
+
 /// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 /// How long a writer waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -53,13 +57,20 @@ INSERT INTO comments (path, body, status, anchor_json, created_at, parent, autho
 ALTER TABLE comments DROP COLUMN summary;
 ";
 
+/// Version 4 to 5 (D200): an agent's thread has a kind and, for a flag, a severity. Its
+/// author is the root's `author`, which version 4 already has. Existing rows keep `NULL`.
+const V5: &str = "
+ALTER TABLE comments ADD COLUMN kind TEXT;
+ALTER TABLE comments ADD COLUMN severity TEXT;
+";
+
 /// The upgrades after the first version, in order. Each runs when the database is at its
 /// `from` version, so a database several versions behind runs every step after it.
-const UPGRADES: [(i64, &str); 3] = [(1, V2), (2, V3), (3, V4)];
+const UPGRADES: [(i64, &str); 4] = [(1, V2), (2, V3), (3, V4), (4, V5)];
 
 /// Columns read back for a root `ReviewComment`, in the order `raw_comment` expects.
 const COLUMNS: &str = "id, path, body, status, anchor_json, created_at, resolved_at, snapshot, \
-     after_snapshot";
+     after_snapshot, author, kind, severity";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreError(pub String);
@@ -86,8 +97,17 @@ pub enum Reply {
     Added { reopened: bool },
 }
 
+/// What an agent starts a thread with (D200): its author (`agent:<client>`), what it
+/// says, and for a flag how serious it is.
+pub struct AgentThread<'a> {
+    pub author: &'a str,
+    pub kind: ReviewKind,
+    pub severity: Option<ReviewSeverity>,
+    pub body: &'a str,
+}
+
 /// One root row as SQLite gives it: id, path, body, status, anchor JSON, created,
-/// resolved, snapshot and the "after" snapshot.
+/// resolved, snapshot, the "after" snapshot, author, kind and severity.
 type RawComment = (
     i64,
     String,
@@ -96,6 +116,9 @@ type RawComment = (
     String,
     i64,
     Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
     Option<String>,
     Option<String>,
 );
@@ -158,6 +181,61 @@ impl ReviewStore {
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Stores a new open thread that an agent started on `path` (D200), and returns its id.
+    /// The open agent threads of the repository and of the file are counted, and the row is
+    /// written, inside one write transaction: a thread over either limit is refused with the
+    /// reason, and nothing is written. Another process cannot add a thread between the count
+    /// and the insert, because the write lock is taken first.
+    pub fn add_agent(
+        &self,
+        path: &str,
+        thread: &AgentThread,
+        anchor: &ReviewAnchor,
+        now: i64,
+    ) -> Result<i64, StoreError> {
+        let anchor_json = to_json(anchor)?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let written: Result<i64, StoreError> = (|| {
+            let in_repository = open_agent_count(&self.conn, None)?;
+            let on_file = open_agent_count(&self.conn, Some(path))?;
+            review::check_agent_limits(in_repository, on_file).map_err(StoreError)?;
+            self.conn.execute(
+                "INSERT INTO comments (path, body, status, anchor_json, created_at, author,
+                 kind, severity)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    path,
+                    thread.body,
+                    status_text(ReviewStatus::Open),
+                    anchor_json,
+                    now,
+                    thread.author,
+                    kind_text(thread.kind),
+                    thread.severity.map(severity_text),
+                ],
+            )?;
+            Ok(self.conn.last_insert_rowid())
+        })();
+        let outcome = written.and_then(|id| {
+            self.conn.execute_batch("COMMIT")?;
+            Ok(id)
+        });
+        if outcome.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+        outcome
+    }
+
+    /// How many agent-started threads are not resolved in the repository (D200).
+    pub fn open_agent_threads(&self) -> Result<usize, StoreError> {
+        open_agent_count(&self.conn, None)
+    }
+
+    /// How many agent-started threads are not resolved on `path` (D200).
+    pub fn open_agent_threads_on(&self, path: &str) -> Result<usize, StoreError> {
+        open_agent_count(&self.conn, Some(path))
     }
 
     /// Every root comment, by path, then by the start line of its anchor, then by id,
@@ -388,6 +466,18 @@ fn insert_reply(
     Ok(conn.last_insert_rowid())
 }
 
+/// The open agent-started threads of the repository, or of `path` (D200): roots whose author
+/// is an agent and whose status is not resolved.
+fn open_agent_count(conn: &Connection, path: Option<&str>) -> Result<usize, StoreError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM comments WHERE parent IS NULL AND author LIKE 'agent:%'
+         AND status != ?1 AND (?2 IS NULL OR path = ?2)",
+        params![status_text(ReviewStatus::Resolved), path],
+        |row| row.get(0),
+    )?;
+    usize::try_from(count).map_err(|e| StoreError(e.to_string()))
+}
+
 /// Creates the schema of an empty database, or brings an older one up to date; refuses one
 /// written by a newer version of the app. Several processes can open the same file at once
 /// (the app and any number of `gitmaster mcp`), so the version is read inside a write
@@ -400,7 +490,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             tx.execute_batch(SCHEMA)?;
             version = 3;
         }
-        1..=3 => {}
+        1..=4 => {}
         v if v == SCHEMA_VERSION => return Ok(()),
         v if v > SCHEMA_VERSION => {
             return Err(StoreError(
@@ -431,6 +521,40 @@ fn status_text(status: ReviewStatus) -> &'static str {
     }
 }
 
+fn kind_text(kind: ReviewKind) -> &'static str {
+    match kind {
+        ReviewKind::Note => "note",
+        ReviewKind::Question => "question",
+        ReviewKind::Flag => "flag",
+    }
+}
+
+fn parse_kind(text: &str) -> Result<ReviewKind, StoreError> {
+    match text {
+        "note" => Ok(ReviewKind::Note),
+        "question" => Ok(ReviewKind::Question),
+        "flag" => Ok(ReviewKind::Flag),
+        other => Err(StoreError(format!("unknown review kind {other:?}"))),
+    }
+}
+
+fn severity_text(severity: ReviewSeverity) -> &'static str {
+    match severity {
+        ReviewSeverity::Low => "low",
+        ReviewSeverity::Medium => "medium",
+        ReviewSeverity::High => "high",
+    }
+}
+
+fn parse_severity(text: &str) -> Result<ReviewSeverity, StoreError> {
+    match text {
+        "low" => Ok(ReviewSeverity::Low),
+        "medium" => Ok(ReviewSeverity::Medium),
+        "high" => Ok(ReviewSeverity::High),
+        other => Err(StoreError(format!("unknown review severity {other:?}"))),
+    }
+}
+
 fn parse_status(text: &str) -> Result<ReviewStatus, StoreError> {
     match text {
         "open" => Ok(ReviewStatus::Open),
@@ -451,6 +575,9 @@ fn raw_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawComment> {
         row.get(6)?,
         row.get(7)?,
         row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
     ))
 }
 
@@ -465,8 +592,20 @@ fn reply_of(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewReply> {
 }
 
 fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
-    let (id, path, body, status, anchor_json, created_at, resolved_at, snapshot, after_snapshot) =
-        raw;
+    let (
+        id,
+        path,
+        body,
+        status,
+        anchor_json,
+        created_at,
+        resolved_at,
+        snapshot,
+        after_snapshot,
+        author,
+        kind,
+        severity,
+    ) = raw;
     Ok(ReviewComment {
         id,
         path,
@@ -481,6 +620,10 @@ fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
         location: None,
         outdated: false,
         replies: Vec::new(),
+        author,
+        kind: kind.as_deref().map(parse_kind).transpose()?,
+        severity: severity.as_deref().map(parse_severity).transpose()?,
+        needs_answer: false,
     })
 }
 
@@ -915,5 +1058,166 @@ mod tests {
             .map(|reply| reply.body)
             .collect();
         assert_eq!(bodies, ["third", "first", "second"]);
+    }
+
+    fn agent_thread(kind: ReviewKind, body: &str) -> AgentThread<'_> {
+        AgentThread {
+            author: "agent:test",
+            kind,
+            severity: None,
+            body,
+        }
+    }
+
+    fn v4_database(path: &Path) {
+        let conn = Connection::open(path).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE comments (id INTEGER PRIMARY KEY, path TEXT NOT NULL,
+             body TEXT NOT NULL, status TEXT NOT NULL, anchor_json TEXT NOT NULL,
+             created_at INTEGER NOT NULL, resolved_at INTEGER, snapshot TEXT,
+             after_snapshot TEXT, parent INTEGER REFERENCES comments(id) ON DELETE CASCADE,
+             author TEXT);
+             INSERT INTO comments (id, path, body, status, anchor_json, created_at,
+                 snapshot, parent, author) VALUES
+             (1, 'a.rs', 'rename this', 'open', '{\"text\":\"x\",\"before\":[],\"after\":[],\"start_line\":1}', 10, 'c1', NULL, NULL),
+             (2, 'a.rs', 'which one?', 'open', '{\"text\":\"x\",\"before\":[],\"after\":[],\"start_line\":1}', 11, NULL, 1, 'human');
+             PRAGMA user_version = 4;",
+        )
+        .expect("v4");
+    }
+
+    #[test]
+    fn a_version_four_database_keeps_its_threads_and_gains_kind_and_severity() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("review.db");
+        v4_database(&path);
+        let store = ReviewStore::open(&path).expect("migrate");
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
+        let kept = store.list().expect("list").remove(0);
+        assert_eq!(kept.body, "rename this");
+        assert_eq!(kept.snapshot.as_deref(), Some("c1"));
+        assert_eq!(kept.author, None, "a person's thread has no author");
+        assert_eq!(kept.kind, None);
+        assert_eq!(kept.severity, None);
+        assert_eq!(kept.replies.len(), 1);
+        assert_eq!(kept.replies[0].author, "human");
+        assert_eq!(store.open_agent_threads().expect("count"), 0);
+        let id = store
+            .add_agent(
+                "a.rs",
+                &AgentThread {
+                    author: "agent:test",
+                    kind: ReviewKind::Flag,
+                    severity: Some(ReviewSeverity::High),
+                    body: "risk",
+                },
+                &anchor("x", 1),
+                20,
+            )
+            .expect("agent thread after the upgrade");
+        assert_eq!(store.open_agent_threads().expect("count"), 1);
+        assert_eq!(
+            store.get(id).expect("get").expect("found").kind,
+            Some(ReviewKind::Flag)
+        );
+    }
+
+    #[test]
+    fn an_agent_thread_round_trips_its_author_kind_and_severity() {
+        let store = ReviewStore::open_in_memory().expect("open");
+        let id = store
+            .add_agent(
+                "src/a.rs",
+                &AgentThread {
+                    author: "agent:claude-code",
+                    kind: ReviewKind::Flag,
+                    severity: Some(ReviewSeverity::Medium),
+                    body: "guess",
+                },
+                &anchor("let x = 1;", 3),
+                7,
+            )
+            .expect("add");
+        let comment = store.get(id).expect("get").expect("found");
+        assert_eq!(comment.path, "src/a.rs");
+        assert_eq!(comment.body, "guess");
+        assert_eq!(comment.status, ReviewStatus::Open);
+        assert_eq!(comment.author.as_deref(), Some("agent:claude-code"));
+        assert_eq!(comment.kind, Some(ReviewKind::Flag));
+        assert_eq!(comment.severity, Some(ReviewSeverity::Medium));
+        assert_eq!(comment.anchor, anchor("let x = 1;", 3));
+        let person = store.add("a.rs", "mine", &anchor("x", 1), 8).expect("add");
+        let person = store.get(person).expect("get").expect("found");
+        assert_eq!(
+            (person.author, person.kind, person.severity),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn agent_threads_are_counted_per_repository_and_per_file_and_not_once_resolved() {
+        let store = ReviewStore::open_in_memory().expect("open");
+        let thread = agent_thread(ReviewKind::Note, "n");
+        for _ in 0..5 {
+            store
+                .add_agent("a.rs", &thread, &anchor("x", 1), 1)
+                .expect("add");
+        }
+        assert_eq!(store.open_agent_threads_on("a.rs").expect("count"), 5);
+        assert_eq!(store.open_agent_threads().expect("count"), 5);
+        let refused = store
+            .add_agent("a.rs", &thread, &anchor("x", 1), 1)
+            .expect_err("sixth on one file");
+        assert!(
+            refused.0.contains("this file already has 5"),
+            "{}",
+            refused.0
+        );
+        assert_eq!(
+            store.open_agent_threads().expect("count"),
+            5,
+            "nothing written"
+        );
+
+        store
+            .add_agent("b.rs", &thread, &anchor("x", 1), 1)
+            .expect("other file");
+        let first = store.list().expect("list")[0].id;
+        store
+            .set_status(first, ReviewStatus::Resolved, 2)
+            .expect("resolve");
+        assert_eq!(store.open_agent_threads_on("a.rs").expect("count"), 4);
+        store
+            .add_agent("a.rs", &thread, &anchor("x", 1), 3)
+            .expect("room again");
+
+        let person = store.add("a.rs", "mine", &anchor("x", 1), 4).expect("add");
+        store
+            .reply(person, "agent:test", "reply", 5, false)
+            .expect("reply");
+        assert_eq!(store.open_agent_threads_on("a.rs").expect("count"), 5);
+        assert_eq!(store.open_agent_threads().expect("count"), 6);
+    }
+
+    #[test]
+    fn the_repository_limit_refuses_a_thread_on_a_new_file() {
+        let store = ReviewStore::open_in_memory().expect("open");
+        let thread = agent_thread(ReviewKind::Question, "q");
+        for file in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+            for _ in 0..5 {
+                store
+                    .add_agent(file, &thread, &anchor("x", 1), 1)
+                    .expect("add");
+            }
+        }
+        let refused = store
+            .add_agent("e.rs", &thread, &anchor("x", 1), 1)
+            .expect_err("twenty-first");
+        assert!(
+            refused.0.contains("the repository already has 20"),
+            "{}",
+            refused.0
+        );
+        assert_eq!(store.open_agent_threads().expect("count"), 20);
     }
 }

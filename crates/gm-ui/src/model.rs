@@ -3238,6 +3238,10 @@ mod stash_tests {
             replies: Vec::new(),
             snapshot: Some("abc".into()),
             after_snapshot: None,
+            author: None,
+            kind: None,
+            severity: None,
+            needs_answer: false,
             location: Some(gm_schema::ReviewLocation {
                 start_line: 2,
                 end_line: 2,

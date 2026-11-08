@@ -12,9 +12,9 @@ use gm_schema::threads::{
     ProvenanceEdit, ProvenanceResult, ProvenanceThread, ThreadRelKind,
 };
 use gm_schema::{
-    CommandKind, EntryRole, Event, RepoStatus, ReviewChange, ReviewComment, ReviewReply,
-    ReviewStatus, SearchGroup, SearchOrder, SubmoduleChange, SubmoduleDetail, ThreadFilter,
-    ThreadHit,
+    CommandKind, EntryRole, Event, RepoStatus, ReviewAuthorFilter, ReviewChange, ReviewComment,
+    ReviewReply, ReviewStatus, SearchGroup, SearchOrder, SubmoduleChange, SubmoduleDetail,
+    ThreadFilter, ThreadHit,
 };
 use serde_json::{Map, Value, json};
 
@@ -337,7 +337,9 @@ fn review_comments_list(session: &mut Session, args: &Value) -> Result<Value, St
             ));
         }
     };
-    let comments = listed_comments(session.run(CommandKind::ListReviewComments)?)?;
+    let comments = listed_comments(session.run(CommandKind::ListReviewComments {
+        author: ReviewAuthorFilter::Human,
+    })?)?;
     let kept: Vec<Value> = comments
         .iter()
         .filter(|comment| wanted.is_none_or(|status| comment.status == status))

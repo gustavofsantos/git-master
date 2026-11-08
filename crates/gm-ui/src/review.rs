@@ -767,6 +767,10 @@ mod tests {
             replies: Vec::new(),
             snapshot: None,
             after_snapshot: None,
+            author: None,
+            kind: None,
+            severity: None,
+            needs_answer: false,
             location: location.map(|(start_line, end_line)| ReviewLocation {
                 start_line,
                 end_line,

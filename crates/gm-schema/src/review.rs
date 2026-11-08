@@ -11,6 +11,37 @@ pub enum ReviewStatus {
     Resolved,
 }
 
+/// What an agent's thread says (D200): a note asks nothing, a question needs the person's
+/// answer, a flag is a risk or a guess to look at. A person's comments have no kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewKind {
+    Note,
+    Question,
+    Flag,
+}
+
+/// How serious an agent's flag is (D200). Only a flag has one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewSeverity {
+    Low,
+    Medium,
+    High,
+}
+
+/// Which threads a list returns, by who started them (D200). `Human` is the default: the
+/// threads a person started, and the agent's that hold a reply from the person. `Agent`
+/// returns only the agent's threads; `Any` returns all of them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewAuthorFilter {
+    #[default]
+    Human,
+    Agent,
+    Any,
+}
+
 /// What a comment is attached to, as it was when the comment was made. The
 /// text is matched exactly, as whole lines; the context is kept for display
 /// only and never breaks a tie (D97).
@@ -78,6 +109,19 @@ pub struct ReviewComment {
     /// person's answers. Narrative only (D96): untrusted.
     #[serde(default)]
     pub replies: Vec<ReviewReply>,
+    /// Who started the thread: `None` for the person, `agent:<client>` for an agent (D200).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// What an agent's thread says (D200); `None` for the person's own comments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ReviewKind>,
+    /// How serious an agent's flag is (D200); `None` for any other comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<ReviewSeverity>,
+    /// True for a question that no person has answered and that is not resolved (D200).
+    /// Computed on read, as `outdated` is.
+    #[serde(default)]
+    pub needs_answer: bool,
 }
 
 /// The anchored lines of a comment as the two snapshots hold them (D140): the
@@ -125,6 +169,40 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_flag_carries_its_author_kind_and_severity() {
+        let json = serde_json::json!({
+            "id": 3,
+            "path": "a.rs",
+            "body": "unsafe here",
+            "status": "open",
+            "anchor": { "text": "x", "before": [], "after": [], "start_line": 1 },
+            "created_at": 5,
+            "resolved_at": null,
+            "snapshot": null,
+            "location": { "start_line": 1, "end_line": 1 },
+            "outdated": false,
+            "author": "agent:claude-code",
+            "kind": "flag",
+            "severity": "high"
+        });
+        let comment: ReviewComment = serde_json::from_value(json).unwrap();
+        assert_eq!(comment.author.as_deref(), Some("agent:claude-code"));
+        assert_eq!(comment.kind, Some(ReviewKind::Flag));
+        assert_eq!(comment.severity, Some(ReviewSeverity::High));
+        assert!(!comment.needs_answer);
+        let back = serde_json::to_value(&comment).unwrap();
+        assert_eq!(back["kind"], "flag");
+        assert_eq!(back["severity"], "high");
+    }
+
+    #[test]
+    fn the_author_filter_defaults_to_the_human() {
+        assert_eq!(ReviewAuthorFilter::default(), ReviewAuthorFilter::Human);
+        let json = serde_json::to_value(ReviewAuthorFilter::Any).unwrap();
+        assert_eq!(json, "any");
+    }
+
+    #[test]
     fn a_comment_lists_its_replies_and_no_summary() {
         let comment = ReviewComment {
             id: 1,
@@ -149,9 +227,15 @@ mod tests {
                 body: "renamed".into(),
                 created_at: 6,
             }],
+            author: None,
+            kind: None,
+            severity: None,
+            needs_answer: false,
         };
         let json = serde_json::to_value(&comment).unwrap();
         assert!(json.get("summary").is_none());
+        assert!(json.get("kind").is_none(), "a person's comment has no kind");
+        assert!(json.get("author").is_none());
         assert_eq!(json["replies"][0]["author"], "agent:claude-code");
         let back: ReviewComment = serde_json::from_value(json).unwrap();
         assert_eq!(back, comment);

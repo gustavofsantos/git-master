@@ -750,6 +750,8 @@ Requested by the author on 2026-11-07. Behavior in `docs/agents/local-review.md`
 
 **Sub-slices.** A1 store and command: review schema v5 with `kind`, `severity`, an author on roots, the limits, `CreateAgentComment` and the default list filter. A2 MCP: `review_comment_create`, the `author` filter of `review_comments_list`, fields in the results. A3 UI: kind and severity chips, **Agent-written**, **Needs answer** badge and count, Local review filter. A4 plugin: the `inbox` skill and the `gitmaster` skill update. Order A1, A2, A4, A3.
 
+**A1** (done 2026-11-07, with gaps): review schema v5 (`kind`, `severity`), `CreateAgentReviewComment`, the limits, the human-only close, `needs_answer` and the `author` list filter (`ReviewAuthorFilter`), with real-Git and store tests. Known gaps: no MCP tool, UI or skill yet (A2 to A4), so the docs stay `Planned`; the MCP `review_comments_list` already uses the human default; nothing seen in a window.
+
 **Acceptance.** Real-Git tests: an agent creates a thread on a unique anchor; a missing or ambiguous anchor and the limits are refused; the agent cannot resolve or reopen it; a person's reply makes it appear in the default list; an agent thread is not handed back as work before a reply. A4 is tried in a real session and what was seen is stated.
 
 ## Slice 8r: reviewers, verdicts and gates (decided 2026-11-07, after slice 6m; D188, D189, Q37, Q39, Q40)

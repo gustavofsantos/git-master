@@ -11,7 +11,7 @@ use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
 use crate::restack::{RestackPlan, RestackRecord, RestackResolution};
-use crate::review::{ReviewChange, ReviewComment};
+use crate::review::{ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewKind, ReviewSeverity};
 use crate::stack::StackSnapshot;
 use crate::stash::StashEntry;
 use crate::status::{
@@ -629,9 +629,28 @@ pub enum CommandKind {
         text: String,
         body: String,
     },
-    /// Lists every review comment, with where its anchor is in the file now.
-    /// Answers `ReviewCommentsListed`. A read: never recorded (D28).
-    ListReviewComments,
+    /// Lists the review comments, with where each anchor is in the file now. `author`
+    /// picks the threads by who started them (D200): by default the person's own, and the
+    /// agent's that hold a reply from the person. Answers `ReviewCommentsListed`. A read:
+    /// never recorded (D28).
+    ListReviewComments {
+        #[serde(default)]
+        author: ReviewAuthorFilter,
+    },
+    /// Starts a review thread on `anchor_text`, lines joined with `\n`, which must be
+    /// in `path` in the working tree exactly once; otherwise it is refused and nothing is
+    /// written (D200). Only an agent starts one, and its author is the agent. A flag takes
+    /// a `severity` and no other kind does. Refused when the repository already has 20 open
+    /// agent threads or the file has 5. A snapshot is taken as for a person's comment
+    /// (D140). Answers `ReviewCommentsListed`.
+    CreateAgentReviewComment {
+        path: String,
+        anchor_text: String,
+        kind: ReviewKind,
+        body: String,
+        #[serde(default)]
+        severity: Option<ReviewSeverity>,
+    },
     /// Replaces the body of review comment `id`. Human only.
     EditReviewComment {
         id: i64,
@@ -1779,8 +1798,31 @@ mod tests {
                 body: "why".into()
             }
         );
-        let list = serde_json::to_value(CommandKind::ListReviewComments).unwrap();
+        let list = serde_json::to_value(CommandKind::ListReviewComments {
+            author: ReviewAuthorFilter::Any,
+        })
+        .unwrap();
         assert_eq!(list["type"], "list_review_comments");
+        assert_eq!(list["author"], "any");
+        let bare: CommandKind =
+            serde_json::from_value(serde_json::json!({ "type": "list_review_comments" })).unwrap();
+        assert_eq!(
+            bare,
+            CommandKind::ListReviewComments {
+                author: ReviewAuthorFilter::Human
+            }
+        );
+        let flag = serde_json::to_value(CommandKind::CreateAgentReviewComment {
+            path: "a.rs".to_owned(),
+            anchor_text: "x".to_owned(),
+            kind: ReviewKind::Flag,
+            body: "guess".to_owned(),
+            severity: Some(ReviewSeverity::Low),
+        })
+        .unwrap();
+        assert_eq!(flag["type"], "create_agent_review_comment");
+        assert_eq!(flag["kind"], "flag");
+        assert_eq!(flag["severity"], "low");
         let change = serde_json::to_value(CommandKind::LoadReviewChange { id: 3 }).unwrap();
         assert_eq!(change["type"], "load_review_change");
         assert_eq!(change["id"], 3);
