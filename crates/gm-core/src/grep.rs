@@ -15,7 +15,7 @@ use gm_schema::{
     GREP_FILE_LIMIT, GREP_LINE_LIMIT, GREP_TOTAL_LIMIT, GrepFile, GrepLine, GrepOptions,
     GrepResult, GrepScope,
 };
-use regex::{Regex, RegexBuilder};
+use regex::bytes::{Regex, RegexBuilder};
 
 /// A search the engine accepted: the text, how to read it and where to look.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -361,7 +361,12 @@ fn highlighter(request: &GrepRequest) -> Option<Regex> {
     } else {
         body
     };
+    // ASCII-only case folding and word boundaries, as `git grep -i` and `-w` match: with
+    // Unicode on, `k` would also mark the Kelvin sign and `s` the long s, which Git does not
+    // match. The regex runs on bytes, so `.` may stop inside a character; `shape_line` widens
+    // each mark to whole characters.
     RegexBuilder::new(&pattern)
+        .unicode(false)
         .case_insensitive(!request.options.case_sensitive)
         .size_limit(1 << 20)
         .build()
@@ -389,7 +394,17 @@ pub fn shape_line(raw: &[u8], column: usize, highlight: Option<&Regex>, number: 
         indent
     };
     let marks: Vec<(usize, usize)> = highlight
-        .map(|re| re.find_iter(text).map(|m| (m.start(), m.end())).collect())
+        .map(|re| {
+            re.find_iter(text.as_bytes())
+                .map(|m| {
+                    (
+                        floor_boundary(text, m.start()),
+                        ceil_boundary(text, m.end()),
+                    )
+                })
+                .filter(|(a, b)| a < b)
+                .collect()
+        })
         .unwrap_or_default();
     cut(text, start, number, &marks)
 }
@@ -399,13 +414,23 @@ pub fn shape_line(raw: &[u8], column: usize, highlight: Option<&Regex>, number: 
 fn cut(text: &str, start: usize, number: u32, marks: &[(usize, usize)]) -> GrepLine {
     let content_start = text.len() - text.trim_start().len();
     let end = floor_boundary(text, (start + GREP_LINE_LIMIT).min(text.len()));
+    // A match is never cut in half: an edge that falls inside one moves out of it, so the
+    // window holds each match whole or not at all. Matches do not overlap, and the window's
+    // first match starts after `start`, so the start only moves forward to an earlier match's
+    // end and the end only moves back to a later match's start: the window never grows.
+    let start = marks
+        .iter()
+        .find(|&&(a, b)| a < start && start < b)
+        .map_or(start, |&(_, b)| b);
+    let end = marks
+        .iter()
+        .find(|&&(a, b)| a < end && end < b)
+        .map_or(end, |&(a, _)| a.max(start));
     let window = &text[start..end];
     let ranges = marks
         .iter()
-        .filter_map(|&(a, b)| {
-            let (a, b) = (a.max(start), b.min(end));
-            (a < b).then(|| (a - start, b - start))
-        })
+        .filter(|&&(a, b)| start <= a && b <= end && a < b)
+        .map(|&(a, b)| (a - start, b - start))
         .collect();
     GrepLine {
         line: number,
@@ -417,6 +442,14 @@ fn cut(text: &str, start: usize, number: u32, marks: &[(usize, usize)]) -> GrepL
 }
 
 /// The largest index at or below `at` that is a character boundary of `text`.
+fn ceil_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at += 1;
+    }
+    at
+}
+
 fn floor_boundary(text: &str, at: usize) -> usize {
     let mut at = at.min(text.len());
     while !text.is_char_boundary(at) {
@@ -917,6 +950,60 @@ mod tests {
 
         assert_eq!(merged.listed, GREP_TOTAL_LIMIT);
         assert!(!merged.truncated);
+    }
+
+    #[test]
+    fn case_folds_as_git_does_ascii_only() {
+        let request = GrepRequest::new("k", GrepOptions::default(), "").unwrap();
+        let re = highlighter(&request);
+        // The Kelvin sign folds to k in Unicode, but `git grep -i` does not match it.
+        let line = shape_line("a\u{212A}b K k".as_bytes(), 1, re.as_ref(), 1);
+        assert_eq!(line.ranges, vec![(6, 7), (8, 9)]);
+        let request = GrepRequest::new("é", GrepOptions::default(), "").unwrap();
+        let line = shape_line("café".as_bytes(), 1, highlighter(&request).as_ref(), 1);
+        assert_eq!(line.ranges, vec![(3, 5)]);
+    }
+
+    #[test]
+    fn a_regex_mark_that_stops_inside_a_character_covers_the_whole_character() {
+        let options = GrepOptions {
+            regex: true,
+            ..GrepOptions::default()
+        };
+        let request = GrepRequest::new("a.", options, "").unwrap();
+        let line = shape_line("xaéy".as_bytes(), 1, highlighter(&request).as_ref(), 1);
+        assert_eq!(line.ranges, vec![(1, 4)]);
+    }
+
+    #[test]
+    fn a_match_across_the_end_of_the_window_is_left_out_whole_not_cut_in_half() {
+        let request = GrepRequest::new("up", GrepOptions::default(), "").unwrap();
+        let re = highlighter(&request);
+        // "up" at bytes 299..301 sits across the 300-byte window of a line matched at column 1.
+        let text = format!("up{}up{}", "x".repeat(297), "y".repeat(100));
+        let line = shape_line(text.as_bytes(), 1, re.as_ref(), 1);
+        assert!(line.cut_end);
+        assert_eq!(line.text.len(), 299);
+        assert_eq!(line.ranges, vec![(0, 2)]);
+    }
+
+    #[test]
+    fn a_match_across_the_start_of_the_window_is_left_out_whole_not_cut_in_half() {
+        let request = GrepRequest::new("abc", GrepOptions::default(), "").unwrap();
+        let re = highlighter(&request);
+        // The window starts 75 bytes before the match at byte 500, inside the "abc" at 424..427.
+        let text = format!(
+            "{}abc{}abc{}",
+            "x".repeat(424),
+            "y".repeat(73),
+            "z".repeat(400)
+        );
+        let line = shape_line(text.as_bytes(), 501, re.as_ref(), 1);
+        assert!(line.cut_start);
+        for &(a, b) in &line.ranges {
+            assert_eq!(&line.text[a..b], "abc");
+        }
+        assert_eq!(line.ranges.len(), 1);
     }
 
     proptest! {

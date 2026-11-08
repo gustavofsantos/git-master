@@ -185,7 +185,7 @@ The search starts 250 ms after you stop typing. Press Enter to start it at once.
 
 | Switch | Effect |
 |---|---|
-| **Aa** | Match case. |
+| **Aa** | Match case. With it off, only the letters A to Z ignore case, as in Git: `k` does not match the Kelvin sign `K`. |
 | **ab** | Whole word: the text must match complete words. |
 | **.\*** | Regular expression: the text is read as a pattern. |
 | **new** | Include new files: files Git does not track yet, unless `.gitignore` hides them. Searches include them by default. |
@@ -207,7 +207,7 @@ A word that names a submodule's folder, or a path inside it, such as `service-a/
 ### Read the results
 
 - Results are grouped by file. Each group shows the file name, its folder, and the number of matches.
-- Each matching line is shown with the matched text highlighted.
+- Each matching line is shown with the matched text highlighted. A long line is cut so that no highlighted match is split at its edge.
 - Click a file header to fold or unfold its lines.
 - Click a line to open the file at that line on the **Files** tab.
 - The summary line above the results shows the state of the search. While it runs, it says **Searching…**. When it ends, it gives the number of matches and of files. If Git reports an error, for example for an invalid regular expression or pathspec, the summary shows Git's message as it is.
