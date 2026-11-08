@@ -936,12 +936,13 @@ mod tests {
             .iter()
             .filter(|action| action.spec().category == Category::Workspaces)
             .count();
-        // Choose Parent is only the second step of Set Parent….
+        // Choose Parent is only the second step of Set Parent…; the folder actions run from a
+        // folder's box in the Changes list.
         let unlisted = Action::ALL
             .iter()
             .filter(|action| !action.listed_in_palette())
             .count();
-        assert_eq!(unlisted, 1);
+        assert_eq!(unlisted, 3);
         assert_eq!(
             actions,
             Action::ALL.len() - worktree_actions - workspace_actions - unlisted

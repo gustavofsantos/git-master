@@ -1367,7 +1367,9 @@ impl StatusView {
         if self.model.select_file_step(down) {
             self.load_selected(cx);
         }
-        if let Some(row) = self.model.selected_row() {
+        if let Some(row) = self.model.selected_row().and_then(|index| {
+            crate::change_tree::row_of(&crate::change_tree::rows(self.model.entries()), index)
+        }) {
             self.scroll.scroll_to_item(row, gpui::ScrollStrategy::Top);
         }
         cx.notify();

@@ -739,6 +739,18 @@ pub fn split_pairs(
     pairs
 }
 
+/// Adds the missing half of every pair that the selection splits, on both
+/// sides, so that each pair is either wholly selected or wholly not. A pair
+/// that is already whole is left as it is.
+pub fn complete_pairs(diffs: Diffs<'_>, selection: &mut Selection) {
+    for side in [Side::Unstaged, Side::Staged] {
+        for (hunk_index, (old, new)) in split_pairs(diffs, selection, side) {
+            selection.keys.insert((side, hunk_index, index_usize(old)));
+            selection.keys.insert((side, hunk_index, index_usize(new)));
+        }
+    }
+}
+
 /// What an apply key does to the selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Apply {
@@ -807,6 +819,10 @@ pub fn hunk_header_text(hunk: &Hunk) -> String {
 
 fn index_u32(index: usize) -> u32 {
     u32::try_from(index).unwrap_or(u32::MAX)
+}
+
+fn index_usize(index: u32) -> usize {
+    usize::try_from(index).unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]
@@ -1221,6 +1237,47 @@ mod tests {
         assert!(split_pairs(d, &sel, Side::Staged).is_empty());
         sel.toggle_line(d, (Side::Unstaged, 0, 2));
         assert!(split_pairs(d, &sel, Side::Unstaged).is_empty());
+    }
+
+    #[test]
+    fn complete_pairs_adds_the_missing_half_of_a_split_pair() {
+        let unstaged = [simple("u0")];
+        let d = diffs(&unstaged, &[]);
+        let mut sel = Selection::default();
+        sel.toggle_line(d, (Side::Unstaged, 0, 1));
+        assert_eq!(split_pairs(d, &sel, Side::Unstaged), vec![(0, (1, 2))]);
+        complete_pairs(d, &mut sel);
+        assert!(sel.contains((Side::Unstaged, 0, 2)));
+        assert!(split_pairs(d, &sel, Side::Unstaged).is_empty());
+        assert!(split_pairs(d, &sel, Side::Staged).is_empty());
+    }
+
+    #[test]
+    fn complete_pairs_leaves_a_whole_pair_unchanged() {
+        let unstaged = [simple("u0")];
+        let d = diffs(&unstaged, &[]);
+        let mut sel = Selection::default();
+        sel.toggle_line(d, (Side::Unstaged, 0, 1));
+        sel.toggle_line(d, (Side::Unstaged, 0, 2));
+        let before = sel.clone();
+        complete_pairs(d, &mut sel);
+        assert_eq!(sel, before);
+    }
+
+    #[test]
+    fn complete_pairs_covers_both_sides_and_leaves_no_split() {
+        let unstaged = [simple("u0")];
+        let staged = [simple("s0")];
+        let d = diffs(&unstaged, &staged);
+        let mut sel = Selection::default();
+        sel.toggle_line(d, (Side::Unstaged, 0, 1));
+        sel.toggle_line(d, (Side::Staged, 0, 2));
+        assert_eq!(split_pairs(d, &sel, Side::Unstaged).len(), 1);
+        assert_eq!(split_pairs(d, &sel, Side::Staged).len(), 1);
+        complete_pairs(d, &mut sel);
+        assert!(split_pairs(d, &sel, Side::Unstaged).is_empty());
+        assert!(split_pairs(d, &sel, Side::Staged).is_empty());
+        assert_eq!(sel.len(), 4);
     }
 
     #[test]

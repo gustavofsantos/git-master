@@ -19,11 +19,11 @@ use gpui::{
 use crate::action_registry::{Action, Args};
 use crate::diff_rows::{
     Apply, Cell, Diffs, Layout, LineKey, Mode, Press, Row, Selection, Side, SplitRow, SplitRows,
-    StackFile, build_rows, build_stack, change_counts, changed_keys_between, concat_hunks,
-    controls, default_side, file_at_row, file_notice, hunk_header_text, hunk_selection_count,
-    hunks_of, max_scroll_columns, next_changed_line, next_hunk_header, no_newline_mark,
-    notice_text, press, prev_changed_line, prev_hunk_header, scroll_padding, skip_columns,
-    split_cell_on_cursor, split_pairs, split_rows, step_from_top,
+    StackFile, build_rows, build_stack, change_counts, changed_keys_between, complete_pairs,
+    concat_hunks, controls, default_side, file_at_row, file_notice, hunk_header_text,
+    hunk_selection_count, hunks_of, max_scroll_columns, next_changed_line, next_hunk_header,
+    no_newline_mark, notice_text, press, prev_changed_line, prev_hunk_header, scroll_padding,
+    skip_columns, split_cell_on_cursor, split_pairs, split_rows, step_from_top,
 };
 use crate::icon::{self, Icon};
 use crate::review::{
@@ -1071,8 +1071,8 @@ impl DiffPane {
             let active = self.layout == layout;
             div()
                 .id(label)
-                .px_3()
-                .h(px(24.))
+                .px_2()
+                .h(px(22.))
                 .flex()
                 .items_center()
                 .rounded_sm()
@@ -1464,8 +1464,8 @@ impl DiffPane {
         })
     }
 
-    /// The file's path and its `+ −` counts on the left, the side selector on
-    /// the right, and under them a one-line summary of the side's chunks.
+    /// One row: the file's path, its `+ − · chunks` counts, and on the right the
+    /// comment button and the side and layout switches.
     fn file_header(&self, cx: &Context<Self>) -> Option<Div> {
         let path = self.path()?;
         let hunks = hunks_of(match self.side {
@@ -1473,14 +1473,17 @@ impl DiffPane {
             Side::Staged => self.staged.as_ref(),
         });
         let (added, removed) = change_counts(hunks);
-        let top = div()
+        let row = div()
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
             .gap_3()
             .px_3()
-            .pt_2()
+            .py_2()
+            .bg(theme::panel())
+            .border_b_1()
+            .border_color(theme::hairline())
             .child(
                 div()
                     .flex()
@@ -1501,8 +1504,9 @@ impl DiffPane {
                     .child(
                         div()
                             .flex_none()
+                            .whitespace_nowrap()
                             .text_color(theme::muted())
-                            .child(format!("+{added} −{removed}")),
+                            .child(header_counts(hunks.len(), added, removed)),
                     ),
             )
             .child(
@@ -1527,23 +1531,7 @@ impl DiffPane {
                             .then(|| self.layout_selector(cx)),
                     ),
             );
-        let summary = (!hunks.is_empty()).then(|| {
-            div()
-                .px_3()
-                .pb_2()
-                .text_color(theme::muted())
-                .child(summary_text(hunks.len(), added, removed))
-        });
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .bg(theme::panel())
-                .border_b_1()
-                .border_color(theme::hairline())
-                .child(top)
-                .children(summary),
-        )
+        Some(row)
     }
 
     /// The two-way switch "Staged | Unstaged", styled like the sidebar's.
@@ -1552,8 +1540,8 @@ impl DiffPane {
             let active = self.side == side;
             div()
                 .id(label)
-                .px_3()
-                .h(px(24.))
+                .px_2()
+                .h(px(22.))
                 .flex()
                 .items_center()
                 .rounded_sm()
@@ -1582,7 +1570,8 @@ impl DiffPane {
     }
 
     /// The bar at the bottom of the pane while the selection splits a pair.
-    fn warning_bar(&self) -> Option<Div> {
+    /// "Select the pair" adds the missing half of each split pair.
+    fn warning_bar(&self, cx: &Context<Self>) -> Option<Div> {
         let diffs = self.diffs();
         let splits = split_pairs(diffs, &self.selection, Side::Unstaged).len()
             + split_pairs(diffs, &self.selection, Side::Staged).len();
@@ -1609,10 +1598,28 @@ impl DiffPane {
                         .gap_2()
                         .child(icon::view(Icon::Warning, icon::SMALL, theme::warn_fg()))
                         // A flexible box lets the text wrap inside the pane's width.
-                        .child(div().flex_1().min_w(px(0.)).child(PAIR_WARNING)),
+                        .child(div().flex_1().min_w(px(0.)).child(PAIR_WARNING))
+                        .child(
+                            chunk_button("select-pair", "Select the pair", true, theme::warn_fg())
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.select_pairs(cx);
+                                })),
+                        ),
                 )
                 .children(hint.map(|text| div().child(text))),
         )
+    }
+
+    /// Adds the missing half of every split pair, so the selection splits none.
+    /// Ends a pending two-press apply, since the selection it warned about is gone.
+    fn select_pairs(&mut self, cx: &mut Context<Self>) {
+        let diffs = sides(self.unstaged.as_ref(), self.staged.as_ref());
+        complete_pairs(diffs, &mut self.selection);
+        // Visual mode would rebuild the selection from its range on the next move and split
+        // the pair again, so it ends here and the completed selection stays.
+        self.visual = None;
+        self.pending = None;
+        cx.notify();
     }
 
     /// A hunk's header row: its text, its line count, and on the right the chunk
@@ -2088,17 +2095,15 @@ fn chunk_label(side: Side) -> &'static str {
     }
 }
 
-/// "2 chunks, 3 insertions, 4 deletions", with the singular where it is one.
-fn summary_text(chunks: usize, insertions: usize, deletions: usize) -> String {
-    let noun = |count: usize, one: &str, many: &str| {
-        format!("{count} {}", if count == 1 { one } else { many })
-    };
-    format!(
-        "{}, {}, {}",
-        noun(chunks, "chunk", "chunks"),
-        noun(insertions, "insertion", "insertions"),
-        noun(deletions, "deletion", "deletions"),
-    )
+/// "+3 −4 · 2 chunks", with the singular for one chunk. With no chunks it is
+/// just "+0 −0".
+fn header_counts(chunks: usize, added: usize, removed: usize) -> String {
+    let counts = format!("+{added} −{removed}");
+    match chunks {
+        0 => counts,
+        1 => format!("{counts} · 1 chunk"),
+        many => format!("{counts} · {many} chunks"),
+    }
 }
 
 /// A small outlined button for a chunk header.
@@ -2249,7 +2254,7 @@ impl Render for DiffPane {
                 self.file_header(cx)
             })
             .child(body)
-            .children(self.warning_bar())
+            .children(self.warning_bar(cx))
     }
 }
 
@@ -2420,9 +2425,10 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_counts_chunks_insertions_and_deletions_in_the_plural_and_singular() {
-        assert_eq!(summary_text(2, 3, 4), "2 chunks, 3 insertions, 4 deletions");
-        assert_eq!(summary_text(1, 1, 0), "1 chunk, 1 insertion, 0 deletions");
+    fn the_header_counts_show_lines_and_chunks_in_the_plural_and_singular() {
+        assert_eq!(header_counts(0, 0, 0), "+0 −0");
+        assert_eq!(header_counts(1, 1, 0), "+1 −0 · 1 chunk");
+        assert_eq!(header_counts(2, 3, 4), "+3 −4 · 2 chunks");
     }
 
     #[test]

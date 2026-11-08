@@ -11,6 +11,7 @@ mod branch_drag;
 mod branch_filter;
 mod branch_menu;
 mod branches;
+mod change_tree;
 mod changes;
 mod code_page;
 mod command_panel;

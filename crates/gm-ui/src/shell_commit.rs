@@ -139,7 +139,7 @@ impl StatusView {
         let button = commit_button(&branch, enabled, cx);
         let height_strip = resize_handle::handle(
             "commit-height-resize",
-            Edge::Top,
+            Edge::Bottom,
             height,
             COMMIT,
             |this: &mut StatusView, height, _| this.commit_height = height,
@@ -154,7 +154,7 @@ impl StatusView {
             .gap_2()
             .p_3()
             .bg(theme::panel())
-            .border_t_1()
+            .border_b_1()
             .border_color(theme::hairline())
             .child(
                 div()

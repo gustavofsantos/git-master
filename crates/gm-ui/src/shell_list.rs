@@ -1,5 +1,5 @@
-//! The left column of the Working Copy window: the heading, the flat change
-//! list and, at its bottom, the commit box.
+//! The left column of the Changes page: the commit box at its top (UI redesign, slice 2), then
+//! the heading and the change list, its files grouped under their folders with a box each.
 
 use std::ops::Range;
 
@@ -10,6 +10,7 @@ use gpui::{
 };
 
 use crate::action_registry::{Action, Args};
+use crate::change_tree::{self, Check, Row};
 use crate::icon::{self, Icon};
 use crate::move_file;
 use crate::resize::{self, LEFT};
@@ -49,9 +50,9 @@ impl StatusView {
             .flex_col()
             .border_r_1()
             .border_color(theme::hairline())
+            .child(self.commit_block(commit_height, cx))
             .child(self.heading())
             .child(self.change_list(cx))
-            .child(self.commit_block(commit_height, cx))
             .child(width_strip)
     }
 
@@ -82,7 +83,7 @@ impl StatusView {
     /// The file list. It is always rendered and always holds the list focus,
     /// so the list keys have a place to go even when there is nothing to list.
     fn change_list(&self, cx: &Context<Self>) -> Div {
-        let count = self.model.entry_count();
+        let count = change_tree::rows(self.model.entries()).len();
         div()
             .flex_1()
             .min_h(px(0.))
@@ -128,13 +129,33 @@ impl StatusView {
                             let selected = this.model.selected_row();
                             let entries = this.model.entries();
                             let submodules = &this.model.submodules;
-                            entries
-                                .get(range.clone())
+                            let rows = change_tree::rows(entries);
+                            rows.get(range.clone())
                                 .unwrap_or_default()
                                 .iter()
                                 .zip(range)
-                                .map(|(entry, index)| {
-                                    file_row(entry, selected == Some(index), index, submodules, cx)
+                                .map(|(row, position)| match row {
+                                    Row::Folder { path, check } => {
+                                        folder_row(path, *check, position, cx).into_any_element()
+                                    }
+                                    Row::File {
+                                        index,
+                                        name,
+                                        check,
+                                        indented,
+                                    } => {
+                                        let Some(entry) = entries.get(*index) else {
+                                            return div().into_any_element();
+                                        };
+                                        let shown = Shown {
+                                            name,
+                                            check: *check,
+                                            indented: *indented,
+                                            selected: selected == Some(*index),
+                                        };
+                                        file_row(entry, &shown, *index, submodules, cx)
+                                            .into_any_element()
+                                    }
                                 })
                                 .collect()
                         },
@@ -162,30 +183,33 @@ impl StatusView {
 /// icon instead of the letter, and its branch and marks after its path (D175).
 fn file_row(
     entry: &StatusEntry,
-    selected: bool,
+    shown: &Shown<'_>,
     index: usize,
     submodules: &Submodules,
     cx: &Context<StatusView>,
 ) -> Stateful<Div> {
+    let selected = shown.selected;
     let (letter, colour) = status_letter(entry);
     let label = match entry.orig_path.as_deref() {
-        Some(orig) => format!("{}  ← {orig}", entry.path),
-        None => entry.path.clone(),
+        Some(orig) => format!("{}  ← {orig}", shown.name),
+        None => shown.name.to_owned(),
     };
     let marks = entry
         .submodule
         .map(|change| submodule::marks(change, submodules.detail(&entry.path)).join(" · "));
     let is_submodule = entry.submodule.is_some();
     let path = entry.path.clone();
-    let staged_mark =
-        (entry.staged.is_some() && !entry.conflicted && !entry.untracked).then(|| {
-            div()
-                .id(("staged-mark", index))
-                .size(px(5.))
-                .flex_none()
-                .rounded_full()
-                .bg(theme::staged())
-        });
+    let check = shown.check.map(|check| {
+        let action = check.file_action();
+        let target = entry.path.clone();
+        checkbox(("file-check", index), check).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                this.run_action(action, &Args::File(target.clone()), window, cx);
+            }),
+        )
+    });
     let row = div()
         .id(("file-row", index))
         .w_full()
@@ -195,6 +219,7 @@ fn file_row(
         .gap_2()
         .h(px(ROW_HEIGHT))
         .px_3()
+        .when(shown.indented, |row| row.pl(px(INDENT)))
         .when(selected, |row| row.bg(theme::selected_row()))
         .cursor_pointer()
         .on_mouse_down(
@@ -213,6 +238,7 @@ fn file_row(
                 this.open_file_menu(index, event.position, window, cx);
             }),
         )
+        .child(div().w(px(14.)).flex_none().children(check))
         .child(match entry.submodule {
             Some(_) => div()
                 .w(px(14.))
@@ -229,7 +255,6 @@ fn file_row(
                 .child(letter.to_string())
                 .into_any_element(),
         })
-        .child(div().w(px(6.)).flex_none().children(staged_mark))
         .child(
             div()
                 .flex_1()
@@ -250,6 +275,81 @@ fn file_row(
         }));
     // A changed file is dragged onto a sidebar row to move its change (D109).
     move_file::drag_source(row, &entry.path, cx)
+}
+
+/// How a file row is drawn: its name in its folder, its box, its indent and its selection.
+struct Shown<'a> {
+    name: &'a str,
+    check: Option<Check>,
+    indented: bool,
+    selected: bool,
+}
+
+/// The left padding of a file drawn under its folder's row.
+const INDENT: f32 = 28.;
+
+/// A folder of the list: its tri-state box, which stages or unstages the files in it, and
+/// its path, muted.
+fn folder_row(
+    path: &str,
+    check: Option<Check>,
+    position: usize,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    let check = check.map(|check| {
+        let action = check.folder_action();
+        let target = path.to_owned();
+        checkbox(("folder-check", position), check).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.run_action(action, &Args::File(target.clone()), window, cx);
+            }),
+        )
+    });
+    div()
+        .id(("folder-row", position))
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .px_3()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(div().w(px(14.)).flex_none().children(check))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .font_family(theme::code_font())
+                .text_color(theme::muted())
+                .child(path.to_owned()),
+        )
+}
+
+/// A box in one of three states: checked (all staged), mixed (part staged), unchecked.
+fn checkbox(id: (&'static str, usize), check: Check) -> Stateful<Div> {
+    let on = check != Check::Unchecked;
+    div()
+        .id(id)
+        .size(px(12.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(if on { theme::accent() } else { theme::muted() })
+        .when(check == Check::Checked, |this| {
+            this.bg(theme::accent())
+                .child(icon::view(Icon::Check, px(10.), theme::ground()))
+        })
+        .when(check == Check::Mixed, |this| {
+            this.child(div().w(px(6.)).h(px(2.)).bg(theme::accent()))
+        })
+        .cursor_pointer()
 }
 
 /// The letter that stands for the file: `?` untracked, `U` conflicted, else the

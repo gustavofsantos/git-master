@@ -521,7 +521,7 @@ pub struct MemoryRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 119] = [
+const SPECS: [Spec; 121] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1349,6 +1349,20 @@ const SPECS: [Spec; 119] = [
         ArgKind::None,
         Category::Repository,
     ),
+    spec(
+        "folder.stage",
+        "Stage Folder",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "folder.unstage",
+        "Unstage Folder",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
+    ),
 ];
 
 const fn spec(
@@ -1510,6 +1524,10 @@ pub enum Action {
     OpenSettings,
     /// Undoes the last operation of the operation log that can be undone (UI redesign, slice 1).
     UndoLastOperation,
+    /// Stages every file of a folder of the Changes list, from its tri-state box (slice 2).
+    StageFolder,
+    /// Unstages every file of a folder of the Changes list, from its tri-state box (slice 2).
+    UnstageFolder,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1571,6 +1589,58 @@ fn undo_rule(ctx: &Context<'_>) -> Result<(), Reason> {
     } else {
         Err("Nothing to undo.")
     }
+}
+
+/// The rule of Stage Folder and Unstage Folder: an idle repository and a folder of the list
+/// (its path with a trailing `/`) with a file the action changes. Gives those files' paths.
+/// Conflicted files and submodules are left out: they have no box in the list.
+fn folder_rule<'a>(action: Action, args: &Args, ctx: &Context<'a>) -> Result<Vec<&'a str>, Reason> {
+    idle(ctx)?;
+    let Args::File(folder) = args else {
+        return Err("No target for this action");
+    };
+    let stage = action == Action::StageFolder;
+    let files: Vec<&'a str> = ctx
+        .entries
+        .iter()
+        .filter(|entry| crate::change_tree::folder_of(&entry.path) == folder.as_str())
+        .filter(|entry| !entry.conflicted && entry.submodule.is_none())
+        .filter(|entry| {
+            if stage {
+                has_unstaged(entry)
+            } else {
+                entry.staged.is_some()
+            }
+        })
+        .map(|entry| entry.path.as_str())
+        .collect();
+    if !files.is_empty() {
+        Ok(files)
+    } else if stage {
+        Err("Nothing unstaged in this folder")
+    } else {
+        Err("Nothing staged in this folder")
+    }
+}
+
+/// The commands of Stage Folder and Unstage Folder: one per file the rule gives, in order.
+fn folder_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
+    let stage = action == Action::StageFolder;
+    Ok(Effect::Send(
+        folder_rule(action, args, ctx)?
+            .into_iter()
+            .map(|path| {
+                let target = StageTarget::File {
+                    path: path.to_owned(),
+                };
+                if stage {
+                    CommandKind::Stage { target }
+                } else {
+                    CommandKind::Unstage { target }
+                }
+            })
+            .collect(),
+    ))
 }
 
 /// The rule of Resolve Conflict: an open repository and a listed file that is
@@ -1952,7 +2022,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 119] = [
+    pub const ALL: [Action; 121] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -2072,6 +2142,8 @@ impl Action {
         Action::ShowInbox,
         Action::OpenSettings,
         Action::UndoLastOperation,
+        Action::StageFolder,
+        Action::UnstageFolder,
     ];
 
     #[must_use]
@@ -2137,7 +2209,10 @@ impl Action {
     /// only the second step of Set Parent…, so it is reached from there.
     #[must_use]
     pub fn listed_in_palette(self) -> bool {
-        self != Action::ChooseStackParent
+        !matches!(
+            self,
+            Action::ChooseStackParent | Action::StageFolder | Action::UnstageFolder
+        )
     }
 
     /// Whether a menu asks before it runs the action, though it destroys
@@ -2419,6 +2494,7 @@ impl Action {
             | Action::ShowLocalReview
             | Action::ShowInbox => repository_open(ctx),
             Action::UndoLastOperation => undo_rule(ctx),
+            Action::StageFolder | Action::UnstageFolder => folder_rule(self, args, ctx).map(|_| ()),
             Action::LabelNew => label_new_rule(ctx),
             Action::LabelRename | Action::LabelDelete => label_rule(args, ctx),
             Action::CheckoutBranch => {
@@ -2590,6 +2666,7 @@ impl Action {
             }
             (Action::ConvertHooks, _) => Effect::Send(vec![CommandKind::ConvertHooksToWorkflows]),
             (Action::UndoLastOperation, _) => Effect::UndoLastOperation,
+            (Action::StageFolder | Action::UnstageFolder, _) => folder_effect(self, args, ctx)?,
             (action, _) if action.is_workflow_rule() => workflow_effect(action, args, ctx)?,
             (action, _) if action.is_thread_action() => thread_effect(action, args)?,
             (action, _) if action.is_label_action() => label_effect(action, args)?,
@@ -3585,6 +3662,40 @@ mod tests {
             hunk: HunkId("h1".into()),
             side,
         }
+    }
+
+    #[test]
+    fn a_folder_box_stages_or_unstages_each_file_directly_in_the_folder() {
+        let entries = [
+            entry("src/a.rs", None, Some(Change::Modified)),
+            entry("src/b.rs", Some(Change::Modified), None),
+            entry("src/ui/c.rs", None, Some(Change::Modified)),
+            entry("README.md", None, Some(Change::Modified)),
+        ];
+        let context = ctx(&entries, "");
+        let folder = Args::File("src/".into());
+        assert_eq!(
+            Action::StageFolder.plan(&folder, &context),
+            Ok(Effect::Send(vec![CommandKind::Stage {
+                target: StageTarget::File {
+                    path: "src/a.rs".into()
+                }
+            }]))
+        );
+        assert_eq!(
+            Action::UnstageFolder.plan(&folder, &context),
+            Ok(Effect::Send(vec![CommandKind::Unstage {
+                target: StageTarget::File {
+                    path: "src/b.rs".into()
+                }
+            }]))
+        );
+        let staged = [entry("lib/x.rs", Some(Change::Added), None)];
+        assert_eq!(
+            Action::StageFolder.enabled(&Args::File("lib/".into()), &ctx(&staged, "")),
+            Err("Nothing unstaged in this folder")
+        );
+        assert!(!Action::StageFolder.listed_in_palette());
     }
 
     #[test]
