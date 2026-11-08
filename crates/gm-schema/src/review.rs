@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Where a review comment stands (B4, D96, D97, D135). `Handled` is set by an agent
-/// through MCP, with a summary; only a human makes a comment `Resolved`.
+/// through MCP, with a reply; only a human makes a comment `Resolved`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewStatus {
@@ -33,8 +33,22 @@ pub struct ReviewLocation {
     pub end_line: u32,
 }
 
+/// A reply on a review comment: the agent's account of what it did, or the person's
+/// answer. Replies are one level deep: a reply to a reply belongs to the root comment.
+/// The text is untrusted (D96).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewReply {
+    pub id: i64,
+    /// `human`, or `agent:<client>` for an agent's reply.
+    pub author: String,
+    pub body: String,
+    /// Milliseconds since the Unix epoch, as the engine's clock gave them.
+    pub created_at: i64,
+}
+
 /// One review comment on a file of the working tree (B4, D96). `location` and
 /// `outdated` are computed on read against the file as it is now, not stored.
+/// Lists hold the root comments only; their replies are in `replies`, oldest first.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReviewComment {
     pub id: i64,
@@ -47,10 +61,6 @@ pub struct ReviewComment {
     pub created_at: i64,
     /// Set while the comment is resolved; cleared when it is reopened.
     pub resolved_at: Option<i64>,
-    /// What the agent says it did, set with `Handled` and kept when the comment is
-    /// resolved; cleared when it is reopened. Narrative only (D96): untrusted.
-    #[serde(default)]
-    pub summary: Option<String>,
     /// Object id of the snapshot taken when the comment was made; `None` when
     /// the snapshot failed.
     pub snapshot: Option<String>,
@@ -64,6 +74,10 @@ pub struct ReviewComment {
     /// True when the anchor is not found exactly once in the file now, or the
     /// file is gone.
     pub outdated: bool,
+    /// The replies to this comment, oldest first: the agent's accounts and the
+    /// person's answers. Narrative only (D96): untrusted.
+    #[serde(default)]
+    pub replies: Vec<ReviewReply>,
 }
 
 /// The anchored lines of a comment as the two snapshots hold them (D140): the
@@ -107,6 +121,39 @@ mod tests {
         });
         let comment: ReviewComment = serde_json::from_value(json).unwrap();
         assert_eq!(comment.after_snapshot, None);
-        assert_eq!(comment.summary, None);
+        assert!(comment.replies.is_empty());
+    }
+
+    #[test]
+    fn a_comment_lists_its_replies_and_no_summary() {
+        let comment = ReviewComment {
+            id: 1,
+            path: "a.rs".into(),
+            body: "rename".into(),
+            status: ReviewStatus::Handled,
+            anchor: ReviewAnchor {
+                text: "x".into(),
+                before: Vec::new(),
+                after: Vec::new(),
+                start_line: 1,
+            },
+            created_at: 5,
+            resolved_at: None,
+            snapshot: None,
+            after_snapshot: None,
+            location: None,
+            outdated: true,
+            replies: vec![ReviewReply {
+                id: 2,
+                author: "agent:claude-code".into(),
+                body: "renamed".into(),
+                created_at: 6,
+            }],
+        };
+        let json = serde_json::to_value(&comment).unwrap();
+        assert!(json.get("summary").is_none());
+        assert_eq!(json["replies"][0]["author"], "agent:claude-code");
+        let back: ReviewComment = serde_json::from_value(json).unwrap();
+        assert_eq!(back, comment);
     }
 }

@@ -47,7 +47,9 @@ pub use restack::{
     PlannedBranch, PlannedCommit, ReplayStep, RestackBlock, RestackMove, RestackPhase, RestackPlan,
     RestackRecord, RestackResolution,
 };
-pub use review::{ReviewAnchor, ReviewChange, ReviewComment, ReviewLocation, ReviewStatus};
+pub use review::{
+    ReviewAnchor, ReviewChange, ReviewComment, ReviewLocation, ReviewReply, ReviewStatus,
+};
 pub use stack::{OWN_COMMITS_LIMIT, Stack, StackBranch, StackSnapshot, StackState};
 pub use stash::StashEntry;
 pub use status::{

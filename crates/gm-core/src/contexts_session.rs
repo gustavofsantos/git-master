@@ -33,6 +33,7 @@ pub(crate) fn is_contexts_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
         CommandKind::ListContexts { .. }
+            | CommandKind::PreviewDeleteContext { .. }
             | CommandKind::CreateContext { .. }
             | CommandKind::UpdateContext { .. }
             | CommandKind::DeleteContext { .. }
@@ -67,6 +68,7 @@ pub(crate) fn run(
 ) -> Result<Vec<Event>, String> {
     match kind {
         CommandKind::ListContexts { repo } => list(id, db, git, root, *repo),
+        CommandKind::PreviewDeleteContext { id: context } => preview_delete(id, db, *context),
         CommandKind::CreateContext { name, parent } => create(id, db, name, *parent),
         CommandKind::UpdateContext { .. } => update(id, db, kind),
         CommandKind::DeleteContext {
@@ -202,6 +204,30 @@ fn list(
         } => listed(Vec::new(), Some(repo_id), Some(other_path)),
     };
     Ok(vec![event])
+}
+
+/// The most memories a `ContextDeletePreview` carries; its `total` is the full count.
+const DELETE_PREVIEW_LIMIT: usize = 50;
+
+/// `PreviewDeleteContext`: what `DeleteContext` would remove, read without a write. The memories
+/// are those `DeleteContext` with `delete_memories` deletes, each scoped to the context's path.
+fn preview_delete(id: OperationId, db: Option<&Path>, context: i64) -> Result<Vec<Event>, String> {
+    let store = open_read(db)?.ok_or_else(|| CONTEXT_MISSING.to_owned())?;
+    let mut preview = store
+        .delete_preview(context, DELETE_PREVIEW_LIMIT)
+        .map_err(context_error)?;
+    let nodes = store.nodes().map_err(|e| e.to_string())?;
+    let scope = visibility::context_path(&nodes, context);
+    for memory in &mut preview.memories {
+        memory.scope.clone_from(&scope);
+    }
+    Ok(vec![Event::ContextDeletePreview {
+        id,
+        context,
+        sub_contexts: preview.sub_contexts,
+        memories: preview.memories,
+        total: preview.total,
+    }])
 }
 
 /// `CreateContext`.

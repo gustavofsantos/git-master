@@ -25,7 +25,7 @@ You act through the window, the menus, the command palette and the keyboard. Eac
 
 ### Agent actor
 
-An agent that connects through the [MCP server](../agents/mcp-server.md) can read review comments and threads. It can record that it handled a review comment, attach labels, and link threads to each other. These writes go to GitMaster's own store. The server has no tool that edits, commits, pushes or deletes anything in the repository. What an agent records is yours to confirm in the app: a comment it marks `handled` stays open to you until you resolve it.
+An agent that connects through the [MCP server](../agents/mcp-server.md) can read review comments and threads. It can record that it handled a review comment, reply on the comment's thread, attach labels, and link threads to each other. These writes go to GitMaster's own store. The server has no tool that edits, commits, pushes or deletes anything in the repository. What an agent records is yours to confirm in the app: a comment it marks `handled` stays open to you until you resolve it.
 
 > **Planned.** Tools that propose and apply a change to the repository. Your agent asks you before each apply call, and apply accepts only a plan, never free-form arguments, so what you approve is exactly what runs. The agent enforces this approval, not GitMaster, so it holds only as long as the agent's own permission settings do. See [Approval](../agents/mcp-server.md#approval).
 
@@ -96,6 +96,6 @@ The operation log records each operation that changes a repository, what was ask
 | Labels and thread links | `.git/gitmaster/threads.db`, with the threads. | Implemented |
 | Memories of a repository and reviewer verdicts | `.git/gitmaster/threads.db`, with the threads. | Planned |
 | Contexts and the memories attached to them | `contexts.db` in the app data directory, readable only by you. Never in a repository. | Planned |
-| Workflow scripts | The workflows directory in your user config: `~/.config/gitmaster/workflows/` on Linux, and `Library/Application Support/gitmaster/workflows/` in your home directory on macOS. Also any directory listed in `gitmaster.workflowPath`. Never a repository. | Implemented |
+| Workflow scripts | The workflows directory in your user config: `~/.config/gitmaster/workflows/`. Also any directory listed in `gitmaster.workflowPath`. Never a repository. | Implemented |
 | Workflow review record | `gitmaster.db` in the app data directory, keyed by the hash of each script version. | Implemented |
 | Workflow run history | `.git/gitmaster/state.db`, in the Git common directory of the repository. | Implemented |

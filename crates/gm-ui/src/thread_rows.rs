@@ -16,7 +16,7 @@ use std::ops::Range;
 use gm_schema::{EditState, ThreadDetail, ThreadEdit};
 
 use crate::threads::{
-    self, Block, Call, CallResult, CallStatus, MessageKind, Place, ThreadsPage, Turn,
+    self, Block, Call, CallResult, CallStatus, Message, MessageKind, Place, ThreadsPage, Turn,
 };
 
 /// How close to the end, or the start, of the rows drawn a page is asked for.
@@ -66,6 +66,16 @@ pub enum Row {
         focused: bool,
         /// Whether the gutter names the speaker: the first reply after a prompt (see `label_speakers`).
         label: bool,
+    },
+    /// A tool result whose call is not loaded: one line with its tool and size, and its
+    /// text under the line when expanded.
+    Result {
+        entry: i64,
+        depth: usize,
+        label: String,
+        text: String,
+        expanded: bool,
+        focused: bool,
     },
     /// The header of a group: its label, and the failures it holds, if any.
     Group {
@@ -314,14 +324,7 @@ fn push_turn(rows: &mut Vec<Row>, turn: &Turn, shown: &Shown<'_>) {
             Block::Call(call) => run.push(call),
             Block::Message(message) => {
                 push_group(rows, &mut run, shown);
-                rows.push(Row::Message {
-                    entry: message.entry_id,
-                    kind: message.kind,
-                    text: message.text.clone(),
-                    depth: 0,
-                    focused: is_focus(shown.focus, message.entry_id),
-                    label: false,
-                });
+                push_message(rows, message, 0, shown);
             }
         }
     }
@@ -383,15 +386,42 @@ fn push_call(rows: &mut Vec<Row>, call: &Call, depth: usize, shown: &Shown<'_>) 
     for child in &call.children {
         match child {
             Block::Call(child) => push_call(rows, child, depth + 1, shown),
-            Block::Message(message) => rows.push(Row::Message {
-                entry: message.entry_id,
-                kind: message.kind,
-                text: message.text.clone(),
-                depth: depth + 1,
-                focused: is_focus(shown.focus, message.entry_id),
-                label: false,
-            }),
+            Block::Message(message) => push_message(rows, message, depth + 1, shown),
         }
+    }
+}
+
+/// A text of a turn: a reply or a notice as it reads, a result whose call is not
+/// loaded as a line that a click opens.
+fn push_message(rows: &mut Vec<Row>, message: &Message, depth: usize, shown: &Shown<'_>) {
+    let focused = is_focus(shown.focus, message.entry_id);
+    if message.kind == MessageKind::Result {
+        rows.push(Row::Result {
+            entry: message.entry_id,
+            depth,
+            label: result_label(message.tool.as_deref(), message.bytes),
+            text: message.text.clone(),
+            expanded: shown.page.is_expanded(message.entry_id),
+            focused,
+        });
+    } else {
+        rows.push(Row::Message {
+            entry: message.entry_id,
+            kind: message.kind,
+            text: message.text.clone(),
+            depth,
+            focused,
+            label: false,
+        });
+    }
+}
+
+/// The line of an unpaired result: its tool and its size, as `Edit result · 64 KB`.
+fn result_label(tool: Option<&str>, bytes: u64) -> String {
+    let size = threads::size_label(bytes);
+    match tool.filter(|tool| !tool.is_empty()) {
+        Some(tool) => format!("{tool} result · {size}"),
+        None => format!("Result · {size}"),
     }
 }
 
@@ -420,9 +450,10 @@ fn push_edit(rows: &mut Vec<Row>, edit: &ThreadEdit, depth: usize, page: &Thread
 pub fn entry_of(row: &Row) -> Option<i64> {
     match row {
         Row::Prompt { entry, .. } => *entry,
-        Row::Message { entry, .. } | Row::Call { entry, .. } | Row::CallBody { entry, .. } => {
-            Some(*entry)
-        }
+        Row::Message { entry, .. }
+        | Row::Result { entry, .. }
+        | Row::Call { entry, .. }
+        | Row::CallBody { entry, .. } => Some(*entry),
         _ => None,
     }
 }
@@ -475,7 +506,7 @@ pub fn near_start(ix: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threads::Place;
+    use crate::threads::{CallStatus, Place};
     use gm_schema::{EditChange, EntryKind, ThreadEdit, ThreadEntry, ThreadSummary};
 
     fn summary(uid: &str) -> ThreadSummary {
@@ -570,6 +601,7 @@ mod tests {
     fn detail(entries: Vec<ThreadEntry>, edits: Vec<ThreadEdit>, more: bool) -> ThreadDetail {
         ThreadDetail {
             summary: summary("u1"),
+            parent: None,
             entries,
             edits,
             links: Vec::new(),
@@ -603,6 +635,7 @@ mod tests {
                 Row::Turn { .. } => "turn",
                 Row::Prompt { .. } => "prompt",
                 Row::Message { .. } => "message",
+                Row::Result { .. } => "result",
                 Row::Group { .. } => "group",
                 Row::Call { .. } => "call",
                 Row::CallBody { .. } => "body",
@@ -839,6 +872,80 @@ mod tests {
         assert!(!kinds(page.rows()).contains(&"body"));
         page.toggle_call(2);
         assert!(kinds(page.rows()).contains(&"body"));
+    }
+
+    #[test]
+    fn a_result_of_a_call_in_an_earlier_turn_is_shown_with_its_call_and_not_in_its_turn() {
+        let entries = vec![
+            text(1, 0, 4, EntryKind::User, "go"),
+            call(2, 1, 4, "c1", "Edit"),
+            text(3, 2, 5, EntryKind::User, "next"),
+            result(4, 3, 5, "c1", false),
+        ];
+        let mut page = shown(detail(entries, Vec::new(), false));
+        let key = group_keys(page.detail().expect("shown")).remove(0);
+        page.toggle_group(&key);
+        assert!(!kinds(page.rows()).contains(&"result"));
+        assert!(!kinds(page.rows()).contains(&"message"));
+        let call_row = page
+            .rows()
+            .iter()
+            .find(|row| matches!(row, Row::Call { .. }))
+            .expect("the call row");
+        assert!(matches!(
+            call_row,
+            Row::Call {
+                status: CallStatus::Done,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_unpaired_result_is_one_collapsed_line_with_its_tool_and_size_until_it_is_opened() {
+        let big = ThreadEntry {
+            tool: Some("Edit".to_owned()),
+            text: "{\"patch\":\"...\"}".to_owned(),
+            orig_bytes: Some(65_563),
+            ..result(2, 1, 1, "gone", false)
+        };
+        let entries = vec![text(1, 0, 1, EntryKind::User, "go"), big];
+        let mut page = shown(detail(entries, Vec::new(), false));
+        let row = |page: &ThreadsPage| {
+            page.rows()
+                .iter()
+                .find(|row| matches!(row, Row::Result { .. }))
+                .cloned()
+                .expect("the result row")
+        };
+        assert!(matches!(
+            row(&page),
+            Row::Result {
+                entry: 2,
+                depth: 0,
+                ref label,
+                expanded: false,
+                ..
+            } if label == "Edit result · 64 KB"
+        ));
+        assert!(!kinds(page.rows()).contains(&"message"));
+        page.toggle_call(2);
+        assert!(matches!(row(&page), Row::Result { expanded: true, .. }));
+        page.toggle_call(2);
+        assert!(matches!(
+            row(&page),
+            Row::Result {
+                expanded: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_result_line_names_its_tool_or_says_result_when_the_tool_is_unknown() {
+        assert_eq!(result_label(Some("Edit"), 65_563), "Edit result · 64 KB");
+        assert_eq!(result_label(Some(""), 1), "Result · 1 B");
+        assert_eq!(result_label(None, 1_048_576), "Result · 1 MB");
     }
 
     #[test]

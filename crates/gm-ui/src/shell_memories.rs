@@ -18,6 +18,7 @@ use gpui::{
 use crate::action_registry::{Action, Args, MemoryEffect};
 use crate::icon::{self, Icon};
 use crate::memories::{self, MemoriesPage, Request, Scope};
+use crate::memory_dialogs::PlaceAction;
 use crate::memory_rows::{self, DetailAction, SourceTarget};
 use crate::resize::{self};
 use crate::resize_handle::{self, Edge};
@@ -100,6 +101,14 @@ impl StatusView {
             MemoryEffect::New => self.open_new_memory_dialog(window, cx),
             MemoryEffect::Accept(uid) => self.accept_memory(&uid, cx),
             MemoryEffect::Reject(uid) => self.reject_memory(&uid, cx),
+            MemoryEffect::ManageContexts => self.open_contexts_dialog(window, cx),
+            MemoryEffect::MoveToContext(uid) => {
+                self.open_place_dialog(&uid, PlaceAction::Move, window, cx);
+            }
+            MemoryEffect::AttachToContext(uid) => {
+                self.open_place_dialog(&uid, PlaceAction::Attach, window, cx);
+            }
+            MemoryEffect::DetachFromContext(uid) => self.open_detach_dialog(&uid, cx),
         }
     }
 
@@ -895,6 +904,30 @@ impl StatusView {
                         this.open_supersede_dialog(cx);
                     })
                 }
+                DetailAction::MoveToContext => action_button(
+                    Action::MoveMemoryToContext,
+                    "memory-move-context",
+                    "Move to Context…",
+                    &target,
+                    &ctx,
+                    cx,
+                ),
+                DetailAction::AttachToContext => action_button(
+                    Action::AttachMemoryToContext,
+                    "memory-attach-context",
+                    "Attach to Context…",
+                    &target,
+                    &ctx,
+                    cx,
+                ),
+                DetailAction::DetachFromContext => action_button(
+                    Action::DetachMemoryFromContext,
+                    "memory-detach-context",
+                    "Detach from Context…",
+                    &target,
+                    &ctx,
+                    cx,
+                ),
                 DetailAction::Delete => button("memory-delete", "Delete…", cx, |this, _, cx| {
                     this.open_delete_memory_dialog(cx);
                 }),

@@ -7,8 +7,6 @@ order: 20
 
 Local review is a loop between you and an agent on your machine. You comment on lines of a diff. The agent reads the comments through MCP, works on the code and marks each comment handled with a summary. GitMaster then shows what changed for each comment, from snapshots of the working tree, not from the agent's own account. You decide when a comment is resolved.
 
-> **Planned.** The agent's summary of a handled comment is not shown in the app yet. The agent receives it, and the handled comment shows its status and its Before and After text.
-
 ## Comment on code
 
 You can comment on any lines of any code in the repository: lines of a diff, changed or not, and lines of a file in the **Code** viewer.
@@ -40,7 +38,7 @@ A comment is always about text in the working tree. In the Working Copy diff (un
 1. You comment on the code.
 2. The agent reads the open comments with `review_comments_list`.
 3. The agent changes the code, then calls `review_comment_resolve` on each comment it handled, with a summary of what it did.
-4. The comment becomes **Handled**, with the summary sent to the agent. You read the change and choose **Resolve Comment**, or **Reopen Comment**.
+4. The comment becomes **Handled**, and the agent's summary is kept as a reply in its thread (see [Replies](#replies)). You read the change and choose **Resolve Comment**, or **Reopen Comment**.
 
 ## Comment states
 
@@ -54,6 +52,44 @@ The app shows each comment with one of these badges:
 | **Outdated** | The text the comment is anchored to no longer appears exactly once, so GitMaster does not place it. |
 
 **Outdated** is a flag on a comment rather than a state of its own: an open, handled or resolved comment becomes outdated when its text is no longer found.
+
+## Replies
+
+> **Planned.** The app does not show replies or offer the **Reply** box yet; agents already read and write replies through MCP.
+
+A thread is a comment and the replies to it. The comment is the **root** of the thread. Its replies follow it in order, oldest first, directly below it in the diff and on the **Local review** page. Each reply has an author, a body and a time. The author is **You** or the agent that wrote the reply, which is shown as **Agent-written**. A reply is plain text: GitMaster shows it as written, does not render markup in it and runs nothing in it.
+
+- A thread is one level deep. A reply to a reply belongs to the thread of the root, so a thread never nests.
+- The status, the anchor, the **Outdated** flag and the Before and After snapshots belong to the root. A reply has none of them.
+- The agent's summary is a reply. When the agent marks a comment handled, its summary becomes a reply by the agent on the thread. Marking it handled again adds another reply, so the thread keeps every answer, and the "after" snapshot is replaced as before.
+- The agent can ask you a question without changing the status. It answers with a reply, which leaves the comment as it is.
+- You reply in the **Reply** box under the thread. Your reply on a handled comment reopens it: it becomes **Open** again, its "after" snapshot is discarded, and the agent sees it the next time it lists the open comments. Your reply on an open comment leaves its status as it is.
+- Nobody replies to a resolved comment. The agent is refused, and the **Reply** box is not offered until you choose **Reopen Comment**.
+- A reply cannot be edited, resolved, handled or deleted on its own. Deleting a comment deletes its replies too.
+
+### Example: a question and an answer
+
+1. You comment on `parse_amount` in `src/ledger.rs`: "Return an error here instead of unwrapping." The comment is 7.
+2. The agent reads it with `review_comments_list`, then asks before it changes anything: `review_comment_reply(id=7, body="Should the error be ParseError or the crate's Error type?")`. The comment stays **Open**.
+3. You reply in the **Reply** box: "Use ParseError." The comment stays **Open**.
+4. The agent changes the code and calls `review_comment_resolve(id=7, summary="parse_amount returns Result<_, ParseError>; callers propagate with ?")`. The summary becomes its reply, and the comment is **Handled**.
+5. You read the change and reply once more: "Cover the empty string too." Your reply reopens the comment: it is **Open** again, and its "after" snapshot is discarded.
+6. The agent calls `review_comments_list(status="open")` and gets the comment with its replies. It fixes the empty string and resolves the comment again. A second summary is added as a reply, and the "after" snapshot is replaced.
+7. You choose **Resolve Comment**. The thread is resolved, and nobody replies to it until you choose **Reopen Comment**.
+
+The agent sees the thread like this:
+
+```text
+review_comments_list(status="open")
+    -> { comments: [{ id: 7, path: "src/ledger.rs", status: "open", outdated: false,
+                      start_line: 41, end_line: 42, body: "Return an error ...",
+                      anchor_text: "...", untrusted: true,
+                      replies: [
+                        { id: 8, author: "agent:claude-code", body: "Should the error be ...?", created_at: "...", untrusted: true },
+                        { id: 9, author: "human", body: "Use ParseError.", created_at: "...", untrusted: true },
+                        { id: 10, author: "agent:claude-code", body: "parse_amount returns ...", created_at: "...", untrusted: true },
+                        { id: 11, author: "human", body: "Cover the empty string too.", created_at: "...", untrusted: true }] }] }
+```
 
 ## Anchors
 
@@ -75,7 +111,7 @@ The snapshots are stored as private refs inside `.git`, so the working tree and 
 
 What the agent did for a comment is the diff between the two snapshots, limited to the region the comment is anchored to. GitMaster finds the anchored lines in the "before" snapshot and follows them through the changes to the file: lines the agent added, removed or rewrote inside the region, or right against its edges, belong to the comment. The agent's summary is the narrative; the diff is the record.
 
-When the agent marks the same comment handled again, the new "after" snapshot replaces the old one. When you reopen a comment, its "after" snapshot and the agent's summary are discarded. If a snapshot cannot be taken, the comment is still handled, without an "after".
+When the agent marks the same comment handled again, the new "after" snapshot replaces the old one. When you reopen a comment, its "after" snapshot is discarded, and its replies stay. If a snapshot cannot be taken, the comment is still handled, without an "after".
 
 > **Planned.** Changes that overlap no comment appear as "other changes".
 

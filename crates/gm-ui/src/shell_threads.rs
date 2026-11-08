@@ -1095,6 +1095,18 @@ impl StatusView {
                 indented(*depth, call_details(args.as_deref(), result.as_ref())),
             )
             .into_any_element(),
+            Row::Result {
+                entry,
+                depth,
+                label,
+                text,
+                expanded,
+                focused,
+            } => {
+                let body = Self::result_view(*entry, label, text, *expanded, *focused, cx);
+                gutter_row(None, indented(*depth, Self::framed(*entry, body, cx)))
+                    .into_any_element()
+            }
             Row::Edit {
                 id,
                 depth,
@@ -1312,6 +1324,54 @@ impl StatusView {
                     .text_color(theme::muted())
                     .child(threads::duration_label(ms))
             }))
+    }
+
+    /// A result whose call is not loaded: a line with its tool and size, which a click
+    /// opens into its text. The text is drawn at most `RESULT_LINES` lines, as a call's is.
+    fn result_view(
+        entry: i64,
+        label: &str,
+        text: &str,
+        expanded: bool,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let line = div()
+            .id(("result", u64::try_from(entry).unwrap_or(0)))
+            .cursor_pointer()
+            .w_full()
+            .px_2()
+            .h(px(LINE_HEIGHT))
+            .rounded_md()
+            .border_1()
+            .border_color(theme::hairline())
+            .when(focused, |line| line.bg(theme::selected_row()))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .min_w(px(0.))
+            .font_family(theme::code_font())
+            .text_xs()
+            .text_color(theme::muted())
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.model.threads.toggle_call(entry);
+                cx.notify();
+            }))
+            .child(if expanded { "▾" } else { "▸" })
+            .child(label.to_owned());
+        let mut block = div().flex().flex_col().w_full().child(line);
+        if expanded {
+            block = block.child(
+                div()
+                    .px_2()
+                    .pb_1()
+                    .font_family(theme::code_font())
+                    .text_xs()
+                    .child(text_block(text, RESULT_LINES)),
+            );
+        }
+        block
     }
 
     /// The row of a thread's marker: a load control at the top, and a line of text at
@@ -2345,6 +2405,16 @@ impl StatusView {
                     .items_center()
                     .gap_3()
                     .child(div().text_xs().text_color(theme::muted()).child(count))
+                    .children(memories.then(|| {
+                        action_button(
+                            Action::ManageContexts,
+                            "memories-manage-contexts",
+                            "Manage Contexts…",
+                            &Args::None,
+                            &ctx,
+                            cx,
+                        )
+                    }))
                     .children(memories.then(|| {
                         action_button(
                             Action::NewMemory,

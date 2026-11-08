@@ -258,6 +258,29 @@ impl ContextStore {
         Ok(count)
     }
 
+    /// What `delete_context` would do to context `id`, read without a write: how many contexts sit
+    /// directly under it, and the memories it holds alone (the same query the delete uses), the
+    /// first `limit` of them with the full count. `NotFound` when the context is missing.
+    pub fn delete_preview(&self, id: i64, limit: usize) -> Result<DeletePreview, StoreError> {
+        context_row(&self.conn, id)?;
+        let children: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM context WHERE parent_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        let alone = memories_only_in(&self.conn, id)?;
+        let memories = alone
+            .iter()
+            .take(limit)
+            .map(|&memory| memories::memory_by_id(&self.conn, memory))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(DeletePreview {
+            sub_contexts: u32::try_from(children).unwrap_or(u32::MAX),
+            memories,
+            total: u32::try_from(alone.len()).unwrap_or(u32::MAX),
+        })
+    }
+
     /// Adds a repository to a context. Adding one that is already there is idempotent: its name is
     /// updated, and its path is set on every context the repository is in, since a clone has one
     /// path (D193 (4)).
@@ -595,6 +618,15 @@ impl ContextStore {
             " AND m.id IN (SELECT memory_id FROM memory_context WHERE context_id IN ({listed}))"
         )
     }
+}
+
+/// What `ContextStore::delete_preview` finds: the direct sub-contexts, the memories held alone
+/// (`limit` of them) and how many there are in all. The memories carry no scope: the caller sets it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DeletePreview {
+    pub sub_contexts: u32,
+    pub memories: Vec<Memory>,
+    pub total: u32,
 }
 
 /// Connection pragmas of `threads.db` (D122), then the migrations of this file.

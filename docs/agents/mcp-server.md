@@ -74,7 +74,7 @@ The same JSON is in `content` as text and in `structuredContent`. Each comment i
 
 Each agent session starts its own `gitmaster mcp`, so several can run on the same repository at the same time, in the same worktree or in different worktrees, and next to the app. They do not talk to each other and none of them blocks the others. Review comments and threads belong to the repository, so every worktree sees the same ones, and a comment handled by one server is handled for all. The comment's lines are found in the files of the worktree the server runs in.
 
-When two servers write the same comment at the same time, the last summary stays. A comment you resolved stays resolved: no server can mark it handled again.
+When two servers mark the same comment handled at the same time, each summary is kept as a reply on its thread. A comment you resolved stays resolved: no server can mark it handled again, or reply to it.
 
 ## What the server may do
 
@@ -83,9 +83,11 @@ The server offers two kinds of tool:
 | Kind | What it does | Approval |
 |---|---|---|
 | Read | Reads review comments, threads, labels and the provenance of lines. Changes nothing. | Not required |
-| Record | Writes to GitMaster's own store only: it marks a review comment as handled, with a summary, creates labels, attaches them and links threads. It never changes your files, your branches or your index. | Not required from GitMaster. Your agent may ask until you allow the tool, see [Claude Code permissions](#claude-code-permissions). |
+| Record | Writes to GitMaster's own store only: it marks a review comment as handled, with a summary, replies to a review comment, creates labels, attaches them and links threads. It never changes your files, your branches or your index. | Not required from GitMaster. Your agent may ask until you allow the tool, see [Claude Code permissions](#claude-code-permissions). |
 
 A record tool takes effect on GitMaster's record, and a person still decides what it means. When an agent marks a comment as `handled`, the comment waits for you. Only you make it `resolved`. A label or a link an agent records carries the agent's name as its origin.
+
+The agent can also add a reply to a comment's thread with `review_comment_reply`. A reply leaves the comment's status as it is, so an agent can ask a question without marking the comment `handled`.
 
 There is no tool that commits, pushes, restacks, edits a file or deletes anything. An agent that changes your code does it with its own tools, as it does without GitMaster, and the [thread](../guide/threads.md) records what it did. The record tools never write thread text, and they never delete or rename anything.
 
@@ -110,7 +112,7 @@ Your agent asks you before it uses a tool that changes the repository. GitMaster
 
 ## Claude Code permissions
 
-Claude Code asks before it uses an MCP tool you have not allowed. The read tools and `review_comment_resolve` are safe to allow, so you can add rules to your Claude Code settings to stop the questions. The rule name for a tool of the GitMaster plugin is `mcp__plugin_gitmaster_gitmaster__<tool>`:
+Claude Code asks before it uses an MCP tool you have not allowed. The read tools, `review_comment_resolve` and `review_comment_reply` are safe to allow, so you can add rules to your Claude Code settings to stop the questions. The rule name for a tool of the GitMaster plugin is `mcp__plugin_gitmaster_gitmaster__<tool>`:
 
 ```json
 {
@@ -118,6 +120,7 @@ Claude Code asks before it uses an MCP tool you have not allowed. The read tools
     "allow": [
       "mcp__plugin_gitmaster_gitmaster__review_comments_list",
       "mcp__plugin_gitmaster_gitmaster__review_comment_resolve",
+      "mcp__plugin_gitmaster_gitmaster__review_comment_reply",
       "mcp__plugin_gitmaster_gitmaster__threads_search",
       "mcp__plugin_gitmaster_gitmaster__thread_get",
       "mcp__plugin_gitmaster_gitmaster__thread_read",
@@ -161,17 +164,18 @@ You commented on two lines of `src/ledger.rs` in the app: "Return an error here 
 review_comments_list(status="open")
     -> { comments: [{ id: 7, path: "src/ledger.rs", status: "open", outdated: false,
                       start_line: 41, end_line: 42, body: "Return an error ...",
-                      anchor_text: "...", summary: null, untrusted: true }] }
+                      anchor_text: "...", replies: [], untrusted: true }] }
        ... the agent edits src/ledger.rs with its own tools ...
 review_comment_resolve(id=7, summary="parse_amount now returns Result; callers propagate with ?")
-    -> { id: 7, status: "handled", summary: "parse_amount now returns Result; ...",
+    -> { id: 7, status: "handled",
+         replies: [{ id: 8, author: "agent:claude-code", body: "parse_amount now returns Result; ...", created_at: "...", untrusted: true }],
          change: { before: [...], after: [...], changed: true,
                    before_start_line: 41, after_start_line: 41 }, untrusted: true }
 ```
 
 1. `review_comments_list` returns the open comments with the lines they are anchored to now. A comment whose text no longer appears exactly once is `outdated`, and its `start_line` and `end_line` are null.
 2. The agent changes the code with its own tools.
-3. `review_comment_resolve` marks the comment `handled`, stores the agent's summary and takes the "after" snapshot. The result carries the change GitMaster observed in the comment's region, so the agent can check that its edit landed where the comment is. The comment appears as handled in the app, and you decide whether to resolve it.
+3. `review_comment_resolve` marks the comment `handled`, stores the agent's summary as a reply and takes the "after" snapshot. The result carries the change GitMaster observed in the comment's region, so the agent can check that its edit landed where the comment is. The comment appears as handled in the app, and you decide whether to resolve it.
 
 An agent that needs an earlier decision searches the threads instead. The answer is an envelope with the hits:
 

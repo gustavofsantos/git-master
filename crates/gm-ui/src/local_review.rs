@@ -516,7 +516,7 @@ mod tests {
             },
             created_at: 1_000 * id,
             resolved_at: None,
-            summary: None,
+            replies: Vec::new(),
             snapshot: Some("abc".into()),
             after_snapshot: None,
             location: line.map(|start_line| ReviewLocation {

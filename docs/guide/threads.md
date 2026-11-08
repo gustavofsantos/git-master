@@ -65,6 +65,24 @@ An edit has one of these states, worked out each time you open the thread from t
 
 An edit that GitMaster could not measure from the file, for example because the file was too large, is marked **From tool input** and shows what the agent asked for, not what the file contained.
 
+### Sub-agents
+
+When the agent starts a sub-agent, GitMaster records the sub-agent's work as a thread of its own. That thread holds the sub-agent's prompts, replies, tool calls, edits, commits and files, as any other thread does. Its link to the thread that started it is observed from the agent's session. Nobody types it, and an agent does not write it.
+
+> **Planned.** Sub-agent threads are not recorded in the app yet.
+
+In the thread that started the sub-agent, the `Agent` tool call is a collapsed row. It shows the sub-agent's type, its description and its status: running or finished. Select the row to read the sub-agent's entries in place. **Open Thread** opens the sub-agent as a thread of its own, with its own turns, edits and commits.
+
+A sub-agent's thread is not a row of the **Threads** list.
+
+Search finds a sub-agent's words and the paths it edited. Each result marks the thread as a sub-agent of its parent. Select the result to open the sub-agent at that entry.
+
+A sub-agent that starts a sub-agent of its own nests the same way, under the `Agent` call in its thread. The indentation stops at a fixed depth, and deeper runs are shown at that depth.
+
+A sub-agent stopping ends the turn of the sub-agent only. It does not end the turn of the thread that started it.
+
+The text a sub-agent wrote is agent text. It is untrusted like any other agent text, and the MCP tools mark it so. Deleting a thread also deletes its sub-agent threads.
+
 ### Changes that are not edits
 
 Only the agent's file-editing tools produce edits. A change made by a shell command, a formatter or a code generator appears as the command and its output, not as an edit.
@@ -150,6 +168,10 @@ Link one thread to another to record how their work connects. A link has one of 
 | **Supersedes** | This thread replaces the work of the other thread, which stays in the list. |
 
 Choose **Link to Thread…** in the **⋯** menu of a thread's header, or in its right-click menu, and pick the kind and the other thread. Each link is a row that shows who made it, you or an agent. GitMaster never infers a link from what two threads say.
+
+The one link GitMaster records from the agent's session is the link between a sub-agent and the thread that started it. You cannot add, change or remove it. See [Sub-agents](#sub-agents).
+
+> **Planned.** Links between a sub-agent and its parent thread are not recorded in the app yet.
 
 ## Understand why code is the way it is
 

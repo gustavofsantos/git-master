@@ -1524,3 +1524,173 @@ fn the_proposed_total_is_full_on_a_page_of_one_and_ignores_the_query() {
     assert_eq!(billing.memories.len(), 1, "only beta is in Billing");
     assert_eq!(billing.proposed_total, 3, "the total ignores the scope");
 }
+
+/// What a `PreviewDeleteContext` answered.
+struct Preview {
+    sub_contexts: u32,
+    memories: Vec<Memory>,
+    total: u32,
+}
+
+fn preview_of(engine: &mut Engine, actor: &Actor, context: i64) -> Preview {
+    let events = send(
+        engine,
+        actor,
+        CommandKind::PreviewDeleteContext { id: context },
+    );
+    assert_eq!(
+        state_of(&events),
+        OperationState::Done,
+        "preview: {events:?}"
+    );
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::ContextDeletePreview {
+                context: answered,
+                sub_contexts,
+                memories,
+                total,
+                ..
+            } => {
+                assert_eq!(*answered, context);
+                Some(Preview {
+                    sub_contexts: *sub_contexts,
+                    memories: memories.clone(),
+                    total: *total,
+                })
+            }
+            _ => None,
+        })
+        .expect("a delete preview")
+}
+
+#[test]
+fn the_preview_lists_exactly_the_memories_a_delete_would_remove() {
+    let world = World::new();
+    let fixture = populate(&world);
+    let mut engine = engine_on(&world.path("api"), &world.db);
+    let first = memory_of(&propose_at(
+        &mut engine,
+        &Actor::Human,
+        Some("Billing"),
+        "Billing rule one",
+    ))
+    .uid;
+    let second = memory_of(&propose_at(
+        &mut engine,
+        &Actor::Human,
+        Some("Billing"),
+        "Billing rule two",
+    ))
+    .uid;
+    let shared = memory_of(&propose_at(
+        &mut engine,
+        &Actor::Human,
+        Some("Billing"),
+        "Shared rule",
+    ))
+    .uid;
+    let attached = send(
+        &mut engine,
+        &Actor::Human,
+        CommandKind::AttachMemory {
+            uid: shared.clone(),
+            context: fixture.partners,
+        },
+    );
+    assert_eq!(state_of(&attached), OperationState::Done, "{attached:?}");
+
+    // An agent may read the preview, and it lists the two held alone and not the shared one.
+    let preview = preview_of(&mut engine, &agent(), fixture.billing);
+    assert_eq!(preview.total, 2);
+    assert_eq!(preview.sub_contexts, 0);
+    let mut uids: Vec<String> = preview.memories.iter().map(|m| m.uid.clone()).collect();
+    uids.sort();
+    let mut expected = vec![first.clone(), second.clone()];
+    expected.sort();
+    assert_eq!(uids, expected);
+    assert!(
+        preview
+            .memories
+            .iter()
+            .all(|m| m.scope == "Platform / Billing"),
+        "{:?}",
+        preview
+            .memories
+            .iter()
+            .map(|m| &m.scope)
+            .collect::<Vec<_>>()
+    );
+
+    // A delete that keeps the memories is refused and names the count.
+    let refused = send(
+        &mut engine,
+        &Actor::Human,
+        CommandKind::DeleteContext {
+            id: fixture.billing,
+            delete_memories: false,
+        },
+    );
+    assert_eq!(state_of(&refused), OperationState::Failed);
+    assert!(
+        failure(&refused).is_some_and(|message| message.contains("2 memories")),
+        "{refused:?}"
+    );
+
+    // A delete with the memories removes exactly the previewed two, and counts them.
+    let deleted = send(
+        &mut engine,
+        &Actor::Human,
+        CommandKind::DeleteContext {
+            id: fixture.billing,
+            delete_memories: true,
+        },
+    );
+    assert_eq!(state_of(&deleted), OperationState::Done, "{deleted:?}");
+    assert_eq!(changed(&deleted).1, preview.total);
+    for uid in [&first, &second] {
+        let gone = send(
+            &mut engine,
+            &Actor::Human,
+            CommandKind::ReadMemory { uid: uid.clone() },
+        );
+        assert_eq!(state_of(&gone), OperationState::Failed, "{uid} is deleted");
+    }
+    assert_eq!(read_memory(&mut engine, &shared).uid, shared);
+
+    let missing = send(
+        &mut engine,
+        &agent(),
+        CommandKind::PreviewDeleteContext {
+            id: fixture.billing,
+        },
+    );
+    assert_eq!(state_of(&missing), OperationState::Failed);
+    assert_eq!(failure(&missing).as_deref(), Some("Context not found."));
+}
+
+#[test]
+fn the_preview_counts_sub_contexts_and_caps_the_list_at_fifty_with_the_full_total() {
+    let world = World::new();
+    let fixture = populate(&world);
+    let mut engine = engine_on(&world.path("api"), &world.db);
+
+    let platform = preview_of(&mut engine, &agent(), fixture.platform);
+    assert_eq!(platform.sub_contexts, 1, "Billing sits under Platform");
+    assert_eq!(platform.total, 0);
+    assert!(platform.memories.is_empty());
+
+    for n in 0..51 {
+        propose_at(
+            &mut engine,
+            &Actor::Human,
+            Some("Partners"),
+            &format!("Partners rule {n:02}"),
+        );
+    }
+    let partners = preview_of(&mut engine, &agent(), fixture.partners);
+    assert_eq!(partners.sub_contexts, 0);
+    assert_eq!(partners.total, 51);
+    assert_eq!(partners.memories.len(), 50);
+}

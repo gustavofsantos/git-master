@@ -14,6 +14,7 @@ use crate::changes::{Summary, summarize};
 use crate::code_page::CodePage;
 use crate::commit_threads::CommitThreads;
 use crate::conflict_resolver::ResolverState;
+use crate::contexts_model::ContextsModel;
 use crate::file_discard::Discarding;
 use crate::gate_wait::GateWait;
 use crate::history_graph::{GraphLayout, StackMarks};
@@ -137,6 +138,8 @@ pub struct Model {
     pub threads: ThreadsPage,
     /// The Memories tab of the Threads page: its memories, filters and detail (D190).
     pub memories: MemoriesPage,
+    /// The Manage Contexts dialog's contexts, the one selected and the writes in flight (D191).
+    pub contexts: ContextsModel,
     /// The threads linked to the commit the history page shows (H3).
     pub commit_threads: CommitThreads,
     /// The Link to Thread picker's threads and choice, while its dialog is open (D143).
@@ -869,6 +872,13 @@ impl Model {
                 self.memories.ended(id, state, detail);
                 None
             }
+            // A failed read or write of the Manage Contexts dialog is shown in it (D191).
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.contexts.owns(id) && state.is_terminal() => {
+                self.contexts.ended(id, state, detail);
+                None
+            }
             // A failed read of the Threads page is shown on the page (T5).
             Event::OperationChanged {
                 id, state, detail, ..
@@ -1175,11 +1185,22 @@ impl Model {
                 id,
                 contexts,
                 repo_id,
-                ..
+                clash,
             } => {
+                // The memories' read and the dialog's read each take only their own answer.
+                self.contexts
+                    .listed(id, contexts.clone(), repo_id.clone(), clash);
                 if self.memories.contexts_listed(id, contexts) {
                     self.memories.set_repo_id(repo_id);
                 }
+                None
+            }
+            Event::ContextsChanged {
+                id,
+                context,
+                deleted_memories,
+            } => {
+                self.contexts.changed(id, context, deleted_memories);
                 None
             }
             Event::ThreadsListed { id, threads, total } => {
@@ -1488,7 +1509,9 @@ impl Model {
             | Event::WorkspaceRemoved { .. }
         // The members of a workspace are read by the agent's tools; the app keeps none (D181).
         | Event::MembersListed { .. }
-        | Event::ContextsChanged { .. } => None,
+        // The delete preview is read by the Manage Contexts dialog from the view, which asks the
+        // delete's question from it; the model keeps no preview (D191).
+        | Event::ContextDeletePreview { .. } => None,
             // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
             Event::HunkSuggested { .. } => {
                 if let Some(conflict) = self.conflict.as_mut() {
@@ -1637,6 +1660,7 @@ impl Model {
         self.submodules = Submodules::default();
         self.threads = ThreadsPage::default();
         self.memories = MemoriesPage::default();
+        self.contexts = ContextsModel::default();
         self.commit_threads = CommitThreads::default();
         self.link_picker = LinkPicker::default();
         self.labels = LabelsPage::default();
@@ -1935,6 +1959,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::MemoryRead { id, .. }
         | Event::MemoryChanged { id, .. }
         | Event::ContextsListed { id, .. }
+        | Event::ContextDeletePreview { id, .. }
         | Event::ContextsChanged { id, .. }
         | Event::ConflictRead { id, .. }
         | Event::ConflictResolved { id, .. }
@@ -3210,7 +3235,7 @@ mod stash_tests {
             },
             created_at: 0,
             resolved_at: None,
-            summary: None,
+            replies: Vec::new(),
             snapshot: Some("abc".into()),
             after_snapshot: None,
             location: Some(gm_schema::ReviewLocation {

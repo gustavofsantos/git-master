@@ -611,7 +611,7 @@ mod tests {
             },
             created_at: 1_000_000,
             resolved_at: None,
-            summary: None,
+            replies: Vec::new(),
             snapshot: None,
             after_snapshot: None,
             location: location.map(|(start_line, end_line)| ReviewLocation {

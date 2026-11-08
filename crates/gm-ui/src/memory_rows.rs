@@ -228,26 +228,41 @@ pub enum DetailAction {
     Reject,
     Edit,
     Supersede,
+    MoveToContext,
+    AttachToContext,
+    DetachFromContext,
     Delete,
 }
 
-/// The detail actions the memory shown offers, in the order the pane shows them.
+/// The detail actions the memory shown offers, in the order the pane shows them. A place action
+/// is offered only when the engine takes it for this memory (D193 (8)).
 #[must_use]
 pub fn detail_actions(memory: Option<&Memory>) -> Vec<DetailAction> {
     let Some(memory) = memory else {
         return Vec::new();
     };
-    if memory.status == MemoryStatus::Proposed {
+    let mut actions = if memory.status == MemoryStatus::Proposed {
         vec![
             DetailAction::Accept,
             DetailAction::Reject,
             DetailAction::Edit,
             DetailAction::Supersede,
-            DetailAction::Delete,
         ]
     } else {
-        vec![DetailAction::Delete]
+        Vec::new()
+    };
+    let place = memories::Placement::of(memory);
+    if memories::check_move(place).is_ok() {
+        actions.push(DetailAction::MoveToContext);
     }
+    if memories::check_attach(place).is_ok() {
+        actions.push(DetailAction::AttachToContext);
+    }
+    if memories::check_detach(place).is_ok() {
+        actions.push(DetailAction::DetachFromContext);
+    }
+    actions.push(DetailAction::Delete);
+    actions
 }
 
 /// Whether a memory names a file that changed since it was accepted (D192 (6)).
@@ -498,11 +513,42 @@ mod tests {
                 DetailAction::Reject,
                 DetailAction::Edit,
                 DetailAction::Supersede,
+                DetailAction::MoveToContext,
                 DetailAction::Delete,
             ]
         );
         let accepted = memory("a", MemoryStatus::Accepted, "human", "t");
-        assert_eq!(detail_actions(Some(&accepted)), vec![DetailAction::Delete]);
+        assert_eq!(
+            detail_actions(Some(&accepted)),
+            vec![DetailAction::MoveToContext, DetailAction::Delete]
+        );
+    }
+
+    #[test]
+    fn a_context_memory_offers_attach_only_when_accepted_and_always_detach() {
+        let mut proposal = memory("p", MemoryStatus::Proposed, "agent:x", "t");
+        proposal.scope = "Platform".to_owned();
+        assert_eq!(
+            detail_actions(Some(&proposal)),
+            vec![
+                DetailAction::Accept,
+                DetailAction::Reject,
+                DetailAction::Edit,
+                DetailAction::Supersede,
+                DetailAction::DetachFromContext,
+                DetailAction::Delete,
+            ]
+        );
+        let mut accepted = memory("a", MemoryStatus::Accepted, "human", "t");
+        accepted.scope = "Platform".to_owned();
+        assert_eq!(
+            detail_actions(Some(&accepted)),
+            vec![
+                DetailAction::AttachToContext,
+                DetailAction::DetachFromContext,
+                DetailAction::Delete,
+            ]
+        );
     }
 
     #[test]

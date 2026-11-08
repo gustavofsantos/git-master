@@ -21,7 +21,7 @@ You can move around a repository without leaving the app. **Quick Open** (`Ctrl+
 
 ### Agents under human accountability
 
-An agent can read your review comments and earlier threads through GitMaster, and record that it handled a comment. It can also attach labels to threads and link related threads. These records are kept in GitMaster's own store, never in the repository. GitMaster gives the agent no way to change the repository, and a comment the agent marks as handled stays open to you until you resolve it. What the agent did is measured from the repository, not taken from its own account.
+An agent can read your review comments and earlier threads through GitMaster, record that it handled a comment, and reply on the comment's thread. It can also attach labels to threads and link related threads. These records are kept in GitMaster's own store, never in the repository. GitMaster gives the agent no way to change the repository, and a comment the agent marks as handled stays open to you until you resolve it. What the agent did is measured from the repository, not taken from its own account.
 
 Workflows are Lua scripts that run in a sandbox and act only through GitMaster's own actions. You run them from the command palette or with a keyboard shortcut. The agent integration is exposed through an MCP server and a local review loop. Branch stacks with restack are a preview feature. See [Stacks](guide/stacks.md).
 

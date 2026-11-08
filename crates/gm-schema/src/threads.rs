@@ -481,11 +481,25 @@ pub struct ThreadLink {
     pub member: Option<String>,
 }
 
+/// The thread a sub-agent thread belongs to (D199 (2)): the parent's uid and the `seq` of the
+/// parent's `Agent` call, when the parent holds that entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ThreadParent {
+    /// The parent thread's uid, as `ThreadSummary::uid`.
+    pub uid: String,
+    /// The `seq` of the parent's `Agent` call entry; `None` when the parent does not hold it.
+    pub seq: Option<u32>,
+}
+
 /// A thread with its entries, edits and links, as `ReadThread` returns it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ThreadDetail {
     pub summary: ThreadSummary,
+    /// The parent of a sub-agent thread (D199 (2)); `None` for any other thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ThreadParent>,
     pub entries: Vec<ThreadEntry>,
     pub edits: Vec<ThreadEdit>,
     pub links: Vec<ThreadLink>,

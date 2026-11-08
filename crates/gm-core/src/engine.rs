@@ -37,7 +37,7 @@ use crate::restack_resolutions::{self, Resolution};
 use crate::restack_session;
 use crate::review;
 use crate::review_session::{self, ReviewSession};
-use crate::review_store::ReviewStore;
+use crate::review_store::{Reply, ReviewStore};
 use crate::script::builtins;
 use crate::script::dry;
 use crate::script::hook_convert;
@@ -63,7 +63,7 @@ use crate::stack_session;
 use crate::submodule;
 use crate::syntax;
 use crate::threads::members;
-use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSession};
+use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSession, origin_of};
 use crate::workflow_session::{self, Effected};
 use crate::workspace::{CreateRequest, Workspaces};
 use crate::worktree;
@@ -4331,7 +4331,10 @@ impl Engine {
             CommandKind::HandleReviewComment {
                 id: comment,
                 summary,
-            } => self.handle_review_comment(id, *comment, summary),
+            } => self.handle_review_comment(id, actor, *comment, summary),
+            CommandKind::ReplyToReviewComment { id: comment, body } => {
+                self.reply_to_review_comment(id, actor, *comment, body)
+            }
             CommandKind::ReopenReviewComment { id: comment } => {
                 only_a_human(actor, "reopen a review comment")?;
                 self.set_review_status(id, *comment, ReviewStatus::Open)
@@ -4430,13 +4433,15 @@ impl Engine {
     }
 
     /// An agent's note that it worked on comment `comment` (D135): the status becomes
-    /// `Handled` and the summary is kept. A resolved comment is a human's decision
-    /// and is not touched. Then the "after" snapshot of the working tree is taken
-    /// and kept under its private ref (D140), in place of an earlier one; a snapshot
-    /// that fails leaves the comment handled without one, and its old ref is dropped.
+    /// `Handled`, and the summary is added as a reply by the actor. A resolved
+    /// comment is a human's decision and is not touched. Then the "after" snapshot of
+    /// the working tree is taken and kept under its private ref (D140), in place of an
+    /// earlier one; a snapshot that fails leaves the comment handled without one, and
+    /// its old ref is dropped.
     fn handle_review_comment(
         &mut self,
         id: OperationId,
+        actor: &Actor,
         comment: i64,
         summary: &str,
     ) -> Result<Vec<Event>, String> {
@@ -4448,7 +4453,10 @@ impl Engine {
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
         let current = find_review(store, comment)?;
         let (earlier, path) = (current.after_snapshot, current.path);
-        if !store.set_handled(comment, summary).map_err(|e| e.0)? {
+        if !store
+            .handle(comment, &origin_of(actor), summary, now_ms())
+            .map_err(|e| e.0)?
+        {
             return Err("the comment is already resolved".to_owned());
         }
         let snapshot = self
@@ -4469,6 +4477,45 @@ impl Engine {
                     .delete_review_ref(&root, comment, ReviewSide::After);
             }
             Err(_) => {}
+        }
+        self.review_listed(id, &root)
+    }
+
+    /// A reply to comment `comment`, which may be a root or a reply: it attaches to the
+    /// root. An agent's reply keeps the status. A person's reply reopens a handled
+    /// comment, as reopening does: the "after" snapshot is dropped with its ref (D140).
+    /// A resolved comment takes no reply.
+    fn reply_to_review_comment(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        comment: i64,
+        body: &str,
+    ) -> Result<Vec<Event>, String> {
+        let body = body.trim();
+        if body.is_empty() {
+            return Err("the reply is empty".to_owned());
+        }
+        let root = self.open_root()?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let parent = store
+            .root_of(comment)
+            .map_err(|e| e.0)?
+            .ok_or_else(|| format!("no review comment {comment}"))?;
+        let current = find_review(store, parent)?;
+        let reopen = matches!(actor, Actor::Human);
+        let outcome = store
+            .reply(parent, &origin_of(actor), body, now_ms(), reopen)
+            .map_err(|e| e.0)?;
+        match outcome {
+            Reply::Resolved => return Err("the comment is already resolved".to_owned()),
+            Reply::Added { reopened } => {
+                if reopened && current.after_snapshot.is_some() {
+                    self.git
+                        .delete_review_ref(&root, parent, ReviewSide::After)
+                        .map_err(|e| e.0)?;
+                }
+            }
         }
         self.review_listed(id, &root)
     }
@@ -5250,6 +5297,7 @@ impl Engine {
                 | CommandKind::ListMemories { .. }
                 | CommandKind::ReadMemory { .. }
                 | CommandKind::ListContexts { .. }
+                | CommandKind::PreviewDeleteContext { .. }
         ) {
             self.log.push(LogEntry {
                 id: op.id,
@@ -5420,6 +5468,7 @@ fn is_review_command(kind: &CommandKind) -> bool {
             | CommandKind::EditReviewComment { .. }
             | CommandKind::ResolveReviewComment { .. }
             | CommandKind::HandleReviewComment { .. }
+            | CommandKind::ReplyToReviewComment { .. }
             | CommandKind::ReopenReviewComment { .. }
             | CommandKind::DeleteReviewComment { .. }
             | CommandKind::LoadReviewSnapshotText { .. }

@@ -18,6 +18,8 @@ mod commit_threads;
 mod composer;
 mod conflict_resolver;
 mod context_menu;
+mod contexts_dialog;
+mod contexts_model;
 mod diff_pane;
 mod diff_rows;
 mod editor;

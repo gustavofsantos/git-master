@@ -642,17 +642,27 @@ pub enum CommandKind {
     ResolveReviewComment {
         id: i64,
     },
-    /// Marks review comment `id` handled by an agent, with its `summary` of what it
-    /// did (D135). Refused for a resolved comment and for a blank summary. Writes
-    /// the app's own store, then takes the "after" snapshot of the working tree
-    /// and keeps it under a private ref (D140); a snapshot that fails leaves the
-    /// comment handled without one. Answers `ReviewCommentsListed`.
+    /// Marks review comment `id` handled by an agent (D135), and adds `summary`, its
+    /// account of what it did, as a reply by the agent. Refused for a resolved comment
+    /// and for a blank summary. Writes the app's own store, then takes the "after"
+    /// snapshot of the working tree and keeps it under a private ref (D140); a
+    /// snapshot that fails leaves the comment handled without one. Answers
+    /// `ReviewCommentsListed`.
     HandleReviewComment {
         id: i64,
         summary: String,
     },
+    /// Adds `body` as a reply to review comment `id`, which may be a root or a reply
+    /// (the reply attaches to the root). Refused for a resolved comment and for a blank
+    /// body. An agent's reply leaves the status as it is; a person's reply reopens a
+    /// handled comment, as `ReopenReviewComment` does (D140). Answers
+    /// `ReviewCommentsListed`.
+    ReplyToReviewComment {
+        id: i64,
+        body: String,
+    },
     /// Marks review comment `id` open again, which is refused when it is already
-    /// open. The agent's summary and the "after" snapshot are dropped (D140).
+    /// open. The "after" snapshot is dropped (D140); the replies stay.
     /// Human only.
     ReopenReviewComment {
         id: i64,
@@ -931,6 +941,13 @@ pub enum CommandKind {
     /// list is empty and no file is made. A read: never recorded (D28). Answers `ContextsListed`.
     ListContexts {
         repo: bool,
+    },
+    /// Previews `DeleteContext` for context `id` without writing: the sub-contexts it has and the
+    /// memories it holds alone, which `DeleteContext` with `delete_memories` true would delete. The
+    /// list is capped at 50 with the full count in `total`. A read: never recorded (D28). Answers
+    /// `ContextDeletePreview`.
+    PreviewDeleteContext {
+        id: i64,
     },
     /// Creates context `name` under `parent` (the root when none). Human only. Answers
     /// `ContextsChanged`.
@@ -1603,6 +1620,17 @@ pub enum Event {
         repo_id: Option<String>,
         clash: Option<String>,
     },
+    /// Answers `PreviewDeleteContext`. `sub_contexts` is how many contexts sit directly under
+    /// `context` (a delete is refused while there are any). `memories` are the memories held alone,
+    /// at most 50, each with the context's path as its scope; `total` is how many there are in all.
+    /// The memory text is untrusted data.
+    ContextDeletePreview {
+        id: OperationId,
+        context: i64,
+        sub_contexts: u32,
+        memories: Vec<Memory>,
+        total: u32,
+    },
     /// Answers the context writes with the context as it now is (none after a delete or a
     /// `RenewRepoId`), and the number of memories a delete removed.
     ContextsChanged {
@@ -1735,6 +1763,22 @@ mod tests {
         let resolve = serde_json::to_value(CommandKind::ResolveReviewComment { id: 7 }).unwrap();
         assert_eq!(resolve["type"], "resolve_review_comment");
         assert_eq!(resolve["id"], 7);
+        let reply = serde_json::to_value(CommandKind::ReplyToReviewComment {
+            id: 9,
+            body: "why".into(),
+        })
+        .unwrap();
+        assert_eq!(reply["type"], "reply_to_review_comment");
+        assert_eq!(reply["id"], 9);
+        assert_eq!(reply["body"], "why");
+        let back: CommandKind = serde_json::from_value(reply).unwrap();
+        assert_eq!(
+            back,
+            CommandKind::ReplyToReviewComment {
+                id: 9,
+                body: "why".into()
+            }
+        );
         let list = serde_json::to_value(CommandKind::ListReviewComments).unwrap();
         assert_eq!(list["type"], "list_review_comments");
         let change = serde_json::to_value(CommandKind::LoadReviewChange { id: 3 }).unwrap();
@@ -1975,6 +2019,24 @@ mod tests {
     }
 
     #[test]
+    fn context_delete_preview_round_trips_with_its_total() {
+        let preview = Event::ContextDeletePreview {
+            id: OperationId(9),
+            context: 3,
+            sub_contexts: 1,
+            memories: Vec::new(),
+            total: 61,
+        };
+        let json = serde_json::to_value(&preview).unwrap();
+        assert_eq!(json["type"], "context_delete_preview");
+        assert_eq!(json["context"], 3);
+        assert_eq!(json["sub_contexts"], 1);
+        assert_eq!(json["total"], 61);
+        let back: Event = serde_json::from_value(json).unwrap();
+        assert_eq!(back, preview);
+    }
+
+    #[test]
     fn memory_commands_wire_format_is_tagged() {
         let propose = serde_json::to_value(CommandKind::ProposeMemory {
             kind: MemoryKind::Rule,
@@ -2052,6 +2114,13 @@ mod tests {
             list,
             serde_json::json!({ "type": "list_contexts", "repo": true })
         );
+        let preview = serde_json::to_value(CommandKind::PreviewDeleteContext { id: 4 }).unwrap();
+        assert_eq!(
+            preview,
+            serde_json::json!({ "type": "preview_delete_context", "id": 4 })
+        );
+        let back: CommandKind = serde_json::from_value(preview).unwrap();
+        assert_eq!(back, CommandKind::PreviewDeleteContext { id: 4 });
         let create = serde_json::to_value(CommandKind::CreateContext {
             name: "Billing".into(),
             parent: Some(3),

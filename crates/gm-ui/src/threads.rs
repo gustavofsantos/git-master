@@ -1557,6 +1557,20 @@ pub fn duration_label(ms: i64) -> String {
     }
 }
 
+/// A size in bytes as a result row shows it: `512 B`, `64 KB`, `3 MB`.
+#[must_use]
+pub fn size_label(bytes: u64) -> String {
+    const KB: u64 = 1_024;
+    const MB: u64 = 1_048_576;
+    if bytes < KB {
+        format!("{bytes} B")
+    } else if bytes < MB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{} MB", bytes / MB)
+    }
+}
+
 /// The first `max_lines` lines of `text`, and how many lines were left out.
 #[must_use]
 pub fn head(text: &str, max_lines: usize) -> (&str, usize) {
@@ -1729,6 +1743,10 @@ pub struct Message {
     pub entry_id: i64,
     pub kind: MessageKind,
     pub text: String,
+    /// The native tool name of a tool result.
+    pub tool: Option<String>,
+    /// The size of the entry's text before the cap, in bytes.
+    pub bytes: u64,
 }
 
 /// One row of a turn: a text, or a tool call.
@@ -1751,21 +1769,52 @@ pub struct Turn {
 }
 
 /// Groups the entries of a thread by turn, in order. Each tool result joins the call
-/// whose `<call>:result` id it has; a sub-agent's entries go under the call that
-/// started them; and each edit goes under the call entry that carried it.
+/// whose `<call>:result` id it has, in the same turn or in an earlier one (a result
+/// that arrives after the next prompt is stored in that later turn); a sub-agent's
+/// entries go under the call that started them; and each edit goes under the call
+/// entry that carried it.
 #[must_use]
 pub fn turns(detail: &ThreadDetail) -> Vec<Turn> {
+    let mut ordered: Vec<&ThreadEntry> = detail.entries.iter().collect();
+    ordered.sort_by_key(|entry| (entry.turn, entry.seq));
+    let pairing = Pairing::of(&ordered);
     let mut by_turn: BTreeMap<u32, Vec<&ThreadEntry>> = BTreeMap::new();
-    for entry in &detail.entries {
+    for entry in ordered {
         by_turn.entry(entry.turn).or_default().push(entry);
     }
     by_turn
         .into_iter()
-        .map(|(number, mut entries)| {
-            entries.sort_by_key(|entry| entry.seq);
-            build_turn(number, &entries, &detail.edits)
-        })
+        .map(|(number, entries)| build_turn(number, &entries, &detail.edits, &pairing))
         .collect()
+}
+
+/// The results of the thread that have a call in the thread loaded, by call id.
+struct Pairing<'a> {
+    by_call: HashMap<&'a str, &'a ThreadEntry>,
+    /// The entry ids of the results that are paired, so their turn does not show them.
+    paired: HashSet<i64>,
+}
+
+impl<'a> Pairing<'a> {
+    /// Pairs over all the entries loaded, in turn and sequence order, so a result
+    /// finds its call in any turn loaded.
+    fn of(entries: &[&'a ThreadEntry]) -> Self {
+        let calls: HashSet<&str> = entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::ToolCall)
+            .map(|entry| entry.source_id.as_str())
+            .collect();
+        let by_call: HashMap<&str, &ThreadEntry> = entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::ToolResult)
+            .filter_map(|entry| {
+                let call = entry.source_id.strip_suffix(RESULT_SUFFIX)?;
+                calls.contains(call).then_some((call, *entry))
+            })
+            .collect();
+        let paired = by_call.values().map(|result| result.id).collect();
+        Self { by_call, paired }
+    }
 }
 
 /// A block before its sub-agent entries are placed under it.
@@ -1776,24 +1825,15 @@ struct Node {
     block: Block,
 }
 
-fn build_turn(number: u32, entries: &[&ThreadEntry], edits: &[ThreadEdit]) -> Turn {
+fn build_turn(
+    number: u32,
+    entries: &[&ThreadEntry],
+    edits: &[ThreadEdit],
+    pairing: &Pairing<'_>,
+) -> Turn {
     let prompt_entry = entries.iter().find(|entry| entry.kind == EntryKind::User);
     let prompt = prompt_entry.map(|entry| entry.text.clone());
     let prompt_id = prompt_entry.map(|entry| entry.id);
-    let calls: HashSet<&str> = entries
-        .iter()
-        .filter(|entry| entry.kind == EntryKind::ToolCall)
-        .map(|entry| entry.source_id.as_str())
-        .collect();
-    let results: HashMap<&str, &ThreadEntry> = entries
-        .iter()
-        .filter(|entry| entry.kind == EntryKind::ToolResult)
-        .filter_map(|entry| {
-            let call = entry.source_id.strip_suffix(RESULT_SUFFIX)?;
-            calls.contains(call).then_some((call, *entry))
-        })
-        .collect();
-    let paired: HashSet<i64> = results.values().map(|result| result.id).collect();
     let call_entries: HashSet<i64> = entries
         .iter()
         .filter(|entry| entry.kind == EntryKind::ToolCall)
@@ -1812,24 +1852,12 @@ fn build_turn(number: u32, entries: &[&ThreadEntry], edits: &[ThreadEdit]) -> Tu
     for entry in entries {
         let block = match entry.kind {
             EntryKind::User => continue,
-            EntryKind::ToolResult if paired.contains(&entry.id) => continue,
-            EntryKind::ToolResult => Block::Message(Message {
-                entry_id: entry.id,
-                kind: MessageKind::Result,
-                text: entry.text.clone(),
-            }),
-            EntryKind::Assistant => Block::Message(Message {
-                entry_id: entry.id,
-                kind: MessageKind::Assistant,
-                text: entry.text.clone(),
-            }),
-            EntryKind::Notice => Block::Message(Message {
-                entry_id: entry.id,
-                kind: MessageKind::Notice,
-                text: entry.text.clone(),
-            }),
+            EntryKind::ToolResult if pairing.paired.contains(&entry.id) => continue,
+            EntryKind::ToolResult => Block::Message(message(entry, MessageKind::Result)),
+            EntryKind::Assistant => Block::Message(message(entry, MessageKind::Assistant)),
+            EntryKind::Notice => Block::Message(message(entry, MessageKind::Notice)),
             EntryKind::ToolCall => {
-                let result = results.get(entry.source_id.as_str()).copied();
+                let result = pairing.by_call.get(entry.source_id.as_str()).copied();
                 let duration_ms = result
                     .map(|result| result.at - entry.at)
                     .filter(|d| *d >= 0);
@@ -1876,6 +1904,18 @@ fn build_turn(number: u32, entries: &[&ThreadEntry], edits: &[ThreadEdit]) -> Tu
         prompt_id,
         blocks: placed,
         edits: turn_edits,
+    }
+}
+
+fn message(entry: &ThreadEntry, kind: MessageKind) -> Message {
+    Message {
+        entry_id: entry.id,
+        kind,
+        text: entry.text.clone(),
+        tool: entry.tool.clone(),
+        bytes: entry
+            .orig_bytes
+            .unwrap_or_else(|| u64::try_from(entry.text.len()).unwrap_or(u64::MAX)),
     }
 }
 
@@ -2048,6 +2088,7 @@ mod tests {
     ) -> ThreadDetail {
         ThreadDetail {
             summary: summary(uid, 1_000),
+            parent: None,
             entries,
             edits,
             links: Vec::<ThreadLink>::new(),
@@ -2992,6 +3033,59 @@ mod tests {
         ];
         let turns = turns(&detail("a", entries, Vec::new(), false));
         assert!(matches!(&turns[0].blocks[0], Block::Message(m) if m.kind == MessageKind::Result));
+    }
+
+    #[test]
+    fn a_result_arriving_after_the_next_prompt_pairs_with_its_call_in_the_earlier_turn() {
+        let entries = vec![
+            with_text(entry(1, 0, 4, EntryKind::User, "u4"), "p4"),
+            tool_call(2, 1, 4, "toolu1", "Edit", r#"{"file_path":"a.rs"}"#),
+            with_text(entry(3, 2, 5, EntryKind::User, "u5"), "p5"),
+            result(4, 3, 5, "toolu1", "patched", false),
+        ];
+        let turns = turns(&detail("a", entries, Vec::new(), false));
+        assert_eq!(turns.len(), 2);
+        let Block::Call(call) = &turns[0].blocks[0] else {
+            panic!("the call of turn 4");
+        };
+        assert_eq!(call.status, CallStatus::Done);
+        assert_eq!(
+            call.result.as_ref().map(|r| r.text.as_str()),
+            Some("patched")
+        );
+        assert_eq!(call.duration_ms, Some(2_000));
+        assert_eq!(turns[0].blocks.len(), 1);
+        assert_eq!(turns[1].prompt.as_deref(), Some("p5"));
+        assert!(
+            turns[1].blocks.is_empty(),
+            "the result is shown with its call only"
+        );
+    }
+
+    #[test]
+    fn a_result_whose_call_is_in_no_loaded_turn_stays_a_message_with_its_tool_and_size() {
+        let mut big = result(3, 2, 1, "gone", "head of the text", false);
+        big.tool = Some("Edit".to_owned());
+        big.orig_bytes = Some(70_003);
+        let entries = vec![entry(1, 0, 1, EntryKind::User, "p"), big];
+        let turns = turns(&detail("a", entries, Vec::new(), false));
+        match &turns[0].blocks[0] {
+            Block::Message(message) => {
+                assert_eq!(message.kind, MessageKind::Result);
+                assert_eq!(message.tool.as_deref(), Some("Edit"));
+                assert_eq!(message.bytes, 70_003);
+            }
+            other @ Block::Call(_) => panic!("not a message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_size_reads_in_bytes_kilobytes_and_megabytes() {
+        assert_eq!(size_label(0), "0 B");
+        assert_eq!(size_label(1_023), "1023 B");
+        assert_eq!(size_label(1_024), "1 KB");
+        assert_eq!(size_label(65_563), "64 KB");
+        assert_eq!(size_label(1_048_576), "1 MB");
     }
 
     #[test]

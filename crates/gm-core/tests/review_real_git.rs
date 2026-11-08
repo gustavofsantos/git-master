@@ -225,7 +225,9 @@ fn an_agent_marks_a_comment_handled_and_only_a_human_resolves_it() {
     assert!(done(&events), "{}", failure(&events));
     let handled = listed(&events).remove(0);
     assert_eq!(handled.status, ReviewStatus::Handled);
-    assert_eq!(handled.summary.as_deref(), Some("renamed b to bee"));
+    assert_eq!(handled.replies.len(), 1);
+    assert_eq!(handled.replies[0].author, "agent:test-agent");
+    assert_eq!(handled.replies[0].body, "renamed b to bee");
 
     let events = engine.handle(
         OperationId(12),
@@ -250,7 +252,7 @@ fn an_agent_marks_a_comment_handled_and_only_a_human_resolves_it() {
     );
     let resolved = listed(&events).remove(0);
     assert_eq!(resolved.status, ReviewStatus::Resolved);
-    assert_eq!(resolved.summary.as_deref(), Some("renamed b to bee"));
+    assert_eq!(resolved.replies[0].body, "renamed b to bee");
     let events = engine.handle(
         OperationId(15),
         &agent(CommandKind::HandleReviewComment {
@@ -266,7 +268,7 @@ fn an_agent_marks_a_comment_handled_and_only_a_human_resolves_it() {
     );
     let reopened = listed(&events).remove(0);
     assert_eq!(reopened.status, ReviewStatus::Open);
-    assert_eq!(reopened.summary, None);
+    assert_eq!(reopened.replies.len(), 1, "reopening keeps the replies");
 }
 
 #[test]
@@ -1142,7 +1144,7 @@ fn reopening_drops_the_after_snapshot_and_its_ref_and_deleting_drops_both_refs()
     assert!(done(&events), "{}", failure(&events));
     let reopened = listed(&events).remove(0);
     assert_eq!(reopened.after_snapshot, None);
-    assert_eq!(reopened.summary, None);
+    assert_eq!(reopened.replies.len(), 1, "reopening keeps the replies");
     assert!(reopened.snapshot.is_some());
     assert_eq!(private_refs(dir.path()), vec![before_ref(id)]);
     assert_eq!(change(&mut engine, id), None);
@@ -1176,7 +1178,10 @@ fn a_comment_is_handled_without_an_after_when_the_snapshot_fails() {
     write(&gitmaster, "tmp", "not a folder");
     let handled = handle(&mut engine, id, "second");
     assert_eq!(handled.status, ReviewStatus::Handled);
-    assert_eq!(handled.summary.as_deref(), Some("second"));
+    assert_eq!(
+        handled.replies.last().map(|r| r.body.as_str()),
+        Some("second")
+    );
     assert_eq!(handled.after_snapshot, None);
     assert_eq!(private_refs(dir.path()), vec![before_ref(id)]);
     assert_eq!(change(&mut engine, id), None);
@@ -1448,5 +1453,266 @@ fn a_snapshot_of_a_plain_file_is_the_same_tree_as_the_whole_worktree() {
         git(dir.path(), &["rev-parse", &format!("{whole}^{{tree}}")]),
         git(dir.path(), &["rev-parse", &format!("{for_path}^{{tree}}")]),
         "a repository without members is snapshotted as before"
+    );
+}
+
+/// The root comment `id` in a listing answer.
+fn root_listed(events: &[Event], id: i64) -> ReviewComment {
+    listed(events)
+        .into_iter()
+        .find(|comment| comment.id == id)
+        .expect("the comment in the listing")
+}
+
+/// A reply by the person to comment `id`.
+fn reply_as_human(engine: &mut Engine, id: i64, body: &str) -> Vec<Event> {
+    engine.handle(
+        OperationId(50),
+        &human(CommandKind::ReplyToReviewComment {
+            id,
+            body: body.to_owned(),
+        }),
+    )
+}
+
+#[test]
+fn a_handled_comment_gets_one_reply_per_handle_and_the_latest_after_snapshot() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 2, 2, "rename b")));
+    let id = only(&mut engine).id;
+
+    write(dir.path(), "f.txt", "a\nB\nc\nd\ne\n");
+    handle(&mut engine, id, "first");
+    let first_after = only(&mut engine).after_snapshot.expect("an after snapshot");
+
+    write(dir.path(), "f.txt", "a\nBee\nc\nd\ne\n");
+    let events = engine.handle(
+        OperationId(20),
+        &agent(CommandKind::HandleReviewComment {
+            id,
+            summary: "second".to_owned(),
+        }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    let handled = root_listed(&events, id);
+    assert_eq!(handled.status, ReviewStatus::Handled);
+    let bodies: Vec<&str> = handled.replies.iter().map(|r| r.body.as_str()).collect();
+    assert_eq!(bodies, ["first", "second"]);
+    assert!(
+        handled
+            .replies
+            .iter()
+            .all(|reply| reply.author == "agent:test-agent")
+    );
+    let second_after = handled
+        .after_snapshot
+        .clone()
+        .expect("a new after snapshot");
+    assert_ne!(second_after, first_after);
+    assert_eq!(
+        private_refs(dir.path()),
+        vec![after_ref(id), before_ref(id)]
+    );
+    assert_eq!(
+        git(dir.path(), &["rev-parse", &after_ref(id)]).trim(),
+        second_after
+    );
+}
+
+#[test]
+fn an_agent_reply_keeps_the_status_and_a_person_reply_reopens_a_handled_comment() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 3, 3, "about c")));
+    let id = only(&mut engine).id;
+    write(dir.path(), "f.txt", "a\nb\nC\nd\ne\n");
+    handle(&mut engine, id, "done");
+
+    let events = engine.handle(
+        OperationId(21),
+        &agent(CommandKind::ReplyToReviewComment {
+            id,
+            body: "  one more thing  ".to_owned(),
+        }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    let kept = root_listed(&events, id);
+    assert_eq!(
+        kept.status,
+        ReviewStatus::Handled,
+        "an agent reply keeps the status"
+    );
+    assert!(kept.after_snapshot.is_some());
+    assert_eq!(
+        kept.replies.last().map(|r| r.body.as_str()),
+        Some("one more thing")
+    );
+
+    let events = engine.handle(
+        OperationId(22),
+        &human(CommandKind::ReplyToReviewComment {
+            id,
+            body: "no, again".to_owned(),
+        }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    let reopened = root_listed(&events, id);
+    assert_eq!(reopened.status, ReviewStatus::Open);
+    assert_eq!(reopened.after_snapshot, None);
+    assert_eq!(private_refs(dir.path()), vec![before_ref(id)]);
+    let bodies: Vec<&str> = reopened.replies.iter().map(|r| r.body.as_str()).collect();
+    assert_eq!(bodies, ["done", "one more thing", "no, again"]);
+    let authors: Vec<&str> = reopened.replies.iter().map(|r| r.author.as_str()).collect();
+    assert_eq!(authors, ["agent:test-agent", "agent:test-agent", "human"]);
+
+    let listing = list(&mut engine);
+    assert_eq!(listing.len(), 1);
+    assert_eq!(listing[0].status, ReviewStatus::Open);
+    assert_eq!(listing[0].replies, reopened.replies);
+}
+
+#[test]
+fn a_reply_to_a_reply_attaches_to_its_root_and_the_root_keeps_its_status() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 1, 1, "about a")));
+    let id = only(&mut engine).id;
+    let events = reply_as_human(&mut engine, id, "first");
+    assert!(done(&events), "{}", failure(&events));
+    let first = root_listed(&events, id).replies[0].id;
+    assert_ne!(first, id, "a reply has an id of its own");
+
+    let events = engine.handle(
+        OperationId(23),
+        &agent(CommandKind::ReplyToReviewComment {
+            id: first,
+            body: "answer to the reply".to_owned(),
+        }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    let listing = listed(&events);
+    assert_eq!(listing.len(), 1, "a reply is not a comment of its own");
+    assert_eq!(listing[0].id, id);
+    assert_eq!(listing[0].status, ReviewStatus::Open);
+    let bodies: Vec<&str> = listing[0].replies.iter().map(|r| r.body.as_str()).collect();
+    assert_eq!(bodies, ["first", "answer to the reply"]);
+}
+
+#[test]
+fn a_reply_is_refused_on_a_resolved_comment_an_empty_body_and_an_unknown_id() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 2, 2, "rename b")));
+    let id = only(&mut engine).id;
+
+    let events = engine.handle(
+        OperationId(11),
+        &human(CommandKind::ResolveReviewComment { id }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    let events = reply_as_human(&mut engine, id, "late");
+    assert_eq!(failure(&events), "the comment is already resolved");
+    let events = engine.handle(
+        OperationId(12),
+        &agent(CommandKind::ReplyToReviewComment {
+            id,
+            body: "late".to_owned(),
+        }),
+    );
+    assert_eq!(failure(&events), "the comment is already resolved");
+    assert!(only(&mut engine).replies.is_empty());
+
+    engine.handle(
+        OperationId(13),
+        &human(CommandKind::ReopenReviewComment { id }),
+    );
+    let events = reply_as_human(&mut engine, id, "  \n ");
+    assert_eq!(failure(&events), "the reply is empty");
+    let events = reply_as_human(&mut engine, 999, "x");
+    assert_eq!(failure(&events), "no review comment 999");
+    assert!(only(&mut engine).replies.is_empty());
+}
+
+#[test]
+fn a_reply_id_is_not_a_comment_for_the_other_comment_commands() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 2, 2, "rename b")));
+    let id = only(&mut engine).id;
+    let events = reply_as_human(&mut engine, id, "reply");
+    assert!(done(&events), "{}", failure(&events));
+    let reply = root_listed(&events, id).replies[0].id;
+    let missing = format!("no review comment {reply}");
+
+    let resolve = engine.handle(
+        OperationId(11),
+        &human(CommandKind::ResolveReviewComment { id: reply }),
+    );
+    assert_eq!(failure(&resolve), missing);
+    let edit = engine.handle(
+        OperationId(12),
+        &human(CommandKind::EditReviewComment {
+            id: reply,
+            body: "changed".to_owned(),
+        }),
+    );
+    assert_eq!(failure(&edit), missing);
+    let handle = engine.handle(
+        OperationId(13),
+        &agent(CommandKind::HandleReviewComment {
+            id: reply,
+            summary: "x".to_owned(),
+        }),
+    );
+    assert_eq!(failure(&handle), missing);
+    let delete = engine.handle(
+        OperationId(14),
+        &human(CommandKind::DeleteReviewComment { id: reply }),
+    );
+    assert_eq!(failure(&delete), missing);
+
+    let kept = only(&mut engine);
+    assert_eq!(kept.status, ReviewStatus::Open);
+    assert_eq!(kept.replies.len(), 1);
+    assert_eq!(kept.replies[0].body, "reply");
+
+    let events = engine.handle(
+        OperationId(15),
+        &human(CommandKind::DeleteReviewComment { id }),
+    );
+    assert!(done(&events), "{}", failure(&events));
+    assert!(
+        list(&mut engine).is_empty(),
+        "the replies go with their comment"
+    );
+}
+
+#[test]
+fn a_reply_is_a_logged_write_and_a_listing_is_not() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    engine.handle(OperationId(10), &human(add("f.txt", 2, 2, "rename b")));
+    let id = only(&mut engine).id;
+    let before = engine.log().len();
+    list(&mut engine);
+    assert_eq!(engine.log().len(), before, "a listing leaves no entry");
+    reply_as_human(&mut engine, id, "logged");
+    let states: Vec<OperationState> = engine
+        .log()
+        .iter()
+        .filter(|entry| matches!(entry.kind, CommandKind::ReplyToReviewComment { .. }))
+        .filter(|entry| entry.id == OperationId(50))
+        .map(|entry| entry.state)
+        .collect();
+    assert!(
+        states.contains(&OperationState::Done),
+        "the reply is in the command log: {states:?}"
     );
 }

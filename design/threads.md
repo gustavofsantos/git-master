@@ -2,7 +2,7 @@
 
 The user-facing behavior is specified in `docs/guide/threads.md` and `docs/agents/agent-integration.md`; this file keeps the engineering rationale and the build plan.
 
-Last updated: 2026-11-07 (sharing, D187, and memories, D190, planned at the end of the file). Status: built except T0, T8 and T9 (see `design/roadmap.md`, slice 6t, for status and gaps; D130 for the choices made while building). The text below is the design as planned; where the build differs, D130 and the roadmap win. The author decided the direction on 2026-10-29 (D119 to D121); the details below are **proposed** (D122 to D128) and each one is listed in "To confirm" before the slice that depends on it starts.
+Last updated: 2026-11-07 (sub-agent threads, D199 and Q45, planned at the end of the file; sharing, D187, and memories, D190, planned at the end of the file). Status: built except T0, T8 and T9 (see `design/roadmap.md`, slice 6t, for status and gaps; D130 for the choices made while building). The text below is the design as planned; where the build differs, D130 and the roadmap win. The author decided the direction on 2026-10-29 (D119 to D121); the details below are **proposed** (D122 to D128) and each one is listed in "To confirm" before the slice that depends on it starts.
 
 ## Why
 
@@ -94,22 +94,24 @@ These are the only input of the pipeline. Fields common to all: `harness`, `sess
 
 | Event | Fields | Becomes |
 |---|---|---|
-| `SessionStarted` | `cwd`, `model?`, `harness_version?`, `log_path?`, `origin` (`new`, `resumed`, `cleared`, `compacted`, `unknown`) | the thread row |
+| `SessionStarted` | `cwd`, `model?`, `harness_version?`, `log_path?`, `origin` (`new`, `resumed`, `cleared`, `compacted`, `unknown`), `parent?` (the parent session and its `Agent` call, for a sub-agent; D199) | the thread row, with `parent_thread` and `parent_call` for a sub-agent |
 | `PromptSubmitted` | `text` | a `user` entry; opens a turn |
 | `AssistantMessage` | `text`, `model?` | an `assistant` entry |
-| `ToolCalled` | `tool: ToolKind`, `native_tool`, `args` (JSON), `parent_call?` | a `tool_call` entry |
+| `ToolCalled` | `tool: ToolKind`, `native_tool`, `args` (JSON) | a `tool_call` entry |
 | `ToolReturned` | `call_source_id`, `text`, `is_error` | a `tool_result` entry |
-| `TurnEnded` | `parent_call?` (set for a sub-agent) | closes the turn; reads `HEAD` for links |
+| `TurnEnded` | — | closes the turn of this session only; reads `HEAD` for links |
 | `SessionEnded` | `reason` | `ended_at` |
 | `Notice` | `text` | a `notice` entry (compaction, interruption) |
 
 `ToolKind` is the canonical tool class: `Read`, `Edit`, `Write`, `Shell`, `Search`, `Web`, `Agent` (a sub-agent), `Other`. The adapter maps the native name to it and keeps the native name in `native_tool` so nothing is lost. The pipeline uses the kind, not the name: `Edit` and `Write` are what trigger pre and post images, and `Shell` is what T8 watches.
 
+A sub-agent is a session of its own (D199). Its events carry its own `session_id` (`<session_id>/agent-<agentId>`), and its first event is `SessionStarted` with `parent` set. Its `TurnEnded` closes its own turn and never the parent's. No event carries a `parent_call`: the link is a property of the sub-agent's thread.
+
 For an edit the adapter also provides an **edit intent** inside `ToolCalled.args` normalization: the repository-relative or absolute `path`, the change kind, and the old and new text when the harness gives them. The pipeline decides what to measure from the file (D123); the intent is the fallback.
 
 ### Mapping for Claude Code
 
-The first adapter. The left column is the harness's contract and **unverified until T0** (Q26); the right is canonical.
+The first adapter. The left column is the harness's contract and **unverified until T0** (Q26); the right is canonical. The sub-agent rows are also unverified until Q45 is answered (D199).
 
 | Claude Code | Canonical |
 |---|---|
@@ -118,7 +120,7 @@ The first adapter. The left column is the harness's contract and **unverified un
 | hook `PreToolUse` on `Edit`, `MultiEdit`, `Write`, `NotebookEdit` | `EditPhase::Before` and `ToolCalled` |
 | hook `PostToolUse` | `ToolReturned`, `ToolCalled` if not seen, and `EditPhase::After` for edit tools |
 | hook `Stop` | `TurnEnded` |
-| hook `SubagentStop` | `TurnEnded` with `parent_call` |
+| hook `SubagentStop` | a trigger only: reads the sub-agent's transcript into its own thread (`TurnEnded` for the sub-agent, never for the parent; D199, Q45) |
 | hook `SessionEnd` | `SessionEnded` |
 | transcript `assistant` text block | `AssistantMessage` |
 | transcript `tool_use`, `tool_result` | `ToolCalled`, `ToolReturned` (reconciliation) |
@@ -135,7 +137,8 @@ The first adapter. The left column is the harness's contract and **unverified un
 | tool `Bash` | `ToolKind::Shell` |
 | tool `Grep`, `Glob` | `ToolKind::Search` |
 | tool `WebFetch`, `WebSearch` | `ToolKind::Web` |
-| tool `Task` | `ToolKind::Agent` |
+| tool `Agent` (the name the harness uses now; earlier drafts of this table said `Task`, which the adapter must not map) | `ToolKind::Agent`, and starts a sub-agent thread (D199) |
+| `Agent` call's `tool_result` (`toolUseResult.agentId`), and hook `PostToolUse` of an `Agent` call | a trigger only: the sub-agent's identity and its files `<transcript dir>/<session>/subagents/agent-<agentId>.jsonl` and `.meta.json` (`agentType`, `description`, `toolUseId`); see "Sub-agent threads" (D199, Q45) |
 | any other tool, or an MCP tool | `ToolKind::Other`, name kept |
 
 An event or record the adapter does not recognize is **not an error**: it is skipped, counted in a `capture_gap` row with the native type name. A payload that does not parse at all is a gap too. That makes harness version drift visible instead of silent.
@@ -328,7 +331,7 @@ entry(
   turn       INTEGER NOT NULL,          -- 1-based, increments on each human prompt
   kind       TEXT NOT NULL,             -- 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'notice'
   source_id  TEXT NOT NULL,             -- harness id; UNIQUE per thread
-  parent_id  TEXT,                      -- tool_use id of the call a sub-agent entry belongs to
+  parent_id  TEXT,                      -- not written from schema v9: a sub-agent's entries live in its own thread (D199)
   tool       TEXT,                      -- tool name for tool_call / tool_result
   text       TEXT NOT NULL,             -- redacted, capped
   args_json  TEXT,                      -- redacted tool input, capped
@@ -402,7 +405,7 @@ An agent can call the reads, which are exposed through MCP in T9 (and the proven
 
 ## UI
 
-See `design/screens.md` (Threads page) and `docs/guide/threads.md`. The page follows the History page's pattern: a virtualized list on the left (title, agent chip, branch, relative time, counts of edits, a redaction chip when something was redacted), the detail on the right. The detail groups by turn: the human's prompt, the agent's text, then its tool calls as one-line collapsed chips (tool, argument summary, status, duration); an edit is a card with the path, `+n −m`, the derived state, **Open Diff** (the read-only commit diff view with the patch) and **View File** (the Code page). Search results show snippets and open the thread at the matching entry. The model is pure and tested without a window; the view is thin. Long lists and long threads are virtualized, and loading a thread reads only the visible range plus a margin.
+See `design/screens.md` (Threads page) and `docs/guide/threads.md`. The page follows the History page's pattern: a virtualized list on the left (title, agent chip, branch, relative time, counts of edits, a redaction chip when something was redacted), the detail on the right. The detail groups by turn: the human's prompt, the agent's text, then its tool calls as one-line collapsed chips (tool, argument summary, status, duration); an edit is a card with the path, `+n −m`, the derived state, **Open Diff** (the read-only commit diff view with the patch) and **View File** (the Code page). Search results show snippets and open the thread at the matching entry. The model is pure and tested without a window; the view is thin. Long lists and long threads are virtualized, and loading a thread reads only the visible range plus a margin. A sub-agent run is a collapsed row under the `Agent` call that started it, and opens as a thread of its own; its rules are in "Sub-agent threads" (D199).
 
 ## Settings and files
 
@@ -476,7 +479,7 @@ Done when: the conformance kit passes for the fake adapter; the idempotence and 
 
 ### T3b: Claude Code adapter
 
-The adapter from T0's fixtures: hook parsing, transcript reader, tool mapping, sub-agents, resumed sessions, `discover` and `ImportThreads`.
+The adapter from T0's fixtures: hook parsing, transcript reader, tool mapping, resumed sessions, `discover` and `ImportThreads`. Sub-agents are built in the sub-agent slices (D199), not here.
 
 Done when: the conformance kit passes for `claude-code` with the real fixtures; the idempotence and order properties pass; a real Git repository is unchanged outside `.git/gitmaster/`; the measured p95 of the hook process meets the budget or Q25's fallback is built.
 
@@ -819,7 +822,7 @@ A context is a named set of repositories at the user level. A memory attached to
 
 #### `contexts.db`
 
-In the app data directory (`~/.local/share/gitmaster/contexts.db`, `Library/Application Support/gitmaster/contexts.db` on macOS), mode `0600`, WAL, `secure_delete`, its own schema version (the app and every `gitmaster mcp` process open it).
+In the app data directory (`~/.local/share/gitmaster/contexts.db`, or under `$XDG_DATA_HOME`; the same on macOS), mode `0600`, WAL, `secure_delete`, its own schema version (the app and every `gitmaster mcp` process open it).
 
 ```text
 context(
@@ -862,6 +865,7 @@ visible_contexts(repo_id) = ancestors_inclusive( { c : (c, repo_id) in context_r
 | `ListContexts { repo? }` | read | any | Contexts, their nesting, repositories and counts; with `repo`, those the repository belongs to (this is MCP `contexts_list`). |
 | `CreateContext { name, parent? }` | apply | human | |
 | `UpdateContext { id, name?, parent? }` | apply | human | Refuses a cycle and a duplicate sibling name. |
+| `PreviewDeleteContext { id }` | read | any | What `DeleteContext` would do, without writing (D196): the sub-contexts and the memories attached to no other context, at most 50 with the full `total`. Answers `ContextDeletePreview`. |
 | `DeleteContext { id }` | apply | human | Refused while it has sub-contexts. Memories attached to no other context are listed with their count and deleted on confirmation. |
 | `AddRepoToContext { context, repo }` / `RemoveRepoFromContext` | apply | human | Writes `repo-id` on first join. Removing leaves the memories whose sources are in the repository. |
 | `MoveMemoryToContext { memory, context }` | apply | human | Moves a repository memory into `contexts.db` (insert, then delete from `threads.db`, in that order, so a crash duplicates and never loses) and keeps its sources. |
@@ -905,3 +909,82 @@ Pure: the state machine (every illegal transition is refused, an agent actor can
 - **M3, Memories tab** (with C2: the scope chip and filter).
 - **M4, skills:** `/gitmaster:propose-memories` and `/gitmaster:prepare` (design/reviewers.md).
 - **M5, sharing of memories** (with SH5): deferred with sharing, not in the build order.
+
+## Sub-agent threads (D199)
+
+Decided by the author on 2026-11-07, not built. User-facing behavior: `docs/guide/threads.md` ("Sub-agents", marked `Planned`) and the `parent` fields in `docs/reference/mcp-tools.md`, marked `Planned`. The decision is in `design/decisions.md` (D199); the unverified harness facts are Q45.
+
+### Why a thread of its own
+
+The T3b draft kept a sub-agent inside its parent: its entries carried a `parent_id`, and its `SubagentStop` closed the parent's turn. Both are wrong. A sub-agent has its own turns, edits and commits, and its stop ends only its own work. As a thread of its own it gets every existing rule without a special case: redaction, caps, search, the derived edit states and commit links. The parent keeps the `Agent` call and its result.
+
+### Identity and link
+
+- The sub-agent's `session_id` is `<session_id>/agent-<agentId>`. Its `uid` is derived as for every thread, so `UNIQUE(harness, session_id)` holds.
+- `parent_thread` is the parent's `thread.id`. `parent_call` is the `tool_use` id of the parent's `Agent` call, which is the `source_id` of the parent's `tool_call` entry.
+- The `agentId` comes from `toolUseResult.agentId` on the `Agent` tool's result. The sub-agent's `agent-<agentId>.meta.json` must name the same `toolUseId`; a mismatch writes a `capture_gap` on the sub-agent and no link.
+- The sub-agent's transcript is `<transcript dir>/<session>/subagents/agent-<agentId>.jsonl`. Its title follows the same rule as any thread (its first prompt).
+- The type and description shown in the parent row come from the `Agent` call's input (`subagent_type`, `description`, both in the parent entry's `args_json`) and are checked against the meta file. Which of them the harness provides is Q45 (e).
+
+### Capture
+
+- **Triggers.** The hook `SubagentStop`, and the `PostToolUse` of an `Agent` call (its result is read). The hook payload only triggers the read. No field of it is a source until Q45 verifies it.
+- **One read.** Resolve the identity, create the thread if it is missing (`SessionStarted` with `parent`), then read the transcript from the thread's own `cursor` through the usual pipeline: normalize, redact, cap, one transaction. The read is idempotent by `source_id`, and the cursor moves in the same transaction. Each read is capped at the same size as any other transcript read.
+- **Running sub-agents.** The result of the `Agent` call may arrive before the sub-agent has stopped. The read is repeated at `SubagentStop`, so the thread shows what has been recorded so far and then the rest.
+- **Nothing crosses.** Sub-agent events never change the parent's turn, its `ended_at` or its cursor. The parent's `TurnEnded` comes from the parent's `Stop` only.
+- **Nesting.** A sub-agent's own `Agent` calls create threads whose `parent_thread` is the sub-agent, by the same rule.
+- **Edits.** A sub-agent's edits are edits of its own thread. How their pre and post images are taken depends on Q45 (a); until it is answered, an edit whose image cannot be taken falls back to `from_input` (D123).
+
+### Storage (schema v9)
+
+```text
+ALTER TABLE thread ADD COLUMN parent_thread INTEGER REFERENCES thread(id) ON DELETE CASCADE;
+ALTER TABLE thread ADD COLUMN parent_call TEXT;
+CREATE INDEX thread_parent ON thread(parent_thread);
+PRAGMA user_version = 9;
+```
+
+- Both columns are `NULL` for a thread that is not a sub-agent, and set together for one that is. The store enforces this; the column definitions carry no `CHECK`.
+- The migration is a numbered function from v8, tested from a v8 fixture, as every migration is (D122).
+- Deleting a parent deletes its sub-agent threads and everything they hold, through the same cascades a thread uses, with `secure_delete`. A test proves no child text remains in the file.
+- `thread_rel` is not used for this link. It stays for links a person or an agent curates (D143). The link is not a `thread_link` row either.
+- `entry.parent_id` is no longer written. The column stays: dropping it needs a table rebuild, and nothing reads it.
+
+### Visibility and search
+
+- **List.** `ListThreads` returns threads with `parent_thread` `NULL` only. A sub-agent appears only under its parent's `Agent` call.
+- **Search.** The sub-agent's entries are indexed under its own thread, as any thread's are. A hit carries `parent`: the parent's `uid` and the `seq` of its `Agent` call. The parent's search does not return the sub-agent's text.
+- **MCP.** `threads_search`, `thread_get` and `thread_read` report `parent` for a sub-agent thread. Its text is untrusted, as any thread text.
+- **Derived links.** A sub-agent's commits are linked by D126's rule over its own events. Whether **Show Threads for File** and a commit's **THREADS** list show a sub-agent's edit under the sub-agent, under its parent or under both is Q45 (c).
+
+### UI
+
+- The `Agent` call's row in the parent detail is collapsed. It shows the sub-agent's type, its description and its status (running while `ended_at` is `NULL`, otherwise finished). Expanding it reads the sub-agent's entries with the same paging as a thread.
+- **Open Thread** shows the sub-agent in the detail pane as a thread of its own, with its own turns, edits and commits. The list gains no row.
+- Indentation caps at a fixed depth. Starting value: three levels (proposed; the author may pick another). Deeper runs stay flat at that depth.
+- Nested rows count in the virtualized list. Their loading follows the rule for threads: the visible range plus a margin.
+
+### Sharing and memories
+
+Sharing (D187) and memories (D190) are unchanged by this section. The sharing rules name what is not exported; the parent link is not in that list. Whether a shared thread carries its parent link is for the transport decision (Q43).
+
+### Tests
+
+Pure: the identity rules (`parent` is set only with both fields and the `toolUseId` match); a property test that no interleaving of sub-agent events changes the parent's turn, `ended_at` or cursor; the rule that the list excludes children; the depth cap.
+
+Real SQLite: migration from a v8 fixture; a parent delete leaves no child text in the file; two reads of the same sub-agent (at the `Agent` result and at `SubagentStop`) store each entry once.
+
+Real Git: the repository is unchanged outside `.git/gitmaster/`, as for T3.
+
+Conformance: the fake harness of T3a gets a sub-agent transcript; the Claude Code adapter's sub-agent cases use the fixtures that Q45 requires.
+
+### Sub-slices
+
+- **S1, storage and model (pure and SQLite):** schema v9 and its migration; the two columns and the index; cascade delete; `ListThreads` without children; `parent` on `thread_get` and `thread_read`. Can start from hand-made fixtures; nothing is released until S2 is verified.
+- **S2, capture:** `SessionStarted.parent`; the identity and meta checks; the child's transcript read with its own cursor; the triggers in the hook. Waits for the Q45 fixtures.
+- **S3, Threads page:** the nested row, its expansion, **Open Thread** and the depth cap. Checked in a window in both themes (or the gap is stated).
+- **S4, search and MCP:** `parent` on `threads_search` hits and on the thread reads; the `Planned` markers in `docs/guide/threads.md` and `docs/reference/mcp-tools.md` removed as each part ships.
+
+### Open facts (Q45)
+
+The `SubagentStop` and `PostToolUse` payloads, the `Agent` result's `agentId`, and the sub-agent's transcript and meta files are not captured. The fixture in the tree is hand-made. S2 does not start until T0's method has captured them.

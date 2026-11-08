@@ -45,6 +45,14 @@ const NOT_COMPLETE: &str = "Clear the filters and search, and load the whole lis
 const NO_AUTHOR_PROPOSALS: &str = "No proposal from that author is shown.";
 const BAD_RANGE: &str = "A thread range starts after it ends.";
 const EMPTY_REF: &str = "A source needs a thread, a commit or a file.";
+const NOT_VISIBLE: &str = "Choose a context this repository belongs to.";
+const ALREADY_IN_CONTEXT: &str = "This memory is already in a context.";
+const NOT_MOVABLE: &str = "Only a proposed or accepted memory can move to a context.";
+const LINKED: &str = "A memory with supersedes links cannot move to a context.";
+const MOVE_FIRST: &str = "This memory is in this repository only: move it to a context first.";
+const NOT_ACCEPTED_TO_ATTACH: &str = "Only an accepted memory can be attached to another context.";
+const NO_CONTEXT_OF_ITS_OWN: &str =
+    "This memory is in this repository only, so it has no context to detach from.";
 
 /// Which memories the list shows by scope (D193 (5)).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -857,6 +865,66 @@ impl MemoriesPage {
         })
     }
 
+    /// Moves the repository memory `uid` into context `context` (D193 (8)). Refused unless `uid` is
+    /// loaded and movable, and `context` is one the repository sees. The engine refuses a duplicate
+    /// of the text in that context; its reason is the write's failure, shown as it comes.
+    pub fn plan_move(&self, uid: &str, context: i64) -> Result<Request, &'static str> {
+        let memory = self.find(uid).ok_or(NOT_SHOWN)?;
+        check_move(Placement::of(memory))?;
+        self.visible_context(context)?;
+        Ok(place(
+            CommandKind::MoveMemoryToContext {
+                uid: uid.to_owned(),
+                context,
+            },
+            uid,
+        ))
+    }
+
+    /// Attaches the accepted context memory `uid` to context `context`, which the repository sees.
+    /// A proposed memory is refused, as the engine refuses it.
+    pub fn plan_attach(&self, uid: &str, context: i64) -> Result<Request, &'static str> {
+        let memory = self.find(uid).ok_or(NOT_SHOWN)?;
+        check_attach(Placement::of(memory))?;
+        self.visible_context(context)?;
+        Ok(place(
+            CommandKind::AttachMemory {
+                uid: uid.to_owned(),
+                context,
+            },
+            uid,
+        ))
+    }
+
+    /// Detaches the context memory `uid` from the context its scope names. The scope shows one of
+    /// the contexts a memory is attached to, so this is the one the dialog can name; the engine
+    /// refuses the last context of a memory, and that reason is shown as it comes.
+    pub fn plan_detach(&self, uid: &str) -> Result<Request, &'static str> {
+        let memory = self.find(uid).ok_or(NOT_SHOWN)?;
+        check_detach(Placement::of(memory))?;
+        let context = self
+            .contexts
+            .iter()
+            .find(|context| context.path == memory.scope)
+            .ok_or(NOT_VISIBLE)?
+            .id;
+        Ok(place(
+            CommandKind::DetachMemory {
+                uid: uid.to_owned(),
+                context,
+            },
+            uid,
+        ))
+    }
+
+    /// The visible context with `id`, or the reason it cannot be a target.
+    fn visible_context(&self, id: i64) -> Result<&Context, &'static str> {
+        self.contexts
+            .iter()
+            .find(|context| context.id == id)
+            .ok_or(NOT_VISIBLE)
+    }
+
     /// The loaded proposal `uid`, or the reason it cannot be acted on.
     fn proposal(&self, uid: &str) -> Result<&Memory, &'static str> {
         let memory = self.find(uid).ok_or(NOT_SHOWN)?;
@@ -864,6 +932,75 @@ impl MemoriesPage {
             return Err(NOT_PROPOSED);
         }
         Ok(memory)
+    }
+}
+
+/// Where a memory sits, for the moves between the repository and its contexts (D193 (8)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placement {
+    /// The memory is a context's, not the repository's own.
+    pub in_context: bool,
+    pub status: MemoryStatus,
+    /// The memory has a supersedes link in either direction.
+    pub linked: bool,
+}
+
+impl Placement {
+    /// The placement of a memory as the engine listed or read it.
+    #[must_use]
+    pub fn of(memory: &Memory) -> Self {
+        Self {
+            in_context: memory.scope != REPOSITORY,
+            status: memory.status,
+            linked: !memory.supersedes.is_empty() || !memory.superseded_by.is_empty(),
+        }
+    }
+}
+
+/// Whether a memory can move from the repository into a context: the reasons are the engine's.
+pub fn check_move(place: Placement) -> Result<(), &'static str> {
+    if place.in_context {
+        Err(ALREADY_IN_CONTEXT)
+    } else if !matches!(
+        place.status,
+        MemoryStatus::Proposed | MemoryStatus::Accepted
+    ) {
+        Err(NOT_MOVABLE)
+    } else if place.linked {
+        Err(LINKED)
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether a memory can be attached to another context: only an accepted context memory.
+pub fn check_attach(place: Placement) -> Result<(), &'static str> {
+    if !place.in_context {
+        Err(MOVE_FIRST)
+    } else if place.status != MemoryStatus::Accepted {
+        Err(NOT_ACCEPTED_TO_ATTACH)
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether a memory can be detached from a context: only a context memory has one.
+pub fn check_detach(place: Placement) -> Result<(), &'static str> {
+    if place.in_context {
+        Ok(())
+    } else {
+        Err(NO_CONTEXT_OF_ITS_OWN)
+    }
+}
+
+/// A move, attach or detach write of `uid`: its answer is the memory as it now is.
+fn place(kind: CommandKind, uid: &str) -> Request {
+    Request {
+        kind,
+        read: Read::Change {
+            uid: Some(uid.to_owned()),
+            removes: false,
+        },
     }
 }
 
@@ -1741,5 +1878,158 @@ mod tests {
         assert!(split.changed.is_empty());
         assert_eq!(split.lines().len(), 2);
         assert!(files_changed(&[]).lines().is_empty());
+    }
+
+    /// A memory of a context, as the engine lists it: its scope names the context.
+    fn in_context(uid: &str, status: MemoryStatus, scope: &str) -> Memory {
+        Memory {
+            scope: scope.to_owned(),
+            ..memory(uid, status, "human", "a context memory")
+        }
+    }
+
+    fn context_at(id: i64, path: &str) -> Context {
+        Context {
+            id,
+            uid: format!("uid-{id}"),
+            name: path.rsplit(" / ").next().unwrap_or(path).to_owned(),
+            parent: None,
+            path: path.to_owned(),
+            repos: Vec::new(),
+            accepted_memories: 0,
+            sub_contexts: 0,
+        }
+    }
+
+    /// A page of the repository's memories and context memories, with the contexts it sees.
+    fn with_contexts(memories: Vec<Memory>, contexts: Vec<Context>) -> MemoriesPage {
+        let mut tab = MemoriesPage::default();
+        let read = tab.plan_list();
+        tab.sent(&read.read, OperationId(1));
+        tab.listed(OperationId(1), page(memories, None));
+        tab.sent(&Read::Contexts, OperationId(2));
+        assert!(tab.contexts_listed(OperationId(2), contexts));
+        tab
+    }
+
+    #[test]
+    fn a_repository_memory_moves_into_a_context_unless_it_is_done_or_linked() {
+        let accepted = Placement::of(&memory("a", MemoryStatus::Accepted, "human", "x"));
+        let proposed = Placement::of(&memory("p", MemoryStatus::Proposed, "agent:x", "x"));
+        assert_eq!(check_move(accepted), Ok(()));
+        assert_eq!(check_move(proposed), Ok(()));
+        let rejected = Placement::of(&memory("r", MemoryStatus::Rejected, "human", "x"));
+        assert_eq!(check_move(rejected), Err(NOT_MOVABLE));
+        let mut linked = memory("l", MemoryStatus::Accepted, "human", "x");
+        linked.superseded_by = vec!["n".to_owned()];
+        assert_eq!(check_move(Placement::of(&linked)), Err(LINKED));
+        let inside = Placement::of(&in_context("c", MemoryStatus::Accepted, "Platform"));
+        assert_eq!(check_move(inside), Err(ALREADY_IN_CONTEXT));
+    }
+
+    #[test]
+    fn attach_is_offered_only_for_an_accepted_context_memory_as_the_engine_allows() {
+        let accepted = Placement::of(&in_context("c", MemoryStatus::Accepted, "Platform"));
+        assert_eq!(check_attach(accepted), Ok(()));
+        let proposed = Placement::of(&in_context("p", MemoryStatus::Proposed, "Platform"));
+        assert_eq!(check_attach(proposed), Err(NOT_ACCEPTED_TO_ATTACH));
+        let own = Placement::of(&memory("a", MemoryStatus::Accepted, "human", "x"));
+        assert_eq!(check_attach(own), Err(MOVE_FIRST));
+    }
+
+    #[test]
+    fn detach_needs_a_context_memory_of_any_status() {
+        let proposed = Placement::of(&in_context("p", MemoryStatus::Proposed, "Platform"));
+        assert_eq!(check_detach(proposed), Ok(()));
+        let own = Placement::of(&memory("a", MemoryStatus::Accepted, "human", "x"));
+        assert_eq!(check_detach(own), Err(NO_CONTEXT_OF_ITS_OWN));
+    }
+
+    #[test]
+    fn a_move_plans_the_engine_command_for_a_visible_context_only() {
+        let tab = with_contexts(
+            vec![memory("a", MemoryStatus::Accepted, "human", "first")],
+            vec![context_at(7, "Platform")],
+        );
+        let request = tab.plan_move("a", 7).expect("planned");
+        assert_eq!(
+            kind_of(&request),
+            &CommandKind::MoveMemoryToContext {
+                uid: "a".to_owned(),
+                context: 7,
+            }
+        );
+        assert_eq!(
+            request.read,
+            Read::Change {
+                uid: Some("a".to_owned()),
+                removes: false,
+            }
+        );
+        assert_eq!(tab.plan_move("a", 8).err(), Some(NOT_VISIBLE));
+        assert_eq!(tab.plan_move("missing", 7).err(), Some(NOT_SHOWN));
+    }
+
+    #[test]
+    fn an_attach_is_refused_for_a_proposal_and_planned_for_an_accepted_context_memory() {
+        let tab = with_contexts(
+            vec![
+                in_context("c", MemoryStatus::Accepted, "Platform"),
+                in_context("p", MemoryStatus::Proposed, "Platform"),
+            ],
+            vec![context_at(7, "Platform"), context_at(8, "Partners")],
+        );
+        assert_eq!(
+            kind_of(&tab.plan_attach("c", 8).expect("planned")),
+            &CommandKind::AttachMemory {
+                uid: "c".to_owned(),
+                context: 8,
+            }
+        );
+        assert_eq!(tab.plan_attach("p", 8).err(), Some(NOT_ACCEPTED_TO_ATTACH));
+    }
+
+    #[test]
+    fn a_detach_names_the_context_the_scope_shows_and_is_refused_for_a_repository_memory() {
+        let tab = with_contexts(
+            vec![
+                in_context("c", MemoryStatus::Accepted, "Platform / Billing"),
+                memory("a", MemoryStatus::Accepted, "human", "own"),
+            ],
+            vec![
+                context_at(7, "Platform"),
+                context_at(9, "Platform / Billing"),
+            ],
+        );
+        assert_eq!(
+            kind_of(&tab.plan_detach("c").expect("planned")),
+            &CommandKind::DetachMemory {
+                uid: "c".to_owned(),
+                context: 9,
+            }
+        );
+        assert_eq!(tab.plan_detach("a").err(), Some(NO_CONTEXT_OF_ITS_OWN));
+        let unseen = with_contexts(
+            vec![in_context("c", MemoryStatus::Accepted, "Gone")],
+            vec![context_at(7, "Platform")],
+        );
+        assert_eq!(unseen.plan_detach("c").err(), Some(NOT_VISIBLE));
+    }
+
+    #[test]
+    fn a_refused_move_onto_a_duplicate_shows_the_engine_reason_as_it_comes() {
+        let mut tab = with_contexts(
+            vec![memory("a", MemoryStatus::Accepted, "human", "first")],
+            vec![context_at(7, "Platform")],
+        );
+        let request = tab.plan_move("a", 7).expect("planned");
+        tab.sent(&request.read, OperationId(30));
+        let reason = "memory m9 in this context already says this, so nothing was moved";
+        tab.ended(
+            OperationId(30),
+            OperationState::Failed,
+            Some(reason.to_owned()),
+        );
+        assert_eq!(tab.failure(), Some(reason));
     }
 }

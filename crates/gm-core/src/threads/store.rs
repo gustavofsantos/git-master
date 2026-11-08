@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use gm_schema::threads::{
     CaptureGap, EditChange, EntryKind, EntryRole, HitKind, LinkKind, LinkOrigin, SearchFacets,
     SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadEntry, ThreadEntryBrief,
-    ThreadFilter, ThreadHit, ThreadLink, ThreadSummary,
+    ThreadFilter, ThreadHit, ThreadLink, ThreadParent, ThreadSummary,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, ToSql, Transaction, TransactionBehavior, params,
@@ -29,6 +29,7 @@ use super::query::{
 /// Migrations in order; `PRAGMA user_version` counts how many have run.
 const MIGRATIONS: &[&str] = &[
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
+    SCHEMA_V9,
 ];
 /// The index in `MIGRATIONS` of the schema that repairs stored entries with the cleaner (D133).
 const REPAIR_MIGRATION: usize = 3;
@@ -421,6 +422,14 @@ UPDATE memory_source SET blob_read = 1
         SELECT id FROM memory WHERE status IN ('accepted','superseded'));
 ";
 
+/// Schema 9 (D199 (2)): a sub-agent thread names its parent thread and the parent's `Agent` call.
+/// Both columns are set together or not at all, which `parent_link` enforces on every write.
+const SCHEMA_V9: &str = "
+ALTER TABLE thread ADD COLUMN parent_thread INTEGER REFERENCES thread(id) ON DELETE CASCADE;
+ALTER TABLE thread ADD COLUMN parent_call TEXT;
+CREATE INDEX thread_parent ON thread(parent_thread);
+";
+
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
 /// Opening a file another process is initializing is retried this many times, this far apart.
 pub(crate) const OPEN_ATTEMPTS: u32 = 200;
@@ -771,6 +780,19 @@ impl ThreadStore {
     /// nothing, so applying a batch twice, or a prefix and then the whole batch, gives the
     /// same database as one pass.
     pub fn apply(&mut self, batch: &Batch) -> Result<Applied, StoreError> {
+        self.apply_with_parent(batch, None, None)
+    }
+
+    /// `apply` for a sub-agent thread (D199 (2)): when the thread is new, it is stored with its
+    /// parent, the uid of the parent thread and the id of the parent's `Agent` call, both or
+    /// neither (`parent_link`). A thread that exists already keeps the parent it was stored with.
+    pub fn apply_with_parent(
+        &mut self,
+        batch: &Batch,
+        parent_thread: Option<&str>,
+        parent_call: Option<&str>,
+    ) -> Result<Applied, StoreError> {
+        let parent = parent_link(parent_thread, parent_call)?;
         let uid = Self::thread_uid(&batch.harness, &batch.session_id);
         let entry_limit = i64::from(self.entry_limit);
         let tx = begin(&mut self.conn)?;
@@ -783,7 +805,7 @@ impl ThreadStore {
             .optional()?;
         let thread = match existing {
             Some(id) => id,
-            None => insert_thread(&tx, &uid, batch)?,
+            None => new_thread(&tx, &uid, batch, parent)?,
         };
         touch_thread(&tx, thread, batch)?;
 
@@ -851,8 +873,9 @@ impl ThreadStore {
             None => (None, None),
         };
         let limit = i64::from(limit);
+        // A sub-agent thread is listed under its parent's `Agent` call, never on its own (D199 (4)).
         let sql = format!(
-            "{SUMMARY_SQL} WHERE 1 = 1{FILTER_SQL}{extra}
+            "{SUMMARY_SQL} WHERE 1 = 1{FILTER_SQL}{extra} AND t.parent_thread IS NULL
              AND (:before_at IS NULL OR (t.last_event_at, t.uid) < (:before_at, :before_uid))
              ORDER BY t.last_event_at DESC, t.uid DESC LIMIT :limit"
         );
@@ -1349,6 +1372,7 @@ impl ThreadStore {
     ) -> Result<ThreadDetail, StoreError> {
         let thread = thread_id(&self.conn, uid)?;
         let summary = summary_of(&self.conn, thread)?;
+        let parent = parent_of(&self.conn, thread)?;
         let limit = i64::from(limit);
         let keep = usize::try_from(limit).unwrap_or(usize::MAX);
 
@@ -1404,6 +1428,7 @@ impl ThreadStore {
 
         Ok(ThreadDetail {
             summary,
+            parent,
             entries,
             edits,
             links,
@@ -1584,10 +1609,14 @@ impl ThreadStore {
     pub fn delete_thread(&mut self, uid: &str) -> Result<(), StoreError> {
         let tx = begin(&mut self.conn)?;
         let thread = thread_id(&tx, uid)?;
-        tx.execute(
-            "DELETE FROM label_attach WHERE kind = 'thread' AND ref = ?1",
-            params![uid],
-        )?;
+        // The sub-agent threads below it go too, at any depth (D199 (2)). Their rows go by the
+        // cascade; labels have no foreign key, so they are removed here.
+        for uid in subtree_uids(&tx, thread)? {
+            tx.execute(
+                "DELETE FROM label_attach WHERE kind = 'thread' AND ref = ?1",
+                params![uid],
+            )?;
+        }
         tx.execute("DELETE FROM thread WHERE id = ?1", params![thread])?;
         purge_search_index(&tx)?;
         tx.commit()?;
@@ -1968,6 +1997,82 @@ fn summary_of(conn: &Connection, thread: i64) -> Result<ThreadSummary, StoreErro
     let (id, mut summary) = conn.query_row(&sql, params![thread], summary_row)?;
     summary.tags = tags_of(conn, id)?;
     Ok(summary)
+}
+
+/// The parent of thread `thread` when it is a sub-agent thread (D199 (2)). `seq` is the `seq` of
+/// the parent's `Agent` call entry, which is the parent's `tool_call` entry with the call's id as
+/// its `source_id`; `None` when the parent does not hold that entry.
+fn parent_of(conn: &Connection, thread: i64) -> Result<Option<ThreadParent>, StoreError> {
+    let parent: Option<(i64, String, Option<String>)> = conn
+        .query_row(
+            "SELECT p.id, p.uid, t.parent_call FROM thread t
+             JOIN thread p ON p.id = t.parent_thread WHERE t.id = ?1",
+            params![thread],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((parent_id, uid, call)) = parent else {
+        return Ok(None);
+    };
+    let seq: Option<i64> = match call {
+        Some(call) => conn
+            .query_row(
+                "SELECT seq FROM entry WHERE thread_id = ?1 AND source_id = ?2
+                 AND kind = 'tool_call'",
+                params![parent_id, call],
+                |row| row.get(0),
+            )
+            .optional()?,
+        None => None,
+    };
+    Ok(Some(ThreadParent {
+        uid,
+        seq: seq.and_then(|seq| u32::try_from(seq).ok()),
+    }))
+}
+
+/// The row id of the parent thread `uid` of a new sub-agent thread. The parent must be stored.
+fn parent_row(conn: &Connection, uid: &str) -> Result<i64, StoreError> {
+    thread_id(conn, uid).map_err(|error| match error {
+        StoreError::NotFound => invalid("the parent thread of a sub-agent is not stored"),
+        other => other,
+    })
+}
+
+/// The uids of thread `root` and of every sub-agent thread below it, at any depth (D199 (2)).
+/// The walk is a set, so a cycle could not loop it (none can be stored: a parent is stored first).
+fn subtree_uids(conn: &Connection, root: i64) -> Result<Vec<String>, StoreError> {
+    let mut statement = conn.prepare(
+        "WITH RECURSIVE subtree(id) AS (
+            SELECT id FROM thread WHERE id = ?1
+            UNION
+            SELECT t.id FROM thread t JOIN subtree s ON t.parent_thread = s.id)
+         SELECT t.uid FROM thread t JOIN subtree s ON t.id = s.id",
+    )?;
+    let uids = statement
+        .query_map(params![root], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(uids)
+}
+
+/// The parent link of a new thread (D199 (2)): the parent's uid and the id of the parent's
+/// `Agent` call. Both are set or neither is; a half-set pair, or an empty part, is refused.
+fn parent_link<'a>(
+    parent_thread: Option<&'a str>,
+    parent_call: Option<&'a str>,
+) -> Result<Option<(&'a str, &'a str)>, StoreError> {
+    match (parent_thread, parent_call) {
+        (None, None) => Ok(None),
+        (Some(thread), Some(call)) if !thread.is_empty() && !call.is_empty() => {
+            Ok(Some((thread, call)))
+        }
+        (Some(_), Some(_)) => Err(invalid(
+            "a sub-agent thread needs the parent's uid and the id of its call",
+        )),
+        _ => Err(invalid(
+            "a parent thread and its call are set together or not at all",
+        )),
+    }
 }
 
 /// The names of the labels attached to thread `thread` (D145), by name.
@@ -2666,11 +2771,33 @@ fn derive_title(text: &str) -> Option<String> {
     Some(line.chars().take(TITLE_CHARS).collect())
 }
 
-fn insert_thread(conn: &Connection, uid: &str, batch: &Batch) -> Result<i64, StoreError> {
+/// Inserts a new thread, linked to its parent when it is a sub-agent (D199 (2)).
+fn new_thread(
+    conn: &Connection,
+    uid: &str,
+    batch: &Batch,
+    parent: Option<(&str, &str)>,
+) -> Result<i64, StoreError> {
+    let parent = parent
+        .map(|(parent_uid, call)| parent_row(conn, parent_uid).map(|thread| (thread, call)))
+        .transpose()?;
+    insert_thread(conn, uid, batch, parent)
+}
+
+fn insert_thread(
+    conn: &Connection,
+    uid: &str,
+    batch: &Batch,
+    parent: Option<(i64, &str)>,
+) -> Result<i64, StoreError> {
+    let (parent_thread, parent_call) = match parent {
+        Some((thread, call)) => (Some(thread), Some(call)),
+        None => (None, None),
+    };
     conn.execute(
         "INSERT INTO thread (uid, harness, session_id, worktree, branch, head_start, title,
-            started_at, last_event_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            started_at, last_event_at, parent_thread, parent_call)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             uid,
             batch.harness,
@@ -2680,7 +2807,9 @@ fn insert_thread(conn: &Connection, uid: &str, batch: &Batch) -> Result<i64, Sto
             batch.head,
             UNTITLED,
             batch.started_at,
-            batch.at
+            batch.at,
+            parent_thread,
+            parent_call
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -3234,7 +3363,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         assert_eq!(store.total_threads().expect("count"), 1);
     }
 
@@ -4158,6 +4287,255 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_link_is_set_together_or_not_at_all() {
+        assert_eq!(parent_link(None, None).expect("none"), None);
+        assert_eq!(
+            parent_link(Some("0123456789abcdef"), Some("toolu_1")).expect("both"),
+            Some(("0123456789abcdef", "toolu_1"))
+        );
+        assert!(parent_link(Some("0123456789abcdef"), None).is_err());
+        assert!(parent_link(None, Some("toolu_1")).is_err());
+        assert!(parent_link(Some(""), Some("toolu_1")).is_err());
+        assert!(parent_link(Some("0123456789abcdef"), Some("")).is_err());
+    }
+
+    /// Schema 9 (D199 (2)) on a version 8 file: the columns are added, nothing is linked, and a
+    /// sub-agent stored afterwards reads back its parent and the `seq` of the parent's call.
+    #[test]
+    fn schema_nine_adds_the_parent_link_to_a_version_eight_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rows = format!(
+            "INSERT INTO thread (uid, harness, session_id, worktree, title, started_at,
+                last_event_at)
+             VALUES ('{}', 'claude-code', 's1', '/repo', 'parent', 1, 1);
+             INSERT INTO entry (thread_id, seq, turn, kind, source_id, tool, text, at)
+             VALUES (1, 0, 1, 'user', 'u0', NULL, 'start', 1),
+                (1, 1, 1, 'tool_call', 'toolu_1', 'Agent', 'a sub-agent', 2);",
+            uid("s1")
+        );
+        legacy_database(dir.path(), 8, &rows);
+        let mut store = ThreadStore::open(dir.path()).expect("migrate");
+        assert_eq!(version_of(dir.path()), 9);
+        assert_eq!(
+            store.read_thread(&uid("s1"), 0, 10).expect("read").parent,
+            None
+        );
+        store
+            .apply_with_parent(
+                &batch(
+                    "s1/agent-a1",
+                    3,
+                    vec![new_entry("u1", EntryKind::User, "the child prompt", 3)],
+                ),
+                Some(&uid("s1")),
+                Some("toolu_1"),
+            )
+            .expect("child");
+        let child = store
+            .read_thread(&uid("s1/agent-a1"), 0, 10)
+            .expect("read child");
+        assert_eq!(
+            child.parent,
+            Some(ThreadParent {
+                uid: uid("s1"),
+                seq: Some(1)
+            })
+        );
+    }
+
+    #[test]
+    fn a_sub_agent_is_listed_under_its_parent_and_read_with_its_parent() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "p",
+                1,
+                vec![
+                    new_entry("u0", EntryKind::User, "review the parser", 1),
+                    new_entry("toolu_1", EntryKind::ToolCall, "Agent", 2),
+                ],
+            ))
+            .expect("parent");
+        store
+            .apply_with_parent(
+                &batch(
+                    "p/agent-a",
+                    3,
+                    vec![new_entry("c0", EntryKind::User, "check the lexer", 3)],
+                ),
+                Some(&uid("p")),
+                Some("toolu_1"),
+            )
+            .expect("child");
+        store
+            .apply_with_parent(
+                &batch(
+                    "p/agent-b",
+                    4,
+                    vec![new_entry("c1", EntryKind::User, "check the printer", 4)],
+                ),
+                Some(&uid("p")),
+                Some("toolu_gone"),
+            )
+            .expect("child without its call");
+
+        // The list holds the parent only; the children are not rows of it (D199 (4)).
+        let listed = store
+            .list_threads(&ThreadFilter::default(), None, 10)
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].uid, uid("p"));
+
+        // A child is still a thread of its own: it is read, and search finds its text (D199 (3)).
+        let child = store
+            .read_thread(&uid("p/agent-a"), 0, 10)
+            .expect("read child");
+        assert_eq!(child.summary.uid, uid("p/agent-a"));
+        assert_eq!(
+            child.parent,
+            Some(ThreadParent {
+                uid: uid("p"),
+                seq: Some(1)
+            })
+        );
+        let orphan = store
+            .read_thread(&uid("p/agent-b"), 0, 10)
+            .expect("read child without its call");
+        assert_eq!(
+            orphan.parent,
+            Some(ThreadParent {
+                uid: uid("p"),
+                seq: None
+            })
+        );
+        assert_eq!(
+            store
+                .read_thread(&uid("p"), 0, 10)
+                .expect("read parent")
+                .parent,
+            None
+        );
+        let hits = store
+            .search("lexer", &ThreadFilter::default(), 10)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].thread_uid, uid("p/agent-a"));
+    }
+
+    #[test]
+    fn a_half_set_parent_link_or_an_unknown_parent_stores_nothing() {
+        let mut store = ThreadStore::open_memory().expect("open");
+        store
+            .apply(&batch(
+                "p",
+                1,
+                vec![new_entry("toolu_1", EntryKind::ToolCall, "Agent", 1)],
+            ))
+            .expect("parent");
+        assert!(
+            store
+                .apply_with_parent(&batch("p/agent-a", 2, vec![]), Some(&uid("p")), None)
+                .is_err()
+        );
+        assert!(
+            store
+                .apply_with_parent(&batch("p/agent-a", 2, vec![]), None, Some("toolu_1"))
+                .is_err()
+        );
+        assert!(
+            store
+                .apply_with_parent(
+                    &batch("x/agent-a", 2, vec![]),
+                    Some(&uid("nobody")),
+                    Some("toolu_1"),
+                )
+                .is_err()
+        );
+        assert_eq!(store.total_threads().expect("count"), 1);
+    }
+
+    #[test]
+    fn deleting_a_parent_deletes_its_sub_agents_and_leaves_no_child_text_in_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = "zqx9childmarker";
+        let mut store = ThreadStore::open(dir.path()).expect("open");
+        store
+            .apply(&batch(
+                "p",
+                1,
+                vec![new_entry("toolu_1", EntryKind::ToolCall, "Agent", 1)],
+            ))
+            .expect("parent");
+        store
+            .apply_with_parent(
+                &batch(
+                    "p/agent-a",
+                    2,
+                    vec![
+                        new_entry("c0", EntryKind::User, &format!("look at {marker}"), 2),
+                        new_entry("toolu_2", EntryKind::ToolCall, "Agent", 3),
+                    ],
+                ),
+                Some(&uid("p")),
+                Some("toolu_1"),
+            )
+            .expect("child");
+        // A sub-agent of the sub-agent: the cascade reaches it at any depth.
+        store
+            .apply_with_parent(
+                &batch(
+                    "p/agent-a/agent-b",
+                    4,
+                    vec![new_entry(
+                        "g0",
+                        EntryKind::User,
+                        &format!("deep {marker}"),
+                        4,
+                    )],
+                ),
+                Some(&uid("p/agent-a")),
+                Some("toolu_2"),
+            )
+            .expect("grandchild");
+        store
+            .apply(&batch(
+                "other",
+                5,
+                vec![new_entry("o0", EntryKind::User, "unrelated", 5)],
+            ))
+            .expect("other");
+        assert_eq!(store.total_threads().expect("count"), 4);
+        assert_eq!(
+            store
+                .search("deep", &ThreadFilter::default(), 10)
+                .expect("search")
+                .len(),
+            1
+        );
+
+        store.delete_thread(&uid("p")).expect("delete parent");
+        assert_eq!(store.total_threads().expect("count"), 1);
+        assert_eq!(
+            store
+                .search(marker, &ThreadFilter::default(), 10)
+                .expect("search")
+                .len(),
+            0
+        );
+        store.checkpoint().expect("checkpoint");
+
+        let db = dir.path().join("gitmaster");
+        for name in ["threads.db", "threads.db-wal"] {
+            if let Ok(bytes) = std::fs::read(db.join(name)) {
+                assert!(
+                    !contains(&bytes, marker.as_bytes()),
+                    "{name} still holds the sub-agent text"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn delete_entry_removes_its_edits_and_fixes_the_counters() {
         let mut store = ThreadStore::open_memory().expect("open");
         store
@@ -4651,7 +5029,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         let hits = store
             .search("ndex", &ThreadFilter::default(), 10)
             .expect("search");
@@ -5172,7 +5550,7 @@ mod tests {
                 (3, 'file', 'src/c.rs', NULL, 'def');",
         );
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 8);
+        assert_eq!(version_of(dir.path()), 9);
         let mut statement = store
             .conn
             .prepare(
@@ -5305,7 +5683,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             legacy_database(dir.path(), versions, EVERY_KIND_ROWS);
             let store = ThreadStore::open(dir.path()).expect("migrate");
-            assert_eq!(version_of(dir.path()), 8, "from version {versions}");
+            assert_eq!(version_of(dir.path()), 9, "from version {versions}");
             assert_eq!(index_rows(&store), (2, 2), "from version {versions}");
             assert_eq!(stage_hits(&store, "backoff", "ckof", "bakcoff"), [1, 1, 1]);
             assert_eq!(
@@ -5347,7 +5725,7 @@ mod tests {
 
         let store = ThreadStore::open(dir.path()).expect("migrate");
 
-        assert_eq!(version_of(dir.path()), 8);
+        assert_eq!(version_of(dir.path()), 9);
         let detail = store.read_thread("old1", 0, 10).expect("read");
         assert_eq!(detail.edits.len(), 1);
         assert_eq!(detail.edits[0].path, "src/hexagonal_port.rs");
@@ -5543,7 +5921,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 3, MARKER_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 8);
+        assert_eq!(version_of(dir.path()), 9);
 
         // Slash command as typed, output and bash as notices and a bash prompt, reminders
         // gone, the interruption as a notice; the marker-only prompt is deleted.
@@ -5663,7 +6041,7 @@ mod tests {
             open_for_hook_below(dir.path(), 6).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(dir.path()), 8);
+        assert_eq!(version_of(dir.path()), 9);
 
         // An up-to-date database is opened whatever its size.
         assert!(matches!(
@@ -5676,7 +6054,7 @@ mod tests {
             open_for_hook_below(fresh.path(), 1).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(fresh.path()), 8);
+        assert_eq!(version_of(fresh.path()), 9);
     }
 
     /// A deterministic generator for the benchmark: no randomness crate, same text every run.
@@ -6473,7 +6851,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 4, VERSION_FOUR_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 8);
+        assert_eq!(version_of(dir.path()), 9);
         assert_eq!(
             store.thread_summary("t1uid").expect("t1").tags,
             ["api", "bug"]
@@ -6524,7 +6902,7 @@ mod tests {
         );
         let store = ThreadStore::open(dir.path()).expect("migrate");
         assert_eq!(store.total_threads().expect("count"), 1);
-        assert_eq!(version_of(dir.path()), 8);
+        assert_eq!(version_of(dir.path()), 9);
         let raw = raw_connection(dir.path());
         for name in ["memory", "memory_source", "memory_rel", "memory_fts"] {
             let found: i64 = raw

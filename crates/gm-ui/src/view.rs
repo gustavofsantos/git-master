@@ -30,6 +30,7 @@ use crate::branch_filter::BranchFilter;
 use crate::branch_menu::BranchMenu;
 use crate::composer::{Composer, ComposerEvent};
 use crate::context_menu::ContextMenu;
+use crate::contexts_dialog::ContextsDialog;
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::diff_rows::Layout;
 use crate::editor_theme;
@@ -194,6 +195,8 @@ pub struct StatusView {
     pub(crate) threads_tab: ThreadsTab,
     /// The New Memory, Supersedes… or Delete dialog, while it is open (D190).
     pub(crate) memory_dialog: Option<MemoryDialog>,
+    /// The Manage Contexts dialog, while it is open (D191).
+    pub(crate) contexts_dialog: Option<ContextsDialog>,
     pub(crate) labels_view: LabelsView,
     /// The create-worktree dialog, while it is open.
     pub(crate) worktree_dialog: Option<WorktreeDialog>,
@@ -493,6 +496,7 @@ impl StatusView {
             memories_view: MemoriesView::new(memories_query, memory_path),
             threads_tab: ThreadsTab::default(),
             memory_dialog: None,
+            contexts_dialog: None,
             labels_view: LabelsView::new(labels_query),
             worktree_dialog: None,
             removal_dialog: None,
@@ -626,6 +630,7 @@ impl StatusView {
         let failed_start = self.take_settled_startup(&event);
         let converted = convert_answer(&event);
         self.follow_memories(&event, cx);
+        self.follow_contexts(&event, cx);
         let shown = self.model.apply(event);
         if moved_by_workflow {
             self.replan_after_workflow_restack(cx);
@@ -1608,6 +1613,7 @@ impl StatusView {
                 .map(|memory| MemoryRef {
                     uid: &memory.uid,
                     proposed: memory.status == gm_schema::threads::MemoryStatus::Proposed,
+                    placement: crate::memories::Placement::of(memory),
                 }),
             code: self.code_ctx(),
             submodules: Some(&self.model.submodules),
@@ -1999,6 +2005,7 @@ impl StatusView {
         layers.extend(self.stash_layers(window, cx));
         layers.extend(self.thread_layers(window, cx));
         layers.extend(self.memory_layers(window, cx));
+        layers.extend(self.contexts_layers(window, cx));
         layers.extend(self.label_layers(window, cx));
         layers.extend(self.threads_settings_layer(window, cx));
         layers.extend(self.review_composer_layer(window, cx));

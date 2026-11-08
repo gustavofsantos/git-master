@@ -124,6 +124,7 @@ fn the_handshake_lists_only_the_tools_the_agent_does_not_have() {
         [
             "review_comments_list",
             "review_comment_resolve",
+            "review_comment_reply",
             "threads_search",
             "thread_get",
             "thread_read",
@@ -180,13 +181,80 @@ fn an_agent_lists_a_comment_handles_it_and_the_person_still_has_to_resolve_it() 
             .is_empty()
     );
     assert_eq!(
-        result(&replies[4])["comments"][0]["summary"],
+        result(&replies[4])["comments"][0]["replies"][0]["body"],
         "renamed b to bee"
+    );
+    assert_eq!(
+        result(&replies[4])["comments"][0]["replies"][0]["author"],
+        "agent:test-client"
     );
     assert_eq!(replies[5]["result"]["isError"], true);
 
     // The record is in the repository's store: the app reads it from there.
     assert!(dir.path().join(".git/gitmaster/review.db").is_file());
+}
+
+#[test]
+fn an_agent_replies_on_a_thread_and_the_replies_are_listed_untrusted() {
+    let dir = repo();
+    comment(dir.path(), 2, "rename b");
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(
+                2,
+                "review_comment_resolve",
+                &json!({ "id": 1, "summary": "renamed b to bee" }),
+            ),
+            // The summary is reply 2 (the ids of a comment and its replies share one sequence).
+            call(
+                3,
+                "review_comment_reply",
+                &json!({ "id": 1, "body": "tests pass" }),
+            ),
+            call(
+                4,
+                "review_comment_reply",
+                &json!({ "id": 2, "body": "answer to the summary" }),
+            ),
+            call(5, "review_comment_reply", &json!({ "id": 99, "body": "x" })),
+            call(6, "review_comment_reply", &json!({ "id": 1, "body": " " })),
+            call(7, "review_comments_list", &json!({ "status": "handled" })),
+        ],
+    );
+    let resolved = result(&replies[1]);
+    assert_eq!(resolved["status"], "handled");
+    assert_eq!(resolved["untrusted"], true);
+    assert!(resolved.get("summary").is_none(), "{resolved}");
+    assert_eq!(resolved["replies"].as_array().unwrap().len(), 1);
+    assert_eq!(resolved["replies"][0]["id"], 2);
+    assert_eq!(resolved["replies"][0]["author"], "agent:test-client");
+    assert_eq!(resolved["replies"][0]["body"], "renamed b to bee");
+    assert_eq!(resolved["replies"][0]["untrusted"], true);
+
+    // A reply keeps the status, and a reply to a reply belongs to the comment.
+    let answered = result(&replies[2]);
+    assert_eq!(answered["id"], 1);
+    assert_eq!(answered["status"], "handled");
+    let bodies: Vec<&str> = answered["replies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|reply| reply["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(bodies, ["renamed b to bee", "tests pass"]);
+    let nested = result(&replies[3]);
+    assert_eq!(nested["id"], 1);
+    assert_eq!(nested["replies"].as_array().unwrap().len(), 3);
+    assert_eq!(nested["replies"][2]["body"], "answer to the summary");
+
+    assert_eq!(replies[4]["result"]["isError"], true);
+    assert_eq!(replies[5]["result"]["isError"], true);
+    let listed = result(&replies[6])["comments"].as_array().unwrap().clone();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["replies"].as_array().unwrap().len(), 3);
+    assert_eq!(listed[0]["replies"][0]["untrusted"], true);
 }
 
 #[test]
@@ -401,6 +469,78 @@ fn an_agent_searches_a_thread_then_reads_it_in_pages() {
     assert_eq!(entries[0]["kind"], "assistant");
     assert_eq!(entries[0]["untrusted"], true);
     assert_eq!(page["has_more"], true);
+}
+
+/// A sub-agent of thread `parent` (session `s1`), started by the `Agent` call `e4` that
+/// `store_thread` does not hold, so the call is stored first. Returns the sub-agent's uid.
+fn store_sub_agent(dir: &Path, parent: &str) -> String {
+    let mut store = ThreadStore::open(&dir.join(".git")).unwrap();
+    store
+        .apply(&new_batch(
+            dir,
+            "s1",
+            "claude-opus-4",
+            "main",
+            vec![new_entry("e4", EntryKind::ToolCall, "Agent", 6)],
+        ))
+        .unwrap();
+    store
+        .apply_with_parent(
+            &new_batch(
+                dir,
+                "s1/agent-a1",
+                "claude-haiku",
+                "main",
+                vec![
+                    new_entry("c0", EntryKind::User, "find the backoff constant", 7),
+                    new_entry("c1", EntryKind::Assistant, "the constant is 250 ms", 8),
+                ],
+            ),
+            Some(parent),
+            Some("e4"),
+        )
+        .unwrap();
+    ThreadStore::thread_uid("claude-code", "s1/agent-a1")
+}
+
+#[test]
+fn a_sub_agent_thread_reports_its_parent_and_is_not_listed_on_its_own() {
+    let dir = repo();
+    let parent = store_thread(dir.path());
+    let child = store_sub_agent(dir.path(), &parent);
+    let replies = session(
+        dir.path(),
+        &[
+            initialize(),
+            call(2, "thread_get", &json!({ "id": child })),
+            call(
+                3,
+                "thread_read",
+                &json!({ "id": child, "from": 0, "limit": 5 }),
+            ),
+            call(4, "thread_get", &json!({ "id": parent })),
+            call(5, "threads_search", &json!({})),
+        ],
+    );
+
+    let overview = result(&replies[1]);
+    assert_eq!(overview["thread"]["uid"], child.as_str());
+    assert_eq!(overview["parent"]["uid"], parent.as_str());
+    assert_eq!(overview["parent"]["seq"], 4);
+    assert_eq!(overview["untrusted"], true);
+
+    let read = result(&replies[2]);
+    assert_eq!(read["parent"]["uid"], parent.as_str());
+    assert_eq!(read["parent"]["seq"], 4);
+    let entries = read["entries"].as_array().unwrap();
+    assert_eq!(entries[0]["text"], "find the backoff constant");
+    assert_eq!(entries[0]["untrusted"], true);
+
+    assert!(result(&replies[3]).get("parent").is_none());
+
+    let listed = thread_ids(&replies[4]);
+    assert!(listed.contains(&parent), "the parent is listed");
+    assert!(!listed.contains(&child), "the sub-agent is not listed");
 }
 
 /// A thread of `count` assistant entries, seq 0 to `count - 1`, each saying its own seq.

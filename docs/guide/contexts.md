@@ -49,7 +49,7 @@ Choose **New Memory** and pick the scope. A memory you write is accepted at once
 
 ### Move a memory into a context
 
-A memory written in one repository can turn out to matter to others. Select it, choose **Move to Context…** and pick the context. The memory moves, with its sources, and leaves the repository's own list. To make a context memory also belong to another context, choose **Attach to Context…**. It stays one memory, not a copy.
+A memory written in one repository can turn out to matter to others. Select it, choose **Move to Context…** and pick the context. The memory moves, with its sources, and leaves the repository's own list. To make a context memory also belong to another context, choose **Attach to Context…**. It stays one memory, not a copy. To take a context memory out of a context, choose **Detach from Context…**; a memory always keeps at least one context.
 
 ### Let an agent propose a memory in a context
 

@@ -16,6 +16,7 @@ use gm_schema::{
     WorktreeEntry,
 };
 
+use crate::memories::{self, Placement};
 use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, SAME_WORKTREE};
 use crate::stacks::Stacks;
 use crate::stashes;
@@ -485,17 +486,27 @@ pub enum MemoryEffect {
     New,
     Accept(String),
     Reject(String),
+    /// Opens the Manage Contexts dialog (D191).
+    ManageContexts,
+    /// Opens the picker of the contexts the memory moves into (D193 (8)).
+    MoveToContext(String),
+    /// Opens the picker of the contexts the memory is attached to.
+    AttachToContext(String),
+    /// Opens the confirmation that detaches the memory from the context its scope names.
+    DetachFromContext(String),
 }
 
-/// The memory the Memories tab has selected: its uid and whether it is a proposal.
+/// The memory the Memories tab has selected: its uid, whether it is a proposal, and where it
+/// sits, which the moves between the repository and its contexts take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryRef<'a> {
     pub uid: &'a str,
     pub proposed: bool,
+    pub placement: Placement,
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 110] = [
+const SPECS: [Spec; 114] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1260,6 +1271,34 @@ const SPECS: [Spec; 110] = [
         ArgKind::Memory,
         Category::Repository,
     ),
+    spec(
+        "contexts.manage",
+        "Manage Contexts…",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "memories.move_to_context",
+        "Move Memory to Context…",
+        None,
+        ArgKind::Memory,
+        Category::Repository,
+    ),
+    spec(
+        "memories.attach_to_context",
+        "Attach Memory to Context…",
+        None,
+        ArgKind::Memory,
+        Category::Repository,
+    ),
+    spec(
+        "memories.detach_from_context",
+        "Detach Memory from Context…",
+        None,
+        ArgKind::Memory,
+        Category::Repository,
+    ),
 ];
 
 const fn spec(
@@ -1403,6 +1442,14 @@ pub enum Action {
     AcceptMemory,
     /// Rejects the selected proposed memory (D190).
     RejectMemory,
+    /// Opens the Manage Contexts dialog: the contexts, their repositories and their memories (D191).
+    ManageContexts,
+    /// Moves the selected repository memory into a context (D193 (8)).
+    MoveMemoryToContext,
+    /// Attaches the selected accepted context memory to another context (D193 (8)).
+    AttachMemoryToContext,
+    /// Detaches the selected context memory from the context its scope names (D193 (8)).
+    DetachMemoryFromContext,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1494,13 +1541,31 @@ pub(crate) fn memory_args(memory: MemoryRef<'_>) -> Args {
     }
 }
 
-/// The rule of Accept and Reject (D190): a repository is open and a proposed memory is selected.
-fn memory_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
+/// The rules of the memory actions on the selected memory. Accept and Reject need a proposal (D190).
+/// Move, Attach and Detach need the placement the engine takes (D193 (8)): the memory model checks
+/// it as the engine does, so the menu and the engine give the same answer.
+fn memory_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
     repository_open(ctx)?;
-    match args {
-        Args::Memory { proposed: true, .. } => Ok(()),
-        Args::Memory { .. } => Err(NOT_PROPOSED_MEMORY),
-        _ => Err(SELECT_MEMORY),
+    let Args::Memory { uid, proposed } = args else {
+        return Err(SELECT_MEMORY);
+    };
+    if matches!(action, Action::AcceptMemory | Action::RejectMemory) {
+        return if *proposed {
+            Ok(())
+        } else {
+            Err(NOT_PROPOSED_MEMORY)
+        };
+    }
+    let Some(memory) = ctx
+        .selected_memory
+        .filter(|memory| memory.uid == uid.as_str())
+    else {
+        return Err(SELECT_MEMORY);
+    };
+    match action {
+        Action::MoveMemoryToContext => memories::check_move(memory.placement),
+        Action::AttachMemoryToContext => memories::check_attach(memory.placement),
+        _ => memories::check_detach(memory.placement),
     }
 }
 
@@ -1594,11 +1659,21 @@ fn thread_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
 fn memory_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
     Ok(match (action, args) {
         (Action::NewMemory, _) => Effect::Memory(MemoryEffect::New),
+        (Action::ManageContexts, _) => Effect::Memory(MemoryEffect::ManageContexts),
         (Action::AcceptMemory, Args::Memory { uid, .. }) => {
             Effect::Memory(MemoryEffect::Accept(uid.clone()))
         }
         (Action::RejectMemory, Args::Memory { uid, .. }) => {
             Effect::Memory(MemoryEffect::Reject(uid.clone()))
+        }
+        (Action::MoveMemoryToContext, Args::Memory { uid, .. }) => {
+            Effect::Memory(MemoryEffect::MoveToContext(uid.clone()))
+        }
+        (Action::AttachMemoryToContext, Args::Memory { uid, .. }) => {
+            Effect::Memory(MemoryEffect::AttachToContext(uid.clone()))
+        }
+        (Action::DetachMemoryFromContext, Args::Memory { uid, .. }) => {
+            Effect::Memory(MemoryEffect::DetachFromContext(uid.clone()))
         }
         _ => return Err(NOT_AVAILABLE),
     })
@@ -1791,7 +1866,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 110] = [
+    pub const ALL: [Action; 114] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -1902,6 +1977,10 @@ impl Action {
         Action::NewMemory,
         Action::AcceptMemory,
         Action::RejectMemory,
+        Action::ManageContexts,
+        Action::MoveMemoryToContext,
+        Action::AttachMemoryToContext,
+        Action::DetachMemoryFromContext,
     ];
 
     #[must_use]
@@ -2094,6 +2173,32 @@ impl Action {
     }
 
     /// Whether the action is one of the Labels page's write actions (P4), which `label_effect` plans.
+    /// Whether the action is one of the memory actions that `memory_effect` plans.
+    fn is_memory_effect(self) -> bool {
+        matches!(
+            self,
+            Action::NewMemory
+                | Action::AcceptMemory
+                | Action::RejectMemory
+                | Action::ManageContexts
+                | Action::MoveMemoryToContext
+                | Action::AttachMemoryToContext
+                | Action::DetachMemoryFromContext
+        )
+    }
+
+    /// Whether the action's rule is `memory_rule`: the ones that act on the selected memory.
+    fn is_memory_rule(self) -> bool {
+        matches!(
+            self,
+            Action::AcceptMemory
+                | Action::RejectMemory
+                | Action::MoveMemoryToContext
+                | Action::AttachMemoryToContext
+                | Action::DetachMemoryFromContext
+        )
+    }
+
     fn is_label_action(self) -> bool {
         matches!(
             self,
@@ -2159,6 +2264,10 @@ impl Action {
                 | Action::LabelRename
                 | Action::LabelDelete
                 | Action::NewMemory
+                | Action::ManageContexts
+                | Action::MoveMemoryToContext
+                | Action::AttachMemoryToContext
+                | Action::DetachMemoryFromContext
         )
     }
 
@@ -2267,8 +2376,9 @@ impl Action {
             Action::ThreadScrub
             | Action::ShowThreadsForFile
             | Action::ShowMemories
+            | Action::ManageContexts
             | Action::NewMemory => repository_open(ctx),
-            Action::AcceptMemory | Action::RejectMemory => memory_rule(args, ctx),
+            action if action.is_memory_rule() => memory_rule(action, args, ctx),
             // The settings and New Workspace dialogs need no repository.
             Action::ThreadsSettings | Action::NewWorkspace => Ok(()),
             // The placeholders, refused above by `available`.
@@ -2385,9 +2495,7 @@ impl Action {
             (action, _) if action.is_workflow_rule() => workflow_effect(action, args, ctx)?,
             (action, _) if action.is_thread_action() => thread_effect(action, args)?,
             (action, _) if action.is_label_action() => label_effect(action, args)?,
-            (Action::NewMemory | Action::AcceptMemory | Action::RejectMemory, _) => {
-                memory_effect(self, args)?
-            }
+            (action, _) if action.is_memory_effect() => memory_effect(action, args)?,
             // Only reached when `enabled` said Ok, which no placeholder does.
             _ => return Err(NOT_AVAILABLE),
         })
@@ -4782,6 +4890,30 @@ mod tests {
                 "Reject Memory",
                 ArgKind::Memory,
             ),
+            (
+                Action::ManageContexts,
+                "contexts.manage",
+                "Manage Contexts…",
+                ArgKind::None,
+            ),
+            (
+                Action::MoveMemoryToContext,
+                "memories.move_to_context",
+                "Move Memory to Context…",
+                ArgKind::Memory,
+            ),
+            (
+                Action::AttachMemoryToContext,
+                "memories.attach_to_context",
+                "Attach Memory to Context…",
+                ArgKind::Memory,
+            ),
+            (
+                Action::DetachMemoryFromContext,
+                "memories.detach_from_context",
+                "Detach Memory from Context…",
+                ArgKind::Memory,
+            ),
         ];
         for (action, id, title, args) in expected {
             assert_eq!(action.id(), id);
@@ -4832,10 +4964,12 @@ mod tests {
         let accepted = memory_ctx(Some(MemoryRef {
             uid: "m1",
             proposed: false,
+            placement: own(gm_schema::threads::MemoryStatus::Accepted),
         }));
         let accepted_target = memory_args(MemoryRef {
             uid: "m1",
             proposed: false,
+            placement: own(gm_schema::threads::MemoryStatus::Accepted),
         });
         assert_eq!(
             Action::RejectMemory.enabled(&accepted_target, &accepted),
@@ -4844,10 +4978,12 @@ mod tests {
         let proposal = memory_ctx(Some(MemoryRef {
             uid: "m1",
             proposed: true,
+            placement: own(gm_schema::threads::MemoryStatus::Proposed),
         }));
         let target = memory_args(MemoryRef {
             uid: "m1",
             proposed: true,
+            placement: own(gm_schema::threads::MemoryStatus::Proposed),
         });
         assert_eq!(Action::AcceptMemory.enabled(&target, &proposal), Ok(()));
         assert_eq!(
@@ -4863,10 +4999,106 @@ mod tests {
             ..memory_ctx(Some(MemoryRef {
                 uid: "m1",
                 proposed: true,
+                placement: own(gm_schema::threads::MemoryStatus::Proposed),
             }))
         };
         assert_eq!(
             Action::AcceptMemory.enabled(&target, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    /// The placement of a repository memory in the given status: in no context, with no links.
+    fn own(status: gm_schema::threads::MemoryStatus) -> Placement {
+        Placement {
+            in_context: false,
+            status,
+            linked: false,
+        }
+    }
+
+    #[test]
+    fn the_context_moves_follow_the_placement_the_engine_takes() {
+        use gm_schema::threads::MemoryStatus;
+        let own_accepted = MemoryRef {
+            uid: "m1",
+            proposed: false,
+            placement: own(MemoryStatus::Accepted),
+        };
+        let target = memory_args(own_accepted);
+        assert_eq!(
+            Action::MoveMemoryToContext.plan(&target, &memory_ctx(Some(own_accepted))),
+            Ok(Effect::Memory(MemoryEffect::MoveToContext("m1".into())))
+        );
+        let in_context = MemoryRef {
+            uid: "m1",
+            proposed: false,
+            placement: Placement {
+                in_context: true,
+                status: MemoryStatus::Accepted,
+                linked: false,
+            },
+        };
+        let inside = memory_ctx(Some(in_context));
+        assert_eq!(
+            Action::MoveMemoryToContext.enabled(&target, &inside),
+            Err("This memory is already in a context.")
+        );
+        assert_eq!(
+            Action::AttachMemoryToContext.plan(&target, &inside),
+            Ok(Effect::Memory(MemoryEffect::AttachToContext("m1".into())))
+        );
+        assert_eq!(
+            Action::DetachMemoryFromContext.plan(&target, &inside),
+            Ok(Effect::Memory(MemoryEffect::DetachFromContext("m1".into())))
+        );
+        let proposed_in_context = MemoryRef {
+            uid: "m1",
+            proposed: true,
+            placement: Placement {
+                in_context: true,
+                status: MemoryStatus::Proposed,
+                linked: false,
+            },
+        };
+        assert_eq!(
+            Action::AttachMemoryToContext.enabled(
+                &memory_args(proposed_in_context),
+                &memory_ctx(Some(proposed_in_context))
+            ),
+            Err("Only an accepted memory can be attached to another context.")
+        );
+        assert_eq!(
+            Action::DetachMemoryFromContext.enabled(&target, &memory_ctx(Some(own_accepted))),
+            Err("This memory is in this repository only, so it has no context to detach from.")
+        );
+        assert_eq!(
+            Action::MoveMemoryToContext.enabled(&Args::None, &memory_ctx(None)),
+            Err(SELECT_MEMORY)
+        );
+        let closed = Context {
+            repo_open: false,
+            ..memory_ctx(Some(own_accepted))
+        };
+        assert_eq!(
+            Action::MoveMemoryToContext.enabled(&target, &closed),
+            Err("No repository is open.")
+        );
+    }
+
+    #[test]
+    fn manage_contexts_needs_an_open_repository_and_opens_its_dialog() {
+        assert!(Action::ManageContexts.opens_dialog());
+        assert_eq!(
+            Action::ManageContexts.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::Memory(MemoryEffect::ManageContexts))
+        );
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        assert_eq!(
+            Action::ManageContexts.enabled(&Args::None, &closed),
             Err("No repository is open.")
         );
     }
@@ -5717,7 +5949,6 @@ mod tests {
             },
             created_at: 0,
             resolved_at: None,
-            summary: None,
             snapshot: None,
             after_snapshot: None,
             location: Some(gm_schema::ReviewLocation {
@@ -5725,6 +5956,7 @@ mod tests {
                 end_line: 1,
             }),
             outdated: false,
+            replies: Vec::new(),
         }
     }
 
