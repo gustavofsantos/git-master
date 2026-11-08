@@ -32,9 +32,11 @@ WORK="${CAPTURE_WORK:-$HOME/.cache/gm-capture}"
 OUT="${CAPTURE_OUT:-$ROOT/build/screens}"
 THEMES=(${CAPTURE_THEMES:-light dark})
 SCREENS=(working-copy diff-unified diff-split file-menu branch-picker project-list
-  sidebar-branches command-palette command-palette-args quick-open search-text settings
-  command-log workflows history commit-detail commit-diff real-history real-working-copy
-  real-quick-open real-search-text welcome)
+  sidebar-branches command-palette command-palette-args quick-open search-text
+  command-log staged-commit discard-confirm conflict branch-menu workflows history commit-detail
+  commit-diff code search-page stashes reflog threads
+  labels local-review worktrees workspaces real-history real-working-copy real-quick-open
+  real-search-text real-code welcome)
 
 # Window geometry and click targets: the same constants as scripts/ui-smoke.sh.
 # The Working Copy list always starts at the same row, so these hold on both repos.
@@ -50,6 +52,7 @@ HISTORY_X=120; HISTORY_Y=175
 WORKING_COPY_X=120; WORKING_COPY_Y=147
 HISTORY_ROW_X=420; HISTORY_ROW_TOP_Y=162
 WORK_LAYOUT_SPLIT_X=1320; WORK_LAYOUT_Y=120
+COMMIT_FILE_Y=409   # first file row of the commit detail panel (screen y)
 
 XPID=""; APP_PID=""; RUN_DIR=""; THEME=""; N=0
 FAILED=()
@@ -133,6 +136,16 @@ EOF
   printf 'pub mod audit;\n' >> "$repo/src/ledger/mod.rs"
   git -C "$repo" add -A; c "feat(ledger): declare the audit module" 2
   git -C "$repo" tag -a v0.9.0 -m "v0.9.0" HEAD~2
+  if [ -n "${2:-}" ]; then
+    # A merge stopped on a conflict in api/routes.rs, started from clean trees.
+    git -C "$repo" checkout -q -b topic/routes "$(git -C "$repo" rev-list --max-parents=0 HEAD)"
+    printf 'topic\n' > "$repo/api/routes.rs"
+    git -C "$repo" add -A; c "feat(api): route from the topic branch" 3
+    git -C "$repo" checkout -q main
+    printf 'main\n' > "$repo/api/routes.rs"
+    git -C "$repo" add -A; c "feat(api): route from main" 1
+    git -C "$repo" merge topic/routes >/dev/null 2>&1 || true
+  fi
   # The dirty state: two edited files and one untracked.
   cat > "$repo/src/ledger/total.rs" <<'EOF'
 impl Ledger {
@@ -234,7 +247,6 @@ screen_command_palette() { keys ctrl+k; sleep 0.5; shot command-palette; typed "
 screen_command_palette_args() { keys ctrl+k; typed "stage file"; keys Tab; sleep 0.5; shot command-palette-args; keys Escape; }
 screen_quick_open() { park; keys ctrl+p; sleep 0.5; typed "ledger"; shot quick-open; keys Escape; }
 screen_search_text() { park; keys ctrl+shift+f; sleep 0.5; typed "total"; sleep 1.5; shot search-text; keys Escape; }
-screen_settings() { park; keys ctrl+comma; sleep 1; shot settings; keys Escape; }
 screen_command_log() {
   click "$NAME_X" "$FIRST_ROW_Y"; keys space   # one side effect, so the log has a row
   click "$LOG_BUTTON_X" "$LOG_BUTTON_Y"; shot command-log
@@ -245,11 +257,36 @@ screen_commit_detail() {
   click "$HISTORY_X" "$HISTORY_Y" 1 1.5
   click "$HISTORY_ROW_X" "$((HISTORY_ROW_TOP_Y + 48))" 1 1.5; park; shot commit-detail
 }
+# The oldest commit adds five files, so its detail panel lists several; its first file row is
+# at window y 359 + 0 (the title is one line, as for the merge above).
 screen_commit_diff() {
   click "$HISTORY_X" "$HISTORY_Y" 1 1.5
-  click "$HISTORY_ROW_X" "$((HISTORY_ROW_TOP_Y + 48))" 1 1.5
-  click 1082 505 1 1.5; park; shot commit-diff
+  click "$HISTORY_ROW_X" "$((HISTORY_ROW_TOP_Y + 48 * 6))" 1 1.5
+  click 1060 "$COMMIT_FILE_Y" 1 1.5; park; shot commit-diff
 }
+screen_staged_commit() {
+  click "$NAME_X" "$FIRST_ROW_Y"; keys space
+  click 540 690; typed "fix(ledger): declare the ledger module"
+  keys ctrl+shift+a; park; shot staged-commit
+}
+screen_discard_confirm() {
+  click "$NAME_X" "$SECOND_ROW_Y"; click 1181 173 1 0.8; shot discard-confirm
+}
+screen_conflict() { park; shot conflict; click "$NAME_X" "$((FIRST_ROW_Y + 48))" 1 1.5; park; shot conflict-open; }
+screen_branch_menu() { open_branches; click 160 657 3; shot branch-menu; keys Escape; }
+
+# Sidebar pages: the rows are 28 px apart from Working Copy (window y 91), +50 for the screen.
+sidebar_page() { click 120 "$((141 + 28 * $1))" 1 1.5; park; shot "$2"; }
+screen_code() { sidebar_page 2 code; }
+screen_search_page() { sidebar_page 3 search-page; }
+screen_stashes() { sidebar_page 5 stashes; }
+screen_reflog() { sidebar_page 6 reflog; }
+screen_threads() { sidebar_page 7 threads; }
+screen_labels() { sidebar_page 8 labels; }
+screen_local_review() { sidebar_page 9 local-review; }
+screen_worktrees() { click 120 459 1 1; park; shot worktrees; }
+screen_workspaces() { click 120 493 1 1; park; shot workspaces; }
+screen_real_code() { sidebar_page 2 real-code; }
 screen_real_history() { click "$HISTORY_X" "$HISTORY_Y" 1 1.5; park; shot real-history; }
 screen_real_working_copy() { click "$NAME_X" "$FIRST_ROW_Y"; park; shot real-working-copy; }
 screen_real_quick_open() { park; keys ctrl+p; sleep 0.5; typed "architecture"; shot real-quick-open; keys Return; sleep 1.5; shot real-file-viewer; }
@@ -267,13 +304,13 @@ run_screen() {
   local name="$1" fn
   fn="screen_${name//-/_}"
   if [ "$name" = welcome ]; then
-    mkdir -p "$WORK/plain"; rm -rf "$RUN_DIR/xdg/gitmaster/recent.json"
+    mkdir -p "$WORK/plain"; rm -rf "$WORK/run"
     launch "$THEME" "" "$WORK/plain" || { FAILED+=("$THEME/$name"); return; }
     shot welcome; quit; return
   fi
   declare -F "$fn" >/dev/null || { echo "  unknown screen: $name" >&2; FAILED+=("$THEME/$name"); return; }
   local repo; repo="$(repo_for "$name")"
-  mkdir -p "$WORK/run/xdg/gitmaster"
+  rm -rf "$WORK/run"; mkdir -p "$WORK/run/xdg/gitmaster"
   printf '[\n  "%s/payments-web",\n  "%s"\n]\n' "$WORK" "$repo" > "$WORK/run/xdg/gitmaster/recent.json"
   launch "$THEME" "$repo" || { FAILED+=("$THEME/$name"); return; }
   "$fn" || FAILED+=("$THEME/$name")
@@ -291,7 +328,7 @@ for theme in "${THEMES[@]}"; do
   for s in "${SCREENS[@]}"; do
     # The fixtures are rebuilt for every screen: a staged file or a checkout from the
     # previous screen must not leak into the next one.
-    make_fixture "$WORK/fixture"
+    make_fixture "$WORK/fixture" "$([ "$s" = conflict ] && echo 1)"
     case "$s" in real-*) make_real "${CAPTURE_REPO:-$ROOT}" "$WORK/real" || { FAILED+=("$theme/$s"); continue; } ;; esac
     echo "-- $s"
     run_screen "$s"
