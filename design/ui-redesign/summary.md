@@ -45,6 +45,10 @@ The brief asked for a `ui/redesign` branch. AGENTS.md forbids feature branches a
 - Selecting an item fills the top bar's actions; Enter or a double-click runs the primary one; the sidebar badge counts Needs you and Returned by agents.
 - Mine, all of it.
 
+## Fixed along the way
+
+- The text search highlight (a random failure of the `gm-core` property test `a_shaped_line_is_valid_text_with_marks_inside_it`): a long line's window could cut a match in half, and Unicode case folding marked characters `git grep -i` does not match (the Kelvin sign for `k`). Both fixed; marks are whole matches with ASCII case folding, as in Git.
+
 ## Not done, and why
 
 - Slice 5 (topics, storage, single-instance IPC, ⌘1–9, Add to topic, workspace action): dropped by Gustavo. With it go the topic Goal on Review, grouping Changes by member, and the Inbox's All topics / this topic switch.
@@ -53,7 +57,6 @@ The brief asked for a `ui/redesign` branch. AGENTS.md forbids feature branches a
 - Turn outline and collapsed turn ranges in the thread reader; model name on a thread row (slice 3).
 - Goal text (needs topics), gate bypass (planned reviewer gates), inline conversations in the continuous diff, persisted Viewed marks (slice 4).
 - General undo: only a restack can be undone; undoing a commit would add Git behavior.
-- A pre-existing random failure of `gm-core` proptest `grep::tests::a_shaped_line_is_valid_text_with_marks_inside_it` (Unicode case folding in the search highlight, e.g. query "up"). The saved regression file was removed so the suite runs as it did at HEAD; the bug itself is not fixed.
 
 ## Settled with Gustavo
 
