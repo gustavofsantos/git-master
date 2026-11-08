@@ -19,8 +19,9 @@ Actions without a shortcut on this page can be run from the [command palette](..
 | Quit | `Ctrl+Q` | `⌘Q` | Implemented |
 | Open the context menu of the selected file | `Shift+F10` | `Shift+F10` | Implemented |
 | Refresh | `R` | `R` | Implemented |
+| Undo Last Operation, which undoes the last restack | `Ctrl+Z` | `⌘Z` | Implemented |
 
-`R` does not work while you type in the message box or in a diff.
+`R` does not work while you type in the message box or in a diff. `Ctrl+Z` works while the file list has focus, not while you type in a text field.
 
 ## Working Copy list
 

@@ -167,7 +167,7 @@ From the command palette:
 
 ## Search text
 
-The **Search** page finds text in the files of the active worktree. Open it from the sidebar, with `Ctrl+Shift+F` (`⇧⌘F` on macOS), or choose **Search Text…** in the command palette.
+The **Search** page finds text in the files of the active worktree. It sits in the **Code** entry of the sidebar, beside the Code page. Press `Ctrl+Shift+F` (`⇧⌘F` on macOS), or choose **Search Text…** in the command palette.
 
 ### Start a search
 

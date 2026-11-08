@@ -11,7 +11,7 @@ GitMaster is a Git client joined to the tools an engineer needs to work with cod
 
 ### A complete and fast Git client
 
-GitMaster covers the work you do every day in a repository. The **Working Copy** shows your changes, with staging per file, per chunk and per line, and a commit composer. **History** shows the commit graph with the files and diff of each commit. Branches and worktrees are managed from the sidebar, and the remote operations **Fetch**, **Pull** and **Push with lease** are available in the top bar. Every action can be reached from the command palette (`Ctrl+K`, `⌘K` on macOS), the menus and the keyboard.
+GitMaster covers the work you do every day in a repository. The **Working Copy** shows your changes, with staging per file, per chunk and per line, and a commit composer. **History** shows the commit graph with the files and diff of each commit. Branches and worktrees are managed from the sidebar, and the remote operations **Fetch**, **Pull** and **Push with lease** run from the sync button in the top bar. Every action can be reached from the command palette (`Ctrl+K`, `⌘K` on macOS), the menus and the keyboard.
 
 Resolving conflicts by hand is a preview feature. See [Resolving conflicts](guide/conflicts.md).
 

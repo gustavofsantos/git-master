@@ -130,7 +130,7 @@ Each row of the sidebar answers while you drag over it. A row that accepts the f
 
 The branch you are on and the worktree marked **here** never accept a file.
 
-> **Planned.** The hint is shown in the status bar while the file is dragged, not beside the row yet. The popover opens beside the sidebar, not on its row yet. In the **By stack** view the Branches header is not a drop target yet.
+> **Planned.** The hint is shown in the status bar while the file is dragged, not beside the row yet. The popover opens beside the sidebar, not on its row yet.
 
 ### Move to a worktree
 

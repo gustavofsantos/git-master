@@ -13,7 +13,7 @@ You can comment on any lines of any code in the repository: lines of a diff, cha
 
 1. Press on a line number and drag to the last line, or click a line number and Shift-click another. The range is highlighted. This selection is separate from the checkboxes that stage lines.
 2. Press `Ctrl+Shift+M` (`⌘⇧M` on macOS), or choose **Comment** in the small bar that appears over the selection.
-3. Write the comment. It appears inline, and the comments of the repository are listed on the **Local review** page.
+3. Write the comment. It appears inline, and the comments of the repository are listed on the **Review** page.
 
 Where you can select:
 
@@ -31,7 +31,7 @@ A comment is always about text in the working tree. In the Working Copy diff (un
 2. Click the line number of `.unwrap()` and Shift-click the line number of the last line of the same expression.
 3. Press `Ctrl+Shift+M` and write: `Return an error here instead of unwrapping.`
 4. Ask the agent to work through the open review comments. It calls `review_comments_list`, changes the code, and calls `review_comment_resolve` with a summary.
-5. Open **Local review** in the sidebar. The comment shows **Handled**. Read the change, then choose **Resolve Comment**, or **Reopen Comment** to send it back.
+5. Open **Review** in the sidebar. The comment shows **Handled**. Read the change, then choose **Resolve Comment**, or **Reopen Comment** to send it back.
 
 ## The loop
 
@@ -55,14 +55,14 @@ The app shows each comment with one of these badges:
 
 ## Replies
 
-A thread is a comment and the replies to it. The comment is the **root** of the thread. Its replies follow it in order, oldest first, directly below it in the diff and on the **Local review** page. Each reply has an author, a body and a time. The author is **You** or the agent that wrote the reply, which is shown as **Agent-written**. A reply is plain text: GitMaster shows it as written, does not render markup in it and runs nothing in it.
+A thread is a comment and the replies to it. The comment is the **root** of the thread. Its replies follow it in order, oldest first, directly below it in the diff and on the **Review** page. Each reply has an author, a body and a time. The author is **You** or the agent that wrote the reply, which is shown as **Agent-written**. A reply is plain text: GitMaster shows it as written, does not render markup in it and runs nothing in it.
 
 - A thread is one level deep. A reply to a reply belongs to the thread of the root, so a thread never nests.
 - The status, the anchor, the **Outdated** flag and the Before and After snapshots belong to the root. A reply has none of them.
 - The agent's summary is a reply. When the agent marks a comment handled, its summary becomes a reply by the agent on the thread. Marking it handled again adds another reply, so the thread keeps every answer, and the "after" snapshot is replaced as before.
 - The agent can ask you a question without changing the status. It answers with a reply, which leaves the comment as it is.
 - A thread of more than two replies shows its latest reply and a toggle, **N earlier replies**, that shows the others; **Hide earlier replies** folds them again.
-- You reply in the **Reply** box under the thread on the **Local review** page, or with **Reply** on the card in the diff, which opens the comment box on the thread. Your reply on a handled comment reopens it: it becomes **Open** again, its "after" snapshot is discarded, and the agent sees it the next time it lists the open comments. Your reply on an open comment leaves its status as it is.
+- You reply in the **Reply** box under the thread on the **Review** page, or with **Reply** on the card in the diff, which opens the comment box on the thread. Your reply on a handled comment reopens it: it becomes **Open** again, its "after" snapshot is discarded, and the agent sees it the next time it lists the open comments. Your reply on an open comment leaves its status as it is.
 - Nobody replies to a resolved comment. The agent is refused, and the **Reply** box is not offered until you choose **Reopen Comment**.
 - A reply cannot be edited, resolved, handled or deleted on its own. Deleting a comment deletes its replies too.
 
@@ -138,7 +138,7 @@ Each comment appears inline in the diff. A comment opens on **Before** when it h
 
 Comments and snapshots live outside the working tree, in the repository's `.git/gitmaster/` directory, in `review.db`. Nothing is written into your files.
 
-Open the **Local review** entry in the sidebar to see the comments of the repository.
+Open the **Review** entry in the sidebar to see the comments of the repository.
 
 ## See also
 

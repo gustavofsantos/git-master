@@ -1,6 +1,6 @@
 ---
 title: Stacks and restack
-description: Branch stacks, the By stack sidebar view and history graph, and restack with conflict handling, undo, push and automation.
+description: Branch stacks, the STACK section of the sidebar and the history graph, and restack with conflict handling, undo, push and automation.
 status: partial
 order: 80
 preview: stacks
@@ -67,17 +67,14 @@ When a branch is in more than one state, the tag shows the first that applies in
 
 GitMaster compares patch IDs against the most recent 2,000 commits of the root that the parent's branch does not have. A parent merged further back than that is not detected.
 
-A parent value that points back at its own child, directly or through other branches, is a loop that Git cannot express as a tree. GitMaster shows the branches of a loop under **No stack**, with the **parent loop** tag, until you set or remove one of the parents.
-## The By stack view
+A parent value that points back at its own child, directly or through other branches, is a loop that Git cannot express as a tree. GitMaster shows the branches of a loop at the end of the **STACK** section, with the **parent loop** tag, until you set or remove one of the parents.
+## The STACK section
 
-The sidebar has two views of your branches: **By stack** and **By name**. **By name** groups branches by prefix, such as `feature/`, as described in [Branches](branches.md).
+The **STACK** section of the sidebar shows the stacks of the repository as trees of parents, with their marks. The **BRANCHES** section lists branches by prefix, such as `feature/`, as described in [Branches](branches.md). The **STACK** section is open by default; click its header to fold it.
 
-**By stack** shows an indented tree of dependencies, in two sections:
+The section shows each tree as an indented list of dependencies, with its root branch at the top. A branch with no parent and no children is in no stack: it is listed only under **BRANCHES**. Until the first stack is recorded, the section reads **No stacks yet**.
 
-- **Stacks** lists each tree, with its root branch at the top.
-- **No stack** lists the branches that have no parent and no children.
-
-The sidebar shows these indicators:
+The section shows these indicators:
 
 | Indicator | Where | Meaning |
 |---|---|---|
@@ -87,7 +84,6 @@ The sidebar shows these indicators:
 
 Hover a tag or an indicator to read what it means.
 
-The list is virtualized, so a repository with hundreds of branches stays responsive.
 
 ## Set a parent
 
@@ -100,7 +96,7 @@ Every action below is in the branch menu of the sidebar and in the command palet
 
 ### Drag to set a parent
 
-In the **By stack** view, drag a branch onto another branch. The branch you drop it on becomes the parent of the dragged branch, as with **Set Parent…**. While you drag, the row under the pointer is highlighted when it can be the parent, and the status bar says what the drop does. A row that cannot be the parent is dimmed, and the status bar says why: the branch itself, a branch under it, or its parent already.
+In the **STACK** section, drag a branch onto another branch row. The branch you drop it on becomes the parent of the dragged branch, as with **Set Parent…**. While you drag, the row under the pointer is highlighted when it can be the parent, and the status bar says what the drop does. A row that cannot be the parent is dimmed, and the status bar says why: the branch itself, a branch under it, or its parent already.
 
 ## Stacks in the history graph
 
@@ -121,6 +117,8 @@ The graph has two modes. **Commits** shows the graph of commits. **Stacks** show
 
 Restack brings a stack up to date. It walks the tree from the top down, so parents come before their children. For each branch, it replays the branch's own commits onto the new tip of its parent. When the branch is done, its base moves to that tip, and the walk continues with the next branch.
 
+The top bar shows **Restack N behind** in amber when branches of the current branch's stack are behind their parent. Click it to open the restack dialog. See [First steps](../getting-started/first-steps.md#top-bar).
+
 ### How restack works
 
 - **The plan is exact.** Before anything runs, GitMaster builds a plan. The plan replays each commit in order, with the same algorithm that runs the restack, so it shows exactly which commits conflict. It never reports a probable conflict.
@@ -139,7 +137,7 @@ Restack brings a stack up to date. It walks the tree from the top down, so paren
 3. **Conflict.** A branch that conflicts is listed in the plan and stays where it is, with its children. Close the dialog with **Cancel**, restack the rest, or resolve the conflict.
 
    **Resolve conflict** opens the resolver on the commit that conflicts. GitMaster replays that commit in a private worktree of its own, so your working copy, your staged changes and your checked-out branch stay as they are, even when the conflicting branch is the one you have checked out. That worktree is not listed under **Worktrees**. When every file is resolved, **Continue restack** turns your resolution into the replayed commit and plans the restack again: the step shows as **Resolved**, the rest of the branch replays, and the branches under it plan as usual. A later commit can conflict too, and you resolve it the same way. **Cancel** drops the resolution in progress. Nothing moves until you choose **Restack N branches**, so a resolution is undone like any other restack. A finished resolution is kept when you close the app, and it is used only while the parent stays where it was: if the parent moves, the commit is replayed again and the conflict comes back, with your recorded resolution offered. See [Resolving conflicts](conflicts.md).
-4. **Done.** Choose **Undo restack** to restore every branch the restack moved. The undo is also offered after you reopen the app.
+4. **Done.** Choose **Undo restack** to restore every branch the restack moved. The undo is also offered after you reopen the app. From the file list, `Ctrl+Z` (`⌘Z` on macOS) runs **Undo Last Operation**, which undoes the last restack.
 
 ### Recorded resolutions
 

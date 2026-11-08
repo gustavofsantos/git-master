@@ -27,7 +27,7 @@ A thread belongs to the repository where the agent ran. A session started in a l
 
 ## Open the Threads page
 
-Choose **Threads** in the sidebar, or run **Show Threads** from the command palette. The list is on the left and the selected thread is on the right.
+Open **Agents** in the sidebar, which shows the **Threads** page, or run **Show Threads** from the command palette. The list is on the left and the selected thread is on the right.
 
 Each row of the list shows the title, the agent, the branch, how long ago the last event was, and how many edits the thread made. A dot marks a session that is still open. A **redacted** mark shows when GitMaster removed a secret from the thread.
 
@@ -215,7 +215,7 @@ You can attach a label to:
 - a commit, which keeps the label through a rewrite as a commit link does (see [After a rewrite](#after-a-rewrite));
 - another label.
 
-Open the **Labels** entry in the sidebar to see every label. Choose one to list everything attached to it: threads, files, commits and other labels. Use **Rename Label…** and **Delete** in a label's menu. Deleting a label removes its attachments too.
+Open **Agents** in the sidebar and choose **Labels**, or run **Show Labels** from the command palette, to see every label. Choose one to list everything attached to it: threads, files, commits and other labels. Use **Rename Label…** and **Delete** in a label's menu. Deleting a label removes its attachments too.
 
 You create labels, attach them and remove attachments. Only you can rename or delete a label. An agent connected through MCP can create a label and attach it; the label and each attachment it made show the agent's name, and you can remove them.
 

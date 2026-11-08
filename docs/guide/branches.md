@@ -5,11 +5,11 @@ status: partial
 order: 40
 ---
 
-The sidebar lists the local and remote branches of the repository. Use it to see which branch HEAD points at, to search the list, and to open a branch's menu. Check out, create and delete branches from the branch menu, the branch picker in the top bar or the command palette. The top bar holds the remote commands: **Fetch**, **Pull** and **Push with lease**.
+The sidebar lists the local and remote branches of the repository. Use it to see which branch HEAD points at, to search the list, and to open a branch's menu. Check out, create and delete branches from the branch menu, the branch picker in the top bar or the command palette. The sync button in the top bar runs the remote commands: **Fetch**, **Pull** and **Push with lease**.
 
 ## The branch sidebar
 
-The **By name** view groups branches by their prefix. A branch named `feature/login` is listed under the `feature/` group. Local and remote branches are both listed. The branch that HEAD points at has a **HEAD** badge.
+The **BRANCHES** section groups branches by their prefix. A branch named `feature/login` is listed under the `feature/` group. Local and remote branches are both listed. The branch that HEAD points at has a **HEAD** badge.
 
 Long names keep their end visible. The last 16 characters always stay on screen, and the start of the name shrinks with an ellipsis when the row is narrow. A name longer than 24 characters shows its full text in a tooltip when you hover over it.
 
@@ -24,9 +24,9 @@ The sidebar starts at 240 px. Its width is not kept between runs.
 
 ## Fold the sections
 
-The sidebar has four sections: **Repository**, **Branches**, **Worktrees** and **Workspaces**. Click a section's header to fold it, and click it again to open it. A caret before the title shows the state: it points down when the section is open and to the right when it is folded. A folded section shows its header only, so the sections you do not need leave room for the others. The **+** at the end of the Branches and Worktrees headers still works while the section is folded.
+The sidebar has four sections: **STACK**, **BRANCHES · <repo name>**, **WORKTREES** and **WORKSPACES**. Click a section's header to fold it, and click it again to open it. A caret before the title shows the state: it points down when the section is open and to the right when it is folded. A folded section shows its header only, so the sections you do not need leave room for the others. The **+** at the end of the BRANCHES and WORKTREES headers still works while the section is folded.
 
-When the window starts, **Repository** is open and the other sections are folded, so the sidebar shows its headers and the pages of the repository. Open the ones you need. Which ones are folded is not kept between runs.
+The **STACK** section is open when the window starts, and it appears only with the stacks preview feature. **BRANCHES**, **WORKTREES** and **WORKSPACES** are folded when the window starts. Which sections are folded is not kept between runs.
 
 ## Search the branches
 
@@ -56,7 +56,7 @@ GitMaster does not stash or carry your uncommitted changes across a checkout. If
 
 ## Create a branch
 
-1. Run **New Branch…** from the command palette, from the branch menu, or with the **+** button in the Branches header.
+1. Run **New Branch…** from the command palette, from the branch menu, or with the **+** button in the **BRANCHES** header.
 2. Type the **New branch name**. The form shows the reason when the name is not valid. A branch name follows Git's rules: it cannot contain spaces or `..`, and no part of it can end with `.lock`.
 3. Optionally, type the **Branch, tag or commit** to start from. When it is empty, the new branch starts from HEAD. The branch menu fills this field with the branch you chose.
 4. Tick **Check out the new branch** to switch to the new branch as well. The dialog shows the Git command it will run: `git branch` with the name and the start point, or `git checkout -b` when the box is ticked.
@@ -112,7 +112,7 @@ If the branches changed after the list was shown, nothing is deleted. The list i
 
 ## Fetch, Pull and Push with lease
 
-The three buttons in the top bar run the remote commands. Each command appears in the Git commands panel. Only one remote command runs at a time, and while one runs, its button shows the progress, such as **Fetching…** or **Pulling…**.
+The sync button in the top bar runs the remote commands, and its ▾ menu lists them. Each command appears in the Git commands panel. Only one remote command runs at a time, and while one runs, the sync button shows the progress, such as **Fetching…** or **Pulling…**.
 
 | Button | Runs | Rules |
 | --- | --- | --- |
@@ -125,6 +125,8 @@ For **Push with lease**, the upstream decides where the branch goes:
 - When the branch has an upstream, the push goes there.
 - When the branch has no upstream and the repository has exactly one remote, the push goes to that remote, and the branch's upstream is set to it.
 - When the branch has no upstream and the repository has no remote or several remotes, the push is refused. GitMaster does not guess a remote.
+
+GitMaster also runs **Fetch** in the background every 10 minutes, while the current branch has an upstream and no remote command runs. A background fetch shows no notice. If it fails, the error appears only in the Git commands panel.
 
 ## The branch menu
 
@@ -161,17 +163,17 @@ The branch menu has these stack actions:
 
 > **Planned.** Rename Branch is not available yet. Its item is listed in the branch menu, disabled.
 
-## By stack view
+## The STACK section
 
-> **Note.** The **By stack** view is part of the Stacks preview feature. Without it, the sidebar shows only **By name**.
+> **Note.** The **STACK** section is part of the Stacks preview feature. Without it, the sidebar shows only the **BRANCHES** section.
 
-The **By stack** view shows the local branches as a tree of parents, under a **Stacks** section and a **No stack** section. Remote branches are listed in the **By name** view only. A branch whose parent has moved shows an amber dot. A branch with commits beyond its parent shows their number, such as `↑3`. A parent that has branches to restack shows the number of branches, such as `restack 3`. For stacks, see [Stacks and restack](stacks.md).
+The **STACK** section shows the stacks of the repository as trees of parents, each with its root branch at the top. A branch whose parent has moved shows an amber dot. A branch with commits beyond its parent shows their number, such as `↑3`. A parent that has branches to restack shows the number of branches, such as `restack 3`. A branch whose parent is gone or merged, or whose base has diverged, shows a tag. Remote branches are listed in the **BRANCHES** section only. For stacks, see [Stacks and restack](stacks.md).
 
 ## Set a parent by dragging
 
 > **Note.** Dragging to set a parent is part of the Stacks preview feature.
 
-In the **By stack** view, drag a branch onto another branch. The branch you drop it on becomes the parent of the dragged branch. A row that cannot be the parent is dimmed while you drag, and the status bar says why. For how a parent is set and what it changes, see [Stacks and restack](stacks.md).
+In the **STACK** section, drag a branch onto another branch row. The branch you drop it on becomes the parent of the dragged branch. A row that cannot be the parent is dimmed while you drag, and the status bar says why. For how a parent is set and what it changes, see [Stacks and restack](stacks.md).
 
 ## Move a file to a branch
 
@@ -179,4 +181,4 @@ Drag a changed file from the Working Copy and drop it on a branch row. A popover
 
 ## Reflog and stashes
 
-The **Repository** section of the sidebar lists **Stashes** and **Reflog**. Stashes lists the changes you have saved aside. Reflog lists the past positions of HEAD and of the branches.
+The footer of the sidebar lists **Stashes** and **Reflog**. Stashes lists the changes you have saved aside. Reflog lists the past positions of HEAD and of the branches.

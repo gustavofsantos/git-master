@@ -25,7 +25,7 @@ A memory belongs to the repository where it was written, or to one or more [cont
 
 ## Open the Memories tab
 
-Choose **Threads** in the sidebar, then the **Memories** tab. The list shows the text, the kind, the status and the origin. A memory that is **Tested** or **Unconfirmed** also shows its basis as a chip; an **Observed** memory shows none. An **Unconfirmed** chip is flagged, as a changed file is. **Proposed** memories come first and carry a count in the tab, so a new proposal does not wait unseen.
+Open **Agents** in the sidebar, choose **Threads**, then the **Memories** tab. The list shows the text, the kind, the status and the origin. A memory that is **Tested** or **Unconfirmed** also shows its basis as a chip; an **Observed** memory shows none. An **Unconfirmed** chip is flagged, as a changed file is. **Proposed** memories come first and carry a count in the tab, so a new proposal does not wait unseen.
 
 Filter the list by kind, by status, by file, by author or by scope: this repository, one context, or everything the repository sees. Search finds a memory by its words.
 

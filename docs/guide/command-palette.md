@@ -50,9 +50,13 @@ Press **Esc** to leave the target step. Press **Esc** again to close the palette
 
 ## Disabled actions
 
-An action that cannot run right now stays in the list, dimmed. Its reason takes the place of its shortcut, for example `Nothing is staged.` A disabled action does not run.
+Inside each section, the actions that can run now come first. The actions that cannot run now are collapsed into one line at the end of the section, such as **3 unavailable — show**. Press **Enter** on that line, or click it, to list them dimmed. Their reason takes the place of the shortcut, for example `Nothing is staged.` A new search collapses them again. A disabled action does not run.
 
 The same rule applies to the keyboard shortcut and to the menu item for the action.
+
+## Actions for the selection
+
+When you select a file, a commit, a thread or another item, the top bar shows up to three of its actions. See [Top bar](../getting-started/first-steps.md#top-bar). The **⋯** button opens the command palette with only the actions of that selection, under the title **Actions for** followed by the name of the item. The button shows the palette shortcut, `Ctrl+K` (`⌘K` on macOS). The actions are the ones of the item's context menu, in the same order.
 
 ## Context menus
 
