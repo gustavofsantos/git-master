@@ -202,6 +202,8 @@ pub struct Model {
     pub review_write: ReviewWrite,
     /// The Local review page: its filter, the selected comment and its texts (B4d).
     pub local_review: LocalReview,
+    /// The Review page's continuous diff and its Viewed marks (UI redesign, slice 4).
+    pub(crate) review_files: crate::review_files::ReviewFiles,
     /// The conflict resolver of the file read last: its panes, choices and staged note (C3b).
     pub conflict: Option<ResolverState>,
     /// The read that opened the resolver, until the view takes it and shows the page.
@@ -1020,6 +1022,15 @@ impl Model {
                 }
                 None
             }
+            // A read of the Review page's diff that failed leaves its file unread, quietly.
+            Event::OperationChanged { id, state, .. }
+                if state.is_terminal()
+                    && state != OperationState::Done
+                    && self.review_files.owns(id) =>
+            {
+                self.review_files.settled(id);
+                None
+            }
             Event::OperationChanged {
                 id,
                 state: OperationState::Failed,
@@ -1050,6 +1061,10 @@ impl Model {
                 self.error = Some(detail.unwrap_or_else(|| "the operation failed".to_owned()));
                 self.loading = false;
                 self.settle(id, None, None)
+            }
+            Event::DiffLoaded { id, diff, .. } if self.review_files.owns(id) => {
+                self.review_files.loaded(id, diff);
+                None
             }
             Event::DiffLoaded { id, side, diff } => self.settle(id, Some(side), Some(diff)),
             Event::Committed { oid, .. } => {
@@ -1662,6 +1677,7 @@ impl Model {
         self.stash_stack = OpenStack::default();
         self.review = ReviewList::default();
         self.local_review = LocalReview::default();
+        self.review_files.clear();
         self.reflog = ReflogList::default();
         self.reflog_commit = CommitPane::Empty;
         self.reflog_stack = OpenStack::default();

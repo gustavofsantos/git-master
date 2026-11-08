@@ -19,6 +19,7 @@ use crate::review::{self, Badge, DELETE_CONFIRM, Delete};
 use crate::review_composer::{self, KEY_CONTEXT, SaveReviewComment};
 use crate::shell_history::{action_button, now_secs};
 use crate::shell_memories::tag;
+use crate::shell_review_files;
 use crate::theme;
 use crate::view::{Screen, StatusView};
 
@@ -46,22 +47,34 @@ impl StatusView {
             .gap_3()
             .border_b_1()
             .border_color(theme::hairline())
-            .child(div().font_weight(FontWeight::MEDIUM).child("Local review"))
+            .child(div().font_weight(FontWeight::MEDIUM).child("Review"))
             .child(filter_chips(self.model.local_review.filter(), counts, cx));
         let body = div()
             .flex_1()
             .min_h(px(0.))
             .flex()
             .flex_row()
+            // Left: the cards and the conversations; middle: the continuous diff; right: the
+            // selected conversation (UI redesign, slice 4).
             .child(
                 div()
-                    .flex_1()
-                    .min_w(px(0.))
+                    .w(px(shell_review_files::SIDE_WIDTH))
+                    .flex_none()
                     .min_h(px(0.))
                     .flex()
                     .flex_col()
+                    .child(self.review_cards())
+                    .child(
+                        div()
+                            .px_4()
+                            .pt_2()
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .child("CONVERSATIONS"),
+                    )
                     .child(self.review_list(cx)),
             )
+            .child(self.review_files_pane(cx))
             .child(self.review_detail(cx));
         div()
             .flex_1()
@@ -431,6 +444,7 @@ impl StatusView {
     /// Shows the page: the list is read again, and the selected comment's texts with it.
     pub(crate) fn show_local_review(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::LocalReview;
+        self.request_review_files();
         self.request_review_list();
         self.request_review_texts();
         cx.notify();

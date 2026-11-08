@@ -905,6 +905,7 @@ impl StatusView {
     fn after_status(&mut self, head_before: Option<&str>, cx: &mut Context<Self>) {
         self.request_stacks();
         self.request_submodules();
+        self.request_review_files();
         if self.head_name().as_deref() != head_before {
             self.request_branch_list();
             self.request_hook_sections();
