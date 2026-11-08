@@ -212,9 +212,11 @@ Moving a file needs Git 2.38 or newer. With an older Git, the drop is refused an
 
 ## Reviewed marker
 
-> **Planned.** Marking a file as reviewed is not available in the app yet.
-
 A reviewed mark is a reminder that you read a file's changes. It is independent of staging: marking a file as reviewed does not stage it, and staging does not mark it. The mark clears by itself when the change in the file changes. It is a reminder, never an approval.
+
+Set it with the **Viewed** box of the file on the **Review** page. A viewed file folds to its header in the page's diff. The **Changes** card of the page counts the files viewed.
+
+> **Planned.** The marks are kept while the window is open; they are not kept after you close it, and the Changes list does not show them yet.
 
 ## Generated files and lockfiles
 

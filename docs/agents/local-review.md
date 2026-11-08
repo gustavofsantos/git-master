@@ -7,6 +7,16 @@ order: 20
 
 Local review is a loop between you and an agent on your machine. You comment on lines of a diff. The agent reads the comments through MCP, works on the code and marks each comment handled with a summary. GitMaster then shows what changed for each comment, from snapshots of the working tree, not from the agent's own account. You decide when a comment is resolved.
 
+## The Review page
+
+Open **Review** in the sidebar. The page has three parts:
+
+- On the left, three cards and the conversations. **Changes** shows the branch and its upstream (`feature → origin/feature`), the commits ahead and behind, the lines added and removed in the working tree, and how many files you marked **Viewed**. **Gates** lists the `before.<operation>` workflows that are switched on, with **needs review** on a gate whose version you have not reviewed, and says how many gates run before **Push with lease**. **Reviewers** has no content: reviewers are not available yet. Below the cards, **CONVERSATIONS** lists the review comments, grouped by file, with the filter chips in the page header.
+- In the middle, one continuous diff: every changed file, one after another, with its path, `+a −r` and a **Viewed** box. A viewed file folds to its header. The mark clears by itself when the file's change changes. A file shows at most 400 lines; open it on **Changes** to read the rest. At most 200 files are read.
+- On the right, the selected conversation: the comment, its replies, the reply box, its actions and the **Before** and **After** of the change.
+
+> **Planned.** Bypassing a gate with a written reason, and reviewers and their verdicts, are not available yet. See [Reviewers and gates](reviewers.md).
+
 ## Comment on code
 
 You can comment on any lines of any code in the repository: lines of a diff, changed or not, and lines of a file in the **Code** viewer.
