@@ -229,6 +229,7 @@ impl StatusView {
                     .flex_row()
                     .items_center()
                     .gap_2()
+                    .child(self.code_tabs(cx))
                     .child(
                         div()
                             .flex_1()

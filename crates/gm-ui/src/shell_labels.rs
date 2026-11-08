@@ -178,7 +178,8 @@ impl StatusView {
             .gap_3()
             .border_b_1()
             .border_color(theme::hairline())
-            .child(div().font_weight(FontWeight::MEDIUM).child("Labels"))
+            // The Agents page's tabs: Labels is the third, after Threads and Memories.
+            .child(self.threads_tabs(cx))
             .child(
                 div()
                     .flex()

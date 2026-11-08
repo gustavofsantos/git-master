@@ -926,6 +926,22 @@ impl ThreadsPage {
         true
     }
 
+    /// Sets or clears the agent filter: the threads of one harness. Returns whether it changed;
+    /// the caller reads the list again.
+    pub fn set_agent(&mut self, harness: Option<String>) -> bool {
+        if self.filter.harness == harness {
+            return false;
+        }
+        self.filter.harness = harness;
+        true
+    }
+
+    /// The harness the agent filter holds, when one is set.
+    #[must_use]
+    pub fn agent_filter(&self) -> Option<&str> {
+        self.filter.harness.as_deref()
+    }
+
     /// The name the label filter holds, when one is set.
     #[must_use]
     pub fn label_filter(&self) -> Option<&str> {
@@ -1432,6 +1448,66 @@ pub fn header_counts(detail: &ThreadDetail) -> HeaderCounts {
 #[must_use]
 pub fn relative(now_secs: i64, at_ms: i64) -> String {
     relative_time(now_secs, at_ms.div_euclid(1000))
+}
+
+/// A line of the thread list (UI redesign, slice 3): the day the threads under it were last
+/// active, or a thread by its index in the list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DayRow {
+    Day(String),
+    Thread(usize),
+}
+
+/// The thread list grouped by day: a `Day` line before the first thread of each day, in the
+/// list's order (newest first). Days are UTC calendar days, so the grouping does not depend on
+/// where the machine is.
+#[must_use]
+pub fn day_rows(threads: &[ThreadSummary], now_secs: i64) -> Vec<DayRow> {
+    let mut rows = Vec::with_capacity(threads.len() + 8);
+    let mut day = None;
+    for (index, thread) in threads.iter().enumerate() {
+        let this = thread.last_event_at.div_euclid(1000).div_euclid(DAY_SECS);
+        if day != Some(this) {
+            day = Some(this);
+            rows.push(DayRow::Day(day_label(now_secs.div_euclid(DAY_SECS), this)));
+        }
+        rows.push(DayRow::Thread(index));
+    }
+    rows
+}
+
+/// The position in `rows` of thread `index`.
+#[must_use]
+pub fn day_row_of(rows: &[DayRow], index: usize) -> Option<usize> {
+    rows.iter().position(|row| *row == DayRow::Thread(index))
+}
+
+const DAY_SECS: i64 = 86_400;
+
+/// "Today", "Yesterday", or the date as `YYYY-MM-DD`, for day number `day` since the epoch.
+fn day_label(today: i64, day: i64) -> String {
+    match today - day {
+        0 => "Today".to_owned(),
+        1 => "Yesterday".to_owned(),
+        _ => {
+            let (year, month, date) = civil_from_days(day);
+            format!("{year:04}-{month:02}-{date:02}")
+        }
+    }
+}
+
+/// The proleptic Gregorian date of day `days` since 1970-01-01 (H. Hinnant's algorithm).
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let date = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, date)
 }
 
 /// The header's count of search hits: "1 match", "3 matches", or "First 50 matches"
@@ -1977,6 +2053,45 @@ mod tests {
 
     fn page_len() -> usize {
         usize::try_from(PAGE).unwrap_or(usize::MAX)
+    }
+
+    #[test]
+    fn the_list_groups_threads_by_utc_day_newest_first() {
+        // 2026-11-08 12:00 UTC.
+        let now = 1_794_139_200;
+        let ms = |secs: i64| secs * 1000;
+        let threads = [
+            summary("a", ms(now - 60)),
+            summary("b", ms(now - 3_600)),
+            summary("c", ms(now - 86_400)),
+            summary("d", ms(now - 5 * 86_400)),
+        ];
+        let rows = day_rows(&threads, now);
+        assert_eq!(
+            rows,
+            vec![
+                DayRow::Day("Today".into()),
+                DayRow::Thread(0),
+                DayRow::Thread(1),
+                DayRow::Day("Yesterday".into()),
+                DayRow::Thread(2),
+                DayRow::Day("2026-11-03".into()),
+                DayRow::Thread(3),
+            ]
+        );
+        assert_eq!(day_row_of(&rows, 2), Some(4));
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
+    }
+
+    #[test]
+    fn the_agent_filter_is_set_once_and_cleared() {
+        let mut page = ThreadsPage::default();
+        assert!(page.set_agent(Some("claude-code".into())));
+        assert!(!page.set_agent(Some("claude-code".into())));
+        assert_eq!(page.agent_filter(), Some("claude-code"));
+        assert!(page.set_agent(None));
+        assert_eq!(page.agent_filter(), None);
     }
 
     fn summary(uid: &str, last: i64) -> ThreadSummary {

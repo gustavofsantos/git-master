@@ -8,9 +8,9 @@ use std::ops::Range;
 
 use gm_schema::{Actor, CommandKind};
 use gpui::{
-    AnyElement, Context, Div, HighlightStyle, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollStrategy, ScrollWheelEvent, Stateful, StyledText, UniformListScrollHandle,
-    Window, div, prelude::*, px, uniform_list,
+    AnyElement, Context, Div, FontWeight, HighlightStyle, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ScrollStrategy, ScrollWheelEvent, Stateful, StyledText,
+    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 
 use crate::action_registry::{Action, Args, CommentSpot};
@@ -229,6 +229,74 @@ impl StatusView {
             .children(self.provenance_panel(cx))
     }
 
+    /// The tab strip of the Code page and the text search, one page with two tabs: Files
+    /// and Search. The tab shown is underlined, as the Threads page's tabs are.
+    pub(crate) fn code_tabs(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_4()
+            .child(self.code_tab_button(
+                Screen::Code,
+                "Files",
+                "code-tab-files",
+                Action::ShowCode,
+                cx,
+            ))
+            .child(self.code_tab_button(
+                Screen::Search,
+                "Search",
+                "code-tab-search",
+                Action::SearchText,
+                cx,
+            ))
+    }
+
+    /// One tab of the strip: its name, underlined while its screen is shown. A click runs its
+    /// action, which switches the screen.
+    fn code_tab_button(
+        &self,
+        screen: Screen,
+        label: &'static str,
+        id: &'static str,
+        action: Action,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let active = self.screen == screen;
+        div()
+            .id(id)
+            .cursor_pointer()
+            .h(px(32.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .border_b_2()
+            .border_color(if active {
+                theme::accent()
+            } else {
+                theme::panel()
+            })
+            .font_weight(if active {
+                FontWeight::MEDIUM
+            } else {
+                FontWeight::NORMAL
+            })
+            .text_color(if active {
+                theme::text()
+            } else {
+                theme::muted()
+            })
+            .child(label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    this.run_action(action, &Args::None, window, cx);
+                }),
+            )
+    }
+
     fn code_tree(&self, cx: &mut Context<Self>) -> Div {
         let code = &self.model.code;
         let summary = if code.indexing {
@@ -270,7 +338,7 @@ impl StatusView {
                     .justify_between()
                     .border_b_1()
                     .border_color(theme::hairline())
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Files"))
+                    .child(self.code_tabs(cx))
                     .child(div().text_xs().text_color(theme::muted()).child(summary)),
             )
             .child(if rows.is_empty() {

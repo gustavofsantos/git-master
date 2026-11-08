@@ -924,6 +924,44 @@ mod tests {
     }
 
     #[test]
+    fn every_thread_action_is_reachable_from_a_thread_menu_or_the_palette() {
+        let entries: [StatusEntry; 0] = [];
+        let context = ctx(&entries);
+        let menus: Vec<Action> = thread_items("t", false, &context)
+            .into_iter()
+            .chain(thread_more_items("t", false, &context))
+            .map(|item| item.action)
+            .collect();
+        let thread_actions = [
+            Action::ThreadStar,
+            Action::ThreadRename,
+            Action::ThreadNote,
+            Action::ThreadTags,
+            Action::ThreadLinkCommit,
+            Action::ThreadLinkThread,
+            Action::ThreadExport,
+            Action::ThreadCopyMarkdown,
+            Action::ThreadExpandAll,
+            Action::ThreadCollapseAll,
+            Action::ThreadDelete,
+            Action::ThreadScrub,
+            Action::ShowThreadsForFile,
+            Action::ThreadsSettings,
+            Action::ShowThreads,
+            Action::ShowLabels,
+            Action::LabelNew,
+            Action::LabelRename,
+            Action::LabelDelete,
+        ];
+        for action in thread_actions {
+            assert!(
+                menus.contains(&action) || action.listed_in_palette(),
+                "{action:?} is in no menu and not in the palette"
+            );
+        }
+    }
+
+    #[test]
     fn the_more_menu_of_a_thread_lists_its_actions_in_order_and_delete_last() {
         let items = thread_more_items("u1", true, &ctx(&[]));
         let actions: Vec<Action> = items.iter().map(|item| item.action).collect();

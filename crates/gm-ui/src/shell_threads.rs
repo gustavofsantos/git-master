@@ -35,7 +35,7 @@ use crate::theme;
 use crate::thread_curate as curate;
 use crate::thread_rows::{self, GroupKey, Marker, Row};
 use crate::threads::{
-    self, CallResult, CallStatus, Chip, Empty, MessageKind, Mode, Panel, Request, Span,
+    self, CallResult, CallStatus, Chip, DayRow, Empty, MessageKind, Mode, Panel, Request, Span,
 };
 use crate::view::{Screen, StatusView};
 
@@ -502,6 +502,14 @@ impl StatusView {
             self.send_threads(request);
         }
         if let Some(row) = self.model.threads.selected_row() {
+            // In the thread list, day lines sit between the rows; the hits have none.
+            let row = if self.model.threads.mode() == Mode::Threads {
+                let now = now_secs();
+                threads::day_row_of(&threads::day_rows(self.model.threads.threads(), now), row)
+                    .unwrap_or(row)
+            } else {
+                row
+            };
             self.threads_view
                 .list
                 .scroll_to_item(row, ScrollStrategy::Center);
@@ -564,6 +572,7 @@ impl StatusView {
                 .child(self.threads_chip(Chip::HasEdits, "Has edits", "threads-chip-edits", cx))
                 .children(self.threads_path_chip(cx))
                 .children(self.threads_label_chip(cx))
+                .children(self.threads_agent_chip(cx))
         };
         let body = if memories {
             self.memories_body(cx)
@@ -659,8 +668,12 @@ impl StatusView {
             }
             Mode::Threads => match page.empty() {
                 Some(empty) => Self::empty_view(empty, None).into_any_element(),
-                None => thread_rows(page.threads().len(), self.threads_view.list.clone(), cx)
-                    .into_any_element(),
+                None => thread_rows(
+                    threads::day_rows(page.threads(), now_secs()).len(),
+                    self.threads_view.list.clone(),
+                    cx,
+                )
+                .into_any_element(),
             },
         };
         let width = self.thread_list_width;
@@ -927,6 +940,55 @@ impl StatusView {
             .list
             .scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
+    }
+
+    fn set_threads_agent(&mut self, harness: Option<String>, cx: &mut Context<Self>) {
+        if self.model.threads.set_agent(harness) {
+            self.request_threads_refresh();
+        }
+        self.threads_view
+            .list
+            .scroll_to_item(0, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    /// The toolbar chip of the agent filter, which clears the filter when clicked.
+    fn threads_agent_chip(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let harness = self.model.threads.agent_filter()?;
+        Some(
+            div()
+                .id("threads-chip-agent")
+                .cursor_pointer()
+                .flex_none()
+                .max_w(px(PATH_CHIP_WIDTH))
+                .px_2()
+                .h(px(24.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .rounded_full()
+                .border_1()
+                .border_color(theme::accent())
+                .bg(theme::selection())
+                .text_xs()
+                .text_color(theme::accent())
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(format!("Agent: {harness}")),
+                )
+                .child(icon::view(Icon::Close, icon::SMALL, theme::accent()))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.set_threads_agent(None, cx);
+                    }),
+                ),
+        )
     }
 
     /// The toolbar chip of the label filter, which clears the filter when clicked.
@@ -1723,14 +1785,20 @@ fn thread_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Sta
                     let page = &this.model.threads;
                     let labels = this.model.labels.labels();
                     let selected = page.selected();
-                    page.threads()
-                        .get(range.clone())
+                    let rows = threads::day_rows(page.threads(), now);
+                    rows.get(range)
                         .unwrap_or_default()
                         .iter()
-                        .zip(range)
-                        .map(|(thread, index)| {
-                            let is_selected = selected == Some(thread.uid.as_str());
-                            thread_row(thread, index, now, is_selected, labels, cx)
+                        .map(|row| match row {
+                            DayRow::Day(label) => day_header(label.clone()).into_any_element(),
+                            DayRow::Thread(index) => {
+                                let Some(thread) = page.threads().get(*index) else {
+                                    return div().into_any_element();
+                                };
+                                let is_selected = selected == Some(thread.uid.as_str());
+                                thread_row(thread, *index, now, is_selected, labels, cx)
+                                    .into_any_element()
+                            }
                         })
                         .collect()
                 },
@@ -1854,7 +1922,21 @@ fn thread_row(
         .min_w(px(0.))
         .text_xs()
         .text_color(theme::muted())
-        .child(chip(thread.harness.clone()))
+        .child({
+            // A click on the agent's chip filters the list to that agent.
+            let harness = thread.harness.clone();
+            div()
+                .id(("thread-row-agent", index))
+                .cursor_pointer()
+                .child(chip(thread.harness.clone()))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.set_threads_agent(Some(harness.clone()), cx);
+                    }),
+                )
+        })
         .children(thread.branch.clone().map(|branch| {
             div()
                 .flex_none()
@@ -1907,6 +1989,23 @@ fn thread_row(
         )
         .child(head)
         .child(meta)
+}
+
+/// The line above the threads last active on one day: "Today", "Yesterday" or the date.
+fn day_header(label: String) -> Div {
+    div()
+        .w_full()
+        .h(px(THREAD_ROW_HEIGHT))
+        .px_4()
+        .pb_1()
+        .flex()
+        .items_end()
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme::muted())
+        .border_b_1()
+        .border_color(theme::hairline())
+        .child(label)
 }
 
 /// One hit: the thread's title, its turn, the snippet around the match, and the thread's
@@ -2440,7 +2539,7 @@ impl StatusView {
 impl StatusView {
     /// The tab strip of the Threads page: Threads, and Memories with a badge of the proposals
     /// waiting (D190).
-    fn threads_tabs(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn threads_tabs(&self, cx: &mut Context<Self>) -> Div {
         let badge = memory_rows::tab_badge(self.model.memories.proposed_count());
         div()
             .flex()
@@ -2461,6 +2560,42 @@ impl StatusView {
                 badge,
                 cx,
             ))
+            .child(self.labels_tab_button(cx))
+    }
+
+    /// The Labels tab: the Labels page, which the Agents page holds beside the threads and the
+    /// memories (UI redesign, slice 3).
+    pub(crate) fn labels_tab_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let active = self.screen == Screen::Labels;
+        div()
+            .id("threads-tab-labels")
+            .cursor_pointer()
+            .h(px(44.))
+            .flex()
+            .items_center()
+            .border_b_2()
+            .border_color(if active {
+                theme::accent()
+            } else {
+                theme::panel()
+            })
+            .font_weight(if active {
+                FontWeight::MEDIUM
+            } else {
+                FontWeight::NORMAL
+            })
+            .text_color(if active {
+                theme::text()
+            } else {
+                theme::muted()
+            })
+            .child("Labels")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.run_action(Action::ShowLabels, &Args::None, window, cx);
+                }),
+            )
     }
 
     /// One tab of the strip: its name, underlined when it is the tab shown.
@@ -2472,7 +2607,7 @@ impl StatusView {
         badge: Option<String>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let active = self.threads_tab == tab;
+        let active = self.screen == Screen::Threads && self.threads_tab == tab;
         div()
             .id(id)
             .cursor_pointer()
