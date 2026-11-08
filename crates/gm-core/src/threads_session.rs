@@ -185,6 +185,7 @@ pub(crate) fn is_memory_command(kind: &CommandKind) -> bool {
             | CommandKind::AttachMemory { .. }
             | CommandKind::DetachMemory { .. }
             | CommandKind::RecordMemoryRetrieval { .. }
+            | CommandKind::MarkMemory { .. }
     )
 }
 
@@ -524,7 +525,24 @@ fn memories_command(
         }
         CommandKind::ReadMemory { uid } => {
             let memory = memory_scope::read(&stores, ctx, uid)?;
-            Ok(vec![Event::MemoryRead { id, memory }])
+            let mark_history = memory_scope::mark_history(&stores, uid)?;
+            Ok(vec![Event::MemoryRead {
+                id,
+                memory,
+                mark_history,
+            }])
+        }
+        CommandKind::MarkMemory { uid, mark, reason } => {
+            memories::authorize(is_human, &MemoryAction::Mark)?;
+            memory_scope::mark(
+                id,
+                &mut stores,
+                ctx,
+                &origin_of(actor),
+                uid,
+                *mark,
+                reason.as_deref(),
+            )
         }
         CommandKind::RecordMemoryRetrieval { uids } => {
             memory_scope::count_retrievals(&mut stores, uids, now_ms())?;

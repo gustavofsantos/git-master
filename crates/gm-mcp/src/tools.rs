@@ -340,6 +340,7 @@ pub fn call(session: &mut Session, name: &str, args: &Value) -> Result<Value, St
         "memory_get" => memory_tools::memory_get(session, args),
         "contexts_list" => memory_tools::contexts_list(session, args),
         "memory_propose" => memory_tools::memory_propose(session, args),
+        "memory_mark" => memory_tools::memory_mark(session, args),
         other => Err(format!("there is no tool {other}")),
     }
 }

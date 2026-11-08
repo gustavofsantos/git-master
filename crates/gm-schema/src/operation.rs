@@ -22,9 +22,9 @@ use crate::submodule::SubmoduleDetail;
 use crate::syntax::HighlightSpan;
 use crate::threads::{
     AttachKind, Context, EditState, Label, LabelDetail, LinkKind, Memory, MemoryBasis, MemoryKind,
-    MemorySourceInput, MemoryStatus, ProvenanceResult, SearchFacets, SearchGroup, SearchOrder,
-    ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink, ThreadRelKind, ThreadRelation,
-    ThreadSummary,
+    MemoryMark, MemoryMarkSummary, MemorySourceInput, MemoryStatus, ProvenanceResult, SearchFacets,
+    SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink,
+    ThreadRelKind, ThreadRelation, ThreadSummary,
 };
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
@@ -928,6 +928,18 @@ pub enum CommandKind {
         #[serde(default)]
         basis: MemoryBasis,
     },
+    /// Records `mark` on memory `uid` from the actor (D202): `useful` or `wrong`, with an optional
+    /// one-line `reason` that passes through the redaction of the memory text and holds at most 200
+    /// characters. Either actor may mark, and only an accepted memory (proposed, rejected and
+    /// superseded ones are refused). It keeps each actor's marks as history: a mark equal to that
+    /// actor's latest mark writes nothing. It changes nothing else about the memory. Logged with its
+    /// actor (a side effect). Answers `MemoryChanged`, with `created` true when a mark was written.
+    MarkMemory {
+        uid: String,
+        mark: MemoryMark,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// Accepts memory `uid` (a proposal, or an accepted one for an edit or a supersede). `text`
     /// replaces the text when given (redacted). Each memory uid in `supersedes` must be accepted,
     /// in the same store as the memory, and becomes superseded in the same write. Human only.
@@ -1634,14 +1646,18 @@ pub enum Event {
         #[serde(default)]
         accepted_characters: u64,
     },
-    /// Answers `ReadMemory`.
+    /// Answers `ReadMemory`. `mark_history` is every mark the memory has, oldest first (D202); the
+    /// memory's own `marks` are the latest of each actor.
     MemoryRead {
         id: OperationId,
         memory: Memory,
+        #[serde(default)]
+        mark_history: Vec<MemoryMarkSummary>,
     },
-    /// Answers `ProposeMemory`, `AcceptMemory` and `RejectMemory` with the memory as it now is,
-    /// and `DeleteMemory` with none. `created` is true only when `ProposeMemory` wrote a new row;
-    /// false when it returned an existing duplicate.
+    /// Answers `ProposeMemory`, `AcceptMemory`, `RejectMemory` and `MarkMemory` with the memory as it
+    /// now is, and `DeleteMemory` with none. `created` is true only when `ProposeMemory` wrote a new
+    /// row, or `MarkMemory` wrote a new mark; false when it returned an existing duplicate or a
+    /// repeated mark.
     MemoryChanged {
         id: OperationId,
         memory: Option<Memory>,
@@ -2346,5 +2362,59 @@ mod tests {
         assert_eq!(json["type"], "operation_changed");
         assert_eq!(json["actor"]["type"], "agent");
         assert_eq!(json["state"], "awaiting_approval");
+    }
+
+    #[test]
+    fn a_mark_command_names_its_mark_and_an_absent_reason_is_not_written() {
+        let json = serde_json::to_value(CommandKind::MarkMemory {
+            uid: "0123456789abcdef".into(),
+            mark: MemoryMark::Wrong,
+            reason: None,
+        })
+        .expect("serialize");
+        assert_eq!(json["type"], "mark_memory");
+        assert_eq!(json["mark"], "wrong");
+        assert!(json.get("reason").is_none(), "{json}");
+        let back: CommandKind = serde_json::from_value(serde_json::json!({
+            "type": "mark_memory",
+            "uid": "0123456789abcdef",
+            "mark": "useful",
+            "reason": "it helped"
+        }))
+        .expect("parse");
+        assert!(matches!(
+            back,
+            CommandKind::MarkMemory {
+                mark: MemoryMark::Useful,
+                reason: Some(_),
+                ..
+            }
+        ));
+        assert!(
+            serde_json::from_value::<CommandKind>(serde_json::json!({
+                "type": "mark_memory", "uid": "x", "mark": "helpful"
+            }))
+            .is_err(),
+            "a mark outside the two words is refused"
+        );
+    }
+
+    #[test]
+    fn a_memory_read_without_a_history_in_its_json_has_none() {
+        let read: Event = serde_json::from_value(serde_json::json!({
+            "type": "memory_read",
+            "id": 1,
+            "memory": {
+                "id": 1, "uid": "0123456789abcdef", "kind": "rule", "text": "rule",
+                "status": "accepted", "origin": "human", "created_at": 1, "reviewed": true,
+                "sources": [], "supersedes": [], "superseded_by": [],
+                "files_changed_since": [], "scope": "repository"
+            }
+        }))
+        .expect("an old read parses");
+        assert!(matches!(
+            read,
+            Event::MemoryRead { mark_history, .. } if mark_history.is_empty()
+        ));
     }
 }

@@ -5,7 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use gm_schema::threads::{Context, ContextRepo, Memory, MemoryFilter, MemoryStatus};
+use gm_schema::threads::{
+    Context, ContextRepo, Memory, MemoryFilter, MemoryMark, MemoryMarkSummary, MemoryStatus,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::visibility::{self, ContextNode};
@@ -13,7 +15,7 @@ use crate::threads::memories::{self, BlobRead, Carried, Found, NewMemory, Placem
 use crate::threads::store::{BUSY_TIMEOUT, StoreError, begin, create_private, invalid, retry_busy};
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run, so the first is version 1.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
 /// Characters of a context name (D193 (3)).
 const NAME_CHARS: usize = 64;
 
@@ -107,6 +109,19 @@ ALTER TABLE memory ADD COLUMN basis TEXT NOT NULL DEFAULT 'observed'
 const SCHEMA_V4: &str = "
 ALTER TABLE memory ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE memory ADD COLUMN last_retrieved_at INTEGER;
+";
+
+/// Schema 5 (D202): the usefulness marks of a memory, as in `threads.db` schema 12. A memory moved
+/// here keeps its marks, and a delete removes them.
+const SCHEMA_V5: &str = "
+CREATE TABLE memory_mark (
+    id         INTEGER PRIMARY KEY,
+    memory_uid TEXT NOT NULL REFERENCES memory(uid) ON DELETE CASCADE,
+    actor      TEXT NOT NULL,
+    mark       TEXT NOT NULL CHECK (mark IN ('useful','wrong')),
+    reason     TEXT CHECK (reason IS NULL OR length(reason) <= 200),
+    at         INTEGER NOT NULL);
+CREATE INDEX memory_mark_actor ON memory_mark (memory_uid, actor, id);
 ";
 
 /// The contexts store: one connection to `contexts.db`.
@@ -265,7 +280,7 @@ impl ContextStore {
             )));
         }
         for memory in alone {
-            tx.execute("DELETE FROM memory WHERE id = ?1", params![memory])?;
+            memories::delete_in(&tx, memory)?;
         }
         tx.execute("DELETE FROM context WHERE id = ?1", params![id])?;
         tx.commit()?;
@@ -404,14 +419,15 @@ impl ContextStore {
     }
 
     /// Moves a repository memory into `contexts` (D193 (8)): stored under its own uid, with its
-    /// status, origin, history and sources (the caller has set each source's `repo_id`). The
-    /// duplicate key is looked for as in a proposal. A memory already stored under that uid is
-    /// returned with `false` and nothing is written, so a move interrupted after this write is
-    /// finished by a retry.
+    /// status, origin, history, sources and marks (`marks` is every mark it has, D202; the caller has
+    /// set each source's `repo_id`). The duplicate key is looked for as in a proposal. A memory already
+    /// stored under that uid is returned with `false` and nothing is written, so a move interrupted
+    /// after this write is finished by a retry.
     pub fn move_memory_in(
         &mut self,
         memory: &Memory,
         contexts: &[i64],
+        marks: &[MemoryMarkSummary],
     ) -> Result<(Memory, bool), StoreError> {
         if !matches!(
             memory.status,
@@ -437,6 +453,7 @@ impl ContextStore {
             decided_by: memory.decided_by.as_deref(),
             retrieval_count: memory.retrieval_count,
             last_retrieved_at: memory.last_retrieved_at,
+            marks,
         };
         self.store_in_contexts(&new, &checked, Some(&carried), contexts, Some(&memory.uid))
     }
@@ -622,6 +639,29 @@ impl ContextStore {
             return Ok(Vec::new());
         }
         memories::proposed_uids(&self.conn, &Self::within_contexts(contexts))
+    }
+
+    /// Records `mark` of `actor` on the accepted memory `uid` (D202); see `memories::mark_in`.
+    pub(crate) fn mark_memory(
+        &mut self,
+        uid: &str,
+        actor: &str,
+        mark: MemoryMark,
+        reason: Option<&str>,
+        at: i64,
+    ) -> Result<(Memory, bool), StoreError> {
+        let tx = begin(&mut self.conn)?;
+        let marked = memories::mark_in(&tx, uid, actor, mark, reason, at)?;
+        tx.commit()?;
+        Ok(marked)
+    }
+
+    /// Every mark of memory `uid`, oldest first (see `memories::mark_history`).
+    pub(crate) fn memory_mark_history(
+        &self,
+        uid: &str,
+    ) -> Result<Vec<MemoryMarkSummary>, StoreError> {
+        memories::mark_history(&self.conn, uid)
     }
 
     /// Counts one retrieval of memory `uid` now (see `memories::count_retrieval`). Counted in this
@@ -884,7 +924,7 @@ fn attach(conn: &Connection, memory: i64, context: i64) -> Result<(), StoreError
 mod tests {
     use super::*;
     use gm_schema::threads::{
-        MemoryBasis, MemoryKind, MemorySource, MemorySourceKind, MemoryStatus,
+        MemoryBasis, MemoryKind, MemoryMark, MemorySource, MemorySourceKind, MemoryStatus,
     };
 
     const REPO: &str = "0123456789abcdef0123456789abcdef";
@@ -954,7 +994,7 @@ mod tests {
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("version");
-            assert_eq!(version, 4);
+            assert_eq!(version, 5);
         }
     }
 
@@ -979,6 +1019,52 @@ mod tests {
         assert_eq!(
             store.read_memory_by_uid("oldmemory1").expect("read").basis,
             MemoryBasis::Observed
+        );
+    }
+
+    /// Schema 5 (D202) on a version 4 file: a memory stored before it has no marks, and a mark
+    /// written afterwards is kept with its history.
+    #[test]
+    fn version_four_gives_the_stored_memories_no_marks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("contexts.db");
+        {
+            let conn = Connection::open(&path).expect("raw");
+            for sql in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4] {
+                conn.execute_batch(sql).expect("schema");
+            }
+            conn.execute_batch(
+                "INSERT INTO memory (id, uid, kind, text, status, origin, created_at) VALUES
+                    (1, 'oldmemory1', 'rule', 'An old rule.', 'accepted', 'human', 1);",
+            )
+            .expect("rows");
+            conn.pragma_update(None, "user_version", 4)
+                .expect("version");
+        }
+        let mut store = ContextStore::open(&path).expect("migrate");
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, 5);
+        assert!(
+            store
+                .read_memory_by_uid("oldmemory1")
+                .expect("read")
+                .marks
+                .is_empty()
+        );
+        let (marked, written) = store
+            .mark_memory("oldmemory1", "human", MemoryMark::Wrong, None, 7)
+            .expect("mark");
+        assert!(written);
+        assert_eq!(marked.marks.len(), 1);
+        assert_eq!(
+            store
+                .memory_mark_history("oldmemory1")
+                .expect("history")
+                .len(),
+            1
         );
     }
 
@@ -1441,12 +1527,13 @@ mod tests {
             contexts: Vec::new(),
             retrieval_count: 0,
             last_retrieved_at: None,
+            marks: Vec::new(),
         };
         // The crash: the insert into contexts.db happens, the delete from threads.db does not.
-        let (first, created) = store.move_memory_in(&stored, &[a]).expect("insert");
+        let (first, created) = store.move_memory_in(&stored, &[a], &[]).expect("insert");
         assert!(created);
         // The retry finds the uid and writes nothing new.
-        let (again, created) = store.move_memory_in(&stored, &[a]).expect("retry");
+        let (again, created) = store.move_memory_in(&stored, &[a], &[]).expect("retry");
         assert!(!created, "the copy is already there");
         assert_eq!(again.uid, stored.uid);
         assert_eq!(all(&store, &[a]).len(), 1, "one copy");
@@ -1463,7 +1550,7 @@ mod tests {
             ..stored
         };
         assert!(
-            store.move_memory_in(&superseded, &[a]).is_err(),
+            store.move_memory_in(&superseded, &[a], &[]).is_err(),
             "a superseded memory does not move"
         );
     }

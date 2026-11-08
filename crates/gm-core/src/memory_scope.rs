@@ -10,7 +10,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gm_schema::threads::{
-    Memory, MemoryContext, MemoryFilter, MemorySource, MemorySourceKind, MemoryStatus,
+    Memory, MemoryContext, MemoryFilter, MemoryMark, MemoryMarkSummary, MemorySource,
+    MemorySourceKind, MemoryStatus,
 };
 use gm_schema::{Actor, Event, OperationId};
 
@@ -844,12 +845,16 @@ pub(crate) fn move_to_context(
     for source in &mut memory.sources {
         source.repo_id = Some(repo_id.clone());
     }
+    let history = stores
+        .threads
+        .memory_mark_history(uid)
+        .map_err(|e| e.to_string())?;
     let contexts = stores
         .reach
         .store_mut()
         .ok_or_else(|| NOT_VISIBLE.to_owned())?;
     let (moved, created) = contexts
-        .move_memory_in(&memory, &[context])
+        .move_memory_in(&memory, &[context], &history)
         .map_err(|e| e.to_string())?;
     if moved.uid != uid {
         return Err(format!(
@@ -868,6 +873,67 @@ pub(crate) fn move_to_context(
         .delete_memory(row)
         .map_err(|e| named(e, MEMORY_MISSING))?;
     Ok(changed(id, ctx, &stores.reach, moved, false, &attached))
+}
+
+/// `MarkMemory` (D202): `actor` (its origin) marks memory `uid`, of the repository or of a context
+/// the repository sees, `useful` or `wrong`. The reason is redacted like the text and at most 200
+/// characters. Only an accepted memory takes a mark; a repeat of the actor's latest mark writes
+/// nothing and answers the memory as it is. The memory's text, status and order are not touched.
+pub(crate) fn mark(
+    id: OperationId,
+    stores: &mut Stores<'_>,
+    ctx: &Context<'_>,
+    actor: &str,
+    uid: &str,
+    mark: MemoryMark,
+    reason: Option<&str>,
+) -> Result<Vec<Event>, String> {
+    let reason = reason.map(|reason| redacted(ctx, reason)).transpose()?;
+    let reason = memories::check_reason(reason.as_deref())?;
+    let at = now_ms();
+    let (memory, written, attached) = match home_of(stores, uid)? {
+        Home::Repository(_) => {
+            let (memory, written) = stores
+                .threads
+                .mark_memory(uid, actor, mark, reason.as_deref(), at)
+                .map_err(|e| named(e, MEMORY_MISSING))?;
+            (memory, written, Vec::new())
+        }
+        Home::Context => {
+            let contexts = stores
+                .reach
+                .store_mut()
+                .ok_or_else(|| MEMORY_MISSING.to_owned())?;
+            let (memory, written) = contexts
+                .mark_memory(uid, actor, mark, reason.as_deref(), at)
+                .map_err(|e| named(e, MEMORY_MISSING))?;
+            let attached = contexts
+                .memory_contexts(uid)
+                .map_err(|e| named(e, MEMORY_MISSING))?;
+            (memory, written, attached)
+        }
+    };
+    Ok(changed(id, ctx, &stores.reach, memory, written, &attached))
+}
+
+/// The marks of memory `uid`, oldest first, for `ReadMemory` (D202 (2)). The memory's own `marks` are
+/// the latest of each actor; this is the history the person sees.
+pub(crate) fn mark_history(
+    stores: &Stores<'_>,
+    uid: &str,
+) -> Result<Vec<MemoryMarkSummary>, String> {
+    match home_of(stores, uid)? {
+        Home::Repository(_) => stores
+            .threads
+            .memory_mark_history(uid)
+            .map_err(|e| e.to_string()),
+        Home::Context => stores
+            .reach
+            .store()
+            .ok_or_else(|| MEMORY_MISSING.to_owned())?
+            .memory_mark_history(uid)
+            .map_err(|e| e.to_string()),
+    }
 }
 
 /// `AttachMemory` (D193 (8)): accepted context memory `uid` also joins `context`.

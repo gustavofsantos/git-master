@@ -1177,7 +1177,7 @@ impl Model {
                 );
                 None
             }
-            Event::MemoryRead { id, memory } => {
+            Event::MemoryRead { id, memory, .. } => {
                 self.memories.read(id, memory);
                 None
             }

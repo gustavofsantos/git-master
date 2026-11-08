@@ -829,3 +829,219 @@ fn a_failing_count_does_not_fail_the_read() {
     assert_eq!(result(&replies[2])["memories"][0]["id"], uid);
     assert_eq!(retrieval_count(&mut human, &uid), 0);
 }
+
+/// The error text of a tool call that was refused, with the server still answering.
+fn tool_error(reply: &Value) -> &str {
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    reply["result"]["content"][0]["text"]
+        .as_str()
+        .expect("the error text")
+}
+
+#[test]
+fn an_agent_marks_a_memory_and_search_and_get_show_the_marks_and_the_wrong_note() {
+    let (_tmp, repo, db) = fixture();
+    let mut human = engine_on(&repo, &db);
+    let belief = propose_with_basis(
+        &mut human,
+        "A belief about the parser.",
+        MemoryBasis::Unconfirmed,
+    );
+    accept(&mut human, &belief, Vec::new());
+    let plain = propose_as_human(&mut human, "Keep the ledger append-only.", "f.txt", None);
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(
+                2,
+                "memory_mark",
+                &json!({ "memory_id": belief, "mark": "useful" }),
+            ),
+            call(
+                3,
+                "memory_mark",
+                &json!({ "memory_id": belief, "mark": "wrong", "reason": "it sent the job to the wrong queue" }),
+            ),
+            call(
+                4,
+                "memory_mark",
+                &json!({ "memory_id": plain, "mark": "useful" }),
+            ),
+            call(5, "memories_search", &json!({})),
+            call(6, "memory_get", &json!({ "id": belief })),
+        ],
+    );
+
+    let useful = &result(&replies[1])["memory"];
+    assert_eq!(result(&replies[1])["mark"], "useful");
+    assert_eq!(result(&replies[1])["recorded"], true);
+    assert_eq!(useful["marks"][0]["actor"], "agent:test-client");
+    assert_eq!(useful["marks"][0]["mark"], "useful");
+    assert!(useful["marks"][0]["at"].is_number(), "{useful}");
+
+    let changed = &result(&replies[2])["memory"];
+    assert_eq!(
+        result(&replies[2])["recorded"],
+        true,
+        "a change of mind is recorded"
+    );
+    assert_eq!(
+        changed["marks"][0]["mark"], "wrong",
+        "the latest mark counts"
+    );
+    assert_eq!(
+        changed["note"],
+        "Unconfirmed: a belief, not established fact. Marked wrong by agent:test-client; check before relying on it",
+        "both notes, in that order"
+    );
+
+    let listed = result(&replies[4])["memories"].as_array().unwrap().clone();
+    let find = |id: &str| {
+        listed
+            .iter()
+            .find(|memory| memory["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is listed: {listed:?}"))
+    };
+    assert_eq!(find(&belief)["marks"][0]["mark"], "wrong");
+    assert!(
+        find(&belief)["marks"][0].get("reason").is_none(),
+        "search has no reason"
+    );
+    assert!(
+        find(&belief)["note"]
+            .as_str()
+            .unwrap()
+            .contains("Marked wrong by agent:test-client")
+    );
+    assert_eq!(find(&plain)["marks"][0]["mark"], "useful");
+    assert!(
+        find(&plain).get("note").is_none(),
+        "a memory marked useful has no note"
+    );
+
+    let read = &result(&replies[5])["memory"];
+    assert_eq!(
+        read["marks"][0]["reason"],
+        "it sent the job to the wrong queue"
+    );
+    assert_eq!(
+        read["marks"][0]["untrusted"], true,
+        "a reason is untrusted text"
+    );
+}
+
+#[test]
+fn a_mark_on_a_memory_that_is_not_accepted_is_a_tool_error_and_the_server_answers() {
+    let (_tmp, repo, db) = fixture();
+    let proposed = {
+        let replies = session(
+            &repo,
+            &db,
+            &[
+                initialize(),
+                call(
+                    2,
+                    "memory_propose",
+                    &json!({ "kind": "rule", "text": "Not reviewed yet.", "sources": [{ "kind": "file", "ref": "f.txt" }] }),
+                ),
+            ],
+        );
+        result(&replies[1])["memory"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(
+                2,
+                "memory_mark",
+                &json!({ "memory_id": proposed, "mark": "useful" }),
+            ),
+            call(3, "memories_search", &json!({ "status": "proposed" })),
+        ],
+    );
+    let refusal = tool_error(&replies[1]);
+    assert!(
+        refusal.contains("only an accepted memory can be marked"),
+        "{refusal}"
+    );
+    assert_eq!(
+        result(&replies[2])["memories"][0]["id"],
+        proposed,
+        "the server still answers"
+    );
+}
+
+#[test]
+fn an_invalid_mark_or_a_missing_one_is_refused_and_the_server_keeps_answering() {
+    let (_tmp, repo, db) = fixture();
+    let mut human = engine_on(&repo, &db);
+    let uid = propose_as_human(&mut human, "Keep the ledger append-only.", "f.txt", None);
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(
+                2,
+                "memory_mark",
+                &json!({ "memory_id": uid, "mark": "helpful" }),
+            ),
+            call(3, "memory_mark", &json!({ "memory_id": uid })),
+            call(
+                4,
+                "memory_mark",
+                &json!({ "memory_id": uid, "mark": "useful", "reason": "x" }),
+            ),
+            call(5, "memories_search", &json!({})),
+        ],
+    );
+    assert!(
+        tool_error(&replies[1]).contains("mark must be useful or wrong"),
+        "{replies:?}"
+    );
+    assert!(
+        tool_error(&replies[2]).contains("mark is required"),
+        "{replies:?}"
+    );
+    assert_eq!(result(&replies[3])["recorded"], true);
+    assert_eq!(result(&replies[4])["memories"][0]["id"], uid);
+    assert_eq!(
+        result(&replies[4])["memories"][0]["marks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "only the valid mark was written"
+    );
+}
+
+#[test]
+fn a_mark_on_a_memory_the_repository_cannot_see_is_not_found_and_says_how_to_find_one() {
+    let (_tmp, repo, db) = fixture();
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(
+                2,
+                "memory_mark",
+                &json!({ "memory_id": "0000000000000000", "mark": "wrong" }),
+            ),
+        ],
+    );
+    assert!(
+        tool_error(&replies[1]).contains("memories_search lists the memory ids"),
+        "{replies:?}"
+    );
+}

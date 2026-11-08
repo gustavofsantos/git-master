@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gm_schema::threads::{
-    FileChange, FileChangeState, Memory, MemoryBasis, MemoryFilter, MemoryKind, MemorySource,
-    MemorySourceInput, MemorySourceKind, MemoryStatus,
+    FileChange, FileChangeState, Memory, MemoryBasis, MemoryFilter, MemoryKind, MemoryMark,
+    MemoryMarkSummary, MemorySource, MemorySourceInput, MemorySourceKind, MemoryStatus,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use sha2::{Digest, Sha256};
@@ -24,6 +24,8 @@ use super::store::{
 
 /// Characters of a memory's text (D192 (1)). Text over this is refused, not cut.
 pub const TEXT_CHARS: usize = 1000;
+/// Characters of the reason of a mark (D202). A longer reason is refused, not cut.
+pub const REASON_CHARS: usize = 200;
 /// Hex digits of a uid and of a cursor digest (D192 (8)).
 const UID_HEX: usize = 16;
 /// The origin of a human's action. Every other origin is an agent's or an import's.
@@ -67,6 +69,8 @@ pub enum MemoryAction {
     Accept,
     Reject,
     Delete,
+    /// Marking a memory useful or wrong (D202): either actor may.
+    Mark,
 }
 
 /// A state change of a memory (D192 (4)).
@@ -110,6 +114,71 @@ pub fn basis_text(basis: MemoryBasis) -> &'static str {
         MemoryBasis::Observed => "observed",
         MemoryBasis::Tested => "tested",
         MemoryBasis::Unconfirmed => "unconfirmed",
+    }
+}
+
+/// The word a mark is stored and sent as (D202).
+#[must_use]
+pub fn mark_text(mark: MemoryMark) -> &'static str {
+    match mark {
+        MemoryMark::Useful => "useful",
+        MemoryMark::Wrong => "wrong",
+    }
+}
+
+/// The mark a word names: `useful` or `wrong`. Any other word is refused, and the message names the
+/// words that are allowed (D202).
+pub fn check_mark(text: &str) -> Result<MemoryMark, String> {
+    parse_mark(text).ok_or_else(|| format!("mark must be useful or wrong, not {text:?}"))
+}
+
+fn parse_mark(text: &str) -> Option<MemoryMark> {
+    match text {
+        "useful" => Some(MemoryMark::Useful),
+        "wrong" => Some(MemoryMark::Wrong),
+        _ => None,
+    }
+}
+
+/// The reason of a mark as stored: trimmed, `None` when it is empty, and at most `REASON_CHARS`
+/// characters. Called after the redaction, as the text of a memory is (D202).
+pub fn check_reason(text: Option<&str>) -> Result<Option<String>, String> {
+    let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(None);
+    };
+    if text.chars().count() > REASON_CHARS {
+        return Err(format!("a reason is at most {REASON_CHARS} characters"));
+    }
+    Ok(Some(text.to_owned()))
+}
+
+/// Whether a mark is a repeat of the actor's latest mark, and so writes nothing (D202 (2)).
+#[must_use]
+pub fn is_repeat(latest: Option<MemoryMark>, mark: MemoryMark) -> bool {
+    latest == Some(mark)
+}
+
+/// The actors whose latest mark is `wrong`, in the order the summaries give them (D202 (3)). The
+/// result is what a `wrong` note names.
+#[must_use]
+pub fn marked_wrong_by(marks: &[MemoryMarkSummary]) -> Vec<&str> {
+    marks
+        .iter()
+        .filter(|summary| summary.mark == MemoryMark::Wrong)
+        .map(|summary| summary.actor.as_str())
+        .collect()
+}
+
+/// A memory can be marked only while it is accepted (D202 (2)): a proposal is not yet a memory
+/// anyone relies on, and a rejected or superseded one is history.
+pub fn check_markable(status: MemoryStatus) -> Result<(), String> {
+    if status == MemoryStatus::Accepted {
+        Ok(())
+    } else {
+        Err(format!(
+            "only an accepted memory can be marked, and this one is {}",
+            status_text(status)
+        ))
     }
 }
 
@@ -191,7 +260,7 @@ pub fn authorize(is_human: bool, action: &MemoryAction) -> Result<(), String> {
         MemoryAction::Propose { sources: 0 } => {
             Err("An agent must name at least one source for a memory.".to_owned())
         }
-        MemoryAction::Propose { .. } => Ok(()),
+        MemoryAction::Propose { .. } | MemoryAction::Mark => Ok(()),
         MemoryAction::Accept | MemoryAction::Reject | MemoryAction::Delete => {
             Err("An agent can only propose a memory.".to_owned())
         }
@@ -411,6 +480,8 @@ pub(crate) struct Carried<'a> {
     /// The retrieval count and time it has so far (D201 (4)): a moved memory is the same memory.
     pub retrieval_count: u32,
     pub last_retrieved_at: Option<i64>,
+    /// Every mark the memory has, oldest first (D202): a moved memory keeps its history.
+    pub marks: &'a [MemoryMarkSummary],
 }
 
 /// Stores a checked proposal inside the caller's transaction (D192 (2), (3)). A memory with the
@@ -488,6 +559,9 @@ pub(crate) fn propose_in(
     )?;
     let id = conn.last_insert_rowid();
     insert_sources(conn, id, &checked.sources)?;
+    if let Some(kept) = carried {
+        insert_marks(conn, &uid, kept.marks)?;
+    }
     Ok((memory_by_id(conn, id)?, true))
 }
 
@@ -578,6 +652,10 @@ pub(crate) fn reject_in(conn: &Connection, id: i64, at: i64) -> Result<Memory, S
 
 /// Deletes a memory with its sources and its links (a human's action). `NotFound` when missing.
 pub(crate) fn delete_in(conn: &Connection, id: i64) -> Result<(), StoreError> {
+    conn.execute(
+        "DELETE FROM memory_mark WHERE memory_uid = (SELECT uid FROM memory WHERE id = ?1)",
+        params![id],
+    )?;
     if conn.execute("DELETE FROM memory WHERE id = ?1", params![id])? == 0 {
         return Err(StoreError::NotFound);
     }
@@ -830,6 +908,30 @@ impl ThreadStore {
         Ok(())
     }
 
+    /// Records `mark` of `actor` on the accepted memory `uid` (D202), in one transaction. The bool is
+    /// false when the actor's latest mark already is `mark`, and nothing is written then.
+    pub(crate) fn mark_memory(
+        &mut self,
+        uid: &str,
+        actor: &str,
+        mark: MemoryMark,
+        reason: Option<&str>,
+        at: i64,
+    ) -> Result<(Memory, bool), StoreError> {
+        let tx = begin(&mut self.conn)?;
+        let marked = mark_in(&tx, uid, actor, mark, reason, at)?;
+        tx.commit()?;
+        Ok(marked)
+    }
+
+    /// Every mark of memory `uid`, oldest first (see `mark_history`).
+    pub(crate) fn memory_mark_history(
+        &self,
+        uid: &str,
+    ) -> Result<Vec<MemoryMarkSummary>, StoreError> {
+        mark_history(&self.conn, uid)
+    }
+
     /// A memory with its sources and its supersedes links. `NotFound` when missing.
     pub fn read_memory(&self, id: i64) -> Result<Memory, StoreError> {
         memory_by_id(&self.conn, id)
@@ -1053,7 +1155,133 @@ pub(crate) fn memory_by_id(conn: &Connection, id: i64) -> Result<Memory, StoreEr
          WHERE r.to_memory = ?1 AND r.kind = 'supersedes' ORDER BY m.uid",
         id,
     )?;
+    memory.marks = mark_summaries(conn, &memory.uid)?;
     Ok(memory)
+}
+
+/// Writes `mark` of `actor` (its origin, `human` or `agent:<client>`) on memory `uid`, inside the
+/// caller's transaction (D202). Only an accepted memory takes a mark. A mark equal to the actor's
+/// latest mark writes nothing. Returns the memory as it now is and whether a row was written.
+pub(crate) fn mark_in(
+    conn: &Connection,
+    uid: &str,
+    actor: &str,
+    mark: MemoryMark,
+    reason: Option<&str>,
+    at: i64,
+) -> Result<(Memory, bool), StoreError> {
+    let id = id_of_uid(conn, uid)?;
+    let status: String = conn.query_row(
+        "SELECT status FROM memory WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )?;
+    let status =
+        parse_status(&status).ok_or_else(|| invalid("a memory holds an unknown status"))?;
+    check_markable(status).map_err(|message| invalid(&message))?;
+    if is_repeat(latest_mark(conn, uid, actor)?, mark) {
+        return Ok((memory_by_id(conn, id)?, false));
+    }
+    conn.execute(
+        "INSERT INTO memory_mark (memory_uid, actor, mark, reason, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![uid, actor, mark_text(mark), reason, at],
+    )?;
+    Ok((memory_by_id(conn, id)?, true))
+}
+
+/// The latest mark of `actor` on memory `uid`, if it has marked it.
+fn latest_mark(
+    conn: &Connection,
+    uid: &str,
+    actor: &str,
+) -> Result<Option<MemoryMark>, StoreError> {
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT mark FROM memory_mark WHERE memory_uid = ?1 AND actor = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![uid, actor],
+            |row| row.get(0),
+        )
+        .optional()?;
+    text.map(|text| parse_mark(&text).ok_or_else(|| invalid("a memory mark holds an unknown mark")))
+        .transpose()
+}
+
+/// The latest mark of each actor on memory `uid`, by actor (D202 (2)). Earlier marks are not here.
+pub(crate) fn mark_summaries(
+    conn: &Connection,
+    uid: &str,
+) -> Result<Vec<MemoryMarkSummary>, StoreError> {
+    mark_rows(
+        conn,
+        "SELECT m.actor, m.mark, m.at, m.reason FROM memory_mark m
+         WHERE m.memory_uid = ?1 AND m.id = (SELECT MAX(x.id) FROM memory_mark x
+            WHERE x.memory_uid = m.memory_uid AND x.actor = m.actor)
+         ORDER BY m.actor",
+        uid,
+    )
+}
+
+/// Every mark memory `uid` has, oldest first (D202 (2)): the history the marks keep.
+pub(crate) fn mark_history(
+    conn: &Connection,
+    uid: &str,
+) -> Result<Vec<MemoryMarkSummary>, StoreError> {
+    mark_rows(
+        conn,
+        "SELECT actor, mark, at, reason FROM memory_mark WHERE memory_uid = ?1 ORDER BY id",
+        uid,
+    )
+}
+
+fn mark_rows(
+    conn: &Connection,
+    sql: &str,
+    uid: &str,
+) -> Result<Vec<MemoryMarkSummary>, StoreError> {
+    let mut statement = conn.prepare(sql)?;
+    let rows = statement.query_map(params![uid], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut marks = Vec::new();
+    for row in rows {
+        let (actor, mark, at, reason) = row?;
+        let mark =
+            parse_mark(&mark).ok_or_else(|| invalid("a memory mark holds an unknown mark"))?;
+        marks.push(MemoryMarkSummary {
+            actor,
+            mark,
+            at,
+            reason,
+        });
+    }
+    Ok(marks)
+}
+
+/// Stores carried marks under memory `uid` (D202), in the order they were made.
+pub(crate) fn insert_marks(
+    conn: &Connection,
+    uid: &str,
+    marks: &[MemoryMarkSummary],
+) -> Result<(), StoreError> {
+    for mark in marks {
+        conn.execute(
+            "INSERT INTO memory_mark (memory_uid, actor, mark, reason, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                uid,
+                mark.actor,
+                mark_text(mark.mark),
+                mark.reason,
+                mark.at
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 /// A memory row without its sources and relations. A stored value that is not a known kind or
@@ -1094,6 +1322,7 @@ fn memory_row(row: &Row<'_>) -> rusqlite::Result<Result<Memory, StoreError>> {
         contexts: Vec::new(),
         retrieval_count: u32::try_from(retrieval_count).unwrap_or(0),
         last_retrieved_at: row.get(13)?,
+        marks: Vec::new(),
     }))
 }
 
@@ -1549,6 +1778,7 @@ mod tests {
             contexts: Vec::new(),
             retrieval_count: 0,
             last_retrieved_at: None,
+            marks: Vec::new(),
         };
         let source = |path: &str, blob: Option<&str>| MemorySource {
             kind: MemorySourceKind::File,
@@ -1647,6 +1877,7 @@ mod tests {
             contexts: Vec::new(),
             retrieval_count: 0,
             last_retrieved_at: None,
+            marks: Vec::new(),
         };
         // The file is at HEAD now, but nothing was read to compare it with: never `Changed`.
         let lookup = |_: &MemorySource| -> Result<Option<String>, Lookup> {
@@ -2251,5 +2482,67 @@ mod tests {
         );
         let malformed = store.list_memories("", &MemoryFilter::default(), 1, Some("nonsense"));
         assert!(matches!(malformed, Err(StoreError::Invalid(ref m)) if m == CURSOR_MALFORMED));
+    }
+
+    #[test]
+    fn a_reason_is_trimmed_empty_or_at_most_two_hundred_characters() {
+        assert_eq!(check_reason(None), Ok(None));
+        assert_eq!(check_reason(Some("   ")), Ok(None));
+        assert_eq!(
+            check_reason(Some("  stale since the move  ")),
+            Ok(Some("stale since the move".to_owned()))
+        );
+        let two_hundred = "é".repeat(REASON_CHARS);
+        assert_eq!(check_reason(Some(&two_hundred)), Ok(Some(two_hundred)));
+        let too_long = "é".repeat(REASON_CHARS + 1);
+        assert!(
+            check_reason(Some(&too_long)).is_err(),
+            "a longer reason is refused, not cut"
+        );
+    }
+
+    #[test]
+    fn a_mark_is_useful_or_wrong_and_any_other_word_is_refused() {
+        assert_eq!(check_mark("useful"), Ok(MemoryMark::Useful));
+        assert_eq!(check_mark("wrong"), Ok(MemoryMark::Wrong));
+        let refused = check_mark("helpful").expect_err("refused");
+        assert!(refused.contains("useful or wrong"), "{refused}");
+        assert_eq!(mark_text(MemoryMark::Wrong), "wrong");
+    }
+
+    #[test]
+    fn only_an_accepted_memory_can_be_marked_and_a_repeat_is_the_latest_mark() {
+        assert_eq!(check_markable(MemoryStatus::Accepted), Ok(()));
+        for status in [
+            MemoryStatus::Proposed,
+            MemoryStatus::Rejected,
+            MemoryStatus::Superseded,
+        ] {
+            let refused = check_markable(status).expect_err("refused");
+            assert!(
+                refused.starts_with("only an accepted memory can be marked"),
+                "{refused}"
+            );
+        }
+        assert!(is_repeat(Some(MemoryMark::Useful), MemoryMark::Useful));
+        assert!(!is_repeat(Some(MemoryMark::Useful), MemoryMark::Wrong));
+        assert!(!is_repeat(None, MemoryMark::Useful));
+    }
+
+    #[test]
+    fn the_actors_whose_latest_mark_is_wrong_are_named_in_order() {
+        let summary = |actor: &str, mark| MemoryMarkSummary {
+            actor: actor.to_owned(),
+            mark,
+            at: 1,
+            reason: None,
+        };
+        let marks = [
+            summary("agent:a", MemoryMark::Wrong),
+            summary("human", MemoryMark::Useful),
+            summary("agent:b", MemoryMark::Wrong),
+        ];
+        assert_eq!(marked_wrong_by(&marks), ["agent:a", "agent:b"]);
+        assert!(marked_wrong_by(&marks[1..2]).is_empty());
     }
 }

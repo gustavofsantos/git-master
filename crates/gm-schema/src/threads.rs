@@ -809,6 +809,32 @@ pub enum MemoryBasis {
     Unconfirmed,
 }
 
+/// A person's or an agent's judgement of a memory's usefulness (D202). `useful` means the memory
+/// helped; `wrong` means it led somewhere it should not have, or is no longer true. Marks are signals:
+/// they never change the memory's text, status or order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMark {
+    Useful,
+    Wrong,
+}
+
+/// One actor's mark of a memory (D202). `marks` on a memory holds the latest mark of each actor, and
+/// the mark history of a memory lists every mark ever made, oldest first, each with the same fields.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct MemoryMarkSummary {
+    /// `human` or `agent:<client>`, as the origin of a row.
+    pub actor: String,
+    pub mark: MemoryMark,
+    /// When the mark was made, in milliseconds since the Unix epoch.
+    pub at: i64,
+    /// The one-line reason the actor gave, redacted like the memory's text (at most 200 characters).
+    /// Agent-written text: untrusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// The kind of a memory's source: a thread (with an entry range), a commit or a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -937,6 +963,10 @@ pub struct Memory {
     /// When the memory was last retrieved, in milliseconds (D201 (4)); `None` while it never was.
     #[serde(default)]
     pub last_retrieved_at: Option<i64>,
+    /// The latest mark of each actor (D202 (2)), by actor. Derived on read, never stored as a value.
+    /// Absent from older JSON, which reads as no marks.
+    #[serde(default)]
+    pub marks: Vec<MemoryMarkSummary>,
 }
 
 /// A context: a named set of repositories at the user level, with its nesting (design/threads.md,
@@ -1157,6 +1187,7 @@ mod tests {
             contexts: Vec::new(),
             retrieval_count: 0,
             last_retrieved_at: None,
+            marks: Vec::new(),
         };
         let json = serde_json::to_value(&memory).expect("serialize");
         assert!(
@@ -1165,6 +1196,36 @@ mod tests {
         );
         let old: Memory = serde_json::from_value(json).expect("an old memory parses");
         assert!(old.contexts.is_empty());
+    }
+
+    #[test]
+    fn a_memory_mark_is_useful_or_wrong_and_a_memory_without_marks_in_its_json_has_none() {
+        assert_eq!(
+            serde_json::to_value(MemoryMark::Useful).expect("serialize"),
+            "useful"
+        );
+        assert_eq!(
+            serde_json::to_value(MemoryMark::Wrong).expect("serialize"),
+            "wrong"
+        );
+        assert!(serde_json::from_value::<MemoryMark>(serde_json::json!("helpful")).is_err());
+        let summary: MemoryMarkSummary = serde_json::from_value(serde_json::json!({
+            "actor": "agent:claude-code",
+            "mark": "wrong",
+            "at": 5
+        }))
+        .expect("a mark without a reason parses");
+        assert_eq!(summary.reason, None);
+        let json = serde_json::to_value(&summary).expect("serialize");
+        assert!(json.get("reason").is_none(), "no reason is not written");
+        let memory: Memory = serde_json::from_value(serde_json::json!({
+            "id": 1, "uid": "0123456789abcdef", "kind": "rule", "text": "rule",
+            "status": "accepted", "origin": "human", "created_at": 1, "reviewed": true,
+            "sources": [], "supersedes": [], "superseded_by": [],
+            "files_changed_since": [], "scope": "repository"
+        }))
+        .expect("an old memory parses");
+        assert!(memory.marks.is_empty());
     }
 
     #[test]

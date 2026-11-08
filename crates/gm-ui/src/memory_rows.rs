@@ -321,6 +321,7 @@ mod tests {
             basis: MemoryBasis::Observed,
             retrieval_count: 0,
             last_retrieved_at: None,
+            marks: Vec::new(),
         }
     }
 

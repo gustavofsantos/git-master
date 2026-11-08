@@ -84,13 +84,26 @@ The line above the list gives the size of the scope you chose: how many accepted
 
 A memory that names files shows a **Files changed** tag on its row when one of those files is different from when you accepted the memory, or is gone. Its detail lists them under **Changed since accepted** or **Removed since accepted**. GitMaster works this out from the files, each time you open the memory. It does not guess whether the memory is still true: it tells you what changed and leaves the decision to you.
 
+## Mark a memory useful or wrong
+
+A memory can be marked **Useful**, when it helped the work, or **Wrong**, when it misled someone or is no longer true. An agent marks a memory with the `memory_mark` tool of [MCP](../reference/mcp-tools.md), and can give a one-line reason. Only an accepted memory takes a mark.
+
+Every mark is kept. The latest mark of each actor counts, and an earlier one stays in the history. If an agent called a memory useful and that memory then led to a wrong action, the agent marks it wrong; the earlier mark stays. Marking a memory the same way again changes nothing.
+
+A memory whose latest mark from anyone is **Wrong** shows a note that asks to check it before relying on it. A mark is a signal and nothing more: it never deletes, supersedes or reorders a memory, and it never changes its text or status. Only you accept a change.
+
+### Marks you make in the app
+
+> **Planned.** You cannot mark a memory in the app yet, and the Memories tab does not show marks yet. Both are next.
+
 ## How agents use memories
 
 Agents read memories over [MCP](../reference/mcp-tools.md):
 
 - `memories_search` finds accepted memories by their words, by kind, by file or by scope. It searches the repository and every context it belongs to.
 - `contexts_list` lists the contexts the repository belongs to.
-- `memory_get` reads one memory with its sources.
+- `memory_get` reads one memory with its sources and its marks.
+- `memory_mark` records that a memory was useful or wrong, with an optional reason.
 
 By default an agent sees only accepted memories. It can ask for proposed ones, which come marked as not reviewed.
 
