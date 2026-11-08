@@ -90,6 +90,22 @@ review_comments_list(status="open")
                         { id: 11, author: "human", body: "Cover the empty string too.", created_at: "...", untrusted: true }] }] }
 ```
 
+## Notes, questions and flags from the agent
+
+> **Planned.** An agent cannot start a thread yet.
+
+The agent can start a thread of its own on any text in the working tree, with `review_comment_create`. Each one has a kind:
+
+| Kind | Use |
+|---|---|
+| **Note** | Something worth knowing about this code. It asks nothing of you. |
+| **Question** | The agent needs your answer. It shows **Needs answer** until you reply. |
+| **Flag** | A risk or a guess you should look at, with a severity of low, medium or high. |
+
+An agent thread is anchored, snapshotted, shown inline and marked **Outdated** like yours, and its root is labelled **Agent-written**. You answer in the same **Reply** box. The agent does not receive your answer by itself: it reads it the next time it lists its threads, for example when you run `/gitmaster:inbox`. Only you close a thread; **Resolve** on a note dismisses it. An agent has at most 20 open threads in a repository and 5 on one file, and a further one is refused.
+
+`review_comments_list` returns the threads you started by default, so the agent's own notes are not handed back to it as work. A question you have answered is returned, so the agent sees the answer.
+
 ## Anchors
 
 Each comment is anchored to its file, the text you selected and a few lines of context around that text.

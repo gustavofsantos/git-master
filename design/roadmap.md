@@ -738,6 +738,16 @@ Settings, workflows, the recent list and the trust store use one resolver, `gm_c
 - **S3, Threads page** (not started): the nested row, its expansion, **Open Thread** and the depth cap.
 - **S4, search and MCP** (not started): `parent` on search hits and on the thread reads, and the `Planned` markers in `docs/guide/threads.md` and `docs/reference/mcp-tools.md` removed as each part ships.
 
+## Slice 8a: agent annotations (decided 2026-11-07; D200)
+
+Requested by the author on 2026-11-07. Behavior in `docs/agents/local-review.md` ("Notes, questions and flags from the agent", `Planned`).
+
+**Goal.** An agent leaves notes, questions and flags on code and you answer in the app; the agent reads the answer by pull.
+
+**Sub-slices.** A1 store and command: review schema v5 with `kind`, `severity`, an author on roots, the limits, `CreateAgentComment` and the default list filter. A2 MCP: `review_comment_create`, the `author` filter of `review_comments_list`, fields in the results. A3 UI: kind and severity chips, **Agent-written**, **Needs answer** badge and count, Local review filter. A4 plugin: the `inbox` skill and the `gitmaster` skill update. Order A1, A2, A4, A3.
+
+**Acceptance.** Real-Git tests: an agent creates a thread on a unique anchor; a missing or ambiguous anchor and the limits are refused; the agent cannot resolve or reopen it; a person's reply makes it appear in the default list; an agent thread is not handed back as work before a reply. A4 is tried in a real session and what was seen is stated.
+
 ## Slice 8r: reviewers, verdicts and gates (decided 2026-11-07, after slice 6m; D188, D189, Q37, Q39, Q40)
 
 Requested by the author on 2026-11-07. Engineering design in `design/reviewers.md`; behavior in `docs/agents/reviewers.md` (`Planned`). Depends on slice 8 (local review) and slice 7 (MCP record tools); the skills depend on M4's verification of the plugin format.
