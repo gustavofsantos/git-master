@@ -19,6 +19,7 @@ A memory belongs to the repository where it was written, or to one or more [cont
 | Text | Up to 1,000 characters, in plain words. It passes through the same redaction as a thread. |
 | Status | **Proposed**, **Accepted**, **Rejected** or **Superseded**. |
 | Source | The thread and entries, the commits and the files it comes from. A memory an agent proposes always has at least one source. A memory you write yourself may have none. |
+| Basis | How it is known: **Observed** (seen in a thread or a file), **Tested** (checked by running something) or **Unconfirmed** (a belief). An unconfirmed memory is marked and is never given to an agent as established fact. |
 | Origin | You, or the agent that proposed it. |
 | Scope | The repository, or the contexts it is attached to. Shown as a chip on the memory. |
 
@@ -62,6 +63,22 @@ You can choose **Accept selected** for the proposals you choose, or **Accept all
 > **Planned.** A memory you write by hand cannot supersede another memory yet; only a proposal can.
 
 When a decision changes, select the proposed memory that replaces the old one and choose **Supersedes…**. Pick the accepted memories it replaces, then accept it. The chosen memories become **Superseded** and stay in the list with a link to their replacement. An agent cannot change an accepted memory.
+
+## Keep memories true
+
+> **Planned.** The `basis` of a memory, the `/gitmaster:consolidate` skill, retrieval counts and the size line below are not built yet.
+
+A memory is for what nobody can see again by looking: the reason for a choice, a rule, a lesson, a failed attempt. What the code, `git log` or a command shows does not belong in one, and the proposing skill leaves it out.
+
+In a session with the GitMaster [plugin](../agents/agent-integration.md), ask:
+
+```text
+/gitmaster:consolidate
+```
+
+A cheap sub-agent checks accepted memories against their sources, the files as they are now and the threads, starting with the ones that changed under them and the ones agents retrieve most. It proposes a correction, a merge or a replacement. Each proposal is **Proposed** and names the memory it replaces. You accept it or not; nothing is replaced without you.
+
+GitMaster counts on your machine how often each memory is retrieved and when. The counts are never shared and never sent to a model. The tab shows how many accepted memories there are and how much text they hold, so a store that grows without use is visible.
 
 ## When a memory goes stale
 

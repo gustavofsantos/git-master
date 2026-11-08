@@ -37,7 +37,7 @@ The hooks and the MCP settings run `gitmaster` from your `PATH`, so the `gitmast
 
 ## Skills and sub-agents
 
-> **Planned.** `/gitmaster:summarize-thread`, `/gitmaster:inbox`, `/gitmaster:review`, `/gitmaster:tune-reviewers` and `/gitmaster:dispatch` are not part of the plugin yet. `/gitmaster:propose-memories` and `/gitmaster:prepare` are.
+> **Planned.** `/gitmaster:summarize-thread`, `/gitmaster:inbox`, `/gitmaster:consolidate`, `/gitmaster:review`, `/gitmaster:tune-reviewers` and `/gitmaster:dispatch` are not part of the plugin yet. `/gitmaster:propose-memories` and `/gitmaster:prepare` are.
 
 The plugin adds skills you start yourself. Each one hands its work to a sub-agent that uses the cheapest model that is good enough and only the tools the job needs: it reads through GitMaster and records one kind of result. A sub-agent has no shell, cannot edit files and cannot reach the network. The tokens it uses are yours, in your own agent session, and the skill says what it will read before it starts.
 
@@ -45,6 +45,7 @@ The plugin adds skills you start yourself. Each one hands its work to a sub-agen
 |---|---|
 | `/gitmaster:summarize-thread` | Reads a thread and records a short summary on it. |
 | `/gitmaster:propose-memories` | Reads threads and proposes [memories](../guide/memories.md) with their sources. You accept them. |
+| `/gitmaster:consolidate` | Checks accepted [memories](../guide/memories.md) against their sources and proposes corrections, merges and replacements. You accept them. |
 | `/gitmaster:prepare` | For a task you describe, gathers the accepted memories, the related threads and the history of the files, and returns a brief. |
 | `/gitmaster:inbox` | Reads your answers to the questions the agent left in the code, and continues the work. |
 | `/gitmaster:review` | Runs [reviewers](reviewers.md) on a branch and records their verdicts and findings. |
