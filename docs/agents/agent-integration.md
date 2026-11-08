@@ -37,9 +37,9 @@ The hooks and the MCP settings run `gitmaster` from your `PATH`, so the `gitmast
 
 ## Skills and sub-agents
 
-> **Planned.** `/gitmaster:summarize-thread`, `/gitmaster:inbox`, `/gitmaster:consolidate`, `/gitmaster:review`, `/gitmaster:tune-reviewers` and `/gitmaster:dispatch` are not part of the plugin yet. `/gitmaster:propose-memories` and `/gitmaster:prepare` are.
+> **Planned.** `/gitmaster:summarize-thread`, `/gitmaster:consolidate`, `/gitmaster:review`, `/gitmaster:tune-reviewers` and `/gitmaster:dispatch` are not part of the plugin yet. `/gitmaster:propose-memories`, `/gitmaster:prepare` and `/gitmaster:inbox` are.
 
-The plugin adds skills you start yourself. Each one hands its work to a sub-agent that uses the cheapest model that is good enough and only the tools the job needs: it reads through GitMaster and records one kind of result. A sub-agent has no shell, cannot edit files and cannot reach the network. The tokens it uses are yours, in your own agent session, and the skill says what it will read before it starts.
+The plugin adds skills you start yourself. Most hand their work to a sub-agent that uses the cheapest model that is good enough and only the tools the job needs: it reads through GitMaster and records one kind of result. `/gitmaster:prepare` and `/gitmaster:inbox` run in your own session and start none. A sub-agent has no shell, cannot edit files and cannot reach the network. The tokens it uses are yours, in your own agent session, and the skill says what it will read before it starts.
 
 | Skill | What it does |
 |---|---|
