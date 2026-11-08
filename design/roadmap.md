@@ -727,6 +727,10 @@ Requested by the author on 2026-11-07, first priority. Engineering design in `de
 
 **Acceptance.** An agent actor can only propose, with a source; only a human accepts; an accepted memory's file source shows **Files changed since** after the file changes, in a test with real Git. M4 is checked against a real Claude Code session, and what was and was not seen is stated.
 
+## Slice 6q: memory quality (proposed 2026-11-07; D201, Q46)
+
+Behavior to be written in `docs/guide/memories.md` and `docs/reference/mcp-tools.md` as `Planned` once D201 is confirmed. **Sub-slices.** Q1 `basis` on a memory (schema, `memory_propose`, search and detail, Memories tab). Q2 retrieval count and last-retrieved time, and the size signal in the tab. Q3 plugin: the `memory-consolidator` agent and `/gitmaster:consolidate`, the rewritten `memory-proposer` and `prepare` text with a brief cap. **Acceptance.** Real-Git tests: `basis` is stored and returned, an `unconfirmed` memory is marked in results, counts rise on retrieval and are never exported; Q3 tried in a real session and what was seen is stated.
+
 ## Path unification (D197): one config and data path (done 2026-11-07, commit fec4253)
 
 Settings, workflows, the recent list and the trust store use one resolver, `gm_core::paths`, with the XDG layout on Linux and macOS: `$XDG_CONFIG_HOME/gitmaster` and `$XDG_DATA_HOME/gitmaster`, with the home-directory defaults. The earlier macOS locations are not migrated, since the app has no users before go-live (D197 (3)).
