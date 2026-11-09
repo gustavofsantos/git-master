@@ -52,7 +52,14 @@ GitMaster does not start the agent. Choose **Run Reviewer…** on a branch to se
 /gitmaster:review security
 ```
 
-The skill starts a sub-agent for each reviewer, with a cheap model and only the tools it needs: it can read the diff and the repository through GitMaster, and it can record its verdict. It cannot run commands, edit files or reach the network.
+With no name, the skill finds its own way:
+
+1. It reads which gates apply to the branch and which reviewers still need a verdict for the current commit, then lists them and says what it will run, so you can stop it.
+2. It starts one sub-agent for each of those reviewers, at the same time. Each sub-agent runs with the reviewer's own instructions and its **Model**, or `haiku` when the reviewer sets none.
+3. Each sub-agent can read the diff and the repository, and it can record its verdict and findings. It cannot run commands, edit files, change a gate or reach the network.
+4. When they have all returned, the skill reads the gates again and tells you whether the branch is **Ready** or what still blocks it. It never bypasses a gate.
+
+With names, such as `/gitmaster:review security risk`, it runs those reviewers whether or not a gate asks for them.
 
 Nothing runs by itself. A commit or a push does not start a reviewer.
 
