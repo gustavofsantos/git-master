@@ -24,6 +24,8 @@ A reviewer has:
 | Subject | What it reviews: the branch against its parent in the stack or its upstream, the staged changes, or one commit. |
 | Model | An optional hint for the cheapest model that is good enough. |
 
+> **Planned.** Only reviewers with the **Branch** subject can record verdicts. The **Staged changes** and **One commit** subjects are not available yet.
+
 GitMaster ships these starting points: **Code review**, **Security**, **Slop** (sloppy patterns), **Intent drift** (the change no longer matches what the branch set out to do) and **Risk**. Edit them or write your own in **Reviewers Settings…**.
 
 ### Where reviewers are kept
@@ -37,12 +39,13 @@ signal: level
 direction: lower_is_better
 subject: branch
 model: haiku
+paths: services/billing/**, libs/ledger/**
 ---
 Look at what the change adds. Report input that reaches a shell, a query or a file path
 without a check, secrets in the diff, and permissions that grow. Say nothing about style.
 ```
 
-The file name is the reviewer's name, in lowercase letters, digits and hyphens. GitMaster looks in `.git/gitmaster/reviewers/` of the repository first, then in `reviewers/` in your configuration directory, and the repository's file wins when both have the same name. Nothing is written into the working tree. A starting point is a template: **Add Reviewer…** copies it to a file you own.
+`paths` and `branches` say which changes the reviewer is for; see [Reviewers for one change](#reviewers-for-one-change). The file name is the reviewer's name, in lowercase letters, digits and hyphens. GitMaster looks in `.git/gitmaster/reviewers/` of the repository first, then in `reviewers/` in your configuration directory, and the repository's file wins when both have the same name. Nothing is written into the working tree. A starting point is a template: **Add Reviewer…** copies it to a file you own.
 
 ## Run a reviewer
 
@@ -98,6 +101,43 @@ The branch shows its gate state. It reads **Ready** when every gate passes, and 
 ### Bypass a gate
 
 If you decide to go ahead, choose **Bypass** in the message that names the gate and write the reason. The operation runs, and the gate, the reason and the time are kept in the operation log. Only you can bypass: an agent has no tool for it.
+
+## Reviewers for one change
+
+> **Planned.** Reviewers and gates cannot be limited to a change yet.
+
+A large legacy repository or a monorepo has no reviewer that fits every change. A reviewer or a gate can say which changes it is for:
+
+| Field | What it limits |
+|---|---|
+| `branches` | The branches it applies to, as patterns such as `feat/billing-*`. A plain name makes it a reviewer for that one branch. |
+| `paths` | The files the change must touch, as patterns such as `services/billing/**`. |
+
+With neither, it applies to every change. The change is the set of files that differ between the branch and what it is based on: its parent in the stack, else its upstream, else the default branch. A gate whose paths the change does not touch is **Not applicable** and blocks nothing, and the branch says why. If GitMaster cannot tell what the branch is based on, the gate applies.
+
+A reviewer or gate made for one branch shows **Ended** once that branch is merged or deleted. GitMaster never deletes it for you.
+
+### Where defaults and custom ones live
+
+Your defaults live in your configuration directory, in `reviewers/` and `gates.json`. A repository adds its own in `.git/gitmaster/`, and a [workspace](../guide/workspaces.md) adds its own in the workspace repository. When the same name appears in more than one place, the most specific one wins as a whole, and **Reviewers Settings…** shows where each one comes from.
+
+## Have Claude propose reviewers and gates
+
+> **Planned.** An agent cannot propose reviewers or gates yet.
+
+```text
+/gitmaster:plan-review
+```
+
+The skill tells you what it will read, then reads the change, the reviewers and gates you already have, the [memories](../guide/memories.md) that apply to the files the change touches, and the history of those files. It then proposes the reviewers and gates this change needs: for example a reviewer that knows the billing rules of a legacy module, and a gate that requires it whenever `services/billing/**` changes.
+
+A proposal appears in **Reviewers Settings…** as **Proposed**, marked **Agent-written**. A proposed gate does not block anything. You can edit it, then choose **Accept** and pick where it is saved, or **Deny**. A denied proposal stays in the list so it is not proposed again. An agent cannot change, loosen or remove a reviewer or gate you accepted, and cannot accept its own proposal. If it thinks one should change, it proposes the change and you see the old and the new side by side.
+
+## Reviewers and gates in a workspace
+
+> **Planned.** Workspaces have no reviewers or gates yet.
+
+A [workspace](../guide/workspaces.md) can have reviewers and gates of its own, saved in the workspace repository, with the members they are for. A reviewer runs on one member's checkout, and its verdict is kept in that member's repository. Each member's gates are checked against that member's branch and files. The workspace shows **Ready** only when every gate that applies to every member passes. A gate that asks for all members to be ready is a readiness signal and stops no operation, because no operation acts on the whole workspace.
 
 ## Review someone else's branch
 

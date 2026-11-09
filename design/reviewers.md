@@ -124,6 +124,17 @@ Wiring (D212 (3)): the engine calls `evaluate` itself in `handle()` for `PushWit
 
 **Trust gate for someone else's branch.** `branch_agent_config` is a read tool. It lists the commits on the branch that are not the user's (author email differs), and for the branch's tree the agent configuration that would be loaded: `.claude/` settings and commands, hooks, `.mcp.json`, skills, plugins, `CLAUDE.md` and `AGENTS.md`. Unparseable files and symlinks count as unknown, never as empty. The `review` skill calls it first and stops for the user's confirmation when `commits_not_yours` is not empty.
 
+## Conditions, layers, proposals and workspaces (D214)
+
+No reviewer fits every change in a large legacy repository, a monorepo or a workspace, so definitions are made for the change in hand.
+
+- **`when`** (`branches`, `paths`) on reviewers and gates. The change is the file list between the merge base with its base (stack parent, else upstream, else default branch) and the tip. `GateFacts` gains `changed_paths`; a gate or reviewer whose paths the change does not touch is Not applicable. Unknown base or more than 10,000 files: applicable (fail closed). The gate `branches` field of the first draft becomes `when.branches`.
+- **Layers:** user (`reviewers/`, `gates.json` in the config directory), repository (`.git/gitmaster/`), workspace repository. Same name, the more specific wins whole. Gates get an `id`.
+- **Proposals:** `reviewer_propose` and `gate_propose` write rows in a `proposals` table of `review.db` (schema v7), never files; the engine's gate check and `reviewers_list` read files only. Accept writes the file in the layer the person picks. An agent cannot accept, edit, loosen or remove; an update to an accepted definition is a proposal with the same name, shown before and after.
+- **`/gitmaster:plan-review`** (no sub-agent) reads the change, `reviewers_list`, `gates_status`, `memories_for_path` (D213) and `provenance`, then proposes. `/gitmaster:review` passes the memories that apply to the changed files to each reviewer sub-agent as data.
+- **Workspaces:** definitions in the workspace repository name `members`; verdicts stay in each member's clone; `gates_status` takes `member`; `members_ready` is a readiness signal that blocks nothing.
+- **Order:** R2 (conditions, repository and user layers, `id`), R2b (proposals, plan-review), R2c (workspace layer), slice 6u, R3.
+
 ## Cost and honesty
 
 - Verdicts are one agent's opinion, recorded. The UI shows them as **Agent-written** and never as a fact about the code. They are not evidence for provenance (D144).
