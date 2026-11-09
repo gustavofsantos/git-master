@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::review::ReviewSeverity;
-use crate::verdict::ReviewerSubject;
+use crate::verdict::{Approval, ReviewerSubject};
 
 /// The operations a gate can apply to (D212 (3)): a push, a restack, or both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -146,6 +146,20 @@ pub struct GatesStatus {
     pub missing: Vec<MissingReviewer>,
     /// The gate files that could not be read; a gate check that has any fails closed.
     pub errors: Vec<String>,
+}
+
+/// One member's gate check in a workspace (D214 (5)). `branch` is `None` when the member is
+/// detached; `status` is `None` when the member cannot be read, and `error` says why. A member
+/// without a status is never ready.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MemberGates {
+    pub member: String,
+    pub branch: Option<String>,
+    pub status: Option<GatesStatus>,
+    /// The intent of the member's branch, text from the repository, so untrusted.
+    pub intent: Option<String>,
+    pub approval: Option<Approval>,
+    pub error: Option<String>,
 }
 
 /// One bypass of a gate check, as the audit keeps it (D212 (4), R2h): a row written before the

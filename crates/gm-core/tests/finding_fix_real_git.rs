@@ -161,6 +161,7 @@ impl Session {
                 branch: None,
                 reviewer: None,
                 limit: 20,
+                member: None,
             },
         );
         events
@@ -173,7 +174,13 @@ impl Session {
     }
 
     fn gates(&mut self) -> GatesStatus {
-        let events = self.run(Actor::Human, CommandKind::GatesStatus { branch: None });
+        let events = self.run(
+            Actor::Human,
+            CommandKind::GatesStatus {
+                branch: None,
+                member: None,
+            },
+        );
         assert!(done(&events), "{}", failure(&events));
         events
             .into_iter()
@@ -207,6 +214,7 @@ fn record(session: &mut Session, findings: Vec<FindingInput>) -> Vec<Event> {
             value: "High".to_owned(),
             rationale: "Two lines are unchecked.".to_owned(),
             findings,
+            member: None,
         },
     )
 }

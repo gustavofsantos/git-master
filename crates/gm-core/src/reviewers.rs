@@ -299,7 +299,7 @@ pub fn load_layers(
     let mut owners: BTreeMap<String, &WorkspaceDefs> = BTreeMap::new();
     for ws in sorted {
         let dir = ws.dir.join("reviewers");
-        for reviewer in read_dir(&dir, ReviewerSource::Workspace, &mut errors) {
+        for mut reviewer in read_dir(&dir, ReviewerSource::Workspace, &mut errors) {
             if let Some(first) = owners.get(&reviewer.name) {
                 errors.push((
                     dir.join(format!("{}.md", reviewer.name))
@@ -312,6 +312,7 @@ pub fn load_layers(
                 ));
                 continue;
             }
+            workspace_defs::apply_member(ws.member.as_deref(), &mut reviewer.members);
             owners.insert(reviewer.name.clone(), ws);
             by_name.insert(reviewer.name.clone(), reviewer);
         }
@@ -988,6 +989,7 @@ mod tests {
         let ws = WorkspaceDefs {
             dir: root.path().join("ws"),
             name: "ws".to_owned(),
+            member: None,
         };
         let loaded = load_layers(Some(&repo), Some(&user), &[ws]);
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
@@ -1024,10 +1026,12 @@ mod tests {
             WorkspaceDefs {
                 dir: root.path().join("b"),
                 name: "beta".to_owned(),
+                member: None,
             },
             WorkspaceDefs {
                 dir: root.path().join("a"),
                 name: "alpha".to_owned(),
+                member: None,
             },
         ];
         let loaded = load_layers(None, None, &listed);
@@ -1063,6 +1067,7 @@ mod tests {
         let ws = WorkspaceDefs {
             dir: root.path().join("ws"),
             name: "ws".to_owned(),
+            member: None,
         };
         let loaded = load_layers(None, None, &[ws]);
         let names: Vec<&str> = loaded.reviewers.iter().map(|r| r.name.as_str()).collect();

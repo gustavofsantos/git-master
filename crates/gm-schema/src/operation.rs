@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::conflict::{ConflictFileRead, ConflictSite, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
-use crate::gates::{Bypass, GateDef, GateLayer, GateOp, GateOutcome, GatesStatus};
+use crate::gates::{Bypass, GateDef, GateLayer, GateOp, GateOutcome, GatesStatus, MemberGates};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
@@ -668,6 +668,9 @@ pub enum CommandKind {
         value: String,
         rationale: String,
         findings: Vec<FindingInput>,
+        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
     },
     /// Lists the verdicts, newest first, of `branch` and `reviewer` when each is given (all of
     /// them when neither is), at most `limit` (5 when 0, 20 at most). Each says whether it is
@@ -677,6 +680,9 @@ pub enum CommandKind {
         reviewer: Option<String>,
         #[serde(default)]
         limit: u32,
+        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
     },
     /// Lists the reviewers of the repository and the user with the presets they do not
     /// override, by name, or only the one named `name`. Answers `ReviewersListed`. A read.
@@ -689,26 +695,41 @@ pub enum CommandKind {
         branch: String,
         head: String,
         note: Option<String>,
+        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
     },
     /// Withdraws the approval of `branch`, if it has one. Human only. Answers `ApprovalRead`
     /// with no approval.
     RevokeApproval {
         branch: String,
+        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
     },
     /// Reads the approval of `branch`, with whether it is stale against the tip now. A read:
     /// never recorded (D28). Answers `ApprovalRead`.
     ReadApproval {
         branch: String,
+        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
     },
     /// Sets the intent of `branch`, its `branch.<name>.description` (D215 (1)): at most 2,000
     /// characters, no NUL; empty unsets it. Human only. Answers `BranchDescriptionRead`.
     SetBranchDescription {
         branch: String,
         text: String,
+        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
     },
     /// Reads the intent of `branch`. A read: never recorded (D28). Answers `BranchDescriptionRead`.
     ReadBranchDescription {
         branch: String,
+        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
     },
     /// Reads the gate check of `branch` (D212 (5), D215): every gate, whether it applies and
     /// passes, the reviewers that still need a verdict for the tip, the intent and the approval.
@@ -717,6 +738,9 @@ pub enum CommandKind {
     GatesStatus {
         #[serde(default)]
         branch: Option<String>,
+        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
     },
     /// Runs `then`, a push with lease or a restack, past the native gate check (D212 (4)).
     /// `gates` are the ids of the gates the person saw block it (1 to 50 ids, each a gate id or
@@ -735,6 +759,9 @@ pub enum CommandKind {
         branch: Option<String>,
         #[serde(default)]
         limit: u32,
+        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
     },
     /// An agent proposes a reviewer (D214 (3)): the definition and a `reason` of 1 to 300
     /// characters. It is stored as a proposal, not a reviewer, and is refused when it is not a
@@ -1671,6 +1698,14 @@ pub enum Event {
         intent: Option<String>,
         approval: Option<Approval>,
     },
+    /// Answers `GatesStatus` with no `member` in a workspace (D214 (5)): every member's gate
+    /// check, in the order of the workspace's members. `ready` is true only when every member has
+    /// a status and every status is ready (fail closed). It blocks nothing.
+    WorkspaceGatesRead {
+        id: OperationId,
+        ready: bool,
+        members: Vec<MemberGates>,
+    },
     /// A push or a restack the native gate check stopped (D212 (3)). Sent after the operation
     /// ends `Vetoed`, so the window can offer Bypass. `gates` holds only the gates that block
     /// (applicable and not passed); `errors` the gate file problems.
@@ -2066,6 +2101,7 @@ mod tests {
                 body: "risk".into(),
                 suggested_fix: None,
             }],
+            member: None,
         })
         .unwrap();
         assert_eq!(record["type"], "record_verdict");
@@ -2075,6 +2111,7 @@ mod tests {
             branch: None,
             reviewer: Some("risk".into()),
             limit: 0,
+            member: None,
         })
         .unwrap();
         assert_eq!(list["type"], "list_verdicts");
@@ -2087,6 +2124,7 @@ mod tests {
                 branch: None,
                 reviewer: None,
                 limit: 0,
+                member: None,
             }
         );
         let reviewers = serde_json::to_value(CommandKind::ListReviewers { name: None }).unwrap();
@@ -2123,6 +2161,7 @@ mod tests {
             branch: "feat/x".into(),
             head: "a".repeat(40),
             note: Some("looks right".into()),
+            member: None,
         })
         .unwrap();
         assert_eq!(approve["type"], "approve_branch");
@@ -2138,23 +2177,34 @@ mod tests {
                 branch: "b".into(),
                 head: "h".into(),
                 note: None,
+                member: None,
             }
         );
-        let revoke =
-            serde_json::to_value(CommandKind::RevokeApproval { branch: "b".into() }).unwrap();
+        let revoke = serde_json::to_value(CommandKind::RevokeApproval {
+            branch: "b".into(),
+            member: None,
+        })
+        .unwrap();
         assert_eq!(revoke["type"], "revoke_approval");
-        let read = serde_json::to_value(CommandKind::ReadApproval { branch: "b".into() }).unwrap();
+        let read = serde_json::to_value(CommandKind::ReadApproval {
+            branch: "b".into(),
+            member: None,
+        })
+        .unwrap();
         assert_eq!(read["type"], "read_approval");
         let set = serde_json::to_value(CommandKind::SetBranchDescription {
             branch: "b".into(),
             text: "line one\nline \"two\"".into(),
+            member: None,
         })
         .unwrap();
         assert_eq!(set["type"], "set_branch_description");
         assert_eq!(set["text"], "line one\nline \"two\"");
-        let describe =
-            serde_json::to_value(CommandKind::ReadBranchDescription { branch: "b".into() })
-                .unwrap();
+        let describe = serde_json::to_value(CommandKind::ReadBranchDescription {
+            branch: "b".into(),
+            member: None,
+        })
+        .unwrap();
         assert_eq!(describe["type"], "read_branch_description");
     }
 
@@ -2196,12 +2246,22 @@ mod tests {
 
     #[test]
     fn gates_status_wire_format_is_tagged() {
-        let read = serde_json::to_value(CommandKind::GatesStatus { branch: None }).unwrap();
+        let read = serde_json::to_value(CommandKind::GatesStatus {
+            branch: None,
+            member: None,
+        })
+        .unwrap();
         assert_eq!(read["type"], "gates_status");
         assert!(read["branch"].is_null());
         let bare: CommandKind =
             serde_json::from_value(serde_json::json!({ "type": "gates_status" })).unwrap();
-        assert_eq!(bare, CommandKind::GatesStatus { branch: None });
+        assert_eq!(
+            bare,
+            CommandKind::GatesStatus {
+                branch: None,
+                member: None,
+            }
+        );
         let event = Event::GatesStatusRead {
             id: OperationId(9),
             status: GatesStatus {
@@ -2239,6 +2299,7 @@ mod tests {
                 model: None,
                 paths: vec!["services/billing/**".into()],
                 branches: Vec::new(),
+                members: Vec::new(),
             }),
             reason: "legacy rules".into(),
         })
@@ -2320,11 +2381,77 @@ mod tests {
     }
 
     #[test]
+    fn a_member_names_the_checkout_and_old_json_reads_as_none() {
+        let named = serde_json::to_value(CommandKind::GatesStatus {
+            branch: Some("feat".into()),
+            member: Some("api".into()),
+        })
+        .unwrap();
+        assert_eq!(named["member"], "api");
+        let plain = serde_json::to_value(CommandKind::GatesStatus {
+            branch: None,
+            member: None,
+        })
+        .unwrap();
+        assert!(plain.get("member").is_none(), "{plain}");
+        let old: CommandKind =
+            serde_json::from_value(serde_json::json!({ "type": "gates_status" })).unwrap();
+        assert_eq!(
+            old,
+            CommandKind::GatesStatus {
+                branch: None,
+                member: None,
+            }
+        );
+        let old_verdicts: CommandKind = serde_json::from_value(serde_json::json!({
+            "type": "list_verdicts", "branch": "b", "limit": 3
+        }))
+        .unwrap();
+        assert!(matches!(
+            old_verdicts,
+            CommandKind::ListVerdicts { member: None, .. }
+        ));
+        let approve: CommandKind = serde_json::from_value(serde_json::json!({
+            "type": "approve_branch", "branch": "b", "head": "h", "member": "web"
+        }))
+        .unwrap();
+        assert!(matches!(
+            approve,
+            CommandKind::ApproveBranch { member: Some(ref name), .. } if name == "web"
+        ));
+    }
+
+    #[test]
+    fn a_workspace_gates_answer_lists_each_member_with_its_error() {
+        use crate::gates::MemberGates;
+        let event = Event::WorkspaceGatesRead {
+            id: OperationId(14),
+            ready: false,
+            members: vec![MemberGates {
+                member: "api".into(),
+                branch: Some("feat".into()),
+                status: None,
+                intent: None,
+                approval: None,
+                error: Some("member api is detached".into()),
+            }],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "workspace_gates_read");
+        assert_eq!(json["ready"], false);
+        assert_eq!(json["members"][0]["member"], "api");
+        assert!(json["members"][0]["status"].is_null());
+        assert_eq!(json["members"][0]["error"], "member api is detached");
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
+    }
+
+    #[test]
     fn bypass_audit_wire_format_is_tagged() {
         use crate::gates::GateOp;
         let list = serde_json::to_value(CommandKind::ListBypasses {
             branch: Some("feat".into()),
             limit: 0,
+            member: None,
         })
         .unwrap();
         assert_eq!(list["type"], "list_bypasses");
@@ -2336,6 +2463,7 @@ mod tests {
             CommandKind::ListBypasses {
                 branch: None,
                 limit: 0,
+                member: None,
             }
         );
         let bypass = Bypass {

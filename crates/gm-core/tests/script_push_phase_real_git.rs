@@ -166,6 +166,7 @@ fn record(reviewer: &str, value: &str, findings: Vec<FindingInput>) -> CommandKi
         value: value.to_owned(),
         rationale: "Checked the change.".to_owned(),
         findings,
+        member: None,
     }
 }
 

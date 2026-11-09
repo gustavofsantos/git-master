@@ -9,10 +9,10 @@ use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
     ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GateDef, GateLayer, GateOp,
-    GrepOptions, History, MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId,
-    OperationState, ProposalKind, ProposalStatus, REFLOG_PAGE, RestackBlock, RestackPlan,
-    RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewStatus, Reviewer,
-    ReviewerFileError, ReviewerProposal, ReviewerSignal, ReviewerSource, ReviewerSubject,
+    GrepOptions, History, MERGED_LIST_CHANGED, MemberGates, MemberRequest, MergedBranch,
+    OperationId, OperationState, ProposalKind, ProposalStatus, REFLOG_PAGE, RestackBlock,
+    RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewStatus,
+    Reviewer, ReviewerFileError, ReviewerProposal, ReviewerSignal, ReviewerSource, ReviewerSubject,
     STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry,
     WorktreeInspection,
 };
@@ -79,6 +79,7 @@ use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSessi
 use crate::verdicts;
 use crate::workflow_session::{self, Effected};
 use crate::workspace::{CreateRequest, Workspaces};
+use crate::workspace_defs::{self, WorkspaceDefs};
 use crate::worktree;
 
 /// One state change of one operation. The log is audit, and the base for undo
@@ -178,8 +179,8 @@ pub struct Engine {
     trust: Option<TrustStore>,
     /// The `.api/` reference was written for this session already.
     api_written: bool,
-    /// The review comments of the open repository; see `review_session`.
-    review: Option<ReviewSession>,
+    /// The review stores of the checkouts this window judges, by root; see `gate_check::review_store`.
+    review: Vec<ReviewSession>,
     /// The threads of the open repository; see `threads_session`.
     threads: Option<ThreadsSession>,
     /// The restack conflict being resolved in its worktree (D154), if any.
@@ -389,7 +390,7 @@ impl Engine {
             script: None,
             trust: None,
             api_written: false,
-            review: None,
+            review: Vec::new(),
             threads: None,
             restack_resolution: None,
             triggers: false,
@@ -429,7 +430,60 @@ impl Engine {
         GateConfig {
             gates_dir: self.gates_user_dir.clone(),
             reviewers_dir: self.reviewer_user_dir.clone(),
+            explicit: None,
         }
+    }
+
+    /// The gate configuration of a check of `target`: the directories of the user, and the
+    /// workspace layer of the member the target is, when there is one (D214 (5)).
+    fn config_at(&self, target: &Target) -> GateConfig {
+        GateConfig {
+            explicit: target.layer.clone(),
+            ..self.gate_config()
+        }
+    }
+
+    /// The target of a review command that names `member`, in the open repository.
+    fn target_of(&self, member: Option<&str>) -> Result<Target, String> {
+        let root = self.open_root()?;
+        self.target_at(&root, member)
+    }
+
+    /// Where a review command runs (D214 (5)). Outside a workspace a member is refused; inside
+    /// one a command names its member, and the member's checkout is where its Git calls and
+    /// review store are. A repository is judged at its own root.
+    fn target_at(&self, root: &Path, member: Option<&str>) -> Result<Target, String> {
+        match (member, self.is_workspace(root)) {
+            (None, false) => Ok(Target::at(root)),
+            (Some(_), false) => Err("this repository is not a workspace".to_owned()),
+            (None, true) => Err("this is a workspace: name the member".to_owned()),
+            (Some(name), true) => self.member_target(root, name),
+        }
+    }
+
+    /// Whether `root` is a workspace repository (D174).
+    fn is_workspace(&self, root: &Path) -> bool {
+        Workspaces::new(self.git.as_ref(), self.workspace_config.clone()).is_workspace(root)
+    }
+
+    /// The checkout of member `name` in the workspace at `root`: a registered member whose
+    /// folder exists (D214 (5)). Its definitions are the workspace's, judged for that member.
+    fn member_target(&self, root: &Path, name: &str) -> Result<Target, String> {
+        let members = Workspaces::new(self.git.as_ref(), self.workspace_config.clone())
+            .members(root)
+            .map_err(|e| e.message().to_owned())?;
+        let names: Vec<&str> = members.iter().map(|member| member.path.as_str()).collect();
+        if !names.contains(&name) || !root.join(name).is_dir() {
+            return Err(format!(
+                "there is no member {name} in this workspace; members are: {}",
+                names.join(", ")
+            ));
+        }
+        let layer = workspace_defs::member_layer(self.git.as_ref(), root, name)?;
+        Ok(Target {
+            root: root.join(name),
+            layer: Some(layer),
+        })
     }
 
     /// Hands the current gate directories to the script session, when one is open (R2h).
@@ -2708,14 +2762,17 @@ impl Engine {
             .map_err(|e| e.0)
     }
 
-    /// Lists the bypasses, newest first (D212 (4)). A read: never recorded (D28).
+    /// Lists the bypasses, newest first (D212 (4)) of the checkout `member` names, or of the
+    /// repository. A read: never recorded (D28).
     fn list_bypasses(
         &mut self,
         id: OperationId,
         branch: Option<&str>,
         limit: u32,
+        member: Option<&str>,
     ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
+        let open = self.open_root()?;
+        let root = self.target_at(&open, member)?.root;
         let limit = match limit {
             0 => BYPASS_LIST_DEFAULT,
             n => n.min(BYPASS_LIST_MAX),
@@ -4792,6 +4849,22 @@ impl Engine {
                 only_a_human(actor, "delete a review comment")?;
                 self.delete_review_comment(id, *comment)
             }
+            _ if is_verdict_command(kind) => self.verdict_command(id, actor, kind),
+            _ if is_proposal_command(kind) => self.proposal_command(id, actor, kind),
+            _ if is_approval_command(kind) => self.approval_command(id, actor, kind),
+            _ => Err("not a review command".to_owned()),
+        }
+    }
+
+    /// The verdict commands (D212 (6)), the gate-check and bypass reads (D212 (4), (5)), and the
+    /// reviewer list (D212 (1)). Only an agent records a verdict; the reads are not logged (D28).
+    fn verdict_command(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        match kind {
             CommandKind::RecordVerdict {
                 reviewer,
                 branch,
@@ -4799,6 +4872,7 @@ impl Engine {
                 value,
                 rationale,
                 findings,
+                member,
             } => {
                 let request = VerdictRequest {
                     reviewer,
@@ -4808,21 +4882,30 @@ impl Engine {
                     rationale,
                     findings,
                 };
-                self.record_verdict(id, actor, &request)
+                self.record_verdict(id, actor, member.as_deref(), &request)
             }
             CommandKind::ListVerdicts {
                 branch,
                 reviewer,
                 limit,
-            } => self.list_verdicts(id, branch.as_deref(), reviewer.as_deref(), *limit),
+                member,
+            } => self.list_verdicts(
+                id,
+                branch.as_deref(),
+                reviewer.as_deref(),
+                *limit,
+                member.as_deref(),
+            ),
             CommandKind::ListReviewers { name } => self.list_reviewers(id, name.as_deref()),
-            CommandKind::GatesStatus { branch } => self.gates_status(id, branch.as_deref()),
-            CommandKind::ListBypasses { branch, limit } => {
-                self.list_bypasses(id, branch.as_deref(), *limit)
+            CommandKind::GatesStatus { branch, member } => {
+                self.gates_status(id, branch.as_deref(), member.as_deref())
             }
-            _ if is_proposal_command(kind) => self.proposal_command(id, actor, kind),
-            _ if is_approval_command(kind) => self.approval_command(id, actor, kind),
-            _ => Err("not a review command".to_owned()),
+            CommandKind::ListBypasses {
+                branch,
+                limit,
+                member,
+            } => self.list_bypasses(id, branch.as_deref(), *limit, member.as_deref()),
+            _ => Err("not a verdict command".to_owned()),
         }
     }
 
@@ -4835,33 +4918,50 @@ impl Engine {
         kind: &CommandKind,
     ) -> Result<Vec<Event>, String> {
         match kind {
-            CommandKind::ApproveBranch { branch, head, note } => {
+            CommandKind::ApproveBranch {
+                branch,
+                head,
+                note,
+                member,
+            } => {
                 only_a_human(actor, "approve a branch")?;
-                self.approve_branch(id, actor, branch, head, note.as_deref())
+                let target = self.target_of(member.as_deref())?;
+                self.approve_branch(id, actor, &target, branch, head, note.as_deref())
             }
-            CommandKind::RevokeApproval { branch } => {
+            CommandKind::RevokeApproval { branch, member } => {
                 only_a_human(actor, "revoke an approval")?;
-                self.revoke_approval(id, branch)
+                let target = self.target_of(member.as_deref())?;
+                self.revoke_approval(id, &target, branch)
             }
-            CommandKind::ReadApproval { branch } => self.read_approval(id, branch),
-            CommandKind::SetBranchDescription { branch, text } => {
+            CommandKind::ReadApproval { branch, member } => {
+                let target = self.target_of(member.as_deref())?;
+                self.read_approval(id, &target, branch)
+            }
+            CommandKind::SetBranchDescription {
+                branch,
+                text,
+                member,
+            } => {
                 only_a_human(actor, "edit a branch description")?;
-                self.set_branch_description(id, branch, text)
+                let target = self.target_of(member.as_deref())?;
+                self.set_branch_description(id, &target, branch, text)
             }
-            CommandKind::ReadBranchDescription { branch } => {
-                self.read_branch_description(id, branch)
+            CommandKind::ReadBranchDescription { branch, member } => {
+                let target = self.target_of(member.as_deref())?;
+                self.read_branch_description(id, &target, branch)
             }
             _ => Err("not an approval command".to_owned()),
         }
     }
 
-    /// Approves the tip of `branch` (D215 (2)). `head` must be the tip now, so a person approves
-    /// exactly what they saw; a note of more than 500 characters is refused, and a blank one is
-    /// no note.
+    /// Approves the tip of `branch` (D215 (2)) in `target`. `head` must be the tip now, so a
+    /// person approves exactly what they saw; a note of more than 500 characters is refused, and a
+    /// blank one is no note.
     fn approve_branch(
         &mut self,
         id: OperationId,
         actor: &Actor,
+        target: &Target,
         branch: &str,
         head: &str,
         note: Option<&str>,
@@ -4875,15 +4975,15 @@ impl Engine {
                 ));
             }
         }
-        let root = self.open_root()?;
+        let root = target.root.as_path();
         let tip = self
             .git
-            .branch_tip(&root, branch)
+            .branch_tip(root, branch)
             .map_err(|e| e.0)?
             .ok_or_else(|| format!("there is no branch named {branch}"))?;
         let head = self
             .git
-            .resolve_commit(&root, head)
+            .resolve_commit(root, head)
             .map_err(|_| format!("{head:?} is not a commit"))?;
         if head != tip {
             return Err(format!(
@@ -4892,7 +4992,7 @@ impl Engine {
                 short_id(&tip)
             ));
         }
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), root)?;
         store
             .approve(branch, &tip, note, &origin_of(actor), now_ms())
             .map_err(|e| e.0)?;
@@ -4904,11 +5004,15 @@ impl Engine {
         }])
     }
 
-    /// Withdraws the approval of `branch`; the answer has no approval. Revoking a branch with no
-    /// approval changes nothing.
-    fn revoke_approval(&mut self, id: OperationId, branch: &str) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+    /// Withdraws the approval of `branch` in `target`; the answer has no approval. Revoking a
+    /// branch with no approval changes nothing.
+    fn revoke_approval(
+        &mut self,
+        id: OperationId,
+        target: &Target,
+        branch: &str,
+    ) -> Result<Vec<Event>, String> {
+        let store = review_store(&mut self.review, self.git.as_ref(), &target.root)?;
         store.revoke(branch).map_err(|e| e.0)?;
         Ok(vec![Event::ApprovalRead {
             id,
@@ -4917,11 +5021,16 @@ impl Engine {
         }])
     }
 
-    /// The approval of `branch` with whether it is stale against the tip now (D215 (2)).
-    fn read_approval(&mut self, id: OperationId, branch: &str) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        let tip = self.git.branch_tip(&root, branch).map_err(|e| e.0)?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+    /// The approval of `branch` in `target`, with whether it is stale against the tip now (D215
+    /// (2)).
+    fn read_approval(
+        &mut self,
+        id: OperationId,
+        target: &Target,
+        branch: &str,
+    ) -> Result<Vec<Event>, String> {
+        let tip = self.git.branch_tip(&target.root, branch).map_err(|e| e.0)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &target.root)?;
         let approval = approval_now(store, branch, tip.as_deref())?;
         Ok(vec![Event::ApprovalRead {
             id,
@@ -4930,11 +5039,12 @@ impl Engine {
         }])
     }
 
-    /// Sets the intent of `branch` (D215 (1)): its branch description. Blank text unsets it. The
-    /// answer is the description as Git stores it now.
+    /// Sets the intent of `branch` in `target` (D215 (1)): its branch description. Blank text
+    /// unsets it. The answer is the description as Git stores it now.
     fn set_branch_description(
         &mut self,
         id: OperationId,
+        target: &Target,
         branch: &str,
         text: &str,
     ) -> Result<Vec<Event>, String> {
@@ -4947,24 +5057,23 @@ impl Engine {
                 "a branch description is at most {MAX_DESCRIPTION_CHARS} characters, not {count}"
             ));
         }
-        let root = self.open_root()?;
         let stored = (!text.trim().is_empty()).then_some(text);
         self.git
-            .set_branch_description(&root, branch, stored)
+            .set_branch_description(&target.root, branch, stored)
             .map_err(|e| e.0)?;
-        self.read_branch_description(id, branch)
+        self.read_branch_description(id, target, branch)
     }
 
-    /// The intent of `branch`, its branch description, `None` when it has none.
+    /// The intent of `branch` in `target`, its branch description, `None` when it has none.
     fn read_branch_description(
         &mut self,
         id: OperationId,
+        target: &Target,
         branch: &str,
     ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
         let text = self
             .git
-            .branch_description(&root, branch)
+            .branch_description(&target.root, branch)
             .map_err(|e| e.0)?;
         Ok(vec![Event::BranchDescriptionRead {
             id,
@@ -4980,19 +5089,30 @@ impl Engine {
         gate_check::facts_inputs(self.git.as_ref(), store, root, branch)
     }
 
-    /// Answers `GatesStatus`: the gate check of `branch`, or of the branch HEAD is on. A
-    /// detached HEAD needs the branch named. Reads only (D28).
+    /// Answers `GatesStatus` (D212 (5), D214 (5)): the gate check of `branch`, or of the branch
+    /// HEAD is on. With no `member` in a workspace it answers for every member. A detached HEAD
+    /// needs the branch named. Reads only (D28).
     fn gates_status(
         &mut self,
         id: OperationId,
         branch: Option<&str>,
+        member: Option<&str>,
     ) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
+        if member.is_none() && self.is_workspace(&root) {
+            if let Some(branch) = branch {
+                return Err(format!(
+                    "this is a workspace: name the member whose branch {branch} to check, or leave the branch out for every member"
+                ));
+            }
+            return self.workspace_gates(id, &root);
+        }
+        let target = self.target_at(&root, member)?;
         let branch = match branch {
             Some(branch) => branch.to_owned(),
             None => self
                 .git
-                .status(&root)
+                .status(&target.root)
                 .map_err(|e| e.0)?
                 .branch
                 .head
@@ -5000,13 +5120,70 @@ impl Engine {
                     "HEAD is detached; name the branch whose gates to check".to_owned()
                 })?,
         };
-        let report = self.gates_report(&root, &branch, None)?;
+        let report = self.report_at(&target, &branch, None)?;
         Ok(vec![Event::GatesStatusRead {
             id,
             status: report.status,
             intent: report.intent,
             approval: report.approval,
         }])
+    }
+
+    /// `GatesStatus` with no member in a workspace (D214 (5)): every member's gate check, in the
+    /// order of the workspace's members. A workspace with no member is not ready. It blocks
+    /// nothing.
+    fn workspace_gates(&mut self, id: OperationId, root: &Path) -> Result<Vec<Event>, String> {
+        let names: Vec<String> = Workspaces::new(self.git.as_ref(), self.workspace_config.clone())
+            .members(root)
+            .map_err(|e| e.message().to_owned())?
+            .into_iter()
+            .map(|member| member.path)
+            .collect();
+        let members: Vec<MemberGates> = names
+            .iter()
+            .map(|name| self.member_gates(root, name))
+            .collect();
+        let ready = !members.is_empty()
+            && members.iter().all(|row| {
+                row.error.is_none() && row.status.as_ref().is_some_and(|status| status.ready)
+            });
+        Ok(vec![Event::WorkspaceGatesRead { id, ready, members }])
+    }
+
+    /// One member's gate check for the workspace answer. A member that cannot be read has no
+    /// status and says why, so the workspace is not ready (fail closed).
+    fn member_gates(&mut self, root: &Path, name: &str) -> MemberGates {
+        match self.member_report(root, name) {
+            Ok(row) => row,
+            Err(error) => MemberGates {
+                member: name.to_owned(),
+                branch: None,
+                status: None,
+                intent: None,
+                approval: None,
+                error: Some(error),
+            },
+        }
+    }
+
+    /// The gate check of member `name`, on the branch its checkout has. A detached member is
+    /// refused, since there is no branch to check.
+    fn member_report(&mut self, root: &Path, name: &str) -> Result<MemberGates, String> {
+        let target = self.target_at(root, Some(name))?;
+        let Some(branch) = self.git.status(&target.root).map_err(|e| e.0)?.branch.head else {
+            return Err(format!(
+                "member {name} is detached; check out its branch to check its gates"
+            ));
+        };
+        let report = self.report_at(&target, &branch, None)?;
+        Ok(MemberGates {
+            member: name.to_owned(),
+            branch: Some(branch),
+            status: Some(report.status),
+            intent: report.intent,
+            approval: report.approval,
+            error: None,
+        })
     }
 
     /// The gate report of `branch` for `op` (every gate when `None`) (D212 (5), D214, D215). It
@@ -5017,10 +5194,29 @@ impl Engine {
         branch: &str,
         op: Option<GateOp>,
     ) -> Result<GatesReport, String> {
-        let config = self.gate_config();
-        let loaded = gate_check::load(self.git.as_ref(), root, &config)?;
-        let store = review_store(&mut self.review, self.git.as_ref(), root)?;
-        gate_check::report(self.git.as_ref(), store, root, branch, op, &config, &loaded)
+        self.report_at(&Target::at(root), branch, op)
+    }
+
+    /// The gate report of `branch` in `target` for `op` (every gate when `None`), with the
+    /// definitions that target reads (D214 (5)).
+    fn report_at(
+        &mut self,
+        target: &Target,
+        branch: &str,
+        op: Option<GateOp>,
+    ) -> Result<GatesReport, String> {
+        let config = self.config_at(target);
+        let loaded = gate_check::load(self.git.as_ref(), &target.root, &config)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &target.root)?;
+        gate_check::report(
+            self.git.as_ref(),
+            store,
+            &target.root,
+            branch,
+            op,
+            &config,
+            &loaded,
+        )
     }
 
     /// The proposal commands (D214 (3)). An agent proposes; only a person accepts or denies. The
@@ -5169,10 +5365,10 @@ impl Engine {
         edited_reviewer: Option<&ReviewerProposal>,
         edited_gate: Option<&GateDef>,
     ) -> Result<Vec<Event>, String> {
-        if layer == GateLayer::Workspace {
-            return Err(proposals::workspace_not_yet());
-        }
         let root = self.open_root()?;
+        if layer == GateLayer::Workspace && !self.is_workspace(&root) {
+            return Err("this is not a workspace".to_owned());
+        }
         let stored = self.open_proposal(&root, proposal_id)?;
         let common = self.git.common_dir(&root).map_err(|e| e.0)?;
         let body = match stored.kind {
@@ -5188,6 +5384,7 @@ impl Engine {
                 };
                 same_name(proposal_id, &stored.name, &proposed.name)?;
                 let checked = proposals::check_reviewer(&proposed)?;
+                proposals::check_layer_members(layer, &checked.members)?;
                 let (dir, source) = match layer {
                     GateLayer::User => (
                         self.reviewer_user_dir
@@ -5195,7 +5392,12 @@ impl Engine {
                             .ok_or_else(no_user_directory)?,
                         ReviewerSource::User,
                     ),
-                    _ => (reviewers::repo_dir(&common), ReviewerSource::Repository),
+                    GateLayer::Workspace => {
+                        (reviewers::repo_dir(&common), ReviewerSource::Workspace)
+                    }
+                    GateLayer::Repository => {
+                        (reviewers::repo_dir(&common), ReviewerSource::Repository)
+                    }
                 };
                 reviewers::save(&dir, &proposals::to_reviewer(&checked, source))?;
                 proposals::encode(&checked)?
@@ -5212,6 +5414,7 @@ impl Engine {
                 };
                 same_name(proposal_id, &stored.name, &gate.id)?;
                 proposals::check_gate(&gate)?;
+                proposals::check_layer_members(layer, &gate.members)?;
                 let dir = match layer {
                     GateLayer::User => self.gates_user_dir.clone().ok_or_else(no_user_directory)?,
                     _ => common.join("gitmaster"),
@@ -5354,19 +5557,22 @@ impl Engine {
         &mut self,
         id: OperationId,
         actor: &Actor,
+        member: Option<&str>,
         request: &VerdictRequest,
     ) -> Result<Vec<Event>, String> {
         if !matches!(actor, Actor::Agent { .. }) {
             return Err("only an agent records a verdict".to_owned());
         }
         let origin = origin_of(actor);
-        let root = self.open_root()?;
+        let open = self.open_root()?;
+        let target = self.target_at(&open, member)?;
+        let root = target.root.clone();
         // Redaction first, and it fails closed: a configuration that does not compile refuses the
-        // whole record (D121, D212 (6)).
+        // whole record (D121, D212 (6)). The checkout that holds the text decides its settings.
         let redactor = threads_session::redactor_at(&root, None).map_err(|reason| {
             format!("redaction is misconfigured, so nothing was recorded: {reason}")
         })?;
-        let reviewer = self.reviewer_named(&root, request.reviewer)?;
+        let reviewer = self.reviewer_named(&target, request.reviewer)?;
         if reviewer.subject != ReviewerSubject::Branch {
             return Err(format!(
                 "reviewer {} has subject {}; only branch reviewers can record verdicts for now",
@@ -5449,15 +5655,18 @@ impl Engine {
     }
 
     /// The verdicts that `branch` and `reviewer` pick, newest first, each with whether it is
-    /// stale against the tip of its branch now (D189 (2)). Each branch's tip is read once.
+    /// stale against the tip of its branch now (D189 (2)). Each branch's tip is read once. A
+    /// `member` reads that member's checkout and its clone's store (D214 (5)).
     fn list_verdicts(
         &mut self,
         id: OperationId,
         branch: Option<&str>,
         reviewer: Option<&str>,
         limit: u32,
+        member: Option<&str>,
     ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
+        let open = self.open_root()?;
+        let root = self.target_at(&open, member)?.root;
         let limit = match limit {
             0 => verdicts::DEFAULT_LIST_LIMIT,
             n => n.min(verdicts::MAX_LIST_LIMIT),
@@ -5503,15 +5712,16 @@ impl Engine {
         }])
     }
 
-    /// The reviewers of the repository and the user with the presets they do not override, by
-    /// name, or only the one called `name` (D212 (1)). The unreadable files come back too.
+    /// The reviewers of the repository, the user and the workspaces the checkout belongs to, with
+    /// the presets they do not override, by name, or only the one called `name` (D212 (1), D214
+    /// (4)). The unreadable files come back too.
     fn list_reviewers(
         &mut self,
         id: OperationId,
         name: Option<&str>,
     ) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
-        let (mut reviewers, errors) = self.reviewers(&root)?;
+        let (mut reviewers, errors) = self.reviewers(&Target::at(&root))?;
         if let Some(name) = name {
             reviewers.retain(|reviewer| reviewer.name == name);
         }
@@ -5522,21 +5732,26 @@ impl Engine {
         }])
     }
 
-    /// The reviewers a run can use in `root`: the repository's, the user's and the presets.
-    fn reviewers(&self, root: &Path) -> Result<(Vec<Reviewer>, Vec<ReviewerFileError>), String> {
-        let common = self.git.common_dir(root).map_err(|e| e.0)?;
+    /// The reviewers a run can use in `target`: the repository's, the user's, the workspace's
+    /// (when the target is or belongs to one) and the presets.
+    fn reviewers(
+        &self,
+        target: &Target,
+    ) -> Result<(Vec<Reviewer>, Vec<ReviewerFileError>), String> {
+        let common = self.git.common_dir(&target.root).map_err(|e| e.0)?;
+        let layers = workspace_defs::layers_for(self.git.as_ref(), &common, target.layer.as_ref());
         Ok(verdicts::merged_reviewers(
             &reviewers::repo_dir(&common),
             self.reviewer_user_dir.as_deref(),
-            &[],
+            &layers,
         ))
     }
 
-    /// The reviewer called `name`; refused, naming the ones there are, when none is. A preset is
-    /// a template and not a reviewer (R2h, D212 (1)): a name that only a preset has is refused
-    /// until a reviewer file defines it.
-    fn reviewer_named(&self, root: &Path, name: &str) -> Result<Reviewer, String> {
-        let (found, _) = self.reviewers(root)?;
+    /// The reviewer called `name` in `target`; refused, naming the ones there are, when none is. A
+    /// preset is a template and not a reviewer (R2h, D212 (1)): a name that only a preset has is
+    /// refused until a reviewer file defines it.
+    fn reviewer_named(&self, target: &Target, name: &str) -> Result<Reviewer, String> {
+        let (found, _) = self.reviewers(target)?;
         let defined: Vec<&str> = found
             .iter()
             .map(|reviewer| reviewer.name.as_str())
@@ -6559,6 +6774,24 @@ fn success_message(kind: &CommandKind) -> &'static str {
     }
 }
 
+/// Where a review command runs (D214 (5)): the checkout whose Git calls and review store it uses,
+/// and, for a member of the open workspace, the workspace layer its definitions are read from.
+#[derive(Clone, Debug)]
+pub(crate) struct Target {
+    pub(crate) root: PathBuf,
+    pub(crate) layer: Option<WorkspaceDefs>,
+}
+
+impl Target {
+    /// The repository at `root`, which has no workspace layer of its own.
+    pub(crate) fn at(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            layer: None,
+        }
+    }
+}
+
 /// The member of the workspace at `root` that `path` is in (D181), by name. `None` for a file of
 /// the workspace itself, and for every path of a repository without checked-out members.
 fn member_named(root: &Path, path: &str) -> Option<String> {
@@ -6969,6 +7202,18 @@ fn is_approval_command(kind: &CommandKind) -> bool {
             | CommandKind::ReadApproval { .. }
             | CommandKind::SetBranchDescription { .. }
             | CommandKind::ReadBranchDescription { .. }
+    )
+}
+
+/// Whether `kind` is a verdict, reviewer or gate-check command (see `verdict_command`).
+fn is_verdict_command(kind: &CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::RecordVerdict { .. }
+            | CommandKind::ListVerdicts { .. }
+            | CommandKind::ListReviewers { .. }
+            | CommandKind::GatesStatus { .. }
+            | CommandKind::ListBypasses { .. }
     )
 }
 

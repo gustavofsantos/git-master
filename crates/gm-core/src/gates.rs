@@ -174,7 +174,7 @@ pub fn load_layers(
         let path = ws.dir.join(FILE_NAME);
         match read_file(&path, GateLayer::Workspace) {
             Ok(gates) => {
-                for gate in gates {
+                for mut gate in gates {
                     let id = gate.gate.id.clone();
                     if let Some(first) = owners.get(&id) {
                         errors.push(format!(
@@ -185,6 +185,7 @@ pub fn load_layers(
                         ));
                         continue;
                     }
+                    workspace_defs::apply_member(ws.member.as_deref(), &mut gate.gate.members);
                     owners.insert(id.clone(), ws);
                     by_id.insert(id, gate);
                 }
@@ -2066,6 +2067,7 @@ mod tests {
         WorkspaceDefs {
             dir: root.join(name).join("gitmaster"),
             name: name.to_owned(),
+            member: None,
         }
     }
 
@@ -2195,6 +2197,41 @@ mod tests {
             loaded.errors[0].starts_with(&format!("{shown}: gate `ws-only`")),
             "{:?}",
             loaded.errors
+        );
+    }
+
+    #[test]
+    fn a_member_layer_applies_its_own_gates_and_leaves_the_others_not_applicable() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_defs(
+            &root.path().join("ws/gitmaster"),
+            r#"{"gates": [
+                {"id": "for-api", "kind": "up_to_date", "on": ["push"], "members": ["api"]},
+                {"id": "for-web", "kind": "up_to_date", "on": ["push"], "members": ["web"]},
+                {"id": "for-all", "kind": "up_to_date", "on": ["push"]}
+            ]}"#,
+        );
+        let mut layer = defs(root.path(), "ws");
+        layer.member = Some("api".to_owned());
+        let loaded = load_layers(None, None, &[layer]);
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        let members: Vec<(&str, Vec<&str>)> = loaded
+            .gates
+            .iter()
+            .map(|g| {
+                (
+                    g.gate.id.as_str(),
+                    g.gate.members.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            members,
+            [
+                ("for-all", vec![]),
+                ("for-api", vec![]),
+                ("for-web", vec!["web"]),
+            ]
         );
     }
 

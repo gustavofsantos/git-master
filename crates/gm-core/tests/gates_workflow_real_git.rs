@@ -202,6 +202,7 @@ fn security_with_finding() -> CommandKind {
         value: "low".to_owned(),
         rationale: "Checked the change.".to_owned(),
         findings: vec![high_finding()],
+        member: None,
     }
 }
 
@@ -571,6 +572,7 @@ fn a_workflow_push_is_stopped_by_a_failing_human_approval_gate_until_the_branch_
         branch: "feat".into(),
         head: tip.clone(),
         note: None,
+        member: None,
     });
     assert_eq!(state(&approved), OperationState::Done, "{approved:?}");
     let pushed = harness.run("push-feat", true);
@@ -653,6 +655,7 @@ fn a_workflow_restack_is_stopped_by_a_gate_on_the_child_and_moves_nothing_until_
         branch: "b".into(),
         head: tip(&chain.repo, "b"),
         note: None,
+        member: None,
     });
     assert_eq!(state(&approved), OperationState::Done, "{approved:?}");
     let restacked = harness.run("restack-a", true);
@@ -744,6 +747,7 @@ fn a_push_whose_branch_moves_while_its_gates_run_is_vetoed_and_pushes_nothing() 
         branch: "feat".into(),
         head: judged.clone(),
         note: None,
+        member: None,
     });
     assert_eq!(state(&approved), OperationState::Done, "{approved:?}");
 

@@ -272,6 +272,7 @@ fn a_listed_folder_that_is_not_a_workspace_and_a_removed_workspace_are_skipped()
     let defs = WorkspaceDefs {
         dir: ws.join(".git").join("gitmaster"),
         name: "pay".to_owned(),
+        member: None,
     };
     assert!(gates::load_layers(None, None, &[defs]).gates.is_empty());
 }

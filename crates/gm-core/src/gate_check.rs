@@ -20,10 +20,15 @@ use crate::review_store::ReviewStore;
 use crate::reviewers;
 use crate::script::phases::moved_by_plan;
 use crate::verdicts;
+use crate::workspace_defs::{self, WorkspaceDefs};
 
 /// The most verdicts one gate check reads for a branch (D212 (5)). A reviewer keeps five, so
 /// this holds two hundred reviewers; a branch past it reads as missing verdicts, which blocks.
 const GATE_VERDICT_LIMIT: usize = 1000;
+
+/// The review stores one engine keeps open at once (D214 (5)): the open repository and the
+/// members a workspace window judges, each by its root. The oldest one is dropped past this.
+pub(crate) const REVIEW_SESSION_LIMIT: usize = 4;
 
 /// The most distinct commits one gate check tests for ancestry (R2h). A finding whose commit is
 /// past the limit counts, which blocks: the check fails closed.
@@ -40,6 +45,9 @@ pub(crate) struct GateConfig {
     pub(crate) gates_dir: Option<PathBuf>,
     /// The directory of the user's reviewers (`reviewers/`).
     pub(crate) reviewers_dir: Option<PathBuf>,
+    /// The workspace layer a check of one member reads, named by the workspace window that
+    /// judges it (D214 (5)). `None` finds the workspaces the checkout's clone belongs to.
+    pub(crate) explicit: Option<WorkspaceDefs>,
 }
 
 /// The tip of a branch a gate check judged. A push checks that the branch is still there, at this
@@ -168,16 +176,19 @@ pub struct GatesReport {
     pub approval: Option<Approval>,
 }
 
-/// The gate files of the repository and the user, as read (D212 (2)). Nothing else is read.
+/// The gate files of the workspaces, the repository and the user, as read (D212 (2), D214 (5)).
+/// Nothing else is read.
 pub(crate) fn load(
     git: &dyn GitPort,
     root: &Path,
     config: &GateConfig,
 ) -> Result<LoadedGates, String> {
     let common = git.common_dir(root).map_err(|e| e.0)?;
-    Ok(gates::load(
+    let layers = workspace_defs::layers_for(git, &common, config.explicit.as_ref());
+    Ok(gates::load_layers(
         Some(&common.join("gitmaster")),
         config.gates_dir.as_deref(),
+        &layers,
     ))
 }
 
@@ -192,20 +203,23 @@ pub(crate) fn unchecked(reason: &str) -> String {
     format!("gates could not be checked: {reason}")
 }
 
-/// The store of the open repository: opened on first use, and reopened when another repository
-/// is open.
+/// The store of the checkout at `root`: opened on first use and kept, so a window that alternates
+/// between the workspace and a member does not reopen it each time. Each root has its own store,
+/// which is the one of its clone (D214 (5)). Past `REVIEW_SESSION_LIMIT` the oldest is dropped.
 pub(crate) fn review_store<'a>(
-    slot: &'a mut Option<ReviewSession>,
+    slot: &'a mut Vec<ReviewSession>,
     git: &dyn GitPort,
     root: &Path,
 ) -> Result<&'a mut ReviewStore, String> {
-    if slot.as_ref().is_none_or(|session| session.root != root) {
-        *slot = Some(ReviewSession::open(git, root)?);
+    if let Some(index) = slot.iter().position(|session| session.root == root) {
+        return Ok(&mut slot[index].store);
     }
-    match slot {
-        Some(session) => Ok(&mut session.store),
-        None => Err("the review store is not open".to_owned()),
+    if slot.len() >= REVIEW_SESSION_LIMIT {
+        slot.remove(0);
     }
+    slot.push(ReviewSession::open(git, root)?);
+    let last = slot.len() - 1;
+    Ok(&mut slot[last].store)
 }
 
 /// Whether `approval` of a branch is stale against `tip` now (D215 (2)); the store never sets it.
@@ -313,9 +327,11 @@ pub(crate) fn report(
 ) -> Result<GatesReport, String> {
     let common = git.common_dir(root).map_err(|e| e.0)?;
     let inputs = facts_inputs(git, store, root, branch)?;
-    let defined = reviewers::load(
+    let layers = workspace_defs::layers_for(git, &common, config.explicit.as_ref());
+    let defined = reviewers::load_layers(
         Some(&reviewers::repo_dir(&common)),
         config.reviewers_dir.as_deref(),
+        &layers,
     );
     // Every verdict the store keeps for the branch: `evaluate` picks the newest one for each
     // reviewer whose head is the tip, so an older verdict of an earlier commit still counts
@@ -377,7 +393,7 @@ fn block_of(status: GatesStatus) -> GateBlock {
 /// through `slot`.
 pub(crate) fn check(
     git: &dyn GitPort,
-    slot: &mut Option<ReviewSession>,
+    slot: &mut Vec<ReviewSession>,
     root: &Path,
     loaded: &LoadedGates,
     op: GateOp,
@@ -416,7 +432,7 @@ pub(crate) fn refuse(
     if is_idle(&loaded) {
         return Ok(());
     }
-    let mut slot = None;
+    let mut slot = Vec::new();
     let checked = check(git, &mut slot, root, &loaded, op, branches, config)
         .map_err(|reason| unchecked(&reason))?;
     if checked.blocked() {

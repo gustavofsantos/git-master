@@ -78,6 +78,7 @@ fn normalized(reviewer: &ReviewerProposal) -> ReviewerProposal {
             .map(str::to_owned),
         paths: trimmed(&reviewer.paths),
         branches: trimmed(&reviewer.branches),
+        members: reviewer.members.clone(),
     }
 }
 
@@ -101,7 +102,7 @@ pub fn to_reviewer(reviewer: &ReviewerProposal, source: ReviewerSource) -> Revie
         source,
         paths: reviewer.paths.clone(),
         branches: reviewer.branches.clone(),
-        members: Vec::new(),
+        members: reviewer.members.clone(),
     }
 }
 
@@ -154,9 +155,8 @@ pub fn decode_gate(body: &str) -> Result<GateDef, String> {
 /// would change it: the person fixes the file first (D212 (2)).
 pub fn layer_gates(layer: GateLayer, dir: &std::path::Path) -> Result<Vec<GateDef>, String> {
     let loaded = match layer {
-        GateLayer::Repository => gates::load(Some(dir), None),
+        GateLayer::Repository | GateLayer::Workspace => gates::load(Some(dir), None),
         GateLayer::User => gates::load(None, Some(dir)),
-        GateLayer::Workspace => return Err(workspace_not_yet()),
     };
     if !loaded.errors.is_empty() {
         return Err(format!(
@@ -171,10 +171,13 @@ pub fn layer_gates(layer: GateLayer, dir: &std::path::Path) -> Result<Vec<GateDe
         .collect())
 }
 
-/// The refusal of a workspace layer, which is not built yet (D214 (5), R2c).
-pub fn workspace_not_yet() -> String {
-    "accepting into the workspace is not available yet: accept into the repository or your configuration"
-        .to_owned()
+/// Refuses members in a definition that is not a workspace one (D214 (5)): members only apply in
+/// a workspace, so a proposal that names them is accepted into the workspace layer alone.
+pub fn check_layer_members(layer: GateLayer, members: &[String]) -> Result<(), String> {
+    if layer != GateLayer::Workspace && !members.is_empty() {
+        return Err("members only apply in a workspace definition".to_owned());
+    }
+    Ok(())
 }
 
 /// The proposal as the person sees it, with the accepted definition it would replace, if any.
@@ -245,6 +248,7 @@ mod tests {
             model: None,
             paths: vec!["services/billing/**".to_owned()],
             branches: Vec::new(),
+            members: Vec::new(),
         }
     }
 

@@ -126,6 +126,7 @@ pub(crate) fn verdicts_list(session: &mut Session, args: &Value) -> Result<Value
         branch: Some(branch),
         reviewer,
         limit: u32::try_from(limit).unwrap_or(u32::MAX),
+        member: None,
     })?;
     let verdicts = events
         .into_iter()
@@ -143,7 +144,10 @@ pub(crate) fn verdicts_list(session: &mut Session, args: &Value) -> Result<Value
 /// intent and the approval. Only reads (D212 (5), D215).
 pub(crate) fn gates_status(session: &mut Session, args: &Value) -> Result<Value, String> {
     let branch = optional_str(args, "branch")?.map(str::to_owned);
-    let events = session.run(CommandKind::GatesStatus { branch })?;
+    let events = session.run(CommandKind::GatesStatus {
+        branch,
+        member: None,
+    })?;
     let (status, intent, approval) = events
         .into_iter()
         .find_map(|event| match event {
@@ -184,6 +188,7 @@ pub(crate) fn verdict_record(session: &mut Session, args: &Value) -> Result<Valu
         value,
         rationale,
         findings,
+        member: None,
     })?;
     let (verdict, comment_ids) = events
         .into_iter()

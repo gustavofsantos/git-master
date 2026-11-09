@@ -34,7 +34,7 @@ pub use files::{
 };
 pub use gates::{
     Bypass, GateDef, GateKind, GateLayer, GateOp, GateOutcome, GatesStatus, LayeredGate,
-    MissingReason, MissingReviewer, When,
+    MemberGates, MissingReason, MissingReviewer, When,
 };
 pub use grep::{
     GREP_FILE_LIMIT, GREP_LINE_LIMIT, GREP_TOTAL_LIMIT, GrepFile, GrepLine, GrepOptions,

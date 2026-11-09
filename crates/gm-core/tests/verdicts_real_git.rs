@@ -156,6 +156,7 @@ fn record_kind(
         value: value.to_owned(),
         rationale: rationale.to_owned(),
         findings,
+        member: None,
     }
 }
 
@@ -171,6 +172,7 @@ fn verdicts_of(engine: &mut Engine, id: u64) -> Vec<Verdict> {
             branch: None,
             reviewer: None,
             limit: 20,
+            member: None,
         }),
     );
     events
@@ -644,6 +646,7 @@ fn the_listing_filters_by_reviewer_and_takes_a_limit() {
             branch: Some("feat".into()),
             reviewer: Some("security".into()),
             limit: 0,
+            member: None,
         }),
     );
     let listed = only_security

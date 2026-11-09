@@ -1547,6 +1547,9 @@ impl Model {
         // The gate check is read by the agent's tools; the window reads it from R3 on, and the
         // model keeps none yet (D212 (5), D215).
         | Event::GatesStatusRead { .. }
+        // The workspace's gate check is shown by the window from R3 on; the model keeps none yet
+        // (D214 (5)).
+        | Event::WorkspaceGatesRead { .. }
         // A blocked push or restack is shown by the window from R2.3c on (D212 (3)); the model
         // keeps none yet.
         | Event::GatesBlocked { .. }
@@ -2018,6 +2021,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ApprovalRead { id, .. }
         | Event::BranchDescriptionRead { id, .. }
         | Event::GatesStatusRead { id, .. }
+        | Event::WorkspaceGatesRead { id, .. }
         | Event::GatesBlocked { id, .. }
         | Event::BypassesListed { id, .. }
         | Event::ProposalsListed { id, .. }

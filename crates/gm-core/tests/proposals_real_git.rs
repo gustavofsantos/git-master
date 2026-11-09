@@ -152,7 +152,10 @@ impl Session {
     }
 
     fn gates_status(&mut self) -> GatesStatus {
-        let events = self.human(CommandKind::GatesStatus { branch: None });
+        let events = self.human(CommandKind::GatesStatus {
+            branch: None,
+            member: None,
+        });
         events
             .iter()
             .find_map(|event| match event {
@@ -254,6 +257,7 @@ fn reviewer_proposal(name: &str, description: &str) -> ReviewerProposal {
         model: None,
         paths: Vec::new(),
         branches: Vec::new(),
+        members: Vec::new(),
     }
 }
 

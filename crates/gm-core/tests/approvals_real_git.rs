@@ -95,6 +95,7 @@ impl Session {
     fn approval(&mut self, branch: &str) -> Option<gm_schema::Approval> {
         let events = self.human(CommandKind::ReadApproval {
             branch: branch.to_owned(),
+            member: None,
         });
         approval_in(&events)
     }
@@ -148,6 +149,7 @@ fn approve(branch: &str, head: &str, note: Option<&str>) -> CommandKind {
         branch: branch.to_owned(),
         head: head.to_owned(),
         note: note.map(str::to_owned),
+        member: None,
     }
 }
 
@@ -181,11 +183,13 @@ fn an_agent_is_refused_every_write_and_nothing_is_written() {
     assert_eq!(failure(&approved), "only a human can approve a branch");
     let revoked = session.agent(CommandKind::RevokeApproval {
         branch: "feat".to_owned(),
+        member: None,
     });
     assert_eq!(failure(&revoked), "only a human can revoke an approval");
     let described = session.agent(CommandKind::SetBranchDescription {
         branch: "feat".to_owned(),
         text: "an agent's intent".to_owned(),
+        member: None,
     });
     assert_eq!(
         failure(&described),
@@ -209,6 +213,7 @@ fn an_agent_cannot_revoke_an_approval_that_a_person_gave() {
     assert!(done(&session.human(approve("feat", &tip, None))));
     let revoked = session.agent(CommandKind::RevokeApproval {
         branch: "feat".to_owned(),
+        member: None,
     });
     assert_eq!(state_of(&revoked), Some(OperationState::Failed));
     assert!(session.approval("feat").is_some(), "the approval stands");
@@ -264,6 +269,7 @@ fn revoking_removes_the_approval_and_revoking_twice_is_fine() {
     assert!(done(&session.human(approve("feat", &tip, None))));
     let revoked = session.human(CommandKind::RevokeApproval {
         branch: "feat".to_owned(),
+        member: None,
     });
     assert!(done(&revoked));
     assert!(
@@ -275,6 +281,7 @@ fn revoking_removes_the_approval_and_revoking_twice_is_fine() {
     assert_eq!(session.approval("feat"), None);
     assert!(done(&session.human(CommandKind::RevokeApproval {
         branch: "feat".to_owned(),
+        member: None,
     })));
 }
 
@@ -286,6 +293,7 @@ fn a_description_round_trips_with_newlines_and_quotes_and_unsets_on_blank() {
     let read = |session: &mut Session| {
         text_in(&session.human(CommandKind::ReadBranchDescription {
             branch: "billing/invoice".to_owned(),
+            member: None,
         }))
     };
     assert_eq!(read(&mut session), None);
@@ -293,6 +301,7 @@ fn a_description_round_trips_with_newlines_and_quotes_and_unsets_on_blank() {
     let set = session.human(CommandKind::SetBranchDescription {
         branch: "billing/invoice".to_owned(),
         text: text.to_owned(),
+        member: None,
     });
     assert!(done(&set), "{}", failure(&set));
     assert_eq!(text_in(&set), Some(text.to_owned()));
@@ -300,6 +309,7 @@ fn a_description_round_trips_with_newlines_and_quotes_and_unsets_on_blank() {
     let unset = session.human(CommandKind::SetBranchDescription {
         branch: "billing/invoice".to_owned(),
         text: "  ".to_owned(),
+        member: None,
     });
     assert_eq!(text_in(&unset), None);
     assert_eq!(read(&mut session), None);
@@ -312,6 +322,7 @@ fn a_description_over_2000_characters_or_with_a_nul_is_refused() {
     let long = session.human(CommandKind::SetBranchDescription {
         branch: "feat".to_owned(),
         text: "d".repeat(2001),
+        member: None,
     });
     assert_eq!(
         failure(&long),
@@ -320,6 +331,7 @@ fn a_description_over_2000_characters_or_with_a_nul_is_refused() {
     let nul = session.human(CommandKind::SetBranchDescription {
         branch: "feat".to_owned(),
         text: "a\0b".to_owned(),
+        member: None,
     });
     assert_eq!(
         failure(&nul),
@@ -328,6 +340,7 @@ fn a_description_over_2000_characters_or_with_a_nul_is_refused() {
     let exact = session.human(CommandKind::SetBranchDescription {
         branch: "feat".to_owned(),
         text: "d".repeat(2000),
+        member: None,
     });
     assert!(
         done(&exact),
@@ -343,6 +356,7 @@ fn a_description_of_a_missing_branch_is_refused() {
     let events = session.human(CommandKind::SetBranchDescription {
         branch: "nope".to_owned(),
         text: "text".to_owned(),
+        member: None,
     });
     assert_eq!(failure(&events), "there is no local branch named nope");
 }
@@ -355,6 +369,7 @@ fn the_gate_inputs_report_the_tip_the_change_the_approval_and_the_intent() {
     assert!(done(&session.human(CommandKind::SetBranchDescription {
         branch: "feat".to_owned(),
         text: "Fix the rounding.".to_owned(),
+        member: None,
     })));
     let before = inputs(&mut session, dir.path());
     assert_eq!(before.head, tip);

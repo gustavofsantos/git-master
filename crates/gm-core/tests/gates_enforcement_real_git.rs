@@ -178,6 +178,7 @@ fn security_verdict(findings: Vec<FindingInput>) -> CommandKind {
         value: "low".to_owned(),
         rationale: "Checked the change.".to_owned(),
         findings,
+        member: None,
     }
 }
 
@@ -389,6 +390,7 @@ fn a_human_approval_gate_blocks_until_a_person_approves_the_tip_and_a_new_commit
         branch: "feat".into(),
         head: tip.clone(),
         note: None,
+        member: None,
     });
     assert_eq!(state(&approved), OperationState::Done, "{approved:?}");
     let pushed = session.remote(CommandKind::PushWithLease);
@@ -496,6 +498,7 @@ fn a_restack_is_blocked_by_a_restack_gate_on_every_branch_it_moves_until_each_is
             branch: name.into(),
             head,
             note: None,
+            member: None,
         });
         assert_eq!(state(&approved), OperationState::Done, "{approved:?}");
     }
@@ -887,6 +890,7 @@ fn a_bypass_writes_an_audit_row_with_the_gates_the_person_named_and_the_reason()
     let rows = bypasses_of(&session.human(CommandKind::ListBypasses {
         branch: None,
         limit: 0,
+        member: None,
     }));
     assert_eq!(rows.len(), 1, "{rows:?}");
     let row = &rows[0];
@@ -911,6 +915,7 @@ fn the_audit_row_survives_closing_the_engine_and_opening_a_new_one() {
     let rows = bypasses_of(&again.human(CommandKind::ListBypasses {
         branch: None,
         limit: 0,
+        member: None,
     }));
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].reason, "hotfix for billing");
@@ -926,6 +931,7 @@ fn a_bypass_whose_audit_row_cannot_be_written_does_not_run_the_push() {
     session.human(CommandKind::ListBypasses {
         branch: None,
         limit: 0,
+        member: None,
     });
     let database = fx.repo.join(".git").join("gitmaster").join("review.db");
     let other = rusqlite::Connection::open(&database).unwrap();
@@ -966,22 +972,26 @@ fn list_bypasses_returns_the_newest_first_and_filters_by_branch_and_limit() {
     let all = bypasses_of(&session.human(CommandKind::ListBypasses {
         branch: None,
         limit: 0,
+        member: None,
     }));
     let reasons: Vec<&str> = all.iter().map(|row| row.reason.as_str()).collect();
     assert_eq!(reasons, ["second reason", "first reason"]);
     let on_feat = bypasses_of(&session.human(CommandKind::ListBypasses {
         branch: Some("feat".into()),
         limit: 0,
+        member: None,
     }));
     assert_eq!(on_feat.len(), 2);
     let elsewhere = bypasses_of(&session.human(CommandKind::ListBypasses {
         branch: Some("other".into()),
         limit: 0,
+        member: None,
     }));
     assert!(elsewhere.is_empty());
     let newest = bypasses_of(&session.human(CommandKind::ListBypasses {
         branch: None,
         limit: 1,
+        member: None,
     }));
     assert_eq!(newest.len(), 1);
     assert_eq!(newest[0].reason, "second reason");
@@ -1010,6 +1020,7 @@ fn a_refused_bypass_writes_no_audit_row() {
     let rows = bypasses_of(&session.human(CommandKind::ListBypasses {
         branch: None,
         limit: 0,
+        member: None,
     }));
     assert!(rows.is_empty(), "{rows:?}");
 }
@@ -1041,12 +1052,14 @@ fn a_finding_on_a_renamed_branch_still_blocks_the_findings_gate() {
     assert_eq!(state(&recorded), OperationState::Done, "{recorded:?}");
     let before = status_of(&session.human(CommandKind::GatesStatus {
         branch: Some("feat".into()),
+        member: None,
     }));
     assert!(!gate_named(&before, "no-high").passed, "{before:?}");
 
     git(&fx.repo, &["branch", "-m", "feat", "feat2"]);
     let after = status_of(&session.human(CommandKind::GatesStatus {
         branch: Some("feat2".into()),
+        member: None,
     }));
     assert!(
         !gate_named(&after, "no-high").passed,
@@ -1071,15 +1084,18 @@ fn a_finding_on_an_unrelated_branch_does_not_block_another_branch() {
         value: "low".to_owned(),
         rationale: "Checked the change.".to_owned(),
         findings: vec![high_finding()],
+        member: None,
     });
     assert_eq!(state(&recorded), OperationState::Done, "{recorded:?}");
 
     let other = status_of(&session.human(CommandKind::GatesStatus {
         branch: Some("other".into()),
+        member: None,
     }));
     assert!(!gate_named(&other, "no-high").passed, "{other:?}");
     let feat = status_of(&session.human(CommandKind::GatesStatus {
         branch: Some("feat".into()),
+        member: None,
     }));
     assert!(gate_named(&feat, "no-high").passed, "{feat:?}");
 }
@@ -1102,10 +1118,12 @@ fn a_preset_name_is_refused_as_a_reviewer_until_a_file_defines_it_and_a_gate_say
         branch: Some("feat".into()),
         reviewer: None,
         limit: 0,
+        member: None,
     });
     assert!(verdicts_of(&listed).is_empty(), "nothing was written");
     let status = status_of(&session.human(CommandKind::GatesStatus {
         branch: Some("feat".into()),
+        member: None,
     }));
     assert_eq!(
         gate_named(&status, "security").reason.as_deref(),

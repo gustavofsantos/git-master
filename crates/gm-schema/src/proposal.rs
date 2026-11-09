@@ -27,6 +27,10 @@ pub struct ReviewerProposal {
     /// Globs the branch must match for the reviewer to apply (D214 (1)).
     #[serde(default)]
     pub branches: Vec<String>,
+    /// The workspace members the reviewer applies to (D214 (5)). Only a workspace definition
+    /// may name members, so a proposal with any is accepted into the workspace layer alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
 }
 
 /// What a proposal defines: a reviewer or a gate (D214 (3)).
@@ -103,5 +107,26 @@ mod tests {
         assert_eq!(proposal.model, None);
         assert!(proposal.paths.is_empty());
         assert!(proposal.branches.is_empty());
+        assert!(proposal.members.is_empty());
+    }
+
+    #[test]
+    fn members_are_written_only_when_a_proposal_names_some() {
+        let mut proposal: ReviewerProposal = serde_json::from_value(serde_json::json!({
+            "name": "billing",
+            "description": "Knows the billing rules.",
+            "instructions": "Check the invoice rounding.",
+            "signal": "level",
+            "direction": "lower_is_better",
+            "subject": "branch"
+        }))
+        .unwrap();
+        let bare = serde_json::to_value(&proposal).unwrap();
+        assert!(bare.get("members").is_none(), "{bare}");
+        proposal.members = vec!["api".into()];
+        let named = serde_json::to_value(&proposal).unwrap();
+        assert_eq!(named["members"], serde_json::json!(["api"]));
+        let back: ReviewerProposal = serde_json::from_value(named).unwrap();
+        assert_eq!(back, proposal);
     }
 }
