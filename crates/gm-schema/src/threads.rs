@@ -956,6 +956,10 @@ pub struct Memory {
     /// memories and omitted from the wire then. Set by the engine; empty from the store.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contexts: Vec<MemoryContext>,
+    /// The folder of the workspace member whose store holds the memory (D216 (2)), set on a read
+    /// from a workspace; absent otherwise. `scope` is then `member <folder>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
     /// How many times agents retrieved the memory on this machine (D201 (4)). Only the app shows it:
     /// no MCP result carries it, and it is never exported. Zero when the store has none.
     #[serde(default)]
@@ -987,6 +991,10 @@ pub struct Context {
     pub accepted_memories: u32,
     /// Direct sub-contexts.
     pub sub_contexts: u32,
+    /// The folders of the workspace members that see this context, in folder order. Set by a
+    /// `ListContexts` from a workspace (D216 (4)); empty otherwise and omitted then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
 }
 
 /// A repository in a context: its identity (the content of `.git/gitmaster/repo-id`), the last
@@ -1185,6 +1193,7 @@ mod tests {
             files_changed_since: Vec::new(),
             scope: "repository".to_owned(),
             contexts: Vec::new(),
+            member: None,
             retrieval_count: 0,
             last_retrieved_at: None,
             marks: Vec::new(),

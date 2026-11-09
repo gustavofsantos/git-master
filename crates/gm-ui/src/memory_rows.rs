@@ -359,6 +359,7 @@ mod tests {
             files_changed_since: Vec::new(),
             scope: "repository".to_owned(),
             contexts: Vec::new(),
+            member: None,
             basis: MemoryBasis::Observed,
             retrieval_count: 0,
             last_retrieved_at: None,
@@ -392,6 +393,7 @@ mod tests {
             }],
             accepted_memories: 0,
             sub_contexts: 0,
+            members: Vec::new(),
         }
     }
 

@@ -110,7 +110,8 @@ pub(crate) fn now_ms() -> i64 {
 pub(crate) struct Context<'a> {
     pub(crate) git: &'a dyn GitPort,
     pub(crate) root: &'a Path,
-    /// A file to read as the global Git configuration; `None` is the user's own. For the tests.
+    /// The global Git configuration the Git calls read: the engine's workspace one (D177 (5)), or
+    /// the user's own when `None`. A workspace's member folders are read with it (D216 (1)).
     pub(crate) global_config: Option<&'a Path>,
     /// The contexts file (`contexts.db`), read by the memory commands; `None` when there is none.
     pub(crate) contexts_db: Option<&'a Path>,
@@ -611,14 +612,17 @@ fn act_on_memory(
             Home::Repository(_) => {
                 accept_memory(id, stores, ctx, is_human, uid, text.as_deref(), supersedes)
             }
+            Home::Member { .. } => Err(memory_scope::MEMBER_ACTION.to_owned()),
         },
         CommandKind::RejectMemory { uid } => match memory_scope::home_of(stores, uid)? {
             Home::Context => memory_scope::reject_in_context(id, stores, ctx, is_human, uid),
             Home::Repository(_) => reject_memory(id, stores, ctx, is_human, uid),
+            Home::Member { .. } => Err(memory_scope::MEMBER_ACTION.to_owned()),
         },
         CommandKind::DeleteMemory { uid } => match memory_scope::home_of(stores, uid)? {
             Home::Context => memory_scope::delete_in_context(id, stores, is_human, uid),
             Home::Repository(_) => delete_memory(id, stores, is_human, uid),
+            Home::Member { .. } => Err(memory_scope::MEMBER_ACTION.to_owned()),
         },
         _ => Err("not a memory command".to_owned()),
     }

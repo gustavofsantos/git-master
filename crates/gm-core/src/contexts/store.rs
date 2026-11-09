@@ -854,6 +854,7 @@ fn context_with(conn: &Connection, id: i64, nodes: &[ContextNode]) -> Result<Con
         repos,
         accepted_memories: u32::try_from(accepted).unwrap_or(u32::MAX),
         sub_contexts: u32::try_from(subs).unwrap_or(u32::MAX),
+        members: Vec::new(),
     })
 }
 
@@ -1525,6 +1526,7 @@ mod tests {
             files_changed_since: Vec::new(),
             scope: String::new(),
             contexts: Vec::new(),
+            member: None,
             retrieval_count: 0,
             last_retrieved_at: None,
             marks: Vec::new(),

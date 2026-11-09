@@ -12,6 +12,7 @@ use crate::GitPort;
 use crate::contexts::repo_id::{self, Identity};
 use crate::contexts::store::ContextStore;
 use crate::contexts::visibility;
+use crate::memory_scope::{self, Folder};
 use crate::threads::store::StoreError;
 use crate::threads_session::now_ms;
 
@@ -58,16 +59,18 @@ pub(crate) fn human_only(kind: &CommandKind) -> Option<&'static str> {
 }
 
 /// Runs one context command. `db` is the contexts file (`None` when there is no data directory),
-/// and `root` the open repository, when one is open.
+/// and `root` the open repository, when one is open. `global_config` is the Git configuration a
+/// workspace's Git calls read (D177 (5)).
 pub(crate) fn run(
     id: OperationId,
     db: Option<&Path>,
     git: &dyn GitPort,
     root: Option<&Path>,
+    global_config: Option<&Path>,
     kind: &CommandKind,
 ) -> Result<Vec<Event>, String> {
     match kind {
-        CommandKind::ListContexts { repo } => list(id, db, git, root, *repo),
+        CommandKind::ListContexts { repo } => list(id, db, git, root, global_config, *repo),
         CommandKind::PreviewDeleteContext { id: context } => preview_delete(id, db, *context),
         CommandKind::CreateContext { name, parent } => create(id, db, name, *parent),
         CommandKind::UpdateContext { .. } => update(id, db, kind),
@@ -164,13 +167,83 @@ pub(crate) fn repo_identity(store: &mut ContextStore, common: &Path) -> Result<R
     }
 }
 
+/// What a clone's identity says about the contexts it sees (D193 (4)): its id and the contexts it
+/// belongs to directly, or nothing, or the other clone it clashes with.
+pub(crate) enum Sight {
+    Contexts {
+        repo_id: String,
+        member_of: Vec<i64>,
+    },
+    Nothing,
+    Clash {
+        other_path: String,
+    },
+}
+
+/// The sight of the clone at `root`, read from its common directory (D193 (4), D216 (1)).
+pub(crate) fn sight(
+    store: &mut ContextStore,
+    git: &dyn GitPort,
+    root: &Path,
+) -> Result<Sight, String> {
+    let common = git.common_dir(root).map_err(|e| e.0)?;
+    Ok(match repo_identity(store, &common)? {
+        RepoState::None => Sight::Nothing,
+        RepoState::Ok(repo_id) => {
+            let member_of = store.repo_contexts(&repo_id).map_err(|e| e.to_string())?;
+            Sight::Contexts { repo_id, member_of }
+        }
+        RepoState::Clash { other_path, .. } => Sight::Clash { other_path },
+    })
+}
+
+/// The contexts of a workspace's members, each with the members that see it (D216 (4)): the union of
+/// the members' contexts with their parents, nearest first. A member that cannot be read adds none.
+fn workspace_contexts(
+    store: &mut ContextStore,
+    git: &dyn GitPort,
+    folders: &[Folder],
+) -> Result<Vec<Context>, String> {
+    let nodes = store.nodes().map_err(|e| e.to_string())?;
+    let mut member_of = Vec::new();
+    let mut by_member: Vec<(&str, Vec<i64>)> = Vec::new();
+    for folder in folders {
+        let Ok(Sight::Contexts {
+            member_of: direct, ..
+        }) = sight(store, git, &folder.root)
+        else {
+            continue;
+        };
+        let sees: Vec<i64> = visibility::visible_contexts(&nodes, &direct)
+            .into_iter()
+            .map(|(context, _)| context)
+            .collect();
+        member_of.extend(direct);
+        by_member.push((folder.name.as_str(), sees));
+    }
+    visibility::visible_contexts(&nodes, &member_of)
+        .into_iter()
+        .map(|(context, _)| {
+            let mut read = store.read_context(context).map_err(context_error)?;
+            read.members = by_member
+                .iter()
+                .filter(|(_, sees)| sees.contains(&context))
+                .map(|(name, _)| (*name).to_owned())
+                .collect();
+            Ok(read)
+        })
+        .collect()
+}
+
 /// `ListContexts`: every context, or with `repo` those the open repository sees. A clash lists
-/// none and names the other clone (D193 (4)).
+/// none and names the other clone (D193 (4)). From a workspace, `repo` lists its members' contexts
+/// (D216 (4)).
 fn list(
     id: OperationId,
     db: Option<&Path>,
     git: &dyn GitPort,
     root: Option<&Path>,
+    global_config: Option<&Path>,
     repo: bool,
 ) -> Result<Vec<Event>, String> {
     let listed = |contexts, repo_id, clash| Event::ContextsListed {
@@ -183,6 +256,15 @@ fn list(
     if !repo {
         let contexts = match store {
             Some(store) => store.list_contexts().map_err(|e| e.to_string())?,
+            None => Vec::new(),
+        };
+        return Ok(vec![listed(contexts, None, None)]);
+    }
+    if let Some(folders) =
+        root.and_then(|root| memory_scope::workspace_folders(git, global_config, root))
+    {
+        let contexts = match store {
+            Some(mut store) => workspace_contexts(&mut store, git, &folders)?,
             None => Vec::new(),
         };
         return Ok(vec![listed(contexts, None, None)]);

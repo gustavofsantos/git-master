@@ -4742,7 +4742,7 @@ impl Engine {
         let ctx = threads_session::Context {
             git: self.git.as_ref(),
             root: &root,
-            global_config: None,
+            global_config: self.workspace_config.as_deref(),
             contexts_db: self.contexts_db.as_deref(),
         };
         threads_session::run(id, store, &ctx, actor, kind)
@@ -4772,6 +4772,7 @@ impl Engine {
             self.contexts_db.as_deref(),
             self.git.as_ref(),
             self.root.as_deref(),
+            self.workspace_config.as_deref(),
             kind,
         )
     }

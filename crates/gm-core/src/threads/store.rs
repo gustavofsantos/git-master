@@ -775,6 +775,31 @@ impl ThreadStore {
         }))
     }
 
+    /// A handle on the existing store of a workspace member's clone (D216 (1)). The file is never
+    /// created and never migrated: `None` when it is missing, and an error when it cannot be read or
+    /// was written by another schema, which a clone's own engine upgrades when it opens it. It is
+    /// opened read-write only so a retrieval can be counted where its memory lives (D201 (4)).
+    pub fn open_member(git_common_dir: &Path) -> Result<Option<Self>, StoreError> {
+        let path = git_common_dir.join("gitmaster").join("threads.db");
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let latest = i64::try_from(MIGRATIONS.len()).unwrap_or(i64::MAX);
+        if version != latest {
+            return Err(StoreError::Invalid(format!(
+                "its threads.db has schema {version}, not {latest}: open the clone once to upgrade it"
+            )));
+        }
+        Ok(Some(Self {
+            conn,
+            entry_limit: DEFAULT_ENTRY_LIMIT,
+            fallback_below: FALLBACK_BELOW,
+        }))
+    }
+
     /// A store that lives only in memory (tests).
     pub fn open_memory() -> Result<Self, StoreError> {
         let mut conn = Connection::open_in_memory()?;

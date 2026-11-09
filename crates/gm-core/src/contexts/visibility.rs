@@ -61,6 +61,8 @@ pub enum Scope {
     Repository,
     /// One visible context, by id.
     Context(i64),
+    /// One member of a workspace, by its place in the folder order (D216 (3)).
+    Member(usize),
 }
 
 /// Reads a scope name: `all` or empty is every scope, `repository` is the repository, and anything

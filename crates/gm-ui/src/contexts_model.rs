@@ -624,6 +624,7 @@ mod tests {
             repos: Vec::new(),
             accepted_memories: 0,
             sub_contexts: 0,
+            members: Vec::new(),
         }
     }
 
