@@ -64,6 +64,46 @@ You can choose **Accept selected** for the proposals you choose, or **Accept all
 
 When a decision changes, select the proposed memory that replaces the old one and choose **Supersedes…**. Pick the accepted memories it replaces, then accept it. The chosen memories become **Superseded** and stay in the list with a link to their replacement. An agent cannot change an accepted memory.
 
+## Suggest an update to a memory
+
+> **Planned.** An agent cannot suggest an update to an accepted memory yet.
+
+A memory can go out of date, or miss a file it matters for. An agent that finds this can suggest an update instead of writing a second memory. The suggestion changes the text, the files the memory applies to, the links, or any of them, and it always gives a reason.
+
+The suggestion appears on the memory as **Proposed update**, marked **Agent-written**, with the memory as it is and as it would become, side by side. You can:
+
+- **Accept** it. The memory changes in place. Its marks, its links and the contexts it belongs to stay.
+- **Accept edited**: change the new text first, then accept.
+- **Deny** it. A denied suggestion stays in the list so the same idea is not proposed again.
+
+If the memory changed after the agent wrote its suggestion, the suggestion says **Based on an older text** and you can accept it only after editing. The detail of a memory keeps its history: each earlier text, who suggested the change and when you accepted it. An agent can have at most 3 open suggestions on one memory, and at most 20 in a repository.
+
+Use **Supersedes…** instead when a different memory replaces the old one.
+
+## Where a memory applies
+
+> **Planned.** Memories do not list the files they apply to yet.
+
+A memory can list the files it matters for: a path such as `src/billing/retry.rs`, or a pattern such as `src/payments/**`. Use `*` for any name within a folder, `**` for any depth and `?` for one character. A pattern is relative to the root of the repository, and an absolute path or `..` is refused.
+
+These are not sources. A source says where the memory comes from, and a **Files changed** tag compares it with the file as it was. The files a memory applies to say when it is worth reading. Add or edit them in the memory form and in its detail. An agent proposes them with a new memory or with a suggested update, and you accept them with it.
+
+An agent asks which memories apply to a file with `memories_for_path`. The answer lists accepted memories only, each with a short snippet and the pattern that matched, and the agent reads the full memory with `memory_get`.
+
+## Link memories
+
+> **Planned.** Memories cannot be linked yet.
+
+Choose **Link…** in the detail of an accepted memory and pick another accepted memory the repository can see. Three kinds of link are available:
+
+| Kind | Meaning |
+|---|---|
+| **Relates to** | The two memories are about the same thing. The link works both ways. |
+| **Depends on** | This memory holds because of the other one, such as a rule that follows from a decision. |
+| **Contradicts** | The two cannot both be true. Both show **Conflicts with** until you supersede or reject one of them, or remove the link. |
+
+A memory has at most 10 links. An agent proposes links inside a suggested update, and they take effect when you accept it. `memory_get` shows the linked memories one step away.
+
 ## Keep memories true
 
 A memory is for what nobody can see again by looking: the reason for a choice, a rule, a lesson, a failed attempt. What the code, `git log` or a command shows does not belong in one, and the proposing skill leaves it out.
@@ -109,6 +149,8 @@ Agents read memories over [MCP](../reference/mcp-tools.md):
 - `memories_search` finds accepted memories by their words, by kind, by file or by scope. It searches the repository and every context it belongs to.
 - `contexts_list` lists the contexts the repository belongs to.
 - `memory_get` reads one memory with its sources and its marks.
+- `memories_for_path` lists the accepted memories that apply to a file.
+- `memory_revise` suggests an update to an accepted memory. You accept or deny it.
 - `memory_mark` records that a memory was useful or wrong, with an optional reason.
 
 By default an agent sees only accepted memories. It can ask for proposed ones, which come marked as not reviewed.

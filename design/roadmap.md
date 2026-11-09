@@ -776,6 +776,16 @@ Requested by the author on 2026-11-07. Engineering design in `design/reviewers.m
 
 **Plan of 2026-11-09 (D212).** The author chose to build R1 to R3 together; R4 and R5 wait for Q42. Order: (1) docs and D212; (2) R1 store: review schema v6, verdict types, reviewer files, `verdict_record` and `verdicts_list`, `reviewers_list`; (3) R2 gates: pure `gates::evaluate`, `gates.json`, the native check on push and restack, `BypassGates`, `gates_status`, then the `push` phase and `ctx.verdicts()`; (4) R3 UI: Reviewers Settings, **Run Reviewer…**, the verdict panel, gate state on the branch, the blocked-operation message with **Bypass**. Each step ends with `make check`. Status: step 1 in progress.
 
+## Slice 6u: memory revisions, applies-to paths and links (decided 2026-11-09; D213, Q47)
+
+Requested by the author on 2026-11-09. Behavior in `docs/guide/memories.md` and `docs/reference/mcp-tools.md` (`Planned`). Order: after R2 of slice 8r and before R3, as the author chose.
+
+**Goal.** An agent can suggest an update to an accepted memory, covering its text and the files it relates to, and the person accepts or denies it; memories can be linked; and the engine can answer which accepted memories apply to a path, which a later recall hook (Q47) will use.
+
+**Sub-slices.** U1 store: revisions with their history, `memory_applies` and `memory_link` in `threads.db` and `contexts.db`, the pure path match and the link and revision rules. U2 engine and MCP: `ReviseMemory`, the accept, edit and deny commands, `MemoriesForPath`, link commands, `memory_revise`, `memories_for_path`, `applies_to` on `memory_propose`, `links` and `applies_to` on `memory_get`. U3 UI: **Proposed update** in the memory detail with before and after, applies-to and links in the form and detail, **Conflicts with**. U4 skill: `/gitmaster:consolidate` proposes revisions instead of replacement memories where it can.
+
+**Acceptance.** A revision of an accepted memory is proposed by an agent and applied in place by a person, keeping marks and attachments; an agent cannot accept it or change a memory any other way; a stale revision cannot be accepted unedited; the path match and the link rules are pure and property-tested; `MemoriesForPath` is tested on real Git and measured in a release build.
+
 ## Slice 7: MCP
 
 Redirected by the author on 2026-10-31 (D135): `gitmaster mcp` is a second process over stdio, with no socket, token or app-side server. It runs its own engine on the repository and shares only the `.git/gitmaster/` files with the app. Its first tools are the ones an agent does not already have: review comments and threads. No grep, file read or symbol tool (D48 is superseded).
