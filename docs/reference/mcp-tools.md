@@ -107,6 +107,8 @@ The memory, summary and verdict tools follow these rules:
 
 > **Planned.** Each finding of `verdict_record` also takes an optional `suggested_fix` (plain text, at most 1,000 characters). `gates_status` also takes `member`, for a workspace: one member, or every member without it. `review_comment_resolve` accepts a finding for any agent and marks it `handled` only; it never resolves or dismisses one.
 
+> **Planned.** From a workspace, `memories_search`, `memory_get` and `contexts_list` also cover the members and their contexts: each memory's `scope` can be `workspace` or `member <folder>`, and `memory_propose` takes an optional `member`.
+
 - A finding that `verdict_record` creates is a review comment that only you can resolve or dismiss. See [Reviewers and gates](../agents/reviewers.md).
 - There is no tool to change a gate, bypass one or resolve a finding. Gates are yours to set, and `gates_status` only reads them.
 - Text written by an agent shows in the app as **Agent-written** and is never used as evidence for provenance.

@@ -45,7 +45,7 @@ Look at what the change adds. Report input that reaches a shell, a query or a fi
 without a check, secrets in the diff, and permissions that grow. Say nothing about style.
 ```
 
-`paths` and `branches` say which changes the reviewer is for; see [Reviewers for one change](#reviewers-for-one-change). The file name is the reviewer's name, in lowercase letters, digits and hyphens. GitMaster looks in `.git/gitmaster/reviewers/` of the repository first, then in `reviewers/` in your configuration directory, and the repository's file wins when both have the same name. Nothing is written into the working tree. A starting point is a template: **Add Reviewer…** copies it to a file you own.
+`paths` and `branches` say which changes the reviewer is for; see [Reviewers for one change](#reviewers-for-one-change). The file name is the reviewer's name, in lowercase letters, digits and hyphens. GitMaster looks in `.git/gitmaster/reviewers/` of the repository first, then in `reviewers/` in your configuration directory, and the repository's file wins when both have the same name. Nothing is written into the working tree. A starting point is a template: **Add Reviewer…** copies it to a file you own. Until you do, it is not a reviewer: a gate that names it blocks and says so, and an agent cannot record a verdict for it.
 
 ## Run a reviewer
 
@@ -87,25 +87,25 @@ A gate is a rule with a clear answer. The agent can read which gates apply and w
 
 | Gate | It blocks while |
 |---|---|
-| **Fresh verdict** | A reviewer you named has no verdict for the current head of the branch. |
+| **Fresh verdict** | A reviewer you named has no verdict for the current head of the branch. It checks that a verdict exists, not what it says: use **Signal** for that. |
 | **Findings** | An unresolved finding has a severity at or above the one you set. |
 | **Signal** | A reviewer's value is outside the bound you set, such as risk above 30. |
 | **Up to date** | The branch is behind its parent in the stack. |
 | **Human approval** | You have not approved the current commit of the branch. |
 
-Set the gates in **Reviewers Settings…**, for all branches or only for branches that match a pattern such as `feat/*`. A gate applies when you use **Push with lease** or apply a restack from GitMaster. A blocked operation says which gate stopped it and why.
+Set the gates in **Reviewers Settings…**, for all branches or only for branches that match a pattern such as `feat/*`. A gate applies when you use **Push with lease** or apply a restack from GitMaster, and when a workflow does either. A restack is checked for every branch it moves. A blocked operation says which gate stopped it and why.
 
-The branch shows its gate state. It reads **Ready** when every gate passes, and otherwise lists what blocks it, for example "Security has no verdict for this commit" or "1 high finding is open". Ready means the recorded verdicts satisfy your rules. It does not mean the code is correct: the verdicts are one agent's opinion.
+The branch shows its gate state. It reads **Ready** when every gate passes, and otherwise lists what blocks it, for example "Security has no verdict for this commit" or "1 high finding is open". Ready means the recorded verdicts satisfy your rules. It does not mean the code is correct: the verdicts are one agent's opinion. Any agent connected to GitMaster can record a verdict, so **Fresh verdict** and **Signal** say that an agent reported, not that the change was checked independently. **Human approval** and **Findings** are the two gates an agent cannot satisfy.
 
-> **Note.** A gate checks operations done in GitMaster. A `git push` you type in a terminal is not stopped by it. Gates are a check for your own safety, not a sandbox: the files that define them are in `.git/gitmaster/`, and an agent that can run commands or write files can edit them. If a gates file has an error, GitMaster blocks the push and the restack and shows the error until you fix it or bypass.
+> **Note.** A gate checks operations done in GitMaster. A `git push` you type in a terminal is not stopped by it. Gates are a check for your own safety, not a sandbox: the files that define them are in `.git/gitmaster/`, and an agent that can run commands or write files can edit them. If a gates file has an error, GitMaster blocks the push and the restack and shows the error until you fix it or bypass. If you rename a branch outside GitMaster, its approval no longer counts, and its open findings still count because they follow the commits they were written for.
 
 ### Bypass a gate
 
-If you decide to go ahead, choose **Bypass** in the message that names the gate and write the reason. The operation runs, and the gates you bypassed and your reason are kept in the operation log. If another gate starts to block before you confirm, GitMaster does not bypass it: it shows the block again. Only you can bypass: an agent has no tool for it.
+If you decide to go ahead, choose **Bypass** in the message that names the gate and write the reason. The operation runs, and the gates you bypassed, your reason, the branch and its commit are kept in a list of bypasses that survives closing GitMaster. If GitMaster cannot write that record, it does not bypass. If another gate starts to block before you confirm, GitMaster does not bypass it: it shows the block again. Only you can bypass: an agent has no tool for it.
 
 ## The intent of a change
 
-> **Planned.** The branch description is not used as the intent of a change yet.
+> **Planned.** **Edit Branch Description…** is not in the menu yet, and no skill passes the intent to a reviewer yet. An agent can already read it with `gates_status`.
 
 A reviewer such as **Intent drift** compares the change with what it set out to do. That intent is the description of the branch, the one Git keeps for it. Choose **Edit Branch Description…** in the branch menu to write it. GitMaster stores it in the repository's `.git/config`, where `git branch --edit-description` puts it, and writes nothing into the working tree. The agent reads it and gives it to every reviewer it starts, as data.
 
@@ -129,7 +129,7 @@ The skill reads the open findings of the branch, checks each one against the cod
 
 ## Reviewers for one change
 
-> **Planned.** Reviewers and gates cannot be limited to a change yet.
+> **Planned.** The **Ended** tag is not shown yet. Everything else on this page about `branches` and `paths` works.
 
 A large legacy repository or a monorepo has no reviewer that fits every change. A reviewer or a gate can say which changes it is for:
 
