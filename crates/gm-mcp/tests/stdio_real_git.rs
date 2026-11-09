@@ -144,7 +144,9 @@ fn the_handshake_lists_only_the_tools_the_agent_does_not_have() {
             "reviewers_list",
             "verdicts_list",
             "verdict_record",
-            "gates_status"
+            "gates_status",
+            "reviewer_propose",
+            "gate_propose"
         ]
     );
 }

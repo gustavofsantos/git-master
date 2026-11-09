@@ -30,6 +30,7 @@ mod move_preview;
 pub mod path_match;
 pub mod paths;
 mod port;
+mod proposals;
 mod reflog;
 pub mod remote;
 pub mod restack;

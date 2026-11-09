@@ -501,11 +501,17 @@ fn no_tool_changes_a_gate_approves_a_branch_or_bypasses_one() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"gates_status"));
+    // `gate_propose` proposes a gate; a proposal is accepted or denied by the person only (D214 (3)).
+    assert!(names.contains(&"gate_propose") && names.contains(&"reviewer_propose"));
     assert!(
-        names.iter().all(|name| !name.starts_with("gate_")
-            && !name.contains("bypass")
-            && !name.contains("approve")
-            && !name.contains("revoke")),
-        "no tool sets a gate, bypasses one or approves a branch: {names:?}"
+        names.iter().all(
+            |name| (!name.starts_with("gate_") || *name == "gate_propose")
+                && !name.contains("bypass")
+                && !name.contains("approve")
+                && !name.contains("revoke")
+                && !name.contains("accept")
+                && !name.contains("deny")
+        ),
+        "no tool sets a gate, bypasses one, approves a branch or accepts or denies a proposal: {names:?}"
     );
 }

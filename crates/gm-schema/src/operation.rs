@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use crate::conflict::{ConflictFileRead, ConflictSite, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
-use crate::gates::{Bypass, GateOp, GateOutcome, GatesStatus};
+use crate::gates::{Bypass, GateDef, GateLayer, GateOp, GateOutcome, GatesStatus};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
+use crate::proposal::{Proposal, ProposalStatus, ReviewerProposal};
 use crate::reflog::ReflogEntry;
 use crate::restack::{RestackPlan, RestackRecord, RestackResolution};
 use crate::review::{ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewKind, ReviewSeverity};
@@ -734,6 +735,45 @@ pub enum CommandKind {
         branch: Option<String>,
         #[serde(default)]
         limit: u32,
+    },
+    /// An agent proposes a reviewer (D214 (3)): the definition and a `reason` of 1 to 300
+    /// characters. It is stored as a proposal, not a reviewer, and is refused when it is not a
+    /// valid reviewer file, when there are 10 open proposals, or when it duplicates an open or a
+    /// denied one. Agent only. Answers `ProposalDecided`.
+    ProposeReviewer {
+        reviewer: Box<ReviewerProposal>,
+        reason: String,
+    },
+    /// An agent proposes a gate (D214 (3)): `gate` as a gate file writes it, and a `reason`. The
+    /// same limits as `ProposeReviewer`; a proposed gate blocks nothing. Agent only. Answers
+    /// `ProposalDecided`.
+    ProposeGate {
+        gate: Box<GateDef>,
+        reason: String,
+    },
+    /// Lists the proposals, newest first, with `status` when it is given, at most `limit` (20 when
+    /// 0, 100 at most). A read: never recorded (D28). Answers `ProposalsListed`.
+    ListProposals {
+        #[serde(default)]
+        status: Option<ProposalStatus>,
+        #[serde(default)]
+        limit: u32,
+    },
+    /// Accepts proposal `id` (D214 (3)): writes its definition into `layer` (the repository or the
+    /// user; a workspace is not yet). `edited_reviewer` or `edited_gate` replace the proposed
+    /// definition when given, and keep its name or id. Human only. Answers `ProposalDecided`.
+    AcceptProposal {
+        id: i64,
+        layer: GateLayer,
+        #[serde(default)]
+        edited_reviewer: Option<Box<ReviewerProposal>>,
+        #[serde(default)]
+        edited_gate: Option<Box<GateDef>>,
+    },
+    /// Denies proposal `id`, which is kept so the same proposal is not made again. Human only.
+    /// Answers `ProposalDecided`.
+    DenyProposal {
+        id: i64,
     },
     /// Replaces the body of review comment `id`. Human only.
     EditReviewComment {
@@ -1612,6 +1652,17 @@ pub enum Event {
         id: OperationId,
         bypasses: Vec<Bypass>,
     },
+    /// Answers `ListProposals`, newest first.
+    ProposalsListed {
+        id: OperationId,
+        proposals: Vec<Proposal>,
+    },
+    /// Answers `ProposeReviewer`, `ProposeGate`, `AcceptProposal` and `DenyProposal`: the proposal
+    /// as it stands now.
+    ProposalDecided {
+        id: OperationId,
+        proposal: Box<Proposal>,
+    },
     /// Answers `GatesStatus`: the gate check of the branch, its intent and its approval, with
     /// whether the approval is stale (D215 (2)).
     GatesStatusRead {
@@ -2170,6 +2221,100 @@ mod tests {
         assert_eq!(json["intent"], "why");
         assert!(json["approval"].is_null());
         assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
+    }
+
+    #[test]
+    fn proposal_commands_and_events_wire_format_is_tagged() {
+        use crate::gates::{GateDef, GateKind, GateLayer, GateOp, When};
+        use crate::proposal::{ProposalKind, ProposalStatus};
+        let propose = serde_json::to_value(CommandKind::ProposeReviewer {
+            reviewer: Box::new(ReviewerProposal {
+                name: "billing".into(),
+                description: "Knows the rules.".into(),
+                instructions: "Check rounding.".into(),
+                signal: crate::verdict::ReviewerSignal::Level,
+                direction: crate::verdict::ReviewerDirection::LowerIsBetter,
+                subject: crate::verdict::ReviewerSubject::Branch,
+                model: None,
+                paths: vec!["services/billing/**".into()],
+                branches: Vec::new(),
+            }),
+            reason: "legacy rules".into(),
+        })
+        .unwrap();
+        assert_eq!(propose["type"], "propose_reviewer");
+        assert_eq!(propose["reviewer"]["paths"][0], "services/billing/**");
+        let gate = GateDef {
+            id: "billing".into(),
+            kind: GateKind::FreshVerdict {
+                reviewers: vec!["billing".into()],
+            },
+            on: vec![GateOp::Push],
+            when: When {
+                branches: Vec::new(),
+                paths: vec!["services/billing/**".into()],
+            },
+        };
+        let proposed = serde_json::to_value(CommandKind::ProposeGate {
+            gate: Box::new(gate.clone()),
+            reason: "billing changes need it".into(),
+        })
+        .unwrap();
+        assert_eq!(proposed["type"], "propose_gate");
+        assert_eq!(proposed["gate"]["kind"], "fresh_verdict");
+        let list: CommandKind =
+            serde_json::from_value(serde_json::json!({ "type": "list_proposals" })).unwrap();
+        assert_eq!(
+            list,
+            CommandKind::ListProposals {
+                status: None,
+                limit: 0,
+            }
+        );
+        let accept = serde_json::to_value(CommandKind::AcceptProposal {
+            id: 4,
+            layer: GateLayer::Repository,
+            edited_reviewer: None,
+            edited_gate: Some(Box::new(gate)),
+        })
+        .unwrap();
+        assert_eq!(accept["type"], "accept_proposal");
+        assert_eq!(accept["layer"], "repository");
+        assert_eq!(accept["edited_gate"]["id"], "billing");
+        assert_eq!(
+            serde_json::to_value(CommandKind::DenyProposal { id: 4 }).unwrap()["type"],
+            "deny_proposal"
+        );
+        let event = Event::ProposalDecided {
+            id: OperationId(11),
+            proposal: Box::new(Proposal {
+                id: 4,
+                kind: ProposalKind::Gate,
+                name: "billing".into(),
+                reviewer: None,
+                gate: None,
+                reason: "why".into(),
+                origin: "agent:claude-code".into(),
+                status: ProposalStatus::Proposed,
+                at: 9,
+                decided_at: None,
+                updates: false,
+                current_reviewer: None,
+                current_gate: None,
+            }),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "proposal_decided");
+        assert_eq!(json["proposal"]["status"], "proposed");
+        assert!(json["proposal"]["decided_at"].is_null());
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
+        let listed = Event::ProposalsListed {
+            id: OperationId(12),
+            proposals: Vec::new(),
+        };
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["type"], "proposals_listed");
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), listed);
     }
 
     #[test]

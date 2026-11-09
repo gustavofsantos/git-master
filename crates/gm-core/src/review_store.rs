@@ -17,15 +17,15 @@ use std::path::Path;
 use std::time::Duration;
 
 use gm_schema::{
-    Approval, Bypass, GateOp, ReviewAnchor, ReviewComment, ReviewKind, ReviewReply, ReviewSeverity,
-    ReviewStatus, ReviewerSignal, Verdict, VerdictFinding,
+    Approval, Bypass, GateOp, ProposalKind, ProposalStatus, ReviewAnchor, ReviewComment,
+    ReviewKind, ReviewReply, ReviewSeverity, ReviewStatus, ReviewerSignal, Verdict, VerdictFinding,
 };
 use rusqlite::{Connection, OptionalExtension, Params, TransactionBehavior, params};
 
 use crate::review;
 
 /// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 /// How long a writer waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -111,9 +111,19 @@ UPDATE comments SET finding_head = (SELECT head FROM verdicts WHERE verdicts.id 
     WHERE verdict_id IS NOT NULL;
 ";
 
+/// Version 9 to 10 (D214 (3)): proposed reviewers and gates. A proposal is a row, never a file:
+/// `kind` is `reviewer` or `gate`, `body` the JSON of the definition, and `status` is `proposed`,
+/// `denied` or `accepted`. The `suggested_fix` column of a finding is used by the next slice (D215 (3)).
+const V10: &str = "
+CREATE TABLE proposals (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+    body TEXT NOT NULL, reason TEXT NOT NULL, origin TEXT NOT NULL, status TEXT NOT NULL,
+    at INTEGER NOT NULL, decided_at INTEGER);
+ALTER TABLE comments ADD COLUMN suggested_fix TEXT;
+";
+
 /// The upgrades after the first version, in order. Each runs when the database is at its
 /// `from` version, so a database several versions behind runs every step after it.
-const UPGRADES: [(i64, &str); 8] = [
+const UPGRADES: [(i64, &str); 9] = [
     (1, V2),
     (2, V3),
     (3, V4),
@@ -122,12 +132,16 @@ const UPGRADES: [(i64, &str); 8] = [
     (6, V7),
     (7, V8),
     (8, V9),
+    (9, V10),
 ];
 
 /// The most findings one verdict may carry (D212 (6)).
 const MAX_FINDINGS: usize = 30;
 /// The newest verdicts kept per reviewer and branch (D189 (2)).
 const VERDICTS_KEPT: i64 = 5;
+
+/// The columns of a proposal row, in the order `raw_proposal` expects.
+const PROPOSAL_COLUMNS: &str = "id, kind, name, body, reason, origin, status, at, decided_at";
 
 /// The columns of a verdict row, in the order `raw_verdict` expects.
 const VERDICT_COLUMNS: &str = "id, reviewer, branch, head, signal, value, rationale, origin, \
@@ -557,6 +571,122 @@ impl ReviewStore {
         .collect()
     }
 
+    /// Stores a new open proposal and returns its id (D214 (3)). The duplicate checks, the limit
+    /// and the insert are one write transaction, so two processes cannot both take the last open
+    /// place. A proposal identical to an open one is refused, as is one identical to a denied one,
+    /// and so is one past `max_open` open proposals; each refusal says why and nothing is written.
+    /// Identical means the same kind, name and body; the reason may differ.
+    pub fn add_proposal(&mut self, new: &NewProposal, max_open: usize) -> Result<i64, StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(open) =
+            find_proposal_in(&tx, new.kind, new.name, new.body, ProposalStatus::Proposed)?
+        {
+            return Err(StoreError(format!("already proposed as proposal {open}")));
+        }
+        if find_proposal_in(&tx, new.kind, new.name, new.body, ProposalStatus::Denied)?.is_some() {
+            return Err(StoreError(
+                "this exact proposal was denied; propose something different".to_owned(),
+            ));
+        }
+        if count_open_proposals(&tx)? >= max_open {
+            return Err(StoreError(format!(
+                "at most {max_open} open proposals; ask the person to accept or deny some"
+            )));
+        }
+        tx.execute(
+            "INSERT INTO proposals (kind, name, body, reason, origin, status, at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                proposal_kind_text(new.kind),
+                new.name,
+                new.body,
+                new.reason,
+                new.origin,
+                proposal_status_text(ProposalStatus::Proposed),
+                new.at,
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// The id of the proposal with this kind, name and body and `status`, if there is one.
+    pub fn find_proposal(
+        &self,
+        kind: ProposalKind,
+        name: &str,
+        body: &str,
+        status: ProposalStatus,
+    ) -> Result<Option<i64>, StoreError> {
+        find_proposal_in(&self.conn, kind, name, body, status)
+    }
+
+    /// How many proposals are open (`proposed`) in the repository.
+    pub fn open_proposal_count(&self) -> Result<usize, StoreError> {
+        count_open_proposals(&self.conn)
+    }
+
+    /// The proposals, newest first, with `status` when it is given, at most `limit`.
+    pub fn proposals(
+        &self,
+        status: Option<ProposalStatus>,
+        limit: usize,
+    ) -> Result<Vec<StoredProposal>, StoreError> {
+        let limit = i64::try_from(limit).map_err(|e| StoreError(e.to_string()))?;
+        let status = status.map(proposal_status_text);
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {PROPOSAL_COLUMNS} FROM proposals
+             WHERE ?1 IS NULL OR status = ?1 ORDER BY id DESC LIMIT ?2"
+        ))?;
+        let rows = statement.query_map(params![status, limit], raw_proposal)?;
+        rows.map(|row| proposal_of(row?)).collect()
+    }
+
+    /// The proposal `id`, if there is one.
+    pub fn proposal(&self, id: i64) -> Result<Option<StoredProposal>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("SELECT {PROPOSAL_COLUMNS} FROM proposals WHERE id = ?1"),
+                params![id],
+                raw_proposal,
+            )
+            .optional()?
+            .map(proposal_of)
+            .transpose()
+    }
+
+    /// Replaces the body of an open proposal: the definition a person edited before accepting it.
+    pub fn set_proposal_body(&self, id: i64, body: &str) -> Result<(), StoreError> {
+        let rows = self.conn.execute(
+            "UPDATE proposals SET body = ?2 WHERE id = ?1 AND status = ?3",
+            params![id, body, proposal_status_text(ProposalStatus::Proposed)],
+        )?;
+        open_proposal_changed(rows, id)
+    }
+
+    /// Marks an open proposal `status` (accepted or denied) at `at`. A proposal that is not open
+    /// is refused and keeps its status.
+    pub fn set_proposal_status(
+        &self,
+        id: i64,
+        status: ProposalStatus,
+        at: i64,
+    ) -> Result<(), StoreError> {
+        let rows = self.conn.execute(
+            "UPDATE proposals SET status = ?2, decided_at = ?3 WHERE id = ?1 AND status = ?4",
+            params![
+                id,
+                proposal_status_text(status),
+                at,
+                proposal_status_text(ProposalStatus::Proposed),
+            ],
+        )?;
+        open_proposal_changed(rows, id)
+    }
+
     /// How many agent-started threads are not resolved in the repository (D200).
     pub fn open_agent_threads(&self) -> Result<usize, StoreError> {
         open_agent_count(&self.conn, None)
@@ -805,6 +935,47 @@ fn open_agent_count(conn: &Connection, path: Option<&str>) -> Result<usize, Stor
         |row| row.get(0),
     )?;
     usize::try_from(count).map_err(|e| StoreError(e.to_string()))
+}
+
+/// The id of the proposal with this kind, name, body and status, if there is one.
+fn find_proposal_in(
+    conn: &Connection,
+    kind: ProposalKind,
+    name: &str,
+    body: &str,
+    status: ProposalStatus,
+) -> Result<Option<i64>, StoreError> {
+    conn.query_row(
+        "SELECT id FROM proposals WHERE kind = ?1 AND name = ?2 AND body = ?3 AND status = ?4
+         ORDER BY id LIMIT 1",
+        params![
+            proposal_kind_text(kind),
+            name,
+            body,
+            proposal_status_text(status)
+        ],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(StoreError::from)
+}
+
+fn count_open_proposals(conn: &Connection) -> Result<usize, StoreError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM proposals WHERE status = ?1",
+        params![proposal_status_text(ProposalStatus::Proposed)],
+        |row| row.get(0),
+    )?;
+    usize::try_from(count).map_err(|e| StoreError(e.to_string()))
+}
+
+/// Refuses a proposal write that touched no open proposal.
+fn open_proposal_changed(rows: usize, id: i64) -> Result<(), StoreError> {
+    if rows == 0 {
+        Err(StoreError(format!("proposal {id} is not open")))
+    } else {
+        Ok(())
+    }
 }
 
 /// Creates the schema of an empty database, or brings an older one up to date; refuses one
@@ -1181,6 +1352,106 @@ pub struct NewBypass {
     pub actor: String,
     /// Milliseconds since the Unix epoch.
     pub at: i64,
+}
+
+/// A proposal to store (D214 (3)). `body` is the JSON of the definition.
+pub struct NewProposal<'a> {
+    pub kind: ProposalKind,
+    pub name: &'a str,
+    pub body: &'a str,
+    pub reason: &'a str,
+    /// `agent:<client>`.
+    pub origin: &'a str,
+    /// Milliseconds since the Unix epoch.
+    pub at: i64,
+}
+
+/// A proposal as the store keeps it. The engine reads the definition from `body`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredProposal {
+    pub id: i64,
+    pub kind: ProposalKind,
+    pub name: String,
+    pub body: String,
+    pub reason: String,
+    pub origin: String,
+    pub status: ProposalStatus,
+    pub at: i64,
+    pub decided_at: Option<i64>,
+}
+
+/// One proposal row as SQLite gives it, in `PROPOSAL_COLUMNS` order.
+type RawProposal = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    Option<i64>,
+);
+
+fn raw_proposal(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawProposal> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+    ))
+}
+
+fn proposal_of(raw: RawProposal) -> Result<StoredProposal, StoreError> {
+    let (id, kind, name, body, reason, origin, status, at, decided_at) = raw;
+    Ok(StoredProposal {
+        id,
+        kind: parse_proposal_kind(&kind)?,
+        name,
+        body,
+        reason,
+        origin,
+        status: parse_proposal_status(&status)?,
+        at,
+        decided_at,
+    })
+}
+
+fn proposal_kind_text(kind: ProposalKind) -> &'static str {
+    match kind {
+        ProposalKind::Reviewer => "reviewer",
+        ProposalKind::Gate => "gate",
+    }
+}
+
+fn parse_proposal_kind(text: &str) -> Result<ProposalKind, StoreError> {
+    match text {
+        "reviewer" => Ok(ProposalKind::Reviewer),
+        "gate" => Ok(ProposalKind::Gate),
+        other => Err(StoreError(format!("unknown proposal kind {other:?}"))),
+    }
+}
+
+fn proposal_status_text(status: ProposalStatus) -> &'static str {
+    match status {
+        ProposalStatus::Proposed => "proposed",
+        ProposalStatus::Denied => "denied",
+        ProposalStatus::Accepted => "accepted",
+    }
+}
+
+fn parse_proposal_status(text: &str) -> Result<ProposalStatus, StoreError> {
+    match text {
+        "proposed" => Ok(ProposalStatus::Proposed),
+        "denied" => Ok(ProposalStatus::Denied),
+        "accepted" => Ok(ProposalStatus::Accepted),
+        other => Err(StoreError(format!("unknown proposal status {other:?}"))),
+    }
 }
 
 /// What `record_verdict` wrote: the verdict's id and the ids of its findings, in order.
@@ -1808,6 +2079,7 @@ mod tests {
             "SELECT 'index ' || name || ' on ' || tbl_name FROM sqlite_master WHERE type = 'index' ORDER BY name",
             "SELECT 'approvals ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('approvals')",
             "SELECT 'bypasses ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('bypasses')",
+            "SELECT 'proposals ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('proposals')",
         ];
         for sql in queries {
             let rows: Vec<String> = store
@@ -2425,5 +2697,179 @@ mod tests {
         let pairs: Vec<(&str, i64)> = latest.iter().map(|v| (v.reviewer.as_str(), v.id)).collect();
         assert_eq!(pairs, [("code-review", code), ("security", security)]);
         assert!(store.latest_verdicts("nope").expect("none").is_empty());
+    }
+
+    fn v9_database(path: &Path) {
+        v8_database(path);
+        let conn = Connection::open(path).expect("open");
+        conn.execute_batch(V9).expect("v9");
+        conn.pragma_update(None, "user_version", 9)
+            .expect("version");
+    }
+
+    fn new_proposal<'a>(kind: ProposalKind, name: &'a str, body: &'a str) -> NewProposal<'a> {
+        NewProposal {
+            kind,
+            name,
+            body,
+            reason: "legacy rules",
+            origin: "agent:claude-code",
+            at: 7,
+        }
+    }
+
+    #[test]
+    fn a_version_nine_database_gains_the_proposals_table_and_keeps_everything() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("review.db");
+        v9_database(&path);
+        let store = ReviewStore::open(&path).expect("migrate");
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM comments WHERE verdict_id = 1"),
+            1,
+            "the finding survives the upgrade"
+        );
+        assert!(store.get(1).expect("get").is_some());
+        let fresh = ReviewStore::open_in_memory().expect("fresh");
+        assert_eq!(shape(&store), shape(&fresh));
+        assert!(
+            shape(&store)
+                .iter()
+                .any(|line| line == "comments suggested_fix TEXT 0 NULL 0"),
+            "the suggested_fix column is there"
+        );
+    }
+
+    #[test]
+    fn an_upgraded_database_has_the_proposal_table_of_a_fresh_one() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("review.db");
+        v9_database(&path);
+        let mut upgraded = ReviewStore::open(&path).expect("migrate");
+        let body = "{\"name\":\"billing\"}";
+        let id = upgraded
+            .add_proposal(&new_proposal(ProposalKind::Reviewer, "billing", body), 10)
+            .expect("propose after the upgrade");
+        assert_eq!(
+            upgraded.proposal(id).expect("read").expect("there").body,
+            body
+        );
+        let fresh = ReviewStore::open_in_memory().expect("fresh");
+        assert!(
+            shape(&fresh)
+                .iter()
+                .any(|line| line.starts_with("proposals decided_at INTEGER"))
+        );
+    }
+
+    #[test]
+    fn a_proposal_round_trips_and_lists_newest_first_with_status_and_limit() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        let first = store
+            .add_proposal(
+                &new_proposal(ProposalKind::Reviewer, "a-rev", "{\"a\":1}"),
+                10,
+            )
+            .expect("first");
+        let second = store
+            .add_proposal(&new_proposal(ProposalKind::Gate, "a-gate", "{\"b\":2}"), 10)
+            .expect("second");
+        let got = store.proposal(first).expect("get").expect("there");
+        assert_eq!(got.kind, ProposalKind::Reviewer);
+        assert_eq!(got.status, ProposalStatus::Proposed);
+        assert_eq!(got.origin, "agent:claude-code");
+        assert_eq!(got.decided_at, None);
+        assert_eq!(got.at, 7);
+        let all = store.proposals(None, 10).expect("all");
+        assert_eq!(
+            all.iter().map(|p| p.id).collect::<Vec<_>>(),
+            [second, first]
+        );
+        assert_eq!(store.proposals(None, 1).expect("limit").len(), 1);
+        store
+            .set_proposal_status(first, ProposalStatus::Denied, 9)
+            .expect("deny");
+        let denied = store
+            .proposals(Some(ProposalStatus::Denied), 10)
+            .expect("denied");
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].decided_at, Some(9));
+        assert_eq!(store.open_proposal_count().expect("open"), 1);
+        assert!(store.proposal(999).expect("none").is_none());
+    }
+
+    #[test]
+    fn an_identical_open_or_denied_proposal_is_refused_and_the_open_limit_holds() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        let body = "{\"x\":1}";
+        let first = store
+            .add_proposal(&new_proposal(ProposalKind::Reviewer, "rev", body), 2)
+            .expect("first");
+        let again = store
+            .add_proposal(&new_proposal(ProposalKind::Reviewer, "rev", body), 2)
+            .expect_err("identical open");
+        assert_eq!(again.0, format!("already proposed as proposal {first}"));
+        store
+            .add_proposal(&new_proposal(ProposalKind::Reviewer, "rev", "{\"x\":2}"), 2)
+            .expect("a different body is another proposal");
+        let full = store
+            .add_proposal(&new_proposal(ProposalKind::Gate, "gate", "{}"), 2)
+            .expect_err("the limit is 2 open");
+        assert_eq!(
+            full.0,
+            "at most 2 open proposals; ask the person to accept or deny some"
+        );
+        store
+            .set_proposal_status(first, ProposalStatus::Denied, 8)
+            .expect("deny");
+        let denied = store
+            .add_proposal(&new_proposal(ProposalKind::Reviewer, "rev", body), 2)
+            .expect_err("identical denied");
+        assert_eq!(
+            denied.0,
+            "this exact proposal was denied; propose something different"
+        );
+        assert_eq!(store.open_proposal_count().expect("open"), 1);
+        assert_eq!(store.proposals(None, 10).expect("all").len(), 2);
+    }
+
+    #[test]
+    fn a_decided_proposal_is_not_decided_again_and_its_body_is_edited_only_while_open() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        let id = store
+            .add_proposal(&new_proposal(ProposalKind::Gate, "gate", "{}"), 10)
+            .expect("propose");
+        store
+            .set_proposal_body(id, "{\"edited\":true}")
+            .expect("edit while open");
+        assert_eq!(
+            store.proposal(id).expect("get").expect("there").body,
+            "{\"edited\":true}"
+        );
+        store
+            .set_proposal_status(id, ProposalStatus::Accepted, 20)
+            .expect("accept");
+        let accepted = store.proposal(id).expect("get").expect("there");
+        assert_eq!(accepted.status, ProposalStatus::Accepted);
+        assert_eq!(accepted.decided_at, Some(20));
+        assert!(
+            store
+                .set_proposal_status(id, ProposalStatus::Denied, 21)
+                .is_err(),
+            "an accepted proposal keeps its status"
+        );
+        assert!(store.set_proposal_body(id, "{}").is_err());
+        assert_eq!(
+            store
+                .find_proposal(
+                    ProposalKind::Gate,
+                    "gate",
+                    "{\"edited\":true}",
+                    ProposalStatus::Accepted
+                )
+                .expect("find"),
+            Some(id)
+        );
     }
 }

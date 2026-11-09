@@ -8,12 +8,13 @@ use serde_json::{Map, Value, json};
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
-    ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GateOp, GrepOptions,
-    History, MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId, OperationState,
-    REFLOG_PAGE, RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange,
-    ReviewComment, ReviewStatus, Reviewer, ReviewerFileError, ReviewerSignal, ReviewerSource,
-    ReviewerSubject, STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic,
-    WorktreeEntry, WorktreeInspection,
+    ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GateDef, GateLayer, GateOp,
+    GrepOptions, History, MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId,
+    OperationState, ProposalKind, ProposalStatus, REFLOG_PAGE, RestackBlock, RestackPlan,
+    RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewStatus, Reviewer,
+    ReviewerFileError, ReviewerProposal, ReviewerSignal, ReviewerSource, ReviewerSubject,
+    STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry,
+    WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -37,13 +38,16 @@ use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, Histo
 use crate::move_exec;
 use crate::move_preview;
 use crate::port::{HistoryRevs, ReviewSide};
+use crate::proposals;
 use crate::reflog;
 use crate::remote::{RemoteJob, RemoteReport};
 use crate::restack_resolutions::{self, Resolution};
 use crate::restack_session;
 use crate::review;
 use crate::review_session::{self, ReviewSession};
-use crate::review_store::{AgentThread, NewBypass, NewFinding, NewVerdict, Reply, ReviewStore};
+use crate::review_store::{
+    AgentThread, NewBypass, NewFinding, NewProposal, NewVerdict, Reply, ReviewStore, StoredProposal,
+};
 use crate::reviewers;
 use crate::script::builtins;
 use crate::script::dry;
@@ -4816,6 +4820,7 @@ impl Engine {
             CommandKind::ListBypasses { branch, limit } => {
                 self.list_bypasses(id, branch.as_deref(), *limit)
             }
+            _ if is_proposal_command(kind) => self.proposal_command(id, actor, kind),
             _ if is_approval_command(kind) => self.approval_command(id, actor, kind),
             _ => Err("not a review command".to_owned()),
         }
@@ -5016,6 +5021,285 @@ impl Engine {
         let loaded = gate_check::load(self.git.as_ref(), root, &config)?;
         let store = review_store(&mut self.review, self.git.as_ref(), root)?;
         gate_check::report(self.git.as_ref(), store, root, branch, op, &config, &loaded)
+    }
+
+    /// The proposal commands (D214 (3)). An agent proposes; only a person accepts or denies. The
+    /// list is a read and is not logged (D28).
+    fn proposal_command(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        match kind {
+            CommandKind::ProposeReviewer { reviewer, reason } => {
+                let origin = agent_origin(actor, "propose a reviewer")?;
+                self.propose_reviewer(id, &origin, reviewer, reason)
+            }
+            CommandKind::ProposeGate { gate, reason } => {
+                let origin = agent_origin(actor, "propose a gate")?;
+                self.propose_gate(id, &origin, gate, reason)
+            }
+            CommandKind::ListProposals { status, limit } => {
+                self.list_proposals(id, *status, *limit)
+            }
+            CommandKind::AcceptProposal {
+                id: proposal,
+                layer,
+                edited_reviewer,
+                edited_gate,
+            } => {
+                only_a_human(actor, "accept a proposal")?;
+                self.accept_proposal(
+                    id,
+                    *proposal,
+                    *layer,
+                    edited_reviewer.as_deref(),
+                    edited_gate.as_deref(),
+                )
+            }
+            CommandKind::DenyProposal { id: proposal } => {
+                only_a_human(actor, "deny a proposal")?;
+                self.deny_proposal(id, *proposal)
+            }
+            _ => Err("not a proposal command".to_owned()),
+        }
+    }
+
+    /// Stores a reviewer an agent proposes (D214 (3)): its free text and reason are redacted,
+    /// and it is checked as a reviewer file. It is kept as a proposal and is not a reviewer.
+    fn propose_reviewer(
+        &mut self,
+        id: OperationId,
+        origin: &str,
+        reviewer: &ReviewerProposal,
+        reason: &str,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let redactor = proposal_redactor(&root)?;
+        let redact = |text: &str| redactor.redact(text).text;
+        let reason = proposals::check_reason(reason, &redact)?;
+        let reviewer = proposals::check_reviewer(&proposals::redact_reviewer(reviewer, &redact))?;
+        let body = proposals::encode(&reviewer)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let proposal_id = store
+            .add_proposal(
+                &NewProposal {
+                    kind: ProposalKind::Reviewer,
+                    name: &reviewer.name,
+                    body: &body,
+                    reason: &reason,
+                    origin,
+                    at: now_ms(),
+                },
+                proposals::OPEN_LIMIT,
+            )
+            .map_err(|e| e.0)?;
+        self.proposal_decided(id, &root, proposal_id)
+    }
+
+    /// Stores a gate an agent proposes (D214 (3)): checked as the one gate of a gate file, with
+    /// its reason redacted. A proposed gate blocks nothing.
+    fn propose_gate(
+        &mut self,
+        id: OperationId,
+        origin: &str,
+        gate: &GateDef,
+        reason: &str,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let redactor = proposal_redactor(&root)?;
+        let redact = |text: &str| redactor.redact(text).text;
+        let reason = proposals::check_reason(reason, &redact)?;
+        proposals::check_gate(gate)?;
+        let body = proposals::encode(gate)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let proposal_id = store
+            .add_proposal(
+                &NewProposal {
+                    kind: ProposalKind::Gate,
+                    name: &gate.id,
+                    body: &body,
+                    reason: &reason,
+                    origin,
+                    at: now_ms(),
+                },
+                proposals::OPEN_LIMIT,
+            )
+            .map_err(|e| e.0)?;
+        self.proposal_decided(id, &root, proposal_id)
+    }
+
+    /// The proposals, newest first, with `status` when it is given, each with the accepted
+    /// definition it would replace. Reads files only, and changes nothing.
+    fn list_proposals(
+        &mut self,
+        id: OperationId,
+        status: Option<ProposalStatus>,
+        limit: u32,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let limit = match limit {
+            0 => proposals::LIST_DEFAULT,
+            n => n.min(proposals::LIST_MAX),
+        };
+        let current = self.current_definitions(&root)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let rows = store
+            .proposals(status, usize::try_from(limit).unwrap_or(usize::MAX))
+            .map_err(|e| e.0)?;
+        let views = rows
+            .iter()
+            .map(|row| proposals::view(row, &current))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(vec![Event::ProposalsListed {
+            id,
+            proposals: views,
+        }])
+    }
+
+    /// Accepts proposal `proposal_id` (D214 (3)): writes its definition into `layer` first, and
+    /// marks the proposal accepted only once that write is done, so a failed write leaves it
+    /// proposed. `edited_*` replace the proposed definition, keeping its name or id.
+    fn accept_proposal(
+        &mut self,
+        id: OperationId,
+        proposal_id: i64,
+        layer: GateLayer,
+        edited_reviewer: Option<&ReviewerProposal>,
+        edited_gate: Option<&GateDef>,
+    ) -> Result<Vec<Event>, String> {
+        if layer == GateLayer::Workspace {
+            return Err(proposals::workspace_not_yet());
+        }
+        let root = self.open_root()?;
+        let stored = self.open_proposal(&root, proposal_id)?;
+        let common = self.git.common_dir(&root).map_err(|e| e.0)?;
+        let body = match stored.kind {
+            ProposalKind::Reviewer => {
+                if edited_gate.is_some() {
+                    return Err(format!(
+                        "proposal {proposal_id} is a reviewer: edited_gate does not apply"
+                    ));
+                }
+                let proposed = match edited_reviewer {
+                    Some(edited) => edited.clone(),
+                    None => proposals::decode_reviewer(&stored.body)?,
+                };
+                same_name(proposal_id, &stored.name, &proposed.name)?;
+                let checked = proposals::check_reviewer(&proposed)?;
+                let (dir, source) = match layer {
+                    GateLayer::User => (
+                        self.reviewer_user_dir
+                            .clone()
+                            .ok_or_else(no_user_directory)?,
+                        ReviewerSource::User,
+                    ),
+                    _ => (reviewers::repo_dir(&common), ReviewerSource::Repository),
+                };
+                reviewers::save(&dir, &proposals::to_reviewer(&checked, source))?;
+                proposals::encode(&checked)?
+            }
+            ProposalKind::Gate => {
+                if edited_reviewer.is_some() {
+                    return Err(format!(
+                        "proposal {proposal_id} is a gate: edited_reviewer does not apply"
+                    ));
+                }
+                let gate = match edited_gate {
+                    Some(edited) => edited.clone(),
+                    None => proposals::decode_gate(&stored.body)?,
+                };
+                same_name(proposal_id, &stored.name, &gate.id)?;
+                proposals::check_gate(&gate)?;
+                let dir = match layer {
+                    GateLayer::User => self.gates_user_dir.clone().ok_or_else(no_user_directory)?,
+                    _ => common.join("gitmaster"),
+                };
+                let mut defined = proposals::layer_gates(layer, &dir)?;
+                match defined.iter().position(|existing| existing.id == gate.id) {
+                    Some(index) => defined[index] = gate.clone(),
+                    None => defined.push(gate.clone()),
+                }
+                crate::gates::save(&dir, &defined)?;
+                proposals::encode(&gate)?
+            }
+        };
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        store
+            .set_proposal_body(proposal_id, &body)
+            .map_err(|e| e.0)?;
+        store
+            .set_proposal_status(proposal_id, ProposalStatus::Accepted, now_ms())
+            .map_err(|e| e.0)?;
+        self.proposal_decided(id, &root, proposal_id)
+    }
+
+    /// Denies proposal `proposal_id`. It is kept, so the same proposal is refused later.
+    fn deny_proposal(&mut self, id: OperationId, proposal_id: i64) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        self.open_proposal(&root, proposal_id)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        store
+            .set_proposal_status(proposal_id, ProposalStatus::Denied, now_ms())
+            .map_err(|e| e.0)?;
+        self.proposal_decided(id, &root, proposal_id)
+    }
+
+    /// The stored proposal `proposal_id`, when it is still open; refused otherwise.
+    fn open_proposal(&mut self, root: &Path, proposal_id: i64) -> Result<StoredProposal, String> {
+        let store = review_store(&mut self.review, self.git.as_ref(), root)?;
+        let stored = store
+            .proposal(proposal_id)
+            .map_err(|e| e.0)?
+            .ok_or_else(|| format!("there is no proposal {proposal_id}"))?;
+        if stored.status != ProposalStatus::Proposed {
+            return Err(format!(
+                "proposal {proposal_id} is already {}",
+                proposals::status_word(stored.status)
+            ));
+        }
+        Ok(stored)
+    }
+
+    /// Answers a proposal write with the proposal as it stands now.
+    fn proposal_decided(
+        &mut self,
+        id: OperationId,
+        root: &Path,
+        proposal_id: i64,
+    ) -> Result<Vec<Event>, String> {
+        let current = self.current_definitions(root)?;
+        let stored = {
+            let store = review_store(&mut self.review, self.git.as_ref(), root)?;
+            store
+                .proposal(proposal_id)
+                .map_err(|e| e.0)?
+                .ok_or_else(|| format!("there is no proposal {proposal_id}"))?
+        };
+        let proposal = proposals::view(&stored, &current)?;
+        Ok(vec![Event::ProposalDecided {
+            id,
+            proposal: Box::new(proposal),
+        }])
+    }
+
+    /// The accepted reviewers and gates of the repository and the user, read from their files
+    /// alone (D214 (3)): presets are not files, and a proposal is compared with these, never
+    /// counted among them.
+    fn current_definitions(&mut self, root: &Path) -> Result<proposals::Current, String> {
+        let common = self.git.common_dir(root).map_err(|e| e.0)?;
+        let reviewers = reviewers::load(
+            Some(&reviewers::repo_dir(&common)),
+            self.reviewer_user_dir.as_deref(),
+        )
+        .reviewers;
+        let gates = gate_check::load(self.git.as_ref(), root, &self.gate_config())?
+            .gates
+            .into_iter()
+            .map(|layered| layered.gate)
+            .collect();
+        Ok(proposals::Current { reviewers, gates })
     }
 
     /// Anchors a comment on lines of `path` and keeps a snapshot of the working
@@ -6187,6 +6471,7 @@ impl Engine {
                 | CommandKind::ListReviewers { .. }
                 | CommandKind::ListBypasses { .. }
                 | CommandKind::GatesStatus { .. }
+                | CommandKind::ListProposals { .. }
                 | CommandKind::ReadApproval { .. }
                 | CommandKind::ReadBranchDescription { .. }
                 | CommandKind::LoadReviewSnapshotText { .. }
@@ -6572,6 +6857,7 @@ fn is_workspace_command(kind: &CommandKind) -> bool {
 /// Whether `kind` is one of the review comment, verdict or approval commands (B4, D212, D215).
 fn is_review_command(kind: &CommandKind) -> bool {
     is_approval_command(kind)
+        || is_proposal_command(kind)
         || matches!(
             kind,
             CommandKind::AddReviewComment { .. }
@@ -6593,6 +6879,48 @@ fn is_review_command(kind: &CommandKind) -> bool {
                 | CommandKind::ListBypasses { .. }
                 | CommandKind::GatesStatus { .. }
         )
+}
+
+/// The author of a proposal an agent makes: `agent:<client>`. Refused for a person.
+fn agent_origin(actor: &Actor, what: &str) -> Result<String, String> {
+    if matches!(actor, Actor::Agent { .. }) {
+        Ok(origin_of(actor))
+    } else {
+        Err(format!("only an agent can {what}"))
+    }
+}
+
+/// The redactor of a proposal's text. It fails closed, as a verdict's does (D212 (6)).
+fn proposal_redactor(root: &Path) -> Result<Redactor, String> {
+    threads_session::redactor_at(root, None)
+        .map_err(|reason| format!("redaction is misconfigured, so nothing was proposed: {reason}"))
+}
+
+/// Refuses an edited definition that renames the proposal: the name or id is the proposal's.
+fn same_name(proposal_id: i64, proposed: &str, edited: &str) -> Result<(), String> {
+    if proposed == edited {
+        Ok(())
+    } else {
+        Err(format!(
+            "proposal {proposal_id} is {proposed}: an accepted definition keeps its name, not {edited}"
+        ))
+    }
+}
+
+fn no_user_directory() -> String {
+    "there is no configuration directory to accept into".to_owned()
+}
+
+/// Whether `kind` is a proposal command (D214 (3)).
+fn is_proposal_command(kind: &CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::ProposeReviewer { .. }
+            | CommandKind::ProposeGate { .. }
+            | CommandKind::ListProposals { .. }
+            | CommandKind::AcceptProposal { .. }
+            | CommandKind::DenyProposal { .. }
+    )
 }
 
 /// Whether `kind` is an approval or branch intent command (D215).

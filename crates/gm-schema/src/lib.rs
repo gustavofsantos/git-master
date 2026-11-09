@@ -10,6 +10,7 @@ mod grep;
 mod history;
 mod move_changes;
 mod operation;
+mod proposal;
 mod reflog;
 mod restack;
 mod review;
@@ -48,6 +49,7 @@ pub use operation::{
     Actor, Command, CommandKind, Event, IllegalTransition, MERGED_LIST_CHANGED, OperationId,
     OperationState, STASH_LIST_CHANGED, WorktreeMode,
 };
+pub use proposal::{Proposal, ProposalKind, ProposalStatus, ReviewerProposal};
 pub use reflog::{REFLOG_PAGE, ReflogEntry};
 pub use restack::{
     PlannedBranch, PlannedCommit, ReplayStep, RestackBlock, RestackMove, RestackPhase, RestackPlan,
