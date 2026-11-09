@@ -25,7 +25,7 @@ use rusqlite::{Connection, OptionalExtension, Params, TransactionBehavior, param
 use crate::review;
 
 /// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 /// How long a writer waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -87,9 +87,27 @@ CREATE TABLE approvals (branch TEXT PRIMARY KEY, head TEXT NOT NULL, note TEXT,
     origin TEXT NOT NULL, at INTEGER NOT NULL);
 ";
 
+/// Version 7 to 8 (D212 (6), D214 (1)): a finding keeps the branch of its verdict. Retention
+/// unlinks an old verdict's findings (`verdict_id` becomes `NULL`), and a finding that is still
+/// open must keep blocking the `findings` gate of its branch, so the branch is stored with it.
+/// Existing findings take the branch of the verdict they were linked to.
+const V8: &str = "
+ALTER TABLE comments ADD COLUMN finding_branch TEXT;
+UPDATE comments SET finding_branch = (SELECT branch FROM verdicts WHERE verdicts.id = comments.verdict_id)
+    WHERE verdict_id IS NOT NULL;
+";
+
 /// The upgrades after the first version, in order. Each runs when the database is at its
 /// `from` version, so a database several versions behind runs every step after it.
-const UPGRADES: [(i64, &str); 6] = [(1, V2), (2, V3), (3, V4), (4, V5), (5, V6), (6, V7)];
+const UPGRADES: [(i64, &str); 7] = [
+    (1, V2),
+    (2, V3),
+    (3, V4),
+    (4, V5),
+    (5, V6),
+    (6, V7),
+    (7, V8),
+];
 
 /// The most findings one verdict may carry (D212 (6)).
 const MAX_FINDINGS: usize = 30;
@@ -244,6 +262,7 @@ impl ReviewStore {
                     kind: thread.kind,
                     severity: thread.severity,
                     verdict: None,
+                    branch: None,
                 },
             )
         })();
@@ -309,6 +328,7 @@ impl ReviewStore {
                     kind: ReviewKind::Flag,
                     severity: Some(finding.severity),
                     verdict: Some(id),
+                    branch: Some(&new.branch),
                 },
             )?);
         }
@@ -402,6 +422,32 @@ impl ReviewStore {
             ),
             params![branch],
         )
+    }
+
+    /// The findings of the verdicts of `branch`, as `(comment id, severity, status)`, in id
+    /// order, whatever their status and whether or not retention has unlinked their verdict
+    /// (D212 (6), D215 (2)). The `findings` gate reads them.
+    pub fn branch_findings(
+        &self,
+        branch: &str,
+    ) -> Result<Vec<(i64, ReviewSeverity, ReviewStatus)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, severity, status FROM comments
+             WHERE parent IS NULL AND finding_branch = ?1 AND severity IS NOT NULL
+             ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![branch], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, severity, status) = row?;
+            Ok((id, parse_severity(&severity)?, parse_status(&status)?))
+        })
+        .collect()
     }
 
     /// How many agent-started threads are not resolved in the repository (D200).
@@ -701,6 +747,8 @@ struct AgentRoot<'a> {
     severity: Option<ReviewSeverity>,
     /// The verdict a finding belongs to; `None` for a thread an agent starts on its own.
     verdict: Option<i64>,
+    /// The branch of that verdict, kept with the finding after retention unlinks it (D212 (6)).
+    branch: Option<&'a str>,
 }
 
 /// Inserts an open agent-started root comment and returns its id. The caller owns the
@@ -709,8 +757,8 @@ fn insert_agent_root(conn: &Connection, root: &AgentRoot) -> Result<i64, StoreEr
     let anchor_json = to_json(root.anchor)?;
     conn.execute(
         "INSERT INTO comments (path, body, status, anchor_json, created_at, author, kind,
-         severity, snapshot, verdict_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         severity, snapshot, verdict_id, finding_branch)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             root.path,
             root.body,
@@ -722,6 +770,7 @@ fn insert_agent_root(conn: &Connection, root: &AgentRoot) -> Result<i64, StoreEr
             root.severity.map(severity_text),
             root.snapshot,
             root.verdict,
+            root.branch,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -1678,6 +1727,7 @@ mod tests {
             "comments verdict_id INTEGER 0 NULL 0",
             "fk verdicts verdict_id id SET NULL",
             "index verdicts_by_reviewer on verdicts",
+            "comments finding_branch TEXT 0 NULL 0",
         ] {
             assert!(
                 fresh_shape.iter().any(|l| l == line),
@@ -2002,6 +2052,80 @@ mod tests {
                 .expect("the thread limit is still five threads");
         }
         assert_eq!(store.open_agent_threads_on("a.rs").expect("count"), 5);
+    }
+
+    fn v7_database(path: &Path) {
+        v6_database(path);
+        let conn = Connection::open(path).expect("open");
+        conn.execute_batch(V7).expect("v7");
+        conn.execute(
+            "INSERT INTO comments (path, body, status, anchor_json, created_at, author, kind,
+             severity, verdict_id)
+             VALUES ('a.rs', 'risky', 'open', '{\"text\":\"x\",\"before\":[],\"after\":[],\"start_line\":1}',
+             6, 'agent:x', 'flag', 'high', 1)",
+            [],
+        )
+        .expect("finding of verdict 1");
+        conn.pragma_update(None, "user_version", 7)
+            .expect("version");
+    }
+
+    #[test]
+    fn a_version_seven_database_backfills_the_branch_of_existing_findings() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("review.db");
+        v7_database(&path);
+        let store = ReviewStore::open(&path).expect("migrate");
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
+        let found = store.branch_findings("feat").expect("findings");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1, ReviewSeverity::High);
+        assert_eq!(found[0].2, ReviewStatus::Open);
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM comments WHERE verdict_id = 1 AND finding_branch = 'feat'"
+            ),
+            1
+        );
+        let fresh = ReviewStore::open_in_memory().expect("fresh");
+        assert_eq!(shape(&store), shape(&fresh));
+    }
+
+    #[test]
+    fn a_finding_keeps_its_branch_after_retention_deleted_its_verdict() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        let mut high = None;
+        for at in 1..=6 {
+            let finding = if at == 1 {
+                new_finding("a.rs", ReviewSeverity::High, "open risk")
+            } else {
+                new_finding("a.rs", ReviewSeverity::Low, "minor")
+            };
+            let recorded = store
+                .record_verdict(&new_verdict("security", "feat", at), &[finding])
+                .expect("record");
+            if at == 1 {
+                high = Some(recorded.comments[0]);
+            }
+        }
+        let high = high.expect("the first finding");
+        assert_eq!(
+            count(
+                &store,
+                &format!("SELECT COUNT(*) FROM comments WHERE id = {high} AND verdict_id IS NULL")
+            ),
+            1
+        );
+        let found = store.branch_findings("feat").expect("findings");
+        assert!(
+            found.iter().any(|(id, severity, status)| *id == high
+                && *severity == ReviewSeverity::High
+                && *status == ReviewStatus::Open),
+            "{found:?}"
+        );
+        assert_eq!(found.len(), 6);
+        assert!(store.branch_findings("main").expect("none").is_empty());
     }
 
     #[test]

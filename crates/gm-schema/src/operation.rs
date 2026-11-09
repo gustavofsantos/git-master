@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::conflict::{ConflictFileRead, ConflictSite, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
+use crate::gates::GatesStatus;
 use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
@@ -707,6 +708,14 @@ pub enum CommandKind {
     /// Reads the intent of `branch`. A read: never recorded (D28). Answers `BranchDescriptionRead`.
     ReadBranchDescription {
         branch: String,
+    },
+    /// Reads the gate check of `branch` (D212 (5), D215): every gate, whether it applies and
+    /// passes, the reviewers that still need a verdict for the tip, the intent and the approval.
+    /// `branch` defaults to the branch HEAD is on, and a detached HEAD needs one. A read: never
+    /// recorded (D28). Answers `GatesStatusRead`.
+    GatesStatus {
+        #[serde(default)]
+        branch: Option<String>,
     },
     /// Replaces the body of review comment `id`. Human only.
     EditReviewComment {
@@ -1580,6 +1589,14 @@ pub enum Event {
         branch: String,
         text: Option<String>,
     },
+    /// Answers `GatesStatus`: the gate check of the branch, its intent and its approval, with
+    /// whether the approval is stale (D215 (2)).
+    GatesStatusRead {
+        id: OperationId,
+        status: GatesStatus,
+        intent: Option<String>,
+        approval: Option<Approval>,
+    },
     /// Answers `LoadReviewSnapshotText` for comment `comment`: the lines it
     /// covered in the snapshot, empty when there is no snapshot or the file was
     /// not in it.
@@ -2090,6 +2107,36 @@ mod tests {
         assert_eq!(json["type"], "branch_description_read");
         assert_eq!(json["text"], "why");
         assert_eq!(serde_json::from_value::<Event>(json).unwrap(), text);
+    }
+
+    #[test]
+    fn gates_status_wire_format_is_tagged() {
+        let read = serde_json::to_value(CommandKind::GatesStatus { branch: None }).unwrap();
+        assert_eq!(read["type"], "gates_status");
+        assert!(read["branch"].is_null());
+        let bare: CommandKind =
+            serde_json::from_value(serde_json::json!({ "type": "gates_status" })).unwrap();
+        assert_eq!(bare, CommandKind::GatesStatus { branch: None });
+        let event = Event::GatesStatusRead {
+            id: OperationId(9),
+            status: GatesStatus {
+                branch: "feat".into(),
+                head: "c".repeat(40),
+                ready: false,
+                gates: Vec::new(),
+                missing: Vec::new(),
+                errors: vec!["gates.json: not JSON".into()],
+            },
+            intent: Some("why".into()),
+            approval: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "gates_status_read");
+        assert_eq!(json["status"]["ready"], false);
+        assert_eq!(json["status"]["errors"][0], "gates.json: not JSON");
+        assert_eq!(json["intent"], "why");
+        assert!(json["approval"].is_null());
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
     }
 
     #[test]

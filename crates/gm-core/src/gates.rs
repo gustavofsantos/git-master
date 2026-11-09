@@ -237,6 +237,7 @@ fn evaluate_gate(
         not_applicable: None,
         passed: true,
         reason: None,
+        settings: settings_of(gate),
     };
     if let Err(why) = applies(&gate.when.branches, &gate.when.paths, facts) {
         return GateOutcome {
@@ -259,6 +260,22 @@ fn evaluate_gate(
         reason: blocked,
         ..base
     }
+}
+
+/// The gate's configuration as a JSON object: the fields of its kind, `on` and `when`. `id` and
+/// `kind` are the outcome's own fields, so they are left out.
+fn settings_of(gate: &GateDef) -> Value {
+    let mut object = match serde_json::to_value(gate) {
+        Ok(Value::Object(object)) => object,
+        _ => Map::new(),
+    };
+    object.remove("id");
+    object.remove("kind");
+    object.insert(
+        "when".to_owned(),
+        serde_json::to_value(&gate.when).unwrap_or(Value::Null),
+    );
+    Value::Object(object)
 }
 
 /// `fresh_verdict`: every named reviewer that is defined and applies has a verdict for the head.
@@ -899,6 +916,41 @@ mod tests {
 
     const HEAD: &str = "1234567890abcdef";
     const OLD: &str = "abcdef0123456789";
+
+    #[test]
+    fn settings_hold_the_kind_fields_on_and_when_but_not_id_or_kind() {
+        let gate = GateDef {
+            id: "no-high".to_owned(),
+            kind: GateKind::Findings {
+                severity: ReviewSeverity::High,
+            },
+            on: vec![GateOp::Push],
+            when: When::default(),
+        };
+        assert_eq!(
+            settings_of(&gate),
+            json!({"severity": "high", "on": ["push"], "when": {}})
+        );
+        let scoped = GateDef {
+            id: "style".to_owned(),
+            kind: GateKind::FreshVerdict {
+                reviewers: vec!["style".to_owned()],
+            },
+            on: vec![GateOp::Push, GateOp::Restack],
+            when: When {
+                branches: Vec::new(),
+                paths: vec!["services/**".to_owned()],
+            },
+        };
+        assert_eq!(
+            settings_of(&scoped),
+            json!({
+                "reviewers": ["style"],
+                "on": ["push", "restack"],
+                "when": {"paths": ["services/**"]}
+            })
+        );
+    }
 
     fn reviewer(name: &str, signal: ReviewerSignal) -> Reviewer {
         Reviewer {

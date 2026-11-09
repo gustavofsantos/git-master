@@ -1543,7 +1543,10 @@ impl Model {
         // Approvals and branch intents are read by the window from R3 on; the model keeps none
         // yet (D215).
         | Event::ApprovalRead { .. }
-        | Event::BranchDescriptionRead { .. } => None,
+        | Event::BranchDescriptionRead { .. }
+        // The gate check is read by the agent's tools; the window reads it from R3 on, and the
+        // model keeps none yet (D212 (5), D215).
+        | Event::GatesStatusRead { .. } => None,
             // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
             Event::HunkSuggested { .. } => {
                 if let Some(conflict) = self.conflict.as_mut() {
@@ -2003,7 +2006,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::VerdictsListed { id, .. }
         | Event::ReviewersListed { id, .. }
         | Event::ApprovalRead { id, .. }
-        | Event::BranchDescriptionRead { id, .. } => Some(*id),
+        | Event::BranchDescriptionRead { id, .. }
+        | Event::GatesStatusRead { id, .. } => Some(*id),
         Event::ThreadsChanged
         | Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }

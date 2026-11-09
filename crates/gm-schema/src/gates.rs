@@ -104,6 +104,9 @@ pub struct GateOutcome {
     pub passed: bool,
     /// Why the gate blocks, when it does.
     pub reason: Option<String>,
+    /// The gate's own configuration: the fields of its kind, `on` and `when`, as the gate file
+    /// writes them (D212 (5)). It holds reviewer names and patterns, so it is untrusted text.
+    pub settings: serde_json::Value,
 }
 
 /// Why a reviewer has no verdict for the current head.

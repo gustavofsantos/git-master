@@ -346,6 +346,7 @@ pub fn call(session: &mut Session, name: &str, args: &Value) -> Result<Value, St
         "reviewers_list" => verdict_tools::reviewers_list(session, args),
         "verdicts_list" => verdict_tools::verdicts_list(session, args),
         "verdict_record" => verdict_tools::verdict_record(session, args),
+        "gates_status" => verdict_tools::gates_status(session, args),
         other => Err(format!("there is no tool {other}")),
     }
 }

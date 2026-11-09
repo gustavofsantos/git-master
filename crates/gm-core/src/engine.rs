@@ -8,11 +8,12 @@ use serde_json::{Map, Value, json};
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Approval, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
-    ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GrepOptions, History,
-    MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE,
-    RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment,
-    ReviewStatus, Reviewer, ReviewerFileError, ReviewerSignal, ReviewerSubject, STASH_LIST_CHANGED,
-    SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
+    ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GateOp, GatesStatus,
+    GrepOptions, History, MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId,
+    OperationState, REFLOG_PAGE, RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter,
+    ReviewChange, ReviewComment, ReviewStatus, Reviewer, ReviewerFileError, ReviewerSignal,
+    ReviewerSubject, STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic,
+    WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -28,6 +29,7 @@ use crate::files::{
     Building, FilesSession, HighlightJob, HighlightReport, IndexJob, IndexReport, ReadJob,
     ReadReport, SearchJob, SearchReport, TextJob, TextReport,
 };
+use crate::gates::{self, FindingFact, GateFacts};
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::move_exec;
@@ -150,6 +152,9 @@ pub struct Engine {
     workflow_user_dir: Option<PathBuf>,
     /// The user's reviewer directory (D212 (1)): `reviewers/` of the configuration directory.
     reviewer_user_dir: Option<PathBuf>,
+    /// The user's gate file directory (D212 (2)): the configuration directory itself, where
+    /// `gates.json` sits.
+    gates_user_dir: Option<PathBuf>,
     /// The folder a deleted workflow file is moved to; see `delete_workflow_file`.
     workflow_trash_dir: Option<PathBuf>,
     /// The contexts file (`contexts.db`); see `set_contexts_db`.
@@ -363,6 +368,7 @@ impl Engine {
             script_jobs: Vec::new(),
             workflow_user_dir: loader::default_user_dir(),
             reviewer_user_dir: crate::paths::config_dir().map(|dir| reviewers::user_dir(&dir)),
+            gates_user_dir: crate::paths::config_dir(),
             workspace_home: std::env::var_os("HOME")
                 .filter(|home| !home.is_empty())
                 .map(PathBuf::from),
@@ -398,6 +404,12 @@ impl Engine {
     /// `reviewers/` of the user's config directory; tests point it at a temporary folder.
     pub fn set_reviewer_user_dir(&mut self, dir: Option<PathBuf>) {
         self.reviewer_user_dir = dir;
+    }
+
+    /// Sets the directory of the user's `gates.json` (D212 (2)). `None` reads none. The default
+    /// is the user's configuration directory; tests point it at a temporary folder.
+    pub fn set_gates_user_dir(&mut self, dir: Option<PathBuf>) {
+        self.gates_user_dir = dir;
     }
 
     /// Sets the folder deleted workflow files are moved to. `None` refuses
@@ -4399,6 +4411,7 @@ impl Engine {
                 limit,
             } => self.list_verdicts(id, branch.as_deref(), reviewer.as_deref(), *limit),
             CommandKind::ListReviewers { name } => self.list_reviewers(id, name.as_deref()),
+            CommandKind::GatesStatus { branch } => self.gates_status(id, branch.as_deref()),
             _ if is_approval_command(kind) => self.approval_command(id, actor, kind),
             _ => Err("not a review command".to_owned()),
         }
@@ -4572,6 +4585,115 @@ impl Engine {
             approved,
             intent,
         })
+    }
+
+    /// Answers `GatesStatus`: the gate check of `branch`, or of the branch HEAD is on. A
+    /// detached HEAD needs the branch named. Reads only (D28).
+    fn gates_status(
+        &mut self,
+        id: OperationId,
+        branch: Option<&str>,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let branch = match branch {
+            Some(branch) => branch.to_owned(),
+            None => self
+                .git
+                .status(&root)
+                .map_err(|e| e.0)?
+                .branch
+                .head
+                .ok_or_else(|| {
+                    "HEAD is detached; name the branch whose gates to check".to_owned()
+                })?,
+        };
+        let report = self.gates_report(&root, &branch, None)?;
+        Ok(vec![Event::GatesStatusRead {
+            id,
+            status: report.status,
+            intent: report.intent,
+            approval: report.approval,
+        }])
+    }
+
+    /// The gate check of `branch` for `op` (every gate when `op` is `None`) (D212 (5), D214,
+    /// D215). It reads the definitions of the repository and the user, the tip, the change, the
+    /// verdicts and findings of the branch, the approval and the stack parent's distance, then
+    /// calls the pure `gates::evaluate`. A file that cannot be read is an error of the status,
+    /// and a status with any error is never ready (fail closed). It blocks nothing by itself.
+    pub fn gates_report(
+        &mut self,
+        root: &Path,
+        branch: &str,
+        op: Option<GateOp>,
+    ) -> Result<GatesReport, String> {
+        let common = self.git.common_dir(root).map_err(|e| e.0)?;
+        let inputs = self.gate_facts_inputs(root, branch)?;
+        let behind_parent = self.behind_parent(root, branch);
+        let defined = reviewers::load(
+            Some(&reviewers::repo_dir(&common)),
+            self.reviewer_user_dir.as_deref(),
+        );
+        let loaded = gates::load(
+            Some(&common.join("gitmaster")),
+            self.gates_user_dir.as_deref(),
+        );
+        let store = review_store(&mut self.review, self.git.as_ref(), root)?;
+        // Every verdict the store keeps for the branch: `evaluate` picks the newest one for each
+        // reviewer whose head is the tip, so an older verdict of an earlier commit still counts
+        // after a reset back to it. Retention keeps five per reviewer, so the limit is a bound.
+        let verdicts = store
+            .list_verdicts(Some(branch), None, GATE_VERDICT_LIMIT)
+            .map_err(|e| e.0)?;
+        let findings: Vec<FindingFact> = store
+            .branch_findings(branch)
+            .map_err(|e| e.0)?
+            .into_iter()
+            .map(|(_, severity, status)| FindingFact { severity, status })
+            .collect();
+        let approval = approval_now(store, branch, Some(&inputs.head))?;
+        let facts = GateFacts {
+            branch,
+            head: &inputs.head,
+            changed_paths: inputs
+                .change
+                .as_ref()
+                .and_then(|change| change.paths.as_deref()),
+            reviewers: &defined.reviewers,
+            verdicts: &verdicts,
+            findings: &findings,
+            behind_parent,
+            approved: inputs.approved,
+        };
+        let mut status = gates::evaluate(&loaded.gates, op, &facts);
+        let mut errors: Vec<String> = defined
+            .errors
+            .into_iter()
+            .map(|(file, reason)| format!("{file}: {reason}"))
+            .collect();
+        errors.extend(loaded.errors);
+        status.ready = status.ready && errors.is_empty();
+        status.errors = errors;
+        Ok(GatesReport {
+            status,
+            intent: inputs.intent,
+            approval,
+        })
+    }
+
+    /// How many commits `branch` is behind its parent in the stack model (D214 (1)). `None` when
+    /// it has no parent, the parent is not a local branch any more, or the stack cannot be read.
+    fn behind_parent(&self, root: &Path, branch: &str) -> Option<u32> {
+        let link = self
+            .git
+            .stack_links(root)
+            .ok()?
+            .into_iter()
+            .find(|link| link.branch == branch && link.parent != branch)?;
+        self.git
+            .stack_edge(root, branch, &link.parent, link.base.as_deref())
+            .ok()
+            .map(|edge| edge.behind)
     }
 
     /// Anchors a comment on lines of `path` and keeps a snapshot of the working
@@ -5733,6 +5855,7 @@ impl Engine {
                 | CommandKind::ListReviewComments { .. }
                 | CommandKind::ListVerdicts { .. }
                 | CommandKind::ListReviewers { .. }
+                | CommandKind::GatesStatus { .. }
                 | CommandKind::ReadApproval { .. }
                 | CommandKind::ReadBranchDescription { .. }
                 | CommandKind::LoadReviewSnapshotText { .. }
@@ -5881,6 +6004,18 @@ fn review_store<'a>(
         Some(session) => Ok(&mut session.store),
         None => Err("the review store is not open".to_owned()),
     }
+}
+
+/// The most verdicts one gate check reads for a branch (D212 (5)). A reviewer keeps five, so
+/// this holds two hundred reviewers; a branch past it reads as missing verdicts, which blocks.
+const GATE_VERDICT_LIMIT: usize = 1000;
+
+/// What `Engine::gates_report` says about a branch (D212 (5), D215): the gate check, the intent
+/// (text from the repository, so untrusted) and the approval, with whether it is stale.
+pub struct GatesReport {
+    pub status: GatesStatus,
+    pub intent: Option<String>,
+    pub approval: Option<Approval>,
 }
 
 /// What the gates of a branch need, gathered by `Engine::gate_facts_inputs` (D215, D214 (1)).
@@ -6064,6 +6199,7 @@ fn is_review_command(kind: &CommandKind) -> bool {
                 | CommandKind::RecordVerdict { .. }
                 | CommandKind::ListVerdicts { .. }
                 | CommandKind::ListReviewers { .. }
+                | CommandKind::GatesStatus { .. }
         )
 }
 
