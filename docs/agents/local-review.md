@@ -144,6 +144,14 @@ When the agent marks the same comment handled again, the new "after" snapshot re
 
 Each comment appears inline in the diff. A comment opens on **Before** when it has a snapshot, which shows the anchored text as it was when you wrote the comment. Switch to **After** to see the text as it was when the agent marked it handled. Until an agent handles the comment, **After** shows the text as it is in the file now, captioned **Now**.
 
+## Comments in a workspace
+
+A comment made in a [workspace](../guide/workspaces.md) on a file of one of its members is kept with the workspace. An agent working in that member's own repository sees it too: its list shows the comments of every workspace the repository belongs to that are on the repository's own files. The path is relative to the repository, `workspace` names the folder the comment comes from, and its place is found in the repository's own checkout, so a comment shows **Outdated** when the text is no longer there. The agent can reply to these comments and mark a comment you wrote **Handled**, and the change is made where the comment is kept, so the workspace sees it. The ids of these comments are larger numbers than the repository's own: use them as they are given.
+
+The rules do not change: a thread an agent started is listed only with `author` set to `agent` or `any`, and only you resolve or dismiss a thread. A comment made inside the member's repository stays in that repository.
+
+> **Planned.** The workspace does not list the comments made inside a member's repository yet.
+
 ## Where comments are stored
 
 Comments and snapshots live outside the working tree, in the repository's `.git/gitmaster/` directory, in `review.db`. Nothing is written into your files.
