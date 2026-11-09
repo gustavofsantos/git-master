@@ -120,7 +120,7 @@ GateResult { passed: bool, blocked: Vec<Blocked { gate, reason }> }
 
 Wiring (D212 (3)): the engine calls `evaluate` itself in `handle()` for `PushWithLease` and `ApplyRestack`, before the workflow phases, so gates need no script. A block ends the command as `Vetoed` with the reasons joined and sends `GatesBlocked` for the window. `push` also becomes a phase operation so a `before.push` workflow can add rules. `ctx.verdicts()` gives scripts the same inputs. Gates live in `.git/gitmaster/gates.json`. The agent reads them through `gates_status` and `reviewers_list`. The gates apply only to operations GitMaster performs; a push typed in a terminal is not covered (Q40).
 
-**Bypass.** The human chooses **Bypass**, writes a reason, and the window sends `BypassGates { reason, then }`; the operation record (D28) keeps the gates, the reason and the time. An agent actor cannot bypass: the command is human only and is not an MCP tool.
+**Bypass.** The human chooses **Bypass**, writes a reason, and the window sends `BypassGates { gates, reason, then }` naming the gates it showed; the operation log (D28) keeps the gates and the reason, and a gate nobody named is not bypassed. An agent actor cannot bypass: the command is human only and is not an MCP tool.
 
 **Trust gate for someone else's branch.** `branch_agent_config` is a read tool. It lists the commits on the branch that are not the user's (author email differs), and for the branch's tree the agent configuration that would be loaded: `.claude/` settings and commands, hooks, `.mcp.json`, skills, plugins, `CLAUDE.md` and `AGENTS.md`. Unparseable files and symlinks count as unknown, never as empty. The `review` skill calls it first and stops for the user's confirmation when `commits_not_yours` is not empty.
 

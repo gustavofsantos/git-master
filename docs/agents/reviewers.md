@@ -101,7 +101,7 @@ The branch shows its gate state. It reads **Ready** when every gate passes, and 
 
 ### Bypass a gate
 
-If you decide to go ahead, choose **Bypass** in the message that names the gate and write the reason. The operation runs, and the gate, the reason and the time are kept in the operation log. Only you can bypass: an agent has no tool for it.
+If you decide to go ahead, choose **Bypass** in the message that names the gate and write the reason. The operation runs, and the gates you bypassed and your reason are kept in the operation log. If another gate starts to block before you confirm, GitMaster does not bypass it: it shows the block again. Only you can bypass: an agent has no tool for it.
 
 ## The intent of a change
 
