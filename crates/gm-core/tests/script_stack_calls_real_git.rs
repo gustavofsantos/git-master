@@ -98,6 +98,15 @@ enum Message {
     Remote(ScriptReport),
 }
 
+/// An empty directory of the test's own, for the user's gates and reviewers (R2h): the
+/// developer's configuration must not change what this test pushes or restacks.
+fn isolate_user_config(engine: &mut Engine, repo: &Path) {
+    let user = repo.parent().unwrap().join("user-config");
+    std::fs::create_dir_all(&user).unwrap();
+    engine.set_gates_user_dir(Some(user.clone()));
+    engine.set_reviewer_user_dir(Some(gm_core::reviewers::user_dir(&user)));
+}
+
 /// The engine of one repository, with a channel that carries its runs' effects and events.
 struct Harness {
     engine: Engine,
@@ -112,6 +121,7 @@ impl Harness {
         let effects_tx = Mutex::new(tx.clone());
         let events_tx = Mutex::new(tx.clone());
         let mut engine = Engine::new(Box::new(SubprocessGit::default()));
+        isolate_user_config(&mut engine, repo);
         engine.set_workflow_user_dir(Some(flows.to_path_buf()));
         engine.set_trust_store(TrustStore::open_in_memory().unwrap());
         engine.set_script_link(ScriptLink {

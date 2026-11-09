@@ -47,6 +47,15 @@ fn repo(base: &Path) -> PathBuf {
     main
 }
 
+/// An empty directory of the test's own, for the user's gates and reviewers (R2h): the
+/// developer's configuration must not change what this test pushes or restacks.
+fn isolate_user_config(engine: &mut Engine, repo: &Path) {
+    let user = repo.parent().unwrap().join("user-config");
+    std::fs::create_dir_all(&user).unwrap();
+    engine.set_gates_user_dir(Some(user.clone()));
+    engine.set_reviewer_user_dir(Some(gm_core::reviewers::user_dir(&user)));
+}
+
 struct Repo {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -65,6 +74,7 @@ impl Repo {
             ..SubprocessGit::default()
         };
         let mut engine = Engine::new(Box::new(git));
+        isolate_user_config(&mut engine, &root);
         let events = engine.handle(
             OperationId(1),
             &Command {
@@ -644,6 +654,7 @@ fn an_applied_record_survives_a_new_engine_and_can_be_undone() {
     repo.apply("main", &plan.plan_id);
     // A new engine on the same repository, as after closing and opening the app.
     let mut engine = Engine::new(Box::new(SubprocessGit::default()));
+    isolate_user_config(&mut engine, &repo.root);
     let human = |kind| Command {
         actor: Actor::Human,
         kind,

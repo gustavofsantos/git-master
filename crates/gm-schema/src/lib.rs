@@ -32,8 +32,8 @@ pub use files::{
     DirEntry, DirListing, FILE_HIT_LIMIT, FILE_VIEW_LIMIT, FileBody, FileHit, FileSearch, FileView,
 };
 pub use gates::{
-    GateDef, GateKind, GateLayer, GateOp, GateOutcome, GatesStatus, LayeredGate, MissingReason,
-    MissingReviewer, When,
+    Bypass, GateDef, GateKind, GateLayer, GateOp, GateOutcome, GatesStatus, LayeredGate,
+    MissingReason, MissingReviewer, When,
 };
 pub use grep::{
     GREP_FILE_LIMIT, GREP_LINE_LIMIT, GREP_TOTAL_LIMIT, GrepFile, GrepLine, GrepOptions,

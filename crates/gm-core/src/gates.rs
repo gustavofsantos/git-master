@@ -68,6 +68,9 @@ pub struct GateFacts<'a> {
     pub changed_paths: Option<&'a [String]>,
     /// Every defined reviewer, after the layers are merged.
     pub reviewers: &'a [Reviewer],
+    /// The names of the built-in presets (R2h, D212 (1)). A preset is a template, not a defined
+    /// reviewer: a gate that names one is told so, and it still blocks.
+    pub preset_names: &'a [String],
     /// The recorded verdicts for this branch. The newest one of a reviewer that matches `head`
     /// counts; a verdict for another head is stale.
     pub verdicts: &'a [Verdict],
@@ -287,7 +290,7 @@ fn fresh_verdict(
     let mut reasons = Vec::new();
     for name in names {
         let Some(reviewer) = find_reviewer(facts, name) else {
-            reasons.push(format!("reviewer {name} is not defined"));
+            reasons.push(undefined(name, facts));
             continue;
         };
         if applies(&reviewer.branches, &reviewer.paths, facts).is_err()
@@ -331,7 +334,7 @@ fn signal(
     missing: &mut BTreeMap<String, MissingReviewer>,
 ) -> Option<String> {
     let Some(reviewer) = find_reviewer(facts, name) else {
-        return Some(format!("reviewer {name} is not defined"));
+        return Some(undefined(name, facts));
     };
     if applies(&reviewer.branches, &reviewer.paths, facts).is_err() {
         return None;
@@ -494,6 +497,16 @@ fn find_reviewer<'a>(facts: &GateFacts<'a>, name: &str) -> Option<&'a Reviewer> 
         .reviewers
         .iter()
         .find(|reviewer| reviewer.name == name)
+}
+
+/// The reason a gate names a reviewer that is not defined. A preset name gets the hint that a
+/// preset is a template, so the person knows to add the reviewer (R2h, D212 (1)).
+fn undefined(name: &str, facts: &GateFacts<'_>) -> String {
+    if facts.preset_names.iter().any(|preset| preset == name) {
+        format!("reviewer {name} is not defined (it is a preset: add it as a reviewer)")
+    } else {
+        format!("reviewer {name} is not defined")
+    }
 }
 
 /// The reason a reviewer has no verdict for the head, naming the last one it has.
@@ -1050,6 +1063,7 @@ mod tests {
                 head: HEAD,
                 changed_paths: self.changed.as_deref(),
                 reviewers: &self.reviewers,
+                preset_names: &[],
                 verdicts: &self.verdicts,
                 findings: &self.findings,
                 behind_parent: self.behind,
@@ -1128,6 +1142,23 @@ mod tests {
         assert!(status.missing.is_empty());
         let signal = check(&[signal_gate("bar", "ghost", Some(json!(5)), None)], &setup);
         assert_eq!(reason(&signal, "bar"), "reviewer ghost is not defined");
+    }
+
+    #[test]
+    fn a_gate_naming_a_preset_says_it_is_a_preset_and_still_blocks() {
+        let setup = Setup::new(vec![], vec![]);
+        let presets = vec!["security".to_owned()];
+        let facts = GateFacts {
+            preset_names: &presets,
+            ..setup.facts()
+        };
+        let status = evaluate(&[fresh("review", &["security"])], None, &facts);
+        assert!(!status.ready);
+        assert_eq!(
+            reason(&status, "review"),
+            "reviewer security is not defined (it is a preset: add it as a reviewer)"
+        );
+        assert!(status.missing.is_empty());
     }
 
     #[test]
@@ -1801,6 +1832,7 @@ mod tests {
                     head: HEAD,
                     changed_paths: Some(changed.as_slice()),
                     reviewers: &self.reviewers,
+                    preset_names: &[],
                     verdicts: &self.verdicts,
                     findings: &self.findings,
                     behind_parent: self.behind,

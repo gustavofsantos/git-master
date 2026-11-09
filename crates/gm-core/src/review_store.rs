@@ -17,15 +17,15 @@ use std::path::Path;
 use std::time::Duration;
 
 use gm_schema::{
-    Approval, ReviewAnchor, ReviewComment, ReviewKind, ReviewReply, ReviewSeverity, ReviewStatus,
-    ReviewerSignal, Verdict, VerdictFinding,
+    Approval, Bypass, GateOp, ReviewAnchor, ReviewComment, ReviewKind, ReviewReply, ReviewSeverity,
+    ReviewStatus, ReviewerSignal, Verdict, VerdictFinding,
 };
 use rusqlite::{Connection, OptionalExtension, Params, TransactionBehavior, params};
 
 use crate::review;
 
 /// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 /// How long a writer waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -97,9 +97,23 @@ UPDATE comments SET finding_branch = (SELECT branch FROM verdicts WHERE verdicts
     WHERE verdict_id IS NOT NULL;
 ";
 
+/// Version 8 to 9 (D212 (4), R2h): the audit of bypasses, one row per bypass, written before the
+/// bypassed command runs, so it survives the app. A finding also keeps the commit it was made on
+/// (`finding_head`), so a rename of its branch does not let it escape the `findings` gate: a
+/// finding whose commit is an ancestor of the branch's tip counts. Existing findings take the
+/// commit of the verdict they were linked to; a finding that retention unlinked keeps `NULL`.
+const V9: &str = "
+CREATE TABLE bypasses (id INTEGER PRIMARY KEY, branch TEXT NOT NULL, head TEXT NOT NULL,
+    operation TEXT NOT NULL, gates TEXT NOT NULL, reason TEXT NOT NULL, actor TEXT NOT NULL,
+    at INTEGER NOT NULL);
+ALTER TABLE comments ADD COLUMN finding_head TEXT;
+UPDATE comments SET finding_head = (SELECT head FROM verdicts WHERE verdicts.id = comments.verdict_id)
+    WHERE verdict_id IS NOT NULL;
+";
+
 /// The upgrades after the first version, in order. Each runs when the database is at its
 /// `from` version, so a database several versions behind runs every step after it.
-const UPGRADES: [(i64, &str); 7] = [
+const UPGRADES: [(i64, &str); 8] = [
     (1, V2),
     (2, V3),
     (3, V4),
@@ -107,6 +121,7 @@ const UPGRADES: [(i64, &str); 7] = [
     (5, V6),
     (6, V7),
     (7, V8),
+    (8, V9),
 ];
 
 /// The most findings one verdict may carry (D212 (6)).
@@ -263,6 +278,7 @@ impl ReviewStore {
                     severity: thread.severity,
                     verdict: None,
                     branch: None,
+                    head: None,
                 },
             )
         })();
@@ -329,6 +345,7 @@ impl ReviewStore {
                     severity: Some(finding.severity),
                     verdict: Some(id),
                     branch: Some(&new.branch),
+                    head: Some(&new.head),
                 },
             )?);
         }
@@ -446,6 +463,96 @@ impl ReviewStore {
         rows.map(|row| {
             let (id, severity, status) = row?;
             Ok((id, parse_severity(&severity)?, parse_status(&status)?))
+        })
+        .collect()
+    }
+
+    /// The finding comments that may count for `branch` (R2h): every root finding with a severity
+    /// and a branch, whose branch is `branch` or which has a commit to test against the branch's
+    /// tip, as `(comment id, severity, status, finding branch, finding head)`, in id order. The
+    /// engine decides which of them count: a finding counts for `branch` when its branch is
+    /// `branch`, or when its commit is an ancestor of `branch`'s tip.
+    pub fn branch_findings_with_heads(&self, branch: &str) -> Result<Vec<FindingRow>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, severity, status, finding_branch, finding_head FROM comments
+             WHERE parent IS NULL AND severity IS NOT NULL AND finding_branch IS NOT NULL
+             AND (finding_branch = ?1 OR finding_head IS NOT NULL)
+             ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![branch], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, severity, status, finding_branch, finding_head) = row?;
+            Ok((
+                id,
+                parse_severity(&severity)?,
+                parse_status(&status)?,
+                finding_branch,
+                finding_head,
+            ))
+        })
+        .collect()
+    }
+
+    /// Writes one bypass row (D212 (4)) and returns its id. The engine calls it before the
+    /// bypassed command runs, and refuses the bypass when this fails.
+    pub fn record_bypass(&mut self, new: &NewBypass) -> Result<i64, StoreError> {
+        let gates = serde_json::to_string(&new.gates).map_err(|e| StoreError(e.to_string()))?;
+        self.conn.execute(
+            "INSERT INTO bypasses (branch, head, operation, gates, reason, actor, at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                new.branch,
+                new.head,
+                operation_text(new.operation),
+                gates,
+                new.reason,
+                new.actor,
+                new.at,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// The bypasses, newest first, of `branch` when it is given, at most `limit` (D212 (4)).
+    pub fn bypasses(&self, branch: Option<&str>, limit: usize) -> Result<Vec<Bypass>, StoreError> {
+        let limit = i64::try_from(limit).map_err(|e| StoreError(e.to_string()))?;
+        let mut statement = self.conn.prepare(
+            "SELECT id, branch, head, operation, gates, reason, actor, at FROM bypasses
+             WHERE ?1 IS NULL OR branch = ?1
+             ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![branch, limit], |row| {
+            Ok(RawBypass {
+                id: row.get(0)?,
+                branch: row.get(1)?,
+                head: row.get(2)?,
+                operation: row.get(3)?,
+                gates: row.get(4)?,
+                reason: row.get(5)?,
+                actor: row.get(6)?,
+                at: row.get(7)?,
+            })
+        })?;
+        rows.map(|row| {
+            let raw = row?;
+            Ok(Bypass {
+                id: raw.id,
+                branch: raw.branch,
+                head: raw.head,
+                operation: parse_operation(&raw.operation)?,
+                gates: serde_json::from_str(&raw.gates).map_err(|e| StoreError(e.to_string()))?,
+                reason: raw.reason,
+                actor: raw.actor,
+                at: raw.at,
+            })
         })
         .collect()
     }
@@ -749,6 +856,9 @@ struct AgentRoot<'a> {
     verdict: Option<i64>,
     /// The branch of that verdict, kept with the finding after retention unlinks it (D212 (6)).
     branch: Option<&'a str>,
+    /// The commit that verdict judged, kept the same way (R2h): a finding whose commit is an
+    /// ancestor of its branch's tip counts for that branch after a rename.
+    head: Option<&'a str>,
 }
 
 /// Inserts an open agent-started root comment and returns its id. The caller owns the
@@ -757,8 +867,8 @@ fn insert_agent_root(conn: &Connection, root: &AgentRoot) -> Result<i64, StoreEr
     let anchor_json = to_json(root.anchor)?;
     conn.execute(
         "INSERT INTO comments (path, body, status, anchor_json, created_at, author, kind,
-         severity, snapshot, verdict_id, finding_branch)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+         severity, snapshot, verdict_id, finding_branch, finding_head)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             root.path,
             root.body,
@@ -771,6 +881,7 @@ fn insert_agent_root(conn: &Connection, root: &AgentRoot) -> Result<i64, StoreEr
             root.snapshot,
             root.verdict,
             root.branch,
+            root.head,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -910,6 +1021,42 @@ fn severity_text(severity: ReviewSeverity) -> &'static str {
     }
 }
 
+/// One row of `branch_findings_with_heads`: id, severity, status, finding branch and finding head.
+pub type FindingRow = (
+    i64,
+    ReviewSeverity,
+    ReviewStatus,
+    Option<String>,
+    Option<String>,
+);
+
+/// One bypass row as SQLite gives it, before the gates and the operation are parsed.
+struct RawBypass {
+    id: i64,
+    branch: String,
+    head: String,
+    operation: String,
+    gates: String,
+    reason: String,
+    actor: String,
+    at: i64,
+}
+
+fn operation_text(operation: GateOp) -> &'static str {
+    match operation {
+        GateOp::Push => "push",
+        GateOp::Restack => "restack",
+    }
+}
+
+fn parse_operation(text: &str) -> Result<GateOp, StoreError> {
+    match text {
+        "push" => Ok(GateOp::Push),
+        "restack" => Ok(GateOp::Restack),
+        other => Err(StoreError(format!("unknown bypass operation {other:?}"))),
+    }
+}
+
 fn parse_severity(text: &str) -> Result<ReviewSeverity, StoreError> {
     match text {
         "low" => Ok(ReviewSeverity::Low),
@@ -1020,6 +1167,20 @@ pub struct NewFinding {
     pub anchor: ReviewAnchor,
     /// Object id of the snapshot taken when the finding was made, when there is one.
     pub snapshot: Option<String>,
+}
+
+/// A bypass to audit (D212 (4)): the branch and its tip, the operation, the gate ids named, the
+/// trimmed reason, the actor and the time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewBypass {
+    pub branch: String,
+    pub head: String,
+    pub operation: GateOp,
+    pub gates: Vec<String>,
+    pub reason: String,
+    pub actor: String,
+    /// Milliseconds since the Unix epoch.
+    pub at: i64,
 }
 
 /// What `record_verdict` wrote: the verdict's id and the ids of its findings, in order.
@@ -1646,6 +1807,7 @@ mod tests {
             "SELECT 'fk ' || \"table\" || ' ' || \"from\" || ' ' || \"to\" || ' ' || on_delete FROM pragma_foreign_key_list('comments')",
             "SELECT 'index ' || name || ' on ' || tbl_name FROM sqlite_master WHERE type = 'index' ORDER BY name",
             "SELECT 'approvals ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('approvals')",
+            "SELECT 'bypasses ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('bypasses')",
         ];
         for sql in queries {
             let rows: Vec<String> = store
@@ -2126,6 +2288,119 @@ mod tests {
         );
         assert_eq!(found.len(), 6);
         assert!(store.branch_findings("main").expect("none").is_empty());
+    }
+
+    fn v8_database(path: &Path) {
+        v7_database(path);
+        let conn = Connection::open(path).expect("open");
+        conn.execute_batch(V8).expect("v8");
+        conn.pragma_update(None, "user_version", 8)
+            .expect("version");
+    }
+
+    #[test]
+    fn a_version_eight_database_backfills_the_finding_head_and_gains_the_bypass_table() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("review.db");
+        v8_database(&path);
+        let store = ReviewStore::open(&path).expect("migrate");
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
+        assert_eq!(
+            count(
+                &store,
+                &format!(
+                    "SELECT COUNT(*) FROM comments WHERE verdict_id = 1 AND finding_head = '{}'",
+                    "a".repeat(40)
+                )
+            ),
+            1,
+            "the finding takes the commit of its verdict"
+        );
+        assert!(store.bypasses(None, 5).expect("bypasses").is_empty());
+        let fresh = ReviewStore::open_in_memory().expect("fresh");
+        assert_eq!(shape(&store), shape(&fresh));
+    }
+
+    fn new_bypass(branch: &str, at: i64) -> NewBypass {
+        NewBypass {
+            branch: branch.to_owned(),
+            head: "b".repeat(40),
+            operation: GateOp::Push,
+            gates: vec!["security".to_owned(), "gates-file".to_owned()],
+            reason: "hotfix".to_owned(),
+            actor: "human".to_owned(),
+            at,
+        }
+    }
+
+    #[test]
+    fn bypasses_round_trip_newest_first_and_filter_by_branch_and_limit() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        store.record_bypass(&new_bypass("feat", 1)).expect("first");
+        store.record_bypass(&new_bypass("other", 2)).expect("other");
+        let mut restack = new_bypass("feat", 3);
+        restack.operation = GateOp::Restack;
+        restack.reason = "restack past billing".to_owned();
+        store.record_bypass(&restack).expect("restack");
+
+        let all = store.bypasses(None, 10).expect("all");
+        assert_eq!(
+            all.iter().map(|bypass| bypass.at).collect::<Vec<_>>(),
+            [3, 2, 1]
+        );
+        let feat = store.bypasses(Some("feat"), 10).expect("feat");
+        assert_eq!(
+            feat.iter().map(|bypass| bypass.at).collect::<Vec<_>>(),
+            [3, 1]
+        );
+        assert_eq!(feat[0].operation, GateOp::Restack);
+        assert_eq!(feat[0].reason, "restack past billing");
+        assert_eq!(feat[1].operation, GateOp::Push);
+        assert_eq!(feat[1].gates, ["security", "gates-file"]);
+        assert_eq!(feat[1].head, "b".repeat(40));
+        assert_eq!(feat[1].actor, "human");
+        assert_eq!(store.bypasses(None, 2).expect("limit").len(), 2);
+        assert!(store.bypasses(Some("nope"), 10).expect("none").is_empty());
+    }
+
+    #[test]
+    fn a_finding_keeps_its_commit_and_the_candidates_are_its_branch_or_a_commit_of_a_verdict() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        store
+            .record_verdict(
+                &new_verdict("security", "feat", 1),
+                &[new_finding("a.rs", ReviewSeverity::High, "on feat")],
+            )
+            .expect("feat");
+        let mut other = new_verdict("security", "other", 2);
+        other.head = "c".repeat(40);
+        store
+            .record_verdict(
+                &other,
+                &[new_finding("a.rs", ReviewSeverity::Low, "on other")],
+            )
+            .expect("other");
+        store
+            .add("a.rs", "a person's comment", &anchor("x", 1), 3)
+            .expect("a plain comment");
+
+        let feat = store.branch_findings_with_heads("feat").expect("feat");
+        assert_eq!(feat.len(), 2, "{feat:?}");
+        assert_eq!(feat[0].1, ReviewSeverity::High);
+        assert_eq!(feat[0].3.as_deref(), Some("feat"));
+        assert_eq!(feat[0].4.as_deref(), Some("a".repeat(40).as_str()));
+        assert_eq!(feat[1].3.as_deref(), Some("other"));
+        assert_eq!(feat[1].4.as_deref(), Some("c".repeat(40).as_str()));
+        let renamed = store.branch_findings_with_heads("feat2").expect("renamed");
+        assert_eq!(renamed.len(), 2, "a rename still sees both: {renamed:?}");
+        assert!(
+            store
+                .branch_findings_with_heads("nothing")
+                .expect("none")
+                .iter()
+                .all(|row| row.4.is_some()),
+            "a branch with no finding of its own sees only the findings that have a commit"
+        );
     }
 
     #[test]

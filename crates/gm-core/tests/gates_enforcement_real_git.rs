@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
 use gm_core::git::SubprocessGit;
-use gm_core::{Engine, reviewers};
+use gm_core::{Engine, GitPort, reviewers};
 use gm_schema::{
-    Actor, Command, CommandKind, Event, FindingInput, GateOp, GateOutcome, OperationId,
-    OperationState, RestackPlan, ReviewSeverity, Reviewer, ReviewerDirection, ReviewerSignal,
-    ReviewerSource, ReviewerSubject,
+    Actor, Bypass, Command, CommandKind, Event, FindingInput, GateOp, GateOutcome, GatesStatus,
+    OperationId, OperationState, RestackPlan, ReviewSeverity, Reviewer, ReviewerDirection,
+    ReviewerSignal, ReviewerSource, ReviewerSubject, Verdict,
 };
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -793,4 +793,331 @@ fn a_bypass_naming_an_extra_gate_that_does_not_block_still_runs_and_records_it()
             .contains(&"bypassed gates: security, ghost (errors: 0); reason: ship it".to_owned()),
     );
     assert!(!remote_tip(&fx.origin, "feat").is_empty());
+}
+
+/// The bypasses of a `BypassesListed` event.
+fn bypasses_of(events: &[Event]) -> Vec<Bypass> {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::BypassesListed { bypasses, .. } => Some(bypasses.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no BypassesListed in {events:?}"))
+}
+
+/// The gate check of a `GatesStatusRead` event.
+fn status_of(events: &[Event]) -> GatesStatus {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::GatesStatusRead { status, .. } => Some(status.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no GatesStatusRead in {events:?}"))
+}
+
+/// The verdicts of a `VerdictsListed` event.
+fn verdicts_of(events: &[Event]) -> Vec<Verdict> {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::VerdictsListed { verdicts, .. } => Some(verdicts.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no VerdictsListed in {events:?}"))
+}
+
+/// The gate of `status` called `id`.
+fn gate_named<'a>(status: &'a GatesStatus, id: &str) -> &'a GateOutcome {
+    status
+        .gates
+        .iter()
+        .find(|gate| gate.id == id)
+        .unwrap_or_else(|| panic!("no gate {id} in {status:?}"))
+}
+
+/// The `findings` gate of high severity that the push fixture uses.
+const NO_HIGH: &str = r#"{"id":"no-high","kind":"findings","severity":"high","on":["push"]}"#;
+
+/// A high finding on line 2 of `f.txt`.
+fn high_finding() -> FindingInput {
+    FindingInput {
+        severity: ReviewSeverity::High,
+        path: "f.txt".to_owned(),
+        start_line: 2,
+        end_line: 2,
+        body: "unchecked input".to_owned(),
+    }
+}
+
+/// A bypass of the blocked push of `feat` that names `security`, with `reason`.
+fn bypass_push(reason: &str) -> CommandKind {
+    CommandKind::BypassGates {
+        gates: vec!["security".into()],
+        reason: reason.into(),
+        then: Box::new(CommandKind::PushWithLease),
+    }
+}
+
+/// A push fixture whose `security` gate blocks the push, with a reviewer file for `security`.
+fn blocked_push_fixture() -> Push {
+    let fx = push_fixture();
+    save_security(&fx.repo);
+    write_repo_gates(&fx.repo, &format!(r#"{{"gates":[{FRESH_SECURITY}]}}"#));
+    fx
+}
+
+#[test]
+fn a_bypass_writes_an_audit_row_with_the_gates_the_person_named_and_the_reason() {
+    let fx = blocked_push_fixture();
+    let mut session = Session::open(&fx.repo, &fx.user);
+    let head = git(&fx.repo, &["rev-parse", "feat"]);
+
+    let bypassed = session.remote(bypass_push("  hotfix for billing  "));
+    assert_eq!(state(&bypassed), OperationState::Done, "{bypassed:?}");
+
+    let rows = bypasses_of(&session.human(CommandKind::ListBypasses {
+        branch: None,
+        limit: 0,
+    }));
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row.branch, "feat");
+    assert_eq!(row.head, head, "the audit names the tip the push was about");
+    assert_eq!(row.operation, GateOp::Push);
+    assert_eq!(row.gates, ["security"]);
+    assert_eq!(row.reason, "hotfix for billing");
+    assert_eq!(row.actor, "human");
+    assert!(row.at > 0);
+}
+
+#[test]
+fn the_audit_row_survives_closing_the_engine_and_opening_a_new_one() {
+    let fx = blocked_push_fixture();
+    let mut session = Session::open(&fx.repo, &fx.user);
+    let bypassed = session.remote(bypass_push("hotfix for billing"));
+    assert_eq!(state(&bypassed), OperationState::Done, "{bypassed:?}");
+    drop(session);
+
+    let mut again = Session::open(&fx.repo, &fx.user);
+    let rows = bypasses_of(&again.human(CommandKind::ListBypasses {
+        branch: None,
+        limit: 0,
+    }));
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].reason, "hotfix for billing");
+    assert_eq!(rows[0].gates, ["security"]);
+}
+
+#[test]
+fn a_bypass_whose_audit_row_cannot_be_written_does_not_run_the_push() {
+    let fx = blocked_push_fixture();
+    let mut session = Session::open(&fx.repo, &fx.user);
+    // Opening the store creates review.db; a trigger then refuses every audit insert, made from
+    // another connection, so the write fails for the engine.
+    session.human(CommandKind::ListBypasses {
+        branch: None,
+        limit: 0,
+    });
+    let database = fx.repo.join(".git").join("gitmaster").join("review.db");
+    let other = rusqlite::Connection::open(&database).unwrap();
+    other
+        .execute_batch(
+            "CREATE TRIGGER refuse_audit BEFORE INSERT ON bypasses
+             BEGIN SELECT RAISE(ABORT, 'the audit is read only'); END;",
+        )
+        .unwrap();
+    drop(other);
+
+    let events = session.remote(bypass_push("hotfix for billing"));
+    assert_eq!(state(&events), OperationState::Failed, "{events:?}");
+    let detail = ended(&events).1.unwrap_or_default();
+    assert!(
+        detail.starts_with("the bypass is refused, its audit row was not written:"),
+        "{detail}"
+    );
+    assert!(
+        details_in(&events, OperationState::Gating).is_empty(),
+        "{events:?}"
+    );
+    assert!(
+        remote_tip(&fx.origin, "feat").is_empty(),
+        "the push went out without its audit row"
+    );
+}
+
+#[test]
+fn list_bypasses_returns_the_newest_first_and_filters_by_branch_and_limit() {
+    let fx = blocked_push_fixture();
+    let mut session = Session::open(&fx.repo, &fx.user);
+    let first = session.remote(bypass_push("first reason"));
+    assert_eq!(state(&first), OperationState::Done, "{first:?}");
+    let second = session.remote(bypass_push("second reason"));
+    assert_eq!(state(&second), OperationState::Done, "{second:?}");
+
+    let all = bypasses_of(&session.human(CommandKind::ListBypasses {
+        branch: None,
+        limit: 0,
+    }));
+    let reasons: Vec<&str> = all.iter().map(|row| row.reason.as_str()).collect();
+    assert_eq!(reasons, ["second reason", "first reason"]);
+    let on_feat = bypasses_of(&session.human(CommandKind::ListBypasses {
+        branch: Some("feat".into()),
+        limit: 0,
+    }));
+    assert_eq!(on_feat.len(), 2);
+    let elsewhere = bypasses_of(&session.human(CommandKind::ListBypasses {
+        branch: Some("other".into()),
+        limit: 0,
+    }));
+    assert!(elsewhere.is_empty());
+    let newest = bypasses_of(&session.human(CommandKind::ListBypasses {
+        branch: None,
+        limit: 1,
+    }));
+    assert_eq!(newest.len(), 1);
+    assert_eq!(newest[0].reason, "second reason");
+}
+
+#[test]
+fn a_refused_bypass_writes_no_audit_row() {
+    let fx = blocked_push_fixture();
+    let mut session = Session::open(&fx.repo, &fx.user);
+
+    let empty = session.remote(bypass_push("   "));
+    assert_eq!(state(&empty), OperationState::Failed, "{empty:?}");
+    let agent_try = session.send(agent(), bypass_push("please"));
+    assert_eq!(state(&agent_try), OperationState::Failed, "{agent_try:?}");
+    write_repo_gates(
+        &fx.repo,
+        &format!(r#"{{"gates":[{APPROVED_PUSH},{FRESH_SECURITY}]}}"#),
+    );
+    let stale = session.remote(bypass_push("ship it"));
+    assert_eq!(state(&stale), OperationState::Failed, "{stale:?}");
+    assert!(
+        ended(&stale).1.unwrap_or_default().contains("look again"),
+        "{stale:?}"
+    );
+
+    let rows = bypasses_of(&session.human(CommandKind::ListBypasses {
+        branch: None,
+        limit: 0,
+    }));
+    assert!(rows.is_empty(), "{rows:?}");
+}
+
+#[test]
+fn the_git_port_answers_ancestry_for_real_commits_and_refuses_a_missing_one() {
+    let fx = push_fixture();
+    let adapter = SubprocessGit::default();
+    let main = git(&fx.repo, &["rev-parse", "main"]);
+    let feat = git(&fx.repo, &["rev-parse", "feat"]);
+    assert!(adapter.is_ancestor(&fx.repo, &main, &feat).unwrap());
+    assert!(adapter.is_ancestor(&fx.repo, &feat, &feat).unwrap());
+    assert!(!adapter.is_ancestor(&fx.repo, &feat, &main).unwrap());
+    assert!(
+        adapter
+            .is_ancestor(&fx.repo, &"1".repeat(40), &feat)
+            .is_err(),
+        "a commit the repository does not have is an error, which fails closed"
+    );
+}
+
+#[test]
+fn a_finding_on_a_renamed_branch_still_blocks_the_findings_gate() {
+    let fx = push_fixture();
+    save_security(&fx.repo);
+    write_repo_gates(&fx.repo, &format!(r#"{{"gates":[{NO_HIGH}]}}"#));
+    let mut session = Session::open(&fx.repo, &fx.user);
+    let recorded = session.agent(security_verdict(vec![high_finding()]));
+    assert_eq!(state(&recorded), OperationState::Done, "{recorded:?}");
+    let before = status_of(&session.human(CommandKind::GatesStatus {
+        branch: Some("feat".into()),
+    }));
+    assert!(!gate_named(&before, "no-high").passed, "{before:?}");
+
+    git(&fx.repo, &["branch", "-m", "feat", "feat2"]);
+    let after = status_of(&session.human(CommandKind::GatesStatus {
+        branch: Some("feat2".into()),
+    }));
+    assert!(
+        !gate_named(&after, "no-high").passed,
+        "the finding escaped the rename: {after:?}"
+    );
+    assert!(!after.ready);
+}
+
+#[test]
+fn a_finding_on_an_unrelated_branch_does_not_block_another_branch() {
+    let fx = push_fixture();
+    save_security(&fx.repo);
+    write_repo_gates(&fx.repo, &format!(r#"{{"gates":[{NO_HIGH}]}}"#));
+    let mut session = Session::open(&fx.repo, &fx.user);
+    // `other` starts from `main` as `feat` does, so neither tip contains the other's commit.
+    git(&fx.repo, &["checkout", "-q", "-b", "other", "main"]);
+    commit(&fx.repo, "one\ntwo\nthree\nfour\n", "other change");
+    let recorded = session.agent(CommandKind::RecordVerdict {
+        reviewer: "security".to_owned(),
+        branch: "other".to_owned(),
+        head: "HEAD".to_owned(),
+        value: "low".to_owned(),
+        rationale: "Checked the change.".to_owned(),
+        findings: vec![high_finding()],
+    });
+    assert_eq!(state(&recorded), OperationState::Done, "{recorded:?}");
+
+    let other = status_of(&session.human(CommandKind::GatesStatus {
+        branch: Some("other".into()),
+    }));
+    assert!(!gate_named(&other, "no-high").passed, "{other:?}");
+    let feat = status_of(&session.human(CommandKind::GatesStatus {
+        branch: Some("feat".into()),
+    }));
+    assert!(gate_named(&feat, "no-high").passed, "{feat:?}");
+}
+
+#[test]
+fn a_preset_name_is_refused_as_a_reviewer_until_a_file_defines_it_and_a_gate_says_why() {
+    let fx = push_fixture();
+    write_repo_gates(&fx.repo, &format!(r#"{{"gates":[{FRESH_SECURITY}]}}"#));
+    let mut session = Session::open(&fx.repo, &fx.user);
+
+    let refused = session.agent(security_verdict(Vec::new()));
+    assert_eq!(state(&refused), OperationState::Failed, "{refused:?}");
+    assert_eq!(
+        ended(&refused).1.as_deref(),
+        Some(
+            "security is a preset, not a reviewer yet: add it as a reviewer first (Reviewers Settings, or write .git/gitmaster/reviewers/security.md)"
+        )
+    );
+    let listed = session.human(CommandKind::ListVerdicts {
+        branch: Some("feat".into()),
+        reviewer: None,
+        limit: 0,
+    });
+    assert!(verdicts_of(&listed).is_empty(), "nothing was written");
+    let status = status_of(&session.human(CommandKind::GatesStatus {
+        branch: Some("feat".into()),
+    }));
+    assert_eq!(
+        gate_named(&status, "security").reason.as_deref(),
+        Some("reviewer security is not defined (it is a preset: add it as a reviewer)")
+    );
+    let listed = session.human(CommandKind::ListReviewers { name: None });
+    let preset = listed.iter().find_map(|event| match event {
+        Event::ReviewersListed { reviewers, .. } => reviewers
+            .iter()
+            .find(|reviewer| reviewer.name == "security")
+            .cloned(),
+        _ => None,
+    });
+    assert_eq!(
+        preset.map(|reviewer| reviewer.source),
+        Some(ReviewerSource::Preset)
+    );
+
+    save_security(&fx.repo);
+    let accepted = session.agent(security_verdict(Vec::new()));
+    assert_eq!(state(&accepted), OperationState::Done, "{accepted:?}");
 }

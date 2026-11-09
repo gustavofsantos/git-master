@@ -12,8 +12,8 @@ use gm_schema::{
     GatesStatus, GrepOptions, History, MERGED_LIST_CHANGED, MemberRequest, MergedBranch,
     OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackPlan, RestackResolution,
     ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewStatus, Reviewer, ReviewerFileError,
-    ReviewerSignal, ReviewerSubject, STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, StackSnapshot,
-    WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
+    ReviewerSignal, ReviewerSource, ReviewerSubject, STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT,
+    StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -41,7 +41,7 @@ use crate::restack_resolutions::{self, Resolution};
 use crate::restack_session;
 use crate::review;
 use crate::review_session::{self, ReviewSession};
-use crate::review_store::{AgentThread, NewFinding, NewVerdict, Reply, ReviewStore};
+use crate::review_store::{AgentThread, NewBypass, NewFinding, NewVerdict, Reply, ReviewStore};
 use crate::reviewers;
 use crate::script::builtins;
 use crate::script::dry;
@@ -2495,7 +2495,16 @@ impl Engine {
                 self.advance_with(op, OperationState::Failed, Some(message), events);
                 events.push(gates_blocked_event(op.id, blocked));
             }
-            Ok(Bypass::Run(detail)) => {
+            Ok(Bypass::Run { detail, audit }) => {
+                // The audit row is written first: a bypass that cannot be audited does not run
+                // (D212 (4), R2h).
+                if let Err(reason) = self.write_bypass_audit(audit) {
+                    self.advance(op, OperationState::Gating, events);
+                    let message =
+                        format!("the bypass is refused, its audit row was not written: {reason}");
+                    self.advance_with(op, OperationState::Failed, Some(message), events);
+                    return;
+                }
                 self.advance_with(op, OperationState::Gating, Some(detail), events);
                 let inner = Command {
                     actor: op.command.actor.clone(),
@@ -2536,10 +2545,19 @@ impl Engine {
             return Err("only a push or a restack can be bypassed".to_owned());
         }
         check_bypass_gates(gates)?;
+        let (operation, branch, head) = self.bypass_subject(then)?;
+        let audit = BypassAudit {
+            branch,
+            head,
+            operation,
+            gates: gates.to_vec(),
+            reason: reason.to_owned(),
+        };
         let Some(blocked) = self.blocking_gates(actor, then)? else {
-            return Ok(Bypass::Run(format!(
-                "no gate was blocking; reason: {reason}"
-            )));
+            return Ok(Bypass::Run {
+                detail: format!("no gate was blocking; reason: {reason}"),
+                audit,
+            });
         };
         let unseen: Vec<String> = block_ids(&blocked.block)
             .into_iter()
@@ -2554,11 +2572,74 @@ impl Engine {
                 blocked,
             });
         }
-        Ok(Bypass::Run(format!(
-            "bypassed gates: {} (errors: {}); reason: {reason}",
-            gates.join(", "),
-            blocked.block.errors.len()
-        )))
+        Ok(Bypass::Run {
+            detail: format!(
+                "bypassed gates: {} (errors: {}); reason: {reason}",
+                gates.join(", "),
+                blocked.block.errors.len()
+            ),
+            audit,
+        })
+    }
+
+    /// The operation, branch and tip a bypass of `then` is about: a restack of its root branch, or
+    /// a push of the branch HEAD is on. A detached HEAD has no branch to audit, so it is refused.
+    fn bypass_subject(&self, then: &CommandKind) -> Result<(GateOp, String, String), String> {
+        let root = self.open_root()?;
+        let (operation, branch) = match then {
+            CommandKind::ApplyRestack { branch, .. } => (GateOp::Restack, branch.clone()),
+            _ => match self.current(&root)?.0 {
+                Some(branch) => (GateOp::Push, branch),
+                None => {
+                    return Err(
+                        "HEAD is detached; check out the branch whose push to bypass".to_owned(),
+                    );
+                }
+            },
+        };
+        let head = self
+            .git
+            .branch_tip(&root, &branch)
+            .map_err(|e| e.0)?
+            .ok_or_else(|| format!("there is no branch named {branch}"))?;
+        Ok((operation, branch, head))
+    }
+
+    /// Writes the audit row of a bypass (D212 (4), R2h). A failure refuses the bypass.
+    fn write_bypass_audit(&mut self, audit: BypassAudit) -> Result<(), String> {
+        let root = self.open_root()?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        store
+            .record_bypass(&NewBypass {
+                branch: audit.branch,
+                head: audit.head,
+                operation: audit.operation,
+                gates: audit.gates,
+                reason: audit.reason,
+                actor: "human".to_owned(),
+                at: now_ms(),
+            })
+            .map(|_| ())
+            .map_err(|e| e.0)
+    }
+
+    /// Lists the bypasses, newest first (D212 (4)). A read: never recorded (D28).
+    fn list_bypasses(
+        &mut self,
+        id: OperationId,
+        branch: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let limit = match limit {
+            0 => BYPASS_LIST_DEFAULT,
+            n => n.min(BYPASS_LIST_MAX),
+        };
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let bypasses = store
+            .bypasses(branch, usize::try_from(limit).unwrap_or(usize::MAX))
+            .map_err(|e| e.0)?;
+        Ok(vec![Event::BypassesListed { id, bypasses }])
     }
 
     /// The gates of a push or a restack that block it, for a human (D212 (3)). `None` for any
@@ -4622,6 +4703,9 @@ impl Engine {
             } => self.list_verdicts(id, branch.as_deref(), reviewer.as_deref(), *limit),
             CommandKind::ListReviewers { name } => self.list_reviewers(id, name.as_deref()),
             CommandKind::GatesStatus { branch } => self.gates_status(id, branch.as_deref()),
+            CommandKind::ListBypasses { branch, limit } => {
+                self.list_bypasses(id, branch.as_deref(), *limit)
+            }
             _ if is_approval_command(kind) => self.approval_command(id, actor, kind),
             _ => Err("not a review command".to_owned()),
         }
@@ -4855,13 +4939,12 @@ impl Engine {
         let verdicts = store
             .list_verdicts(Some(branch), None, GATE_VERDICT_LIMIT)
             .map_err(|e| e.0)?;
-        let findings: Vec<FindingFact> = store
-            .branch_findings(branch)
-            .map_err(|e| e.0)?
-            .into_iter()
-            .map(|(_, severity, status)| FindingFact { severity, status })
-            .collect();
+        let findings = counted_findings(self.git.as_ref(), store, root, branch, &inputs.head)?;
         let approval = approval_now(store, branch, Some(&inputs.head))?;
+        let preset_names: Vec<String> = reviewers::presets()
+            .into_iter()
+            .map(|preset| preset.name)
+            .collect();
         let facts = GateFacts {
             branch,
             head: &inputs.head,
@@ -4870,6 +4953,7 @@ impl Engine {
                 .as_ref()
                 .and_then(|change| change.paths.as_deref()),
             reviewers: &defined.reviewers,
+            preset_names: &preset_names,
             verdicts: &verdicts,
             findings: &findings,
             behind_parent,
@@ -5154,14 +5238,16 @@ impl Engine {
         ))
     }
 
-    /// The reviewer called `name`; refused, naming the ones there are, when none is.
+    /// The reviewer called `name`; refused, naming the ones there are, when none is. A preset is
+    /// a template and not a reviewer (R2h, D212 (1)): a name that only a preset has is refused
+    /// until a reviewer file defines it.
     fn reviewer_named(&self, root: &Path, name: &str) -> Result<Reviewer, String> {
         let (found, _) = self.reviewers(root)?;
         let defined: Vec<&str> = found
             .iter()
             .map(|reviewer| reviewer.name.as_str())
             .collect();
-        found
+        let reviewer = found
             .iter()
             .find(|reviewer| reviewer.name == name)
             .cloned()
@@ -5170,7 +5256,13 @@ impl Engine {
                     "there is no reviewer named {name:?}; the defined ones are {}",
                     defined.join(", ")
                 )
-            })
+            })?;
+        if reviewer.source == ReviewerSource::Preset {
+            return Err(format!(
+                "{name} is a preset, not a reviewer yet: add it as a reviewer first (Reviewers Settings, or write .git/gitmaster/reviewers/{name}.md)"
+            ));
+        }
+        Ok(reviewer)
     }
 
     /// Comments on `text` where it is in `path` now (D141): found exactly once, or refused.
@@ -6099,6 +6191,7 @@ impl Engine {
                 | CommandKind::ListReviewComments { .. }
                 | CommandKind::ListVerdicts { .. }
                 | CommandKind::ListReviewers { .. }
+                | CommandKind::ListBypasses { .. }
                 | CommandKind::GatesStatus { .. }
                 | CommandKind::ReadApproval { .. }
                 | CommandKind::ReadBranchDescription { .. }
@@ -6240,6 +6333,44 @@ fn reviewed_by(trust: &TrustStore, hash: &str) -> Result<bool, String> {
     trust.is_reviewed(hash).map_err(|e| e.0)
 }
 
+/// The findings that count for `branch` at its tip `tip` (R2h, D212 (6), D214 (1)): a finding
+/// counts when its branch is `branch`, or when the commit it was made on is an ancestor of the tip,
+/// so a rename of the branch does not let it escape. Each distinct commit is tested once. A test
+/// that fails, and a commit past `FINDING_HEAD_LIMIT`, count the finding: the check fails closed.
+fn counted_findings(
+    git: &dyn GitPort,
+    store: &ReviewStore,
+    root: &Path,
+    branch: &str,
+    tip: &str,
+) -> Result<Vec<FindingFact>, String> {
+    let rows = store.branch_findings_with_heads(branch).map_err(|e| e.0)?;
+    let mut ancestors: BTreeMap<String, bool> = BTreeMap::new();
+    let mut facts = Vec::new();
+    for (_, severity, status, finding_branch, finding_head) in rows {
+        let counts = if finding_branch.as_deref() == Some(branch) {
+            true
+        } else {
+            match finding_head {
+                Some(head) => match ancestors.get(&head) {
+                    Some(known) => *known,
+                    None if ancestors.len() >= FINDING_HEAD_LIMIT => true,
+                    None => {
+                        let answer = git.is_ancestor(root, &head, tip).unwrap_or(true);
+                        ancestors.insert(head, answer);
+                        answer
+                    }
+                },
+                None => false,
+            }
+        };
+        if counts {
+            facts.push(FindingFact { severity, status });
+        }
+    }
+    Ok(facts)
+}
+
 /// The ids of a block as a bypass names them: each blocking gate, then `gates-file` once when a
 /// gate file has a problem (D212 (4)).
 fn block_ids(block: &GateBlock) -> Vec<String> {
@@ -6367,12 +6498,32 @@ const GATES_FILE_ID: &str = "gates-file";
 /// What a checked bypass does: run `then` with this operation detail, or refuse it because the
 /// block now holds a gate the person did not name, which is sent with the refusal.
 enum Bypass {
-    Run(String),
+    Run {
+        detail: String,
+        audit: BypassAudit,
+    },
     Stale {
         message: String,
         blocked: BlockedGates,
     },
 }
+
+/// What a bypass writes to its audit row before it runs (D212 (4), R2h).
+struct BypassAudit {
+    branch: String,
+    head: String,
+    operation: GateOp,
+    gates: Vec<String>,
+    reason: String,
+}
+
+/// The bypasses `ListBypasses` returns when it names no limit, and the most it returns (R2h).
+const BYPASS_LIST_DEFAULT: u32 = 20;
+const BYPASS_LIST_MAX: u32 = 200;
+
+/// The most distinct commits one gate check tests for ancestry (R2h). A finding whose commit is
+/// past the limit counts, which blocks: the check fails closed.
+const FINDING_HEAD_LIMIT: usize = 200;
 
 /// What `Engine::gates_report` says about a branch (D212 (5), D215): the gate check, the intent
 /// (text from the repository, so untrusted) and the approval, with whether it is stale.
@@ -6563,6 +6714,7 @@ fn is_review_command(kind: &CommandKind) -> bool {
                 | CommandKind::RecordVerdict { .. }
                 | CommandKind::ListVerdicts { .. }
                 | CommandKind::ListReviewers { .. }
+                | CommandKind::ListBypasses { .. }
                 | CommandKind::GatesStatus { .. }
         )
 }

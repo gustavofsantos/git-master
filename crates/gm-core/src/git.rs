@@ -2739,6 +2739,15 @@ impl GitPort for SubprocessGit {
         self.changed_paths_within(root, from, to, MAX_CHANGED_PATHS)
     }
 
+    fn is_ancestor(&self, root: &Path, ancestor: &str, descendant: &str) -> Result<bool, GitError> {
+        require_commit_id(ancestor)?;
+        require_commit_id(descendant)?;
+        let repo = open(root)?;
+        let ancestor = Oid::from_str(ancestor).map_err(|e| git_err(&e))?;
+        let descendant = Oid::from_str(descendant).map_err(|e| git_err(&e))?;
+        Ok(ancestor == descendant || descends(&repo, descendant, ancestor)?)
+    }
+
     fn merge_base_of_commits(
         &self,
         root: &Path,

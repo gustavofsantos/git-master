@@ -950,6 +950,17 @@ pub trait GitPort: Send {
         ))
     }
 
+    /// Whether commit `ancestor` is `descendant` or one of its ancestors (R2h, the findings of a
+    /// renamed branch). Both are full ids. Never records anything.
+    fn is_ancestor(
+        &self,
+        _root: &Path,
+        _ancestor: &str,
+        _descendant: &str,
+    ) -> Result<bool, GitError> {
+        Err(GitError("ancestry is not supported by this adapter".into()))
+    }
+
     /// The merge base of commits `one` and `two`, both full ids; `None` when they share no
     /// history. Never records anything.
     fn merge_base_of_commits(

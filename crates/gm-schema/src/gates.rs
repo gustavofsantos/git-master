@@ -144,6 +144,25 @@ pub struct GatesStatus {
     pub errors: Vec<String>,
 }
 
+/// One bypass of a gate check, as the audit keeps it (D212 (4), R2h): a row written before the
+/// bypassed command runs, so a bypass is still known after the app closes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Bypass {
+    pub id: i64,
+    pub branch: String,
+    /// The tip of the branch when the bypass ran.
+    pub head: String,
+    pub operation: GateOp,
+    /// The ids of the gates the person named.
+    pub gates: Vec<String>,
+    /// The reason, trimmed.
+    pub reason: String,
+    /// Always `human`: an agent cannot bypass a gate.
+    pub actor: String,
+    /// Milliseconds since the Unix epoch.
+    pub at: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -42,6 +42,20 @@ fn repo(dir: &Path) {
     git(dir, &["checkout", "-q", "-b", "feat"]);
 }
 
+/// Defines the `security` preset as a repository reviewer, as the person does before a reviewer
+/// runs (R2h, D212 (1)): a preset is a template until a file defines it.
+fn define_security(dir: &Path) {
+    let preset = reviewers::presets()
+        .into_iter()
+        .find(|reviewer| reviewer.name == "security")
+        .unwrap();
+    let reviewer = Reviewer {
+        source: ReviewerSource::Repository,
+        ..preset
+    };
+    reviewers::save(&reviewers::repo_dir(&dir.join(".git")), &reviewer).unwrap();
+}
+
 /// Runs the server on `requests` for the repository at `repo`, with the person's reviewers in
 /// `user` (the reviewers folder itself).
 fn session(repo: &Path, user: &Path, requests: &[Value]) -> Vec<Value> {
@@ -205,6 +219,8 @@ fn reviewers_list_shows_the_presets_and_a_repository_file_with_its_source() {
     assert_eq!(by_name("style")["source"], "repository");
     assert_eq!(by_name("style")["model"], "haiku");
     assert_eq!(by_name("style")["untrusted"], true);
+    assert_eq!(by_name("style")["paths"], json!([]));
+    assert_eq!(by_name("style")["branches"], json!([]));
     assert_eq!(all["errors"], json!([]));
     let only = result(&replies[2]);
     assert_eq!(only["reviewers"].as_array().unwrap().len(), 1);
@@ -212,10 +228,49 @@ fn reviewers_list_shows_the_presets_and_a_repository_file_with_its_source() {
 }
 
 #[test]
+fn reviewers_list_says_where_a_reviewer_applies_by_its_paths_and_branches() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    repo(dir.path());
+    let billing = Reviewer {
+        name: "billing".to_owned(),
+        description: "Billing rules".to_owned(),
+        instructions: "Check the billing rules.".to_owned(),
+        signal: ReviewerSignal::Level,
+        direction: ReviewerDirection::LowerIsBetter,
+        subject: ReviewerSubject::Branch,
+        model: None,
+        source: ReviewerSource::Repository,
+        paths: vec!["services/billing/**".to_owned()],
+        branches: vec!["feat/billing-*".to_owned()],
+    };
+    reviewers::save(&reviewers::repo_dir(&dir.path().join(".git")), &billing).unwrap();
+    let replies = session(
+        dir.path(),
+        &reviewers::user_dir(user.path()),
+        &[
+            initialize(),
+            call(2, "reviewers_list", &json!({ "name": "billing" })),
+        ],
+    );
+    let listed = result(&replies[1]);
+    assert_eq!(listed["reviewers"][0]["name"], "billing");
+    assert_eq!(
+        listed["reviewers"][0]["paths"],
+        json!(["services/billing/**"])
+    );
+    assert_eq!(
+        listed["reviewers"][0]["branches"],
+        json!(["feat/billing-*"])
+    );
+}
+
+#[test]
 fn an_agent_records_a_verdict_and_the_listing_returns_it_with_its_findings() {
     let dir = tempfile::tempdir().unwrap();
     let user = tempfile::tempdir().unwrap();
     repo(dir.path());
+    define_security(dir.path());
     let replies = session(
         dir.path(),
         &reviewers::user_dir(user.path()),
@@ -254,6 +309,7 @@ fn a_refused_record_is_a_tool_error_with_the_reason_and_nothing_is_written() {
     let dir = tempfile::tempdir().unwrap();
     let user = tempfile::tempdir().unwrap();
     repo(dir.path());
+    define_security(dir.path());
     let replies = session(
         dir.path(),
         &reviewers::user_dir(user.path()),
@@ -274,6 +330,7 @@ fn a_verdict_is_stale_once_a_new_commit_moves_the_branch() {
     let dir = tempfile::tempdir().unwrap();
     let user = tempfile::tempdir().unwrap();
     repo(dir.path());
+    define_security(dir.path());
     let before = session(
         dir.path(),
         &reviewers::user_dir(user.path()),

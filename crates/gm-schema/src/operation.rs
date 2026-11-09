@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::conflict::{ConflictFileRead, ConflictSite, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
-use crate::gates::{GateOp, GateOutcome, GatesStatus};
+use crate::gates::{Bypass, GateOp, GateOutcome, GatesStatus};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
@@ -727,6 +727,13 @@ pub enum CommandKind {
         gates: Vec<String>,
         reason: String,
         then: Box<CommandKind>,
+    },
+    /// Lists the bypasses of gate checks, newest first, of `branch` when it is given, at most
+    /// `limit` (20 when 0, 200 at most). A read: never recorded (D28). Answers `BypassesListed`.
+    ListBypasses {
+        branch: Option<String>,
+        #[serde(default)]
+        limit: u32,
     },
     /// Replaces the body of review comment `id`. Human only.
     EditReviewComment {
@@ -1600,6 +1607,11 @@ pub enum Event {
         branch: String,
         text: Option<String>,
     },
+    /// Answers `ListBypasses`, newest first.
+    BypassesListed {
+        id: OperationId,
+        bypasses: Vec<Bypass>,
+    },
     /// Answers `GatesStatus`: the gate check of the branch, its intent and its approval, with
     /// whether the approval is stale (D215 (2)).
     GatesStatusRead {
@@ -2157,6 +2169,46 @@ mod tests {
         assert_eq!(json["status"]["errors"][0], "gates.json: not JSON");
         assert_eq!(json["intent"], "why");
         assert!(json["approval"].is_null());
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
+    }
+
+    #[test]
+    fn bypass_audit_wire_format_is_tagged() {
+        use crate::gates::GateOp;
+        let list = serde_json::to_value(CommandKind::ListBypasses {
+            branch: Some("feat".into()),
+            limit: 0,
+        })
+        .unwrap();
+        assert_eq!(list["type"], "list_bypasses");
+        assert_eq!(list["branch"], "feat");
+        let bare: CommandKind =
+            serde_json::from_value(serde_json::json!({ "type": "list_bypasses" })).unwrap();
+        assert_eq!(
+            bare,
+            CommandKind::ListBypasses {
+                branch: None,
+                limit: 0,
+            }
+        );
+        let bypass = Bypass {
+            id: 3,
+            branch: "feat".into(),
+            head: "a".repeat(40),
+            operation: GateOp::Push,
+            gates: vec!["security".into()],
+            reason: "hotfix".into(),
+            actor: "human".into(),
+            at: 42,
+        };
+        let event = Event::BypassesListed {
+            id: OperationId(9),
+            bypasses: vec![bypass.clone()],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "bypasses_listed");
+        assert_eq!(json["bypasses"][0]["operation"], "push");
+        assert_eq!(json["bypasses"][0]["gates"][0], "security");
         assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
     }
 

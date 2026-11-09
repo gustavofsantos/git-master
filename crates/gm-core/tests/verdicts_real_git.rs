@@ -52,6 +52,27 @@ fn repo() -> tempfile::TempDir {
     dir
 }
 
+/// Defines the presets `names` as repository reviewers, as the person does before a reviewer
+/// runs (R2h, D212 (1)): a preset is a template until a file defines it.
+fn define_presets(dir: &Path, names: &[&str]) {
+    for preset in reviewers::presets() {
+        if names.contains(&preset.name.as_str()) {
+            let reviewer = Reviewer {
+                source: ReviewerSource::Repository,
+                ..preset
+            };
+            reviewers::save(&reviewers::repo_dir(&dir.join(".git")), &reviewer).unwrap();
+        }
+    }
+}
+
+/// A repository on `feat` whose `security` and `code-review` reviewers are defined.
+fn repo_with_presets() -> tempfile::TempDir {
+    let dir = repo();
+    define_presets(dir.path(), &["security", "code-review"]);
+    dir
+}
+
 fn human(kind: CommandKind) -> Command {
     Command {
         actor: Actor::Human,
@@ -217,7 +238,7 @@ fn reviewer(name: &str, description: &str, signal: ReviewerSignal) -> Reviewer {
 
 #[test]
 fn an_agent_records_a_verdict_with_two_findings_on_the_checked_out_branch() {
-    let dir = repo();
+    let dir = repo_with_presets();
     let user = tempfile::tempdir().unwrap();
     let mut engine = engine_on(dir.path(), user.path());
     let head = head_of(dir.path());
@@ -312,6 +333,7 @@ fn a_person_cannot_record_a_verdict() {
 /// The repository with a reviewer whose signal is a pass, which no preset has.
 fn repo_with_a_pass_reviewer() -> tempfile::TempDir {
     let dir = repo();
+    define_presets(dir.path(), &["security", "code-review"]);
     reviewers::save(
         &reviewers::repo_dir(&dir.path().join(".git")),
         &reviewer("gate", "A pass gate", ReviewerSignal::Pass),
@@ -481,7 +503,7 @@ fn a_record_with_a_bad_rationale_or_findings_writes_nothing() {
 
 #[test]
 fn a_branch_that_is_not_checked_out_is_refused_and_so_is_a_detached_head() {
-    let dir = repo();
+    let dir = repo_with_presets();
     let user = tempfile::tempdir().unwrap();
     let mut engine = engine_on(dir.path(), user.path());
     git(dir.path(), &["checkout", "-q", "--detach"]);
@@ -495,7 +517,7 @@ fn a_branch_that_is_not_checked_out_is_refused_and_so_is_a_detached_head() {
 
 #[test]
 fn a_second_verdict_keeps_both_and_a_sixth_drops_the_oldest() {
-    let dir = repo();
+    let dir = repo_with_presets();
     let user = tempfile::tempdir().unwrap();
     let mut engine = engine_on(dir.path(), user.path());
     for run in 1..=2 {
@@ -542,7 +564,7 @@ fn a_second_verdict_keeps_both_and_a_sixth_drops_the_oldest() {
 
 #[test]
 fn a_verdict_is_stale_once_the_branch_moves_and_a_verdict_at_the_new_tip_is_not() {
-    let dir = repo();
+    let dir = repo_with_presets();
     let user = tempfile::tempdir().unwrap();
     let mut engine = engine_on(dir.path(), user.path());
     let first = record(
@@ -579,7 +601,7 @@ fn a_verdict_is_stale_once_the_branch_moves_and_a_verdict_at_the_new_tip_is_not(
 
 #[test]
 fn a_verdict_is_stale_when_its_branch_is_gone() {
-    let dir = repo();
+    let dir = repo_with_presets();
     let user = tempfile::tempdir().unwrap();
     let mut engine = engine_on(dir.path(), user.path());
     let events = record(
@@ -596,7 +618,7 @@ fn a_verdict_is_stale_when_its_branch_is_gone() {
 
 #[test]
 fn the_listing_filters_by_reviewer_and_takes_a_limit() {
-    let dir = repo();
+    let dir = repo_with_presets();
     let user = tempfile::tempdir().unwrap();
     let mut engine = engine_on(dir.path(), user.path());
     for (reviewer, run) in [("security", 1), ("code-review", 2), ("security", 3)] {
@@ -721,7 +743,7 @@ fn the_reviewer_list_shows_the_repository_the_user_and_the_presets() {
 
 #[test]
 fn the_verdict_list_names_its_findings_with_their_status_now() {
-    let dir = repo();
+    let dir = repo_with_presets();
     let user = tempfile::tempdir().unwrap();
     let mut engine = engine_on(dir.path(), user.path());
     let events = record(
@@ -747,7 +769,7 @@ fn the_verdict_list_names_its_findings_with_their_status_now() {
 
 #[test]
 fn a_head_that_is_not_the_tip_is_refused_and_nothing_is_written() {
-    let dir = repo();
+    let dir = repo_with_presets();
     let user = tempfile::tempdir().unwrap();
     let mut engine = engine_on(dir.path(), user.path());
     let old = head_of(dir.path());
@@ -802,7 +824,7 @@ fn a_head_that_is_not_the_tip_is_refused_and_nothing_is_written() {
 
 #[test]
 fn a_secret_in_the_rationale_or_a_finding_is_stored_redacted() {
-    let dir = repo();
+    let dir = repo_with_presets();
     let user = tempfile::tempdir().unwrap();
     let mut engine = engine_on(dir.path(), user.path());
     // Built from pieces so that no secret sits in the source (an AWS access key id shape).
