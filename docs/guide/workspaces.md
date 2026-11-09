@@ -28,7 +28,7 @@ The workspace repository is yours to write in. Your service repositories are not
 
 ## Memories and contexts in a workspace
 
-> **Planned.** Accepting, editing, marking or linking a memory that comes from a member, and writing a memory to a member, are not available from the workspace yet. Reading them is.
+> **Planned.** The **Memories** tab of a workspace window cannot choose a member to write a memory to yet, and linking a memory that comes from a member is not available. An agent can already propose to a member with `memory_propose` and its `member` argument.
 
 A workspace keeps the knowledge you already have. When you open a workspace, an agent and you see the [memories](memories.md) of the workspace itself, those of each member repository, and those of every [context](contexts.md) any member belongs to. Nothing is copied: a memory you add to a member later appears in the workspace, and removing the workspace removes none of them. Each memory shows where it is from, as the workspace, a member folder, or a context.
 
