@@ -56,6 +56,12 @@ pub struct Reviewer {
     /// An optional model hint for the run.
     pub model: Option<String>,
     pub source: ReviewerSource,
+    /// Globs the change must touch for the reviewer to apply (D214 (1)); empty means any change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Globs the branch must match for the reviewer to apply (D214 (1)); empty means any branch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<String>,
 }
 
 /// A level, ordered `Low` < `Medium` < `High` (D189).

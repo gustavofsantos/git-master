@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use gm_schema::{Reviewer, ReviewerDirection, ReviewerSignal, ReviewerSource, ReviewerSubject};
 
+use crate::glob;
+
 /// The longest name, in characters.
 const NAME_LIMIT: usize = 40;
 /// The longest value of a front matter key, in characters.
@@ -22,8 +24,18 @@ const VALUE_LIMIT: usize = 200;
 const INSTRUCTIONS_LIMIT: usize = 8000;
 /// The largest file `load` reads; a bigger one is reported and skipped.
 const FILE_LIMIT: u64 = 64 * 1024;
+/// The most patterns one of the `paths` or `branches` lines holds (D214 (1)).
+const PATTERN_COUNT_LIMIT: usize = 20;
 /// The front matter keys, in the order `render` writes them.
-const KEYS: [&str; 5] = ["description", "signal", "direction", "subject", "model"];
+const KEYS: [&str; 7] = [
+    "description",
+    "signal",
+    "direction",
+    "subject",
+    "model",
+    "paths",
+    "branches",
+];
 
 /// The reviewers that were read, by name, and the files that could not be read as reviewers,
 /// as `(file, reason)`.
@@ -135,32 +147,13 @@ pub fn parse(name: &str, text: &str, source: ReviewerSource) -> Result<Reviewer,
             ));
         }
     };
-    let direction = match optional(&fields, "direction") {
-        None | Some("higher_is_better") => ReviewerDirection::HigherIsBetter,
-        Some("lower_is_better") => ReviewerDirection::LowerIsBetter,
-        Some(_) => {
-            return Err(line_error(
-                &fields,
-                "direction",
-                "must be higher_is_better or lower_is_better",
-            ));
-        }
-    };
-    let subject = match optional(&fields, "subject") {
-        None | Some("branch") => ReviewerSubject::Branch,
-        Some("staged") => ReviewerSubject::Staged,
-        Some("commit") => ReviewerSubject::Commit,
-        Some(_) => {
-            return Err(line_error(
-                &fields,
-                "subject",
-                "must be branch, staged or commit",
-            ));
-        }
-    };
+    let direction = direction_of(&fields)?;
+    let subject = subject_of(&fields)?;
     let model = optional(&fields, "model")
         .filter(|model| !model.is_empty())
         .map(str::to_owned);
+    let paths = patterns(&fields, "paths", glob::check_path_pattern)?;
+    let branches = patterns(&fields, "branches", glob::check_pattern)?;
 
     Ok(Reviewer {
         name: name.to_owned(),
@@ -171,6 +164,8 @@ pub fn parse(name: &str, text: &str, source: ReviewerSource) -> Result<Reviewer,
         subject,
         model,
         source,
+        paths,
+        branches,
     })
 }
 
@@ -188,6 +183,14 @@ pub fn render(reviewer: &Reviewer) -> String {
         text.push_str("model: ");
         text.push_str(model);
         text.push('\n');
+    }
+    for (key, list) in [("paths", &reviewer.paths), ("branches", &reviewer.branches)] {
+        if !list.is_empty() {
+            text.push_str(key);
+            text.push_str(": ");
+            text.push_str(&list.join(", "));
+            text.push('\n');
+        }
     }
     text.push_str("---\n\n");
     text.push_str(&reviewer.instructions);
@@ -386,10 +389,68 @@ fn optional<'a>(fields: &BTreeMap<&str, (usize, &'a str)>, key: &str) -> Option<
     fields.get(key).map(|(_, value)| *value)
 }
 
+/// The comma-separated patterns of a field, each checked by `check`. A pattern cannot contain a
+/// comma, and an absent or empty field has none.
+fn patterns(
+    fields: &BTreeMap<&str, (usize, &str)>,
+    key: &str,
+    check: fn(&str) -> Result<(), String>,
+) -> Result<Vec<String>, String> {
+    let Some(&(line, value)) = fields.get(key) else {
+        return Ok(Vec::new());
+    };
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    let items: Vec<&str> = value.split(',').map(str::trim).collect();
+    if items.len() > PATTERN_COUNT_LIMIT {
+        return Err(format!(
+            "line {line}: `{key}` has {} patterns, the most is {PATTERN_COUNT_LIMIT}",
+            items.len()
+        ));
+    }
+    let mut patterns = Vec::with_capacity(items.len());
+    for item in items {
+        if item.is_empty() {
+            return Err(format!("line {line}: `{key}` has an empty pattern"));
+        }
+        check(item).map_err(|reason| format!("line {line}: `{key}` pattern `{item}`: {reason}"))?;
+        patterns.push(item.to_owned());
+    }
+    Ok(patterns)
+}
+
 /// A reason for a field, naming the field's line.
 fn line_error(fields: &BTreeMap<&str, (usize, &str)>, key: &str, reason: &str) -> String {
     let line = fields.get(key).map_or(0, |(line, _)| *line);
     format!("line {line}: `{key}` {reason}")
+}
+
+/// The `direction` field: higher is better when absent.
+fn direction_of(fields: &BTreeMap<&str, (usize, &str)>) -> Result<ReviewerDirection, String> {
+    match optional(fields, "direction") {
+        None | Some("higher_is_better") => Ok(ReviewerDirection::HigherIsBetter),
+        Some("lower_is_better") => Ok(ReviewerDirection::LowerIsBetter),
+        Some(_) => Err(line_error(
+            fields,
+            "direction",
+            "must be higher_is_better or lower_is_better",
+        )),
+    }
+}
+
+/// The `subject` field: a branch when absent.
+fn subject_of(fields: &BTreeMap<&str, (usize, &str)>) -> Result<ReviewerSubject, String> {
+    match optional(fields, "subject") {
+        None | Some("branch") => Ok(ReviewerSubject::Branch),
+        Some("staged") => Ok(ReviewerSubject::Staged),
+        Some("commit") => Ok(ReviewerSubject::Commit),
+        Some(_) => Err(line_error(
+            fields,
+            "subject",
+            "must be branch, staged or commit",
+        )),
+    }
 }
 
 fn signal_text(signal: ReviewerSignal) -> &'static str {
@@ -431,6 +492,8 @@ fn preset(
         subject: ReviewerSubject::Branch,
         model: Some("haiku".to_owned()),
         source: ReviewerSource::Preset,
+        paths: Vec::new(),
+        branches: Vec::new(),
     }
 }
 
@@ -486,6 +549,55 @@ mod tests {
         let text = "---\ndescription: d\nsignal: pass\nmodel:\n---\nDo it.\n";
         let reviewer = parse("gate", text, ReviewerSource::User).unwrap();
         assert_eq!(reviewer.model, None);
+    }
+
+    #[test]
+    fn paths_and_branches_are_comma_separated_and_checked() {
+        let text = "---\ndescription: d\nsignal: pass\n\
+            paths: services/billing/**, api/*.rs\nbranches: feat/billing-*\n---\nCheck it.\n";
+        let reviewer = parse("billing", text, ReviewerSource::Repository).unwrap();
+        assert_eq!(reviewer.paths, ["services/billing/**", "api/*.rs"]);
+        assert_eq!(reviewer.branches, ["feat/billing-*"]);
+        assert_eq!(
+            parse("billing", &render(&reviewer), ReviewerSource::Repository).unwrap(),
+            reviewer
+        );
+    }
+
+    #[test]
+    fn a_reviewer_without_conditions_writes_no_such_lines() {
+        let reviewer = sample();
+        assert!(reviewer.paths.is_empty() && reviewer.branches.is_empty());
+        let text = render(&reviewer);
+        assert!(
+            !text.contains("paths:") && !text.contains("branches:"),
+            "{text}"
+        );
+        assert!(
+            presets()
+                .iter()
+                .all(|p| p.paths.is_empty() && p.branches.is_empty())
+        );
+    }
+
+    #[test]
+    fn a_bad_condition_names_its_line_and_pattern() {
+        let head = "---\ndescription: d\nsignal: pass\n";
+        let absolute = format!("{head}paths: /etc/*\n---\nx\n");
+        assert!(
+            error_of("a", &absolute)
+                .starts_with("line 4: `paths` pattern `/etc/*`: `/etc/*` is absolute"),
+            "{}",
+            error_of("a", &absolute)
+        );
+        let dots = format!("{head}paths: a/../b\n---\nx\n");
+        assert!(error_of("a", &dots).starts_with("line 4: `paths` pattern `a/../b`"));
+        let empty_item = format!("{head}branches: feat/*,,fix/*\n---\nx\n");
+        assert!(error_of("a", &empty_item).starts_with("line 4: `branches` has an empty pattern"));
+        let many = format!("{head}branches: {}\n---\nx\n", vec!["b"; 21].join(","));
+        assert!(error_of("a", &many).starts_with("line 4: `branches` has 21 patterns"));
+        let twenty = format!("{head}branches: {}\n---\nx\n", vec!["b"; 20].join(","));
+        assert!(parse("a", &twenty, ReviewerSource::User).is_ok());
     }
 
     #[test]
@@ -788,6 +900,8 @@ mod tests {
                 Just(ReviewerSubject::Commit),
             ],
             model in proptest::option::of("[a-z0-9.-]{1,20}"),
+            paths in proptest::collection::vec("[a-z*?]{1,8}(/[a-z*?]{1,8}){0,2}", 0..4),
+            branches in proptest::collection::vec("[a-z*?/-]{1,12}", 0..4),
         ) {
             let reviewer = Reviewer {
                 name,
@@ -798,6 +912,8 @@ mod tests {
                 subject,
                 model,
                 source: ReviewerSource::Repository,
+                paths,
+                branches,
             };
             let back = parse(&reviewer.name, &render(&reviewer), reviewer.source);
             prop_assert_eq!(back, Ok(reviewer));

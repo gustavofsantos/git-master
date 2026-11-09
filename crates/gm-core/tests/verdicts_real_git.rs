@@ -210,6 +210,8 @@ fn reviewer(name: &str, description: &str, signal: ReviewerSignal) -> Reviewer {
         subject: ReviewerSubject::Branch,
         model: None,
         source: ReviewerSource::Repository,
+        paths: Vec::new(),
+        branches: Vec::new(),
     }
 }
 

@@ -96,6 +96,8 @@ fn repository_reviewer(dir: &Path, name: &str, description: &str) {
         subject: ReviewerSubject::Branch,
         model: Some("haiku".to_owned()),
         source: ReviewerSource::Repository,
+        paths: Vec::new(),
+        branches: Vec::new(),
     };
     reviewers::save(&reviewers::repo_dir(&dir.join(".git")), &reviewer).unwrap();
 }

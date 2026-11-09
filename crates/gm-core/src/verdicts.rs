@@ -105,6 +105,8 @@ mod tests {
             subject: ReviewerSubject::Branch,
             model: None,
             source: ReviewerSource::Repository,
+            paths: Vec::new(),
+            branches: Vec::new(),
         }
     }
 
