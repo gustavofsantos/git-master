@@ -2,7 +2,7 @@
 
 The user-facing behavior is specified in `docs/agents/reviewers.md`, `docs/guide/memories.md` and `docs/agents/agent-integration.md` ("Skills and sub-agents"), all marked `Planned`; this file keeps the engineering rationale and the build plan for D188 and D189.
 
-Last updated: 2026-11-07. Status: decided (D188, D189), nothing built. Open questions: Q37 (automation), Q39 (shape of reviewer definitions), Q40 (terminal pushes), Q42 (plugin format).
+Last updated: 2026-11-09. Status: decided (D188, D189, D212); R1 to R3 in build, R4 and R5 wait. Open questions: Q37 (automation), Q40 (terminal pushes), Q42 (plugin format). Q39 is resolved by D212.
 
 ## The rule that shapes everything (D188)
 
@@ -74,7 +74,7 @@ reviewer {
 }
 ```
 
-Where they are stored is Q39. Five presets ship in the app (Code review, Security, Slop, Intent drift, Risk); a preset is a template the user copies and edits, never a locked definition.
+Stored as one Markdown file per reviewer (D212 (1)): front matter for the fields, the body as the instructions, in `.git/gitmaster/reviewers/` or the user's `reviewers/` directory. Five presets ship in the app (Code review, Security, Slop, Intent drift, Risk); a preset is a template the user copies and edits, never a locked definition.
 
 **Subject, v1 limit.** A finding is a review comment, and a review comment anchors to text in the working tree (D97). A reviewer therefore runs on the **checked-out branch of the current worktree** (or on the staged changes). Reviewing another branch means creating a worktree for it (a GitMaster worktree, see `docs/guide/worktrees.md`), which the skill offers and the user confirms; it never switches the user's checkout. A commit subject records the verdict against the commit and anchors findings to the files at that commit only where the lines still exist (otherwise they are `outdated`, as comments already can be).
 
@@ -118,9 +118,9 @@ GateResult { passed: bool, blocked: Vec<Blocked { gate, reason }> }
 | `signal` | `reviewer`, `max` or `min` | the latest non-stale value is outside the bound (levels compare low < medium < high) |
 | `up_to_date` | none | the branch is behind its parent in the stack model (slice 4) |
 
-Wiring: the engine calls `evaluate` in the `before.push` and `before.restack-apply` workflow phases (D75). The result `blocked` becomes `ctx.block(reason)` with the reasons joined; the operation then does not run. `ctx.verdicts()` gives scripts the same inputs. The gates apply only to operations GitMaster performs; a push typed in a terminal is not covered (Q40).
+Wiring (D212 (3)): the engine calls `evaluate` itself in `handle()` for `PushWithLease` and `ApplyRestack`, before the workflow phases, so gates need no script. A block ends the command as `Vetoed` with the reasons joined and sends `GatesBlocked` for the window. `push` also becomes a phase operation so a `before.push` workflow can add rules. `ctx.verdicts()` gives scripts the same inputs. Gates live in `.git/gitmaster/gates.json`. The agent reads them through `gates_status` and `reviewers_list`. The gates apply only to operations GitMaster performs; a push typed in a terminal is not covered (Q40).
 
-**Bypass.** The human chooses **Bypass**, writes a reason, and the operation runs; the command log (D28) records the gate, the reason and the time. An agent actor cannot bypass: bypass is not an MCP tool.
+**Bypass.** The human chooses **Bypass**, writes a reason, and the window sends `BypassGates { reason, then }`; the operation record (D28) keeps the gates, the reason and the time. An agent actor cannot bypass: the command is human only and is not an MCP tool.
 
 **Trust gate for someone else's branch.** `branch_agent_config` is a read tool. It lists the commits on the branch that are not the user's (author email differs), and for the branch's tree the agent configuration that would be loaded: `.claude/` settings and commands, hooks, `.mcp.json`, skills, plugins, `CLAUDE.md` and `AGENTS.md`. Unparseable files and symlinks count as unknown, never as empty. The `review` skill calls it first and stops for the user's confirmation when `commits_not_yours` is not empty.
 

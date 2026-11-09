@@ -1,7 +1,7 @@
 ---
 title: Triggers and phases
 description: Which events start a workflow, how the match filter narrows them, and what the before, transform and after phases do.
-status: implemented
+status: partial
 order: 30
 ---
 
@@ -143,8 +143,11 @@ An `after.<operation>` workflow runs after the operation finishes. It returns no
 |---|---|---|
 | `commit` | `before.commit`, `after.commit` | `transform.commit_message`: the message in the composer |
 | `restack` | `before.restack`, `after.restack` | None |
+| `push` | `before.push`, `after.push` | None. `input.trigger` has `branch`, the branch being pushed. |
 | `branch_create` | `before.branch_create`, `after.branch_create` | `transform.branch_name`: the name of the new branch |
 | `conflict_resolve` | `before.conflict_resolve`, `after.conflict_resolve` | `transform.conflict_hunk`: a resolution suggestion for one conflict hunk. `input.trigger` has `path`, `index` (the hunk, from 0), `left`, `right`, `base` (the texts of the hunk, `nil` when the conflict has no base), `left_label`, `right_label` and `current` (the previous workflow's suggestion, or empty). Return the suggested text of the hunk, or `nil`. |
+
+> **Planned.** The `push` phases are not available yet.
 
 See also [Branches](../guide/branches.md), [Stacks](../guide/stacks.md) and [Conflicts](../guide/conflicts.md).
 

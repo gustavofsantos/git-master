@@ -253,8 +253,8 @@ The settings dialog is not available yet, so these fields are edited today in **
 
 | Field | What it does |
 |---|---|
-| **Reviewers** | Lists your reviewers. Each has instructions, a signal, a direction, a subject and an optional model. See [Reviewers and gates](../agents/reviewers.md). |
-| **Gates** | Sets which gates apply to a push and to a restack, for each branch or for all of them. |
+| **Reviewers** | Lists your reviewers. Each has instructions, a signal, a direction, a subject and an optional model, kept as a Markdown file in `.git/gitmaster/reviewers/` of the repository or in `reviewers/` of your configuration directory. See [Reviewers and gates](../agents/reviewers.md). |
+| **Gates** | Sets which gates apply to a push and to a restack, for all branches or for branches that match a pattern. They are kept in `.git/gitmaster/gates.json` of the repository. |
 
 ### Local Review
 

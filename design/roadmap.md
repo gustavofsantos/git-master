@@ -774,6 +774,8 @@ Requested by the author on 2026-11-07. Engineering design in `design/reviewers.m
 
 **Acceptance.** Gate rules are pure and property-tested; a gate blocks `before.push` in a workflow run on real Git; an agent cannot resolve a finding or bypass a gate.
 
+**Plan of 2026-11-09 (D212).** The author chose to build R1 to R3 together; R4 and R5 wait for Q42. Order: (1) docs and D212; (2) R1 store: review schema v6, verdict types, reviewer files, `verdict_record` and `verdicts_list`, `reviewers_list`; (3) R2 gates: pure `gates::evaluate`, `gates.json`, the native check on push and restack, `BypassGates`, `gates_status`, then the `push` phase and `ctx.verdicts()`; (4) R3 UI: Reviewers Settings, **Run Reviewer…**, the verdict panel, gate state on the branch, the blocked-operation message with **Bypass**. Each step ends with `make check`. Status: step 1 in progress.
+
 ## Slice 7: MCP
 
 Redirected by the author on 2026-10-31 (D135): `gitmaster mcp` is a second process over stdio, with no socket, token or app-side server. It runs its own engine on the repository and shares only the `.git/gitmaster/` files with the app. Its first tools are the ones an agent does not already have: review comments and threads. No grep, file read or symbol tool (D48 is superseded).
