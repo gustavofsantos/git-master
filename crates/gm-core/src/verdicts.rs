@@ -7,6 +7,7 @@ use std::path::Path;
 use gm_schema::{Reviewer, ReviewerFileError, ReviewerSignal};
 
 use crate::reviewers;
+use crate::workspace_defs::WorkspaceDefs;
 
 /// The highest score a reviewer can record (D189).
 const SCORE_MAX: u32 = 100;
@@ -71,8 +72,9 @@ fn whole_number(text: &str) -> Option<u32> {
 pub fn merged_reviewers(
     repo_dir: &Path,
     user_dir: Option<&Path>,
+    workspaces: &[WorkspaceDefs],
 ) -> (Vec<Reviewer>, Vec<ReviewerFileError>) {
-    let loaded = reviewers::load(Some(repo_dir), user_dir);
+    let loaded = reviewers::load_layers(Some(repo_dir), user_dir, workspaces);
     let mut reviewers = loaded.reviewers;
     for preset in reviewers::presets() {
         if !reviewers
@@ -109,6 +111,7 @@ mod tests {
             source: ReviewerSource::Repository,
             paths: Vec::new(),
             branches: Vec::new(),
+            members: Vec::new(),
         }
     }
 
@@ -166,7 +169,7 @@ mod tests {
     #[test]
     fn the_preset_is_used_when_no_file_defines_its_name() {
         let dir = tempfile::tempdir().unwrap();
-        let (found, errors) = merged_reviewers(dir.path(), None);
+        let (found, errors) = merged_reviewers(dir.path(), None, &[]);
         assert!(errors.is_empty());
         let names: Vec<&str> = found
             .iter()
@@ -190,7 +193,7 @@ mod tests {
         reviewers::save(repo.path(), &reviewer("security", "repository")).unwrap();
         reviewers::save(user.path(), &reviewer("security", "user")).unwrap();
         reviewers::save(user.path(), &reviewer("style", "user style")).unwrap();
-        let (found, _) = merged_reviewers(repo.path(), Some(user.path()));
+        let (found, _) = merged_reviewers(repo.path(), Some(user.path()), &[]);
         let security = found.iter().find(|r| r.name == "security").unwrap();
         assert_eq!(security.description, "repository");
         assert_eq!(security.source, ReviewerSource::Repository);
@@ -204,7 +207,7 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         reviewers::save(repo.path(), &reviewer("zeta", "last")).unwrap();
         std::fs::write(repo.path().join("broken.md"), "no front matter at all").unwrap();
-        let (found, errors) = merged_reviewers(repo.path(), None);
+        let (found, errors) = merged_reviewers(repo.path(), None, &[]);
         let names: Vec<&str> = found
             .iter()
             .map(|reviewer| reviewer.name.as_str())

@@ -138,6 +138,7 @@ fn reviewer(name: &str) -> Reviewer {
         source: ReviewerSource::Repository,
         paths: Vec::new(),
         branches: Vec::new(),
+        members: Vec::new(),
     }
 }
 

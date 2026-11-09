@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use gm_schema::{Reviewer, ReviewerDirection, ReviewerSignal, ReviewerSource, ReviewerSubject};
 
 use crate::glob;
+use crate::workspace_defs::{self, WorkspaceDefs};
 
 /// The longest name, in characters.
 const NAME_LIMIT: usize = 40;
@@ -27,7 +28,7 @@ const FILE_LIMIT: u64 = 64 * 1024;
 /// The most patterns one of the `paths` or `branches` lines holds (D214 (1)).
 const PATTERN_COUNT_LIMIT: usize = 20;
 /// The front matter keys, in the order `render` writes them.
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 8] = [
     "description",
     "signal",
     "direction",
@@ -35,6 +36,7 @@ const KEYS: [&str; 7] = [
     "model",
     "paths",
     "branches",
+    "members",
 ];
 
 /// The reviewers that were read, by name, and the files that could not be read as reviewers,
@@ -154,6 +156,7 @@ pub fn parse(name: &str, text: &str, source: ReviewerSource) -> Result<Reviewer,
         .map(str::to_owned);
     let paths = patterns(&fields, "paths", glob::check_path_pattern)?;
     let branches = patterns(&fields, "branches", glob::check_pattern)?;
+    let members = members_of(&fields)?;
 
     Ok(Reviewer {
         name: name.to_owned(),
@@ -166,6 +169,7 @@ pub fn parse(name: &str, text: &str, source: ReviewerSource) -> Result<Reviewer,
         source,
         paths,
         branches,
+        members,
     })
 }
 
@@ -184,7 +188,11 @@ pub fn render(reviewer: &Reviewer) -> String {
         text.push_str(model);
         text.push('\n');
     }
-    for (key, list) in [("paths", &reviewer.paths), ("branches", &reviewer.branches)] {
+    for (key, list) in [
+        ("paths", &reviewer.paths),
+        ("branches", &reviewer.branches),
+        ("members", &reviewer.members),
+    ] {
         if !list.is_empty() {
             text.push_str(key);
             text.push_str(": ");
@@ -269,14 +277,53 @@ pub fn presets() -> Vec<Reviewer> {
 /// sorted by name.
 #[must_use]
 pub fn load(repo_dir: Option<&Path>, user_dir: Option<&Path>) -> LoadedReviewers {
+    load_layers(repo_dir, user_dir, &[])
+}
+
+/// Reads the reviewers of the workspace repositories `workspaces` (each `<dir>/reviewers`), then
+/// those of the repository and the user, as [`load`] does. The layers merge by name with the
+/// precedence workspace, then repository, then user, the most specific one winning whole (D214
+/// (2), D174). Two workspaces that define one name are a conflict: the workspace whose `dir`
+/// sorts first wins, and the other's file is reported, so the check fails closed.
+#[must_use]
+pub fn load_layers(
+    repo_dir: Option<&Path>,
+    user_dir: Option<&Path>,
+    workspaces: &[WorkspaceDefs],
+) -> LoadedReviewers {
     let mut by_name: BTreeMap<String, Reviewer> = BTreeMap::new();
     let mut errors = Vec::new();
+    let mut sorted: Vec<&WorkspaceDefs> = workspaces.iter().collect();
+    sorted.sort_by(|a, b| a.dir.cmp(&b.dir));
+    sorted.dedup_by(|a, b| a.dir == b.dir);
+    let mut owners: BTreeMap<String, &WorkspaceDefs> = BTreeMap::new();
+    for ws in sorted {
+        let dir = ws.dir.join("reviewers");
+        for reviewer in read_dir(&dir, ReviewerSource::Workspace, &mut errors) {
+            if let Some(first) = owners.get(&reviewer.name) {
+                errors.push((
+                    dir.join(format!("{}.md", reviewer.name))
+                        .display()
+                        .to_string(),
+                    format!(
+                        "the reviewer {} is defined in two workspaces: {} and {}",
+                        reviewer.name, first.name, ws.name
+                    ),
+                ));
+                continue;
+            }
+            owners.insert(reviewer.name.clone(), ws);
+            by_name.insert(reviewer.name.clone(), reviewer);
+        }
+    }
     for (dir, source) in [
         (repo_dir, ReviewerSource::Repository),
         (user_dir, ReviewerSource::User),
     ] {
         if let Some(dir) = dir {
-            read_dir_into(dir, source, &mut by_name, &mut errors);
+            for reviewer in read_dir(dir, source, &mut errors) {
+                by_name.entry(reviewer.name.clone()).or_insert(reviewer);
+            }
         }
     }
     errors.sort();
@@ -325,22 +372,23 @@ pub fn delete(dir: &Path, name: &str) -> Result<(), String> {
     })
 }
 
-/// Adds the reviewers of one directory to `by_name`, keeping any already there.
-fn read_dir_into(
+/// The reviewers of one directory, each file that reads. A file that does not read is pushed to
+/// `errors` with its name, and the others still load.
+fn read_dir(
     dir: &Path,
     source: ReviewerSource,
-    by_name: &mut BTreeMap<String, Reviewer>,
     errors: &mut Vec<(String, String)>,
-) {
+) -> Vec<Reviewer> {
+    let mut found = Vec::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return found,
         Err(e) => {
             errors.push((
                 dir.display().to_string(),
                 format!("cannot read the directory: {e}"),
             ));
-            return;
+            return found;
         }
     };
     for entry in entries.flatten() {
@@ -368,12 +416,11 @@ fn read_dir_into(
             .map_err(|e| format!("cannot read the file: {e}"))
             .and_then(|text| parse(name, &text, source));
         match read {
-            Ok(reviewer) => {
-                by_name.entry(name.to_owned()).or_insert(reviewer);
-            }
+            Ok(reviewer) => found.push(reviewer),
             Err(reason) => errors.push((file, reason)),
         }
     }
+    found
 }
 
 /// The value of a field that must be present and not empty.
@@ -418,6 +465,38 @@ fn patterns(
         patterns.push(item.to_owned());
     }
     Ok(patterns)
+}
+
+/// The `members` field: comma-separated workspace member folder names, each checked, none twice
+/// (D214 (5)). Absent or empty names no member, which means every member.
+fn members_of(fields: &BTreeMap<&str, (usize, &str)>) -> Result<Vec<String>, String> {
+    let Some(&(line, value)) = fields.get("members") else {
+        return Ok(Vec::new());
+    };
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    let items: Vec<&str> = value.split(',').map(str::trim).collect();
+    if items.len() > workspace_defs::MEMBER_COUNT_LIMIT {
+        return Err(format!(
+            "line {line}: `members` names {} members, the most is {}",
+            items.len(),
+            workspace_defs::MEMBER_COUNT_LIMIT
+        ));
+    }
+    let mut names: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        if item.is_empty() {
+            return Err(format!("line {line}: `members` has an empty name"));
+        }
+        workspace_defs::validate_member(item)
+            .map_err(|reason| format!("line {line}: `members` name `{item}`: {reason}"))?;
+        if names.iter().any(|kept| kept == item) {
+            return Err(format!("line {line}: `members` names `{item}` twice"));
+        }
+        names.push(item.to_owned());
+    }
+    Ok(names)
 }
 
 /// A reason for a field, naming the field's line.
@@ -494,6 +573,7 @@ fn preset(
         source: ReviewerSource::Preset,
         paths: Vec::new(),
         branches: Vec::new(),
+        members: Vec::new(),
     }
 }
 
@@ -562,6 +642,50 @@ mod tests {
             parse("billing", &render(&reviewer), ReviewerSource::Repository).unwrap(),
             reviewer
         );
+    }
+
+    #[test]
+    fn members_are_comma_separated_checked_and_written_only_when_set() {
+        let head = "---\ndescription: d\nsignal: pass\n";
+        let text = format!("{head}members: api, web\n---\nCheck it.\n");
+        let reviewer = parse("api-check", &text, ReviewerSource::Workspace).unwrap();
+        assert_eq!(reviewer.members, ["api", "web"]);
+        assert_eq!(reviewer.source, ReviewerSource::Workspace);
+        assert!(render(&reviewer).contains("\nmembers: api, web\n"));
+        assert!(!render(&sample()).contains("members:"));
+        let empty = format!("{head}members:\n---\nCheck it.\n");
+        assert!(
+            parse("a", &empty, ReviewerSource::User)
+                .unwrap()
+                .members
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_bad_member_names_its_line_and_the_name() {
+        let head = "---\ndescription: d\nsignal: pass\n";
+        let empty_item = format!("{head}members: api,,web\n---\nx\n");
+        assert_eq!(
+            error_of("a", &empty_item),
+            "line 4: `members` has an empty name"
+        );
+        let path_like = format!("{head}members: ../api\n---\nx\n");
+        assert!(
+            error_of("a", &path_like).starts_with("line 4: `members` name `../api`: a member is"),
+            "{}",
+            error_of("a", &path_like)
+        );
+        let twice = format!("{head}members: api, api\n---\nx\n");
+        assert_eq!(error_of("a", &twice), "line 4: `members` names `api` twice");
+        let many = format!(
+            "{head}members: {}\n---\nx\n",
+            (0..21)
+                .map(|i| format!("m{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(error_of("a", &many).starts_with("line 4: `members` names 21 members"));
     }
 
     #[test]
@@ -844,6 +968,110 @@ mod tests {
     }
 
     #[test]
+    fn workspace_reviewers_lose_to_the_repository_and_win_over_the_user() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let repo = root.path().join("repo");
+        let user = root.path().join("user");
+        write(&repo, "same.md", &reviewer_text("repo"));
+        write(&user, "same.md", &reviewer_text("user"));
+        write(&user, "only-user.md", &reviewer_text("user only"));
+        write(
+            &root.path().join("ws/reviewers"),
+            "same.md",
+            &reviewer_text("ws same"),
+        );
+        write(
+            &root.path().join("ws/reviewers"),
+            "api.md",
+            "---\ndescription: api\nsignal: pass\nmembers: api\n---\nCheck it.\n",
+        );
+        let ws = WorkspaceDefs {
+            dir: root.path().join("ws"),
+            name: "ws".to_owned(),
+        };
+        let loaded = load_layers(Some(&repo), Some(&user), &[ws]);
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        let found: Vec<(&str, &str, ReviewerSource)> = loaded
+            .reviewers
+            .iter()
+            .map(|r| (r.name.as_str(), r.description.as_str(), r.source))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("api", "api", ReviewerSource::Workspace),
+                ("only-user", "user only", ReviewerSource::User),
+                ("same", "ws same", ReviewerSource::Workspace),
+            ]
+        );
+        assert_eq!(loaded.reviewers[0].members, ["api"]);
+    }
+
+    #[test]
+    fn two_workspaces_defining_one_reviewer_report_the_second_file() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write(
+            &root.path().join("a/reviewers"),
+            "shared.md",
+            &reviewer_text("from a"),
+        );
+        write(
+            &root.path().join("b/reviewers"),
+            "shared.md",
+            &reviewer_text("from b"),
+        );
+        let listed = [
+            WorkspaceDefs {
+                dir: root.path().join("b"),
+                name: "beta".to_owned(),
+            },
+            WorkspaceDefs {
+                dir: root.path().join("a"),
+                name: "alpha".to_owned(),
+            },
+        ];
+        let loaded = load_layers(None, None, &listed);
+        assert_eq!(loaded.reviewers.len(), 1);
+        assert_eq!(loaded.reviewers[0].description, "from a");
+        let shown = root
+            .path()
+            .join("b/reviewers/shared.md")
+            .display()
+            .to_string();
+        assert_eq!(
+            loaded.errors,
+            [(
+                shown,
+                "the reviewer shared is defined in two workspaces: alpha and beta".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_malformed_workspace_reviewer_is_reported_and_the_others_load() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write(
+            &root.path().join("ws/reviewers"),
+            "broken.md",
+            "no front matter\n",
+        );
+        write(
+            &root.path().join("ws/reviewers"),
+            "good.md",
+            &reviewer_text("good"),
+        );
+        let ws = WorkspaceDefs {
+            dir: root.path().join("ws"),
+            name: "ws".to_owned(),
+        };
+        let loaded = load_layers(None, None, &[ws]);
+        let names: Vec<&str> = loaded.reviewers.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["good"]);
+        assert_eq!(loaded.errors.len(), 1);
+        assert_eq!(loaded.errors[0].0, "broken.md");
+    }
+
+    #[test]
     fn a_shadowed_bad_user_file_is_still_reported() {
         let root = tempfile::tempdir().expect("tempdir");
         let repo = root.path().join("repo");
@@ -902,6 +1130,8 @@ mod tests {
             model in proptest::option::of("[a-z0-9.-]{1,20}"),
             paths in proptest::collection::vec("[a-z*?]{1,8}(/[a-z*?]{1,8}){0,2}", 0..4),
             branches in proptest::collection::vec("[a-z*?/-]{1,12}", 0..4),
+            members in proptest::collection::btree_set("[a-zA-Z0-9][a-zA-Z0-9._-]{0,10}", 0..4)
+                .prop_map(|set| set.into_iter().collect::<Vec<String>>()),
         ) {
             let reviewer = Reviewer {
                 name,
@@ -914,6 +1144,7 @@ mod tests {
                 source: ReviewerSource::Repository,
                 paths,
                 branches,
+                members,
             };
             let back = parse(&reviewer.name, &render(&reviewer), reviewer.source);
             prop_assert_eq!(back, Ok(reviewer));

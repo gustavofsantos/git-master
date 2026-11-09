@@ -39,6 +39,8 @@ pub enum ReviewerSubject {
 pub enum ReviewerSource {
     Repository,
     User,
+    /// A workspace repository's reviewer (D214 (2), D174): it applies to the members it names.
+    Workspace,
     Preset,
 }
 
@@ -62,6 +64,10 @@ pub struct Reviewer {
     /// Globs the branch must match for the reviewer to apply (D214 (1)); empty means any branch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub branches: Vec<String>,
+    /// The workspace members the reviewer applies to, by folder name (D214 (5)); empty means
+    /// every member.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
 }
 
 /// A level, ordered `Low` < `Medium` < `High` (D189).

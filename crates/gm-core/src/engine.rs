@@ -5528,6 +5528,7 @@ impl Engine {
         Ok(verdicts::merged_reviewers(
             &reviewers::repo_dir(&common),
             self.reviewer_user_dir.as_deref(),
+            &[],
         ))
     }
 

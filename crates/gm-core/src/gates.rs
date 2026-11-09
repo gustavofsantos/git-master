@@ -18,6 +18,7 @@ use gm_schema::{
 };
 use serde_json::{Map, Value};
 
+use crate::workspace_defs::{self, WorkspaceDefs};
 use crate::{glob, reviewers};
 
 /// The name of the gate file inside a layer's directory.
@@ -80,6 +81,9 @@ pub struct GateFacts<'a> {
     pub behind_parent: Option<u32>,
     /// True when a person approved `head` (D215 (2)).
     pub approved: bool,
+    /// The workspace member folder being judged (D214 (5)). `None` outside a workspace context:
+    /// a gate or reviewer that names members then does not apply.
+    pub member: Option<&'a str>,
 }
 
 /// Reads a gate file: `{"gates": [ ... ]}`. Every problem is reported, not only the first, and
@@ -144,8 +148,50 @@ pub fn parse(text: &str, layer: GateLayer) -> Result<Vec<LayeredGate>, Vec<Strin
 /// error**: a gate check that cannot see every gate it should cannot say the operation is ready.
 #[must_use]
 pub fn load(repo_dir: Option<&Path>, user_dir: Option<&Path>) -> LoadedGates {
+    load_layers(repo_dir, user_dir, &[])
+}
+
+/// Reads the gates of the workspace repositories `workspaces`, then those of the repository and
+/// the user, as [`load`] reads them. The layers merge by id with the precedence workspace, then
+/// repository, then user; the most specific definition wins whole (D214 (2), D174).
+///
+/// Two workspaces that define one id are a conflict: the workspace whose `dir` sorts first wins,
+/// and the other's gate is an error that names both workspaces, so the check fails closed. The
+/// same `dir` listed twice counts once. The errors are prefixed with the file path as `load` does.
+#[must_use]
+pub fn load_layers(
+    repo_dir: Option<&Path>,
+    user_dir: Option<&Path>,
+    workspaces: &[WorkspaceDefs],
+) -> LoadedGates {
     let mut by_id: BTreeMap<String, LayeredGate> = BTreeMap::new();
     let mut errors = Vec::new();
+    let mut sorted: Vec<&WorkspaceDefs> = workspaces.iter().collect();
+    sorted.sort_by(|a, b| a.dir.cmp(&b.dir));
+    sorted.dedup_by(|a, b| a.dir == b.dir);
+    let mut owners: BTreeMap<String, &WorkspaceDefs> = BTreeMap::new();
+    for ws in sorted {
+        let path = ws.dir.join(FILE_NAME);
+        match read_file(&path, GateLayer::Workspace) {
+            Ok(gates) => {
+                for gate in gates {
+                    let id = gate.gate.id.clone();
+                    if let Some(first) = owners.get(&id) {
+                        errors.push(format!(
+                            "{}: the gate {id} is defined in two workspaces: {} and {}",
+                            path.display(),
+                            first.name,
+                            ws.name
+                        ));
+                        continue;
+                    }
+                    owners.insert(id.clone(), ws);
+                    by_id.insert(id, gate);
+                }
+            }
+            Err(found) => errors.extend(found),
+        }
+    }
     for (dir, layer) in [
         (repo_dir, GateLayer::Repository),
         (user_dir, GateLayer::User),
@@ -242,7 +288,7 @@ fn evaluate_gate(
         reason: None,
         settings: settings_of(gate),
     };
-    if let Err(why) = applies(&gate.when.branches, &gate.when.paths, facts) {
+    if let Err(why) = applies(&gate.members, &gate.when.branches, &gate.when.paths, facts) {
         return GateOutcome {
             applicable: false,
             not_applicable: Some(why),
@@ -293,7 +339,13 @@ fn fresh_verdict(
             reasons.push(undefined(name, facts));
             continue;
         };
-        if applies(&reviewer.branches, &reviewer.paths, facts).is_err()
+        if applies(
+            &reviewer.members,
+            &reviewer.branches,
+            &reviewer.paths,
+            facts,
+        )
+        .is_err()
             || newest(facts.verdicts, name, Some(facts.head)).is_some()
         {
             continue;
@@ -336,7 +388,14 @@ fn signal(
     let Some(reviewer) = find_reviewer(facts, name) else {
         return Some(undefined(name, facts));
     };
-    if applies(&reviewer.branches, &reviewer.paths, facts).is_err() {
+    if applies(
+        &reviewer.members,
+        &reviewer.branches,
+        &reviewer.paths,
+        facts,
+    )
+    .is_err()
+    {
         return None;
     }
     let Some(verdict) = newest(facts.verdicts, name, Some(facts.head)) else {
@@ -460,9 +519,32 @@ fn human_approval(facts: &GateFacts<'_>) -> Option<String> {
     (!facts.approved).then(|| format!("you have not approved {}", short(facts.head)))
 }
 
-/// Whether a gate or reviewer with these conditions applies to the change (D214 (1)). The
-/// branch condition is checked first; an unknown change counts as touching every path.
-fn applies(branches: &[String], paths: &[String], facts: &GateFacts<'_>) -> Result<(), String> {
+/// Whether a gate or reviewer with these conditions applies to the change (D214 (1), (5)). The
+/// member condition is checked first, then the branch; an unknown change counts as touching every
+/// path. A condition on members never applies outside a workspace member (`member` is `None`).
+fn applies(
+    members: &[String],
+    branches: &[String],
+    paths: &[String],
+    facts: &GateFacts<'_>,
+) -> Result<(), String> {
+    if !members.is_empty() {
+        match facts.member {
+            None => {
+                return Err(format!(
+                    "it is for the members {} of a workspace",
+                    members.join(", ")
+                ));
+            }
+            Some(member) if !members.iter().any(|name| name == member) => {
+                return Err(format!(
+                    "the member {member} is not one of {}",
+                    members.join(", ")
+                ));
+            }
+            Some(_) => {}
+        }
+    }
     if !branches.is_empty()
         && !branches
             .iter()
@@ -610,10 +692,12 @@ fn kind_name(kind: &GateKind) -> &'static str {
 /// The keys a gate object may have, for its kind.
 fn kind_keys(kind: &str) -> &'static [&'static str] {
     match kind {
-        "fresh_verdict" => &["id", "kind", "on", "when", "reviewers"],
-        "findings" => &["id", "kind", "on", "when", "severity"],
-        "signal" => &["id", "kind", "on", "when", "reviewer", "max", "min"],
-        _ => &["id", "kind", "on", "when"],
+        "fresh_verdict" => &["id", "kind", "on", "when", "members", "reviewers"],
+        "findings" => &["id", "kind", "on", "when", "members", "severity"],
+        "signal" => &[
+            "id", "kind", "on", "when", "members", "reviewer", "max", "min",
+        ],
+        _ => &["id", "kind", "on", "when", "members"],
     }
 }
 
@@ -699,11 +783,53 @@ fn parse_gate(index: usize, item: &Value) -> Result<GateDef, Vec<String>> {
         None => When::default(),
         Some(value) => parse_when(value, &label, &mut errors),
     };
+    let members = match object.get("members") {
+        None => Vec::new(),
+        Some(value) => member_names(value, &label, &mut errors),
+    };
     let kind = kind_name.and_then(|kind_name| parse_kind(kind_name, object, &label, &mut errors));
     match kind {
-        Some(kind) if errors.is_empty() => Ok(GateDef { id, kind, on, when }),
+        Some(kind) if errors.is_empty() => Ok(GateDef {
+            id,
+            kind,
+            on,
+            when,
+            members,
+        }),
         _ => Err(errors),
     }
+}
+
+/// The member folder names of a gate: a list of text, each checked, with no name twice (D214 (5)).
+fn member_names(value: &Value, label: &str, errors: &mut Vec<String>) -> Vec<String> {
+    let Some(items) = value.as_array() else {
+        errors.push(format!(
+            "{label}: `members` must be a list of member folder names"
+        ));
+        return Vec::new();
+    };
+    if items.len() > workspace_defs::MEMBER_COUNT_LIMIT {
+        errors.push(format!(
+            "{label}: `members` names {} members, the most is {}",
+            items.len(),
+            workspace_defs::MEMBER_COUNT_LIMIT
+        ));
+    }
+    let mut names: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(name) = item.as_str() else {
+            errors.push(format!("{label}: a member name is text, not {item}"));
+            continue;
+        };
+        if let Err(reason) = workspace_defs::validate_member(name) {
+            errors.push(format!("{label}: `members` name `{name}`: {reason}"));
+        } else if names.iter().any(|kept| kept == name) {
+            errors.push(format!("{label}: `members` names `{name}` twice"));
+        } else {
+            names.push(name.to_owned());
+        }
+    }
+    names
 }
 
 /// The settings of a gate kind, read from its object.
@@ -939,6 +1065,7 @@ mod tests {
             },
             on: vec![GateOp::Push],
             when: When::default(),
+            members: Vec::new(),
         };
         assert_eq!(
             settings_of(&gate),
@@ -954,6 +1081,7 @@ mod tests {
                 branches: Vec::new(),
                 paths: vec!["services/**".to_owned()],
             },
+            members: Vec::new(),
         };
         assert_eq!(
             settings_of(&scoped),
@@ -977,6 +1105,7 @@ mod tests {
             source: ReviewerSource::Repository,
             paths: Vec::new(),
             branches: Vec::new(),
+            members: Vec::new(),
         }
     }
 
@@ -1005,6 +1134,7 @@ mod tests {
                 kind,
                 on: vec![GateOp::Push, GateOp::Restack],
                 when: When::default(),
+                members: Vec::new(),
             },
             layer: GateLayer::Repository,
         }
@@ -1043,6 +1173,7 @@ mod tests {
         changed: Option<Vec<String>>,
         behind: Option<u32>,
         approved: bool,
+        member: Option<&'static str>,
     }
 
     impl Setup {
@@ -1054,6 +1185,7 @@ mod tests {
                 changed: Some(vec!["src/lib.rs".to_owned()]),
                 behind: Some(0),
                 approved: true,
+                member: None,
             }
         }
 
@@ -1068,6 +1200,7 @@ mod tests {
                 findings: &self.findings,
                 behind_parent: self.behind,
                 approved: self.approved,
+                member: self.member,
             }
         }
     }
@@ -1471,6 +1604,7 @@ mod tests {
                 },
                 on: vec![GateOp::Push, GateOp::Restack],
                 when: When::default(),
+                members: Vec::new(),
             }
         );
     }
@@ -1717,6 +1851,7 @@ mod tests {
             kind: GateKind::UpToDate,
             on: vec![GateOp::Push],
             when: When::default(),
+            members: Vec::new(),
         };
         assert!(
             save(root.path(), &[bad])
@@ -1736,6 +1871,346 @@ mod tests {
         findings: Vec<FindingFact>,
         behind: Option<u32>,
         approved: bool,
+    }
+
+    const MEMBERS: [&str; 3] = ["api", "web", "docs"];
+
+    fn member_gate(id: &str, members: &[&str]) -> LayeredGate {
+        let mut gate = gate(id, GateKind::UpToDate);
+        gate.gate.members = members.iter().map(|m| (*m).to_owned()).collect();
+        gate
+    }
+
+    #[test]
+    fn members_are_read_checked_and_kept_for_every_kind() {
+        let text = r#"{"gates": [
+            {"id": "api-up", "kind": "up_to_date", "on": ["push"], "members": ["api", "web"]},
+            {"id": "api-high", "kind": "findings", "severity": "high", "on": ["push"], "members": ["api"]},
+            {"id": "plain", "kind": "up_to_date", "on": ["push"]}
+        ]}"#;
+        let gates = parse(text, GateLayer::Repository).expect("valid");
+        let members: Vec<&[String]> = gates.iter().map(|g| g.gate.members.as_slice()).collect();
+        assert_eq!(
+            members,
+            [
+                &["api".to_owned(), "web".to_owned()][..],
+                &["api".to_owned()][..],
+                &[][..]
+            ]
+        );
+    }
+
+    #[test]
+    fn every_member_problem_is_reported_by_name() {
+        let cases = [
+            (r#""members": "api""#, "`members` must be a list"),
+            (r#""members": [7]"#, "a member name is text, not 7"),
+            (
+                r#""members": ["a,b"]"#,
+                "`members` name `a,b`: a member name cannot contain a comma",
+            ),
+            (
+                r#""members": ["../x"]"#,
+                "`members` name `../x`: a member is one folder name",
+            ),
+            (r#""members": [" api"]"#, "cannot start or end with a space"),
+            (
+                r#""members": ["api", "api"]"#,
+                "`members` names `api` twice",
+            ),
+        ];
+        for (field, expected) in cases {
+            let text = format!(
+                r#"{{"gates": [{{"id": "g", "kind": "up_to_date", "on": ["push"], {field}}}]}}"#
+            );
+            let errors = parse(&text, GateLayer::Repository).expect_err(field);
+            assert!(
+                errors.iter().any(|e| e.contains(expected)),
+                "{field}: {errors:?}"
+            );
+        }
+        let many: Vec<String> = (0..21).map(|i| format!("m{i}")).collect();
+        let text = format!(
+            r#"{{"gates": [{{"id": "g", "kind": "up_to_date", "on": ["push"], "members": {}}}]}}"#,
+            serde_json::to_string(&many).expect("json")
+        );
+        let errors = parse(&text, GateLayer::Repository).expect_err("21 members");
+        assert!(
+            errors[0].ends_with("`members` names 21 members, the most is 20"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_gate_for_members_is_not_applicable_outside_them_and_says_why() {
+        let gate = member_gate("api-up", &["api"]);
+        let mut setup = Setup::new(vec![], vec![]);
+        let status = check(std::slice::from_ref(&gate), &setup);
+        let entry = outcome(&status, "api-up");
+        assert!(!entry.applicable && entry.passed);
+        assert_eq!(
+            entry.not_applicable.as_deref(),
+            Some("it is for the members api of a workspace")
+        );
+        setup.member = Some("web");
+        let status = check(std::slice::from_ref(&gate), &setup);
+        assert_eq!(
+            outcome(&status, "api-up").not_applicable.as_deref(),
+            Some("the member web is not one of api")
+        );
+        setup.member = Some("api");
+        let status = check(std::slice::from_ref(&gate), &setup);
+        assert!(outcome(&status, "api-up").applicable);
+        assert!(status.ready, "not behind, so up_to_date passes");
+        setup.behind = Some(1);
+        assert!(
+            !check(&[gate], &setup).ready,
+            "behind blocks for the member"
+        );
+    }
+
+    #[test]
+    fn a_member_list_is_checked_as_a_whole() {
+        let gate = member_gate("pair", &["api", "web"]);
+        let mut setup = Setup::new(vec![], vec![]);
+        setup.member = Some("web");
+        assert!(outcome(&check(std::slice::from_ref(&gate), &setup), "pair").applicable);
+        setup.member = Some("docs");
+        assert_eq!(
+            outcome(&check(&[gate], &setup), "pair")
+                .not_applicable
+                .as_deref(),
+            Some("the member docs is not one of api, web")
+        );
+    }
+
+    #[test]
+    fn a_reviewer_for_other_members_is_skipped_and_for_no_member_too() {
+        let mut api_only = reviewer("api-review", ReviewerSignal::Score);
+        api_only.members = vec!["api".to_owned()];
+        let gates = [fresh("review", &["api-review"])];
+        let mut setup = Setup::new(vec![api_only], vec![]);
+        setup.member = Some("web");
+        let status = check(&gates, &setup);
+        assert!(status.ready && status.missing.is_empty(), "{status:?}");
+        setup.member = None;
+        let status = check(&gates, &setup);
+        assert!(status.ready && status.missing.is_empty(), "{status:?}");
+        setup.member = Some("api");
+        let status = check(&gates, &setup);
+        assert!(!status.ready);
+        assert_eq!(status.missing.len(), 1);
+        assert_eq!(status.missing[0].reviewer, "api-review");
+    }
+
+    #[test]
+    fn a_gate_without_members_applies_inside_any_member() {
+        let gate = member_gate("g", &[]);
+        let mut setup = Setup::new(vec![], vec![]);
+        setup.member = Some("anything");
+        assert!(outcome(&check(&[gate], &setup), "g").applicable);
+    }
+
+    proptest! {
+        #[test]
+        fn a_gate_for_one_member_applies_to_that_member_only(owner in 0usize..3, member in 0usize..4) {
+            let gate = member_gate("g", &[MEMBERS[owner]]);
+            let mut setup = Setup::new(vec![], vec![]);
+            setup.member = MEMBERS.get(member).copied();
+            let status = check(&[gate], &setup);
+            prop_assert_eq!(outcome(&status, "g").applicable, setup.member == Some(MEMBERS[owner]));
+        }
+
+        #[test]
+        fn with_no_members_the_member_of_the_judge_changes_nothing(
+            gate_choices in prop::collection::vec(0usize..6, 0..6),
+            verdict_specs in prop::collection::vec((0usize..3, any::<bool>(), any::<u8>(), 0i64..5), 0..6),
+            finding_specs in prop::collection::vec((0usize..3, 0usize..3), 0..5),
+            behind in prop::option::of(0u32..3),
+            approved in any::<bool>(),
+        ) {
+            let world = build(&gate_choices, &verdict_specs, &finding_specs, behind, approved);
+            prop_assert_eq!(world.status_as(None), world.status_as(Some("x")));
+            prop_assert_eq!(world.status_as(None), world.status());
+        }
+
+        #[test]
+        fn the_result_with_members_does_not_depend_on_the_order_of_its_inputs(
+            gate_choices in prop::collection::vec(0usize..6, 0..6),
+            verdict_specs in prop::collection::vec((0usize..3, any::<bool>(), any::<u8>(), 0i64..5), 0..6),
+            member_bits in prop::collection::vec(0usize..4, 0..12),
+            turn in 0usize..8,
+            judged in 0usize..4,
+        ) {
+            let mut world = build(&gate_choices, &verdict_specs, &[], Some(0), true);
+            let scopes: [&[&str]; 4] = [&[], &["api"], &["web"], &["api", "web"]];
+            for (position, layered) in world.gates.iter_mut().enumerate() {
+                let bits = member_bits.get(position).copied().unwrap_or(0);
+                layered.gate.members = scopes[bits].iter().map(|m| (*m).to_owned()).collect();
+            }
+            for (position, reviewer) in world.reviewers.iter_mut().enumerate() {
+                let bits = member_bits.get(position + 6).copied().unwrap_or(0);
+                reviewer.members = scopes[bits].iter().map(|m| (*m).to_owned()).collect();
+            }
+            let judge = MEMBERS.get(judged).copied();
+            prop_assert_eq!(world.status_as(judge), world.shuffled(turn).status_as(judge));
+        }
+    }
+
+    fn write_defs(dir: &Path, text: &str) {
+        std::fs::create_dir_all(dir).expect("dir");
+        std::fs::write(dir.join(FILE_NAME), text).expect("write");
+    }
+
+    fn defs(root: &Path, name: &str) -> WorkspaceDefs {
+        WorkspaceDefs {
+            dir: root.join(name).join("gitmaster"),
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_workspace_gate_wins_over_the_repository_and_the_user_as_a_whole() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write(
+            &root.path().join("repo"),
+            r#"{"gates": [{"id": "no-high", "kind": "findings", "severity": "low", "on": ["push"]}]}"#,
+        );
+        write(
+            &root.path().join("user"),
+            r#"{"gates": [
+                {"id": "no-high", "kind": "findings", "severity": "high", "on": ["push"]},
+                {"id": "only-user", "kind": "up_to_date", "on": ["restack"]}
+            ]}"#,
+        );
+        write_defs(
+            &root.path().join("ws/gitmaster"),
+            r#"{"gates": [
+                {"id": "no-high", "kind": "findings", "severity": "medium", "on": ["push"], "members": ["api"]},
+                {"id": "ws-only", "kind": "up_to_date", "on": ["push"]}
+            ]}"#,
+        );
+        let loaded = load_layers(
+            Some(&root.path().join("repo")),
+            Some(&root.path().join("user")),
+            &[defs(root.path(), "ws")],
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        let layers: Vec<(&str, GateLayer)> = loaded
+            .gates
+            .iter()
+            .map(|g| (g.gate.id.as_str(), g.layer))
+            .collect();
+        assert_eq!(
+            layers,
+            [
+                ("no-high", GateLayer::Workspace),
+                ("only-user", GateLayer::User),
+                ("ws-only", GateLayer::Workspace),
+            ]
+        );
+        assert_eq!(loaded.gates[0].gate.members, ["api"]);
+        assert_eq!(
+            loaded.gates[0].gate.kind,
+            GateKind::Findings {
+                severity: ReviewSeverity::Medium
+            }
+        );
+    }
+
+    #[test]
+    fn two_workspaces_with_one_id_fail_closed_and_the_smaller_dir_wins() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_defs(
+            &root.path().join("a/gitmaster"),
+            r#"{"gates": [{"id": "shared", "kind": "findings", "severity": "low", "on": ["push"]}]}"#,
+        );
+        write_defs(
+            &root.path().join("b/gitmaster"),
+            r#"{"gates": [{"id": "shared", "kind": "findings", "severity": "high", "on": ["push"]}]}"#,
+        );
+        let listed = [defs(root.path(), "b"), defs(root.path(), "a")];
+        let loaded = load_layers(None, None, &listed);
+        let shown_b = root
+            .path()
+            .join("b/gitmaster")
+            .join(FILE_NAME)
+            .display()
+            .to_string();
+        assert_eq!(
+            loaded.errors,
+            [format!(
+                "{shown_b}: the gate shared is defined in two workspaces: a and b"
+            )]
+        );
+        assert_eq!(loaded.gates.len(), 1);
+        assert_eq!(loaded.gates[0].layer, GateLayer::Workspace);
+        assert_eq!(
+            loaded.gates[0].gate.kind,
+            GateKind::Findings {
+                severity: ReviewSeverity::Low
+            }
+        );
+    }
+
+    #[test]
+    fn the_same_workspace_listed_twice_is_no_conflict() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_defs(
+            &root.path().join("a/gitmaster"),
+            r#"{"gates": [{"id": "one", "kind": "up_to_date", "on": ["push"]}]}"#,
+        );
+        let listed = [defs(root.path(), "a"), defs(root.path(), "a")];
+        let loaded = load_layers(None, None, &listed);
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert_eq!(loaded.gates.len(), 1);
+    }
+
+    #[test]
+    fn a_malformed_workspace_file_contributes_nothing_and_is_reported() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_defs(
+            &root.path().join("ws/gitmaster"),
+            r#"{"gates": [{"id": "ws-only", "kind": "nope", "on": ["push"]}]}"#,
+        );
+        write(
+            &root.path().join("repo"),
+            r#"{"gates": [{"id": "repo-only", "kind": "up_to_date", "on": ["push"]}]}"#,
+        );
+        let loaded = load_layers(
+            Some(&root.path().join("repo")),
+            None,
+            &[defs(root.path(), "ws")],
+        );
+        let ids: Vec<&str> = loaded.gates.iter().map(|g| g.gate.id.as_str()).collect();
+        assert_eq!(ids, ["repo-only"]);
+        assert_eq!(loaded.errors.len(), 1);
+        let shown = root
+            .path()
+            .join("ws/gitmaster")
+            .join(FILE_NAME)
+            .display()
+            .to_string();
+        assert!(
+            loaded.errors[0].starts_with(&format!("{shown}: gate `ws-only`")),
+            "{:?}",
+            loaded.errors
+        );
+    }
+
+    #[test]
+    fn a_workspace_without_a_gate_file_is_no_gates_and_no_error() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let loaded = load_layers(None, None, &[defs(root.path(), "nothing-here")]);
+        assert_eq!(loaded, LoadedGates::default());
+    }
+
+    #[test]
+    fn load_is_load_layers_without_workspaces() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write(&root.path().join("repo"), GOOD);
+        let repo = root.path().join("repo");
+        assert_eq!(load(Some(&repo), None), load_layers(Some(&repo), None, &[]));
     }
 
     const NAMES: [&str; 3] = ["alpha", "beta", "gamma"];
@@ -1823,6 +2298,11 @@ mod tests {
 
     impl World {
         fn status(&self) -> GatesStatus {
+            self.status_as(None)
+        }
+
+        /// The status as judged for `member`.
+        fn status_as(&self, member: Option<&str>) -> GatesStatus {
             let changed = vec!["src/lib.rs".to_owned()];
             evaluate(
                 &self.gates,
@@ -1837,6 +2317,7 @@ mod tests {
                     findings: &self.findings,
                     behind_parent: self.behind,
                     approved: self.approved,
+                    member,
                 },
             )
         }

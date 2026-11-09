@@ -71,6 +71,10 @@ pub struct GateDef {
     pub on: Vec<GateOp>,
     #[serde(default, skip_serializing_if = "When::is_empty")]
     pub when: When,
+    /// The workspace members the gate applies to, by folder name (D214 (5)). Empty means every
+    /// member; a plain repository, which has no members, never gets a gate that names one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
 }
 
 /// Where a gate definition was read from (D214 (2)). The more specific layer wins by id.
@@ -176,6 +180,7 @@ mod tests {
             },
             on: vec![GateOp::Push],
             when: When::default(),
+            members: Vec::new(),
         };
         let json = serde_json::to_value(&gate).unwrap();
         assert_eq!(
@@ -184,6 +189,32 @@ mod tests {
         );
         let back: GateDef = serde_json::from_value(json).unwrap();
         assert_eq!(back, gate);
+    }
+
+    #[test]
+    fn empty_members_are_not_written_and_old_json_reads_as_every_member() {
+        let gate = GateDef {
+            id: "no-high".to_owned(),
+            kind: GateKind::UpToDate,
+            on: vec![GateOp::Push],
+            when: When::default(),
+            members: vec!["api".to_owned()],
+        };
+        let json = serde_json::to_value(&gate).unwrap();
+        assert_eq!(json["members"], serde_json::json!(["api"]));
+        let old = serde_json::json!({"id": "x", "kind": "up_to_date", "on": ["push"]});
+        let read: GateDef = serde_json::from_value(old).unwrap();
+        assert!(read.members.is_empty());
+        let plain = GateDef {
+            members: Vec::new(),
+            ..gate
+        };
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("members")
+                .is_none()
+        );
     }
 
     #[test]

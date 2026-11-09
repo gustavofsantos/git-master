@@ -101,6 +101,7 @@ pub fn to_reviewer(reviewer: &ReviewerProposal, source: ReviewerSource) -> Revie
         source,
         paths: reviewer.paths.clone(),
         branches: reviewer.branches.clone(),
+        members: Vec::new(),
     }
 }
 
@@ -296,6 +297,7 @@ mod tests {
                 branches: Vec::new(),
                 paths: vec!["services/billing/**".to_owned()],
             },
+            members: Vec::new(),
         };
         assert!(check_gate(&gate).is_ok());
         let mut no_ops = gate.clone();

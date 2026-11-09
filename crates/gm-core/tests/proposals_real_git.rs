@@ -265,6 +265,7 @@ fn fresh_verdict_gate(id: &str, reviewer: &str) -> GateDef {
         },
         on: vec![GateOp::Push],
         when: When::default(),
+        members: Vec::new(),
     }
 }
 
@@ -478,6 +479,7 @@ fn an_update_proposal_names_the_accepted_definition_it_would_replace() {
             source: ReviewerSource::Repository,
             paths: Vec::new(),
             branches: Vec::new(),
+            members: Vec::new(),
         },
     )
     .unwrap();
@@ -507,6 +509,7 @@ fn an_update_proposal_names_the_accepted_definition_it_would_replace() {
             kind: GateKind::UpToDate,
             on: vec![GateOp::Restack],
             when: When::default(),
+            members: Vec::new(),
         },
     ));
     assert!(gate.updates);

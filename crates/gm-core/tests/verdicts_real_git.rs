@@ -234,6 +234,7 @@ fn reviewer(name: &str, description: &str, signal: ReviewerSignal) -> Reviewer {
         source: ReviewerSource::Repository,
         paths: Vec::new(),
         branches: Vec::new(),
+        members: Vec::new(),
     }
 }
 

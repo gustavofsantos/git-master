@@ -2255,6 +2255,7 @@ mod tests {
                 branches: Vec::new(),
                 paths: vec!["services/billing/**".into()],
             },
+            members: Vec::new(),
         };
         let proposed = serde_json::to_value(CommandKind::ProposeGate {
             gate: Box::new(gate.clone()),

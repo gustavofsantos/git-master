@@ -81,6 +81,7 @@ fn save_security(dir: &Path, model: Option<&str>) {
         source: ReviewerSource::Repository,
         paths: Vec::new(),
         branches: Vec::new(),
+        members: Vec::new(),
     };
     reviewers::save(&reviewers::repo_dir(&dir.join(".git")), &reviewer).unwrap();
 }

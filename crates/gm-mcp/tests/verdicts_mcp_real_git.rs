@@ -112,6 +112,7 @@ fn repository_reviewer(dir: &Path, name: &str, description: &str) {
         source: ReviewerSource::Repository,
         paths: Vec::new(),
         branches: Vec::new(),
+        members: Vec::new(),
     };
     reviewers::save(&reviewers::repo_dir(&dir.join(".git")), &reviewer).unwrap();
 }
@@ -243,6 +244,7 @@ fn reviewers_list_says_where_a_reviewer_applies_by_its_paths_and_branches() {
         source: ReviewerSource::Repository,
         paths: vec!["services/billing/**".to_owned()],
         branches: vec!["feat/billing-*".to_owned()],
+        members: Vec::new(),
     };
     reviewers::save(&reviewers::repo_dir(&dir.path().join(".git")), &billing).unwrap();
     let replies = session(

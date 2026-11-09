@@ -342,6 +342,7 @@ pub(crate) fn report(
         findings: &findings,
         behind_parent: behind_parent(git, root, branch),
         approved: inputs.approved,
+        member: None,
     };
     let mut status = gates::evaluate(&loaded.gates, op, &facts);
     let mut errors: Vec<String> = defined
