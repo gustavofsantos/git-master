@@ -329,6 +329,8 @@ struct ActiveDetail {
 struct ActiveRemote {
     op: ActiveHistory,
     root: PathBuf,
+    /// The phases of a push, whose `after.push` observers run when it succeeds (`WF3c`).
+    phases: Option<Phases>,
 }
 
 struct Op<'a> {
@@ -1228,7 +1230,11 @@ impl Engine {
             command: &command,
             state: OperationState::Gating,
         };
-        self.run_op(&mut op, Some(&phases), events);
+        if matches!(command.kind, CommandKind::PushWithLease) {
+            self.start_remote_op(&mut op, Some(phases), events);
+        } else {
+            self.run_op(&mut op, Some(&phases), events);
+        }
     }
 
     /// Ends a gated operation with a veto and its reason (`WF3c`, D157).
@@ -1286,6 +1292,9 @@ impl Engine {
             CommandKind::CreateBranch { name, .. }
             | CommandKind::CreateChildBranch { name, .. } => {
                 facts.oid = self.git.branch_tip(&phases.root, name).ok().flatten();
+            }
+            CommandKind::PushWithLease => {
+                facts.oid = self.current(&phases.root).ok().and_then(|(_, oid)| oid);
             }
             _ => {}
         }
@@ -1973,6 +1982,12 @@ impl Engine {
                 ));
                 events.extend(self.refresh_stacks(report.id, &active.root, true));
             }
+            // The observers of a push run when it succeeded, in the repository it ran in (D157(4)).
+            if state == OperationState::Done
+                && let Some(phases) = &active.phases
+            {
+                events.extend(self.start_observers(report.id, phases, &active.op.kind, &[]));
+            }
         }
         // The end comes last: a status clears the error line, and a failure must stay on it.
         events.push(self.finish_op(&active.op, state, detail));
@@ -2370,16 +2385,12 @@ impl Engine {
             }
             return;
         }
-        if matches!(
-            command.kind,
-            CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease
-        ) {
-            match self.start_remote(id, &command.actor, &command.kind) {
-                Ok(()) => self.advance(op, OperationState::Executing, events),
-                Err(message) => {
-                    self.advance_with(op, OperationState::Failed, Some(message), events);
-                }
-            }
+        if matches!(command.kind, CommandKind::Fetch | CommandKind::Pull) {
+            self.start_remote_op(op, None, events);
+            return;
+        }
+        if matches!(command.kind, CommandKind::PushWithLease) {
+            self.run_push(op, events);
             return;
         }
         // A transform operation runs its workflows and answers with `TransformFinished` (`WF3d`).
@@ -2404,20 +2415,40 @@ impl Engine {
                 self.advance_with(op, OperationState::Failed, Some(message), events);
             }
             Ok(Some(found)) if !found.gates.is_empty() => {
-                let waiting = found.gates.iter().cloned().collect();
-                let gate = GatedOp {
-                    id,
-                    command: command.clone(),
-                    phases: found,
-                    waiting,
-                    run: None,
-                };
+                let gate = gated_op(op, found);
                 self.step_gates(gate, events);
             }
             Ok(found) => {
                 self.run_op(op, found.as_ref(), events);
                 self.start_conflict_hunks(id, command, events);
             }
+        }
+    }
+
+    /// A push (`PushWithLease`) after the native check: its `before.push` gates run first, and then
+    /// the push starts as a remote operation, whose `after.push` observers run when it succeeds
+    /// (`WF3c`, D157). A push that cannot start now is refused before any gate runs.
+    fn run_push(&mut self, op: &mut Op, events: &mut Vec<Event>) {
+        if let Err(message) = self.remote_free(&op.command.actor, &op.command.kind) {
+            self.advance_with(op, OperationState::Failed, Some(message), events);
+            return;
+        }
+        match self.open_phases(op.command) {
+            Err(message) => self.advance_with(op, OperationState::Failed, Some(message), events),
+            Ok(Some(found)) if !found.gates.is_empty() => {
+                let gate = gated_op(op, found);
+                self.step_gates(gate, events);
+            }
+            Ok(found) => self.start_remote_op(op, found, events),
+        }
+    }
+
+    /// Starts the remote operation of `op`, which is `Gating`: it is `Executing` until its report,
+    /// or `Failed` when it cannot start.
+    fn start_remote_op(&mut self, op: &mut Op, phases: Option<Phases>, events: &mut Vec<Event>) {
+        match self.start_remote(op.id, &op.command.actor, &op.command.kind, phases) {
+            Ok(()) => self.advance(op, OperationState::Executing, events),
+            Err(message) => self.advance_with(op, OperationState::Failed, Some(message), events),
         }
     }
 
@@ -2761,15 +2792,9 @@ impl Engine {
         Ok(superseded)
     }
 
-    /// Checks a fetch, pull or push with lease and queues its run. The run starts
-    /// on a thread after this returns, so the operation is `Executing` until its
-    /// report. Refused for an agent, and while another remote operation runs.
-    fn start_remote(
-        &mut self,
-        id: OperationId,
-        actor: &Actor,
-        kind: &CommandKind,
-    ) -> Result<(), String> {
+    /// Refuses a remote operation that cannot start now: only a person starts one, and one runs at
+    /// a time.
+    fn remote_free(&self, actor: &Actor, kind: &CommandKind) -> Result<(), String> {
         let what = match kind {
             CommandKind::Fetch => "fetch",
             CommandKind::Pull => "pull",
@@ -2779,6 +2804,20 @@ impl Engine {
         if self.remote.is_some() {
             return Err("a remote operation is already running".to_owned());
         }
+        Ok(())
+    }
+
+    /// Checks a fetch, pull or push with lease and queues its run. The run starts
+    /// on a thread after this returns, so the operation is `Executing` until its
+    /// report. Refused for an agent, and while another remote operation runs.
+    fn start_remote(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        phases: Option<Phases>,
+    ) -> Result<(), String> {
+        self.remote_free(actor, kind)?;
         let root = self.open_root()?;
         let run = match kind {
             CommandKind::Fetch => self.git.fetch(&root),
@@ -2793,6 +2832,7 @@ impl Engine {
                 kind: kind.clone(),
             },
             root,
+            phases,
         });
         self.remote_jobs.push(RemoteJob { id, run });
         Ok(())
@@ -6102,6 +6142,18 @@ impl Engine {
 struct MergedPlan {
     base: Option<String>,
     branches: Vec<MergedBranch>,
+}
+
+/// The gated form of `op`, whose gates are the ones `phases` found, in order.
+fn gated_op(op: &Op, phases: Phases) -> GatedOp {
+    let waiting = phases.gates.iter().cloned().collect();
+    GatedOp {
+        id: op.id,
+        command: op.command.clone(),
+        phases,
+        waiting,
+        run: None,
+    }
 }
 
 /// What a finished remote operation says in its `Done` event.

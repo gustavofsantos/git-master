@@ -42,6 +42,7 @@ mod runner;
 pub mod script;
 mod script_session;
 mod script_stacks;
+mod script_verdicts;
 pub mod settings;
 pub mod stack;
 mod stack_session;

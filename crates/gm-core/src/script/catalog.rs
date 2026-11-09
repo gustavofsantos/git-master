@@ -52,7 +52,13 @@ pub enum FieldKind {
 }
 
 /// Phases a `before.<op>` or `after.<op>` trigger may name.
-const PHASE_OPS: &[&str] = &["commit", "restack", "branch_create", "conflict_resolve"];
+const PHASE_OPS: &[&str] = &[
+    "commit",
+    "restack",
+    "push",
+    "branch_create",
+    "conflict_resolve",
+];
 
 /// Fields a `transform.<field>` trigger may name.
 const TRANSFORM_FIELDS: &[&str] = &["commit_message", "branch_name", "conflict_hunk"];
@@ -193,6 +199,26 @@ static ACTIONS: &[ActionSpec] = &[
         level: Level::Read,
         outcomes: &["done", "failed"],
         fields: &[],
+    },
+    // `ctx.verdicts({ reviewer, branch })`: the name is the Lua name, so it is a plain word.
+    ActionSpec {
+        name: "verdicts",
+        level: Level::Read,
+        outcomes: &["done", "failed"],
+        fields: &[
+            FieldSpec {
+                name: "reviewer",
+                kind: FieldKind::Text,
+                required: false,
+                help: "The reviewer's name. Default: every reviewer.",
+            },
+            FieldSpec {
+                name: "branch",
+                kind: FieldKind::Text,
+                required: false,
+                help: "The branch whose verdicts are read. Default: the branch of the run, else the branch HEAD is on.",
+            },
+        ],
     },
     ActionSpec {
         name: "restack.plan",
@@ -452,6 +478,21 @@ mod tests {
     }
 
     #[test]
+    fn verdicts_is_a_read_at_the_top_level_with_two_optional_text_fields() {
+        let spec = action("verdicts").expect("verdicts exists");
+        assert_eq!(spec.level, Level::Read);
+        assert_eq!(spec.outcomes, &["done", "failed"]);
+        let fields: Vec<(&str, bool)> = spec
+            .fields
+            .iter()
+            .map(|field| (field.name, field.required))
+            .collect();
+        assert_eq!(fields, [("reviewer", false), ("branch", false)]);
+        assert!(spec.fields.iter().all(|f| f.kind == FieldKind::Text));
+        assert_eq!(domain("verdicts"), "general");
+    }
+
+    #[test]
     fn exec_format_takes_only_json() {
         let format = action("exec")
             .expect("exec")
@@ -490,19 +531,27 @@ mod tests {
 
     #[test]
     fn phase_triggers_are_known_for_each_op() {
-        for op in ["commit", "restack", "branch_create", "conflict_resolve"] {
+        for op in [
+            "commit",
+            "restack",
+            "push",
+            "branch_create",
+            "conflict_resolve",
+        ] {
             assert!(is_known_trigger(&format!("before.{op}")), "before.{op}");
             assert!(is_known_trigger(&format!("after.{op}")), "after.{op}");
         }
         assert!(is_known_trigger("before.restack"));
+        assert!(is_known_trigger("before.push"));
+        assert!(is_known_trigger("after.push"));
     }
 
     #[test]
     fn every_listed_trigger_is_known_and_the_list_is_complete() {
         let all = triggers();
         assert_eq!(all.first().map(String::as_str), Some("manual"));
-        // Ten events, four phase ops twice, three fields.
-        assert_eq!(all.len(), 10 + 2 * 4 + 3);
+        // Ten events, five phase ops twice, three fields.
+        assert_eq!(all.len(), 10 + 2 * 5 + 3);
         for on in &all {
             assert!(is_known_trigger(on), "{on} should be known");
         }

@@ -27,13 +27,14 @@ impl Timing {
     }
 }
 
-/// The operation a command is, as a phase names it: `commit`, `restack`, `branch_create` or
-/// `conflict_resolve`. `None` for a command that has no phases.
+/// The operation a command is, as a phase names it: `commit`, `restack`, `push`, `branch_create`
+/// or `conflict_resolve`. `None` for a command that has no phases.
 #[must_use]
 pub fn operation(kind: &CommandKind) -> Option<&'static str> {
     Some(match kind {
         CommandKind::Commit { .. } => "commit",
         CommandKind::ApplyRestack { .. } => "restack",
+        CommandKind::PushWithLease => "push",
         CommandKind::CreateBranch { .. } | CommandKind::CreateChildBranch { .. } => "branch_create",
         CommandKind::ResolveConflict { .. } => "conflict_resolve",
         _ => return None,
@@ -50,7 +51,8 @@ pub struct Facts {
     pub planned: Vec<String>,
     /// The branches a restack moved, from its record.
     pub moved: Vec<String>,
-    /// The commit a commit made, or the tip of a new branch, when there is one.
+    /// The commit a commit made, the tip of a new branch, or the commit a push sent, when there is
+    /// one.
     pub oid: Option<String>,
 }
 
@@ -59,7 +61,7 @@ pub struct Facts {
 #[must_use]
 pub fn branch_of(kind: &CommandKind, facts: &Facts) -> Option<String> {
     match kind {
-        CommandKind::Commit { .. } => facts.head.clone(),
+        CommandKind::Commit { .. } | CommandKind::PushWithLease => facts.head.clone(),
         CommandKind::ApplyRestack { branch, .. } => Some(branch.clone()),
         CommandKind::CreateBranch { name, .. } | CommandKind::CreateChildBranch { name, .. } => {
             Some(name.clone())
@@ -78,6 +80,7 @@ pub fn payload(kind: &CommandKind, facts: &Facts, timing: Timing) -> Option<Valu
         CommandKind::ApplyRestack { branch, .. } => {
             json!({ "root": branch, "branches": facts.planned })
         }
+        CommandKind::PushWithLease => json!({ "branch": facts.head }),
         CommandKind::CreateBranch {
             name, start_point, ..
         } => json!({ "name": name, "start_point": start_point }),
@@ -91,6 +94,7 @@ pub fn payload(kind: &CommandKind, facts: &Facts, timing: Timing) -> Option<Valu
         let map = fields.as_object_mut()?;
         match kind {
             CommandKind::Commit { .. }
+            | CommandKind::PushWithLease
             | CommandKind::CreateBranch { .. }
             | CommandKind::CreateChildBranch { .. } => {
                 map.insert("oid".to_owned(), json!(facts.oid));
@@ -161,6 +165,7 @@ pub fn subject(op: &str) -> &'static str {
     match op {
         "commit" => "the commit",
         "restack" => "the restack",
+        "push" => "the push",
         "branch_create" => "the branch",
         _ => "the conflict resolution",
     }
@@ -273,9 +278,10 @@ mod tests {
     }
 
     #[test]
-    fn four_operations_have_phases_and_the_rest_do_not() {
+    fn five_operations_have_phases_and_the_rest_do_not() {
         assert_eq!(operation(&commit("m")), Some("commit"));
         assert_eq!(operation(&restack("main")), Some("restack"));
+        assert_eq!(operation(&CommandKind::PushWithLease), Some("push"));
         assert_eq!(
             operation(&CommandKind::CreateBranch {
                 name: "b".into(),
@@ -387,6 +393,55 @@ mod tests {
             payload(&child, &facts, Timing::After),
             Some(json!({ "name": "x", "start_point": "a", "parent": "a", "oid": "tip" }))
         );
+    }
+
+    #[test]
+    fn a_push_is_the_push_phase_and_its_branch_is_the_one_head_is_on() {
+        assert_eq!(operation(&CommandKind::PushWithLease), Some("push"));
+        let facts = Facts {
+            head: Some("feat/x".into()),
+            oid: Some("tip".into()),
+            ..Facts::default()
+        };
+        assert_eq!(
+            branch_of(&CommandKind::PushWithLease, &facts).as_deref(),
+            Some("feat/x")
+        );
+        let before = trigger(&CommandKind::PushWithLease, &facts, Timing::Before).unwrap();
+        assert_eq!(before.on, "before.push");
+        assert_eq!(before.branch.as_deref(), Some("feat/x"));
+        assert_eq!(before.payload, json!({ "branch": "feat/x" }));
+        let after = trigger(&CommandKind::PushWithLease, &facts, Timing::After).unwrap();
+        assert_eq!(after.on, "after.push");
+        assert_eq!(after.payload, json!({ "branch": "feat/x", "oid": "tip" }));
+    }
+
+    #[test]
+    fn a_detached_push_has_no_branch_for_its_filter() {
+        let facts = Facts::default();
+        let before = trigger(&CommandKind::PushWithLease, &facts, Timing::Before).unwrap();
+        assert_eq!(before.branch, None);
+        assert_eq!(before.payload, json!({ "branch": null }));
+        assert_eq!(subject("push"), "the push");
+    }
+
+    #[test]
+    fn a_push_gate_with_a_match_filter_runs_only_for_its_branches() {
+        let entries = [
+            entry("any.lua", "before.push", None),
+            entry("feat.lua", "before.push", Some("branch:feat/*")),
+            entry("other.lua", "before.push", Some("branch:other/*")),
+        ];
+        let facts = Facts {
+            head: Some("feat/one".into()),
+            ..Facts::default()
+        };
+        let event = trigger(&CommandKind::PushWithLease, &facts, Timing::Before).unwrap();
+        let chosen: Vec<String> = select(&entries, &event)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(chosen, ["any", "feat"]);
     }
 
     #[test]

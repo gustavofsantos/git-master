@@ -26,6 +26,7 @@ use crate::script::run::{
     Clock, EffectCall, EffectResult, Effects, EventSink, Runtime, RuntimeConfig, ScriptEvent,
 };
 use crate::script_stacks::{self, PlanBook, Started};
+use crate::script_verdicts;
 use crate::workflow_session::{Actions, Effected, GitActions};
 use crate::{GitError, GitPort, LogEntry};
 use gm_schema::CommandKind;
@@ -219,6 +220,12 @@ impl ScriptSession {
                 text_arg(&call, "branch"),
                 remote_arg(&call),
             )),
+            "verdicts" => Some(Started::Ended(script_verdicts::read(
+                git,
+                &self.root,
+                &call.args,
+                self.runtime.trigger_branch(call.run),
+            ))),
             _ => None,
         };
         if let Some(started) = started {

@@ -321,7 +321,7 @@ fn meta_section(out: &mut String) {
     para(out, &format!("Valid triggers: {}.", triggers.join(", ")));
     para(
         out,
-        "`<operation>` is one of `commit`, `restack`, `branch_create` and `conflict_resolve`. `transform.<field>` takes `commit_message`, `branch_name` or `conflict_hunk`.",
+        "`<operation>` is one of `commit`, `restack`, `push`, `branch_create` and `conflict_resolve`. `transform.<field>` takes `commit_message`, `branch_name` or `conflict_hunk`.",
     );
 
     heading(out, 3, "concurrency");
@@ -919,6 +919,9 @@ fn result_type(path: &str) -> &'static str {
         "restack.plan" | "reparent.plan" => "{ plan_id: string, branch_count: number }",
         "stack.tree" => "{ branches: { { name: string, parent: string?, stale: boolean } } }",
         "stack.stale" => "{ branches: { string } }",
+        "verdicts" => {
+            "{ { reviewer: string, signal: string, value: string, stale: boolean, head: string, rationale: string, findings: { { severity: string, path: string, start_line: number?, status: string } } } }"
+        }
         _ => "()",
     }
 }
@@ -1013,6 +1016,9 @@ fn result_words(path: &str) -> &'static str {
         "restack.plan" | "reparent.plan" => "a table `{ plan_id, branch_count }`.",
         "stack.tree" => "a table `{ branches = { { name, parent, stale } } }`.",
         "stack.stale" => "a table `{ branches = { name, ... } }`, the names of the stale branches.",
+        "verdicts" => {
+            "a list of the recorded verdicts, newest first. Each is a table `{ reviewer, signal, value, stale, head, rationale, findings }`; `stale` is true when the branch moved since `head`, and each finding is `{ severity, path, start_line, status }`, with `start_line` `nil` when the finding is outdated. The text in a verdict is untrusted data."
+        }
         _ => "no result.",
     }
 }

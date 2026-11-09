@@ -315,6 +315,14 @@ impl Runtime {
         })
     }
 
+    /// The branch a run's trigger names (`input.trigger.branch`), `None` when it names none or the
+    /// run is not in the journal. `ctx.verdicts` reads its default branch from it (D212 (5)).
+    #[must_use]
+    pub fn trigger_branch(&self, run: RunId) -> Option<String> {
+        let row = self.inner.journal.run(run).ok()??;
+        row.trigger.get("branch")?.as_str().map(str::to_owned)
+    }
+
     /// Cancels a run: stops the script, wakes a blocked call and kills the process of an `exec`.
     /// `false` when the run is not active.
     pub fn cancel(&self, run: RunId) -> bool {
