@@ -18,6 +18,7 @@ mod status;
 mod submodule;
 mod syntax;
 pub mod threads;
+mod verdict;
 mod workflow;
 mod workspace;
 
@@ -68,6 +69,10 @@ pub use threads::{
     SearchOrder, SessionOrigin, ThreadDetail, ThreadEdit, ThreadEntry, ThreadEntryBrief,
     ThreadFilter, ThreadHit, ThreadLink, ThreadRelKind, ThreadRelation, ThreadSummary, ToolKind,
     Unverifiable,
+};
+pub use verdict::{
+    Level, Reviewer, ReviewerDirection, ReviewerSignal, ReviewerSource, ReviewerSubject, Verdict,
+    VerdictFinding,
 };
 pub use workflow::{
     WorkflowCallRecord, WorkflowDiagnostic, WorkflowDryCall, WorkflowDryRun, WorkflowEnd,

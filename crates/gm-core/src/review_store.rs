@@ -3,6 +3,10 @@
 //! is stored as JSON. The location is not stored: it is computed on read, from
 //! the file as it is now (see `review`).
 //!
+//! A verdict (D212 (6)) is what a reviewer's run recorded on a branch, and its findings are
+//! agent-started root comments that name it. They are written in one transaction, kept for the
+//! newest five verdicts per reviewer and branch, and do not count against the agent-thread limits.
+//!
 //! A reply is a row of the same table with a `parent`: one id names a comment or
 //! a reply, and a reply belongs to a root comment (one level deep). A reply copies
 //! its root's path and anchor and has status `open`; only its `body`, `author` and
@@ -14,13 +18,14 @@ use std::time::Duration;
 
 use gm_schema::{
     ReviewAnchor, ReviewComment, ReviewKind, ReviewReply, ReviewSeverity, ReviewStatus,
+    ReviewerSignal, Verdict, VerdictFinding,
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Params, TransactionBehavior, params};
 
 use crate::review;
 
 /// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 /// How long a writer waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -64,9 +69,29 @@ ALTER TABLE comments ADD COLUMN kind TEXT;
 ALTER TABLE comments ADD COLUMN severity TEXT;
 ";
 
+/// Version 5 to 6 (D212 (6)): verdicts, and the findings a verdict produced. A finding is a root
+/// comment with the verdict's id; `ON DELETE SET NULL` keeps the comment when retention deletes
+/// its verdict.
+const V6: &str = "
+CREATE TABLE verdicts (id INTEGER PRIMARY KEY, reviewer TEXT NOT NULL, branch TEXT NOT NULL,
+    head TEXT NOT NULL, signal TEXT NOT NULL, value TEXT NOT NULL, rationale TEXT NOT NULL,
+    origin TEXT NOT NULL, model TEXT, run_thread TEXT, at INTEGER NOT NULL);
+CREATE INDEX verdicts_by_reviewer ON verdicts(reviewer, branch, id);
+ALTER TABLE comments ADD COLUMN verdict_id INTEGER REFERENCES verdicts(id) ON DELETE SET NULL;
+";
+
 /// The upgrades after the first version, in order. Each runs when the database is at its
 /// `from` version, so a database several versions behind runs every step after it.
-const UPGRADES: [(i64, &str); 4] = [(1, V2), (2, V3), (3, V4), (4, V5)];
+const UPGRADES: [(i64, &str); 5] = [(1, V2), (2, V3), (3, V4), (4, V5), (5, V6)];
+
+/// The most findings one verdict may carry (D212 (6)).
+const MAX_FINDINGS: usize = 30;
+/// The newest verdicts kept per reviewer and branch (D189 (2)).
+const VERDICTS_KEPT: i64 = 5;
+
+/// The columns of a verdict row, in the order `raw_verdict` expects.
+const VERDICT_COLUMNS: &str = "id, reviewer, branch, head, signal, value, rationale, origin, \
+     model, run_thread, at";
 
 /// Columns read back for a root `ReviewComment`, in the order `raw_comment` expects.
 const COLUMNS: &str = "id, path, body, status, anchor_json, created_at, resolved_at, snapshot, \
@@ -195,28 +220,25 @@ impl ReviewStore {
         anchor: &ReviewAnchor,
         now: i64,
     ) -> Result<i64, StoreError> {
-        let anchor_json = to_json(anchor)?;
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let written: Result<i64, StoreError> = (|| {
             let in_repository = open_agent_count(&self.conn, None)?;
             let on_file = open_agent_count(&self.conn, Some(path))?;
             review::check_agent_limits(in_repository, on_file).map_err(StoreError)?;
-            self.conn.execute(
-                "INSERT INTO comments (path, body, status, anchor_json, created_at, author,
-                 kind, severity)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
+            insert_agent_root(
+                &self.conn,
+                &AgentRoot {
                     path,
-                    thread.body,
-                    status_text(ReviewStatus::Open),
-                    anchor_json,
+                    body: thread.body,
+                    anchor,
+                    snapshot: None,
                     now,
-                    thread.author,
-                    kind_text(thread.kind),
-                    thread.severity.map(severity_text),
-                ],
-            )?;
-            Ok(self.conn.last_insert_rowid())
+                    author: thread.author,
+                    kind: thread.kind,
+                    severity: thread.severity,
+                    verdict: None,
+                },
+            )
         })();
         let outcome = written.and_then(|id| {
             self.conn.execute_batch("COMMIT")?;
@@ -226,6 +248,106 @@ impl ReviewStore {
             let _ = self.conn.execute_batch("ROLLBACK");
         }
         outcome
+    }
+
+    /// Records a verdict and its findings (D212 (6)) in one write transaction, then keeps only
+    /// the newest five verdicts of its reviewer and branch; older ones are deleted and their
+    /// findings stay, unlinked. A finding is an open flag by `new.origin`, and it is not counted
+    /// against the agent-thread limits. More than 30 findings, or an unknown signal, is refused
+    /// and nothing is written.
+    pub fn record_verdict(
+        &mut self,
+        new: &NewVerdict,
+        findings: &[NewFinding],
+    ) -> Result<RecordedVerdict, StoreError> {
+        parse_signal(&new.signal)?;
+        if findings.len() > MAX_FINDINGS {
+            return Err(StoreError(format!(
+                "a verdict has at most {MAX_FINDINGS} findings, not {}",
+                findings.len()
+            )));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO verdicts (reviewer, branch, head, signal, value, rationale, origin,
+             model, run_thread, at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                new.reviewer,
+                new.branch,
+                new.head,
+                new.signal,
+                new.value,
+                new.rationale,
+                new.origin,
+                new.model,
+                new.run_thread,
+                new.at,
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        let mut comments = Vec::with_capacity(findings.len());
+        for finding in findings {
+            comments.push(insert_agent_root(
+                &tx,
+                &AgentRoot {
+                    path: &finding.path,
+                    body: &finding.body,
+                    anchor: &finding.anchor,
+                    snapshot: finding.snapshot.as_deref(),
+                    now: new.at,
+                    author: &new.origin,
+                    kind: ReviewKind::Flag,
+                    severity: Some(finding.severity),
+                    verdict: Some(id),
+                },
+            )?);
+        }
+        tx.execute(
+            "DELETE FROM verdicts WHERE reviewer = ?1 AND branch = ?2 AND id NOT IN (
+                 SELECT id FROM verdicts WHERE reviewer = ?1 AND branch = ?2
+                 ORDER BY id DESC LIMIT ?3)",
+            params![new.reviewer, new.branch, VERDICTS_KEPT],
+        )?;
+        tx.commit()?;
+        Ok(RecordedVerdict { id, comments })
+    }
+
+    /// The verdicts of `branch` and `reviewer` (each optional), newest first, at most `limit`,
+    /// each with its findings. `stale` is false: the engine derives it.
+    pub fn list_verdicts(
+        &self,
+        branch: Option<&str>,
+        reviewer: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Verdict>, StoreError> {
+        let limit = i64::try_from(limit).map_err(|e| StoreError(e.to_string()))?;
+        read_verdicts(
+            &self.conn,
+            &format!(
+                "SELECT {VERDICT_COLUMNS} FROM verdicts
+                 WHERE (?1 IS NULL OR branch = ?1) AND (?2 IS NULL OR reviewer = ?2)
+                 ORDER BY id DESC LIMIT ?3"
+            ),
+            params![branch, reviewer, limit],
+        )
+    }
+
+    /// The newest verdict of each reviewer on `branch`, by reviewer name.
+    pub fn latest_verdicts(&self, branch: &str) -> Result<Vec<Verdict>, StoreError> {
+        read_verdicts(
+            &self.conn,
+            &format!(
+                "SELECT {VERDICT_COLUMNS} FROM verdicts AS v
+                 WHERE v.branch = ?1 AND v.id = (
+                     SELECT MAX(w.id) FROM verdicts AS w
+                     WHERE w.branch = v.branch AND w.reviewer = v.reviewer)
+                 ORDER BY v.reviewer"
+            ),
+            params![branch],
+        )
     }
 
     /// How many agent-started threads are not resolved in the repository (D200).
@@ -467,11 +589,11 @@ fn insert_reply(
 }
 
 /// The open agent-started threads of the repository, or of `path` (D200): roots whose author
-/// is an agent and whose status is not resolved.
+/// is an agent and whose status is not resolved. A verdict's findings are not threads (D212 (6)).
 fn open_agent_count(conn: &Connection, path: Option<&str>) -> Result<usize, StoreError> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM comments WHERE parent IS NULL AND author LIKE 'agent:%'
-         AND status != ?1 AND (?2 IS NULL OR path = ?2)",
+         AND verdict_id IS NULL AND status != ?1 AND (?2 IS NULL OR path = ?2)",
         params![status_text(ReviewStatus::Resolved), path],
         |row| row.get(0),
     )?;
@@ -490,7 +612,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             tx.execute_batch(SCHEMA)?;
             version = 3;
         }
-        1..=4 => {}
+        1..=5 => {}
         v if v == SCHEMA_VERSION => return Ok(()),
         v if v > SCHEMA_VERSION => {
             return Err(StoreError(
@@ -511,6 +633,145 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit().map_err(StoreError::from)
+}
+
+/// What an agent-started root row holds (D200, D212 (6)).
+struct AgentRoot<'a> {
+    path: &'a str,
+    body: &'a str,
+    anchor: &'a ReviewAnchor,
+    snapshot: Option<&'a str>,
+    now: i64,
+    author: &'a str,
+    kind: ReviewKind,
+    severity: Option<ReviewSeverity>,
+    /// The verdict a finding belongs to; `None` for a thread an agent starts on its own.
+    verdict: Option<i64>,
+}
+
+/// Inserts an open agent-started root comment and returns its id. The caller owns the
+/// transaction and any limit check.
+fn insert_agent_root(conn: &Connection, root: &AgentRoot) -> Result<i64, StoreError> {
+    let anchor_json = to_json(root.anchor)?;
+    conn.execute(
+        "INSERT INTO comments (path, body, status, anchor_json, created_at, author, kind,
+         severity, snapshot, verdict_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            root.path,
+            root.body,
+            status_text(ReviewStatus::Open),
+            anchor_json,
+            root.now,
+            root.author,
+            kind_text(root.kind),
+            root.severity.map(severity_text),
+            root.snapshot,
+            root.verdict,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// One verdict row as SQLite gives it, in `VERDICT_COLUMNS` order.
+type RawVerdict = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+);
+
+fn raw_verdict(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawVerdict> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+    ))
+}
+
+/// The verdicts `sql` selects, in its order, each with its findings in id order.
+fn read_verdicts<P: Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<Vec<Verdict>, StoreError> {
+    let mut statement = conn.prepare(sql)?;
+    let raw: Vec<RawVerdict> = statement
+        .query_map(params, raw_verdict)?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut verdicts = Vec::with_capacity(raw.len());
+    for (id, reviewer, branch, head, signal, value, rationale, origin, model, run_thread, at) in raw
+    {
+        verdicts.push(Verdict {
+            id,
+            reviewer,
+            branch,
+            head,
+            signal: parse_signal(&signal)?,
+            value,
+            rationale,
+            origin,
+            model,
+            run_thread,
+            at,
+            stale: false,
+            findings: findings_of(conn, id)?,
+        });
+    }
+    Ok(verdicts)
+}
+
+/// The findings of verdict `verdict`: its root comments, in id order, with their status now.
+fn findings_of(conn: &Connection, verdict: i64) -> Result<Vec<VerdictFinding>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT id, severity, path, status FROM comments
+         WHERE verdict_id = ?1 AND parent IS NULL ORDER BY id",
+    )?;
+    let rows = statement.query_map(params![verdict], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut findings = Vec::new();
+    for row in rows {
+        let (comment_id, severity, path, status) = row?;
+        let severity =
+            severity.ok_or_else(|| StoreError(format!("finding {comment_id} has no severity")))?;
+        findings.push(VerdictFinding {
+            comment_id,
+            severity: parse_severity(&severity)?,
+            path,
+            status: parse_status(&status)?,
+        });
+    }
+    Ok(findings)
+}
+
+fn parse_signal(text: &str) -> Result<ReviewerSignal, StoreError> {
+    match text {
+        "score" => Ok(ReviewerSignal::Score),
+        "level" => Ok(ReviewerSignal::Level),
+        "pass" => Ok(ReviewerSignal::Pass),
+        other => Err(StoreError(format!("unknown reviewer signal {other:?}"))),
+    }
 }
 
 fn status_text(status: ReviewStatus) -> &'static str {
@@ -629,6 +890,40 @@ fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
 
 fn to_json(anchor: &ReviewAnchor) -> Result<String, StoreError> {
     serde_json::to_string(anchor).map_err(|e| StoreError(format!("cannot encode JSON: {e}")))
+}
+
+/// A verdict to record (D212 (6)). `origin` is the author of its findings too.
+pub struct NewVerdict {
+    pub reviewer: String,
+    pub branch: String,
+    pub head: String,
+    /// `score`, `level` or `pass`.
+    pub signal: String,
+    pub value: String,
+    pub rationale: String,
+    /// `agent:<client>`.
+    pub origin: String,
+    pub model: Option<String>,
+    pub run_thread: Option<String>,
+    /// Milliseconds since the Unix epoch.
+    pub at: i64,
+}
+
+/// A finding to record with its verdict: a flag anchored like any comment.
+pub struct NewFinding {
+    pub severity: ReviewSeverity,
+    pub path: String,
+    pub body: String,
+    pub anchor: ReviewAnchor,
+    /// Object id of the snapshot taken when the finding was made, when there is one.
+    pub snapshot: Option<String>,
+}
+
+/// What `record_verdict` wrote: the verdict's id and the ids of its findings, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedVerdict {
+    pub id: i64,
+    pub comments: Vec<i64>,
 }
 
 #[cfg(test)]
@@ -1219,5 +1514,399 @@ mod tests {
             refused.0
         );
         assert_eq!(store.open_agent_threads().expect("count"), 20);
+    }
+
+    fn v5_database(path: &Path) {
+        let conn = Connection::open(path).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE comments (id INTEGER PRIMARY KEY, path TEXT NOT NULL,
+             body TEXT NOT NULL, status TEXT NOT NULL, anchor_json TEXT NOT NULL,
+             created_at INTEGER NOT NULL, resolved_at INTEGER, snapshot TEXT,
+             after_snapshot TEXT, parent INTEGER REFERENCES comments(id) ON DELETE CASCADE,
+             author TEXT, kind TEXT, severity TEXT);
+             INSERT INTO comments (id, path, body, status, anchor_json, created_at, snapshot,
+                 parent, author, kind, severity) VALUES
+             (1, 'a.rs', 'rename this', 'open', '{\"text\":\"x\",\"before\":[],\"after\":[],\"start_line\":1}', 10, 'c1', NULL, NULL, NULL, NULL),
+             (2, 'a.rs', 'guess', 'open', '{\"text\":\"x\",\"before\":[],\"after\":[],\"start_line\":2}', 11, NULL, NULL, 'agent:claude-code', 'flag', 'high'),
+             (3, 'a.rs', 'which one?', 'open', '{\"text\":\"x\",\"before\":[],\"after\":[],\"start_line\":1}', 12, NULL, 1, 'human', NULL, NULL);
+             PRAGMA user_version = 5;",
+        )
+        .expect("v5");
+    }
+
+    /// The shape of the comments and verdicts tables, their foreign keys and the indexes.
+    fn shape(store: &ReviewStore) -> Vec<String> {
+        let mut shape = Vec::new();
+        let queries = [
+            "SELECT 'comments ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('comments')",
+            "SELECT 'verdicts ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('verdicts')",
+            "SELECT 'fk ' || \"table\" || ' ' || \"from\" || ' ' || \"to\" || ' ' || on_delete FROM pragma_foreign_key_list('comments')",
+            "SELECT 'index ' || name || ' on ' || tbl_name FROM sqlite_master WHERE type = 'index' ORDER BY name",
+        ];
+        for sql in queries {
+            let rows: Vec<String> = store
+                .conn
+                .prepare(sql)
+                .expect("prepare")
+                .query_map([], |row| row.get(0))
+                .expect("query")
+                .map(|row| row.expect("row"))
+                .collect();
+            shape.extend(rows);
+        }
+        shape
+    }
+
+    fn new_verdict(reviewer: &str, branch: &str, at: i64) -> NewVerdict {
+        NewVerdict {
+            reviewer: reviewer.to_owned(),
+            branch: branch.to_owned(),
+            head: "a".repeat(40),
+            signal: "level".to_owned(),
+            value: "low".to_owned(),
+            rationale: "looks fine".to_owned(),
+            origin: "agent:claude-code".to_owned(),
+            model: Some("haiku".to_owned()),
+            run_thread: Some("thread-1".to_owned()),
+            at,
+        }
+    }
+
+    fn new_finding(path: &str, severity: ReviewSeverity, body: &str) -> NewFinding {
+        NewFinding {
+            severity,
+            path: path.to_owned(),
+            body: body.to_owned(),
+            anchor: anchor("x", 1),
+            snapshot: Some("s".repeat(40)),
+        }
+    }
+
+    fn count(store: &ReviewStore, sql: &str) -> i64 {
+        store
+            .conn
+            .query_row(sql, [], |row| row.get(0))
+            .expect("count")
+    }
+
+    #[test]
+    fn a_version_five_database_gains_the_verdicts_table_and_keeps_its_comments() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("review.db");
+        v5_database(&path);
+        let mut store = ReviewStore::open(&path).expect("migrate");
+        assert_eq!(user_version(&store), 6);
+        assert_eq!(SCHEMA_VERSION, 6);
+        let kept = store.get(1).expect("get").expect("kept");
+        assert_eq!(kept.replies.len(), 1);
+        assert_eq!(kept.replies[0].body, "which one?");
+        let flag = store.get(2).expect("get").expect("kept");
+        assert_eq!(flag.kind, Some(ReviewKind::Flag));
+        assert_eq!(flag.severity, Some(ReviewSeverity::High));
+        let recorded = store
+            .record_verdict(
+                &new_verdict("security", "feat", 20),
+                &[new_finding("a.rs", ReviewSeverity::Low, "after upgrade")],
+            )
+            .expect("record after the upgrade");
+        assert_eq!(recorded.comments.len(), 1);
+    }
+
+    #[test]
+    fn an_upgraded_database_has_the_same_shape_as_a_fresh_one() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("review.db");
+        v5_database(&path);
+        let upgraded = ReviewStore::open(&path).expect("migrate");
+        let fresh = ReviewStore::open_in_memory().expect("fresh");
+        let fresh_shape = shape(&fresh);
+        for line in [
+            "comments verdict_id INTEGER 0 NULL 0",
+            "fk verdicts verdict_id id SET NULL",
+            "index verdicts_by_reviewer on verdicts",
+        ] {
+            assert!(
+                fresh_shape.iter().any(|l| l == line),
+                "{line} in {fresh_shape:?}"
+            );
+        }
+        assert_eq!(shape(&upgraded), fresh_shape);
+    }
+
+    #[test]
+    fn a_fresh_database_has_the_verdicts_table_and_the_verdict_link() {
+        let store = ReviewStore::open_in_memory().expect("open");
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'verdicts'"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM pragma_table_info('comments') WHERE name = 'verdict_id'"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn a_verdict_and_its_findings_are_written_together() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        let recorded = store
+            .record_verdict(
+                &new_verdict("security", "feat", 100),
+                &[
+                    new_finding("src/a.rs", ReviewSeverity::High, "unchecked input"),
+                    new_finding("src/b.rs", ReviewSeverity::Low, "naming"),
+                ],
+            )
+            .expect("record");
+        assert_eq!(recorded.comments.len(), 2);
+        let listed = store
+            .list_verdicts(Some("feat"), Some("security"), 10)
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        let verdict = &listed[0];
+        assert_eq!(verdict.id, recorded.id);
+        assert_eq!(verdict.reviewer, "security");
+        assert_eq!(verdict.signal, ReviewerSignal::Level);
+        assert_eq!(verdict.value, "low");
+        assert_eq!(verdict.origin, "agent:claude-code");
+        assert_eq!(verdict.model.as_deref(), Some("haiku"));
+        assert_eq!(verdict.run_thread.as_deref(), Some("thread-1"));
+        assert_eq!(verdict.at, 100);
+        assert!(!verdict.stale);
+        let findings: Vec<(i64, ReviewSeverity, &str, ReviewStatus)> = verdict
+            .findings
+            .iter()
+            .map(|f| (f.comment_id, f.severity, f.path.as_str(), f.status))
+            .collect();
+        assert_eq!(
+            findings,
+            [
+                (
+                    recorded.comments[0],
+                    ReviewSeverity::High,
+                    "src/a.rs",
+                    ReviewStatus::Open
+                ),
+                (
+                    recorded.comments[1],
+                    ReviewSeverity::Low,
+                    "src/b.rs",
+                    ReviewStatus::Open
+                ),
+            ]
+        );
+        let comment = store.get(recorded.comments[0]).expect("get").expect("root");
+        assert_eq!(comment.author.as_deref(), Some("agent:claude-code"));
+        assert_eq!(comment.kind, Some(ReviewKind::Flag));
+        assert_eq!(comment.severity, Some(ReviewSeverity::High));
+        assert_eq!(comment.body, "unchecked input");
+        assert_eq!(comment.snapshot, Some("s".repeat(40)));
+        assert_eq!(comment.anchor, anchor("x", 1));
+        assert_eq!(
+            count(
+                &store,
+                &format!(
+                    "SELECT COUNT(*) FROM comments WHERE verdict_id = {}",
+                    recorded.id
+                )
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn a_verdict_with_too_many_findings_or_an_unknown_signal_writes_nothing() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        let thirty_one: Vec<NewFinding> = (0..31)
+            .map(|i| new_finding("a.rs", ReviewSeverity::Low, &format!("f{i}")))
+            .collect();
+        let refused = store
+            .record_verdict(&new_verdict("security", "feat", 1), &thirty_one)
+            .expect_err("refused");
+        assert_eq!(refused.0, "a verdict has at most 30 findings, not 31");
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM verdicts"), 0);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM comments"), 0);
+
+        let thirty = &thirty_one[..30];
+        store
+            .record_verdict(&new_verdict("security", "feat", 2), thirty)
+            .expect("thirty is allowed");
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM comments"), 30);
+
+        let mut bad = new_verdict("security", "feat", 3);
+        bad.signal = "spin".to_owned();
+        assert!(store.record_verdict(&bad, &[]).is_err());
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM verdicts"), 1);
+    }
+
+    #[test]
+    fn retention_keeps_the_newest_five_per_reviewer_and_branch_and_unlinks_the_rest() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        let mut first_comment = None;
+        let mut first_verdict = None;
+        for at in 1..=6 {
+            let recorded = store
+                .record_verdict(
+                    &new_verdict("security", "feat", at),
+                    &[new_finding(
+                        "a.rs",
+                        ReviewSeverity::Medium,
+                        &format!("run {at}"),
+                    )],
+                )
+                .expect("record");
+            if at == 1 {
+                first_comment = Some(recorded.comments[0]);
+                first_verdict = Some(recorded.id);
+            }
+        }
+        store
+            .record_verdict(
+                &new_verdict("code-review", "feat", 7),
+                &[new_finding("a.rs", ReviewSeverity::Low, "other")],
+            )
+            .expect("record");
+        store
+            .record_verdict(
+                &new_verdict("security", "main", 8),
+                &[new_finding("a.rs", ReviewSeverity::Low, "branch")],
+            )
+            .expect("record");
+
+        let kept = store
+            .list_verdicts(Some("feat"), Some("security"), 10)
+            .expect("list");
+        let ids: Vec<i64> = kept.iter().map(|v| v.id).collect();
+        assert_eq!(kept.len(), 5);
+        assert!(!ids.contains(&first_verdict.expect("first")), "{ids:?}");
+        assert_eq!(
+            store
+                .list_verdicts(Some("feat"), Some("code-review"), 10)
+                .expect("list")
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_verdicts(Some("main"), Some("security"), 10)
+                .expect("list")
+                .len(),
+            1
+        );
+
+        let unlinked = first_comment.expect("first comment");
+        let comment = store
+            .get(unlinked)
+            .expect("get")
+            .expect("the finding stays");
+        assert_eq!(comment.body, "run 1");
+        assert_eq!(
+            count(
+                &store,
+                &format!(
+                    "SELECT COUNT(*) FROM comments WHERE id = {unlinked} AND verdict_id IS NULL"
+                )
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn list_verdicts_filters_orders_newest_first_and_limits() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        let a = store
+            .record_verdict(&new_verdict("security", "feat", 1), &[])
+            .expect("a")
+            .id;
+        let b = store
+            .record_verdict(&new_verdict("slop", "feat", 2), &[])
+            .expect("b")
+            .id;
+        let c = store
+            .record_verdict(&new_verdict("security", "main", 3), &[])
+            .expect("c")
+            .id;
+        let ids = |verdicts: Vec<Verdict>| -> Vec<i64> { verdicts.iter().map(|v| v.id).collect() };
+        assert_eq!(
+            ids(store.list_verdicts(None, None, 10).expect("all")),
+            vec![c, b, a]
+        );
+        assert_eq!(
+            ids(store.list_verdicts(Some("feat"), None, 10).expect("branch")),
+            vec![b, a]
+        );
+        assert_eq!(
+            ids(store
+                .list_verdicts(None, Some("security"), 10)
+                .expect("reviewer")),
+            vec![c, a]
+        );
+        assert_eq!(
+            ids(store
+                .list_verdicts(Some("feat"), Some("security"), 10)
+                .expect("both")),
+            vec![a]
+        );
+        assert_eq!(
+            ids(store.list_verdicts(None, None, 2).expect("limit")),
+            vec![c, b]
+        );
+        assert!(
+            store
+                .list_verdicts(Some("nope"), None, 10)
+                .expect("none")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn findings_do_not_count_against_the_agent_thread_limits() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        let findings: Vec<NewFinding> = (0..25)
+            .map(|i| new_finding("a.rs", ReviewSeverity::High, &format!("flag {i}")))
+            .collect();
+        store
+            .record_verdict(&new_verdict("security", "feat", 1), &findings)
+            .expect("twenty-five findings are recorded");
+        assert_eq!(store.open_agent_threads().expect("count"), 0);
+        assert_eq!(store.open_agent_threads_on("a.rs").expect("count"), 0);
+
+        let thread = agent_thread(ReviewKind::Note, "n");
+        for _ in 0..5 {
+            store
+                .add_agent("a.rs", &thread, &anchor("x", 1), 2)
+                .expect("the thread limit is still five threads");
+        }
+        assert_eq!(store.open_agent_threads_on("a.rs").expect("count"), 5);
+    }
+
+    #[test]
+    fn latest_verdicts_picks_the_newest_of_each_reviewer_on_the_branch() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        store
+            .record_verdict(&new_verdict("security", "feat", 1), &[])
+            .expect("old security");
+        let code = store
+            .record_verdict(&new_verdict("code-review", "feat", 2), &[])
+            .expect("code")
+            .id;
+        let security = store
+            .record_verdict(&new_verdict("security", "feat", 3), &[])
+            .expect("new security")
+            .id;
+        store
+            .record_verdict(&new_verdict("security", "main", 4), &[])
+            .expect("other branch");
+
+        let latest = store.latest_verdicts("feat").expect("latest");
+        let pairs: Vec<(&str, i64)> = latest.iter().map(|v| (v.reviewer.as_str(), v.id)).collect();
+        assert_eq!(pairs, [("code-review", code), ("security", security)]);
+        assert!(store.latest_verdicts("nope").expect("none").is_empty());
     }
 }
