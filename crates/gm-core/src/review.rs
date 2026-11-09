@@ -515,6 +515,20 @@ mod tests {
     }
 
     #[test]
+    fn a_label_after_the_client_is_still_an_agent_and_not_a_person() {
+        // The label is display only (D200): `agent:<client>/<label>` is an agent's thread in every
+        // rule that asks whether an agent started a thread.
+        let labelled = thread(
+            Some("agent:claude-code/billing"),
+            Some(ReviewKind::Note),
+            ReviewStatus::Open,
+        );
+        assert!(is_agent_started(&labelled));
+        assert!(!listed_for(&labelled, ReviewAuthorFilter::Human));
+        assert!(listed_for(&labelled, ReviewAuthorFilter::Agent));
+    }
+
+    #[test]
     fn the_agent_limits_are_checked_per_repository_then_per_file() {
         assert!(check_agent_limits(0, 0).is_ok());
         assert!(check_agent_limits(19, 4).is_ok());

@@ -452,7 +452,7 @@ fn gates_status_reports_the_gates_the_engine_checks_and_marks_its_text_untrusted
 }
 
 #[test]
-fn gates_status_has_no_member_argument_and_a_missing_branch_is_refused() {
+fn gates_status_takes_a_member_and_a_missing_branch_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     repo(dir.path());
@@ -473,7 +473,9 @@ fn gates_status_has_no_member_argument_and_a_missing_branch_is_refused() {
         .expect("gates_status is listed");
     assert_eq!(tool["annotations"]["readOnlyHint"], true);
     let properties = tool["inputSchema"]["properties"].as_object().unwrap();
-    assert_eq!(properties.keys().collect::<Vec<_>>(), vec!["branch"]);
+    let mut keys: Vec<&str> = properties.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["agent", "branch", "member"]);
     assert_eq!(tool["inputSchema"]["additionalProperties"], false);
     assert_eq!(
         refusal(&replies[2]),

@@ -2572,7 +2572,7 @@ fn outside_a_workspace_the_status_says_so_with_no_members() {
 }
 
 #[test]
-fn the_workspace_status_schema_is_read_only_and_takes_no_arguments() {
+fn the_workspace_status_schema_is_read_only_and_takes_only_the_agent_label() {
     let dir = repo();
     let replies = session(
         dir.path(),
@@ -2591,5 +2591,13 @@ fn the_workspace_status_schema_is_read_only_and_takes_no_arguments() {
     assert_eq!(tool["annotations"]["readOnlyHint"], true);
     assert_eq!(tool["annotations"]["destructiveHint"], false);
     assert_eq!(tool["inputSchema"]["additionalProperties"], false);
-    assert_eq!(tool["inputSchema"]["properties"], json!({}));
+    // It takes no argument but the optional agent label every tool takes (D200).
+    assert_eq!(
+        tool["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        vec!["agent"]
+    );
 }
