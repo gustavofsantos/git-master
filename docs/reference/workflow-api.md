@@ -157,8 +157,6 @@ A reparent moves everything or nothing. If any branch of the plan conflicts or i
 
 ### Verdicts
 
-> **Planned.** These calls are not available yet.
-
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
 | `ctx.verdicts({ reviewer, branch })` | `reviewer` (optional): the reviewer's name. `branch` (optional): defaults to the branch of the run. | A list of the recorded verdicts, newest first, each with `reviewer`, `signal`, `value`, `stale`, `head`, `rationale` and `findings` (with `severity`, `path`, `start_line` and `status`). | read | `done`, `failed` |
