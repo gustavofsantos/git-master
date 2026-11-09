@@ -88,7 +88,7 @@ A gate is a rule with a clear answer. The agent can read which gates apply and w
 | Gate | It blocks while |
 |---|---|
 | **Fresh verdict** | A reviewer you named has no verdict for the current head of the branch. It checks that a verdict exists, not what it says: use **Signal** for that. |
-| **Findings** | An unresolved finding has a severity at or above the one you set. |
+| **Findings** | An unresolved finding has a severity at or above the one you set. A finding written for a commit that the branch contains counts too, so renaming a branch does not drop it, and a branch cut from a commit with an open finding inherits it. |
 | **Signal** | A reviewer's value is outside the bound you set, such as risk above 30. |
 | **Up to date** | The branch is behind its parent in the stack. |
 | **Human approval** | You have not approved the current commit of the branch. |
