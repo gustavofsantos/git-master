@@ -148,7 +148,7 @@ Your defaults live in your configuration directory, in `reviewers/` and `gates.j
 
 ## Have Claude propose reviewers and gates
 
-> **Planned.** An agent cannot propose reviewers or gates yet.
+> **Planned.** **Accept**, **Deny** and the **Proposed** list in **Reviewers Settings…** are not available yet, and `/gitmaster:plan-review` does not exist yet. An agent can already propose through `reviewer_propose` and `gate_propose`, and a proposal never acts as a reviewer or a gate.
 
 ```text
 /gitmaster:plan-review
