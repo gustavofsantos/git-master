@@ -30,10 +30,10 @@ A memory attached to **Platform** is found from all seven repositories, includin
 Choose **Manage Contexts…** on the **Memories** tab of the **Agents** page, or from the command palette.
 
 1. Choose **New Context** and give it a name. When a context is selected, the name box also asks whether the new one is a sub-context of it: choose **As a sub-context of** to switch between yes and no.
-2. Choose **Add Repository** and pick from your recent repositories, or add the repository that is open.
+2. Choose **Add Repository** and pick from your recent repositories, add the repository that is open, or choose **Browse…** to pick any folder that holds a Git repository. A context can hold as many repositories as you like, and the context you just created is selected, so you can add them at once.
 3. Choose **⋯** on a context, then **Rename**, **Move…** or **Delete**.
 
-When a repository first joins a context, GitMaster gives that clone an id, in its `.git` folder, so the membership still holds if you move the folder. Nothing is written into the working tree. If another clone already holds that id, the dialog says so and offers **Give this clone a new id**. After that the clone belongs to no context, so add it to the contexts again.
+Contexts are not kept in any repository. The contexts, the repositories that belong to each, and the memories attached to them are in one database of your own, in the GitMaster data folder, so a context can reach across as many repositories as you want. When a repository first joins a context, GitMaster gives that clone an id, in its `.git` folder, so the membership still holds if you move the folder. That id is the only thing GitMaster writes in a repository for a context, and nothing is written into the working tree. If another clone already holds that id, the dialog says so and offers **Give this clone a new id**. After that the clone belongs to no context, so add it to the contexts again.
 
 A context cannot be deleted while it has sub-contexts. Deleting one lists the memories that belong to no other context and asks before it removes them.
 
