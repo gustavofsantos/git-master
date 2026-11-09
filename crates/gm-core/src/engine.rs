@@ -79,6 +79,7 @@ use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSessi
 use crate::verdicts;
 use crate::workflow_session::{self, Effected};
 use crate::workspace::{CreateRequest, Workspaces};
+use crate::workspace_comments;
 use crate::workspace_defs::{self, WorkspaceDefs};
 use crate::worktree;
 
@@ -5795,10 +5796,11 @@ impl Engine {
         body: &str,
     ) -> Result<Vec<Event>, String> {
         let body = review_body(body)?;
-        let root = self.open_root()?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        store.set_body(comment, body).map_err(|e| e.0)?;
-        self.review_listed(id, &root)
+        let view = self.open_root()?;
+        let site = workspace_comments::site(self.git.as_ref(), &view, comment)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &site.store_root)?;
+        store.set_body(site.local, body).map_err(|e| e.0)?;
+        self.review_listed(id, &view)
     }
 
     /// Resolves or reopens comment `comment`; refused when it already has `status`.
@@ -5808,9 +5810,10 @@ impl Engine {
         comment: i64,
         status: ReviewStatus,
     ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let current = find_review(store, comment)?;
+        let view = self.open_root()?;
+        let site = workspace_comments::site(self.git.as_ref(), &view, comment)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &site.store_root)?;
+        let current = find_review(store, site.local)?;
         if current.status == status {
             return Err(match status {
                 ReviewStatus::Resolved => "the comment is already resolved".to_owned(),
@@ -5820,15 +5823,15 @@ impl Engine {
             });
         }
         store
-            .set_status(comment, status, now_ms())
+            .set_status(site.local, status, now_ms())
             .map_err(|e| e.0)?;
         // Reopening drops the "after" snapshot (D140); the row no longer names it.
         if status == ReviewStatus::Open && current.after_snapshot.is_some() {
             self.git
-                .delete_review_ref(&root, comment, ReviewSide::After)
+                .delete_review_ref(&site.store_root, site.local, ReviewSide::After)
                 .map_err(|e| e.0)?;
         }
-        self.review_listed(id, &root)
+        self.review_listed(id, &view)
     }
 
     /// An agent's note that it worked on comment `comment` (D135): the status becomes
@@ -5848,9 +5851,10 @@ impl Engine {
         if summary.is_empty() {
             return Err("the summary is empty".to_owned());
         }
-        let root = self.open_root()?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let current = find_review(store, comment)?;
+        let view = self.open_root()?;
+        let site = workspace_comments::site(self.git.as_ref(), &view, comment)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &site.store_root)?;
+        let current = find_review(store, site.local)?;
         // An agent may hand off a finding, so it can fix what a reviewer found (D215 (3)); every
         // other thread it started is the person's to close (D200 (5a)).
         if matches!(actor, Actor::Agent { .. })
@@ -5863,31 +5867,31 @@ impl Engine {
         }
         let (earlier, path) = (current.after_snapshot, current.path);
         if !store
-            .handle(comment, &origin_of(actor), summary, now_ms())
+            .handle(site.local, &origin_of(actor), summary, now_ms())
             .map_err(|e| e.0)?
         {
             return Err("the comment is already resolved".to_owned());
         }
-        let snapshot = self
-            .git
-            .snapshot_worktree_for(&root, &path)
-            .and_then(|oid| {
-                self.git
-                    .set_review_ref(&root, comment, ReviewSide::After, &oid)?;
-                Ok(oid)
-            });
+        let root = &site.store_root;
+        let snapshot = self.git.snapshot_worktree_for(root, &path).and_then(|oid| {
+            self.git
+                .set_review_ref(root, site.local, ReviewSide::After, &oid)?;
+            Ok(oid)
+        });
         match snapshot {
-            Ok(oid) => store.set_after_snapshot(comment, &oid).map_err(|e| e.0)?,
+            Ok(oid) => store
+                .set_after_snapshot(site.local, &oid)
+                .map_err(|e| e.0)?,
             Err(_) if earlier.is_some() => {
                 // The comment stays handled without an "after"; a ref left behind
                 // would keep an old snapshot alive for nothing.
                 let _ = self
                     .git
-                    .delete_review_ref(&root, comment, ReviewSide::After);
+                    .delete_review_ref(root, site.local, ReviewSide::After);
             }
             Err(_) => {}
         }
-        self.review_listed(id, &root)
+        self.review_listed(id, &view)
     }
 
     /// A reply to comment `comment`, which may be a root or a reply: it attaches to the
@@ -5905,10 +5909,11 @@ impl Engine {
         if body.is_empty() {
             return Err("the reply is empty".to_owned());
         }
-        let root = self.open_root()?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let view = self.open_root()?;
+        let site = workspace_comments::site(self.git.as_ref(), &view, comment)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &site.store_root)?;
         let parent = store
-            .root_of(comment)
+            .root_of(site.local)
             .map_err(|e| e.0)?
             .ok_or_else(|| format!("no review comment {comment}"))?;
         let current = find_review(store, parent)?;
@@ -5921,12 +5926,12 @@ impl Engine {
             Reply::Added { reopened } => {
                 if reopened && current.after_snapshot.is_some() {
                     self.git
-                        .delete_review_ref(&root, parent, ReviewSide::After)
+                        .delete_review_ref(&site.store_root, parent, ReviewSide::After)
                         .map_err(|e| e.0)?;
                 }
             }
         }
-        self.review_listed(id, &root)
+        self.review_listed(id, &view)
     }
 
     /// Deletes comment `comment` and the private refs that kept its snapshots.
@@ -5935,21 +5940,22 @@ impl Engine {
         id: OperationId,
         comment: i64,
     ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let current = find_review(store, comment)?;
-        store.delete(comment).map_err(|e| e.0)?;
+        let view = self.open_root()?;
+        let site = workspace_comments::site(self.git.as_ref(), &view, comment)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &site.store_root)?;
+        let current = find_review(store, site.local)?;
+        store.delete(site.local).map_err(|e| e.0)?;
         if current.snapshot.is_some() {
             self.git
-                .delete_review_ref(&root, comment, ReviewSide::Before)
+                .delete_review_ref(&site.store_root, site.local, ReviewSide::Before)
                 .map_err(|e| e.0)?;
         }
         if current.after_snapshot.is_some() {
             self.git
-                .delete_review_ref(&root, comment, ReviewSide::After)
+                .delete_review_ref(&site.store_root, site.local, ReviewSide::After)
                 .map_err(|e| e.0)?;
         }
-        self.review_listed(id, &root)
+        self.review_listed(id, &view)
     }
 
     /// The lines comment `comment` covered in its snapshot, for the Before side.
@@ -5959,13 +5965,14 @@ impl Engine {
         id: OperationId,
         comment: i64,
     ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let current = find_review(store, comment)?;
+        let view = self.open_root()?;
+        let site = workspace_comments::site(self.git.as_ref(), &view, comment)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &site.store_root)?;
+        let current = find_review(store, site.local)?;
         let lines = match &current.snapshot {
             Some(oid) => match self
                 .git
-                .file_at_commit(&root, oid, &current.path)
+                .file_at_commit(&site.store_root, oid, &current.path)
                 .map_err(|e| e.0)?
             {
                 Some(bytes) => String::from_utf8(bytes).map_or_else(
@@ -5979,7 +5986,7 @@ impl Engine {
         Ok(vec![Event::ReviewSnapshotText {
             id,
             comment,
-            path: current.path,
+            path: site.shown(&current.path),
             lines,
         }])
     }
@@ -5987,16 +5994,19 @@ impl Engine {
     /// The lines comment `comment` covers in the file now, for the After side.
     /// Empty when the comment is outdated, or its file cannot be read.
     fn load_review_current(&mut self, id: OperationId, comment: i64) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let current = find_review(store, comment)?;
-        let lines = review_session::read_text(&root, &current.path)
+        let view = self.open_root()?;
+        let site = workspace_comments::site(self.git.as_ref(), &view, comment)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &site.store_root)?;
+        let current = find_review(store, site.local)?;
+        // The file is read from the checkout the person is in, under the path it has there.
+        let path = site.shown(&current.path);
+        let lines = review_session::read_text(&view, &path)
             .map(|text| review::current_region(&text, &current.anchor))
             .unwrap_or_default();
         Ok(vec![Event::ReviewCurrentText {
             id,
             comment,
-            path: current.path,
+            path,
             lines,
         }])
     }
@@ -6007,17 +6017,20 @@ impl Engine {
     /// not in the "before" text. A file gone from the "after" snapshot has an
     /// empty after side.
     fn load_review_change(&mut self, id: OperationId, comment: i64) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let current = find_review(store, comment)?;
+        let view = self.open_root()?;
+        let site = workspace_comments::site(self.git.as_ref(), &view, comment)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &site.store_root)?;
+        let current = find_review(store, site.local)?;
         let change = match (&current.snapshot, &current.after_snapshot) {
-            (Some(before), Some(after)) => self.review_change(&root, &current, before, after)?,
+            (Some(before), Some(after)) => {
+                self.review_change(&site.store_root, &current, before, after)?
+            }
             _ => None,
         };
         Ok(vec![Event::ReviewChange {
             id,
             comment,
-            path: current.path,
+            path: site.shown(&current.path),
             change,
         }])
     }
@@ -6083,7 +6096,7 @@ impl Engine {
         author: ReviewAuthorFilter,
     ) -> Result<Vec<Event>, String> {
         let store = review_store(&mut self.review, self.git.as_ref(), root)?;
-        let comments = review_session::listed(store, root)?
+        let comments = workspace_comments::listed(self.git.as_ref(), root, store)?
             .into_iter()
             .filter(|comment| review::listed_for(comment, author))
             .collect();

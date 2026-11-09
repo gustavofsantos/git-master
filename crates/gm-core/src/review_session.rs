@@ -73,8 +73,15 @@ pub(crate) fn read_text(root: &Path, path: &str) -> Result<String, String> {
 /// comments outdated.
 pub(crate) fn listed(store: &ReviewStore, root: &Path) -> Result<Vec<ReviewComment>, String> {
     let comments = store.list().map_err(|e| e.0)?;
+    Ok(located(comments, root))
+}
+
+/// `comments`, each with its location in the file `root` holds at its path now, and whether it
+/// waits for an answer (D200). The paths are relative to `root`, so a comment that a workspace
+/// holds for a member is located in the member's own checkout. Each distinct file is read once.
+pub(crate) fn located(comments: Vec<ReviewComment>, root: &Path) -> Vec<ReviewComment> {
     let mut texts: BTreeMap<String, Option<String>> = BTreeMap::new();
-    Ok(comments
+    comments
         .into_iter()
         .map(|mut comment| {
             let text = texts
@@ -88,5 +95,5 @@ pub(crate) fn listed(store: &ReviewStore, root: &Path) -> Result<Vec<ReviewComme
             comment.needs_answer = review::needs_answer(&comment);
             comment
         })
-        .collect())
+        .collect()
 }

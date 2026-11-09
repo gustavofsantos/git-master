@@ -276,6 +276,7 @@ mod tests {
             needs_answer: false,
             suggested_fix: None,
             finding: false,
+            workspace: None,
         }
     }
 }

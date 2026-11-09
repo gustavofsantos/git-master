@@ -888,6 +888,7 @@ mod tests {
                 end_line,
             }),
             outdated: location.is_none(),
+            workspace: None,
         }
     }
 

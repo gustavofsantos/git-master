@@ -3309,6 +3309,7 @@ mod stash_tests {
                 end_line: 2,
             }),
             outdated: false,
+            workspace: None,
         }
     }
 

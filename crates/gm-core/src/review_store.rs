@@ -1325,6 +1325,7 @@ fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
         needs_answer: false,
         suggested_fix,
         finding,
+        workspace: None,
     })
 }
 

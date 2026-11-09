@@ -60,6 +60,7 @@ pub mod watch;
 mod workflow_session;
 pub mod workspace;
 pub mod workspace_cli;
+pub mod workspace_comments;
 pub mod workspace_defs;
 mod workspace_pointer;
 pub mod worktree;

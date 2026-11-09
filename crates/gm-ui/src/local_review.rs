@@ -568,6 +568,7 @@ mod tests {
                 end_line: start_line,
             }),
             outdated: line.is_none(),
+            workspace: None,
         }
     }
 

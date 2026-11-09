@@ -6267,6 +6267,7 @@ mod tests {
             }),
             outdated: false,
             replies: Vec::new(),
+            workspace: None,
         }
     }
 

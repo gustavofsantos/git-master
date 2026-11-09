@@ -129,6 +129,11 @@ pub struct ReviewComment {
     /// True when the thread is a finding of a verdict (D215 (3)): a flag a reviewer recorded.
     #[serde(default)]
     pub finding: bool,
+    /// The folder name of the workspace the comment is in, when a member's repository lists a
+    /// comment its workspace holds on one of its files; `None` for the repository's own comments.
+    /// The id of such a comment is composite (`workspace_comments`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// The anchored lines of a comment as the two snapshots hold them (D140): the
@@ -265,6 +270,7 @@ mod tests {
             needs_answer: false,
             suggested_fix: None,
             finding: false,
+            workspace: None,
         };
         let json = serde_json::to_value(&comment).unwrap();
         assert!(json.get("summary").is_none());
