@@ -105,6 +105,8 @@ The memory, summary and verdict tools follow these rules:
 - `scope` takes `all`, `repository`, a context's path such as `Platform / Billing`, or a context name that only one of the repository's contexts has. A name several contexts share is refused with their paths.
 > **Planned.** `memory_propose` also takes `applies_to` (at most 20 patterns), and `memory_get` also returns the memory's `applies_to`, its `links` one step away (each with the other memory's `id`, `kind`, direction, status and snippet), its open `revisions` and the memories that conflict with it.
 
+> **Planned.** Each finding of `verdict_record` also takes an optional `suggested_fix` (plain text, at most 1,000 characters). `gates_status` also returns `intent`, the description of the branch, as untrusted text or null, and `approved`, whether you have approved the current commit. `review_comment_resolve` accepts a finding for any agent and marks it `handled` only; it never resolves or dismisses one.
+
 - A finding that `verdict_record` creates is a review comment that only you can resolve or dismiss. See [Reviewers and gates](../agents/reviewers.md).
 - There is no tool to change a gate, bypass one or resolve a finding. Gates are yours to set, and `gates_status` only reads them.
 - Text written by an agent shows in the app as **Agent-written** and is never used as evidence for provenance.

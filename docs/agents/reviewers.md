@@ -79,7 +79,7 @@ A verdict is **Stale** when the branch has moved on since it was recorded. A sta
 
 ### Findings
 
-A finding is a [review comment](local-review.md) that an agent wrote. It sits in the diff where you read it, and it follows its lines when the code moves. Only you resolve or dismiss a finding. The agent can run again and record a new verdict, but it cannot close a finding.
+A finding is a [review comment](local-review.md) that an agent wrote. It sits in the diff where you read it, and it follows its lines when the code moves. Only you resolve or dismiss a finding. The agent can run again and record a new verdict, and a coding agent can mark a finding handled, but neither can close it.
 
 ## Gates
 
@@ -91,6 +91,7 @@ A gate is a rule with a clear answer. The agent can read which gates apply and w
 | **Findings** | An unresolved finding has a severity at or above the one you set. |
 | **Signal** | A reviewer's value is outside the bound you set, such as risk above 30. |
 | **Up to date** | The branch is behind its parent in the stack. |
+| **Human approval** | You have not approved the current commit of the branch. |
 
 Set the gates in **Reviewers Settings…**, for all branches or only for branches that match a pattern such as `feat/*`. A gate applies when you use **Push with lease** or apply a restack from GitMaster. A blocked operation says which gate stopped it and why.
 
@@ -101,6 +102,30 @@ The branch shows its gate state. It reads **Ready** when every gate passes, and 
 ### Bypass a gate
 
 If you decide to go ahead, choose **Bypass** in the message that names the gate and write the reason. The operation runs, and the gate, the reason and the time are kept in the operation log. Only you can bypass: an agent has no tool for it.
+
+## The intent of a change
+
+> **Planned.** The branch description is not used as the intent of a change yet.
+
+A reviewer such as **Intent drift** compares the change with what it set out to do. That intent is the description of the branch, the one Git keeps for it. Choose **Edit Branch Description…** in the branch menu to write it. GitMaster stores it in the repository's `.git/config`, where `git branch --edit-description` puts it, and writes nothing into the working tree. The agent reads it and gives it to every reviewer it starts, as data.
+
+## Approve a branch
+
+> **Planned.** **Approve Branch** is not available yet.
+
+Choose **Approve Branch** on a branch to say you read its current commit and accept it. You can add a note. The approval stops counting when the branch moves on, and **Revoke Approval** withdraws it. The **Human approval** gate blocks until the current commit is approved. An agent cannot approve a branch, and nothing an agent records can satisfy this gate.
+
+## Fix the findings
+
+> **Planned.** Findings do not carry a suggested fix yet, and an agent cannot mark a finding handled.
+
+A finding can carry a **Suggested fix**, written by the reviewer and shown under the finding. To have your coding agent work through the findings, ask it from its session:
+
+```text
+/gitmaster:fix-findings
+```
+
+The skill reads the open findings of the branch, checks each one against the code, changes the code or explains why it does not, and marks each finding **Handled** with a short summary. It does not resolve or dismiss anything, and it does not push or merge. A handled finding still counts for the **Findings** gate. You read the summary and the change, then resolve or dismiss the finding yourself.
 
 ## Reviewers for one change
 
