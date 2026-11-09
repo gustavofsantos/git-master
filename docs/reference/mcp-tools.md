@@ -105,11 +105,11 @@ The memory, summary and verdict tools follow these rules:
 - `scope` takes `all`, `repository`, a context's path such as `Platform / Billing`, or a context name that only one of the repository's contexts has. A name several contexts share is refused with their paths.
 > **Planned.** `memory_propose` also takes `applies_to` (at most 20 patterns), and `memory_get` also returns the memory's `applies_to`, its `links` one step away (each with the other memory's `id`, `kind`, direction, status and snippet), its open `revisions` and the memories that conflict with it.
 
-> **Planned.** `verdict_record`, `verdicts_list` and `gates_status` also take `member`, for a workspace: the member's folder. Without it, `gates_status` answers for every member and a record or a list is refused. `reviewers_list` shows `members` and the `workspace` source.
+`verdict_record`, `verdicts_list` and `gates_status` also take `member`, for a workspace: the member's folder. Without it, `gates_status` answers for every member and a record or a list is refused. `reviewers_list` shows `members` and the `workspace` source. In the session of a member itself, a reviewer from a workspace shows `members` empty, because it already applies to that checkout.
 
-> **Planned.** Every tool takes an optional `agent`, a label of 1 to 40 letters, digits, `.`, `_` or `-` that names the agent in what it writes, such as `claude-code/billing`. The label is only shown: it never changes what an agent may do. `review_comments_list` also returns `agent_threads_not_shown`, the number of threads started by agents that the `author` filter left out.
+Every tool takes an optional `agent`, a label of 1 to 40 letters, digits, `.`, `_` or `-` that names the agent in what it writes, such as `claude-code/billing`. The label is only shown: it never changes what an agent may do. `review_comments_list` also returns `agent_threads_not_shown`, the number of threads started by agents that the `author` filter left out.
 
-> **Planned.** `reviewer_propose` and `gate_propose` also take `members`, for a workspace.
+`reviewer_propose` and `gate_propose` also take `members`, for a workspace.
 
 > **Planned.** From a workspace, `memories_search`, `memory_get` and `contexts_list` also cover the members and their contexts: each memory's `scope` can be `workspace` or `member <folder>`, and `memory_propose` takes an optional `member`.
 
