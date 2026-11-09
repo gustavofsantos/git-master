@@ -12,10 +12,12 @@ use std::ops::Range;
 use gm_schema::{Actor, CommandKind, Event, OperationId};
 use gpui::{
     Context, Div, Entity, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
-    Stateful, Subscription, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    PathPromptOptions, Stateful, Subscription, UniformListScrollHandle, Window, div, prelude::*,
+    px, uniform_list,
 };
 
 use crate::contexts_model::{ContextRow, ContextsModel, DeleteConfirm, DeletePlan, DeletePreview};
+use crate::icon::{self, Icon};
 use crate::memory_rows;
 use crate::shell_memories::button;
 use crate::text_area::{Newline, TextArea};
@@ -323,6 +325,34 @@ impl StatusView {
             dialog.adding = !dialog.adding;
         }
         cx.notify();
+    }
+
+    /// Browse… of Add Repository: shows the native folder prompt, then adds the folder it returns
+    /// to the selected context. The window does not wait for the prompt; the answer comes back
+    /// later. A cancelled prompt does nothing; a folder that is not a repository is refused by the
+    /// engine, and the refusal shows in the dialog.
+    fn pick_context_repository(cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| match picked.await {
+            Ok(Ok(Some(paths))) => {
+                if let Some(path) = paths.into_iter().next() {
+                    let text = path.display().to_string();
+                    let _ = this.update(cx, |view, cx| view.add_repository_to_context(&text, cx));
+                }
+            }
+            // Cancelled: nothing to do.
+            Ok(Ok(None)) | Err(_) => {}
+            Ok(Err(error)) => {
+                let text = format!("Could not open the folder prompt: {error}");
+                let _ = this.update(cx, |view, cx| view.notify_user(&text, cx));
+            }
+        })
+        .detach();
     }
 
     /// Adds the repository in folder `path` to the selected context.
@@ -779,10 +809,29 @@ impl StatusView {
             .children(chooser)
     }
 
-    /// The choices of Add Repository: the window's own repository, then the recent ones.
+    /// The choices of Add Repository: Browse… first, then the window's own repository and the
+    /// recent ones. Browse… is there even when the list is empty.
     fn repository_chooser(&self, cx: &Context<Self>) -> Stateful<Div> {
         let root = self.model.status().map(|status| status.root.clone());
         let choices = repo_choices(root.as_deref(), self.recents.paths());
+        let browse = div()
+            .id("context-repo-browse")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .py_1()
+            .text_sm()
+            .text_color(theme::text())
+            .child(icon::view(Icon::Folder, icon::SMALL, theme::muted()))
+            .child("Browse…")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                    Self::pick_context_repository(cx);
+                }),
+            );
         let rows: Vec<Stateful<Div>> = choices
             .into_iter()
             .enumerate()
@@ -810,7 +859,7 @@ impl StatusView {
             div()
                 .text_sm()
                 .text_color(theme::muted())
-                .child("No recent repository is known. Open one first.")
+                .child("No recent repository is known. Use Browse… to choose a folder.")
         });
         div()
             .id("context-repo-choices")
@@ -821,6 +870,7 @@ impl StatusView {
             .border_t_1()
             .border_color(theme::hairline())
             .pt_2()
+            .child(browse)
             .children(rows)
             .children(empty)
     }

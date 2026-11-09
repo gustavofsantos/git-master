@@ -79,6 +79,17 @@ pub enum DeletePlan {
     Confirm(DeleteConfirm),
 }
 
+/// What a write in flight does to the list when its answer comes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Write {
+    /// Changes one context or a repository of it: the list is read again and nothing is removed.
+    Other,
+    /// Deletes context `id`: it leaves the list when the answer comes.
+    Removes(i64),
+    /// Creates a context: the answer names it, and the next list selects it.
+    Creates,
+}
+
 /// The state of the Manage Contexts dialog: the contexts, the context selected and the writes
 /// in flight.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -91,8 +102,10 @@ pub struct ContextsModel {
     selected: Option<i64>,
     /// The list read in flight. A later list, or a write, ends it: its late answer is dropped.
     list_pending: Option<OperationId>,
-    /// The writes in flight, each with the context it removes when it answers (a delete).
-    writes: Vec<(OperationId, Option<i64>)>,
+    /// The writes in flight, each with what it does to the list when it answers.
+    writes: Vec<(OperationId, Write)>,
+    /// The context a create answered with. The next applied list selects it when it is listed.
+    select_when_listed: Option<i64>,
     deleted_memories: u32,
     failure: Option<String>,
 }
@@ -169,9 +182,10 @@ impl ContextsModel {
         true
     }
 
-    /// Clears the selection.
+    /// Clears the selection, and the context a create asked to select.
     pub fn deselect(&mut self) {
         self.selected = None;
+        self.select_when_listed = None;
     }
 
     /// The list read, sent from the dialog. The contexts are all of them, not only the open
@@ -190,11 +204,15 @@ impl ContextsModel {
             CommandKind::ListContexts { .. } => self.list_pending = Some(id),
             CommandKind::DeleteContext { id: context, .. } => {
                 self.list_pending = None;
-                self.writes.push((id, Some(*context)));
+                self.writes.push((id, Write::Removes(*context)));
+            }
+            CommandKind::CreateContext { .. } => {
+                self.list_pending = None;
+                self.writes.push((id, Write::Creates));
             }
             _ => {
                 self.list_pending = None;
-                self.writes.push((id, None));
+                self.writes.push((id, Write::Other));
             }
         }
     }
@@ -206,7 +224,8 @@ impl ContextsModel {
     }
 
     /// Applies the list answered by `id`. Returns false for an answer that is not the list read in
-    /// flight. The selection stays when its context is still listed and clears otherwise.
+    /// flight. The selection stays when its context is still listed and clears otherwise. The
+    /// context a create answered with is selected when it is listed, and is not selected otherwise.
     pub fn listed(
         &mut self,
         id: OperationId,
@@ -224,6 +243,9 @@ impl ContextsModel {
         self.listed = true;
         self.failure = None;
         self.refresh();
+        if let Some(created) = self.select_when_listed.take() {
+            self.select(created);
+        }
         true
     }
 
@@ -240,11 +262,14 @@ impl ContextsModel {
         let Some(index) = self.writes.iter().position(|(pending, _)| *pending == id) else {
             return false;
         };
-        let (_, removes) = self.writes.remove(index);
-        if let Some(removed) = removes {
+        let (_, write) = self.writes.remove(index);
+        if let Write::Removes(removed) = write {
             self.contexts.retain(|context| context.id != removed);
         }
         if let Some(context) = context {
+            if write == Write::Creates {
+                self.select_when_listed = Some(context.id);
+            }
             self.upsert(context);
         }
         self.deleted_memories = deleted_memories;
@@ -991,6 +1016,163 @@ mod tests {
         model.sent(&CommandKind::RenewRepoId, OperationId(21));
         model.ended(OperationId(21), OperationState::Failed, None);
         assert_eq!(model.failure(), Some(NO_MESSAGE));
+    }
+
+    /// The answer of a create of `name` under the root, as the engine gives it.
+    fn created(model: &mut ContextsModel, write: u64, id: i64, name: &str) {
+        let create = CommandKind::CreateContext {
+            name: name.to_owned(),
+            parent: None,
+        };
+        model.sent(&create, OperationId(write));
+        assert!(model.changed(OperationId(write), Some(context(id, name, None)), 0));
+    }
+
+    #[test]
+    fn a_created_context_is_selected_once_the_list_is_read_again() {
+        let mut model = model_with(guide_tree());
+        assert!(model.select(1));
+        created(&mut model, 10, 4, "Ops");
+        assert_eq!(model.selected(), Some(1), "the list is not read yet");
+
+        model.sent(&ContextsModel::plan_list(), OperationId(11));
+        let mut listed = guide_tree();
+        listed.push(context(4, "Ops", None));
+        assert!(model.listed(OperationId(11), listed, None, None));
+        assert_eq!(model.selected(), Some(4));
+        assert_eq!(
+            model.selected_context().map(|c| c.name.as_str()),
+            Some("Ops")
+        );
+    }
+
+    #[test]
+    fn a_created_sub_context_is_selected_when_listed_under_its_parent() {
+        let mut model = model_with(guide_tree());
+        assert!(model.select(1));
+        let create = CommandKind::CreateContext {
+            name: "Ledger".to_owned(),
+            parent: Some(1),
+        };
+        model.sent(&create, OperationId(12));
+        assert!(model.changed(OperationId(12), Some(context(5, "Ledger", Some(1))), 0));
+        model.sent(&ContextsModel::plan_list(), OperationId(13));
+        let mut listed = guide_tree();
+        listed.push(context(5, "Ledger", Some(1)));
+        assert!(model.listed(OperationId(13), listed, None, None));
+        assert_eq!(model.selected(), Some(5));
+    }
+
+    #[test]
+    fn a_rename_keeps_the_current_selection() {
+        let mut model = model_with(guide_tree());
+        assert!(model.select(1));
+        let rename = CommandKind::UpdateContext {
+            id: 2,
+            name: Some("Invoices".to_owned()),
+            parent: None,
+        };
+        model.sent(&rename, OperationId(14));
+        assert!(model.changed(OperationId(14), Some(context(2, "Invoices", Some(1))), 0));
+        model.sent(&ContextsModel::plan_list(), OperationId(15));
+        let mut listed = guide_tree();
+        listed[1].name = "Invoices".to_owned();
+        assert!(model.listed(OperationId(15), listed, None, None));
+        assert_eq!(model.selected(), Some(1), "the rename selects nothing");
+
+        let mut none = model_with(guide_tree());
+        let rename = CommandKind::UpdateContext {
+            id: 3,
+            name: Some("Allies".to_owned()),
+            parent: None,
+        };
+        none.sent(&rename, OperationId(16));
+        assert!(none.changed(OperationId(16), Some(context(3, "Allies", None)), 0));
+        none.sent(&ContextsModel::plan_list(), OperationId(17));
+        assert!(none.listed(OperationId(17), guide_tree(), None, None));
+        assert_eq!(none.selected(), None);
+    }
+
+    #[test]
+    fn a_created_context_missing_from_the_next_list_selects_nothing() {
+        let mut model = model_with(guide_tree());
+        assert!(model.select(1));
+        created(&mut model, 18, 4, "Ops");
+        model.sent(&ContextsModel::plan_list(), OperationId(19));
+        assert!(model.listed(OperationId(19), guide_tree(), None, None));
+        assert_eq!(
+            model.selected(),
+            Some(1),
+            "the selection stays; the created context is not listed, so it is not selected"
+        );
+
+        model.sent(&ContextsModel::plan_list(), OperationId(20));
+        let mut listed = guide_tree();
+        listed.push(context(4, "Ops", None));
+        assert!(model.listed(OperationId(20), listed, None, None));
+        assert_eq!(
+            model.selected(),
+            Some(1),
+            "the create's selection was used up by the first list"
+        );
+    }
+
+    #[test]
+    fn a_failed_create_changes_nothing_and_its_refusal_is_kept() {
+        let mut model = model_with(guide_tree());
+        assert!(model.select(1));
+        let create = CommandKind::CreateContext {
+            name: "Ops".to_owned(),
+            parent: None,
+        };
+        model.sent(&create, OperationId(21));
+        model.ended(
+            OperationId(21),
+            OperationState::Failed,
+            Some("the database is locked".to_owned()),
+        );
+        assert_eq!(model.failure(), Some("the database is locked"));
+        assert_eq!(model.selected(), Some(1));
+
+        model.sent(&ContextsModel::plan_list(), OperationId(22));
+        let mut listed = guide_tree();
+        listed.push(context(4, "Ops", None));
+        assert!(model.listed(OperationId(22), listed, None, None));
+        assert_eq!(
+            model.selected(),
+            Some(1),
+            "no context was created to select"
+        );
+    }
+
+    #[test]
+    fn a_refused_repository_keeps_git_s_reason_for_the_dialog() {
+        let mut model = model_with(guide_tree());
+        assert!(model.select(1));
+        let add = model.add_repository(1, "/work/notes").unwrap();
+        model.sent(&add, OperationId(23));
+        model.ended(
+            OperationId(23),
+            OperationState::Failed,
+            Some("/work/notes is not a Git repository.".to_owned()),
+        );
+        assert_eq!(
+            model.failure(),
+            Some("/work/notes is not a Git repository.")
+        );
+        assert_eq!(model.selected(), Some(1));
+    }
+
+    #[test]
+    fn closing_the_dialog_drops_a_pending_selection() {
+        let mut model = model_with(guide_tree());
+        created(&mut model, 24, 4, "Ops");
+        model.deselect();
+        model.sent(&ContextsModel::plan_list(), OperationId(25));
+        let mut listed = guide_tree();
+        listed.push(context(4, "Ops", None));
+        assert!(model.listed(OperationId(25), listed, None, None));
+        assert_eq!(model.selected(), None);
     }
 
     /// `context` with its path given, as the engine derives it from the parents.
