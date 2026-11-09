@@ -606,6 +606,7 @@ fn a_memory_is_proposed_accepted_and_read_by_its_uid() {
             }],
             context: None,
             basis: MemoryBasis::Observed,
+            member: None,
         },
     );
     let proposed = memory_of(&events);
@@ -776,6 +777,7 @@ fn propose_at(engine: &mut Engine, actor: &Actor, context: Option<&str>, text: &
             }],
             context: context.map(str::to_owned),
             basis: MemoryBasis::Observed,
+            member: None,
         },
     )
 }
@@ -1111,6 +1113,7 @@ fn moving_a_repository_memory_into_a_context_keeps_its_uid_history_and_sources()
             }],
             context: None,
             basis: MemoryBasis::Tested,
+            member: None,
         },
     ));
     let blob = original.sources[0].blob_oid.clone();

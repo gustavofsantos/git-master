@@ -18,7 +18,7 @@ use gm_schema::threads::{
 use gm_schema::{Actor, CommandKind, Event, OperationId};
 
 use crate::blame::BlameLine;
-use crate::memory_scope::{self, Home, Stores};
+use crate::memory_scope::{self, Home, MemberStore, Stores};
 use crate::threads::members;
 use crate::threads::memories::{self, BlobRead, MemoryAction, NewMemory};
 use crate::threads::provenance::{
@@ -484,6 +484,10 @@ fn memories_command(
 ) -> Result<Vec<Event>, String> {
     let is_human = matches!(actor, Actor::Human);
     let mut stores = Stores::new(store, ctx);
+    if let Some(index) = member_of_command(&stores, kind)? {
+        let member = stores.members.swap_remove(index);
+        return in_member(id, ctx, actor, member, kind);
+    }
     match kind {
         CommandKind::ListMemories {
             query,
@@ -549,26 +553,7 @@ fn memories_command(
             memory_scope::count_retrievals(&mut stores, uids, now_ms())?;
             Ok(Vec::new())
         }
-        CommandKind::ProposeMemory {
-            kind: memory_kind,
-            text,
-            sources,
-            context,
-            basis,
-        } => {
-            let proposal = Proposal {
-                kind: *memory_kind,
-                text,
-                sources,
-                basis: *basis,
-            };
-            match context {
-                None => propose_memory(id, &mut stores, ctx, actor, &proposal),
-                Some(name) => {
-                    memory_scope::propose_in_context(id, &mut stores, ctx, actor, name, &proposal)
-                }
-            }
-        }
+        CommandKind::ProposeMemory { .. } => propose_command(id, &mut stores, ctx, actor, kind),
         CommandKind::AcceptMemory { .. }
         | CommandKind::RejectMemory { .. }
         | CommandKind::DeleteMemory { .. } => act_on_memory(id, &mut stores, ctx, is_human, kind),
@@ -582,6 +567,83 @@ fn memories_command(
             memory_scope::detach(id, &mut stores, ctx, uid, *context)
         }
         _ => Err("not a memory command".to_owned()),
+    }
+}
+
+/// The workspace member a memory command runs in (D216 (3), (5)): a proposal's `member`, or the
+/// member whose store holds the memory a command acts on. `None` runs the command in the
+/// repository's own store.
+fn member_of_command(stores: &Stores<'_>, kind: &CommandKind) -> Result<Option<usize>, String> {
+    match kind {
+        CommandKind::ProposeMemory {
+            member: Some(name), ..
+        } => memory_scope::member_index(stores, name).map(Some),
+        CommandKind::AcceptMemory { uid, .. }
+        | CommandKind::RejectMemory { uid }
+        | CommandKind::DeleteMemory { uid }
+        | CommandKind::MarkMemory { uid, .. }
+        | CommandKind::MoveMemoryToContext { uid, .. }
+        | CommandKind::AttachMemory { uid, .. }
+        | CommandKind::DetachMemory { uid, .. } => memory_scope::member_of_uid(stores, uid),
+        _ => Ok(None),
+    }
+}
+
+/// Runs a memory command in workspace member `member`, as the member runs it (D216 (3), (5)): with
+/// the member's store, its repository and the contexts the member sees, so every rule of the command
+/// applies unchanged. The answer is labelled as the workspace sees it. The command names no member
+/// any more, since the member is the repository it runs in.
+fn in_member(
+    id: OperationId,
+    ctx: &Context<'_>,
+    actor: &Actor,
+    mut member: MemberStore,
+    kind: &CommandKind,
+) -> Result<Vec<Event>, String> {
+    let mut threads = memory_scope::take_store(ctx.git, &mut member)?;
+    let member_ctx = Context {
+        git: ctx.git,
+        root: &member.root,
+        global_config: ctx.global_config,
+        contexts_db: ctx.contexts_db,
+    };
+    let mut inner = kind.clone();
+    if let CommandKind::ProposeMemory { member: named, .. } = &mut inner {
+        *named = None;
+    }
+    let mut events = memories_command(id, &mut threads, &member_ctx, actor, &inner)?;
+    memory_scope::label_member(&mut events, &member.folder);
+    Ok(events)
+}
+
+/// `ProposeMemory` in the repository's own store or, with a context, in that context (D193 (7)).
+fn propose_command(
+    id: OperationId,
+    stores: &mut Stores<'_>,
+    ctx: &Context<'_>,
+    actor: &Actor,
+    kind: &CommandKind,
+) -> Result<Vec<Event>, String> {
+    let CommandKind::ProposeMemory {
+        kind: memory_kind,
+        text,
+        sources,
+        context,
+        basis,
+        ..
+    } = kind
+    else {
+        return Err("not a memory command".to_owned());
+    };
+    let proposal = Proposal {
+        kind: *memory_kind,
+        text,
+        sources,
+        basis: *basis,
+    };
+    match context {
+        None => propose_memory(id, stores, ctx, actor, &proposal),
+        Some(name) => memory_scope::propose_in_context(id, stores, ctx, actor, name, &proposal),
     }
 }
 
@@ -612,17 +674,17 @@ fn act_on_memory(
             Home::Repository(_) => {
                 accept_memory(id, stores, ctx, is_human, uid, text.as_deref(), supersedes)
             }
-            Home::Member { .. } => Err(memory_scope::MEMBER_ACTION.to_owned()),
+            Home::Member { .. } => Err(memory_scope::ROUTED.to_owned()),
         },
         CommandKind::RejectMemory { uid } => match memory_scope::home_of(stores, uid)? {
             Home::Context => memory_scope::reject_in_context(id, stores, ctx, is_human, uid),
             Home::Repository(_) => reject_memory(id, stores, ctx, is_human, uid),
-            Home::Member { .. } => Err(memory_scope::MEMBER_ACTION.to_owned()),
+            Home::Member { .. } => Err(memory_scope::ROUTED.to_owned()),
         },
         CommandKind::DeleteMemory { uid } => match memory_scope::home_of(stores, uid)? {
             Home::Context => memory_scope::delete_in_context(id, stores, is_human, uid),
             Home::Repository(_) => delete_memory(id, stores, is_human, uid),
-            Home::Member { .. } => Err(memory_scope::MEMBER_ACTION.to_owned()),
+            Home::Member { .. } => Err(memory_scope::ROUTED.to_owned()),
         },
         _ => Err("not a memory command".to_owned()),
     }

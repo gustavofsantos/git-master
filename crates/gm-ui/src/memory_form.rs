@@ -196,6 +196,7 @@ mod tests {
                 sources,
                 context,
                 basis,
+                ..
             } => {
                 assert_eq!(kind, MemoryKind::Rule);
                 assert_eq!(text, "Keep retries bounded.");

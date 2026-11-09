@@ -200,6 +200,7 @@ fn propose(
             sources,
             context: None,
             basis: MemoryBasis::Observed,
+            member: None,
         },
     )
 }

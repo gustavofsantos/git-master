@@ -164,6 +164,7 @@ fn propose(engine: &mut Engine, actor: &Actor, text: &str, context: Option<&str>
             sources: vec![file("parser.rs")],
             context: context.map(str::to_owned),
             basis: MemoryBasis::Observed,
+            member: None,
         },
     )
 }

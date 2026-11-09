@@ -110,7 +110,7 @@ fn memory_mark_definition() -> ToolDefinition {
 fn memory_propose_definition() -> ToolDefinition {
     ToolDefinition {
         name: "memory_propose",
-        description: "Propose a memory: a short record of a decision, rule, lesson or fact that future sessions should know. `kind` is decision, rule, lesson or fact; `text` is 1 to 1,000 characters. Name at least one source: a thread entry range (`kind` thread, `ref` the thread id, `entry_from` and `entry_to`), a commit (`ref` the commit id) or a file (`ref` a repository-relative path). The memory is recorded as proposed, with you as its origin, and only the person can accept it; until then it is not offered as a memory. `basis` says how you know it: `observed` (you saw it in a thread or a file; the default), `tested` (you checked it by running something) or `unconfirmed` (a belief, which results mark with a `note`). `context` proposes it for a context this repository belongs to, by its path or a context name that only one of them has; without it the memory belongs to the repository. Asking again with the same kind and text returns the memory that is there, with `created` false. This writes only GitMaster's own store, never the repository.",
+        description: "Propose a memory: a short record of a decision, rule, lesson or fact that future sessions should know. `kind` is decision, rule, lesson or fact; `text` is 1 to 1,000 characters. Name at least one source: a thread entry range (`kind` thread, `ref` the thread id, `entry_from` and `entry_to`), a commit (`ref` the commit id) or a file (`ref` a repository-relative path). The memory is recorded as proposed, with you as its origin, and only the person can accept it; until then it is not offered as a memory. `basis` says how you know it: `observed` (you saw it in a thread or a file; the default), `tested` (you checked it by running something) or `unconfirmed` (a belief, which results mark with a `note`). `context` proposes it for a context this repository belongs to, by its path or a context name that only one of them has; without it the memory belongs to the repository. In a workspace, `member` (a member's folder) proposes it in that member's repository instead, where its `context` and its sources are the member's; without it the memory belongs to the workspace. Asking again with the same kind and text returns the memory that is there, with `created` false. This writes only GitMaster's own store, never the repository.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -133,7 +133,8 @@ fn memory_propose_definition() -> ToolDefinition {
                     }
                 },
                 "basis": { "type": "string", "enum": ["observed", "tested", "unconfirmed"], "default": "observed", "description": "How you know it: observed (seen in a thread or a file), tested (checked by running something) or unconfirmed (a belief). Left out, it is observed." },
-                "context": { "type": "string", "description": "A context this repository belongs to, by its path or a name only one of them has. Left out, the memory belongs to the repository." }
+                "context": { "type": "string", "description": "A context this repository belongs to, by its path or a name only one of them has. Left out, the memory belongs to the repository." },
+                "member": { "type": "string", "minLength": 1, "description": "In a workspace only: the folder of a member repository to propose the memory in. Left out, the memory belongs to the workspace." }
             },
             "required": ["kind", "text", "sources"],
             "additionalProperties": false
@@ -271,6 +272,7 @@ pub(crate) fn memory_propose(session: &mut Session, args: &Value) -> Result<Valu
         sources,
         context: optional_text(args, "context")?,
         basis,
+        member: optional_text(args, "member")?,
     })?;
     let (memory, created) = events
         .into_iter()

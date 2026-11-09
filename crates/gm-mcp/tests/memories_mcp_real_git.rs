@@ -166,6 +166,7 @@ fn propose(
             sources: vec![file_source(path)],
             context: context.map(str::to_owned),
             basis: MemoryBasis::Observed,
+            member: None,
         },
     );
     assert_eq!(ended(&events), OperationState::Done, "propose: {events:?}");
@@ -545,6 +546,7 @@ fn propose_with_basis(engine: &mut Engine, text: &str, basis: MemoryBasis) -> St
             sources: vec![file_source("f.txt")],
             context: None,
             basis,
+            member: None,
         },
     );
     assert_eq!(ended(&events), OperationState::Done, "propose: {events:?}");

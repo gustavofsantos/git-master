@@ -1069,6 +1069,9 @@ pub enum CommandKind {
     /// once in that context and found from every repository that sees it (D193 (7)). Logged with
     /// its actor. A text already held by a non-rejected memory of the same kind returns that memory
     /// and writes nothing. `basis` says how the memory is known (D201 (1)); absent, it is `observed`.
+    /// From a workspace, `member` (a member's folder) stores the memory in that member's repository,
+    /// as the member would store it: its `context` and its sources are the member's (D216 (5)); absent,
+    /// the workspace's own store holds it. `member` outside a workspace is refused.
     /// Answers `MemoryChanged`.
     ProposeMemory {
         kind: MemoryKind,
@@ -1078,6 +1081,8 @@ pub enum CommandKind {
         context: Option<String>,
         #[serde(default)]
         basis: MemoryBasis,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
     },
     /// Records `mark` on memory `uid` from the actor (D202): `useful` or `wrong`, with an optional
     /// one-line `reason` that passes through the redaction of the memory text and holds at most 200
@@ -2803,12 +2808,17 @@ mod tests {
             }],
             context: None,
             basis: MemoryBasis::Tested,
+            member: None,
         })
         .unwrap();
         assert_eq!(propose["type"], "propose_memory");
         assert!(
             propose.get("context").is_none(),
             "an absent context is not written"
+        );
+        assert!(
+            propose.get("member").is_none(),
+            "an absent member is not written"
         );
         assert_eq!(propose["kind"], "rule");
         assert_eq!(propose["basis"], "tested");

@@ -929,6 +929,7 @@ impl MemoriesPage {
                 sources,
                 context,
                 basis: new.basis,
+                member: None,
             },
             read: Read::Change {
                 uid: None,
