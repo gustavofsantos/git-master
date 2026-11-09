@@ -471,7 +471,7 @@ fn a_restack_gate_does_not_block_a_push_and_a_push_gate_does_not_block_a_restack
 }
 
 #[test]
-fn a_restack_is_blocked_by_a_restack_gate_on_its_root_until_the_root_is_approved() {
+fn a_restack_is_blocked_by_a_restack_gate_on_every_branch_it_moves_until_each_is_approved() {
     let stack = stack_fixture();
     write_repo_gates(&stack.repo, &format!(r#"{{"gates":[{APPROVED_RESTACK}]}}"#));
     let mut session = Session::open(&stack.repo, &stack.user);
@@ -482,17 +482,21 @@ fn a_restack_is_blocked_by_a_restack_gate_on_its_root_until_the_root_is_approved
     let (operation, branch, gates, _) = blocked(&vetoed);
     assert_eq!(operation, GateOp::Restack);
     assert_eq!(branch, "main");
-    assert_eq!(gates.len(), 1);
-    assert_eq!(gates[0].id, "approved");
+    // The restack moves main, a and b, and each one blocks on the gate (R2h): the root alone is
+    // not enough.
+    assert_eq!(gates.len(), 3, "{gates:?}");
+    assert!(gates.iter().all(|gate| gate.id == "approved"));
     assert_eq!(git(&stack.repo, &["rev-parse", "a"]), before, "a moved");
 
-    let tip = git(&stack.repo, &["rev-parse", "main"]);
-    let approved = session.human(CommandKind::ApproveBranch {
-        branch: "main".into(),
-        head: tip,
-        note: None,
-    });
-    assert_eq!(state(&approved), OperationState::Done, "{approved:?}");
+    for name in ["main", "a", "b"] {
+        let head = git(&stack.repo, &["rev-parse", name]);
+        let approved = session.human(CommandKind::ApproveBranch {
+            branch: name.into(),
+            head,
+            note: None,
+        });
+        assert_eq!(state(&approved), OperationState::Done, "{approved:?}");
+    }
     let restacked = session.restack_main();
     assert_eq!(state(&restacked), OperationState::Done, "{restacked:?}");
     assert_ne!(git(&stack.repo, &["rev-parse", "a"]), before);

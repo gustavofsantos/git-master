@@ -15,6 +15,7 @@ use gm_schema::{
 };
 use serde_json::{Value, json};
 
+use crate::gate_check::GateConfig;
 use crate::port::{RemoteRun, ScriptRemote};
 use crate::script::builtins;
 use crate::script::dry::{self, DryRun};
@@ -127,6 +128,8 @@ pub(crate) struct ScriptSession {
     plans: PlanBook,
     /// The workflow each run runs, by run id (`WF4c`): a restack conflict names it.
     workflows: BTreeMap<RunId, String>,
+    /// The gate directories a `ctx.push.lease` or `ctx.restack.apply` checks against (D212).
+    pub(crate) gates: GateConfig,
 }
 
 impl ScriptSession {
@@ -137,6 +140,7 @@ impl ScriptSession {
         git: &dyn GitPort,
         clock: Clock,
         opened_by: OperationId,
+        gates: GateConfig,
     ) -> Result<Self, String> {
         let journal = Journal::open(state_db).map_err(|e| e.0)?;
         let engine: Arc<dyn ScriptEngine> = Arc::new(LuauEngine::new());
@@ -163,6 +167,7 @@ impl ScriptSession {
             diffs: BTreeMap::new(),
             plans: PlanBook::default(),
             workflows: BTreeMap::new(),
+            gates,
         })
     }
 
@@ -217,6 +222,7 @@ impl ScriptSession {
             "push.lease" => Some(script_stacks::push_lease(
                 git,
                 &self.root,
+                &self.gates,
                 text_arg(&call, "branch"),
                 remote_arg(&call),
             )),
@@ -247,7 +253,13 @@ impl ScriptSession {
             };
         }
         let mut actions = Actions::new(git, &self.root, log, origin);
-        let result = effect(&mut actions, &mut self.plans, &call, &self.events);
+        let result = effect(
+            &mut actions,
+            &mut self.plans,
+            &self.gates,
+            &call,
+            &self.events,
+        );
         let effected = actions.finish();
         // The run may be gone (cancelled while it waited for the engine); nobody needs the answer.
         let _ = reply.send(result);
@@ -275,6 +287,7 @@ fn remote_arg(call: &EffectCall) -> &str {
 fn effect(
     actions: &mut Actions<'_>,
     plans: &mut PlanBook,
+    gates: &GateConfig,
     call: &EffectCall,
     events: &EventSink,
 ) -> EffectResult {
@@ -304,7 +317,9 @@ fn effect(
             plans,
             text_arg(call, "plan_id"),
         ),
-        "restack.apply" => script_stacks::apply_restack(actions, plans, text_arg(call, "plan_id")),
+        "restack.apply" => {
+            script_stacks::apply_restack(actions, plans, gates, text_arg(call, "plan_id"))
+        }
         "reparent.apply" => {
             script_stacks::apply_reparent(actions, plans, text_arg(call, "plan_id"))
         }

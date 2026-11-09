@@ -17,6 +17,7 @@ mod engine;
 pub mod fake;
 pub mod file_index;
 mod files;
+mod gate_check;
 pub mod gates;
 pub mod git;
 pub mod glob;
