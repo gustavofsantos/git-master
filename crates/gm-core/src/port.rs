@@ -936,6 +936,60 @@ pub trait GitPort: Send {
         Err(GitError("stacks are not supported by this adapter".into()))
     }
 
+    /// The paths that differ between commits `from` and `to`, sorted and without duplicates, a
+    /// rename listing both its paths (`--no-renames`). `None` when there are more than 10,000
+    /// (D214 (1)). Never records anything.
+    fn changed_paths(
+        &self,
+        _root: &Path,
+        _from: &str,
+        _to: &str,
+    ) -> Result<Option<Vec<String>>, GitError> {
+        Err(GitError(
+            "changed paths is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The merge base of commits `one` and `two`, both full ids; `None` when they share no
+    /// history. Never records anything.
+    fn merge_base_of_commits(
+        &self,
+        _root: &Path,
+        _one: &str,
+        _two: &str,
+    ) -> Result<Option<String>, GitError> {
+        Err(GitError(
+            "merge base is not supported by this adapter".into(),
+        ))
+    }
+
+    /// The intent of local branch `branch`, its `branch.<name>.description` in the repository's
+    /// config; `None` when unset. Never records anything (D215 (1)).
+    fn branch_description(&self, _root: &Path, _branch: &str) -> Result<Option<String>, GitError> {
+        Err(GitError(
+            "branch descriptions are not supported by this adapter".into(),
+        ))
+    }
+
+    /// Writes the description of local branch `branch`, or unsets it for `None` and the empty
+    /// string (a missing key is not an error). The branch must exist. Recorded in the command log.
+    fn set_branch_description(
+        &self,
+        _root: &Path,
+        _branch: &str,
+        _text: Option<&str>,
+    ) -> Result<(), GitError> {
+        Err(GitError(
+            "branch descriptions are not supported by this adapter".into(),
+        ))
+    }
+
+    /// The upstream of local branch `branch` as a remote-tracking name such as `origin/feat/x`;
+    /// `None` when it has none. Never records anything.
+    fn upstream_of(&self, _root: &Path, _branch: &str) -> Result<Option<String>, GitError> {
+        Ok(None)
+    }
+
     /// The branch `refs/remotes/origin/HEAD` names, as `git symbolic-ref --short`
     /// prints it (`origin/main`); `None` when that ref is not there. Never records
     /// anything.

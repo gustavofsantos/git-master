@@ -17,7 +17,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use gm_schema::{
-    ReviewAnchor, ReviewComment, ReviewKind, ReviewReply, ReviewSeverity, ReviewStatus,
+    Approval, ReviewAnchor, ReviewComment, ReviewKind, ReviewReply, ReviewSeverity, ReviewStatus,
     ReviewerSignal, Verdict, VerdictFinding,
 };
 use rusqlite::{Connection, OptionalExtension, Params, TransactionBehavior, params};
@@ -25,7 +25,7 @@ use rusqlite::{Connection, OptionalExtension, Params, TransactionBehavior, param
 use crate::review;
 
 /// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 /// How long a writer waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -80,9 +80,16 @@ CREATE INDEX verdicts_by_reviewer ON verdicts(reviewer, branch, id);
 ALTER TABLE comments ADD COLUMN verdict_id INTEGER REFERENCES verdicts(id) ON DELETE SET NULL;
 ";
 
+/// Version 6 to 7 (D215 (2)): the approval of a branch's tip, one row per branch. `head` is the
+/// commit approved; the approval is stale when the branch has moved on, derived on read.
+const V7: &str = "
+CREATE TABLE approvals (branch TEXT PRIMARY KEY, head TEXT NOT NULL, note TEXT,
+    origin TEXT NOT NULL, at INTEGER NOT NULL);
+";
+
 /// The upgrades after the first version, in order. Each runs when the database is at its
 /// `from` version, so a database several versions behind runs every step after it.
-const UPGRADES: [(i64, &str); 5] = [(1, V2), (2, V3), (3, V4), (4, V5), (5, V6)];
+const UPGRADES: [(i64, &str); 6] = [(1, V2), (2, V3), (3, V4), (4, V5), (5, V6), (6, V7)];
 
 /// The most findings one verdict may carry (D212 (6)).
 const MAX_FINDINGS: usize = 30;
@@ -313,6 +320,53 @@ impl ReviewStore {
         )?;
         tx.commit()?;
         Ok(RecordedVerdict { id, comments })
+    }
+
+    /// Approves `branch` at commit `head` (D215 (2)), replacing the approval it had. Writes
+    /// nothing else: the engine checks that `head` is the tip and the note's length.
+    pub fn approve(
+        &mut self,
+        branch: &str,
+        head: &str,
+        note: Option<&str>,
+        origin: &str,
+        at: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO approvals (branch, head, note, origin, at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![branch, head, note, origin, at],
+        )?;
+        Ok(())
+    }
+
+    /// Withdraws the approval of `branch`; `false` when it had none.
+    pub fn revoke(&mut self, branch: &str) -> Result<bool, StoreError> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM approvals WHERE branch = ?1", params![branch])?;
+        Ok(rows > 0)
+    }
+
+    /// The approval of `branch`, if it has one. `stale` is false: the engine derives it.
+    pub fn approval(&self, branch: &str) -> Result<Option<Approval>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT branch, head, note, origin, at FROM approvals WHERE branch = ?1",
+                params![branch],
+                |row| {
+                    Ok(Approval {
+                        branch: row.get(0)?,
+                        head: row.get(1)?,
+                        note: row.get(2)?,
+                        origin: row.get(3)?,
+                        at: row.get(4)?,
+                        stale: false,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     /// The verdicts of `branch` and `reviewer` (each optional), newest first, at most `limit`,
@@ -612,7 +666,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             tx.execute_batch(SCHEMA)?;
             version = 3;
         }
-        1..=5 => {}
+        1..SCHEMA_VERSION => {}
         v if v == SCHEMA_VERSION => return Ok(()),
         v if v > SCHEMA_VERSION => {
             return Err(StoreError(
@@ -1542,6 +1596,7 @@ mod tests {
             "SELECT 'verdicts ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('verdicts')",
             "SELECT 'fk ' || \"table\" || ' ' || \"from\" || ' ' || \"to\" || ' ' || on_delete FROM pragma_foreign_key_list('comments')",
             "SELECT 'index ' || name || ' on ' || tbl_name FROM sqlite_master WHERE type = 'index' ORDER BY name",
+            "SELECT 'approvals ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('approvals')",
         ];
         for sql in queries {
             let rows: Vec<String> = store
@@ -1595,8 +1650,7 @@ mod tests {
         let path = dir.path().join("review.db");
         v5_database(&path);
         let mut store = ReviewStore::open(&path).expect("migrate");
-        assert_eq!(user_version(&store), 6);
-        assert_eq!(SCHEMA_VERSION, 6);
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
         let kept = store.get(1).expect("get").expect("kept");
         assert_eq!(kept.replies.len(), 1);
         assert_eq!(kept.replies[0].body, "which one?");
@@ -1631,6 +1685,70 @@ mod tests {
             );
         }
         assert_eq!(shape(&upgraded), fresh_shape);
+    }
+
+    fn v6_database(path: &Path) {
+        v5_database(path);
+        let conn = Connection::open(path).expect("open");
+        conn.execute_batch(V6).expect("v6");
+        conn.execute(
+            "INSERT INTO verdicts (reviewer, branch, head, signal, value, rationale, origin, at)
+             VALUES ('security', 'feat', ?1, 'level', 'low', 'fine', 'agent:x', 5)",
+            params!["a".repeat(40)],
+        )
+        .expect("verdict");
+        conn.pragma_update(None, "user_version", 6)
+            .expect("version");
+    }
+
+    #[test]
+    fn a_version_six_database_gains_the_approvals_table_and_keeps_comments_and_verdicts() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("review.db");
+        v6_database(&path);
+        let mut store = ReviewStore::open(&path).expect("migrate");
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
+        let kept = store.get(1).expect("get").expect("kept comment");
+        assert_eq!(kept.replies.len(), 1);
+        let verdicts = store
+            .list_verdicts(Some("feat"), None, 5)
+            .expect("verdicts");
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(verdicts[0].reviewer, "security");
+        store
+            .approve("feat", &"b".repeat(40), None, "human", 7)
+            .expect("approve");
+        assert!(store.approval("feat").expect("read").is_some());
+    }
+
+    #[test]
+    fn approving_a_branch_replaces_its_approval_and_revoking_removes_it() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        assert_eq!(store.approval("feat").expect("none"), None);
+        store
+            .approve("feat", &"a".repeat(40), Some("first"), "human", 1)
+            .expect("first");
+        store
+            .approve("feat", &"b".repeat(40), None, "human", 2)
+            .expect("second");
+        assert_eq!(
+            store.approval("feat").expect("read"),
+            Some(Approval {
+                branch: "feat".to_owned(),
+                head: "b".repeat(40),
+                note: None,
+                origin: "human".to_owned(),
+                at: 2,
+                stale: false,
+            })
+        );
+        store
+            .approve("other", &"c".repeat(40), None, "human", 3)
+            .expect("other");
+        assert!(store.revoke("feat").expect("revoke"));
+        assert_eq!(store.approval("feat").expect("gone"), None);
+        assert!(store.approval("other").expect("kept").is_some());
+        assert!(!store.revoke("feat").expect("nothing to revoke"));
     }
 
     #[test]

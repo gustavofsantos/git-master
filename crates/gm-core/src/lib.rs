@@ -3,6 +3,7 @@
 
 pub mod blame;
 pub mod branch;
+pub mod change;
 pub mod combination;
 pub mod command_log;
 pub mod commit_detail;
@@ -61,7 +62,7 @@ pub mod worktree;
 pub mod worktree_cli;
 pub mod worktree_include;
 
-pub use engine::{Engine, LogEntry};
+pub use engine::{Engine, GateInputs, LogEntry};
 pub use files::{
     HighlightJob, HighlightReport, IndexJob, IndexReport, ReadJob, ReadReport, SearchJob,
     SearchReport, TextJob, TextReport,

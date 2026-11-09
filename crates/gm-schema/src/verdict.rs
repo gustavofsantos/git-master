@@ -104,6 +104,24 @@ pub struct Verdict {
     pub findings: Vec<VerdictFinding>,
 }
 
+/// A person's approval of a branch's tip (D215 (2)): the commit approved, who approved it and
+/// when. `stale` is derived on read, as for a verdict; the store never sets it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Approval {
+    pub branch: String,
+    /// The commit that was approved.
+    pub head: String,
+    /// What the person wrote with the approval, at most 500 characters.
+    pub note: Option<String>,
+    /// Who approved it: `human`.
+    pub origin: String,
+    /// Milliseconds since the Unix epoch, as the engine's clock gave them.
+    pub at: i64,
+    /// True when the branch has moved since the approval. Derived on read.
+    #[serde(default)]
+    pub stale: bool,
+}
+
 /// One finding of a verdict: a review comment with the verdict's origin (D189 (3)).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VerdictFinding {

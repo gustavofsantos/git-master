@@ -26,7 +26,7 @@ use crate::threads::{
     SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink,
     ThreadRelKind, ThreadRelation, ThreadSummary,
 };
-use crate::verdict::{FindingInput, Reviewer, ReviewerFileError, Verdict};
+use crate::verdict::{Approval, FindingInput, Reviewer, ReviewerFileError, Verdict};
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
     WorkflowRunStatus, WorkflowRunSummary,
@@ -680,6 +680,33 @@ pub enum CommandKind {
     /// override, by name, or only the one named `name`. Answers `ReviewersListed`. A read.
     ListReviewers {
         name: Option<String>,
+    },
+    /// Approves the tip of `branch` (D215 (2)): `head` must be the tip now, so a person approves
+    /// exactly what they saw; `note` is at most 500 characters. Human only. Answers `ApprovalRead`.
+    ApproveBranch {
+        branch: String,
+        head: String,
+        note: Option<String>,
+    },
+    /// Withdraws the approval of `branch`, if it has one. Human only. Answers `ApprovalRead`
+    /// with no approval.
+    RevokeApproval {
+        branch: String,
+    },
+    /// Reads the approval of `branch`, with whether it is stale against the tip now. A read:
+    /// never recorded (D28). Answers `ApprovalRead`.
+    ReadApproval {
+        branch: String,
+    },
+    /// Sets the intent of `branch`, its `branch.<name>.description` (D215 (1)): at most 2,000
+    /// characters, no NUL; empty unsets it. Human only. Answers `BranchDescriptionRead`.
+    SetBranchDescription {
+        branch: String,
+        text: String,
+    },
+    /// Reads the intent of `branch`. A read: never recorded (D28). Answers `BranchDescriptionRead`.
+    ReadBranchDescription {
+        branch: String,
     },
     /// Replaces the body of review comment `id`. Human only.
     EditReviewComment {
@@ -1539,6 +1566,20 @@ pub enum Event {
         reviewers: Vec<Reviewer>,
         errors: Vec<ReviewerFileError>,
     },
+    /// Answers `ReadApproval`, `ApproveBranch` and `RevokeApproval` (no approval once revoked):
+    /// the approval of `branch`, with whether it is stale.
+    ApprovalRead {
+        id: OperationId,
+        branch: String,
+        approval: Option<Approval>,
+    },
+    /// Answers `ReadBranchDescription` and `SetBranchDescription`: the intent of `branch` as
+    /// stored, `None` when there is none.
+    BranchDescriptionRead {
+        id: OperationId,
+        branch: String,
+        text: Option<String>,
+    },
     /// Answers `LoadReviewSnapshotText` for comment `comment`: the lines it
     /// covered in the snapshot, empty when there is no snapshot or the file was
     /// not in it.
@@ -1972,6 +2013,83 @@ mod tests {
         let json = serde_json::to_value(&verdicts).unwrap();
         assert_eq!(json["type"], "verdicts_listed");
         assert_eq!(serde_json::from_value::<Event>(json).unwrap(), verdicts);
+    }
+
+    #[test]
+    fn approval_and_description_commands_wire_format_is_tagged() {
+        let approve = serde_json::to_value(CommandKind::ApproveBranch {
+            branch: "feat/x".into(),
+            head: "a".repeat(40),
+            note: Some("looks right".into()),
+        })
+        .unwrap();
+        assert_eq!(approve["type"], "approve_branch");
+        assert_eq!(approve["branch"], "feat/x");
+        assert_eq!(approve["note"], "looks right");
+        let bare: CommandKind = serde_json::from_value(
+            serde_json::json!({ "type": "approve_branch", "branch": "b", "head": "h" }),
+        )
+        .unwrap();
+        assert_eq!(
+            bare,
+            CommandKind::ApproveBranch {
+                branch: "b".into(),
+                head: "h".into(),
+                note: None,
+            }
+        );
+        let revoke =
+            serde_json::to_value(CommandKind::RevokeApproval { branch: "b".into() }).unwrap();
+        assert_eq!(revoke["type"], "revoke_approval");
+        let read = serde_json::to_value(CommandKind::ReadApproval { branch: "b".into() }).unwrap();
+        assert_eq!(read["type"], "read_approval");
+        let set = serde_json::to_value(CommandKind::SetBranchDescription {
+            branch: "b".into(),
+            text: "line one\nline \"two\"".into(),
+        })
+        .unwrap();
+        assert_eq!(set["type"], "set_branch_description");
+        assert_eq!(set["text"], "line one\nline \"two\"");
+        let describe =
+            serde_json::to_value(CommandKind::ReadBranchDescription { branch: "b".into() })
+                .unwrap();
+        assert_eq!(describe["type"], "read_branch_description");
+    }
+
+    #[test]
+    fn approval_events_wire_format_is_tagged() {
+        let read = Event::ApprovalRead {
+            id: OperationId(6),
+            branch: "feat".into(),
+            approval: Some(Approval {
+                branch: "feat".into(),
+                head: "b".repeat(40),
+                note: None,
+                origin: "human".into(),
+                at: 9,
+                stale: false,
+            }),
+        };
+        let json = serde_json::to_value(&read).unwrap();
+        assert_eq!(json["type"], "approval_read");
+        assert_eq!(json["approval"]["origin"], "human");
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), read);
+        let revoked = Event::ApprovalRead {
+            id: OperationId(7),
+            branch: "feat".into(),
+            approval: None,
+        };
+        let json = serde_json::to_value(&revoked).unwrap();
+        assert!(json["approval"].is_null());
+        let text = Event::BranchDescriptionRead {
+            id: OperationId(8),
+            branch: "feat".into(),
+            text: Some("why".into()),
+        };
+        let json = serde_json::to_value(&text).unwrap();
+        assert_eq!(json["type"], "branch_description_read");
+        assert_eq!(json["text"], "why");
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), text);
     }
 
     #[test]

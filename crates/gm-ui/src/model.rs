@@ -1539,7 +1539,11 @@ impl Model {
         // on, and the model keeps none yet (D212).
         | Event::VerdictRecorded { .. }
         | Event::VerdictsListed { .. }
-        | Event::ReviewersListed { .. } => None,
+        | Event::ReviewersListed { .. }
+        // Approvals and branch intents are read by the window from R3 on; the model keeps none
+        // yet (D215).
+        | Event::ApprovalRead { .. }
+        | Event::BranchDescriptionRead { .. } => None,
             // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
             Event::HunkSuggested { .. } => {
                 if let Some(conflict) = self.conflict.as_mut() {
@@ -1997,7 +2001,9 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkflowGateUnreviewed { id, .. }
         | Event::VerdictRecorded { id, .. }
         | Event::VerdictsListed { id, .. }
-        | Event::ReviewersListed { id, .. } => Some(*id),
+        | Event::ReviewersListed { id, .. }
+        | Event::ApprovalRead { id, .. }
+        | Event::BranchDescriptionRead { id, .. } => Some(*id),
         Event::ThreadsChanged
         | Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }

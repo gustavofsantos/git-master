@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
-    Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
+    Actor, Approval, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
     ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GrepOptions, History,
     MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE,
     RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment,
@@ -18,6 +18,7 @@ use gm_schema::{
 use crate::GitPort;
 use crate::blame::BlameLine;
 use crate::branch;
+use crate::change::{self, Change};
 use crate::combination;
 use crate::commit_detail::{DetailJob, DetailReport};
 use crate::commit_diff::{StackJob, StackReport};
@@ -4398,8 +4399,179 @@ impl Engine {
                 limit,
             } => self.list_verdicts(id, branch.as_deref(), reviewer.as_deref(), *limit),
             CommandKind::ListReviewers { name } => self.list_reviewers(id, name.as_deref()),
+            _ if is_approval_command(kind) => self.approval_command(id, actor, kind),
             _ => Err("not a review command".to_owned()),
         }
+    }
+
+    /// The approval and intent commands (D215). The writes are human only, so an agent can never
+    /// approve a branch or change its intent; the reads are not logged (D28).
+    fn approval_command(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        match kind {
+            CommandKind::ApproveBranch { branch, head, note } => {
+                only_a_human(actor, "approve a branch")?;
+                self.approve_branch(id, actor, branch, head, note.as_deref())
+            }
+            CommandKind::RevokeApproval { branch } => {
+                only_a_human(actor, "revoke an approval")?;
+                self.revoke_approval(id, branch)
+            }
+            CommandKind::ReadApproval { branch } => self.read_approval(id, branch),
+            CommandKind::SetBranchDescription { branch, text } => {
+                only_a_human(actor, "edit a branch description")?;
+                self.set_branch_description(id, branch, text)
+            }
+            CommandKind::ReadBranchDescription { branch } => {
+                self.read_branch_description(id, branch)
+            }
+            _ => Err("not an approval command".to_owned()),
+        }
+    }
+
+    /// Approves the tip of `branch` (D215 (2)). `head` must be the tip now, so a person approves
+    /// exactly what they saw; a note of more than 500 characters is refused, and a blank one is
+    /// no note.
+    fn approve_branch(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        branch: &str,
+        head: &str,
+        note: Option<&str>,
+    ) -> Result<Vec<Event>, String> {
+        let note = note.filter(|note| !note.trim().is_empty());
+        if let Some(note) = note {
+            let count = note.chars().count();
+            if count > MAX_APPROVAL_NOTE_CHARS {
+                return Err(format!(
+                    "an approval note is at most {MAX_APPROVAL_NOTE_CHARS} characters, not {count}"
+                ));
+            }
+        }
+        let root = self.open_root()?;
+        let tip = self
+            .git
+            .branch_tip(&root, branch)
+            .map_err(|e| e.0)?
+            .ok_or_else(|| format!("there is no branch named {branch}"))?;
+        let head = self
+            .git
+            .resolve_commit(&root, head)
+            .map_err(|_| format!("{head:?} is not a commit"))?;
+        if head != tip {
+            return Err(format!(
+                "the branch moved since you looked: {} is not the tip {}; look again",
+                short_id(&head),
+                short_id(&tip)
+            ));
+        }
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        store
+            .approve(branch, &tip, note, &origin_of(actor), now_ms())
+            .map_err(|e| e.0)?;
+        let approval = approval_now(store, branch, Some(&tip))?;
+        Ok(vec![Event::ApprovalRead {
+            id,
+            branch: branch.to_owned(),
+            approval,
+        }])
+    }
+
+    /// Withdraws the approval of `branch`; the answer has no approval. Revoking a branch with no
+    /// approval changes nothing.
+    fn revoke_approval(&mut self, id: OperationId, branch: &str) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        store.revoke(branch).map_err(|e| e.0)?;
+        Ok(vec![Event::ApprovalRead {
+            id,
+            branch: branch.to_owned(),
+            approval: None,
+        }])
+    }
+
+    /// The approval of `branch` with whether it is stale against the tip now (D215 (2)).
+    fn read_approval(&mut self, id: OperationId, branch: &str) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let tip = self.git.branch_tip(&root, branch).map_err(|e| e.0)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let approval = approval_now(store, branch, tip.as_deref())?;
+        Ok(vec![Event::ApprovalRead {
+            id,
+            branch: branch.to_owned(),
+            approval,
+        }])
+    }
+
+    /// Sets the intent of `branch` (D215 (1)): its branch description. Blank text unsets it. The
+    /// answer is the description as Git stores it now.
+    fn set_branch_description(
+        &mut self,
+        id: OperationId,
+        branch: &str,
+        text: &str,
+    ) -> Result<Vec<Event>, String> {
+        if text.contains('\0') {
+            return Err("a branch description cannot contain a NUL character".to_owned());
+        }
+        let count = text.chars().count();
+        if count > MAX_DESCRIPTION_CHARS {
+            return Err(format!(
+                "a branch description is at most {MAX_DESCRIPTION_CHARS} characters, not {count}"
+            ));
+        }
+        let root = self.open_root()?;
+        let stored = (!text.trim().is_empty()).then_some(text);
+        self.git
+            .set_branch_description(&root, branch, stored)
+            .map_err(|e| e.0)?;
+        self.read_branch_description(id, branch)
+    }
+
+    /// The intent of `branch`, its branch description, `None` when it has none.
+    fn read_branch_description(
+        &mut self,
+        id: OperationId,
+        branch: &str,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let text = self
+            .git
+            .branch_description(&root, branch)
+            .map_err(|e| e.0)?;
+        Ok(vec![Event::BranchDescriptionRead {
+            id,
+            branch: branch.to_owned(),
+            text,
+        }])
+    }
+
+    /// What the gates of `branch` need from the repository (D215, D214 (1)): the tip, the change,
+    /// whether a person approved the tip, and the intent. It gathers and never runs a gate.
+    pub fn gate_facts_inputs(&mut self, root: &Path, branch: &str) -> Result<GateInputs, String> {
+        let head = self
+            .git
+            .branch_tip(root, branch)
+            .map_err(|e| e.0)?
+            .ok_or_else(|| format!("there is no branch named {branch}"))?;
+        let change = change::change_of(self.git.as_ref(), root, branch).map_err(|e| e.0)?;
+        let intent = self.git.branch_description(root, branch).map_err(|e| e.0)?;
+        let store = review_store(&mut self.review, self.git.as_ref(), root)?;
+        let approved = store
+            .approval(branch)
+            .map_err(|e| e.0)?
+            .is_some_and(|approval| !verdicts::is_stale(&approval.head, Some(&head)));
+        Ok(GateInputs {
+            head,
+            change,
+            approved,
+            intent,
+        })
     }
 
     /// Anchors a comment on lines of `path` and keeps a snapshot of the working
@@ -5561,6 +5733,8 @@ impl Engine {
                 | CommandKind::ListReviewComments { .. }
                 | CommandKind::ListVerdicts { .. }
                 | CommandKind::ListReviewers { .. }
+                | CommandKind::ReadApproval { .. }
+                | CommandKind::ReadBranchDescription { .. }
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }
                 | CommandKind::LoadReviewChange { .. }
@@ -5709,6 +5883,18 @@ fn review_store<'a>(
     }
 }
 
+/// What the gates of a branch need, gathered by `Engine::gate_facts_inputs` (D215, D214 (1)).
+pub struct GateInputs {
+    /// The tip of the branch: the commit the gates judge.
+    pub head: String,
+    /// The change of the branch, `None` when it has no base (D214 (1)).
+    pub change: Option<Change>,
+    /// True when a person approved `head` and the approval is not stale (D215 (2)).
+    pub approved: bool,
+    /// The intent of the branch, its description; text from the repository, so untrusted.
+    pub intent: Option<String>,
+}
+
 /// What an agent records as a verdict (`CommandKind::RecordVerdict`), borrowed from the command.
 struct VerdictRequest<'a> {
     reviewer: &'a str,
@@ -5770,6 +5956,11 @@ fn anchored_findings(
 }
 
 /// A commit id as people write it in a message.
+/// The longest note an approval may carry, in characters (D215 (2)).
+const MAX_APPROVAL_NOTE_CHARS: usize = 500;
+/// The longest intent a branch description may carry, in characters (D215 (1)).
+const MAX_DESCRIPTION_CHARS: usize = 2_000;
+
 fn short_id(id: &str) -> &str {
     id.get(..7).unwrap_or(id)
 }
@@ -5852,27 +6043,54 @@ fn is_workspace_command(kind: &CommandKind) -> bool {
     )
 }
 
-/// Whether `kind` is one of the review comment commands (B4).
+/// Whether `kind` is one of the review comment, verdict or approval commands (B4, D212, D215).
 fn is_review_command(kind: &CommandKind) -> bool {
+    is_approval_command(kind)
+        || matches!(
+            kind,
+            CommandKind::AddReviewComment { .. }
+                | CommandKind::AddReviewCommentByText { .. }
+                | CommandKind::ListReviewComments { .. }
+                | CommandKind::CreateAgentReviewComment { .. }
+                | CommandKind::EditReviewComment { .. }
+                | CommandKind::ResolveReviewComment { .. }
+                | CommandKind::HandleReviewComment { .. }
+                | CommandKind::ReplyToReviewComment { .. }
+                | CommandKind::ReopenReviewComment { .. }
+                | CommandKind::DeleteReviewComment { .. }
+                | CommandKind::LoadReviewSnapshotText { .. }
+                | CommandKind::LoadReviewCurrentText { .. }
+                | CommandKind::LoadReviewChange { .. }
+                | CommandKind::RecordVerdict { .. }
+                | CommandKind::ListVerdicts { .. }
+                | CommandKind::ListReviewers { .. }
+        )
+}
+
+/// Whether `kind` is an approval or branch intent command (D215).
+fn is_approval_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
-        CommandKind::AddReviewComment { .. }
-            | CommandKind::AddReviewCommentByText { .. }
-            | CommandKind::ListReviewComments { .. }
-            | CommandKind::CreateAgentReviewComment { .. }
-            | CommandKind::EditReviewComment { .. }
-            | CommandKind::ResolveReviewComment { .. }
-            | CommandKind::HandleReviewComment { .. }
-            | CommandKind::ReplyToReviewComment { .. }
-            | CommandKind::ReopenReviewComment { .. }
-            | CommandKind::DeleteReviewComment { .. }
-            | CommandKind::LoadReviewSnapshotText { .. }
-            | CommandKind::LoadReviewCurrentText { .. }
-            | CommandKind::LoadReviewChange { .. }
-            | CommandKind::RecordVerdict { .. }
-            | CommandKind::ListVerdicts { .. }
-            | CommandKind::ListReviewers { .. }
+        CommandKind::ApproveBranch { .. }
+            | CommandKind::RevokeApproval { .. }
+            | CommandKind::ReadApproval { .. }
+            | CommandKind::SetBranchDescription { .. }
+            | CommandKind::ReadBranchDescription { .. }
     )
+}
+
+/// The approval of `branch` as the store holds it, with whether it is stale against `tip` now
+/// (D215 (2)); the store never sets `stale`.
+fn approval_now(
+    store: &ReviewStore,
+    branch: &str,
+    tip: Option<&str>,
+) -> Result<Option<Approval>, String> {
+    let approval = store.approval(branch).map_err(|e| e.0)?;
+    Ok(approval.map(|mut approval| {
+        approval.stale = verdicts::is_stale(&approval.head, tip);
+        approval
+    }))
 }
 
 /// Whether two paths name the same folder, through symbolic links when both exist.

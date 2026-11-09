@@ -1,7 +1,7 @@
 //! `GitPort` over the `git` executable. Status uses porcelain v2 with `-z`:
 //! stable, machine-readable, and it honors fsmonitor and the untracked cache.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -150,6 +150,31 @@ impl SubprocessGit {
             .common_dir(root)?
             .join("gitmaster")
             .join("restack-resolve"))
+    }
+
+    /// The paths that differ between `from` and `to`, or `None` when there are more than `limit`
+    /// (D214 (1)). The limit is a parameter so a test can lower it.
+    fn changed_paths_within(
+        &self,
+        root: &Path,
+        from: &str,
+        to: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<String>>, GitError> {
+        require_commit_id(from)?;
+        require_commit_id(to)?;
+        let mut command = self.git(root);
+        command.args(["diff", "--name-only", "-z", "--no-renames", from, to, "--"]);
+        let out = Self::run(command)?;
+        let paths: BTreeSet<String> = String::from_utf8_lossy(&out)
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if paths.len() > limit {
+            return Ok(None);
+        }
+        Ok(Some(paths.into_iter().collect()))
     }
 
     fn run(command: Command) -> Result<Vec<u8>, GitError> {
@@ -2705,6 +2730,76 @@ impl GitPort for SubprocessGit {
         Ok(())
     }
 
+    fn changed_paths(
+        &self,
+        root: &Path,
+        from: &str,
+        to: &str,
+    ) -> Result<Option<Vec<String>>, GitError> {
+        self.changed_paths_within(root, from, to, MAX_CHANGED_PATHS)
+    }
+
+    fn merge_base_of_commits(
+        &self,
+        root: &Path,
+        one: &str,
+        two: &str,
+    ) -> Result<Option<String>, GitError> {
+        require_commit_id(one)?;
+        require_commit_id(two)?;
+        let repo = open(root)?;
+        let one = Oid::from_str(one).map_err(|e| git_err(&e))?;
+        let two = Oid::from_str(two).map_err(|e| git_err(&e))?;
+        Ok(optional_merge_base(&repo, one, two)?.map(|oid| oid.to_string()))
+    }
+
+    fn branch_description(&self, root: &Path, branch: &str) -> Result<Option<String>, GitError> {
+        let key = description_key(branch)?;
+        // `--get-all` lists the values in config order; the last one is what `--get` answers.
+        Ok(self.config_values(root, &key)?.pop())
+    }
+
+    fn set_branch_description(
+        &self,
+        root: &Path,
+        branch: &str,
+        text: Option<&str>,
+    ) -> Result<(), GitError> {
+        let key = description_key(branch)?;
+        if self.branch_tip(root, branch)?.is_none() {
+            return Err(GitError(format!("there is no local branch named {branch}")));
+        }
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            // The text is one argument of the process, never part of a shell line.
+            let mut command = self.git(root);
+            command.args(["config", "--local", "--", key.as_str(), text]);
+            self.logged(command, None).map(drop)
+        } else {
+            let mut command = self.git(root);
+            command.args(["config", "--local", "--unset-all", key.as_str()]);
+            // Exit 5 is git's answer for a key that is not set.
+            let output = self.logged_output(command, None)?;
+            Self::checked(output, &[0, 5]).map(drop)
+        }
+    }
+
+    fn upstream_of(&self, root: &Path, branch: &str) -> Result<Option<String>, GitError> {
+        if let Some(problem) = branch::name_problem(branch) {
+            return Err(GitError(problem.into()));
+        }
+        // Git fails for a branch with no upstream (and for a branch that does not exist): no answer.
+        let mut command = self.git(root);
+        command.args([
+            "rev-parse",
+            "--abbrev-ref",
+            format!("{branch}@{{upstream}}").as_str(),
+        ]);
+        Ok(Self::run(command).ok().and_then(|out| {
+            let text = String::from_utf8_lossy(&out).trim().to_owned();
+            (!text.is_empty()).then_some(text)
+        }))
+    }
+
     fn origin_head(&self, root: &Path) -> Result<Option<String>, GitError> {
         // Git fails when origin/HEAD is not a symbolic ref, which is an answer here.
         let mut command = self.git(root);
@@ -3635,6 +3730,9 @@ fn has_ref(repo: &Repository, name: &str) -> bool {
 /// How many commits of the root `branch_landed` reads for patch ids (D138).
 const LANDED_SCAN: usize = 2_000;
 
+/// The most changed paths a change may list (D214 (1)); more than this is `None`, which fails closed.
+const MAX_CHANGED_PATHS: usize = 10_000;
+
 /// The tip of local branch `name`; `None` when there is no such branch.
 fn local_tip(repo: &Repository, name: &str) -> Result<Option<Oid>, GitError> {
     match repo.find_branch(name, BranchType::Local) {
@@ -4088,6 +4186,14 @@ fn ref_under_refs(name: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+/// The config key of a branch's description (D215 (1)), after the branch name is checked.
+fn description_key(branch: &str) -> Result<String, GitError> {
+    if let Some(problem) = branch::name_problem(branch) {
+        return Err(GitError(problem.into()));
+    }
+    Ok(format!("branch.{branch}.description"))
+}
+
 fn require_commit_id(oid: &str) -> Result<(), GitError> {
     if oid.is_empty() || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(GitError(format!("not a commit id: {oid:?}")));
@@ -4284,5 +4390,62 @@ u UU N... 100644 100644 100644 100644 a b c both.rs\0\
             .and_then(|meta| meta.modified())
             .expect("copy time");
         assert_eq!(copied, past);
+    }
+}
+
+#[cfg(test)]
+mod changed_paths_limit_tests {
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn more_changed_paths_than_the_limit_is_none_and_at_the_limit_is_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.path().join(name), "one\n").unwrap();
+        }
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "init"]);
+        git(dir.path(), &["checkout", "-q", "-b", "feat"]);
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.path().join(name), "two\n").unwrap();
+        }
+        git(dir.path(), &["commit", "-q", "-am", "change"]);
+        let adapter = SubprocessGit::default();
+        let from = adapter.resolve_commit(dir.path(), "main").unwrap();
+        let to = adapter.resolve_commit(dir.path(), "feat").unwrap();
+        assert_eq!(
+            adapter
+                .changed_paths_within(dir.path(), &from, &to, 2)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            adapter
+                .changed_paths_within(dir.path(), &from, &to, 3)
+                .unwrap(),
+            Some(vec![
+                "a.txt".to_owned(),
+                "b.txt".to_owned(),
+                "c.txt".to_owned()
+            ])
+        );
     }
 }
