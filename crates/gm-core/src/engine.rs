@@ -8,12 +8,12 @@ use serde_json::{Map, Value, json};
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Approval, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
-    ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GateOp, GatesStatus,
-    GrepOptions, History, MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId,
-    OperationState, REFLOG_PAGE, RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter,
-    ReviewChange, ReviewComment, ReviewStatus, Reviewer, ReviewerFileError, ReviewerSignal,
-    ReviewerSubject, STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic,
-    WorktreeEntry, WorktreeInspection,
+    ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GateOp, GateOutcome,
+    GatesStatus, GrepOptions, History, MERGED_LIST_CHANGED, MemberRequest, MergedBranch,
+    OperationId, OperationState, REFLOG_PAGE, RestackBlock, RestackPlan, RestackResolution,
+    ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewStatus, Reviewer, ReviewerFileError,
+    ReviewerSignal, ReviewerSubject, STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, StackSnapshot,
+    WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -2333,30 +2333,54 @@ impl Engine {
             state: OperationState::Requested,
         };
         self.record(&op, None, &mut events);
-        self.advance(&mut op, OperationState::Gating, &mut events);
+        if let CommandKind::BypassGates {
+            gates,
+            reason,
+            then,
+        } = &command.kind
+        {
+            self.bypass_gates(&mut op, gates, reason, then, &mut events);
+        } else {
+            // Gating has nothing to check for most commands; the states are walked so that every
+            // operation has the same shape in the log.
+            self.advance(&mut op, OperationState::Gating, &mut events);
+            self.run_command(&mut op, GateCheck::Native, &mut events);
+        }
+        events
+    }
+
+    /// Runs the command of `op`, which is `Gating`, to its end. The native gate check runs first
+    /// unless `gates` is `Bypassed` (D212 (3), (4)); the workflow phases run either way. An
+    /// operation with phases (`WF3c`) stays in Gating while its gates run.
+    fn run_command(&mut self, op: &mut Op, gates: GateCheck, events: &mut Vec<Event>) {
+        let id = op.id;
+        let command = op.command;
+        if gates == GateCheck::Native && self.gate_stops(op, events) {
+            return;
+        }
         if let Some(started) = self.start_read(id, command) {
             match started {
                 Ok(superseded) => {
                     events.extend(superseded);
-                    self.advance(&mut op, OperationState::Executing, &mut events);
+                    self.advance(op, OperationState::Executing, events);
                 }
                 Err(message) => {
-                    self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
+                    self.advance_with(op, OperationState::Failed, Some(message), events);
                 }
             }
-            return events;
+            return;
         }
         if matches!(
             command.kind,
             CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease
         ) {
             match self.start_remote(id, &command.actor, &command.kind) {
-                Ok(()) => self.advance(&mut op, OperationState::Executing, &mut events),
+                Ok(()) => self.advance(op, OperationState::Executing, events),
                 Err(message) => {
-                    self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
+                    self.advance_with(op, OperationState::Failed, Some(message), events);
                 }
             }
-            return events;
+            return;
         }
         // A transform operation runs its workflows and answers with `TransformFinished` (`WF3d`).
         let transform = match &command.kind {
@@ -2367,20 +2391,17 @@ impl Engine {
             _ => None,
         };
         if let Some((field, current, composer)) = transform {
-            self.advance(&mut op, OperationState::Executing, &mut events);
+            self.advance(op, OperationState::Executing, events);
             if let Err(message) =
-                self.start_transform(id, command, &field, &current, composer, &mut events)
+                self.start_transform(id, command, &field, &current, composer, events)
             {
-                self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
+                self.advance_with(op, OperationState::Failed, Some(message), events);
             }
-            return events;
+            return;
         }
-        // Gating has nothing to check for the other commands; the states are walked
-        // so that every operation has the same shape in the log. An operation with
-        // phases (`WF3c`) stays in Gating while its gates run.
         match self.open_phases(command) {
             Err(message) => {
-                self.advance_with(&mut op, OperationState::Failed, Some(message), &mut events);
+                self.advance_with(op, OperationState::Failed, Some(message), events);
             }
             Ok(Some(found)) if !found.gates.is_empty() => {
                 let waiting = found.gates.iter().cloned().collect();
@@ -2391,14 +2412,163 @@ impl Engine {
                     waiting,
                     run: None,
                 };
-                self.step_gates(gate, &mut events);
+                self.step_gates(gate, events);
             }
             Ok(found) => {
-                self.run_op(&mut op, found.as_ref(), &mut events);
-                self.start_conflict_hunks(id, command, &mut events);
+                self.run_op(op, found.as_ref(), events);
+                self.start_conflict_hunks(id, command, events);
             }
         }
-        events
+    }
+
+    /// The native gate check of a push or a restack (D212 (3)). Returns true when it ended the
+    /// operation: a block vetoes it with the reasons and sends `GatesBlocked`, and a check that
+    /// cannot run fails closed. Nothing is started and no gate state is kept.
+    fn gate_stops(&mut self, op: &mut Op, events: &mut Vec<Event>) -> bool {
+        let command = op.command;
+        match self.blocking_gates(&command.actor, &command.kind) {
+            Ok(None) => false,
+            Ok(Some(blocked)) => {
+                let text = block_text(&blocked.block);
+                self.advance_with(op, OperationState::Vetoed, Some(text), events);
+                events.push(gates_blocked_event(op.id, blocked));
+                true
+            }
+            Err(text) => {
+                self.advance_with(op, OperationState::Vetoed, Some(text), events);
+                true
+            }
+        }
+    }
+
+    /// `BypassGates` (D212 (4)): a human runs `then`, a push or a restack, past the native gate
+    /// check, having seen the gates in `gates` block it. A block that now holds a gate the person
+    /// did not name is refused, and the current block is sent for the window. The command is
+    /// logged whole, so the log keeps the gates and the reason (D28). The command then runs under
+    /// the same operation, with the native check off and its phases as usual.
+    fn bypass_gates(
+        &mut self,
+        op: &mut Op,
+        gates: &[String],
+        reason: &str,
+        then: &CommandKind,
+        events: &mut Vec<Event>,
+    ) {
+        match self.prepare_bypass(&op.command.actor, gates, reason, then) {
+            Err(message) => {
+                self.advance(op, OperationState::Gating, events);
+                self.advance_with(op, OperationState::Failed, Some(message), events);
+            }
+            Ok(Bypass::Stale { message, blocked }) => {
+                self.advance(op, OperationState::Gating, events);
+                self.advance_with(op, OperationState::Failed, Some(message), events);
+                events.push(gates_blocked_event(op.id, blocked));
+            }
+            Ok(Bypass::Run(detail)) => {
+                self.advance_with(op, OperationState::Gating, Some(detail), events);
+                let inner = Command {
+                    actor: op.command.actor.clone(),
+                    kind: then.clone(),
+                };
+                self.supersede_conflict_hunks(&inner.kind);
+                let mut inner_op = Op {
+                    id: op.id,
+                    command: &inner,
+                    state: OperationState::Gating,
+                };
+                self.run_command(&mut inner_op, GateCheck::Bypassed, events);
+            }
+        }
+    }
+
+    /// Checks a bypass: the person, the reason, the command, the gates named, and whether the
+    /// block still holds only gates the person saw. Returns what to do, or the refusal.
+    fn prepare_bypass(
+        &mut self,
+        actor: &Actor,
+        gates: &[String],
+        reason: &str,
+        then: &CommandKind,
+    ) -> Result<Bypass, String> {
+        only_a_human(actor, "bypass gates")?;
+        let reason = reason.trim();
+        let length = reason.chars().count();
+        if !(1..=BYPASS_REASON_LIMIT).contains(&length) {
+            return Err(format!(
+                "a bypass needs a reason of 1 to {BYPASS_REASON_LIMIT} characters"
+            ));
+        }
+        if !matches!(
+            then,
+            CommandKind::PushWithLease | CommandKind::ApplyRestack { .. }
+        ) {
+            return Err("only a push or a restack can be bypassed".to_owned());
+        }
+        check_bypass_gates(gates)?;
+        let Some(blocked) = self.blocking_gates(actor, then)? else {
+            return Ok(Bypass::Run(format!(
+                "no gate was blocking; reason: {reason}"
+            )));
+        };
+        let unseen: Vec<String> = block_ids(&blocked.block)
+            .into_iter()
+            .filter(|id| !gates.contains(id))
+            .collect();
+        if !unseen.is_empty() {
+            return Ok(Bypass::Stale {
+                message: format!(
+                    "the gates changed since you looked: {} now block; look again",
+                    unseen.join(", ")
+                ),
+                blocked,
+            });
+        }
+        Ok(Bypass::Run(format!(
+            "bypassed gates: {} (errors: {}); reason: {reason}",
+            gates.join(", "),
+            blocked.block.errors.len()
+        )))
+    }
+
+    /// The gates of a push or a restack that block it, for a human (D212 (3)). `None` for any
+    /// other command or actor, when no gate file exists, when HEAD is detached and when no
+    /// repository is open: the command then reports its own refusal. A check that cannot run is
+    /// an error, which the caller turns into a veto.
+    fn blocking_gates(
+        &mut self,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Option<BlockedGates>, String> {
+        let operation = match (actor, kind) {
+            (Actor::Human, CommandKind::PushWithLease) => GateOp::Push,
+            (Actor::Human, CommandKind::ApplyRestack { .. }) => GateOp::Restack,
+            _ => return Ok(None),
+        };
+        let Ok(root) = self.open_root() else {
+            return Ok(None);
+        };
+        // Without a gate file the branch is not read, so a user without gates pays nothing.
+        let loaded = self
+            .gate_files(&root)
+            .map_err(|reason| unchecked(&reason))?;
+        if loaded.gates.is_empty() && loaded.errors.is_empty() {
+            return Ok(None);
+        }
+        let branch = match kind {
+            CommandKind::ApplyRestack { branch, .. } => branch.clone(),
+            _ => match self.current(&root).map_err(|reason| unchecked(&reason))?.0 {
+                Some(branch) => branch,
+                None => return Ok(None),
+            },
+        };
+        let block = self
+            .gate_check(operation, &branch)
+            .map_err(|reason| unchecked(&reason))?;
+        Ok(block.map(|block| BlockedGates {
+            operation,
+            branch,
+            block,
+        }))
     }
 
     fn execute(
@@ -2479,7 +2649,7 @@ impl Engine {
             CommandKind::ApplyReparent { .. } => {
                 Err("a reparent is applied by a workflow run".to_owned())
             }
-            _ if is_handled_run(kind) => Err("a run is started by handle, not execute".to_owned()),
+            _ if is_handled_run(kind) => Err("handle starts this command, not execute".to_owned()),
             CommandKind::StageAll => self.stage_all(id),
             CommandKind::CancelOperation { op } => self.cancel_operation(actor, *op),
             _ if is_conflict_command(kind) => self.conflict_command(id, actor, kind),
@@ -4681,6 +4851,40 @@ impl Engine {
         })
     }
 
+    /// The gate files of the repository and the user, as read (D212 (2)). Nothing else is read.
+    fn gate_files(&self, root: &Path) -> Result<gates::LoadedGates, String> {
+        let common = self.git.common_dir(root).map_err(|e| e.0)?;
+        Ok(gates::load(
+            Some(&common.join("gitmaster")),
+            self.gates_user_dir.as_deref(),
+        ))
+    }
+
+    /// The native gate check of `branch` for `operation` (D212 (3)): `None` when nothing blocks.
+    /// With no gate and no gate file problem it returns at once. A reviewer file problem alone
+    /// does not block; with a gate defined, the report counts it, and it fails closed.
+    fn gate_check(&mut self, operation: GateOp, branch: &str) -> Result<Option<GateBlock>, String> {
+        let root = self.open_root()?;
+        let loaded = self.gate_files(&root)?;
+        if loaded.gates.is_empty() && loaded.errors.is_empty() {
+            return Ok(None);
+        }
+        let report = self.gates_report(&root, branch, Some(operation))?;
+        if report.status.ready {
+            return Ok(None);
+        }
+        let gates = report
+            .status
+            .gates
+            .into_iter()
+            .filter(|gate| gate.applicable && !gate.passed)
+            .collect();
+        Ok(Some(GateBlock {
+            gates,
+            errors: report.status.errors,
+        }))
+    }
+
     /// How many commits `branch` is behind its parent in the stack model (D214 (1)). `None` when
     /// it has no parent, the parent is not a local branch any more, or the stack cannot be read.
     fn behind_parent(&self, root: &Path, branch: &str) -> Option<u32> {
@@ -5959,7 +6163,9 @@ fn check_workflow_script(id: OperationId, source: &str) -> Vec<Event> {
 fn is_handled_run(kind: &CommandKind) -> bool {
     matches!(
         kind,
-        CommandKind::RunTransform { .. } | CommandKind::ComposerOpened
+        CommandKind::RunTransform { .. }
+            | CommandKind::ComposerOpened
+            | CommandKind::BypassGates { .. }
     )
 }
 
@@ -5980,6 +6186,71 @@ fn reviewed_by(trust: &TrustStore, hash: &str) -> Result<bool, String> {
         return Ok(true);
     }
     trust.is_reviewed(hash).map_err(|e| e.0)
+}
+
+/// The ids of a block as a bypass names them: each blocking gate, then `gates-file` once when a
+/// gate file has a problem (D212 (4)).
+fn block_ids(block: &GateBlock) -> Vec<String> {
+    let mut ids: Vec<String> = block.gates.iter().map(|gate| gate.id.clone()).collect();
+    if !block.errors.is_empty() {
+        ids.push(GATES_FILE_ID.to_owned());
+    }
+    ids
+}
+
+/// Checks the gate ids a bypass names: 1 to 50 of them, each a gate id or `gates-file` (D212 (4)).
+fn check_bypass_gates(gates: &[String]) -> Result<(), String> {
+    if gates.is_empty() || gates.len() > BYPASS_GATES_LIMIT {
+        return Err(format!(
+            "a bypass names the gates it bypasses: 1 to {BYPASS_GATES_LIMIT} gate ids"
+        ));
+    }
+    for id in gates {
+        if id != GATES_FILE_ID && reviewers::validate_name(id).is_err() {
+            return Err(
+                "a gate id is 1 to 40 characters of a-z, 0-9 and '-', or gates-file".to_owned(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The `GatesBlocked` event for a blocked push or restack (D212 (3)).
+fn gates_blocked_event(id: OperationId, blocked: BlockedGates) -> Event {
+    Event::GatesBlocked {
+        id,
+        operation: blocked.operation,
+        branch: blocked.branch,
+        gates: blocked.block.gates,
+        errors: blocked.block.errors,
+    }
+}
+
+/// The veto text of a block: one line per blocking gate, then one per gate file problem (D212 (3)).
+fn block_text(block: &GateBlock) -> String {
+    block
+        .gates
+        .iter()
+        .map(|gate| {
+            format!(
+                "Blocked by gate {}: {}",
+                gate.id,
+                gate.reason.as_deref().unwrap_or("the gate does not pass")
+            )
+        })
+        .chain(
+            block
+                .errors
+                .iter()
+                .map(|error| format!("Gate file problem: {error}")),
+        )
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The text of a native gate check that could not run: it fails closed (D212 (3)).
+fn unchecked(reason: &str) -> String {
+    format!("gates could not be checked: {reason}")
 }
 
 fn only_a_human(actor: &Actor, what: &str) -> Result<(), String> {
@@ -6009,6 +6280,47 @@ fn review_store<'a>(
 /// The most verdicts one gate check reads for a branch (D212 (5)). A reviewer keeps five, so
 /// this holds two hundred reviewers; a branch past it reads as missing verdicts, which blocks.
 const GATE_VERDICT_LIMIT: usize = 1000;
+
+/// Whether the native gate check runs for an operation (D212 (3), (4)). `Bypassed` is set only by
+/// `BypassGates` for the command it runs, and nothing else sets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GateCheck {
+    Native,
+    Bypassed,
+}
+
+/// What the native gate check found for a push or a restack (D212 (3)): the gates that block
+/// (applicable and not passed) and the gate file problems.
+struct GateBlock {
+    gates: Vec<GateOutcome>,
+    errors: Vec<String>,
+}
+
+/// A blocked push or restack: its operation and branch, and what blocks it.
+struct BlockedGates {
+    operation: GateOp,
+    branch: String,
+    block: GateBlock,
+}
+
+/// The longest reason a bypass takes, once trimmed (D212 (4)).
+const BYPASS_REASON_LIMIT: usize = 500;
+
+/// The most gate ids one bypass names (D212 (4)).
+const BYPASS_GATES_LIMIT: usize = 50;
+
+/// The id a gate file problem has in a bypass (D212 (4)).
+const GATES_FILE_ID: &str = "gates-file";
+
+/// What a checked bypass does: run `then` with this operation detail, or refuse it because the
+/// block now holds a gate the person did not name, which is sent with the refusal.
+enum Bypass {
+    Run(String),
+    Stale {
+        message: String,
+        blocked: BlockedGates,
+    },
+}
 
 /// What `Engine::gates_report` says about a branch (D212 (5), D215): the gate check, the intent
 /// (text from the repository, so untrusted) and the approval, with whether it is stale.

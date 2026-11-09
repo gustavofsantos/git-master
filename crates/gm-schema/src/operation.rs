@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::conflict::{ConflictFileRead, ConflictSite, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
-use crate::gates::GatesStatus;
+use crate::gates::{GateOp, GateOutcome, GatesStatus};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
@@ -716,6 +716,17 @@ pub enum CommandKind {
     GatesStatus {
         #[serde(default)]
         branch: Option<String>,
+    },
+    /// Runs `then`, a push with lease or a restack, past the native gate check (D212 (4)).
+    /// `gates` are the ids of the gates the person saw block it (1 to 50 ids, each a gate id or
+    /// `gates-file` for a gate file problem); a block that now holds a gate not in `gates` is
+    /// refused. `reason` is 1 to 500 characters once trimmed. The command is logged whole, so the
+    /// log keeps the gates and the reason. Human only, and not an MCP tool: an agent cannot bypass
+    /// a gate.
+    BypassGates {
+        gates: Vec<String>,
+        reason: String,
+        then: Box<CommandKind>,
     },
     /// Replaces the body of review comment `id`. Human only.
     EditReviewComment {
@@ -1597,6 +1608,16 @@ pub enum Event {
         intent: Option<String>,
         approval: Option<Approval>,
     },
+    /// A push or a restack the native gate check stopped (D212 (3)). Sent after the operation
+    /// ends `Vetoed`, so the window can offer Bypass. `gates` holds only the gates that block
+    /// (applicable and not passed); `errors` the gate file problems.
+    GatesBlocked {
+        id: OperationId,
+        operation: GateOp,
+        branch: String,
+        gates: Vec<GateOutcome>,
+        errors: Vec<String>,
+    },
     /// Answers `LoadReviewSnapshotText` for comment `comment`: the lines it
     /// covered in the snapshot, empty when there is no snapshot or the file was
     /// not in it.
@@ -2136,6 +2157,55 @@ mod tests {
         assert_eq!(json["status"]["errors"][0], "gates.json: not JSON");
         assert_eq!(json["intent"], "why");
         assert!(json["approval"].is_null());
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
+    }
+
+    #[test]
+    fn bypass_and_gates_blocked_wire_format_is_tagged() {
+        use crate::gates::GateLayer;
+        let bypass = serde_json::to_value(CommandKind::BypassGates {
+            gates: vec!["security".into(), "gates-file".into()],
+            reason: "hotfix".into(),
+            then: Box::new(CommandKind::PushWithLease),
+        })
+        .unwrap();
+        assert_eq!(bypass["type"], "bypass_gates");
+        assert_eq!(bypass["gates"][0], "security");
+        assert_eq!(bypass["gates"][1], "gates-file");
+        assert_eq!(bypass["reason"], "hotfix");
+        assert_eq!(bypass["then"]["type"], "push_with_lease");
+        let back: CommandKind = serde_json::from_value(bypass.clone()).unwrap();
+        assert_eq!(
+            back,
+            CommandKind::BypassGates {
+                gates: vec!["security".into(), "gates-file".into()],
+                reason: "hotfix".into(),
+                then: Box::new(CommandKind::PushWithLease),
+            }
+        );
+        let event = Event::GatesBlocked {
+            id: OperationId(7),
+            operation: GateOp::Push,
+            branch: "feat".into(),
+            gates: vec![GateOutcome {
+                id: "security".into(),
+                kind: "fresh_verdict".into(),
+                layer: GateLayer::Repository,
+                applicable: true,
+                not_applicable: None,
+                passed: false,
+                reason: Some("security has no verdict for the tip".into()),
+                settings: serde_json::json!({ "reviewers": ["security"] }),
+            }],
+            errors: vec!["gates.json: not JSON".into()],
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "gates_blocked");
+        assert_eq!(json["operation"], "push");
+        assert_eq!(json["branch"], "feat");
+        assert_eq!(json["gates"][0]["id"], "security");
+        assert_eq!(json["gates"][0]["passed"], false);
+        assert_eq!(json["errors"][0], "gates.json: not JSON");
         assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
     }
 
