@@ -5470,6 +5470,21 @@ impl Engine {
                 usize::try_from(limit).unwrap_or(usize::MAX),
             )
             .map_err(|e| e.0)?;
+        // Each finding takes its body, fix and current line from its comment (D215 (3)).
+        let comments = review_session::listed(store, &root)?;
+        let by_id: BTreeMap<i64, &ReviewComment> = comments
+            .iter()
+            .map(|comment| (comment.id, comment))
+            .collect();
+        for verdict in &mut found {
+            for finding in &mut verdict.findings {
+                if let Some(comment) = by_id.get(&finding.comment_id) {
+                    finding.body.clone_from(&comment.body);
+                    finding.suggested_fix.clone_from(&comment.suggested_fix);
+                    finding.start_line = comment.location.map(|at| at.start_line);
+                }
+            }
+        }
         let mut tips: BTreeMap<String, Option<String>> = BTreeMap::new();
         for verdict in &mut found {
             if !tips.contains_key(&verdict.branch) {
@@ -5620,7 +5635,12 @@ impl Engine {
         let root = self.open_root()?;
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
         let current = find_review(store, comment)?;
-        if matches!(actor, Actor::Agent { .. }) && review::is_agent_started(&current) {
+        // An agent may hand off a finding, so it can fix what a reviewer found (D215 (3)); every
+        // other thread it started is the person's to close (D200 (5a)).
+        if matches!(actor, Actor::Agent { .. })
+            && review::is_agent_started(&current)
+            && !current.finding
+        {
             return Err(
                 "an agent cannot hand off a thread it started: only a person closes it".to_owned(),
             );
@@ -6750,6 +6770,21 @@ fn anchored_findings(
     for finding in inputs {
         let body = redactor.redact(&finding.body).text;
         let body = verdict_text(&body, verdicts::MAX_FINDING_BODY_CHARS, "a finding's body")?;
+        // An empty fix is no fix (D215 (3)); a fix is redacted and checked like the body.
+        let suggested_fix = match finding.suggested_fix.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(fix) => {
+                let fix = redactor.redact(fix).text;
+                Some(
+                    verdict_text(
+                        &fix,
+                        verdicts::MAX_SUGGESTED_FIX_CHARS,
+                        "a finding's suggested fix",
+                    )?
+                    .to_owned(),
+                )
+            }
+        };
         let file = files
             .get(finding.path.as_str())
             .ok_or_else(|| format!("there is no file {} in the worktree", finding.path))?;
@@ -6761,6 +6796,7 @@ fn anchored_findings(
             body: body.to_owned(),
             anchor,
             snapshot: None,
+            suggested_fix,
         });
     }
     Ok(findings)

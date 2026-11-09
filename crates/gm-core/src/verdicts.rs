@@ -14,6 +14,8 @@ const SCORE_MAX: u32 = 100;
 pub const MAX_RATIONALE_CHARS: usize = 4_000;
 /// The longest body of a finding, in characters (D212 (6)).
 pub const MAX_FINDING_BODY_CHARS: usize = 1_000;
+/// The longest suggested fix a finding may carry, in characters (D215 (3)).
+pub const MAX_SUGGESTED_FIX_CHARS: usize = 1_000;
 /// The most findings one verdict records (D212 (6)).
 pub const MAX_FINDINGS: usize = 30;
 /// The verdicts a listing returns when it names no limit, and the most it returns.

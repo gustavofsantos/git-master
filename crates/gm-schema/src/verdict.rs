@@ -129,6 +129,15 @@ pub struct VerdictFinding {
     pub severity: ReviewSeverity,
     pub path: String,
     pub status: ReviewStatus,
+    /// The line the finding's anchor is on now, 1-based; `None` when it is outdated (D215 (3)).
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    /// What the finding says, redacted. Written by the reviewer: untrusted text (D215 (3)).
+    #[serde(default)]
+    pub body: String,
+    /// The fix the reviewer suggested, redacted, when it gave one. Untrusted text (D215 (3)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_fix: Option<String>,
 }
 
 /// A finding an agent records with its verdict (D212 (6)): a flag on lines of a file, with
@@ -140,6 +149,9 @@ pub struct FindingInput {
     pub start_line: u32,
     pub end_line: u32,
     pub body: String,
+    /// The fix the reviewer suggests, as plain text, at most 1,000 characters (D215 (3)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_fix: Option<String>,
 }
 
 /// A reviewer file that could not be read as a reviewer (D212 (1)), with the reason.
@@ -166,6 +178,31 @@ mod tests {
         assert!(Level::Low < Level::Medium && Level::Medium < Level::High);
         let json = serde_json::to_value(Level::High).unwrap();
         assert_eq!(json, "high");
+    }
+
+    #[test]
+    fn a_finding_written_before_its_body_and_fix_reads_with_defaults() {
+        let json = serde_json::json!({
+            "comment_id": 9,
+            "severity": "high",
+            "path": "a.rs",
+            "status": "open"
+        });
+        let finding: VerdictFinding = serde_json::from_value(json).unwrap();
+        assert_eq!(finding.start_line, None);
+        assert_eq!(finding.body, "");
+        assert_eq!(finding.suggested_fix, None);
+        let input: FindingInput = serde_json::from_value(serde_json::json!({
+            "severity": "low",
+            "path": "a.rs",
+            "start_line": 1,
+            "end_line": 1,
+            "body": "x"
+        }))
+        .unwrap();
+        assert_eq!(input.suggested_fix, None);
+        let back = serde_json::to_value(&input).unwrap();
+        assert!(back.get("suggested_fix").is_none());
     }
 
     #[test]

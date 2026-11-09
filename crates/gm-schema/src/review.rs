@@ -122,6 +122,13 @@ pub struct ReviewComment {
     /// Computed on read, as `outdated` is.
     #[serde(default)]
     pub needs_answer: bool,
+    /// The fix a reviewer suggested for a finding, as plain text (D215 (3)); `None` for any
+    /// other comment and for a finding without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_fix: Option<String>,
+    /// True when the thread is a finding of a verdict (D215 (3)): a flag a reviewer recorded.
+    #[serde(default)]
+    pub finding: bool,
 }
 
 /// The anchored lines of a comment as the two snapshots hold them (D140): the
@@ -203,6 +210,31 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_without_a_fix_or_a_finding_flag_reads_as_before() {
+        let json = serde_json::json!({
+            "id": 4,
+            "path": "a.rs",
+            "body": "unchecked",
+            "status": "open",
+            "anchor": { "text": "x", "before": [], "after": [], "start_line": 1 },
+            "created_at": 5,
+            "resolved_at": null,
+            "snapshot": null,
+            "location": null,
+            "outdated": true,
+            "author": "agent:reviewer",
+            "kind": "flag",
+            "severity": "high"
+        });
+        let comment: ReviewComment = serde_json::from_value(json).unwrap();
+        assert_eq!(comment.suggested_fix, None);
+        assert!(!comment.finding);
+        let back = serde_json::to_value(&comment).unwrap();
+        assert!(back.get("suggested_fix").is_none());
+        assert_eq!(back["finding"], false);
+    }
+
+    #[test]
     fn a_comment_lists_its_replies_and_no_summary() {
         let comment = ReviewComment {
             id: 1,
@@ -231,6 +263,8 @@ mod tests {
             kind: None,
             severity: None,
             needs_answer: false,
+            suggested_fix: None,
+            finding: false,
         };
         let json = serde_json::to_value(&comment).unwrap();
         assert!(json.get("summary").is_none());

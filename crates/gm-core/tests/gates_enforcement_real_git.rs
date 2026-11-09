@@ -425,6 +425,7 @@ fn an_open_high_finding_blocks_the_push_until_a_person_resolves_it() {
         start_line: 2,
         end_line: 2,
         body: "unchecked input".to_owned(),
+        suggested_fix: None,
     };
     let recorded = session.agent(security_verdict(vec![finding]));
     assert_eq!(state(&recorded), OperationState::Done, "{recorded:?}");
@@ -852,6 +853,7 @@ fn high_finding() -> FindingInput {
         start_line: 2,
         end_line: 2,
         body: "unchecked input".to_owned(),
+        suggested_fix: None,
     }
 }
 

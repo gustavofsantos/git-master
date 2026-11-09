@@ -3298,6 +3298,8 @@ mod stash_tests {
             kind: None,
             severity: None,
             needs_answer: false,
+            suggested_fix: None,
+            finding: false,
             location: Some(gm_schema::ReviewLocation {
                 start_line: 2,
                 end_line: 2,

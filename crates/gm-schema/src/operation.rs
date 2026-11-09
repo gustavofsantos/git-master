@@ -2064,6 +2064,7 @@ mod tests {
                 start_line: 2,
                 end_line: 3,
                 body: "risk".into(),
+                suggested_fix: None,
             }],
         })
         .unwrap();

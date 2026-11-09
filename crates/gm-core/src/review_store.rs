@@ -147,9 +147,10 @@ const PROPOSAL_COLUMNS: &str = "id, kind, name, body, reason, origin, status, at
 const VERDICT_COLUMNS: &str = "id, reviewer, branch, head, signal, value, rationale, origin, \
      model, run_thread, at";
 
-/// Columns read back for a root `ReviewComment`, in the order `raw_comment` expects.
+/// Columns read back for a root `ReviewComment`, in the order `raw_comment` expects. A finding is
+/// the root with a branch (D212 (6), D215 (3)); the branch stays after retention unlinks its verdict.
 const COLUMNS: &str = "id, path, body, status, anchor_json, created_at, resolved_at, snapshot, \
-     after_snapshot, author, kind, severity";
+     after_snapshot, author, kind, severity, suggested_fix, finding_branch IS NOT NULL";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreError(pub String);
@@ -186,7 +187,8 @@ pub struct AgentThread<'a> {
 }
 
 /// One root row as SQLite gives it: id, path, body, status, anchor JSON, created,
-/// resolved, snapshot, the "after" snapshot, author, kind and severity.
+/// resolved, snapshot, the "after" snapshot, author, kind, severity, the suggested fix and
+/// whether it is a finding.
 type RawComment = (
     i64,
     String,
@@ -200,6 +202,8 @@ type RawComment = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
+    bool,
 );
 
 pub struct ReviewStore {
@@ -293,6 +297,7 @@ impl ReviewStore {
                     verdict: None,
                     branch: None,
                     head: None,
+                    suggested_fix: None,
                 },
             )
         })();
@@ -360,6 +365,7 @@ impl ReviewStore {
                     verdict: Some(id),
                     branch: Some(&new.branch),
                     head: Some(&new.head),
+                    suggested_fix: finding.suggested_fix.as_deref(),
                 },
             )?);
         }
@@ -930,7 +936,7 @@ fn insert_reply(
 fn open_agent_count(conn: &Connection, path: Option<&str>) -> Result<usize, StoreError> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM comments WHERE parent IS NULL AND author LIKE 'agent:%'
-         AND verdict_id IS NULL AND status != ?1 AND (?2 IS NULL OR path = ?2)",
+         AND finding_branch IS NULL AND status != ?1 AND (?2 IS NULL OR path = ?2)",
         params![status_text(ReviewStatus::Resolved), path],
         |row| row.get(0),
     )?;
@@ -1030,6 +1036,8 @@ struct AgentRoot<'a> {
     /// The commit that verdict judged, kept the same way (R2h): a finding whose commit is an
     /// ancestor of its branch's tip counts for that branch after a rename.
     head: Option<&'a str>,
+    /// The fix a reviewer suggested for a finding (D215 (3)), redacted; `None` for a thread.
+    suggested_fix: Option<&'a str>,
 }
 
 /// Inserts an open agent-started root comment and returns its id. The caller owns the
@@ -1038,8 +1046,8 @@ fn insert_agent_root(conn: &Connection, root: &AgentRoot) -> Result<i64, StoreEr
     let anchor_json = to_json(root.anchor)?;
     conn.execute(
         "INSERT INTO comments (path, body, status, anchor_json, created_at, author, kind,
-         severity, snapshot, verdict_id, finding_branch, finding_head)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         severity, snapshot, verdict_id, finding_branch, finding_head, suggested_fix)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             root.path,
             root.body,
@@ -1053,6 +1061,7 @@ fn insert_agent_root(conn: &Connection, root: &AgentRoot) -> Result<i64, StoreEr
             root.verdict,
             root.branch,
             root.head,
+            root.suggested_fix,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -1145,6 +1154,10 @@ fn findings_of(conn: &Connection, verdict: i64) -> Result<Vec<VerdictFinding>, S
             severity: parse_severity(&severity)?,
             path,
             status: parse_status(&status)?,
+            // The engine reads the body, the fix and the line from the listed comments.
+            start_line: None,
+            body: String::new(),
+            suggested_fix: None,
         });
     }
     Ok(findings)
@@ -1260,6 +1273,8 @@ fn raw_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawComment> {
         row.get(9)?,
         row.get(10)?,
         row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
     ))
 }
 
@@ -1287,6 +1302,8 @@ fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
         author,
         kind,
         severity,
+        suggested_fix,
+        finding,
     ) = raw;
     Ok(ReviewComment {
         id,
@@ -1306,6 +1323,8 @@ fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
         kind: kind.as_deref().map(parse_kind).transpose()?,
         severity: severity.as_deref().map(parse_severity).transpose()?,
         needs_answer: false,
+        suggested_fix,
+        finding,
     })
 }
 
@@ -1338,6 +1357,8 @@ pub struct NewFinding {
     pub anchor: ReviewAnchor,
     /// Object id of the snapshot taken when the finding was made, when there is one.
     pub snapshot: Option<String>,
+    /// The redacted fix the reviewer suggested, when it gave one (D215 (3)).
+    pub suggested_fix: Option<String>,
 }
 
 /// A bypass to audit (D212 (4)): the branch and its tip, the operation, the gate ids named, the
@@ -2117,6 +2138,7 @@ mod tests {
             body: body.to_owned(),
             anchor: anchor("x", 1),
             snapshot: Some("s".repeat(40)),
+            suggested_fix: None,
         }
     }
 

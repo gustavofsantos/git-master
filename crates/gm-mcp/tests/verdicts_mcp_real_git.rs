@@ -515,3 +515,151 @@ fn no_tool_changes_a_gate_approves_a_branch_or_bypasses_one() {
         "no tool sets a gate, bypasses one, approves a branch or accepts or denies a proposal: {names:?}"
     );
 }
+
+/// The initialize request of a client called `name`: the agent's name is its client's (D200).
+fn initialize_as(name: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18", "capabilities": {},
+                        "clientInfo": { "name": name, "version": "1" } } })
+}
+
+fn fixed_record_args(fix: &str) -> Value {
+    let mut args = record_args("security", "High");
+    args["findings"][0]["suggested_fix"] = json!(fix);
+    args
+}
+
+#[test]
+fn a_finding_carries_its_suggested_fix_in_the_verdict_and_the_thread_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    repo(dir.path());
+    define_security(dir.path());
+    let replies = session(
+        dir.path(),
+        &reviewers::user_dir(user.path()),
+        &[
+            initialize(),
+            call(
+                2,
+                "verdict_record",
+                &fixed_record_args("Return an error for an empty value."),
+            ),
+            call(3, "verdicts_list", &json!({})),
+            call(4, "review_comments_list", &json!({ "author": "any" })),
+        ],
+    );
+    let recorded = result(&replies[1]);
+    let id = recorded["comment_ids"][0].clone();
+
+    let finding = &result(&replies[2])["verdicts"][0]["findings"][0];
+    assert_eq!(finding["id"], id);
+    assert_eq!(finding["body"], "The input is not checked here.");
+    assert_eq!(finding["start_line"], 2);
+    assert_eq!(
+        finding["suggested_fix"],
+        "Return an error for an empty value."
+    );
+    assert_eq!(result(&replies[2])["verdicts"][0]["untrusted"], true);
+
+    let comments = result(&replies[3])["comments"].as_array().unwrap();
+    let comment = comments
+        .iter()
+        .find(|comment| comment["id"] == id)
+        .expect("the finding is listed");
+    assert_eq!(comment["finding"], true);
+    assert_eq!(
+        comment["suggested_fix"],
+        "Return an error for an empty value."
+    );
+    assert_eq!(comment["untrusted"], true);
+}
+
+#[test]
+fn another_agent_marks_a_finding_handled_and_the_tools_offer_no_other_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    repo(dir.path());
+    define_security(dir.path());
+    let user_dir = reviewers::user_dir(user.path());
+    let recorded = session(
+        dir.path(),
+        &user_dir,
+        &[
+            initialize(),
+            call(2, "verdict_record", &fixed_record_args("Reject it.")),
+        ],
+    );
+    let id = result(&recorded[1])["comment_ids"][0].clone();
+
+    let fixer = session(
+        dir.path(),
+        &user_dir,
+        &[
+            initialize_as("fixer"),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+            call(
+                3,
+                "review_comment_resolve",
+                &json!({ "id": id, "summary": "Rejects the empty value at line 2." }),
+            ),
+            call(4, "review_comments_list", &json!({ "author": "any" })),
+        ],
+    );
+    let names: Vec<&str> = fixer[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    for route in ["resolve", "dismiss", "reopen", "delete"] {
+        let offered: Vec<&&str> = names.iter().filter(|name| name.contains(route)).collect();
+        if route == "resolve" {
+            assert_eq!(offered, [&"review_comment_resolve"], "{names:?}");
+        } else {
+            assert!(offered.is_empty(), "{route} is not offered: {names:?}");
+        }
+    }
+
+    let handed = result(&fixer[2]);
+    assert_eq!(handed["id"], id);
+    assert_eq!(
+        handed["status"], "handled",
+        "a hand-off sets handled, not resolved"
+    );
+    assert_eq!(handed["finding"], true);
+    let reply = handed["replies"].as_array().unwrap().last().unwrap();
+    assert_eq!(reply["author"], "agent:fixer");
+    assert_eq!(reply["body"], "Rejects the empty value at line 2.");
+    let listed = result(&fixer[3])["comments"].as_array().unwrap();
+    let comment = listed.iter().find(|comment| comment["id"] == id).unwrap();
+    assert_eq!(comment["status"], "handled");
+}
+
+#[test]
+fn a_suggested_fix_over_a_thousand_characters_is_a_tool_error_and_nothing_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    repo(dir.path());
+    define_security(dir.path());
+    let replies = session(
+        dir.path(),
+        &reviewers::user_dir(user.path()),
+        &[
+            initialize(),
+            call(2, "verdict_record", &fixed_record_args(&"x".repeat(1_001))),
+            call(3, "verdicts_list", &json!({})),
+        ],
+    );
+    assert!(
+        refusal(&replies[1]).contains("1001 characters"),
+        "{}",
+        refusal(&replies[1])
+    );
+    assert!(
+        result(&replies[2])["verdicts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}

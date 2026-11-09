@@ -160,6 +160,9 @@ mod tests {
             severity,
             path: "src/a.rs".into(),
             status: ReviewStatus::Open,
+            start_line: None,
+            body: String::new(),
+            suggested_fix: None,
         }
     }
 
@@ -271,6 +274,8 @@ mod tests {
             kind: None,
             severity: None,
             needs_answer: false,
+            suggested_fix: None,
+            finding: false,
         }
     }
 }

@@ -137,6 +137,7 @@ fn finding(severity: ReviewSeverity, path: &str, start: u32, end: u32, body: &st
         start_line: start,
         end_line: end,
         body: body.to_owned(),
+        suggested_fix: None,
     }
 }
 

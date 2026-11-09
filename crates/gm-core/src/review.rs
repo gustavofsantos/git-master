@@ -454,6 +454,8 @@ mod tests {
             kind,
             severity: None,
             needs_answer: false,
+            suggested_fix: None,
+            finding: false,
         }
     }
 

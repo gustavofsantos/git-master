@@ -561,6 +561,8 @@ mod tests {
             kind: None,
             severity: None,
             needs_answer: false,
+            suggested_fix: None,
+            finding: false,
             location: line.map(|start_line| ReviewLocation {
                 start_line,
                 end_line: start_line,

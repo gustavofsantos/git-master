@@ -188,6 +188,7 @@ fn high_finding() -> FindingInput {
         start_line: 2,
         end_line: 2,
         body: "unchecked input".to_owned(),
+        suggested_fix: None,
     }
 }
 

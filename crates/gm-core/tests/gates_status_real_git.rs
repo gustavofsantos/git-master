@@ -200,6 +200,7 @@ fn finding(severity: ReviewSeverity, start: u32, end: u32, body: &str) -> Findin
         start_line: start,
         end_line: end,
         body: body.to_owned(),
+        suggested_fix: None,
     }
 }
 
@@ -369,15 +370,16 @@ fn a_findings_gate_blocks_on_an_open_finding_and_unblocks_when_a_person_resolves
         id: comment,
         summary: "Added a check.".to_owned(),
     });
-    // An agent cannot hand off a thread it started (D200 (5a)); D215 (3) lets it mark a finding
-    // handled in a later slice. Until then the open finding keeps blocking.
-    assert_eq!(state_of(&handled), Some(OperationState::Failed));
+    // An agent may mark a finding handled (D215 (3)), but a handled finding still blocks: only
+    // the person's resolve or dismiss unblocks the gate.
     assert_eq!(
-        failure(&handled),
-        "an agent cannot hand off a thread it started: only a person closes it"
+        state_of(&handled),
+        Some(OperationState::Done),
+        "{}",
+        failure(&handled)
     );
     let still = session.status(None);
-    assert!(!still.status.ready, "an open finding blocks");
+    assert!(!still.status.ready, "a handled finding blocks");
 
     let resolved = session.human(CommandKind::ResolveReviewComment { id: comment });
     assert!(done(&resolved), "{}", failure(&resolved));

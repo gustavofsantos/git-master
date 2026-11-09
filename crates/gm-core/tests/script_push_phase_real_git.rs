@@ -152,6 +152,7 @@ fn finding(severity: ReviewSeverity, start: u32, body: &str) -> FindingInput {
         start_line: start,
         end_line: start,
         body: body.to_owned(),
+        suggested_fix: None,
     }
 }
 
