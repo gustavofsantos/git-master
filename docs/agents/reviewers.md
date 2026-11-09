@@ -117,7 +117,7 @@ Choose **Approve Branch** on a branch to say you read its current commit and acc
 
 ## Fix the findings
 
-> **Planned.** Findings do not carry a suggested fix yet, and an agent cannot mark a finding handled.
+> **Planned.** `/gitmaster:fix-findings` does not exist yet, and the diff does not show the **Suggested fix** under a finding yet. An agent can already read the fix and the finding with `verdicts_list` and mark a finding handled with `review_comment_resolve`.
 
 A finding can carry a **Suggested fix**, written by the reviewer and shown under the finding. To have your coding agent work through the findings, ask it from its session:
 
