@@ -1534,7 +1534,12 @@ impl Model {
         | Event::MembersListed { .. }
         // The delete preview is read by the Manage Contexts dialog from the view, which asks the
         // delete's question from it; the model keeps no preview (D191).
-        | Event::ContextDeletePreview { .. } => None,
+        | Event::ContextDeletePreview { .. }
+        // Verdicts and reviewers are read by the agent's tools; the review panel reads them from R3
+        // on, and the model keeps none yet (D212).
+        | Event::VerdictRecorded { .. }
+        | Event::VerdictsListed { .. }
+        | Event::ReviewersListed { .. } => None,
             // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
             Event::HunkSuggested { .. } => {
                 if let Some(conflict) = self.conflict.as_mut() {
@@ -1989,7 +1994,10 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ConflictResolved { id, .. }
         | Event::RecordedResolutionForgotten { id, .. }
         | Event::TransformFinished { id, .. }
-        | Event::WorkflowGateUnreviewed { id, .. } => Some(*id),
+        | Event::WorkflowGateUnreviewed { id, .. }
+        | Event::VerdictRecorded { id, .. }
+        | Event::VerdictsListed { id, .. }
+        | Event::ReviewersListed { id, .. } => Some(*id),
         Event::ThreadsChanged
         | Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }

@@ -8,11 +8,11 @@ use serde_json::{Map, Value, json};
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
-    ConflictSite, DirListing, Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED,
-    MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE, RestackBlock,
-    RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewStatus,
-    STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry,
-    WorktreeInspection,
+    ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GrepOptions, History,
+    MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE,
+    RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment,
+    ReviewStatus, Reviewer, ReviewerFileError, ReviewerSignal, ReviewerSubject, STASH_LIST_CHANGED,
+    SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
 
 use crate::GitPort;
@@ -38,7 +38,8 @@ use crate::restack_resolutions::{self, Resolution};
 use crate::restack_session;
 use crate::review;
 use crate::review_session::{self, ReviewSession};
-use crate::review_store::{AgentThread, Reply, ReviewStore};
+use crate::review_store::{AgentThread, NewFinding, NewVerdict, Reply, ReviewStore};
+use crate::reviewers;
 use crate::script::builtins;
 use crate::script::dry;
 use crate::script::hook_convert;
@@ -64,7 +65,9 @@ use crate::stack_session;
 use crate::submodule;
 use crate::syntax;
 use crate::threads::members;
+use crate::threads::redact::Redactor;
 use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSession, origin_of};
+use crate::verdicts;
 use crate::workflow_session::{self, Effected};
 use crate::workspace::{CreateRequest, Workspaces};
 use crate::worktree;
@@ -144,6 +147,8 @@ pub struct Engine {
     script_jobs: Vec<ScriptJob>,
     /// The user's workflow directory, read before `gitmaster.workflowPath`.
     workflow_user_dir: Option<PathBuf>,
+    /// The user's reviewer directory (D212 (1)): `reviewers/` of the configuration directory.
+    reviewer_user_dir: Option<PathBuf>,
     /// The folder a deleted workflow file is moved to; see `delete_workflow_file`.
     workflow_trash_dir: Option<PathBuf>,
     /// The contexts file (`contexts.db`); see `set_contexts_db`.
@@ -356,6 +361,7 @@ impl Engine {
             script_waiting: BTreeMap::new(),
             script_jobs: Vec::new(),
             workflow_user_dir: loader::default_user_dir(),
+            reviewer_user_dir: crate::paths::config_dir().map(|dir| reviewers::user_dir(&dir)),
             workspace_home: std::env::var_os("HOME")
                 .filter(|home| !home.is_empty())
                 .map(PathBuf::from),
@@ -385,6 +391,12 @@ impl Engine {
     /// `None` reads none. The default is the user's config directory.
     pub fn set_workflow_user_dir(&mut self, dir: Option<PathBuf>) {
         self.workflow_user_dir = dir;
+    }
+
+    /// Sets the directory of the user's reviewers (D212 (1)). `None` reads none. The default is
+    /// `reviewers/` of the user's config directory; tests point it at a temporary folder.
+    pub fn set_reviewer_user_dir(&mut self, dir: Option<PathBuf>) {
+        self.reviewer_user_dir = dir;
     }
 
     /// Sets the folder deleted workflow files are moved to. `None` refuses
@@ -4362,6 +4374,30 @@ impl Engine {
                 only_a_human(actor, "delete a review comment")?;
                 self.delete_review_comment(id, *comment)
             }
+            CommandKind::RecordVerdict {
+                reviewer,
+                branch,
+                head,
+                value,
+                rationale,
+                findings,
+            } => {
+                let request = VerdictRequest {
+                    reviewer,
+                    branch,
+                    head,
+                    value,
+                    rationale,
+                    findings,
+                };
+                self.record_verdict(id, actor, &request)
+            }
+            CommandKind::ListVerdicts {
+                branch,
+                reviewer,
+                limit,
+            } => self.list_verdicts(id, branch.as_deref(), reviewer.as_deref(), *limit),
+            CommandKind::ListReviewers { name } => self.list_reviewers(id, name.as_deref()),
             _ => Err("not a review command".to_owned()),
         }
     }
@@ -4408,6 +4444,195 @@ impl Engine {
             .map_err(|e| e.0)?;
         snapshot_before(self.git.as_ref(), store, &root, comment, path)?;
         self.review_listed(id, &root)
+    }
+
+    /// Records a verdict and its findings (D212 (6)). Every check runs before the first write:
+    /// the store keeps the verdict and its findings in one transaction, and each finding is
+    /// anchored on its lines as an agent's comment is (D97), with the "before" snapshot taken as
+    /// for a person's comment (D140).
+    fn record_verdict(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        request: &VerdictRequest,
+    ) -> Result<Vec<Event>, String> {
+        if !matches!(actor, Actor::Agent { .. }) {
+            return Err("only an agent records a verdict".to_owned());
+        }
+        let origin = origin_of(actor);
+        let root = self.open_root()?;
+        // Redaction first, and it fails closed: a configuration that does not compile refuses the
+        // whole record (D121, D212 (6)).
+        let redactor = threads_session::redactor_at(&root, None).map_err(|reason| {
+            format!("redaction is misconfigured, so nothing was recorded: {reason}")
+        })?;
+        let reviewer = self.reviewer_named(&root, request.reviewer)?;
+        if reviewer.subject != ReviewerSubject::Branch {
+            return Err(format!(
+                "reviewer {} has subject {}; only branch reviewers can record verdicts for now",
+                reviewer.name,
+                subject_name(reviewer.subject)
+            ));
+        }
+        match self.git.status(&root).map_err(|e| e.0)?.branch.head {
+            Some(current) if current == request.branch => {}
+            Some(current) => {
+                return Err(format!(
+                    "the branch {} is not checked out here, HEAD is on {current}; a verdict is for the branch checked out in this worktree",
+                    request.branch
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "HEAD is detached; check out {} to record its verdict",
+                    request.branch
+                ));
+            }
+        }
+        let head = self
+            .git
+            .resolve_commit(&root, request.head)
+            .map_err(|_| format!("{:?} is not a commit", request.head))?;
+        let tip = self
+            .git
+            .branch_tip(&root, request.branch)
+            .map_err(|e| e.0)?;
+        if tip.as_deref() != Some(head.as_str()) {
+            return Err(format!(
+                "head {} is not the tip of {} ({}); the branch moved since you judged it, run the reviewer again",
+                short_id(&head),
+                request.branch,
+                tip.as_deref().map_or("none", short_id)
+            ));
+        }
+        let value = verdicts::check_value(reviewer.signal, request.value)?;
+        let rationale = redactor.redact(request.rationale).text;
+        let rationale = verdict_text(&rationale, verdicts::MAX_RATIONALE_CHARS, "the rationale")?;
+        if request.findings.len() > verdicts::MAX_FINDINGS {
+            return Err(format!(
+                "a verdict has at most {} findings, not {}",
+                verdicts::MAX_FINDINGS,
+                request.findings.len()
+            ));
+        }
+        let findings = anchored_findings(&root, request.findings, &redactor)?;
+        let new = NewVerdict {
+            reviewer: reviewer.name.clone(),
+            branch: request.branch.to_owned(),
+            head,
+            signal: signal_name(reviewer.signal).to_owned(),
+            value,
+            rationale: rationale.to_owned(),
+            origin,
+            model: None,
+            run_thread: None,
+            at: now_ms(),
+        };
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let recorded = store.record_verdict(&new, &findings).map_err(|e| e.0)?;
+        for (comment, finding) in recorded.comments.iter().zip(request.findings) {
+            snapshot_before(self.git.as_ref(), store, &root, *comment, &finding.path)?;
+        }
+        let verdict = store
+            .list_verdicts(Some(request.branch), Some(&reviewer.name), 1)
+            .map_err(|e| e.0)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "the engine did not list the new verdict".to_owned())?;
+        let mut events = vec![Event::VerdictRecorded {
+            id,
+            verdict,
+            comment_ids: recorded.comments,
+        }];
+        events.extend(self.review_listed(id, &root)?);
+        Ok(events)
+    }
+
+    /// The verdicts that `branch` and `reviewer` pick, newest first, each with whether it is
+    /// stale against the tip of its branch now (D189 (2)). Each branch's tip is read once.
+    fn list_verdicts(
+        &mut self,
+        id: OperationId,
+        branch: Option<&str>,
+        reviewer: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let limit = match limit {
+            0 => verdicts::DEFAULT_LIST_LIMIT,
+            n => n.min(verdicts::MAX_LIST_LIMIT),
+        };
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let mut found = store
+            .list_verdicts(
+                branch,
+                reviewer,
+                usize::try_from(limit).unwrap_or(usize::MAX),
+            )
+            .map_err(|e| e.0)?;
+        let mut tips: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for verdict in &mut found {
+            if !tips.contains_key(&verdict.branch) {
+                let tip = self
+                    .git
+                    .branch_tip(&root, &verdict.branch)
+                    .map_err(|e| e.0)?;
+                tips.insert(verdict.branch.clone(), tip);
+            }
+            let tip = tips.get(&verdict.branch).and_then(|tip| tip.as_deref());
+            verdict.stale = verdicts::is_stale(&verdict.head, tip);
+        }
+        Ok(vec![Event::VerdictsListed {
+            id,
+            verdicts: found,
+        }])
+    }
+
+    /// The reviewers of the repository and the user with the presets they do not override, by
+    /// name, or only the one called `name` (D212 (1)). The unreadable files come back too.
+    fn list_reviewers(
+        &mut self,
+        id: OperationId,
+        name: Option<&str>,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let (mut reviewers, errors) = self.reviewers(&root)?;
+        if let Some(name) = name {
+            reviewers.retain(|reviewer| reviewer.name == name);
+        }
+        Ok(vec![Event::ReviewersListed {
+            id,
+            reviewers,
+            errors,
+        }])
+    }
+
+    /// The reviewers a run can use in `root`: the repository's, the user's and the presets.
+    fn reviewers(&self, root: &Path) -> Result<(Vec<Reviewer>, Vec<ReviewerFileError>), String> {
+        let common = self.git.common_dir(root).map_err(|e| e.0)?;
+        Ok(verdicts::merged_reviewers(
+            &reviewers::repo_dir(&common),
+            self.reviewer_user_dir.as_deref(),
+        ))
+    }
+
+    /// The reviewer called `name`; refused, naming the ones there are, when none is.
+    fn reviewer_named(&self, root: &Path, name: &str) -> Result<Reviewer, String> {
+        let (found, _) = self.reviewers(root)?;
+        let defined: Vec<&str> = found
+            .iter()
+            .map(|reviewer| reviewer.name.as_str())
+            .collect();
+        found
+            .iter()
+            .find(|reviewer| reviewer.name == name)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "there is no reviewer named {name:?}; the defined ones are {}",
+                    defined.join(", ")
+                )
+            })
     }
 
     /// Comments on `text` where it is in `path` now (D141): found exactly once, or refused.
@@ -5334,6 +5559,8 @@ impl Engine {
                 | CommandKind::DeleteWorkflowFile { .. }
                 | CommandKind::DismissWorkflowRequest { .. }
                 | CommandKind::ListReviewComments { .. }
+                | CommandKind::ListVerdicts { .. }
+                | CommandKind::ListReviewers { .. }
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }
                 | CommandKind::LoadReviewChange { .. }
@@ -5472,13 +5699,96 @@ fn review_store<'a>(
     slot: &'a mut Option<ReviewSession>,
     git: &dyn GitPort,
     root: &Path,
-) -> Result<&'a ReviewStore, String> {
+) -> Result<&'a mut ReviewStore, String> {
     if slot.as_ref().is_none_or(|session| session.root != root) {
         *slot = Some(ReviewSession::open(git, root)?);
     }
     match slot {
-        Some(session) => Ok(&session.store),
+        Some(session) => Ok(&mut session.store),
         None => Err("the review store is not open".to_owned()),
+    }
+}
+
+/// What an agent records as a verdict (`CommandKind::RecordVerdict`), borrowed from the command.
+struct VerdictRequest<'a> {
+    reviewer: &'a str,
+    branch: &'a str,
+    head: &'a str,
+    value: &'a str,
+    rationale: &'a str,
+    findings: &'a [FindingInput],
+}
+
+/// A verdict's text without its surrounding blank space; refused when it is empty or longer
+/// than `limit` characters. `what` names the text in the reason.
+fn verdict_text<'a>(text: &'a str, limit: usize, what: &str) -> Result<&'a str, String> {
+    let text = text.trim();
+    let length = text.chars().count();
+    if text.is_empty() {
+        Err(format!("{what} is empty"))
+    } else if length > limit {
+        Err(format!(
+            "{what} is {length} characters, at most {limit} are allowed"
+        ))
+    } else {
+        Ok(text)
+    }
+}
+
+/// The findings of a verdict as the store takes them: each body redacted and checked, each
+/// file read once, and each finding anchored on its lines as the file is now (D97).
+fn anchored_findings(
+    root: &Path,
+    inputs: &[FindingInput],
+    redactor: &Redactor,
+) -> Result<Vec<NewFinding>, String> {
+    let mut files: BTreeMap<&str, String> = BTreeMap::new();
+    for finding in inputs {
+        if !files.contains_key(finding.path.as_str()) {
+            let text = review_session::read_text(root, &finding.path)?;
+            files.insert(&finding.path, text);
+        }
+    }
+    let mut findings = Vec::with_capacity(inputs.len());
+    for finding in inputs {
+        let body = redactor.redact(&finding.body).text;
+        let body = verdict_text(&body, verdicts::MAX_FINDING_BODY_CHARS, "a finding's body")?;
+        let file = files
+            .get(finding.path.as_str())
+            .ok_or_else(|| format!("there is no file {} in the worktree", finding.path))?;
+        let anchor = review::anchor_for(file, finding.start_line, finding.end_line)
+            .map_err(|reason| format!("{}: {reason}", finding.path))?;
+        findings.push(NewFinding {
+            severity: finding.severity,
+            path: finding.path.clone(),
+            body: body.to_owned(),
+            anchor,
+            snapshot: None,
+        });
+    }
+    Ok(findings)
+}
+
+/// A commit id as people write it in a message.
+fn short_id(id: &str) -> &str {
+    id.get(..7).unwrap_or(id)
+}
+
+/// The name of a reviewer's subject, as the reviewer file writes it.
+fn subject_name(subject: ReviewerSubject) -> &'static str {
+    match subject {
+        ReviewerSubject::Branch => "branch",
+        ReviewerSubject::Staged => "staged",
+        ReviewerSubject::Commit => "commit",
+    }
+}
+
+/// The name a verdict's signal has in the store.
+fn signal_name(signal: ReviewerSignal) -> &'static str {
+    match signal {
+        ReviewerSignal::Score => "score",
+        ReviewerSignal::Level => "level",
+        ReviewerSignal::Pass => "pass",
     }
 }
 
@@ -5559,6 +5869,9 @@ fn is_review_command(kind: &CommandKind) -> bool {
             | CommandKind::LoadReviewSnapshotText { .. }
             | CommandKind::LoadReviewCurrentText { .. }
             | CommandKind::LoadReviewChange { .. }
+            | CommandKind::RecordVerdict { .. }
+            | CommandKind::ListVerdicts { .. }
+            | CommandKind::ListReviewers { .. }
     )
 }
 

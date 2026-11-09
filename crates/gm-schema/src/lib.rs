@@ -71,8 +71,8 @@ pub use threads::{
     Unverifiable,
 };
 pub use verdict::{
-    Level, Reviewer, ReviewerDirection, ReviewerSignal, ReviewerSource, ReviewerSubject, Verdict,
-    VerdictFinding,
+    FindingInput, Level, Reviewer, ReviewerDirection, ReviewerFileError, ReviewerSignal,
+    ReviewerSource, ReviewerSubject, Verdict, VerdictFinding,
 };
 pub use workflow::{
     WorkflowCallRecord, WorkflowDiagnostic, WorkflowDryCall, WorkflowDryRun, WorkflowEnd,

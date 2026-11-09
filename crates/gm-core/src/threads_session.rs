@@ -1344,10 +1344,16 @@ fn page(limit: u32) -> Result<u32, String> {
 /// The redaction patterns of the `gitmaster.*` configuration, compiled. Invalid patterns refuse
 /// the command, as capture does (design/threads.md, "Redaction").
 fn redactor(ctx: &Context<'_>) -> Result<Redactor, String> {
+    redactor_at(ctx.root, ctx.global_config)
+}
+
+/// The redaction patterns of the configuration that `root` reads, compiled (D121). Shared with
+/// the reviews, which redact their text at ingest (D212 (6)); an invalid pattern is the error.
+pub(crate) fn redactor_at(root: &Path, global: Option<&Path>) -> Result<Redactor, String> {
     let source = crate::settings::Source {
-        global: ctx.global_config.map(Path::to_path_buf),
+        global: global.map(Path::to_path_buf),
     };
-    let config = crate::settings::Settings::load(ctx.root, &source).threads;
+    let config = crate::settings::Settings::load(root, &source).threads;
     Redactor::new(&config.redact).map_err(|problems| {
         let listed: Vec<String> = problems
             .iter()

@@ -107,6 +107,24 @@ pub struct VerdictFinding {
     pub status: ReviewStatus,
 }
 
+/// A finding an agent records with its verdict (D212 (6)): a flag on lines of a file, with
+/// 1-based inclusive line numbers. The engine checks the lines against the file as it is now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FindingInput {
+    pub severity: ReviewSeverity,
+    pub path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub body: String,
+}
+
+/// A reviewer file that could not be read as a reviewer (D212 (1)), with the reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewerFileError {
+    pub file: String,
+    pub reason: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

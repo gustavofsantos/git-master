@@ -26,6 +26,7 @@ use crate::threads::{
     SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink,
     ThreadRelKind, ThreadRelation, ThreadSummary,
 };
+use crate::verdict::{FindingInput, Reviewer, ReviewerFileError, Verdict};
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
     WorkflowRunStatus, WorkflowRunSummary,
@@ -650,6 +651,35 @@ pub enum CommandKind {
         body: String,
         #[serde(default)]
         severity: Option<ReviewSeverity>,
+    },
+    /// Records one run of reviewer `reviewer` on `branch` at commit `head` (D212 (6)). Only
+    /// an agent records one, and the author is the agent. `branch` must be the branch HEAD
+    /// is on in this worktree, `head` a commit, `value` a value the reviewer's signal takes
+    /// (`check_value`), `rationale` 1 to 4,000 characters and `findings` at most 30, each with
+    /// a body of 1 to 1,000 characters on lines that are in its file now. Nothing is written
+    /// when a check fails. Answers `VerdictRecorded`, then `ReviewCommentsListed` with the
+    /// findings as review comments.
+    RecordVerdict {
+        reviewer: String,
+        branch: String,
+        head: String,
+        value: String,
+        rationale: String,
+        findings: Vec<FindingInput>,
+    },
+    /// Lists the verdicts, newest first, of `branch` and `reviewer` when each is given (all of
+    /// them when neither is), at most `limit` (5 when 0, 20 at most). Each says whether it is
+    /// stale. Answers `VerdictsListed`. A read: never recorded (D28).
+    ListVerdicts {
+        branch: Option<String>,
+        reviewer: Option<String>,
+        #[serde(default)]
+        limit: u32,
+    },
+    /// Lists the reviewers of the repository and the user with the presets they do not
+    /// override, by name, or only the one named `name`. Answers `ReviewersListed`. A read.
+    ListReviewers {
+        name: Option<String>,
     },
     /// Replaces the body of review comment `id`. Human only.
     EditReviewComment {
@@ -1491,6 +1521,24 @@ pub enum Event {
         id: OperationId,
         comments: Vec<ReviewComment>,
     },
+    /// Answers `RecordVerdict`: the verdict as stored, and the ids of its finding comments in
+    /// the order of the findings.
+    VerdictRecorded {
+        id: OperationId,
+        verdict: Verdict,
+        comment_ids: Vec<i64>,
+    },
+    /// Answers `ListVerdicts`, newest first.
+    VerdictsListed {
+        id: OperationId,
+        verdicts: Vec<Verdict>,
+    },
+    /// Answers `ListReviewers`: the reviewers, and the reviewer files that could not be read.
+    ReviewersListed {
+        id: OperationId,
+        reviewers: Vec<Reviewer>,
+        errors: Vec<ReviewerFileError>,
+    },
     /// Answers `LoadReviewSnapshotText` for comment `comment`: the lines it
     /// covered in the snapshot, empty when there is no snapshot or the file was
     /// not in it.
@@ -1858,6 +1906,72 @@ mod tests {
         let change = serde_json::to_value(CommandKind::LoadReviewChange { id: 3 }).unwrap();
         assert_eq!(change["type"], "load_review_change");
         assert_eq!(change["id"], 3);
+    }
+
+    #[test]
+    fn verdict_commands_wire_format_is_tagged() {
+        let record = serde_json::to_value(CommandKind::RecordVerdict {
+            reviewer: "security".into(),
+            branch: "feat".into(),
+            head: "a".repeat(40),
+            value: "medium".into(),
+            rationale: "why".into(),
+            findings: vec![FindingInput {
+                severity: ReviewSeverity::High,
+                path: "a.rs".into(),
+                start_line: 2,
+                end_line: 3,
+                body: "risk".into(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(record["type"], "record_verdict");
+        assert_eq!(record["findings"][0]["severity"], "high");
+        assert_eq!(record["findings"][0]["end_line"], 3);
+        let list = serde_json::to_value(CommandKind::ListVerdicts {
+            branch: None,
+            reviewer: Some("risk".into()),
+            limit: 0,
+        })
+        .unwrap();
+        assert_eq!(list["type"], "list_verdicts");
+        assert_eq!(list["reviewer"], "risk");
+        let bare: CommandKind =
+            serde_json::from_value(serde_json::json!({ "type": "list_verdicts" })).unwrap();
+        assert_eq!(
+            bare,
+            CommandKind::ListVerdicts {
+                branch: None,
+                reviewer: None,
+                limit: 0,
+            }
+        );
+        let reviewers = serde_json::to_value(CommandKind::ListReviewers { name: None }).unwrap();
+        assert_eq!(reviewers["type"], "list_reviewers");
+    }
+
+    #[test]
+    fn verdict_events_wire_format_is_tagged() {
+        let listed = Event::ReviewersListed {
+            id: OperationId(4),
+            reviewers: Vec::new(),
+            errors: vec![ReviewerFileError {
+                file: "bad.md".into(),
+                reason: "no signal".into(),
+            }],
+        };
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["type"], "reviewers_listed");
+        assert_eq!(json["errors"][0]["file"], "bad.md");
+        let back: Event = serde_json::from_value(json).unwrap();
+        assert_eq!(back, listed);
+        let verdicts = Event::VerdictsListed {
+            id: OperationId(5),
+            verdicts: Vec::new(),
+        };
+        let json = serde_json::to_value(&verdicts).unwrap();
+        assert_eq!(json["type"], "verdicts_listed");
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), verdicts);
     }
 
     #[test]

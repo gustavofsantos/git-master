@@ -140,7 +140,10 @@ fn the_handshake_lists_only_the_tools_the_agent_does_not_have() {
             "memory_get",
             "contexts_list",
             "memory_propose",
-            "memory_mark"
+            "memory_mark",
+            "reviewers_list",
+            "verdicts_list",
+            "verdict_record"
         ]
     );
 }

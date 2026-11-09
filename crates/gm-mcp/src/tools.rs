@@ -20,6 +20,7 @@ use serde_json::{Map, Value, json};
 
 use crate::memory_tools;
 use crate::session::Session;
+use crate::verdict_tools;
 
 /// What an MCP server lists for a tool.
 pub struct ToolDefinition {
@@ -191,6 +192,7 @@ pub fn tools() -> Vec<ToolDefinition> {
         thread_link_definition(),
     ]);
     all.extend(memory_tools::definitions());
+    all.extend(verdict_tools::definitions());
     all
 }
 
@@ -341,6 +343,9 @@ pub fn call(session: &mut Session, name: &str, args: &Value) -> Result<Value, St
         "contexts_list" => memory_tools::contexts_list(session, args),
         "memory_propose" => memory_tools::memory_propose(session, args),
         "memory_mark" => memory_tools::memory_mark(session, args),
+        "reviewers_list" => verdict_tools::reviewers_list(session, args),
+        "verdicts_list" => verdict_tools::verdicts_list(session, args),
+        "verdict_record" => verdict_tools::verdict_record(session, args),
         other => Err(format!("there is no tool {other}")),
     }
 }

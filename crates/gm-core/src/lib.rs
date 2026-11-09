@@ -49,6 +49,7 @@ mod submodule_files;
 pub mod syntax;
 pub mod threads;
 mod threads_session;
+pub mod verdicts;
 pub mod watch;
 mod workflow_session;
 pub mod workspace;

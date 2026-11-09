@@ -8,6 +8,7 @@ mod memory_tools;
 mod protocol;
 mod session;
 mod tools;
+mod verdict_tools;
 
 pub use protocol::serve;
 pub use session::Session;
