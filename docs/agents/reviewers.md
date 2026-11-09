@@ -97,7 +97,7 @@ Set the gates in **Reviewers Settings…**, for all branches or only for branche
 
 The branch shows its gate state. It reads **Ready** when every gate passes, and otherwise lists what blocks it, for example "Security has no verdict for this commit" or "1 high finding is open". Ready means the recorded verdicts satisfy your rules. It does not mean the code is correct: the verdicts are one agent's opinion.
 
-> **Note.** A gate checks operations done in GitMaster. A `git push` you type in a terminal is not stopped by it.
+> **Note.** A gate checks operations done in GitMaster. A `git push` you type in a terminal is not stopped by it. Gates are a check for your own safety, not a sandbox: the files that define them are in `.git/gitmaster/`, and an agent that can run commands or write files can edit them. If a gates file has an error, GitMaster blocks the push and the restack and shows the error until you fix it or bypass.
 
 ### Bypass a gate
 
@@ -138,7 +138,7 @@ A large legacy repository or a monorepo has no reviewer that fits every change. 
 | `branches` | The branches it applies to, as patterns such as `feat/billing-*`. A plain name makes it a reviewer for that one branch. |
 | `paths` | The files the change must touch, as patterns such as `services/billing/**`. |
 
-With neither, it applies to every change. The change is the set of files that differ between the branch and what it is based on: its parent in the stack, else its upstream, else the default branch. A gate whose paths the change does not touch is **Not applicable** and blocks nothing, and the branch says why. If GitMaster cannot tell what the branch is based on, the gate applies.
+With neither, it applies to every change. The change is the set of files that differ between the branch and what it is based on: its parent in the stack, else its upstream, else the default branch of the remote. A gate whose paths the change does not touch is **Not applicable** and blocks nothing, and the branch says why. If GitMaster cannot tell what the branch is based on, the gate applies.
 
 A reviewer or gate made for one branch shows **Ended** once that branch is merged or deleted. GitMaster never deletes it for you.
 
