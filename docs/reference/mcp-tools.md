@@ -111,7 +111,9 @@ Every tool takes an optional `agent`, a label of 1 to 40 letters, digits, `.`, `
 
 `reviewer_propose` and `gate_propose` also take `members`, for a workspace.
 
-> **Planned.** From a workspace, `memories_search`, `memory_get` and `contexts_list` also cover the members and their contexts: each memory's `scope` can be `workspace` or `member <folder>`, and `memory_propose` takes an optional `member`.
+From a workspace, `memories_search`, `memory_get` and `contexts_list` also cover the members and their contexts. A memory's `scope` is `workspace`, `member <folder>` or a context path, and a member's memory also has `member`. `scope` accepts `workspace` and `member <folder>`, and `contexts_list` gives each context its `members`. A member that cannot be read is named in the `note` and the others still answer.
+
+> **Planned.** `memory_propose` takes an optional `member` to write to a member, and changing a memory that comes from a member from the workspace is not available.
 
 - A finding that `verdict_record` creates is a review comment that only you can resolve or dismiss. An agent can mark it handled with `review_comment_resolve` and a summary, which does not satisfy the Findings gate. See [Reviewers and gates](../agents/reviewers.md).
 - There is no tool to change a gate, bypass one or resolve a finding. Gates are yours to set, and `gates_status` only reads them.

@@ -1,7 +1,7 @@
 ---
 title: Contexts
 description: Group repositories that share one context, so a memory about work that touches several of them is found from each of them.
-status: partial
+status: implemented
 order: 106
 ---
 
@@ -64,8 +64,6 @@ A memory's sources can be threads, commits and files of different repositories. 
 Over [MCP](../reference/mcp-tools.md), `memories_search` returns the memories of every scope the repository sees, each labeled with its scope. An agent can narrow the search to the repository or to one context, and `contexts_list` tells it which contexts its repository belongs to.
 
 ## Contexts in a workspace
-
-> **Planned.** A workspace does not show its members' contexts yet.
 
 A [workspace](workspaces.md) belongs to no context. It shows the contexts its members belong to, so the memories of those contexts are found from the workspace too. Managing contexts from a workspace window changes the repositories, not the workspace. See [Memories and contexts in a workspace](workspaces.md#memories-and-contexts-in-a-workspace).
 
