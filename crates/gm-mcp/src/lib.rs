@@ -5,7 +5,6 @@
 //! threads); the agent has its own for files, search and Git.
 
 mod memory_tools;
-mod proposal_tools;
 mod protocol;
 mod session;
 mod tools;

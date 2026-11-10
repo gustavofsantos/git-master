@@ -156,23 +156,11 @@ fn write_security(ws: &Path) {
     .unwrap();
 }
 
-/// The workspace gate `security-review`: a fresh verdict of `security`, for member `api` only.
-fn write_security_gate(ws: &Path) {
-    let dir = ws_gitmaster(ws);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("gates.json"),
-        r#"{"gates": [{"id": "security-review", "kind": "fresh_verdict", "on": ["push"], "reviewers": ["security"], "members": ["api"]}]}"#,
-    )
-    .unwrap();
-}
-
 /// Runs the server on `requests` for the repository at `repo`, with the person's configuration in
 /// `config`, and returns its replies.
 fn session(repo: &Path, config: &Path, requests: &[Value]) -> Vec<Value> {
     let mut engine = Engine::new(Box::new(SubprocessGit::default()));
     engine.set_reviewer_user_dir(Some(reviewers::user_dir(config)));
-    engine.set_gates_user_dir(Some(config.to_path_buf()));
     let mut server = Session::open(engine, &repo.to_string_lossy()).expect("the repository opens");
     let input = requests
         .iter()
@@ -210,16 +198,6 @@ fn refusal(reply: &Value) -> String {
         .as_str()
         .unwrap()
         .to_owned()
-}
-
-/// The row of member `name` in an aggregate gate answer.
-fn member_row<'a>(answer: &'a Value, name: &str) -> &'a Value {
-    answer["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["member"] == name)
-        .unwrap_or_else(|| panic!("no member {name} in {answer}"))
 }
 
 /// The tip of `branch` in `dir`, a full commit id.
@@ -281,69 +259,6 @@ fn person_comment(ws: &Path, path: &str, text: &str, body: &str) {
 }
 
 #[test]
-fn gates_status_without_a_member_answers_for_both_members_until_each_is_ready() {
-    let fx = Fixture::new();
-    write_security(&fx.ws);
-    write_security_gate(&fx.ws);
-    let head = tip(&fx.member_api, "feat");
-    let replies = session(
-        &fx.ws,
-        &fx.config,
-        &[
-            initialize(),
-            call(2, "gates_status", &json!({})),
-            call(3, "gates_status", &json!({ "member": "api" })),
-            call(4, "gates_status", &json!({ "member": "web" })),
-            security_verdict(5, Some("api"), &head),
-            call(6, "gates_status", &json!({})),
-            call(7, "gates_status", &json!({ "member": "api" })),
-        ],
-    );
-
-    let before = result(&replies[1]);
-    assert_eq!(before["workspace"], true, "{before}");
-    assert_eq!(
-        before["ready"], false,
-        "api still needs its verdict: {before}"
-    );
-    assert_eq!(before["untrusted"], true);
-    assert_eq!(before["members"].as_array().unwrap().len(), 2, "{before}");
-    let api = member_row(before, "api");
-    assert_eq!(api["ready"], false, "{api}");
-    assert_eq!(api["branch"], "feat");
-    assert_eq!(api["error"], Value::Null);
-    assert_eq!(api["missing"][0]["reviewer"], "security", "{api}");
-    let gate = api["gates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|gate| gate["id"] == "security-review")
-        .expect("the workspace gate of api");
-    assert_eq!(gate["applicable"], true, "{gate}");
-    let web = member_row(before, "web");
-    assert_eq!(web["ready"], true, "web has no gate that applies: {web}");
-    assert_eq!(web["missing"], json!([]));
-
-    let one = result(&replies[2]);
-    assert_eq!(one["member"], "api", "{one}");
-    assert_eq!(one["ready"], false);
-    assert!(
-        one.get("members").is_none(),
-        "one member, not the aggregate: {one}"
-    );
-    assert_eq!(one["missing"][0]["reviewer"], "security");
-    assert_eq!(result(&replies[3])["ready"], true);
-    assert_eq!(result(&replies[3])["member"], "web");
-
-    // The verdict for the tip makes every member ready.
-    assert_eq!(result(&replies[4])["verdict"]["reviewer"], "security");
-    let after = result(&replies[5]);
-    assert_eq!(after["ready"], true, "{after}");
-    assert_eq!(member_row(after, "api")["ready"], true);
-    assert_eq!(result(&replies[6])["ready"], true);
-}
-
-#[test]
 fn a_verdict_with_a_member_lands_in_its_clone_and_a_second_session_lists_it() {
     let fx = Fixture::new();
     write_security(&fx.ws);
@@ -397,8 +312,6 @@ fn a_workspace_refuses_a_write_or_a_read_without_a_member_and_an_unknown_member(
             initialize(),
             security_verdict(2, None, &head),
             call(3, "verdicts_list", &json!({ "branch": "feat" })),
-            call(4, "gates_status", &json!({ "member": "nope" })),
-            call(5, "gates_status", &json!({ "member": "" })),
         ],
     );
     assert!(
@@ -411,12 +324,6 @@ fn a_workspace_refuses_a_write_or_a_read_without_a_member_and_an_unknown_member(
         "{}",
         refusal(&replies[2])
     );
-    assert!(
-        refusal(&replies[3]).contains("there is no member nope"),
-        "{}",
-        refusal(&replies[3])
-    );
-    assert!(refusal(&replies[4]).contains("member must not be empty"));
 }
 
 #[test]
@@ -428,11 +335,6 @@ fn a_member_in_a_plain_repository_is_a_tool_error() {
         &fx.config,
         &[
             initialize(),
-            call(
-                2,
-                "gates_status",
-                &json!({ "branch": "feat", "member": "api" }),
-            ),
             call(
                 3,
                 "verdict_record",
@@ -485,54 +387,6 @@ fn reviewers_list_shows_a_workspace_reviewer_and_the_members_it_names() {
     let seen = &result(&in_member[1])["reviewers"][0];
     assert_eq!(seen["source"], "workspace", "{seen}");
     assert!(seen["members"].is_array(), "{seen}");
-}
-
-#[test]
-fn reviewer_propose_and_gate_propose_carry_members_into_a_workspace_proposal() {
-    let fx = Fixture::new();
-    let replies = session(
-        &fx.ws,
-        &fx.config,
-        &[
-            initialize(),
-            call(
-                2,
-                "reviewer_propose",
-                &json!({
-                    "name": "api-check",
-                    "description": "Checks the API.",
-                    "instructions": "Read the handlers.",
-                    "signal": "pass",
-                    "direction": "higher_is_better",
-                    "subject": "branch",
-                    "members": ["api"],
-                    "reason": "The api member needs a check."
-                }),
-            ),
-            call(
-                3,
-                "gate_propose",
-                &json!({
-                    "id": "api-current",
-                    "kind": "up_to_date",
-                    "on": ["push"],
-                    "members": ["api"],
-                    "reason": "The api branch must be current."
-                }),
-            ),
-        ],
-    );
-    let reviewer = &result(&replies[1])["proposal"];
-    assert_eq!(reviewer["status"], "proposed", "{reviewer}");
-    assert_eq!(
-        reviewer["reviewer"]["members"],
-        json!(["api"]),
-        "{reviewer}"
-    );
-    assert_eq!(reviewer["untrusted"], true);
-    let gate = &result(&replies[2])["proposal"];
-    assert_eq!(gate["status"], "proposed", "{gate}");
-    assert_eq!(gate["gate"]["members"], json!(["api"]), "{gate}");
 }
 
 #[test]

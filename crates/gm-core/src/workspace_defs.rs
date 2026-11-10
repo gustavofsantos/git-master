@@ -1,5 +1,5 @@
 //! Where a workspace's definitions live, and which of them a member's clone sees (D214 (5), D174,
-//! D180 (2)). A workspace repository keeps its gates and reviewers in `.git/gitmaster/`, as any
+//! D180 (2)). A workspace repository keeps its reviewers in `.git/gitmaster/`, as any
 //! repository does. A member's clone lists the workspaces it belongs to in the pointer file of its
 //! common directory (`gitmaster/workspaces`); from that list this module finds the definitions
 //! that apply to the clone, and the member folder each one is. Nothing here is written, and no
@@ -16,7 +16,7 @@ pub const MEMBER_COUNT_LIMIT: usize = 20;
 /// The definitions of one workspace repository, as the gate and reviewer loaders read them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceDefs {
-    /// The workspace repository's `<git dir>/gitmaster`, which holds `gates.json` and `reviewers/`.
+    /// The workspace repository's `<git dir>/gitmaster`, which holds `reviewers/`.
     pub dir: PathBuf,
     /// The workspace's folder name, shown in errors.
     pub name: String,

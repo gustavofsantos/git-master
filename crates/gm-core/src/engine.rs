@@ -8,11 +8,10 @@ use serde_json::{Map, Value, json};
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
-    ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GateDef, GateLayer, GateOp,
-    GrepOptions, History, MERGED_LIST_CHANGED, MemberGates, MemberRequest, MergedBranch,
-    OperationId, OperationState, ProposalKind, ProposalStatus, REFLOG_PAGE, RestackBlock,
-    RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewStatus,
-    Reviewer, ReviewerFileError, ReviewerProposal, ReviewerSignal, ReviewerSource, ReviewerSubject,
+    ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GrepOptions, History,
+    MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE,
+    RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment,
+    ReviewStatus, Reviewer, ReviewerFileError, ReviewerSignal, ReviewerSource, ReviewerSubject,
     STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry,
     WorktreeInspection,
 };
@@ -29,25 +28,18 @@ use crate::files::{
     Building, FilesSession, HighlightJob, HighlightReport, IndexJob, IndexReport, ReadJob,
     ReadReport, SearchJob, SearchReport, TextJob, TextReport,
 };
-use crate::gate_check::{
-    self, Checked, GATES_FILE_ID, GateConfig, Seen, approval_now, review_store,
-};
-pub use crate::gate_check::{GateInputs, GatesReport};
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::move_exec;
 use crate::move_preview;
 use crate::port::{HistoryRevs, ReviewSide};
-use crate::proposals;
 use crate::reflog;
 use crate::remote::{RemoteJob, RemoteReport};
 use crate::restack_resolutions::{self, Resolution};
 use crate::restack_session;
 use crate::review;
-use crate::review_session::{self, ReviewSession};
-use crate::review_store::{
-    AgentThread, NewBypass, NewFinding, NewProposal, NewVerdict, Reply, ReviewStore, StoredProposal,
-};
+use crate::review_session::{self, ReviewSession, review_store};
+use crate::review_store::{AgentThread, NewFinding, NewVerdict, Reply, ReviewStore};
 use crate::reviewers;
 use crate::script::builtins;
 use crate::script::dry;
@@ -160,9 +152,6 @@ pub struct Engine {
     workflow_user_dir: Option<PathBuf>,
     /// The user's reviewer directory (D212 (1)): `reviewers/` of the configuration directory.
     reviewer_user_dir: Option<PathBuf>,
-    /// The user's gate file directory (D212 (2)): the configuration directory itself, where
-    /// `gates.json` sits.
-    gates_user_dir: Option<PathBuf>,
     /// The folder a deleted workflow file is moved to; see `delete_workflow_file`.
     workflow_trash_dir: Option<PathBuf>,
     /// The contexts file (`contexts.db`); see `set_contexts_db`.
@@ -180,7 +169,7 @@ pub struct Engine {
     trust: Option<TrustStore>,
     /// The `.api/` reference was written for this session already.
     api_written: bool,
-    /// The review stores of the checkouts this window judges, by root; see `gate_check::review_store`.
+    /// The review stores of the checkouts this window judges, by root; see `review_session::review_store`.
     review: Vec<ReviewSession>,
     /// The threads of the open repository; see `threads_session`.
     threads: Option<ThreadsSession>,
@@ -244,8 +233,6 @@ struct GatedOp {
     waiting: VecDeque<(String, String)>,
     /// The run of the gate in progress.
     run: Option<ScriptRunId>,
-    /// The tip a push's native gate check judged, checked again before the push starts (R2h).
-    checked: Option<Seen>,
 }
 
 /// A transform operation whose `transform.<field>` runs are in progress (`WF3d`, D155). The runs
@@ -380,7 +367,6 @@ impl Engine {
             script_jobs: Vec::new(),
             workflow_user_dir: loader::default_user_dir(),
             reviewer_user_dir: crate::paths::config_dir().map(|dir| reviewers::user_dir(&dir)),
-            gates_user_dir: crate::paths::config_dir(),
             workspace_home: std::env::var_os("HOME")
                 .filter(|home| !home.is_empty())
                 .map(PathBuf::from),
@@ -416,32 +402,6 @@ impl Engine {
     /// `reviewers/` of the user's config directory; tests point it at a temporary folder.
     pub fn set_reviewer_user_dir(&mut self, dir: Option<PathBuf>) {
         self.reviewer_user_dir = dir;
-        self.sync_gate_config();
-    }
-
-    /// Sets the directory of the user's `gates.json` (D212 (2)). `None` reads none. The default
-    /// is the user's configuration directory; tests point it at a temporary folder.
-    pub fn set_gates_user_dir(&mut self, dir: Option<PathBuf>) {
-        self.gates_user_dir = dir;
-        self.sync_gate_config();
-    }
-
-    /// The gate directories the native check and the workflow calls read (D212 (1), (2)).
-    fn gate_config(&self) -> GateConfig {
-        GateConfig {
-            gates_dir: self.gates_user_dir.clone(),
-            reviewers_dir: self.reviewer_user_dir.clone(),
-            explicit: None,
-        }
-    }
-
-    /// The gate configuration of a check of `target`: the directories of the user, and the
-    /// workspace layer of the member the target is, when there is one (D214 (5)).
-    fn config_at(&self, target: &Target) -> GateConfig {
-        GateConfig {
-            explicit: target.layer.clone(),
-            ..self.gate_config()
-        }
     }
 
     /// The target of a review command that names `member`, in the open repository.
@@ -485,14 +445,6 @@ impl Engine {
             root: root.join(name),
             layer: Some(layer),
         })
-    }
-
-    /// Hands the current gate directories to the script session, when one is open (R2h).
-    fn sync_gate_config(&mut self) {
-        let config = self.gate_config();
-        if let Some(script) = self.script.as_mut() {
-            script.gates = config;
-        }
     }
 
     /// Sets the folder deleted workflow files are moved to. `None` refuses
@@ -608,7 +560,6 @@ impl Engine {
                 self.git.as_ref(),
                 clock,
                 id,
-                self.gate_config(),
             )?);
         }
         let session = self
@@ -1307,14 +1258,13 @@ impl Engine {
         let id = gate.id;
         let command = gate.command;
         let phases = gate.phases;
-        let seen = gate.checked;
         let mut op = Op {
             id,
             command: &command,
             state: OperationState::Gating,
         };
         if matches!(command.kind, CommandKind::PushWithLease) {
-            self.start_remote_op(&mut op, Some(phases), seen.as_ref(), events);
+            self.start_remote_op(&mut op, Some(phases), events);
         } else {
             self.run_op(&mut op, Some(&phases), events);
         }
@@ -2431,42 +2381,19 @@ impl Engine {
             state: OperationState::Requested,
         };
         self.record(&op, None, &mut events);
-        if let CommandKind::BypassGates {
-            gates,
-            reason,
-            then,
-        } = &command.kind
-        {
-            self.bypass_gates(&mut op, gates, reason, then, &mut events);
-        } else {
-            // Gating has nothing to check for most commands; the states are walked so that every
-            // operation has the same shape in the log.
-            self.advance(&mut op, OperationState::Gating, &mut events);
-            self.run_command(&mut op, GateCheck::Native, None, &mut events);
-        }
+        // Every operation walks the same states in the log. Its only gates are the `before.<op>`
+        // workflows, which the phases run (D219).
+        self.advance(&mut op, OperationState::Gating, &mut events);
+        self.run_command(&mut op, &mut events);
         events
     }
 
-    /// Runs the command of `op`, which is `Gating`, to its end. The native gate check runs first
-    /// unless `gates` is `Bypassed` (D212 (3), (4)); the workflow phases run either way. A bypassed
-    /// push passes `judged`, the tip its audit row recorded (R2h). An operation with phases
-    /// (`WF3c`) stays in Gating while its gates run.
-    fn run_command(
-        &mut self,
-        op: &mut Op,
-        gates: GateCheck,
-        judged: Option<Seen>,
-        events: &mut Vec<Event>,
-    ) {
+    /// Runs the command of `op`, which is `Gating`, to its end. The workflow phases run first: a
+    /// `before.<op>` workflow that blocks vetoes the command, and an operation with phases (`WF3c`)
+    /// stays in Gating while its gates run.
+    fn run_command(&mut self, op: &mut Op, events: &mut Vec<Event>) {
         let id = op.id;
         let command = op.command;
-        let seen = match gates {
-            GateCheck::Native => match self.gate_stops(op, events) {
-                NativeOutcome::Stopped => return,
-                NativeOutcome::Passed(seen) => seen,
-            },
-            GateCheck::Bypassed => judged,
-        };
         if let Some(started) = self.start_read(id, command) {
             match started {
                 Ok(superseded) => {
@@ -2480,11 +2407,11 @@ impl Engine {
             return;
         }
         if matches!(command.kind, CommandKind::Fetch | CommandKind::Pull) {
-            self.start_remote_op(op, None, None, events);
+            self.start_remote_op(op, None, events);
             return;
         }
         if matches!(command.kind, CommandKind::PushWithLease) {
-            self.run_push(op, seen, events);
+            self.run_push(op, events);
             return;
         }
         // A transform operation runs its workflows and answers with `TransformFinished` (`WF3d`).
@@ -2509,7 +2436,7 @@ impl Engine {
                 self.advance_with(op, OperationState::Failed, Some(message), events);
             }
             Ok(Some(found)) if !found.gates.is_empty() => {
-                let gate = gated_op(op, found, None);
+                let gate = gated_op(op, found);
                 self.step_gates(gate, events);
             }
             Ok(found) => {
@@ -2519,10 +2446,10 @@ impl Engine {
         }
     }
 
-    /// A push (`PushWithLease`) after the native check: its `before.push` gates run first, and then
-    /// the push starts as a remote operation, whose `after.push` observers run when it succeeds
-    /// (`WF3c`, D157). A push that cannot start now is refused before any gate runs.
-    fn run_push(&mut self, op: &mut Op, seen: Option<Seen>, events: &mut Vec<Event>) {
+    /// A push (`PushWithLease`): its `before.push` gates run first, and then the push starts as a
+    /// remote operation, whose `after.push` observers run when it succeeds (`WF3c`, D157). A push
+    /// that cannot start now is refused before any gate runs.
+    fn run_push(&mut self, op: &mut Op, events: &mut Vec<Event>) {
         if let Err(message) = self.remote_free(&op.command.actor, &op.command.kind) {
             self.advance_with(op, OperationState::Failed, Some(message), events);
             return;
@@ -2530,328 +2457,19 @@ impl Engine {
         match self.open_phases(op.command) {
             Err(message) => self.advance_with(op, OperationState::Failed, Some(message), events),
             Ok(Some(found)) if !found.gates.is_empty() => {
-                let gate = gated_op(op, found, seen);
+                let gate = gated_op(op, found);
                 self.step_gates(gate, events);
             }
-            Ok(found) => self.start_remote_op(op, found, seen.as_ref(), events),
+            Ok(found) => self.start_remote_op(op, found, events),
         }
     }
 
     /// Starts the remote operation of `op`, which is `Gating`: it is `Executing` until its report,
-    /// or `Failed` when it cannot start. A push whose gate check judged `seen` first checks that
-    /// the branch still is at that tip; a branch that moved while the gates ran is `Vetoed`, and
-    /// nothing is pushed (R2h). Only a recorded check costs the read.
-    fn start_remote_op(
-        &mut self,
-        op: &mut Op,
-        phases: Option<Phases>,
-        seen: Option<&Seen>,
-        events: &mut Vec<Event>,
-    ) {
-        if let Some(seen) = seen
-            && let Err(text) = self.moved_since_check(seen)
-        {
-            self.advance_with(op, OperationState::Vetoed, Some(text), events);
-            return;
-        }
+    /// or `Failed` when it cannot start.
+    fn start_remote_op(&mut self, op: &mut Op, phases: Option<Phases>, events: &mut Vec<Event>) {
         match self.start_remote(op.id, &op.command.actor, &op.command.kind, phases) {
             Ok(()) => self.advance(op, OperationState::Executing, events),
             Err(message) => self.advance_with(op, OperationState::Failed, Some(message), events),
-        }
-    }
-
-    /// Checks that the branch of a push is still the one its gates judged (R2h): HEAD is still on
-    /// it, at the same tip. The text is the veto; a read that fails fails closed.
-    fn moved_since_check(&self, seen: &Seen) -> Result<(), String> {
-        let root = self.open_root()?;
-        let (head, _) = self
-            .current(&root)
-            .map_err(|reason| gate_check::unchecked(&reason))?;
-        let tip = self
-            .git
-            .branch_tip(&root, &seen.branch)
-            .map_err(|e| gate_check::unchecked(&e.0))?;
-        gate_check::moved_veto(seen, head.as_deref(), tip.as_deref()).map_or(Ok(()), Err)
-    }
-
-    /// The native gate check of a push or a restack (D212 (3)). A block vetoes the operation with
-    /// its text and sends `GatesBlocked`; a check that cannot run fails closed. Nothing is started
-    /// and no gate state is kept. A push that passed reports the tip it judged (R2h).
-    fn gate_stops(&mut self, op: &mut Op, events: &mut Vec<Event>) -> NativeOutcome {
-        let command = op.command;
-        match self.native_check(&command.actor, &command.kind) {
-            Ok(None) => NativeOutcome::Passed(None),
-            Ok(Some(native)) if native.checked.blocked() => {
-                let text = native.checked.text();
-                self.advance_with(op, OperationState::Vetoed, Some(text), events);
-                events.push(gates_blocked_event(op.id, native));
-                NativeOutcome::Stopped
-            }
-            Ok(Some(native)) => {
-                let seen = match native.operation {
-                    GateOp::Push => native.checked.seen.into_iter().next(),
-                    GateOp::Restack => None,
-                };
-                NativeOutcome::Passed(seen)
-            }
-            Err(text) => {
-                self.advance_with(op, OperationState::Vetoed, Some(text), events);
-                NativeOutcome::Stopped
-            }
-        }
-    }
-
-    /// `BypassGates` (D212 (4)): a human runs `then`, a push or a restack, past the native gate
-    /// check, having seen the gates in `gates` block it. A block that now holds a gate the person
-    /// did not name is refused, and the current block is sent for the window. The command is
-    /// logged whole, so the log keeps the gates and the reason (D28). The command then runs under
-    /// the same operation, with the native check off and its phases as usual.
-    fn bypass_gates(
-        &mut self,
-        op: &mut Op,
-        gates: &[String],
-        reason: &str,
-        then: &CommandKind,
-        events: &mut Vec<Event>,
-    ) {
-        match self.prepare_bypass(&op.command.actor, gates, reason, then) {
-            Err(message) => {
-                self.advance(op, OperationState::Gating, events);
-                self.advance_with(op, OperationState::Failed, Some(message), events);
-            }
-            Ok(Bypass::Stale { message, blocked }) => {
-                self.advance(op, OperationState::Gating, events);
-                self.advance_with(op, OperationState::Failed, Some(message), events);
-                events.push(gates_blocked_event(op.id, blocked));
-            }
-            Ok(Bypass::Run { detail, audit }) => {
-                // The tip the audit row records is the one a bypassed push checks again (R2h).
-                let judged = (audit.operation == GateOp::Push).then(|| Seen {
-                    branch: audit.branch.clone(),
-                    head: audit.head.clone(),
-                });
-                // The audit row is written first: a bypass that cannot be audited does not run
-                // (D212 (4), R2h).
-                if let Err(reason) = self.write_bypass_audit(audit) {
-                    self.advance(op, OperationState::Gating, events);
-                    let message =
-                        format!("the bypass is refused, its audit row was not written: {reason}");
-                    self.advance_with(op, OperationState::Failed, Some(message), events);
-                    return;
-                }
-                self.advance_with(op, OperationState::Gating, Some(detail), events);
-                let inner = Command {
-                    actor: op.command.actor.clone(),
-                    kind: then.clone(),
-                };
-                self.supersede_conflict_hunks(&inner.kind);
-                let mut inner_op = Op {
-                    id: op.id,
-                    command: &inner,
-                    state: OperationState::Gating,
-                };
-                self.run_command(&mut inner_op, GateCheck::Bypassed, judged, events);
-            }
-        }
-    }
-
-    /// Checks a bypass: the person, the reason, the command, the gates named, and whether the
-    /// block still holds only gates the person saw. Returns what to do, or the refusal.
-    fn prepare_bypass(
-        &mut self,
-        actor: &Actor,
-        gates: &[String],
-        reason: &str,
-        then: &CommandKind,
-    ) -> Result<Bypass, String> {
-        only_a_human(actor, "bypass gates")?;
-        let reason = reason.trim();
-        let length = reason.chars().count();
-        if !(1..=BYPASS_REASON_LIMIT).contains(&length) {
-            return Err(format!(
-                "a bypass needs a reason of 1 to {BYPASS_REASON_LIMIT} characters"
-            ));
-        }
-        if !matches!(
-            then,
-            CommandKind::PushWithLease | CommandKind::ApplyRestack { .. }
-        ) {
-            return Err("only a push or a restack can be bypassed".to_owned());
-        }
-        check_bypass_gates(gates)?;
-        let (operation, branch, head) = self.bypass_subject(then)?;
-        let audit = BypassAudit {
-            branch,
-            head,
-            operation,
-            gates: gates.to_vec(),
-            reason: reason.to_owned(),
-        };
-        let Some(native) = self
-            .native_check(actor, then)?
-            .filter(|native| native.checked.blocked())
-        else {
-            return Ok(Bypass::Run {
-                detail: format!("no gate was blocking; reason: {reason}"),
-                audit,
-            });
-        };
-        // Every branch the check judged counts: a block on any of them must be named (R2h).
-        let unseen: Vec<String> = native
-            .checked
-            .ids()
-            .into_iter()
-            .filter(|id| !gates.contains(id))
-            .collect();
-        if !unseen.is_empty() {
-            return Ok(Bypass::Stale {
-                message: format!(
-                    "the gates changed since you looked: {} now block; look again",
-                    unseen.join(", ")
-                ),
-                blocked: native,
-            });
-        }
-        Ok(Bypass::Run {
-            detail: format!(
-                "bypassed gates: {} (errors: {}); reason: {reason}",
-                gates.join(", "),
-                native.checked.errors().len()
-            ),
-            audit,
-        })
-    }
-
-    /// The operation, branch and tip a bypass of `then` is about: a restack of its root branch, or
-    /// a push of the branch HEAD is on. A detached HEAD has no branch to audit, so it is refused.
-    fn bypass_subject(&self, then: &CommandKind) -> Result<(GateOp, String, String), String> {
-        let root = self.open_root()?;
-        let (operation, branch) = match then {
-            CommandKind::ApplyRestack { branch, .. } => (GateOp::Restack, branch.clone()),
-            _ => match self.current(&root)?.0 {
-                Some(branch) => (GateOp::Push, branch),
-                None => {
-                    return Err(
-                        "HEAD is detached; check out the branch whose push to bypass".to_owned(),
-                    );
-                }
-            },
-        };
-        let head = self
-            .git
-            .branch_tip(&root, &branch)
-            .map_err(|e| e.0)?
-            .ok_or_else(|| format!("there is no branch named {branch}"))?;
-        Ok((operation, branch, head))
-    }
-
-    /// Writes the audit row of a bypass (D212 (4), R2h). A failure refuses the bypass.
-    fn write_bypass_audit(&mut self, audit: BypassAudit) -> Result<(), String> {
-        let root = self.open_root()?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        store
-            .record_bypass(&NewBypass {
-                branch: audit.branch,
-                head: audit.head,
-                operation: audit.operation,
-                gates: audit.gates,
-                reason: audit.reason,
-                actor: "human".to_owned(),
-                at: now_ms(),
-            })
-            .map(|_| ())
-            .map_err(|e| e.0)
-    }
-
-    /// Lists the bypasses, newest first (D212 (4)) of the checkout `member` names, or of the
-    /// repository. A read: never recorded (D28).
-    fn list_bypasses(
-        &mut self,
-        id: OperationId,
-        branch: Option<&str>,
-        limit: u32,
-        member: Option<&str>,
-    ) -> Result<Vec<Event>, String> {
-        let open = self.open_root()?;
-        let root = self.target_at(&open, member)?.root;
-        let limit = match limit {
-            0 => BYPASS_LIST_DEFAULT,
-            n => n.min(BYPASS_LIST_MAX),
-        };
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let bypasses = store
-            .bypasses(branch, usize::try_from(limit).unwrap_or(usize::MAX))
-            .map_err(|e| e.0)?;
-        Ok(vec![Event::BypassesListed { id, bypasses }])
-    }
-
-    /// The gates of a push or a restack that block it, for a human (D212 (3)). `None` for any
-    /// other command or actor, when no gate file exists, when HEAD is detached and when no
-    /// repository is open: the command then reports its own refusal. A check that cannot run is
-    /// an error, which the caller turns into a veto.
-    fn native_check(
-        &mut self,
-        actor: &Actor,
-        kind: &CommandKind,
-    ) -> Result<Option<NativeCheck>, String> {
-        let operation = match (actor, kind) {
-            (Actor::Human, CommandKind::PushWithLease) => GateOp::Push,
-            (Actor::Human, CommandKind::ApplyRestack { .. }) => GateOp::Restack,
-            _ => return Ok(None),
-        };
-        let Ok(root) = self.open_root() else {
-            return Ok(None);
-        };
-        let config = self.gate_config();
-        // Without a gate file no branch is read, so a user without gates pays nothing.
-        let loaded = gate_check::load(self.git.as_ref(), &root, &config)
-            .map_err(|reason| gate_check::unchecked(&reason))?;
-        if gate_check::is_idle(&loaded) {
-            return Ok(None);
-        }
-        let Some((branch, branches)) = self
-            .checked_branches(&root, kind)
-            .map_err(|reason| gate_check::unchecked(&reason))?
-        else {
-            return Ok(None);
-        };
-        let checked = gate_check::check(
-            self.git.as_ref(),
-            &mut self.review,
-            &root,
-            &loaded,
-            operation,
-            &branches,
-            &config,
-        )
-        .map_err(|reason| gate_check::unchecked(&reason))?;
-        Ok(Some(NativeCheck {
-            operation,
-            branch,
-            checked,
-        }))
-    }
-
-    /// The branch a push or a restack is about, and every branch its check judges (D212 (2)): for
-    /// a restack its root and the branches its plan moves, for a push the branch HEAD is on.
-    /// `None` when HEAD is detached.
-    fn checked_branches(
-        &self,
-        root: &Path,
-        kind: &CommandKind,
-    ) -> Result<Option<(String, Vec<String>)>, String> {
-        match kind {
-            CommandKind::ApplyRestack { branch, skip, .. } => {
-                let plan = restack_session::plan(self.git.as_ref(), root, branch, skip, &|path| {
-                    same_folder(root, path)
-                })?;
-                let branches = gate_check::restack_branches(branch, &plan);
-                Ok(Some((branch.clone(), branches)))
-            }
-            _ => Ok(self
-                .current(root)?
-                .0
-                .map(|branch| (branch.clone(), vec![branch]))),
         }
     }
 
@@ -4852,8 +4470,7 @@ impl Engine {
                 self.delete_review_comment(id, *comment)
             }
             _ if is_verdict_command(kind) => self.verdict_command(id, actor, kind),
-            _ if is_proposal_command(kind) => self.proposal_command(id, actor, kind),
-            _ if is_approval_command(kind) => self.approval_command(id, actor, kind),
+            _ if is_description_command(kind) => self.description_command(id, kind),
             _ => Err("not a review command".to_owned()),
         }
     }
@@ -4899,171 +4516,23 @@ impl Engine {
                 member.as_deref(),
             ),
             CommandKind::ListReviewers { name } => self.list_reviewers(id, name.as_deref()),
-            CommandKind::GatesStatus { branch, member } => {
-                self.gates_status(id, branch.as_deref(), member.as_deref())
-            }
-            CommandKind::ListBypasses {
-                branch,
-                limit,
-                member,
-            } => self.list_bypasses(id, branch.as_deref(), *limit, member.as_deref()),
             _ => Err("not a verdict command".to_owned()),
         }
     }
 
-    /// The approval and intent commands (D215). The writes are human only, so an agent can never
-    /// approve a branch or change its intent; the reads are not logged (D28).
-    fn approval_command(
+    /// The branch description read (D215 (1)). A read: never recorded (D28).
+    fn description_command(
         &mut self,
         id: OperationId,
-        actor: &Actor,
         kind: &CommandKind,
     ) -> Result<Vec<Event>, String> {
         match kind {
-            CommandKind::ApproveBranch {
-                branch,
-                head,
-                note,
-                member,
-            } => {
-                only_a_human(actor, "approve a branch")?;
-                let target = self.target_of(member.as_deref())?;
-                self.approve_branch(id, actor, &target, branch, head, note.as_deref())
-            }
-            CommandKind::RevokeApproval { branch, member } => {
-                only_a_human(actor, "revoke an approval")?;
-                let target = self.target_of(member.as_deref())?;
-                self.revoke_approval(id, &target, branch)
-            }
-            CommandKind::ReadApproval { branch, member } => {
-                let target = self.target_of(member.as_deref())?;
-                self.read_approval(id, &target, branch)
-            }
-            CommandKind::SetBranchDescription {
-                branch,
-                text,
-                member,
-            } => {
-                only_a_human(actor, "edit a branch description")?;
-                let target = self.target_of(member.as_deref())?;
-                self.set_branch_description(id, &target, branch, text)
-            }
             CommandKind::ReadBranchDescription { branch, member } => {
                 let target = self.target_of(member.as_deref())?;
                 self.read_branch_description(id, &target, branch)
             }
-            _ => Err("not an approval command".to_owned()),
+            _ => Err("not a branch description command".to_owned()),
         }
-    }
-
-    /// Approves the tip of `branch` (D215 (2)) in `target`. `head` must be the tip now, so a
-    /// person approves exactly what they saw; a note of more than 500 characters is refused, and a
-    /// blank one is no note.
-    fn approve_branch(
-        &mut self,
-        id: OperationId,
-        actor: &Actor,
-        target: &Target,
-        branch: &str,
-        head: &str,
-        note: Option<&str>,
-    ) -> Result<Vec<Event>, String> {
-        let note = note.filter(|note| !note.trim().is_empty());
-        if let Some(note) = note {
-            let count = note.chars().count();
-            if count > MAX_APPROVAL_NOTE_CHARS {
-                return Err(format!(
-                    "an approval note is at most {MAX_APPROVAL_NOTE_CHARS} characters, not {count}"
-                ));
-            }
-        }
-        let root = target.root.as_path();
-        let tip = self
-            .git
-            .branch_tip(root, branch)
-            .map_err(|e| e.0)?
-            .ok_or_else(|| format!("there is no branch named {branch}"))?;
-        let head = self
-            .git
-            .resolve_commit(root, head)
-            .map_err(|_| format!("{head:?} is not a commit"))?;
-        if head != tip {
-            return Err(format!(
-                "the branch moved since you looked: {} is not the tip {}; look again",
-                short_id(&head),
-                short_id(&tip)
-            ));
-        }
-        let store = review_store(&mut self.review, self.git.as_ref(), root)?;
-        store
-            .approve(branch, &tip, note, &origin_of(actor), now_ms())
-            .map_err(|e| e.0)?;
-        let approval = approval_now(store, branch, Some(&tip))?;
-        Ok(vec![Event::ApprovalRead {
-            id,
-            branch: branch.to_owned(),
-            approval,
-        }])
-    }
-
-    /// Withdraws the approval of `branch` in `target`; the answer has no approval. Revoking a
-    /// branch with no approval changes nothing.
-    fn revoke_approval(
-        &mut self,
-        id: OperationId,
-        target: &Target,
-        branch: &str,
-    ) -> Result<Vec<Event>, String> {
-        let store = review_store(&mut self.review, self.git.as_ref(), &target.root)?;
-        store.revoke(branch).map_err(|e| e.0)?;
-        Ok(vec![Event::ApprovalRead {
-            id,
-            branch: branch.to_owned(),
-            approval: None,
-        }])
-    }
-
-    /// The approval of `branch` in `target`, with whether it is stale against the tip now (D215
-    /// (2)).
-    fn read_approval(
-        &mut self,
-        id: OperationId,
-        target: &Target,
-        branch: &str,
-    ) -> Result<Vec<Event>, String> {
-        let tip = self.git.branch_tip(&target.root, branch).map_err(|e| e.0)?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &target.root)?;
-        let approval = approval_now(store, branch, tip.as_deref())?;
-        Ok(vec![Event::ApprovalRead {
-            id,
-            branch: branch.to_owned(),
-            approval,
-        }])
-    }
-
-    /// Sets the intent of `branch` in `target` (D215 (1)): its branch description. Blank text
-    /// unsets it. The answer is the description as Git stores it now.
-    fn set_branch_description(
-        &mut self,
-        id: OperationId,
-        target: &Target,
-        branch: &str,
-        text: &str,
-    ) -> Result<Vec<Event>, String> {
-        if text.contains('\0') {
-            return Err("a branch description cannot contain a NUL character".to_owned());
-        }
-        let count = text.chars().count();
-        if count > MAX_DESCRIPTION_CHARS {
-            return Err(format!(
-                "a branch description is at most {MAX_DESCRIPTION_CHARS} characters, not {count}"
-            ));
-        }
-        let stored = (!text.trim().is_empty()).then_some(text);
-        self.git
-            .set_branch_description(&target.root, branch, stored)
-            .map_err(|e| e.0)?;
-        self.read_branch_description(id, target, branch)
     }
 
     /// The intent of `branch` in `target`, its branch description, `None` when it has none.
@@ -5082,429 +4551,6 @@ impl Engine {
             branch: branch.to_owned(),
             text,
         }])
-    }
-
-    /// What the gates of `branch` need from the repository (D215, D214 (1)): the tip, the change,
-    /// whether a person approved the tip, and the intent. It gathers and never runs a gate.
-    pub fn gate_facts_inputs(&mut self, root: &Path, branch: &str) -> Result<GateInputs, String> {
-        let store = review_store(&mut self.review, self.git.as_ref(), root)?;
-        gate_check::facts_inputs(self.git.as_ref(), store, root, branch)
-    }
-
-    /// Answers `GatesStatus` (D212 (5), D214 (5)): the gate check of `branch`, or of the branch
-    /// HEAD is on. With no `member` in a workspace it answers for every member. A detached HEAD
-    /// needs the branch named. Reads only (D28).
-    fn gates_status(
-        &mut self,
-        id: OperationId,
-        branch: Option<&str>,
-        member: Option<&str>,
-    ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        if member.is_none() && self.is_workspace(&root) {
-            if let Some(branch) = branch {
-                return Err(format!(
-                    "this is a workspace: name the member whose branch {branch} to check, or leave the branch out for every member"
-                ));
-            }
-            return self.workspace_gates(id, &root);
-        }
-        let target = self.target_at(&root, member)?;
-        let branch = match branch {
-            Some(branch) => branch.to_owned(),
-            None => self
-                .git
-                .status(&target.root)
-                .map_err(|e| e.0)?
-                .branch
-                .head
-                .ok_or_else(|| {
-                    "HEAD is detached; name the branch whose gates to check".to_owned()
-                })?,
-        };
-        let report = self.report_at(&target, &branch, None)?;
-        Ok(vec![Event::GatesStatusRead {
-            id,
-            status: report.status,
-            intent: report.intent,
-            approval: report.approval,
-        }])
-    }
-
-    /// `GatesStatus` with no member in a workspace (D214 (5)): every member's gate check, in the
-    /// order of the workspace's members. A workspace with no member is not ready. It blocks
-    /// nothing.
-    fn workspace_gates(&mut self, id: OperationId, root: &Path) -> Result<Vec<Event>, String> {
-        let names: Vec<String> = Workspaces::new(self.git.as_ref(), self.workspace_config.clone())
-            .members(root)
-            .map_err(|e| e.message().to_owned())?
-            .into_iter()
-            .map(|member| member.path)
-            .collect();
-        let members: Vec<MemberGates> = names
-            .iter()
-            .map(|name| self.member_gates(root, name))
-            .collect();
-        let ready = !members.is_empty()
-            && members.iter().all(|row| {
-                row.error.is_none() && row.status.as_ref().is_some_and(|status| status.ready)
-            });
-        Ok(vec![Event::WorkspaceGatesRead { id, ready, members }])
-    }
-
-    /// One member's gate check for the workspace answer. A member that cannot be read has no
-    /// status and says why, so the workspace is not ready (fail closed).
-    fn member_gates(&mut self, root: &Path, name: &str) -> MemberGates {
-        match self.member_report(root, name) {
-            Ok(row) => row,
-            Err(error) => MemberGates {
-                member: name.to_owned(),
-                branch: None,
-                status: None,
-                intent: None,
-                approval: None,
-                error: Some(error),
-            },
-        }
-    }
-
-    /// The gate check of member `name`, on the branch its checkout has. A detached member is
-    /// refused, since there is no branch to check.
-    fn member_report(&mut self, root: &Path, name: &str) -> Result<MemberGates, String> {
-        let target = self.target_at(root, Some(name))?;
-        let Some(branch) = self.git.status(&target.root).map_err(|e| e.0)?.branch.head else {
-            return Err(format!(
-                "member {name} is detached; check out its branch to check its gates"
-            ));
-        };
-        let report = self.report_at(&target, &branch, None)?;
-        Ok(MemberGates {
-            member: name.to_owned(),
-            branch: Some(branch),
-            status: Some(report.status),
-            intent: report.intent,
-            approval: report.approval,
-            error: None,
-        })
-    }
-
-    /// The gate report of `branch` for `op` (every gate when `None`) (D212 (5), D214, D215). It
-    /// blocks nothing by itself: see `gate_check::report`.
-    pub fn gates_report(
-        &mut self,
-        root: &Path,
-        branch: &str,
-        op: Option<GateOp>,
-    ) -> Result<GatesReport, String> {
-        self.report_at(&Target::at(root), branch, op)
-    }
-
-    /// The gate report of `branch` in `target` for `op` (every gate when `None`), with the
-    /// definitions that target reads (D214 (5)).
-    fn report_at(
-        &mut self,
-        target: &Target,
-        branch: &str,
-        op: Option<GateOp>,
-    ) -> Result<GatesReport, String> {
-        let config = self.config_at(target);
-        let loaded = gate_check::load(self.git.as_ref(), &target.root, &config)?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &target.root)?;
-        gate_check::report(
-            self.git.as_ref(),
-            store,
-            &target.root,
-            branch,
-            op,
-            &config,
-            &loaded,
-        )
-    }
-
-    /// The proposal commands (D214 (3)). An agent proposes; only a person accepts or denies. The
-    /// list is a read and is not logged (D28).
-    fn proposal_command(
-        &mut self,
-        id: OperationId,
-        actor: &Actor,
-        kind: &CommandKind,
-    ) -> Result<Vec<Event>, String> {
-        match kind {
-            CommandKind::ProposeReviewer { reviewer, reason } => {
-                let origin = agent_origin(actor, "propose a reviewer")?;
-                self.propose_reviewer(id, &origin, reviewer, reason)
-            }
-            CommandKind::ProposeGate { gate, reason } => {
-                let origin = agent_origin(actor, "propose a gate")?;
-                self.propose_gate(id, &origin, gate, reason)
-            }
-            CommandKind::ListProposals { status, limit } => {
-                self.list_proposals(id, *status, *limit)
-            }
-            CommandKind::AcceptProposal {
-                id: proposal,
-                layer,
-                edited_reviewer,
-                edited_gate,
-            } => {
-                only_a_human(actor, "accept a proposal")?;
-                self.accept_proposal(
-                    id,
-                    *proposal,
-                    *layer,
-                    edited_reviewer.as_deref(),
-                    edited_gate.as_deref(),
-                )
-            }
-            CommandKind::DenyProposal { id: proposal } => {
-                only_a_human(actor, "deny a proposal")?;
-                self.deny_proposal(id, *proposal)
-            }
-            _ => Err("not a proposal command".to_owned()),
-        }
-    }
-
-    /// Stores a reviewer an agent proposes (D214 (3)): its free text and reason are redacted,
-    /// and it is checked as a reviewer file. It is kept as a proposal and is not a reviewer.
-    fn propose_reviewer(
-        &mut self,
-        id: OperationId,
-        origin: &str,
-        reviewer: &ReviewerProposal,
-        reason: &str,
-    ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        let redactor = proposal_redactor(&root)?;
-        let redact = |text: &str| redactor.redact(text).text;
-        let reason = proposals::check_reason(reason, &redact)?;
-        let reviewer = proposals::check_reviewer(&proposals::redact_reviewer(reviewer, &redact))?;
-        let body = proposals::encode(&reviewer)?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let proposal_id = store
-            .add_proposal(
-                &NewProposal {
-                    kind: ProposalKind::Reviewer,
-                    name: &reviewer.name,
-                    body: &body,
-                    reason: &reason,
-                    origin,
-                    at: now_ms(),
-                },
-                proposals::OPEN_LIMIT,
-            )
-            .map_err(|e| e.0)?;
-        self.proposal_decided(id, &root, proposal_id)
-    }
-
-    /// Stores a gate an agent proposes (D214 (3)): checked as the one gate of a gate file, with
-    /// its reason redacted. A proposed gate blocks nothing.
-    fn propose_gate(
-        &mut self,
-        id: OperationId,
-        origin: &str,
-        gate: &GateDef,
-        reason: &str,
-    ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        let redactor = proposal_redactor(&root)?;
-        let redact = |text: &str| redactor.redact(text).text;
-        let reason = proposals::check_reason(reason, &redact)?;
-        proposals::check_gate(gate)?;
-        let body = proposals::encode(gate)?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let proposal_id = store
-            .add_proposal(
-                &NewProposal {
-                    kind: ProposalKind::Gate,
-                    name: &gate.id,
-                    body: &body,
-                    reason: &reason,
-                    origin,
-                    at: now_ms(),
-                },
-                proposals::OPEN_LIMIT,
-            )
-            .map_err(|e| e.0)?;
-        self.proposal_decided(id, &root, proposal_id)
-    }
-
-    /// The proposals, newest first, with `status` when it is given, each with the accepted
-    /// definition it would replace. Reads files only, and changes nothing.
-    fn list_proposals(
-        &mut self,
-        id: OperationId,
-        status: Option<ProposalStatus>,
-        limit: u32,
-    ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        let limit = match limit {
-            0 => proposals::LIST_DEFAULT,
-            n => n.min(proposals::LIST_MAX),
-        };
-        let current = self.current_definitions(&root)?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let rows = store
-            .proposals(status, usize::try_from(limit).unwrap_or(usize::MAX))
-            .map_err(|e| e.0)?;
-        let views = rows
-            .iter()
-            .map(|row| proposals::view(row, &current))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(vec![Event::ProposalsListed {
-            id,
-            proposals: views,
-        }])
-    }
-
-    /// Accepts proposal `proposal_id` (D214 (3)): writes its definition into `layer` first, and
-    /// marks the proposal accepted only once that write is done, so a failed write leaves it
-    /// proposed. `edited_*` replace the proposed definition, keeping its name or id.
-    fn accept_proposal(
-        &mut self,
-        id: OperationId,
-        proposal_id: i64,
-        layer: GateLayer,
-        edited_reviewer: Option<&ReviewerProposal>,
-        edited_gate: Option<&GateDef>,
-    ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        if layer == GateLayer::Workspace && !self.is_workspace(&root) {
-            return Err("this is not a workspace".to_owned());
-        }
-        let stored = self.open_proposal(&root, proposal_id)?;
-        let common = self.git.common_dir(&root).map_err(|e| e.0)?;
-        let body = match stored.kind {
-            ProposalKind::Reviewer => {
-                if edited_gate.is_some() {
-                    return Err(format!(
-                        "proposal {proposal_id} is a reviewer: edited_gate does not apply"
-                    ));
-                }
-                let proposed = match edited_reviewer {
-                    Some(edited) => edited.clone(),
-                    None => proposals::decode_reviewer(&stored.body)?,
-                };
-                same_name(proposal_id, &stored.name, &proposed.name)?;
-                let checked = proposals::check_reviewer(&proposed)?;
-                proposals::check_layer_members(layer, &checked.members)?;
-                let (dir, source) = match layer {
-                    GateLayer::User => (
-                        self.reviewer_user_dir
-                            .clone()
-                            .ok_or_else(no_user_directory)?,
-                        ReviewerSource::User,
-                    ),
-                    GateLayer::Workspace => {
-                        (reviewers::repo_dir(&common), ReviewerSource::Workspace)
-                    }
-                    GateLayer::Repository => {
-                        (reviewers::repo_dir(&common), ReviewerSource::Repository)
-                    }
-                };
-                reviewers::save(&dir, &proposals::to_reviewer(&checked, source))?;
-                proposals::encode(&checked)?
-            }
-            ProposalKind::Gate => {
-                if edited_reviewer.is_some() {
-                    return Err(format!(
-                        "proposal {proposal_id} is a gate: edited_reviewer does not apply"
-                    ));
-                }
-                let gate = match edited_gate {
-                    Some(edited) => edited.clone(),
-                    None => proposals::decode_gate(&stored.body)?,
-                };
-                same_name(proposal_id, &stored.name, &gate.id)?;
-                proposals::check_gate(&gate)?;
-                proposals::check_layer_members(layer, &gate.members)?;
-                let dir = match layer {
-                    GateLayer::User => self.gates_user_dir.clone().ok_or_else(no_user_directory)?,
-                    _ => common.join("gitmaster"),
-                };
-                let mut defined = proposals::layer_gates(layer, &dir)?;
-                match defined.iter().position(|existing| existing.id == gate.id) {
-                    Some(index) => defined[index] = gate.clone(),
-                    None => defined.push(gate.clone()),
-                }
-                crate::gates::save(&dir, &defined)?;
-                proposals::encode(&gate)?
-            }
-        };
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        store
-            .set_proposal_body(proposal_id, &body)
-            .map_err(|e| e.0)?;
-        store
-            .set_proposal_status(proposal_id, ProposalStatus::Accepted, now_ms())
-            .map_err(|e| e.0)?;
-        self.proposal_decided(id, &root, proposal_id)
-    }
-
-    /// Denies proposal `proposal_id`. It is kept, so the same proposal is refused later.
-    fn deny_proposal(&mut self, id: OperationId, proposal_id: i64) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        self.open_proposal(&root, proposal_id)?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        store
-            .set_proposal_status(proposal_id, ProposalStatus::Denied, now_ms())
-            .map_err(|e| e.0)?;
-        self.proposal_decided(id, &root, proposal_id)
-    }
-
-    /// The stored proposal `proposal_id`, when it is still open; refused otherwise.
-    fn open_proposal(&mut self, root: &Path, proposal_id: i64) -> Result<StoredProposal, String> {
-        let store = review_store(&mut self.review, self.git.as_ref(), root)?;
-        let stored = store
-            .proposal(proposal_id)
-            .map_err(|e| e.0)?
-            .ok_or_else(|| format!("there is no proposal {proposal_id}"))?;
-        if stored.status != ProposalStatus::Proposed {
-            return Err(format!(
-                "proposal {proposal_id} is already {}",
-                proposals::status_word(stored.status)
-            ));
-        }
-        Ok(stored)
-    }
-
-    /// Answers a proposal write with the proposal as it stands now.
-    fn proposal_decided(
-        &mut self,
-        id: OperationId,
-        root: &Path,
-        proposal_id: i64,
-    ) -> Result<Vec<Event>, String> {
-        let current = self.current_definitions(root)?;
-        let stored = {
-            let store = review_store(&mut self.review, self.git.as_ref(), root)?;
-            store
-                .proposal(proposal_id)
-                .map_err(|e| e.0)?
-                .ok_or_else(|| format!("there is no proposal {proposal_id}"))?
-        };
-        let proposal = proposals::view(&stored, &current)?;
-        Ok(vec![Event::ProposalDecided {
-            id,
-            proposal: Box::new(proposal),
-        }])
-    }
-
-    /// The accepted reviewers and gates of the repository and the user, read from their files
-    /// alone (D214 (3)): presets are not files, and a proposal is compared with these, never
-    /// counted among them.
-    fn current_definitions(&mut self, root: &Path) -> Result<proposals::Current, String> {
-        let common = self.git.common_dir(root).map_err(|e| e.0)?;
-        let reviewers = reviewers::load(
-            Some(&reviewers::repo_dir(&common)),
-            self.reviewer_user_dir.as_deref(),
-        )
-        .reviewers;
-        let gates = gate_check::load(self.git.as_ref(), root, &self.gate_config())?
-            .gates
-            .into_iter()
-            .map(|layered| layered.gate)
-            .collect();
-        Ok(proposals::Current { reviewers, gates })
     }
 
     /// Anchors a comment on lines of `path` and keeps a snapshot of the working
@@ -6719,10 +5765,6 @@ impl Engine {
                 | CommandKind::ListReviewComments { .. }
                 | CommandKind::ListVerdicts { .. }
                 | CommandKind::ListReviewers { .. }
-                | CommandKind::ListBypasses { .. }
-                | CommandKind::GatesStatus { .. }
-                | CommandKind::ListProposals { .. }
-                | CommandKind::ReadApproval { .. }
                 | CommandKind::ReadBranchDescription { .. }
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }
@@ -6767,7 +5809,7 @@ struct MergedPlan {
 }
 
 /// The gated form of `op`, whose gates are the ones `phases` found, in order.
-fn gated_op(op: &Op, phases: Phases, checked: Option<Seen>) -> GatedOp {
+fn gated_op(op: &Op, phases: Phases) -> GatedOp {
     let waiting = phases.gates.iter().cloned().collect();
     GatedOp {
         id: op.id,
@@ -6775,7 +5817,6 @@ fn gated_op(op: &Op, phases: Phases, checked: Option<Seen>) -> GatedOp {
         phases,
         waiting,
         run: None,
-        checked,
     }
 }
 
@@ -6856,9 +5897,7 @@ fn check_workflow_script(id: OperationId, source: &str) -> Vec<Event> {
 fn is_handled_run(kind: &CommandKind) -> bool {
     matches!(
         kind,
-        CommandKind::RunTransform { .. }
-            | CommandKind::ComposerOpened
-            | CommandKind::BypassGates { .. }
+        CommandKind::RunTransform { .. } | CommandKind::ComposerOpened
     )
 }
 
@@ -6881,23 +5920,6 @@ fn reviewed_by(trust: &TrustStore, hash: &str) -> Result<bool, String> {
     trust.is_reviewed(hash).map_err(|e| e.0)
 }
 
-/// Checks the gate ids a bypass names: 1 to 50 of them, each a gate id or `gates-file` (D212 (4)).
-fn check_bypass_gates(gates: &[String]) -> Result<(), String> {
-    if gates.is_empty() || gates.len() > BYPASS_GATES_LIMIT {
-        return Err(format!(
-            "a bypass names the gates it bypasses: 1 to {BYPASS_GATES_LIMIT} gate ids"
-        ));
-    }
-    for id in gates {
-        if id != GATES_FILE_ID && reviewers::validate_name(id).is_err() {
-            return Err(
-                "a gate id is 1 to 40 characters of a-z, 0-9 and '-', or gates-file".to_owned(),
-            );
-        }
-    }
-    Ok(())
-}
-
 fn only_a_human(actor: &Actor, what: &str) -> Result<(), String> {
     if matches!(actor, Actor::Human) {
         Ok(())
@@ -6905,74 +5927,6 @@ fn only_a_human(actor: &Actor, what: &str) -> Result<(), String> {
         Err(format!("only a human can {what}"))
     }
 }
-
-/// Whether the native gate check runs for an operation (D212 (3), (4)). `Bypassed` is set only by
-/// `BypassGates` for the command it runs, and nothing else sets it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GateCheck {
-    Native,
-    Bypassed,
-}
-
-/// The native check of a push or a restack (D212 (3)): the operation, the branch it is about
-/// (the root of a restack) and what the check found over every branch it judged.
-struct NativeCheck {
-    operation: GateOp,
-    branch: String,
-    checked: Checked,
-}
-
-/// What the native check left for the operation to go on with (D212 (3)).
-enum NativeOutcome {
-    /// The check ended the operation: it is vetoed.
-    Stopped,
-    /// The operation goes on. `Some` is the tip a push was judged at (R2h).
-    Passed(Option<Seen>),
-}
-
-/// The `GatesBlocked` event for a blocked push or restack (D212 (3)).
-fn gates_blocked_event(id: OperationId, native: NativeCheck) -> Event {
-    let (gates, errors) = native.checked.outcomes();
-    Event::GatesBlocked {
-        id,
-        operation: native.operation,
-        branch: native.branch,
-        gates,
-        errors,
-    }
-}
-
-/// The longest reason a bypass takes, once trimmed (D212 (4)).
-const BYPASS_REASON_LIMIT: usize = 500;
-
-/// The most gate ids one bypass names (D212 (4)).
-const BYPASS_GATES_LIMIT: usize = 50;
-
-/// What a checked bypass does: run `then` with this operation detail, or refuse it because the
-/// block now holds a gate the person did not name, which is sent with the refusal.
-enum Bypass {
-    Run {
-        detail: String,
-        audit: BypassAudit,
-    },
-    Stale {
-        message: String,
-        blocked: NativeCheck,
-    },
-}
-
-/// What a bypass writes to its audit row before it runs (D212 (4), R2h).
-struct BypassAudit {
-    branch: String,
-    head: String,
-    operation: GateOp,
-    gates: Vec<String>,
-    reason: String,
-}
-
-/// The bypasses `ListBypasses` returns when it names no limit, and the most it returns (R2h).
-const BYPASS_LIST_DEFAULT: u32 = 20;
-const BYPASS_LIST_MAX: u32 = 200;
 
 /// What an agent records as a verdict (`CommandKind::RecordVerdict`), borrowed from the command.
 struct VerdictRequest<'a> {
@@ -7049,12 +6003,6 @@ fn anchored_findings(
     }
     Ok(findings)
 }
-
-/// A commit id as people write it in a message.
-/// The longest note an approval may carry, in characters (D215 (2)).
-const MAX_APPROVAL_NOTE_CHARS: usize = 500;
-/// The longest intent a branch description may carry, in characters (D215 (1)).
-const MAX_DESCRIPTION_CHARS: usize = 2_000;
 
 fn short_id(id: &str) -> &str {
     id.get(..7).unwrap_or(id)
@@ -7138,10 +6086,10 @@ fn is_workspace_command(kind: &CommandKind) -> bool {
     )
 }
 
-/// Whether `kind` is one of the review comment, verdict or approval commands (B4, D212, D215).
+/// Whether `kind` is one of the review comment, verdict or branch description commands (B4, D212,
+/// D215).
 fn is_review_command(kind: &CommandKind) -> bool {
-    is_approval_command(kind)
-        || is_proposal_command(kind)
+    is_description_command(kind)
         || matches!(
             kind,
             CommandKind::AddReviewComment { .. }
@@ -7160,63 +6108,12 @@ fn is_review_command(kind: &CommandKind) -> bool {
                 | CommandKind::RecordVerdict { .. }
                 | CommandKind::ListVerdicts { .. }
                 | CommandKind::ListReviewers { .. }
-                | CommandKind::ListBypasses { .. }
-                | CommandKind::GatesStatus { .. }
         )
 }
 
-/// The author of a proposal an agent makes: `agent:<client>`. Refused for a person.
-fn agent_origin(actor: &Actor, what: &str) -> Result<String, String> {
-    if matches!(actor, Actor::Agent { .. }) {
-        Ok(origin_of(actor))
-    } else {
-        Err(format!("only an agent can {what}"))
-    }
-}
-
-/// The redactor of a proposal's text. It fails closed, as a verdict's does (D212 (6)).
-fn proposal_redactor(root: &Path) -> Result<Redactor, String> {
-    threads_session::redactor_at(root, None)
-        .map_err(|reason| format!("redaction is misconfigured, so nothing was proposed: {reason}"))
-}
-
-/// Refuses an edited definition that renames the proposal: the name or id is the proposal's.
-fn same_name(proposal_id: i64, proposed: &str, edited: &str) -> Result<(), String> {
-    if proposed == edited {
-        Ok(())
-    } else {
-        Err(format!(
-            "proposal {proposal_id} is {proposed}: an accepted definition keeps its name, not {edited}"
-        ))
-    }
-}
-
-fn no_user_directory() -> String {
-    "there is no configuration directory to accept into".to_owned()
-}
-
-/// Whether `kind` is a proposal command (D214 (3)).
-fn is_proposal_command(kind: &CommandKind) -> bool {
-    matches!(
-        kind,
-        CommandKind::ProposeReviewer { .. }
-            | CommandKind::ProposeGate { .. }
-            | CommandKind::ListProposals { .. }
-            | CommandKind::AcceptProposal { .. }
-            | CommandKind::DenyProposal { .. }
-    )
-}
-
 /// Whether `kind` is an approval or branch intent command (D215).
-fn is_approval_command(kind: &CommandKind) -> bool {
-    matches!(
-        kind,
-        CommandKind::ApproveBranch { .. }
-            | CommandKind::RevokeApproval { .. }
-            | CommandKind::ReadApproval { .. }
-            | CommandKind::SetBranchDescription { .. }
-            | CommandKind::ReadBranchDescription { .. }
-    )
+fn is_description_command(kind: &CommandKind) -> bool {
+    matches!(kind, CommandKind::ReadBranchDescription { .. })
 }
 
 /// Whether `kind` is a verdict, reviewer or gate-check command (see `verdict_command`).
@@ -7226,8 +6123,6 @@ fn is_verdict_command(kind: &CommandKind) -> bool {
         CommandKind::RecordVerdict { .. }
             | CommandKind::ListVerdicts { .. }
             | CommandKind::ListReviewers { .. }
-            | CommandKind::GatesStatus { .. }
-            | CommandKind::ListBypasses { .. }
     )
 }
 

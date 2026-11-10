@@ -17,8 +17,6 @@ mod engine;
 pub mod fake;
 pub mod file_index;
 mod files;
-mod gate_check;
-pub mod gates;
 pub mod git;
 pub mod glob;
 pub mod grep;
@@ -30,7 +28,6 @@ mod move_preview;
 pub mod path_match;
 pub mod paths;
 mod port;
-mod proposals;
 mod reflog;
 pub mod remote;
 pub mod restack;
@@ -67,7 +64,7 @@ pub mod worktree;
 pub mod worktree_cli;
 pub mod worktree_include;
 
-pub use engine::{Engine, GateInputs, LogEntry};
+pub use engine::{Engine, LogEntry};
 pub use files::{
     HighlightJob, HighlightReport, IndexJob, IndexReport, ReadJob, ReadReport, SearchJob,
     SearchReport, TextJob, TextReport,

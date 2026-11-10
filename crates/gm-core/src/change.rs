@@ -1,7 +1,6 @@
 //! The change of a branch (D214 (1)): the files that differ between the merge base of the branch
-//! with its base and the tip of the branch. Reviewers and gates with `when.paths` are checked
-//! against it, and so is the fail-closed rule: a change whose files are unknown counts as
-//! touching everything.
+//! with its base and the tip of the branch. Reviewers with `when.paths` are checked against it,
+//! and so is the fail-closed rule: a change whose files are unknown counts as touching everything.
 
 use std::path::Path;
 

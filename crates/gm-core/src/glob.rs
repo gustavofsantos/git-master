@@ -1,4 +1,4 @@
-//! Glob patterns for gates and reviewers (D214 (1)): `when.branches` matches a branch name, and
+//! Glob patterns for reviewers (D214 (1)): `when.branches` matches a branch name, and
 //! `when.paths` matches the repository-relative paths a change touches. Pure: no I/O and no
 //! regex, so a pattern cannot make matching run away.
 //!

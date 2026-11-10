@@ -60,12 +60,11 @@ fn state_of(events: &[Event]) -> Option<OperationState> {
     })
 }
 
-/// An empty directory of the test's own, for the user's gates and reviewers (R2h): the
+/// An empty directory of the test's own, for the user's workflows and reviewers (R2h): the
 /// developer's configuration must not change what this test pushes or restacks.
 fn isolate_user_config(engine: &mut Engine, repo: &Path) {
     let user = repo.parent().unwrap().join("user-config");
     std::fs::create_dir_all(&user).unwrap();
-    engine.set_gates_user_dir(Some(user.clone()));
     engine.set_reviewer_user_dir(Some(gm_core::reviewers::user_dir(&user)));
 }
 

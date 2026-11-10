@@ -117,15 +117,6 @@ fn write_workflow(flows: &Path, name: &str, source: &str) {
     std::fs::write(flows.join(format!("{name}.lua")), source).unwrap();
 }
 
-fn write_repo_gates(repo: &Path, text: &str) {
-    let dir = repo.join(".git").join("gitmaster");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("gates.json"), text).unwrap();
-}
-
-const APPROVED_PUSH: &str =
-    r#"{"gates":[{"id":"approved","kind":"human_approval","on":["push"]}]}"#;
-
 fn reviewer(name: &str) -> Reviewer {
     Reviewer {
         name: name.to_owned(),
@@ -188,15 +179,14 @@ struct Harness {
 }
 
 impl Harness {
-    /// Opens `fx.repo` with the workflows and the gates of `fx.user`, and the switch the app turns
-    /// on for triggers.
+    /// Opens `fx.repo` with the workflows and the reviewers of `fx.user`, and the switch the app
+    /// turns on for triggers.
     fn open(fx: &Fixture) -> Self {
         let (tx, messages) = mpsc::channel();
         let effects_tx = Mutex::new(tx.clone());
         let events_tx = Mutex::new(tx);
         let mut engine = Engine::new(Box::new(SubprocessGit::default()));
         engine.set_workflow_user_dir(Some(fx.user.join("flows")));
-        engine.set_gates_user_dir(Some(fx.user.clone()));
         engine.set_reviewer_user_dir(Some(reviewers::user_dir(&fx.user)));
         engine.set_trust_store(TrustStore::open_in_memory().unwrap());
         engine.set_script_link(ScriptLink {
@@ -241,7 +231,7 @@ impl Harness {
     }
 
     /// Runs the Git jobs the engine queued, and their follow-ups, until none is left (the runner's
-    /// part). A push runs here once its gates passed.
+    /// part). A push runs here once its `before.push` workflows passed.
     fn jobs(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         loop {
@@ -562,40 +552,6 @@ fn an_unreviewed_before_push_gate_vetoes_the_push_with_the_review_text() {
         )),
         "{events:?}"
     );
-    assert!(remote_tip(&fx.origin, "feat").is_empty());
-}
-
-#[test]
-fn a_failing_native_gate_vetoes_before_any_workflow_gate_runs() {
-    let fx = fixture();
-    write_repo_gates(&fx.repo, APPROVED_PUSH);
-    write_workflow(
-        &fx.user.join("flows"),
-        "pass",
-        &gate_source("pass", "before.push", None, "ctx.notify(\"ran\")"),
-    );
-    let mut h = Harness::open(&fx);
-    h.review("pass");
-
-    let (id, events) = h.human(CommandKind::PushWithLease);
-    let events = h.finish(id, events);
-
-    assert_eq!(
-        state_of(&events, id),
-        Some(OperationState::Vetoed),
-        "{events:?}"
-    );
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, Event::GatesBlocked { .. })),
-        "{events:?}"
-    );
-    assert!(
-        gate_names(&events).is_empty(),
-        "a workflow gate ran: {events:?}"
-    );
-    assert!(notices(&events).is_empty());
     assert!(remote_tip(&fx.origin, "feat").is_empty());
 }
 

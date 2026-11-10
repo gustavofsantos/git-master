@@ -20,7 +20,6 @@ use gm_schema::{
 use serde_json::{Map, Value, json};
 
 use crate::memory_tools;
-use crate::proposal_tools;
 use crate::session::Session;
 use crate::verdict_tools;
 
@@ -195,7 +194,6 @@ pub fn tools() -> Vec<ToolDefinition> {
     ]);
     all.extend(memory_tools::definitions());
     all.extend(verdict_tools::definitions());
-    all.extend(proposal_tools::definitions());
     all.into_iter().map(with_agent_argument).collect()
 }
 
@@ -404,9 +402,6 @@ fn dispatch(session: &mut Session, name: &str, args: &Value) -> Result<Value, St
         "reviewers_list" => verdict_tools::reviewers_list(session, args),
         "verdicts_list" => verdict_tools::verdicts_list(session, args),
         "verdict_record" => verdict_tools::verdict_record(session, args),
-        "gates_status" => verdict_tools::gates_status(session, args),
-        "reviewer_propose" => proposal_tools::reviewer_propose(session, args),
-        "gate_propose" => proposal_tools::gate_propose(session, args),
         other => Err(format!("there is no tool {other}")),
     }
 }

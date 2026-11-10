@@ -11,11 +11,8 @@ use std::path::Path;
 use gm_schema::{CommandKind, RestackBlock, RestackPlan, StackSnapshot, StackState};
 use serde_json::{Value, json};
 
-use gm_schema::GateOp;
-
 use crate::GitPort;
 use crate::branch;
-use crate::gate_check::{self, GateConfig};
 use crate::port::ScriptRemote;
 use crate::restack_session;
 use crate::script::run::EffectResult;
@@ -263,12 +260,9 @@ pub(crate) fn preview(
 /// id, else `stale`. Its unblocked branches move in one transaction; a conflict ends `conflict`
 /// after they moved; a plan that moves nothing and was refused ends `failed` with the reasons.
 ///
-/// The restack gates (D212 (2), R2h) judge the root and every branch the plan moves, before any ref
-/// moves. A workflow never bypasses a gate: no `ctx` call does (D212 (4)).
 pub(crate) fn apply_restack(
     actions: &mut Actions<'_>,
     book: &PlanBook,
-    gates: &GateConfig,
     plan_id: &str,
 ) -> EffectResult {
     let from = match route(book.get(plan_id), true) {
@@ -296,10 +290,6 @@ pub(crate) fn apply_restack(
     }
     if let Some(reason) = plan.stopped.first() {
         return ended("failed", reason.clone());
-    }
-    let branches = gate_check::restack_branches(&from, &plan);
-    if let Err(text) = gate_check::refuse(git, root, &branches, GateOp::Restack, gates) {
-        return ended("failed", text);
     }
     let found = blocks(&plan);
     if branch_count(&plan) > 0 {
@@ -443,24 +433,13 @@ pub(crate) fn fetch(git: &dyn GitPort, root: &Path, remote: &str) -> Started {
 }
 
 /// `ctx.push.lease({ branch, remote })`: `git push --force-with-lease`, off the engine thread. The
-/// approval is asked by the run before the call gets here. The push gates of `branch` are checked
-/// first, and a block fails the call with nothing pushed. A workflow never bypasses a gate: no
-/// `ctx` call does (D212 (4)).
-pub(crate) fn push_lease(
-    git: &dyn GitPort,
-    root: &Path,
-    gates: &GateConfig,
-    branch: &str,
-    remote: &str,
-) -> Started {
+/// approval is asked by the run before the call gets here.
+pub(crate) fn push_lease(git: &dyn GitPort, root: &Path, branch: &str, remote: &str) -> Started {
     if let Some(problem) = remote_problem(remote) {
         return Started::Ended(ended("failed", problem));
     }
     if let Some(problem) = branch::name_problem(branch) {
         return Started::Ended(ended("failed", problem));
-    }
-    if let Err(text) = gate_check::refuse(git, root, &[branch.to_owned()], GateOp::Push, gates) {
-        return Started::Ended(ended("failed", text));
     }
     match git.push_branch_with_lease(root, branch, remote) {
         Ok(remote) => Started::Waiting { remote },

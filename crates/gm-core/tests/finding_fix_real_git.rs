@@ -10,7 +10,7 @@ use std::process::Command as Process;
 use gm_core::git::SubprocessGit;
 use gm_core::{Engine, reviewers};
 use gm_schema::{
-    Actor, Command, CommandKind, Event, FindingInput, GatesStatus, OperationId, OperationState,
+    Actor, Command, CommandKind, Event, FindingInput, OperationId, OperationState,
     ReviewAuthorFilter, ReviewComment, ReviewSeverity, ReviewStatus, Reviewer, ReviewerSource,
     Verdict,
 };
@@ -55,13 +55,6 @@ fn repo() -> tempfile::TempDir {
             reviewers::save(&reviewers::repo_dir(&dir.path().join(".git")), &reviewer).unwrap();
         }
     }
-    let gitmaster = dir.path().join(".git").join("gitmaster");
-    std::fs::create_dir_all(&gitmaster).unwrap();
-    std::fs::write(
-        gitmaster.join("gates.json"),
-        r#"{"gates":[{"id":"no-high","kind":"findings","severity":"high","on":["push"]}]}"#,
-    )
-    .unwrap();
     dir
 }
 
@@ -116,7 +109,6 @@ impl Session {
         let user = tempfile::tempdir().unwrap();
         let mut engine = Engine::new(Box::new(SubprocessGit::default()));
         engine.set_reviewer_user_dir(Some(reviewers::user_dir(user.path())));
-        engine.set_gates_user_dir(Some(user.path().to_path_buf()));
         let mut session = Self {
             engine,
             _user: user,
@@ -171,24 +163,6 @@ impl Session {
                 _ => None,
             })
             .expect("the listing answers")
-    }
-
-    fn gates(&mut self) -> GatesStatus {
-        let events = self.run(
-            Actor::Human,
-            CommandKind::GatesStatus {
-                branch: None,
-                member: None,
-            },
-        );
-        assert!(done(&events), "{}", failure(&events));
-        events
-            .into_iter()
-            .find_map(|event| match event {
-                Event::GatesStatusRead { status, .. } => Some(status),
-                _ => None,
-            })
-            .expect("the gate check answers")
     }
 }
 
@@ -290,7 +264,7 @@ fn a_finding_keeps_its_fix_redacted_and_the_listing_returns_body_fix_and_line() 
 }
 
 #[test]
-fn another_agent_hands_off_a_finding_and_the_findings_gate_still_waits_for_the_person() {
+fn another_agent_hands_off_a_finding_and_only_the_person_resolves_it() {
     let dir = repo();
     let mut session = Session::open(dir.path());
     let recorded = record(
@@ -299,7 +273,6 @@ fn another_agent_hands_off_a_finding_and_the_findings_gate_still_waits_for_the_p
     );
     assert!(done(&recorded), "{}", failure(&recorded));
     let id = finding_id(&recorded);
-    assert!(!session.gates().ready, "an open finding blocks");
 
     let handed = hand_off(
         &mut session,
@@ -313,20 +286,6 @@ fn another_agent_hands_off_a_finding_and_the_findings_gate_still_waits_for_the_p
     let reply = root.replies.last().expect("the summary is a reply");
     assert_eq!(reply.author, "agent:fixer");
     assert_eq!(reply.body, "Rejects empty input at line 2.");
-
-    let gates = session.gates();
-    assert!(!gates.ready, "a handled finding still blocks");
-    let gate = gates
-        .gates
-        .iter()
-        .find(|gate| gate.id == "no-high")
-        .unwrap();
-    assert!(
-        gate.reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("unresolved finding")),
-        "{gate:?}"
-    );
 
     for kind in [
         CommandKind::ResolveReviewComment { id },
@@ -345,7 +304,7 @@ fn another_agent_hands_off_a_finding_and_the_findings_gate_still_waits_for_the_p
 
     let resolved = session.run(Actor::Human, CommandKind::ResolveReviewComment { id });
     assert!(done(&resolved), "{}", failure(&resolved));
-    assert!(session.gates().ready, "a person's resolve passes the gate");
+    assert_eq!(comment(&mut session, id).status, ReviewStatus::Resolved);
 }
 
 #[test]
@@ -378,7 +337,7 @@ fn an_agent_still_cannot_hand_off_a_plain_note_it_started() {
 }
 
 #[test]
-fn a_person_reply_reopens_a_handled_finding_and_a_resolve_then_passes_the_gate() {
+fn a_person_reply_reopens_a_handled_finding_and_a_resolve_closes_it() {
     let dir = repo();
     let mut session = Session::open(dir.path());
     let recorded = record(&mut session, vec![finding(2, "unchecked input", None)]);
@@ -399,7 +358,6 @@ fn a_person_reply_reopens_a_handled_finding_and_a_resolve_then_passes_the_gate()
     );
     assert!(done(&reply), "{}", failure(&reply));
     assert_eq!(comment(&mut session, id).status, ReviewStatus::Open);
-    assert!(!session.gates().ready);
 
     assert!(done(&hand_off(
         &mut session,
@@ -410,7 +368,7 @@ fn a_person_reply_reopens_a_handled_finding_and_a_resolve_then_passes_the_gate()
     assert_eq!(comment(&mut session, id).status, ReviewStatus::Handled);
     let resolved = session.run(Actor::Human, CommandKind::ResolveReviewComment { id });
     assert!(done(&resolved), "{}", failure(&resolved));
-    assert!(session.gates().ready);
+    assert_eq!(comment(&mut session, id).status, ReviewStatus::Resolved);
 }
 
 #[test]

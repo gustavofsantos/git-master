@@ -171,7 +171,6 @@ impl Session {
     fn open(dir: &Path, user: &Path) -> Self {
         let mut engine = Engine::new(Box::new(SubprocessGit::default()));
         engine.set_reviewer_user_dir(Some(reviewers::user_dir(user)));
-        engine.set_gates_user_dir(Some(user.to_path_buf()));
         let mut session = Self { engine, next: 1 };
         let events = session.human(CommandKind::OpenRepo {
             path: dir.to_string_lossy().into_owned(),

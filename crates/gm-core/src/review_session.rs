@@ -36,6 +36,27 @@ impl ReviewSession {
     }
 }
 
+/// How many repositories' stores the engine keeps open at once (D96).
+pub(crate) const REVIEW_SESSION_LIMIT: usize = 4;
+
+/// The store of the checkout at `root` in `slot`, opened on first use. The oldest session is
+/// dropped when the slot is full.
+pub(crate) fn review_store<'a>(
+    slot: &'a mut Vec<ReviewSession>,
+    git: &dyn GitPort,
+    root: &Path,
+) -> Result<&'a mut ReviewStore, String> {
+    if let Some(index) = slot.iter().position(|session| session.root == root) {
+        return Ok(&mut slot[index].store);
+    }
+    if slot.len() >= REVIEW_SESSION_LIMIT {
+        slot.remove(0);
+    }
+    slot.push(ReviewSession::open(git, root)?);
+    let last = slot.len() - 1;
+    Ok(&mut slot[last].store)
+}
+
 /// Reads `path`, relative to `root`, as the text a comment is anchored in. The
 /// path must be made of plain names and its folder must resolve inside the
 /// root. Refused: a missing file, a symbolic link, a folder, a file over

@@ -90,12 +90,11 @@ fn origin_at(origin: &Path, rev: &str) -> String {
     git_in(origin, &["rev-parse", rev])
 }
 
-/// An empty directory of the test's own, for the user's gates and reviewers (R2h): the
+/// An empty directory of the test's own, for the user's workflows and reviewers (R2h): the
 /// developer's configuration must not change what this test pushes or restacks.
 fn isolate_user_config(engine: &mut Engine, repo: &Path) {
     let user = repo.parent().unwrap().join("user-config");
     std::fs::create_dir_all(&user).unwrap();
-    engine.set_gates_user_dir(Some(user.clone()));
     engine.set_reviewer_user_dir(Some(gm_core::reviewers::user_dir(&user)));
 }
 
@@ -494,7 +493,6 @@ fn the_command_log_records_the_git_runs_and_not_the_reads() {
 fn remote_commands_need_an_open_repository() {
     let mut engine = Engine::new(Box::new(SubprocessGit::default()));
     let user = tempfile::tempdir().unwrap();
-    engine.set_gates_user_dir(Some(user.path().to_path_buf()));
     engine.set_reviewer_user_dir(Some(gm_core::reviewers::user_dir(user.path())));
     let events = send(&mut engine, 1, Actor::Human, CommandKind::Fetch);
     assert_eq!(failure(&events), "no repository is open");

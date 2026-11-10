@@ -6,11 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::conflict::{ConflictFileRead, ConflictSite, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
-use crate::gates::{Bypass, GateDef, GateLayer, GateOp, GateOutcome, GatesStatus, MemberGates};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
-use crate::proposal::{Proposal, ProposalStatus, ReviewerProposal};
 use crate::reflog::ReflogEntry;
 use crate::restack::{RestackPlan, RestackRecord, RestackResolution};
 use crate::review::{ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewKind, ReviewSeverity};
@@ -28,7 +26,7 @@ use crate::threads::{
     SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink,
     ThreadRelKind, ThreadRelation, ThreadSummary,
 };
-use crate::verdict::{Approval, FindingInput, Reviewer, ReviewerFileError, Verdict};
+use crate::verdict::{FindingInput, Reviewer, ReviewerFileError, Verdict};
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
     WorkflowRunStatus, WorkflowRunSummary,
@@ -689,118 +687,12 @@ pub enum CommandKind {
     ListReviewers {
         name: Option<String>,
     },
-    /// Approves the tip of `branch` (D215 (2)): `head` must be the tip now, so a person approves
-    /// exactly what they saw; `note` is at most 500 characters. Human only. Answers `ApprovalRead`.
-    ApproveBranch {
-        branch: String,
-        head: String,
-        note: Option<String>,
-        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        member: Option<String>,
-    },
-    /// Withdraws the approval of `branch`, if it has one. Human only. Answers `ApprovalRead`
-    /// with no approval.
-    RevokeApproval {
-        branch: String,
-        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        member: Option<String>,
-    },
-    /// Reads the approval of `branch`, with whether it is stale against the tip now. A read:
-    /// never recorded (D28). Answers `ApprovalRead`.
-    ReadApproval {
-        branch: String,
-        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        member: Option<String>,
-    },
-    /// Sets the intent of `branch`, its `branch.<name>.description` (D215 (1)): at most 2,000
-    /// characters, no NUL; empty unsets it. Human only. Answers `BranchDescriptionRead`.
-    SetBranchDescription {
-        branch: String,
-        text: String,
-        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        member: Option<String>,
-    },
     /// Reads the intent of `branch`. A read: never recorded (D28). Answers `BranchDescriptionRead`.
     ReadBranchDescription {
         branch: String,
         /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         member: Option<String>,
-    },
-    /// Reads the gate check of `branch` (D212 (5), D215): every gate, whether it applies and
-    /// passes, the reviewers that still need a verdict for the tip, the intent and the approval.
-    /// `branch` defaults to the branch HEAD is on, and a detached HEAD needs one. A read: never
-    /// recorded (D28). Answers `GatesStatusRead`.
-    GatesStatus {
-        #[serde(default)]
-        branch: Option<String>,
-        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        member: Option<String>,
-    },
-    /// Runs `then`, a push with lease or a restack, past the native gate check (D212 (4)).
-    /// `gates` are the ids of the gates the person saw block it (1 to 50 ids, each a gate id or
-    /// `gates-file` for a gate file problem); a block that now holds a gate not in `gates` is
-    /// refused. `reason` is 1 to 500 characters once trimmed. The command is logged whole, so the
-    /// log keeps the gates and the reason. Human only, and not an MCP tool: an agent cannot bypass
-    /// a gate.
-    BypassGates {
-        gates: Vec<String>,
-        reason: String,
-        then: Box<CommandKind>,
-    },
-    /// Lists the bypasses of gate checks, newest first, of `branch` when it is given, at most
-    /// `limit` (20 when 0, 200 at most). A read: never recorded (D28). Answers `BypassesListed`.
-    ListBypasses {
-        branch: Option<String>,
-        #[serde(default)]
-        limit: u32,
-        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        member: Option<String>,
-    },
-    /// An agent proposes a reviewer (D214 (3)): the definition and a `reason` of 1 to 300
-    /// characters. It is stored as a proposal, not a reviewer, and is refused when it is not a
-    /// valid reviewer file, when there are 10 open proposals, or when it duplicates an open or a
-    /// denied one. Agent only. Answers `ProposalDecided`.
-    ProposeReviewer {
-        reviewer: Box<ReviewerProposal>,
-        reason: String,
-    },
-    /// An agent proposes a gate (D214 (3)): `gate` as a gate file writes it, and a `reason`. The
-    /// same limits as `ProposeReviewer`; a proposed gate blocks nothing. Agent only. Answers
-    /// `ProposalDecided`.
-    ProposeGate {
-        gate: Box<GateDef>,
-        reason: String,
-    },
-    /// Lists the proposals, newest first, with `status` when it is given, at most `limit` (20 when
-    /// 0, 100 at most). A read: never recorded (D28). Answers `ProposalsListed`.
-    ListProposals {
-        #[serde(default)]
-        status: Option<ProposalStatus>,
-        #[serde(default)]
-        limit: u32,
-    },
-    /// Accepts proposal `id` (D214 (3)): writes its definition into `layer` (the repository or the
-    /// user; a workspace is not yet). `edited_reviewer` or `edited_gate` replace the proposed
-    /// definition when given, and keep its name or id. Human only. Answers `ProposalDecided`.
-    AcceptProposal {
-        id: i64,
-        layer: GateLayer,
-        #[serde(default)]
-        edited_reviewer: Option<Box<ReviewerProposal>>,
-        #[serde(default)]
-        edited_gate: Option<Box<GateDef>>,
-    },
-    /// Denies proposal `id`, which is kept so the same proposal is not made again. Human only.
-    /// Answers `ProposalDecided`.
-    DenyProposal {
-        id: i64,
     },
     /// Replaces the body of review comment `id`. Human only.
     EditReviewComment {
@@ -1665,61 +1557,12 @@ pub enum Event {
         reviewers: Vec<Reviewer>,
         errors: Vec<ReviewerFileError>,
     },
-    /// Answers `ReadApproval`, `ApproveBranch` and `RevokeApproval` (no approval once revoked):
-    /// the approval of `branch`, with whether it is stale.
-    ApprovalRead {
-        id: OperationId,
-        branch: String,
-        approval: Option<Approval>,
-    },
-    /// Answers `ReadBranchDescription` and `SetBranchDescription`: the intent of `branch` as
+    /// Answers `ReadBranchDescription`: the intent of `branch` as
     /// stored, `None` when there is none.
     BranchDescriptionRead {
         id: OperationId,
         branch: String,
         text: Option<String>,
-    },
-    /// Answers `ListBypasses`, newest first.
-    BypassesListed {
-        id: OperationId,
-        bypasses: Vec<Bypass>,
-    },
-    /// Answers `ListProposals`, newest first.
-    ProposalsListed {
-        id: OperationId,
-        proposals: Vec<Proposal>,
-    },
-    /// Answers `ProposeReviewer`, `ProposeGate`, `AcceptProposal` and `DenyProposal`: the proposal
-    /// as it stands now.
-    ProposalDecided {
-        id: OperationId,
-        proposal: Box<Proposal>,
-    },
-    /// Answers `GatesStatus`: the gate check of the branch, its intent and its approval, with
-    /// whether the approval is stale (D215 (2)).
-    GatesStatusRead {
-        id: OperationId,
-        status: GatesStatus,
-        intent: Option<String>,
-        approval: Option<Approval>,
-    },
-    /// Answers `GatesStatus` with no `member` in a workspace (D214 (5)): every member's gate
-    /// check, in the order of the workspace's members. `ready` is true only when every member has
-    /// a status and every status is ready (fail closed). It blocks nothing.
-    WorkspaceGatesRead {
-        id: OperationId,
-        ready: bool,
-        members: Vec<MemberGates>,
-    },
-    /// A push or a restack the native gate check stopped (D212 (3)). Sent after the operation
-    /// ends `Vetoed`, so the window can offer Bypass. `gates` holds only the gates that block
-    /// (applicable and not passed); `errors` the gate file problems.
-    GatesBlocked {
-        id: OperationId,
-        operation: GateOp,
-        branch: String,
-        gates: Vec<GateOutcome>,
-        errors: Vec<String>,
     },
     /// Answers `LoadReviewSnapshotText` for comment `comment`: the lines it
     /// covered in the snapshot, empty when there is no snapshot or the file was
@@ -2161,253 +2004,25 @@ mod tests {
     }
 
     #[test]
-    fn approval_and_description_commands_wire_format_is_tagged() {
-        let approve = serde_json::to_value(CommandKind::ApproveBranch {
-            branch: "feat/x".into(),
-            head: "a".repeat(40),
-            note: Some("looks right".into()),
-            member: None,
-        })
-        .unwrap();
-        assert_eq!(approve["type"], "approve_branch");
-        assert_eq!(approve["branch"], "feat/x");
-        assert_eq!(approve["note"], "looks right");
-        let bare: CommandKind = serde_json::from_value(
-            serde_json::json!({ "type": "approve_branch", "branch": "b", "head": "h" }),
-        )
-        .unwrap();
-        assert_eq!(
-            bare,
-            CommandKind::ApproveBranch {
-                branch: "b".into(),
-                head: "h".into(),
-                note: None,
-                member: None,
-            }
-        );
-        let revoke = serde_json::to_value(CommandKind::RevokeApproval {
-            branch: "b".into(),
-            member: None,
-        })
-        .unwrap();
-        assert_eq!(revoke["type"], "revoke_approval");
-        let read = serde_json::to_value(CommandKind::ReadApproval {
-            branch: "b".into(),
-            member: None,
-        })
-        .unwrap();
-        assert_eq!(read["type"], "read_approval");
-        let set = serde_json::to_value(CommandKind::SetBranchDescription {
-            branch: "b".into(),
-            text: "line one\nline \"two\"".into(),
-            member: None,
-        })
-        .unwrap();
-        assert_eq!(set["type"], "set_branch_description");
-        assert_eq!(set["text"], "line one\nline \"two\"");
+    fn branch_description_commands_wire_format_is_tagged() {
         let describe = serde_json::to_value(CommandKind::ReadBranchDescription {
             branch: "b".into(),
             member: None,
         })
         .unwrap();
         assert_eq!(describe["type"], "read_branch_description");
-    }
-
-    #[test]
-    fn approval_events_wire_format_is_tagged() {
-        let read = Event::ApprovalRead {
-            id: OperationId(6),
-            branch: "feat".into(),
-            approval: Some(Approval {
-                branch: "feat".into(),
-                head: "b".repeat(40),
-                note: None,
-                origin: "human".into(),
-                at: 9,
-                stale: false,
-            }),
-        };
-        let json = serde_json::to_value(&read).unwrap();
-        assert_eq!(json["type"], "approval_read");
-        assert_eq!(json["approval"]["origin"], "human");
-        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), read);
-        let revoked = Event::ApprovalRead {
-            id: OperationId(7),
-            branch: "feat".into(),
-            approval: None,
-        };
-        let json = serde_json::to_value(&revoked).unwrap();
-        assert!(json["approval"].is_null());
         let text = Event::BranchDescriptionRead {
-            id: OperationId(8),
-            branch: "feat".into(),
-            text: Some("why".into()),
+            id: OperationId(6),
+            branch: "b".into(),
+            text: Some("line one\nline \"two\"".into()),
         };
         let json = serde_json::to_value(&text).unwrap();
         assert_eq!(json["type"], "branch_description_read");
-        assert_eq!(json["text"], "why");
         assert_eq!(serde_json::from_value::<Event>(json).unwrap(), text);
     }
 
     #[test]
-    fn gates_status_wire_format_is_tagged() {
-        let read = serde_json::to_value(CommandKind::GatesStatus {
-            branch: None,
-            member: None,
-        })
-        .unwrap();
-        assert_eq!(read["type"], "gates_status");
-        assert!(read["branch"].is_null());
-        let bare: CommandKind =
-            serde_json::from_value(serde_json::json!({ "type": "gates_status" })).unwrap();
-        assert_eq!(
-            bare,
-            CommandKind::GatesStatus {
-                branch: None,
-                member: None,
-            }
-        );
-        let event = Event::GatesStatusRead {
-            id: OperationId(9),
-            status: GatesStatus {
-                branch: "feat".into(),
-                head: "c".repeat(40),
-                ready: false,
-                gates: Vec::new(),
-                missing: Vec::new(),
-                errors: vec!["gates.json: not JSON".into()],
-            },
-            intent: Some("why".into()),
-            approval: None,
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "gates_status_read");
-        assert_eq!(json["status"]["ready"], false);
-        assert_eq!(json["status"]["errors"][0], "gates.json: not JSON");
-        assert_eq!(json["intent"], "why");
-        assert!(json["approval"].is_null());
-        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
-    }
-
-    #[test]
-    fn proposal_commands_and_events_wire_format_is_tagged() {
-        use crate::gates::{GateDef, GateKind, GateLayer, GateOp, When};
-        use crate::proposal::{ProposalKind, ProposalStatus};
-        let propose = serde_json::to_value(CommandKind::ProposeReviewer {
-            reviewer: Box::new(ReviewerProposal {
-                name: "billing".into(),
-                description: "Knows the rules.".into(),
-                instructions: "Check rounding.".into(),
-                signal: crate::verdict::ReviewerSignal::Level,
-                direction: crate::verdict::ReviewerDirection::LowerIsBetter,
-                subject: crate::verdict::ReviewerSubject::Branch,
-                model: None,
-                paths: vec!["services/billing/**".into()],
-                branches: Vec::new(),
-                members: Vec::new(),
-            }),
-            reason: "legacy rules".into(),
-        })
-        .unwrap();
-        assert_eq!(propose["type"], "propose_reviewer");
-        assert_eq!(propose["reviewer"]["paths"][0], "services/billing/**");
-        let gate = GateDef {
-            id: "billing".into(),
-            kind: GateKind::FreshVerdict {
-                reviewers: vec!["billing".into()],
-            },
-            on: vec![GateOp::Push],
-            when: When {
-                branches: Vec::new(),
-                paths: vec!["services/billing/**".into()],
-            },
-            members: Vec::new(),
-        };
-        let proposed = serde_json::to_value(CommandKind::ProposeGate {
-            gate: Box::new(gate.clone()),
-            reason: "billing changes need it".into(),
-        })
-        .unwrap();
-        assert_eq!(proposed["type"], "propose_gate");
-        assert_eq!(proposed["gate"]["kind"], "fresh_verdict");
-        let list: CommandKind =
-            serde_json::from_value(serde_json::json!({ "type": "list_proposals" })).unwrap();
-        assert_eq!(
-            list,
-            CommandKind::ListProposals {
-                status: None,
-                limit: 0,
-            }
-        );
-        let accept = serde_json::to_value(CommandKind::AcceptProposal {
-            id: 4,
-            layer: GateLayer::Repository,
-            edited_reviewer: None,
-            edited_gate: Some(Box::new(gate)),
-        })
-        .unwrap();
-        assert_eq!(accept["type"], "accept_proposal");
-        assert_eq!(accept["layer"], "repository");
-        assert_eq!(accept["edited_gate"]["id"], "billing");
-        assert_eq!(
-            serde_json::to_value(CommandKind::DenyProposal { id: 4 }).unwrap()["type"],
-            "deny_proposal"
-        );
-        let event = Event::ProposalDecided {
-            id: OperationId(11),
-            proposal: Box::new(Proposal {
-                id: 4,
-                kind: ProposalKind::Gate,
-                name: "billing".into(),
-                reviewer: None,
-                gate: None,
-                reason: "why".into(),
-                origin: "agent:claude-code".into(),
-                status: ProposalStatus::Proposed,
-                at: 9,
-                decided_at: None,
-                updates: false,
-                current_reviewer: None,
-                current_gate: None,
-            }),
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "proposal_decided");
-        assert_eq!(json["proposal"]["status"], "proposed");
-        assert!(json["proposal"]["decided_at"].is_null());
-        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
-        let listed = Event::ProposalsListed {
-            id: OperationId(12),
-            proposals: Vec::new(),
-        };
-        let json = serde_json::to_value(&listed).unwrap();
-        assert_eq!(json["type"], "proposals_listed");
-        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), listed);
-    }
-
-    #[test]
-    fn a_member_names_the_checkout_and_old_json_reads_as_none() {
-        let named = serde_json::to_value(CommandKind::GatesStatus {
-            branch: Some("feat".into()),
-            member: Some("api".into()),
-        })
-        .unwrap();
-        assert_eq!(named["member"], "api");
-        let plain = serde_json::to_value(CommandKind::GatesStatus {
-            branch: None,
-            member: None,
-        })
-        .unwrap();
-        assert!(plain.get("member").is_none(), "{plain}");
-        let old: CommandKind =
-            serde_json::from_value(serde_json::json!({ "type": "gates_status" })).unwrap();
-        assert_eq!(
-            old,
-            CommandKind::GatesStatus {
-                branch: None,
-                member: None,
-            }
-        );
+    fn an_old_verdict_list_reads_with_no_member() {
         let old_verdicts: CommandKind = serde_json::from_value(serde_json::json!({
             "type": "list_verdicts", "branch": "b", "limit": 3
         }))
@@ -2416,129 +2031,6 @@ mod tests {
             old_verdicts,
             CommandKind::ListVerdicts { member: None, .. }
         ));
-        let approve: CommandKind = serde_json::from_value(serde_json::json!({
-            "type": "approve_branch", "branch": "b", "head": "h", "member": "web"
-        }))
-        .unwrap();
-        assert!(matches!(
-            approve,
-            CommandKind::ApproveBranch { member: Some(ref name), .. } if name == "web"
-        ));
-    }
-
-    #[test]
-    fn a_workspace_gates_answer_lists_each_member_with_its_error() {
-        use crate::gates::MemberGates;
-        let event = Event::WorkspaceGatesRead {
-            id: OperationId(14),
-            ready: false,
-            members: vec![MemberGates {
-                member: "api".into(),
-                branch: Some("feat".into()),
-                status: None,
-                intent: None,
-                approval: None,
-                error: Some("member api is detached".into()),
-            }],
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "workspace_gates_read");
-        assert_eq!(json["ready"], false);
-        assert_eq!(json["members"][0]["member"], "api");
-        assert!(json["members"][0]["status"].is_null());
-        assert_eq!(json["members"][0]["error"], "member api is detached");
-        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
-    }
-
-    #[test]
-    fn bypass_audit_wire_format_is_tagged() {
-        use crate::gates::GateOp;
-        let list = serde_json::to_value(CommandKind::ListBypasses {
-            branch: Some("feat".into()),
-            limit: 0,
-            member: None,
-        })
-        .unwrap();
-        assert_eq!(list["type"], "list_bypasses");
-        assert_eq!(list["branch"], "feat");
-        let bare: CommandKind =
-            serde_json::from_value(serde_json::json!({ "type": "list_bypasses" })).unwrap();
-        assert_eq!(
-            bare,
-            CommandKind::ListBypasses {
-                branch: None,
-                limit: 0,
-                member: None,
-            }
-        );
-        let bypass = Bypass {
-            id: 3,
-            branch: "feat".into(),
-            head: "a".repeat(40),
-            operation: GateOp::Push,
-            gates: vec!["security".into()],
-            reason: "hotfix".into(),
-            actor: "human".into(),
-            at: 42,
-        };
-        let event = Event::BypassesListed {
-            id: OperationId(9),
-            bypasses: vec![bypass.clone()],
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "bypasses_listed");
-        assert_eq!(json["bypasses"][0]["operation"], "push");
-        assert_eq!(json["bypasses"][0]["gates"][0], "security");
-        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
-    }
-
-    #[test]
-    fn bypass_and_gates_blocked_wire_format_is_tagged() {
-        use crate::gates::GateLayer;
-        let bypass = serde_json::to_value(CommandKind::BypassGates {
-            gates: vec!["security".into(), "gates-file".into()],
-            reason: "hotfix".into(),
-            then: Box::new(CommandKind::PushWithLease),
-        })
-        .unwrap();
-        assert_eq!(bypass["type"], "bypass_gates");
-        assert_eq!(bypass["gates"][0], "security");
-        assert_eq!(bypass["gates"][1], "gates-file");
-        assert_eq!(bypass["reason"], "hotfix");
-        assert_eq!(bypass["then"]["type"], "push_with_lease");
-        let back: CommandKind = serde_json::from_value(bypass.clone()).unwrap();
-        assert_eq!(
-            back,
-            CommandKind::BypassGates {
-                gates: vec!["security".into(), "gates-file".into()],
-                reason: "hotfix".into(),
-                then: Box::new(CommandKind::PushWithLease),
-            }
-        );
-        let event = Event::GatesBlocked {
-            id: OperationId(7),
-            operation: GateOp::Push,
-            branch: "feat".into(),
-            gates: vec![GateOutcome {
-                id: "security".into(),
-                kind: "fresh_verdict".into(),
-                layer: GateLayer::Repository,
-                applicable: true,
-                not_applicable: None,
-                passed: false,
-                reason: Some("security has no verdict for the tip".into()),
-                settings: serde_json::json!({ "reviewers": ["security"] }),
-            }],
-            errors: vec!["gates.json: not JSON".into()],
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "gates_blocked");
-        assert_eq!(json["operation"], "push");
-        assert_eq!(json["branch"], "feat");
-        assert_eq!(json["gates"][0]["id"], "security");
-        assert_eq!(json["gates"][0]["passed"], false);
-        assert_eq!(json["errors"][0], "gates.json: not JSON");
-        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
     }
 
     #[test]

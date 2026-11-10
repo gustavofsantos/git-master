@@ -5,12 +5,10 @@ mod conflict;
 mod diff;
 pub mod features;
 mod files;
-mod gates;
 mod grep;
 mod history;
 mod move_changes;
 mod operation;
-mod proposal;
 mod reflog;
 mod restack;
 mod review;
@@ -32,10 +30,6 @@ pub use features::{Feature, FeatureSet};
 pub use files::{
     DirEntry, DirListing, FILE_HIT_LIMIT, FILE_VIEW_LIMIT, FileBody, FileHit, FileSearch, FileView,
 };
-pub use gates::{
-    Bypass, GateDef, GateKind, GateLayer, GateOp, GateOutcome, GatesStatus, LayeredGate,
-    MemberGates, MissingReason, MissingReviewer, When,
-};
 pub use grep::{
     GREP_FILE_LIMIT, GREP_LINE_LIMIT, GREP_TOTAL_LIMIT, GrepFile, GrepLine, GrepOptions,
     GrepResult, GrepScope,
@@ -49,7 +43,6 @@ pub use operation::{
     Actor, Command, CommandKind, Event, IllegalTransition, MERGED_LIST_CHANGED, OperationId,
     OperationState, STASH_LIST_CHANGED, WorktreeMode,
 };
-pub use proposal::{Proposal, ProposalKind, ProposalStatus, ReviewerProposal};
 pub use reflog::{REFLOG_PAGE, ReflogEntry};
 pub use restack::{
     PlannedBranch, PlannedCommit, ReplayStep, RestackBlock, RestackMove, RestackPhase, RestackPlan,
@@ -78,7 +71,7 @@ pub use threads::{
     Unverifiable,
 };
 pub use verdict::{
-    Approval, FindingInput, Level, Reviewer, ReviewerDirection, ReviewerFileError, ReviewerSignal,
+    FindingInput, Level, Reviewer, ReviewerDirection, ReviewerFileError, ReviewerSignal,
     ReviewerSource, ReviewerSubject, Verdict, VerdictFinding,
 };
 pub use workflow::{
