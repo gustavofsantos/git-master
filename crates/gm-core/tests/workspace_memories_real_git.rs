@@ -874,8 +874,8 @@ fn a_human_accepts_a_proposed_member_memory_from_the_workspace() {
         status_in(&clone.memories, "api proposed"),
         MemoryStatus::Accepted
     );
-    // The clone is bound to one context, so its own memories moved there (D222 (6)).
-    assert!(labelled(&clone.memories).contains(&row("api proposed", "Platform", None)));
+    // The clone's own memories go to its own context, `api`, whatever it is bound to (D222 (6)).
+    assert!(labelled(&clone.memories).contains(&row("api proposed", "api", None)));
 }
 
 #[test]
@@ -1267,12 +1267,12 @@ fn a_plain_repository_lists_no_member_and_sees_only_its_own_scopes() {
     let mut api = fx.engine_on(&fx.member_api);
     let listed = list(&mut api, None).expect("the list answers");
     assert_eq!(listed.note, None);
-    // The clone is bound to one context, so its memories moved there on this list (D222 (6)).
+    // The clone's memories moved to its own context, `api`, on this list (D222 (6)).
     assert_eq!(
         labelled(&listed.memories),
         vec![
-            row("api note", "Platform", None),
-            row("api rule", "Platform", None),
+            row("api note", "api", None),
+            row("api rule", "api", None),
             row("platform policy", "Platform", None),
         ]
     );
@@ -1282,6 +1282,10 @@ fn a_plain_repository_lists_no_member_and_sees_only_its_own_scopes() {
     }
     let (plain, _, _) = contexts(&mut api, true);
     let names: Vec<&str> = plain.iter().map(|context| context.name.as_str()).collect();
-    assert_eq!(names, vec!["Platform"]);
+    assert_eq!(
+        names,
+        vec!["Platform", "api"],
+        "the own context is bound too"
+    );
     assert!(members_of(&plain, "Platform").is_empty());
 }

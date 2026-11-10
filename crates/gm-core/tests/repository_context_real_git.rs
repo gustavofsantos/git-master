@@ -564,6 +564,58 @@ fn a_repositorys_threads_memories_move_into_its_context_on_the_next_command_with
     assert_eq!(again.len(), 4);
 }
 
+/// A second repository `name` beside the world's `api`, on `main`, with one commit.
+fn second_repo(world: &World, name: &str) -> PathBuf {
+    let root = world.root.parent().unwrap().join(name);
+    std::fs::create_dir(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("f.txt"), "one\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "init"]);
+    root
+}
+
+#[test]
+fn a_repositorys_threads_memories_move_to_its_own_context_when_it_is_bound_to_a_shared_one() {
+    let world = World::new();
+    let mut setup = engine_on(&world.root, Some(&world.db));
+    let platform = create_context(&mut setup, "Platform");
+    join(&mut setup, platform, &world.root);
+    drop(setup);
+    let billing_root = second_repo(&world, "billing");
+    let mut billing = engine_on(&billing_root, Some(&world.db));
+    join(&mut billing, platform, &billing_root);
+    drop(billing);
+    let uids = keep_in_threads(&world.root);
+
+    // The move goes to the repository's own context, `api`, bound beside the shared `Platform`; the
+    // memories are not put in `Platform`, which the other repository sees.
+    let mut engine = engine_on(&world.root, Some(&world.db));
+    let (listed, note) = list(&mut engine);
+    assert_eq!(note, None, "the move did not fail");
+    assert_eq!(listed.len(), 4);
+    for memory in &listed {
+        assert_eq!(memory.scope, "api", "{}", memory.text);
+        assert!(!stored_in_threads(&world.root, &memory.uid));
+    }
+    for uid in &uids {
+        assert!(listed.iter().any(|memory| &memory.uid == uid), "{uid}");
+    }
+    let mut bound = bound_names(&mut engine);
+    bound.sort();
+    assert_eq!(bound, ["Platform", "api"], "the own context is bound too");
+
+    // From the other repository, bound only to `Platform`, none of the memories is listed.
+    let mut other = engine_on(&billing_root, Some(&world.db));
+    let (seen, note) = list(&mut other);
+    assert_eq!(note, None);
+    assert!(
+        seen.is_empty(),
+        "a private memory of api is not visible from billing: {seen:?}"
+    );
+    assert_eq!(bound_names(&mut other), ["Platform"]);
+}
+
 #[test]
 fn a_move_finished_after_an_interrupted_insert_duplicates_nothing() {
     let world = World::new();

@@ -288,9 +288,10 @@ pub(crate) fn proposal_home(
     }
 }
 
-/// Where the memories of a plain repository move when they leave its `threads.db` (D222 (6)): the
-/// same context a proposal goes to, except that a repository bound to several contexts moves its
-/// memories to its own. `None` for a clone whose id clashes, which is left as it is.
+/// Where the memories of a plain repository move when they leave its `threads.db` (D222 (6)): always
+/// the repository's own context, the one with `repository_of` set to its id, whatever contexts it is
+/// bound to. A repository's private memories must not become visible to every other repository bound
+/// to a shared context. `None` for a clone whose id clashes, which is left as it is.
 pub(crate) fn move_home(
     store: &mut ContextStore,
     git: &dyn GitPort,
@@ -298,12 +299,7 @@ pub(crate) fn move_home(
 ) -> Result<Option<OwnContext>, String> {
     match binding(store, git, root)? {
         Binding::Clash { .. } => Ok(None),
-        Binding::Clone { repo_id, bound } if bound.len() > 1 => {
-            own_context(store, git, root, repo_id).map(Some)
-        }
-        Binding::Clone { repo_id, bound } => {
-            one_or_own(store, git, root, repo_id, &bound).map(Some)
-        }
+        Binding::Clone { repo_id, .. } => own_context(store, git, root, repo_id).map(Some),
     }
 }
 
