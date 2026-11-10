@@ -34,4 +34,4 @@ Click an item to select it. The top bar then shows its actions, the primary one 
 | Stack branch behind its parent | **Restack This Stack** | |
 | Stack branch whose parent is gone or merged | **Reparent to Grandparent** | **Remove From Stack** |
 
-> **Planned.** A gate that blocked an operation is not listed under **Needs you**.
+> **Planned.** A `before` workflow that blocked an operation is not listed under **Needs you**.

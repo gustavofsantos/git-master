@@ -67,7 +67,7 @@ Agent sessions are captured into `.git/gitmaster/threads.db`. Full design in `de
 - SQLite via `rusqlite` with bundled SQLite: compiled into the binary, no external dependency.
 - Retention: 200 runs per workflow and per repository, pruned when a run starts. Outputs larger than 64 KiB are stored as hash, size and the first 4 KiB.
 - Stack parents: git config of the repository.
-- Operation log, review comments, approvals: SQLite in the Git common directory (`git rev-parse --git-common-dir`), in `gitmaster/state.db`. Works with worktrees.
+- Operation log, review comments: SQLite in the Git common directory (`git rev-parse --git-common-dir`), in `gitmaster/state.db`. Works with worktrees.
 - Snapshots: private refs inside `.git`.
 - Threads: `threads.db` in the same directory (WAL, FTS5, `0600`), written by the hook process and by the engine, with a spool for events that cannot be written at once (D122, D124).
 - The operation log is the audit trail and the base of undo (through ref snapshots). **It is not event sourcing**: rebuilding state by replay is a trap, because Git changes outside the app.

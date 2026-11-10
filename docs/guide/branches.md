@@ -163,13 +163,9 @@ The branch menu has these stack actions:
 
 > **Planned.** Rename Branch is not available yet. Its item is listed in the branch menu, disabled.
 
-## Describe and approve a branch
+## The description of a branch
 
-> **Planned.** **Edit Branch Description…**, **Approve Branch** and **Revoke Approval** are not available yet.
-
-**Edit Branch Description…**, in the branch menu and the command palette, writes what the branch is for. GitMaster keeps it in the repository's `.git/config`, where `git branch --edit-description` puts it. Agents and [reviewers](../agents/reviewers.md#the-intent-of-a-change) read it as the intent of the change.
-
-**Approve Branch** says you read the current commit of the branch and accept it. **Revoke Approval** withdraws it. See [Reviewers and gates](../agents/reviewers.md#approve-a-branch).
+A branch can have a description: what the branch is for. Git keeps it in the repository's `.git/config`, and `git branch --edit-description` writes it. Review workflows read it as the intent of the change; see [Review workflows and scorecards](../agents/reviewers.md).
 
 ## The STACK section
 

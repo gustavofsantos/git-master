@@ -335,6 +335,6 @@ A thread can carry a short summary of what you asked for and what came out of it
 
 - [Agent integration](../agents/agent-integration.md): install the capture hooks.
 - [Memories](memories.md): keep decisions and rules for later sessions.
-- [Reviewers and gates](../agents/reviewers.md): have an agent review a branch and record what it found.
+- [Review workflows and scorecards](../agents/reviewers.md): have an agent review a branch and record what it found.
 - [Trust and safety](../concepts/trust-and-safety.md): what GitMaster records and where.
 - [Configuration](../reference/configuration.md): the `threads` settings and the database file.

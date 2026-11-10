@@ -11,11 +11,11 @@ Local review is a loop between you and an agent on your machine. You comment on 
 
 Open **Review** in the sidebar. The page has three parts:
 
-- On the left, three cards and the conversations. **Changes** shows the branch and its upstream (`feature → origin/feature`), the commits ahead and behind, the lines added and removed in the working tree, and how many files you marked **Viewed**. **Gates** lists the `before.<operation>` workflows that are switched on, with **needs review** on a gate whose version you have not reviewed, and says how many gates run before **Push with lease**. **Reviewers** has no content: reviewers are not available yet. Below the cards, **CONVERSATIONS** lists the review comments, grouped by file, with the filter chips in the page header.
+- On the left, the **Changes** card shows the branch and its upstream (`feature → origin/feature`), the commits ahead and behind, the lines added and removed in the working tree, and how many files you marked **Viewed**. Below it, the **Scorecards** table lists the results of the [review workflows](reviewers.md), and **Run review…** starts them. Below that, **Conversations** lists the review comments, grouped by file, with the filters **Blocking**, **Scorecard** and **Label** in the page header.
 - In the middle, one continuous diff: every changed file, one after another, with its path, `+a −r` and a **Viewed** box. A viewed file folds to its header. The mark clears by itself when the file's change changes. A file shows at most 400 lines; open it on **Changes** to read the rest. At most 200 files are read.
 - On the right, the selected conversation: the comment, its replies, the reply box, its actions and the **Before** and **After** of the change.
 
-> **Planned.** Bypassing a gate with a written reason, and reviewers and their verdicts, are not available yet. See [Reviewers and gates](reviewers.md).
+> **Planned.** The **Scorecards** table, **Run review…** and the **Blocking**, **Scorecard** and **Label** filters are not available yet.
 
 ## Comment on code
 
@@ -58,7 +58,7 @@ The app shows each comment with one of these badges:
 |---|---|
 | **Open** | Waiting for the agent. |
 | **Handled** | The agent has worked on it and left a summary. The agent sets this state. |
-| **Resolved** | You confirmed it. The agent only proposes this state; you make it final. An agent cannot mark a resolved comment handled again. |
+| **Resolved** | You confirmed it. Only you set this state. An agent cannot mark a resolved comment handled again. |
 | **Outdated** | The text the comment is anchored to no longer appears exactly once, so GitMaster does not place it. |
 
 **Outdated** is a flag on a comment rather than a state of its own: an open, handled or resolved comment becomes outdated when its text is no longer found.
@@ -100,19 +100,35 @@ review_comments_list(status="open")
                         { id: 11, author: "human", body: "Cover the empty string too.", created_at: "...", untrusted: true }] }] }
 ```
 
-## Notes, questions and flags from the agent
+## Labels and decorations
 
-The agent can start a thread of its own on any text in the working tree, with `review_comment_create`. Each one has a kind:
+A comment has a conventional-comment **label** and optional **decorations**. The agent sets them with `review_comment_create`.
 
-| Kind | Use |
+| Label | Use |
 |---|---|
-| **Note** | Something worth knowing about this code. It asks nothing of you. |
-| **Question** | The agent needs your answer. It shows **Needs answer** until you reply. |
-| **Flag** | A risk or a guess you should look at, with a severity of low, medium or high. |
+| **praise** | Something done well. |
+| **nitpick** | A small change you may skip. |
+| **suggestion** | A change that would help. |
+| **issue** | A problem to fix. |
+| **todo** | A change to make before the work is done. |
+| **question** | The agent needs your answer. |
+| **thought** | An idea, not a request. |
+| **chore** | Upkeep, such as a rename or a format change. |
+| **note** | Something worth knowing about this code. |
 
-An agent thread is anchored, snapshotted, shown inline and marked **Outdated** like yours, and its root is labelled **Agent-written**. Its root also shows its kind as a chip: **Note**, **Question** or **Flag**. A flag shows its severity after the kind, as **low**, **medium** or **high**. A question that no one has answered shows the **Needs answer** badge. You answer in the same **Reply** box. The agent does not receive your answer by itself: it reads it the next time it lists its threads, for example when you run `/gitmaster:inbox`. Only you close a thread. On a note the button reads **Dismiss** instead of **Resolve**. An agent has at most 20 open threads in a repository and 5 on one file, and a further one is refused.
+Decorations are `blocking`, `non-blocking` and `if-minor`, and up to three words of the agent's own, such as `security`. The Review page shows them as chips. A `blocking` comment counts toward the blocking workflows (see [Review workflows and scorecards](reviewers.md)).
 
-The **Local review** page has two filters for these threads: **Needs answer**, the questions waiting for your answer, and **Agent**, every thread an agent started, whatever its status. The count on the sidebar's **Local review** row counts only the open threads you started. An agent's note or flag is not work waiting for the agent, so it is not counted there.
+The label also sets the kind and the severity of a comment when they are not given:
+
+| Kind | From the label | Severity |
+|---|---|---|
+| **Question** | `question` | None. |
+| **Note** | `praise`, `note`, `thought` | None. |
+| **Flag** | `issue`, `suggestion`, `todo`, `nitpick`, `chore` | `issue`, `suggestion` and `todo`: medium. `nitpick` and `chore`: low. A `blocking` decoration: high. |
+
+Kinds work as before. A **Note** asks nothing of you, and a **Question** shows **Needs answer** until you reply. A **Flag** shows its severity after the kind, as **low**, **medium** or **high**. A note's button reads **Dismiss** instead of **Resolve**.
+
+An agent has at most 20 open threads in a repository and 5 on one file, and a further one is refused. Its root is labelled **Agent-written**, and it is anchored, snapshotted and marked **Outdated** like yours. You answer in the same **Reply** box. The agent does not receive your answer by itself: it reads it the next time it lists its threads, for example when you run `/gitmaster:inbox`. Only you close a thread.
 
 `review_comments_list` returns the threads you started by default, so the agent's own notes are not handed back to it as work. A question you have answered is returned, so the agent sees the answer.
 
@@ -160,6 +176,7 @@ Open the **Review** entry in the sidebar to see the comments of the repository.
 
 ## See also
 
+- [Review workflows and scorecards](reviewers.md): the reviewers, the scorecards and the blocking workflows.
 - [MCP server](mcp-server.md): how the agent connects and how approvals work.
 - [MCP tools](../reference/mcp-tools.md): the review tools, with their arguments and approval.
 - [Diff and staging](../guide/diff-and-staging.md): the diff where you write comments.

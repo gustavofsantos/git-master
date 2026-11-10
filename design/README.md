@@ -15,7 +15,8 @@ The product is specified in [`docs/`](../docs/README.md): the official documenta
 | [`code-navigation.md`](code-navigation.md) | Engineering design for Quick Open, the viewer and text search: engines, ranking, risks (symbols removed, D163). |
 | [`workflow-scripts.md`](workflow-scripts.md) | Engineering design for script workflows: sandbox, budgets, journal, approvals, tooling. |
 | [`threads.md`](threads.md) | Engineering design for threads: capture, redaction, storage, provenance, labels, memories and a deferred sharing design. |
-| [`reviewers.md`](reviewers.md) | Engineering design for reviewers, verdicts, gates and the plugin's skills and sub-agents. |
+| [`reviewers.md`](reviewers.md) | Engineering design for review workflows and scorecards. |
+| [`agent-skills.md`](agent-skills.md) | Engineering design for the plugin's skills and sub-agents. |
 | [`hooks-transitional.md`](hooks-transitional.md) | The `prepare-commit` hook that workflows replace. |
 | [`visual-identity.md`](visual-identity.md) | Palette, icon, files in `assets/icons/`. |
 | [`lessons.md`](lessons.md) | Toolchain pitfalls, GPUI practice, how agents are used on this codebase. |

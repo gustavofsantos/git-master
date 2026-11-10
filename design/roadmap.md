@@ -2,7 +2,7 @@
 
 The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `make docs-status` lists what the docs still mark as planned.
 
-Last updated: 2026-11-07 (M1 to M3 of slice 6m done, path unification done (D197), review reply threads (D198) and sub-agent threads (D199) recorded; before that, slices 6s, 6m and 8r planned, D187 to D190; before that, N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
+Last updated: 2026-11-10 (slice 8r is replaced by slice 8s, D219; before that, 2026-11-07: M1 to M3 of slice 6m done, path unification done (D197), review reply threads (D198) and sub-agent threads (D199) recorded; before that, slices 6s, 6m and 8r planned, D187 to D190; before that, N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
 
 ## Order criteria
 
@@ -713,7 +713,7 @@ The author decided the principles (D187: opt-in, additive, explicit, redaction c
 
 ## Slice 6m: memories (M1 to M4 done 2026-11-07; D190, D191, Q42, Q44)
 
-Requested by the author on 2026-11-07, first priority. Engineering design in `design/threads.md` ("Memories") and `design/reviewers.md` ("Skills and sub-agents"); behavior in `docs/guide/memories.md` (`Planned`). Depends on slice 6t and 6g (threads, labels, provenance).
+Requested by the author on 2026-11-07, first priority. Engineering design in `design/threads.md` ("Memories") and `design/agent-skills.md` ("Skills and sub-agents"); behavior in `docs/guide/memories.md` (`Planned`). Depends on slice 6t and 6g (threads, labels, provenance).
 
 **Goal.** Decisions, rules and lessons that agents propose and the human accepts, searchable by later sessions over MCP, with sources and a derived staleness signal.
 
@@ -764,15 +764,29 @@ Requested by the author on 2026-11-07. Behavior in `docs/agents/local-review.md`
 
 **Acceptance.** Real-Git tests: an agent creates a thread on a unique anchor; a missing or ambiguous anchor and the limits are refused; the agent cannot resolve or reopen it; a person's reply makes it appear in the default list; an agent thread is not handed back as work before a reply. A4 is tried in a real session and what was seen is stated.
 
-## Slice 8r: reviewers, verdicts and gates (decided 2026-11-07, after slice 6m; D188, D189, Q37, Q39, Q40)
+## Slice 8s: review workflows and scorecards (decided 2026-11-10, D219)
 
-Requested by the author on 2026-11-07. Engineering design in `design/reviewers.md`; behavior in `docs/agents/reviewers.md` (`Planned`). Depends on slice 8 (local review) and slice 7 (MCP record tools); the skills depend on M4's verification of the plugin format.
+Requested by the author on 2026-11-10. Engineering design in `design/reviewers.md`; behavior in `docs/agents/reviewers.md`, `docs/agents/local-review.md` and `docs/reference/mcp-tools.md` (`Planned` where not built). Depends on slice 8 (local review), slice 7 (MCP) and slice 3w (workflows). It replaces slice 8r: its gates, approvals, proposals, reviewer files and bypass are removed (S2), and its verdict table is replaced by scorecards (S3).
 
-**Goal.** An agent in the user's own session scores and reviews a branch; the app records the verdict and its findings, and deterministic gates over those records can stop a push or a restack until they pass.
+**Goal.** A reviewer is a manual workflow that starts the person's own agent. Its result is a scorecard. A push is blocked only by a `before.push` workflow that reads the scorecards, and nothing in the app is native or bypassed.
+
+**Sub-slices.**
+
+- **S1, docs and D219 (done when this lands).** The docs, `design/decisions.md`, this roadmap, `design/reviewers.md` and `design/agent-skills.md`.
+- **S2, removal.** Remove gates, `gates.json`, proposals, approvals, reviewers, Bypass and the native check from the engine, MCP and tests. Done when no code path or test names them and `make check` passes.
+- **S3, scorecards.** The `scorecards` table, labels and decorations on comments, migration v11, the MCP tools `scorecard_publish` and `scorecards_list`, `label` and `decorations` on `review_comment_create`, and `ctx.scorecards`.
+- **S4, review workflows.** `meta.review`, `ctx.change()`, the `.git/gitmaster/workflows/` loader path, `GITMASTER_WORKFLOW_RUN` in the child environment, and the two templates `review-invariants.lua` and `review-for-task.lua`.
+- **S5, Review page.** Pure view models first (chips, trend, blocking count, filters), then the GPUI page: the Scorecards table, **Run review…**, Conversations by file with the filters Blocking, Scorecard and Label. Then `ui-smoke` in both themes.
+- **S6, live check.** `claude -p` with MCP: tool names, the flags that deny shell and file writes, environment passing and thread capture, against a real session, kept as fixtures. Cursor CLI afterwards, once its MCP configuration and permission flags are verified without writing into the working tree (Q42).
+- **S7, plugin skill.** `/gitmaster:write-reviewer` in `ai/`, a separate repository: noted here only.
+
+**Acceptance.** A `before.push` workflow that calls `ctx.block` vetoes a real push on real Git and fails closed on an error. A stale scorecard is marked **Stale** wherever it is read. An agent cannot resolve a comment, publish on a stale head or switch off a blocking workflow.
+
+### History of slice 8r (R1, R2, R2h; removed by D219)
+
+The work below was built in part and verified in the backend. D219 removes it: the gates, approvals, proposals, Bypass and reviewer files in S2, and the verdict table in S3. It stays here as the record of what was built.
 
 **Sub-slices.** R1 verdict store and findings, R2 gates (pure, with the workflow phases and `ctx.verdicts()`), R3 UI, R4 the remaining skills and sub-agents, R5 `branch_agent_config`.
-
-**Acceptance.** Gate rules are pure and property-tested; a gate blocks `before.push` in a workflow run on real Git; an agent cannot resolve a finding or bypass a gate.
 
 **Review of 2026-11-09 and slice R2h.** An independent review found that workflow `ctx.push.lease` and `ctx.restack.apply` were not gated, that the gate check did not see the presets that `verdict_record` accepted, that the bypass record was in memory only, that a restack was gated on its root only, that a commit could land between the check and the push, that findings were keyed by branch name, and that five test files were not hermetic. R2h fixes them and the docs were corrected; see the commits. The order now is R2h, R2b, R2c, slice 6w (workspace inherits the memories and contexts of its members, D216), slice 6u, R3.
 
@@ -780,7 +794,7 @@ Requested by the author on 2026-11-07. Engineering design in `design/reviewers.m
 
 ## Slice 6u: memory revisions, applies-to paths and links (decided 2026-11-09; D213, Q47)
 
-Requested by the author on 2026-11-09. Behavior in `docs/guide/memories.md` and `docs/reference/mcp-tools.md` (`Planned`). Order: after R2 of slice 8r and before R3, as the author chose.
+Requested by the author on 2026-11-09. Behavior in `docs/guide/memories.md` and `docs/reference/mcp-tools.md` (`Planned`). Order: as the author chose on 2026-11-09, after the review workflows of slice 8s (S4); D219 replaces the gates of slice 8r that it was planned after.
 
 **Goal.** An agent can suggest an update to an accepted memory, covering its text and the files it relates to, and the person accepts or denies it; memories can be linked; and the engine can answer which accepted memories apply to a path, which a later recall hook (Q47) will use.
 
@@ -790,7 +804,7 @@ Requested by the author on 2026-11-09. Behavior in `docs/guide/memories.md` and 
 
 ## Slice 6w: a workspace inherits the knowledge of its members (decided 2026-11-09; D216)
 
-Requested by the author on 2026-11-09. Behavior in `docs/guide/workspaces.md`, `docs/guide/memories.md`, `docs/guide/contexts.md` and `docs/reference/mcp-tools.md` (`Planned`). After R2c, before slice 6u.
+Requested by the author on 2026-11-09. Behavior in `docs/guide/workspaces.md`, `docs/guide/memories.md`, `docs/guide/contexts.md` and `docs/reference/mcp-tools.md` (`Planned`). After R2c, before slice 6u. D219 removes R2c with the rest of slice 8r; the order of slices 6w and 6u is unchanged.
 
 **Goal.** Opening a workspace of two or more repositories that already hold memories, the workspace sees all their memories and the contexts they belong to, with its own threads kept, and nothing is copied.
 

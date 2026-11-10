@@ -34,7 +34,7 @@ The brief asked for a `ui/redesign` branch. AGENTS.md forbids feature branches a
 
 ### Slice 4: Review (D209)
 
-- Left: Changes, Gates and Reviewers (planned) cards over the conversations. Middle: continuous diff of every changed file with **Viewed** (clears when the file's change changes; folds the file). Right: the selected conversation with replies and Before/After.
+- Left: the Changes card, the Scorecards table with Run review… (planned, D219), and the conversations. Middle: continuous diff of every changed file with **Viewed** (clears when the file's change changes; folds the file). Right: the selected conversation with replies and Before/After.
 - Replies, handled, resolve and reopen already existed (D198, D200); the MCP loop is unchanged and its tests pass.
 - Mine, all of it (the session was running short).
 

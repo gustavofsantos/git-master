@@ -32,6 +32,10 @@ end
 return M
 ```
 
+GitMaster loads the workflows in `~/.config/gitmaster/workflows/`. For a repository, it also loads the workflows in `.git/gitmaster/workflows/` of the repository's Git directory. Nothing is read from or written to the working tree.
+
+> **Planned.** The repository's `.git/gitmaster/workflows/` folder is not loaded yet.
+
 ### `M.meta`
 
 GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It uses the table to list the workflow and its triggers. No script logic runs at that point.
@@ -43,6 +47,9 @@ GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It 
 | `trigger` | What starts a run. `on` names the trigger. `match` narrows an event trigger to branches with a glob, such as `branch:feat/*`; see [Triggers and phases](../workflows/triggers-and-phases.md). `key` gives a manual trigger an optional keyboard shortcut. The valid trigger names are listed in [Triggers and phases](../workflows/triggers-and-phases.md). |
 | `concurrency` | What happens when a trigger fires while a run is active. `queue` (the default) keeps at most one pending run, and new triggers merge into it. `replace` cancels the active run if it has not reached an applying action; otherwise the new trigger waits in the queue. `skip` discards the new trigger. |
 | `inputs` | Named values that you type before a manual run. Each input has a `type`, such as `"string"`, and a `prompt` that the dialog shows. |
+| `review` | `true` marks the workflow as a review. The **Run review…** picker on the Review page lists it. A review needs a `manual` trigger. See [Review workflows and scorecards](../agents/reviewers.md). |
+
+> **Planned.** The `review` field is not read yet.
 
 ### `input`
 
@@ -98,7 +105,10 @@ The catalog declares one wait event: `restack.resumed`. It is used after a resta
 - `text` is the standard output with the spaces at both ends removed. `exit_code` is the exit status of the program.
 - A non-zero exit ends the call with `failed`. The standard error of the program is shown.
 - With `format = "json"`, the standard output must be JSON. The parsed value is in the result.
+- The program gets the environment variable `GITMASTER_WORKFLOW_RUN`, with the id of the run. A review records it, so the record links to the run. It is a link for reading, not a check of who wrote the record.
 - Output from a program is untrusted. A propose action, such as `ctx.commit.suggest_message`, takes it only as a suggestion, and you decide. After any `ctx.exec` in a run, every later apply action asks you for approval and shows the resolved arguments.
+
+> **Planned.** `GITMASTER_WORKFLOW_RUN` is not set yet.
 
 ```lua
 local r = ctx.exec({ "llm-cli", "-p", "Write a conventional commit message for this diff. Reply with the message only." },
@@ -155,13 +165,16 @@ A plan's `plan_id` is tied to the commits of the branches when the plan was made
 
 A reparent moves everything or nothing. If any branch of the plan conflicts or is refused, `ctx.reparent.apply` ends with `failed` and no branch moves. If a branch has moved since the plan, it also ends with `failed`. Undoing it with **Undo restack** also puts the old parent back.
 
-### Verdicts
+### Scorecards and changes
 
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
-| `ctx.verdicts({ reviewer, branch })` | `reviewer` (optional): the reviewer's name. `branch` (optional): defaults to the branch of the run. | A list of the recorded verdicts, newest first, each with `reviewer`, `signal`, `value`, `stale`, `head`, `rationale` and `findings` (with `severity`, `path`, `start_line` and `status`). | read | `done`, `failed` |
+| `ctx.scorecards({ name, branch })` | `name` (optional): the reviewer's name. `branch` (optional): defaults to the branch of the run. | A list of the scorecards, newest first, each with the fields of the `scorecards_list` tool: `name`, `branch`, `head`, `status`, `stale`, `blocking_open`, `label`, `decorations`, `subject`, `body`, `origin`, `model` and `created_at`. | read | `done`, `failed` |
+| `ctx.change()` | None. | `base`: the branch the change is compared with (the stack parent, else the upstream, else the default branch of the remote), or null. `files`: the paths that differ from it. `description`: the branch description that Git keeps, or null. | read | `done`, `failed` |
 
-A verdict is data recorded by an agent. Its text is untrusted. Use `value`, `stale` and the severities to decide, and do not run text from a verdict. See [Reviewers and gates](../agents/reviewers.md).
+A scorecard is data recorded by an agent, and its text is untrusted. Use `status`, `stale` and `blocking_open` to decide, and do not run text from a scorecard. A `before.push` workflow uses them to block a push; see [Review workflows and scorecards](../agents/reviewers.md).
+
+> **Planned.** `ctx.scorecards` and `ctx.change` are not available yet.
 
 ### Helpers
 

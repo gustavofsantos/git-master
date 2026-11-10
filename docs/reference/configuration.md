@@ -35,7 +35,8 @@ GitMaster keeps per-repository state in `.git/gitmaster/`, inside the Git common
 | Path | What it holds | Status |
 |---|---|---|
 | `.git/gitmaster/state.db` | Workflow run history: every run and every call it made. | |
-| `.git/gitmaster/review.db` | The comments of the [local review](../agents/local-review.md) and their states. Their snapshots are kept in `refs/gitmaster/review/`. | |
+| `.git/gitmaster/review.db` | The comments of the [local review](../agents/local-review.md) and their states. Their snapshots are kept in `refs/gitmaster/review/`. The scorecards of the [review workflows](../agents/reviewers.md) are kept here too. | Scorecards planned |
+| `.git/gitmaster/workflows/` | Workflow files that apply to this repository only, such as a review for one task. | Planned |
 | `.git/gitmaster/threads.db` | The [threads](../guide/threads.md) captured from agent sessions in this repository: conversation, tool calls and edits, with a search index. Readable only by you. | |
 | `.git/gitmaster/repo-id` | A random id for this clone, written when the repository first joins a [context](../guide/contexts.md), so the membership survives moving the folder. | Planned |
 | `.git/gitmaster/threads-spool/`, `threads-tmp/`, `threads.log` | Events waiting to be written when the database was busy, temporary copies of files the agent is about to edit, and the capture log. The log keeps at most 256 KiB. | |
@@ -246,15 +247,6 @@ The settings dialog is not available yet, so these fields are edited today in **
 | **Sensitive Paths** | Edits the list of paths whose content is never stored. |
 | **Test** | Shows the result of redacting a sample text with the current patterns. |
 | **Result Size** | Sets the most bytes of one tool result that are stored. |
-
-### Reviewers
-
-> **Planned.** The Reviewers fields are not available yet.
-
-| Field | What it does |
-|---|---|
-| **Reviewers** | Lists your reviewers. Each has instructions, a signal, a direction, a subject and an optional model, kept as a Markdown file in `.git/gitmaster/reviewers/` of the repository or in `reviewers/` of your configuration directory. See [Reviewers and gates](../agents/reviewers.md). |
-| **Gates** | Sets which gates apply to a push and to a restack, for all branches or for branches that match a pattern. They are kept in `gates.json` in `.git/gitmaster/` of the repository, in your configuration directory for your defaults, and in the workspace repository for a workspace. A gate or reviewer can be limited to branches and paths. |
 
 ### Local Review
 

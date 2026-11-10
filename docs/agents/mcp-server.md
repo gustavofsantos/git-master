@@ -100,7 +100,7 @@ Your agent asks you before it uses a tool that changes the repository. GitMaster
 > **Planned.** The tools that apply a change are not available yet. The rest of this section is how they will work.
 
 - **Plan first.** A propose tool returns the whole plan and a `plan_id`. An apply tool accepts only that `plan_id`, never free arguments, so what you approve is the plan.
-- **The agent asks every time.** Each apply tool tells the client that it needs a person's approval on every call. In Claude Code the prompt appears even when you allow edits automatically, in auto mode and in bypass mode. It offers no "don't ask again", and an allow rule does not skip it. In Claude Code's `dontAsk` mode the call is denied instead.
+- **The agent asks every time.** Each apply tool tells the client that it needs a person's approval on every call. In Claude Code the prompt appears even when you allow edits automatically, in auto mode and when permission prompts are skipped. It offers no "don't ask again", and an allow rule does not skip it. In Claude Code's `dontAsk` mode the call is denied instead.
 - **The server still checks.** Before it applies, it rebuilds the plan and refuses one that is stale, because the branches moved, or one that was already applied.
 - **Only as strong as the client.** The approval is enforced by the agent, not by GitMaster. A client with no such control could let an apply call through, so the apply tools are offered only to clients known to enforce it.
 - **Read and record tools do not ask for approval from GitMaster.** Your agent may still ask the first time you use them. See [Claude Code permissions](#claude-code-permissions).

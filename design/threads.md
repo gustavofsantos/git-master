@@ -754,7 +754,7 @@ Pure: serializer determinism (same thread, same bytes, same hash), hash verifica
 
 ## Memories (D190)
 
-Decided 2026-11-07 (D190), not built. User-facing behavior: `docs/guide/memories.md` (marked `Planned`). Wider scope: contexts, D191 (details in Q44). The agent-side work (the skills) is in `design/reviewers.md`, "Skills and sub-agents".
+Decided 2026-11-07 (D190), not built. User-facing behavior: `docs/guide/memories.md` (marked `Planned`). Wider scope: contexts, D191 (details in Q44). The agent-side work (the skills) is in `design/agent-skills.md`, "Skills and sub-agents".
 
 ### Schema
 
@@ -907,7 +907,7 @@ Pure: the state machine (every illegal transition is refused, an agent actor can
 - **M1, model and store (pure):** schema, state machine, commands, search; no UI.
 - **M2, MCP tools:** `memories_search`, `memory_get`, `memory_propose`, `contexts_list`; with slice 7's tool plumbing. After C1, because the search arguments carry the scope.
 - **M3, Memories tab** (with C2: the scope chip and filter).
-- **M4, skills:** `/gitmaster:propose-memories` and `/gitmaster:prepare` (design/reviewers.md).
+- **M4, skills:** `/gitmaster:propose-memories` and `/gitmaster:prepare` (design/agent-skills.md).
 - **M5, sharing of memories** (with SH5): deferred with sharing, not in the build order.
 
 ## Sub-agent threads (D199)
