@@ -431,7 +431,7 @@ fn contexts_connect_two_repositories_and_a_memory_of_one_is_found_from_the_other
             initialize(),
             call(2, "contexts_list", &json!({})),
             call(3, "memories_search", &json!({})),
-            call(4, "memories_search", &json!({ "scope": "repository" })),
+            call(4, "memories_search", &json!({ "scope": "bound" })),
             call(5, "memories_search", &json!({ "scope": "Platform" })),
             call(
                 6,
@@ -463,6 +463,7 @@ fn contexts_connect_two_repositories_and_a_memory_of_one_is_found_from_the_other
     assert_eq!(contexts[0]["name"], "Platform");
     assert_eq!(contexts[0]["path"], "Platform");
     assert_eq!(contexts[0]["accepted_memories"], 2);
+    assert_eq!(contexts[0]["bound"], true);
 
     let everything = result(&replies[2])["memories"].as_array().unwrap().clone();
     let shared_hit = everything
@@ -473,7 +474,7 @@ fn contexts_connect_two_repositories_and_a_memory_of_one_is_found_from_the_other
     assert_eq!(shared_hit["untrusted"], true);
 
     // Repository B is bound to one context, so its own memory is stored there too (D222 (4)): the
-    // scope `repository` is its reach, and both memories are in Platform.
+    // scope `bound` is its reach, and both memories are in Platform.
     let own = result(&replies[3])["memories"].as_array().unwrap().clone();
     assert_eq!(own.len(), 2, "{own:?}");
     assert!(own.iter().any(|memory| memory["id"] == local.as_str()));
@@ -1045,4 +1046,301 @@ fn a_mark_on_a_memory_the_repository_cannot_see_is_not_found_and_says_how_to_fin
         tool_error(&replies[1]).contains("memories_search lists the memory ids"),
         "{replies:?}"
     );
+}
+
+/// A child context under `parent` as the person, and its id.
+fn create_child(engine: &mut Engine, name: &str, parent: i64) -> i64 {
+    let events = send(
+        engine,
+        &Actor::Human,
+        CommandKind::CreateContext {
+            name: name.into(),
+            parent: Some(parent),
+        },
+    );
+    assert_eq!(ended(&events), OperationState::Done, "create: {events:?}");
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::ContextsChanged {
+                context: Some(context),
+                ..
+            } => Some(context.id),
+            _ => None,
+        })
+        .expect("the context")
+}
+
+/// The `name` of each context of a `contexts_list` answer, in the order it lists them.
+fn names_of(listed: &Value) -> Vec<String> {
+    listed["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The `texts` of the memories of a search answer.
+fn texts_of(found: &Value) -> Vec<String> {
+    found["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|memory| memory["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_search_reads_the_bound_contexts_with_what_they_inherit_and_names_an_unbound_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("a");
+    let other = tmp.path().join("b");
+    let fresh = tmp.path().join("c");
+    make_repo(&repo);
+    make_repo(&other);
+    make_repo(&fresh);
+    let db = tmp.path().join("contexts.db");
+
+    let mut a = engine_on(&repo, &db);
+    let platform = create_context(&mut a, "Platform");
+    let billing = create_child(&mut a, "Billing", platform);
+    join(&mut a, billing, &repo);
+    propose_as_human(&mut a, "platform rule", "f.txt", Some("Platform"));
+    propose_as_human(&mut a, "billing rule", "f.txt", Some("Platform / Billing"));
+
+    // An incident that no repository is bound to; another repository wrote it.
+    let mut b = engine_on(&other, &db);
+    let incident = create_context(&mut b, "Incident: stuck exports");
+    join(&mut b, incident, &other);
+    propose_as_human(
+        &mut b,
+        "exports stall on retry",
+        "f.txt",
+        Some("Incident: stuck exports"),
+    );
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(2, "memories_search", &json!({})),
+            call(
+                3,
+                "memories_search",
+                &json!({ "scope": "Incident: stuck exports" }),
+            ),
+            call(4, "memories_search", &json!({ "scope": "Platform" })),
+        ],
+    );
+
+    let bound = texts_of(result(&replies[1]));
+    assert!(bound.contains(&"billing rule".to_owned()), "{bound:?}");
+    assert!(
+        bound.contains(&"platform rule".to_owned()),
+        "the context above the bound one is inherited: {bound:?}"
+    );
+    assert!(
+        !bound.contains(&"exports stall on retry".to_owned()),
+        "{bound:?}"
+    );
+    let billing_hit = result(&replies[1])["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|memory| memory["text"] == "billing rule")
+        .unwrap();
+    assert_eq!(billing_hit["scope"], "Platform / Billing");
+    let paths: Vec<&str> = billing_hit["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["Platform / Billing"]);
+
+    assert_eq!(
+        texts_of(result(&replies[2])),
+        ["exports stall on retry"],
+        "a name reads an unbound context"
+    );
+    assert_eq!(
+        texts_of(result(&replies[3])),
+        ["platform rule"],
+        "a context does not take the memories of its sub-contexts"
+    );
+
+    // A repository bound to no context reads the incident by its name, and its bound reach is empty.
+    let none = session(
+        &fresh,
+        &db,
+        &[
+            initialize(),
+            call(2, "memories_search", &json!({})),
+            call(
+                3,
+                "memories_search",
+                &json!({ "scope": "Incident: stuck exports" }),
+            ),
+        ],
+    );
+    assert!(texts_of(result(&none[1])).is_empty(), "{none:?}");
+    assert_eq!(texts_of(result(&none[2])), ["exports stall on retry"]);
+}
+
+#[test]
+fn contexts_list_gives_the_bound_contexts_and_with_all_every_one_with_what_each_inherits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("a");
+    let other = tmp.path().join("b");
+    make_repo(&repo);
+    make_repo(&other);
+    let db = tmp.path().join("contexts.db");
+
+    let mut a = engine_on(&repo, &db);
+    let platform = create_context(&mut a, "Platform");
+    let billing = create_child(&mut a, "Billing", platform);
+    join(&mut a, billing, &repo);
+    propose_as_human(&mut a, "platform rule", "f.txt", Some("Platform"));
+    propose_as_human(&mut a, "billing rule", "f.txt", Some("Platform / Billing"));
+    let mut b = engine_on(&other, &db);
+    let partners = create_context(&mut b, "Partners");
+    join(&mut b, partners, &other);
+    propose_as_human(&mut b, "partners rule", "f.txt", Some("Partners"));
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(2, "contexts_list", &json!({})),
+            call(3, "contexts_list", &json!({ "all": true })),
+        ],
+    );
+
+    let bound = result(&replies[1]);
+    assert_eq!(names_of(bound), ["Billing", "Platform"], "{bound}");
+    let billing_row = &bound["contexts"][0];
+    assert_eq!(billing_row["path"], "Platform / Billing");
+    assert_eq!(billing_row["bound"], true);
+    assert_eq!(
+        billing_row["accepted_memories"], 2,
+        "its own and Platform's"
+    );
+    let platform_row = &bound["contexts"][1];
+    assert_eq!(platform_row["bound"], false);
+    assert_eq!(platform_row["accepted_memories"], 1);
+
+    let every = result(&replies[2]);
+    assert_eq!(names_of(every).len(), 3, "{every}");
+    let partners_row = every["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| context["name"] == "Partners")
+        .unwrap();
+    assert_eq!(partners_row["bound"], false);
+    assert_eq!(partners_row["accepted_memories"], 1);
+    let billing_all = every["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| context["name"] == "Billing")
+        .unwrap();
+    assert_eq!(billing_all["bound"], true);
+    assert_eq!(billing_all["accepted_memories"], 2);
+}
+
+#[test]
+fn a_repository_scope_is_refused_and_a_repository_bound_to_two_contexts_must_name_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("a");
+    make_repo(&repo);
+    let db = tmp.path().join("contexts.db");
+
+    let mut a = engine_on(&repo, &db);
+    let platform = create_context(&mut a, "Platform");
+    let partners = create_context(&mut a, "Partners");
+    join(&mut a, platform, &repo);
+    join(&mut a, partners, &repo);
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(2, "memories_search", &json!({ "scope": "repository" })),
+            call(
+                3,
+                "memory_propose",
+                &json!({
+                    "kind": "fact",
+                    "text": "no context named",
+                    "sources": [{ "kind": "file", "ref": "f.txt" }]
+                }),
+            ),
+            call(
+                4,
+                "memory_propose",
+                &json!({
+                    "kind": "fact",
+                    "text": "named context",
+                    "sources": [{ "kind": "file", "ref": "f.txt" }],
+                    "context": "Platform"
+                }),
+            ),
+        ],
+    );
+
+    assert_eq!(replies[1]["result"]["isError"], true, "{}", replies[1]);
+    let refusal = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        refusal.contains(
+            "scope \"repository\" no longer exists: every memory belongs to a context; name a context, or use bound"
+        ),
+        "{refusal}"
+    );
+    assert_eq!(replies[2]["result"]["isError"], true, "{}", replies[2]);
+    let several = replies[2]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        several.contains("\"Partners\"") && several.contains("\"Platform\""),
+        "{several}"
+    );
+    assert_eq!(result(&replies[3])["created"], true, "{}", replies[3]);
+}
+
+#[test]
+fn memory_propose_has_no_member_argument_and_contexts_list_has_all() {
+    let (_tmp, repo, db) = fixture();
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        ],
+    );
+    let tools = replies[1]["result"]["tools"].as_array().unwrap();
+    let propose = tools
+        .iter()
+        .find(|tool| tool["name"] == "memory_propose")
+        .expect("memory_propose is listed");
+    let properties = &propose["inputSchema"]["properties"];
+    assert!(properties.get("member").is_none(), "{propose}");
+    assert!(properties.get("context").is_some(), "{propose}");
+    let listed = tools
+        .iter()
+        .find(|tool| tool["name"] == "contexts_list")
+        .expect("contexts_list is listed");
+    assert!(listed["inputSchema"]["properties"].get("all").is_some());
+    let search = tools
+        .iter()
+        .find(|tool| tool["name"] == "memories_search")
+        .expect("memories_search is listed");
+    let scope = search["inputSchema"]["properties"]["scope"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(scope.contains("bound"), "{scope}");
+    assert!(!scope.contains("repository"), "{scope}");
 }

@@ -394,6 +394,8 @@ mod tests {
             accepted_memories: 0,
             sub_contexts: 0,
             members: Vec::new(),
+            bound: false,
+            inherited_memories: 0,
         }
     }
 

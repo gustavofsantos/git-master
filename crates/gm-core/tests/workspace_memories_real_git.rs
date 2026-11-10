@@ -522,7 +522,11 @@ fn read(engine: &mut Engine, uid: &str) -> Memory {
 
 /// `ListContexts`: the contexts, the repository id and the clash.
 fn contexts(engine: &mut Engine, repo: bool) -> (Vec<Context>, Option<String>, Option<String>) {
-    let events = send(engine, &Actor::Human, CommandKind::ListContexts { repo });
+    let events = send(
+        engine,
+        &Actor::Human,
+        CommandKind::ListContexts { repo, all: false },
+    );
     assert_eq!(state_of(&events), OperationState::Done, "list: {events:?}");
     events
         .iter()

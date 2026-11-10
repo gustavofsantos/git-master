@@ -3,6 +3,7 @@
 //! open clone may use the contexts its id belongs to (D193 (4)). The commands are declared in
 //! `gm-schema`; `engine` routes them here. The file is `contexts.db` in the app data directory.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gm_schema::threads::Context;
@@ -70,7 +71,9 @@ pub(crate) fn run(
     kind: &CommandKind,
 ) -> Result<Vec<Event>, String> {
     match kind {
-        CommandKind::ListContexts { repo } => list(id, db, git, root, global_config, *repo),
+        CommandKind::ListContexts { repo, all } => {
+            list(id, db, git, root, global_config, *repo, *all)
+        }
         CommandKind::PreviewDeleteContext { id: context } => preview_delete(id, db, *context),
         CommandKind::CreateContext { name, parent } => create(id, db, name, *parent),
         CommandKind::UpdateContext { .. } => update(id, db, kind),
@@ -417,19 +420,23 @@ pub(crate) fn workspace_home(
     }
 }
 
-/// The contexts a workspace sees, each with the members that see it (D216 (4), D222 (5)): the union of
-/// the contexts bound to the workspace repository and to each member, with their parents, nearest
-/// first. The workspace repository is named `workspace` among them. A member that cannot be read adds
-/// none.
-fn workspace_contexts(
+/// What the repositories of a workspace are bound to (D216 (4), D222 (5)): the contexts bound directly
+/// to the workspace and to each member, and for each folder the contexts it sees, with their ancestors.
+struct WorkspaceBindings {
+    direct: Vec<i64>,
+    by_member: Vec<(String, Vec<i64>)>,
+}
+
+/// The bindings of a workspace and its members. A member that cannot be read adds none.
+fn workspace_bindings(
     store: &mut ContextStore,
     git: &dyn GitPort,
     root: &Path,
     folders: &[Folder],
-) -> Result<Vec<Context>, String> {
+) -> Result<WorkspaceBindings, String> {
     let nodes = store.nodes().map_err(|e| e.to_string())?;
-    let mut member_of = Vec::new();
-    let mut by_member: Vec<(&str, Vec<i64>)> = Vec::new();
+    let mut direct_all = Vec::new();
+    let mut by_member = Vec::new();
     let named = std::iter::once((memory_scope::WORKSPACE, root)).chain(
         folders
             .iter()
@@ -446,26 +453,70 @@ fn workspace_contexts(
             .into_iter()
             .map(|(context, _)| context)
             .collect();
-        member_of.extend(direct);
-        by_member.push((name, sees));
+        direct_all.extend(direct);
+        by_member.push((name.to_owned(), sees));
     }
-    visibility::visible_contexts(&nodes, &member_of)
-        .into_iter()
-        .map(|(context, _)| {
+    Ok(WorkspaceBindings {
+        direct: direct_all,
+        by_member,
+    })
+}
+
+/// The contexts a workspace sees, each with the members that see it: the union of the contexts bound
+/// to it and to each member with their parents, nearest first. With `every`, every context, each with
+/// the members that see it.
+fn workspace_contexts(
+    store: &ContextStore,
+    bindings: &WorkspaceBindings,
+    every: bool,
+) -> Result<Vec<Context>, String> {
+    let nodes = store.nodes().map_err(|e| e.to_string())?;
+    let ids: Vec<i64> = if every {
+        nodes.iter().map(|node| node.id).collect()
+    } else {
+        visibility::visible_contexts(&nodes, &bindings.direct)
+            .into_iter()
+            .map(|(context, _)| context)
+            .collect()
+    };
+    ids.into_iter()
+        .map(|context| {
             let mut read = store.read_context(context).map_err(context_error)?;
-            read.members = by_member
+            read.members = bindings
+                .by_member
                 .iter()
                 .filter(|(_, sees)| sees.contains(&context))
-                .map(|(name, _)| (*name).to_owned())
+                .map(|(name, _)| name.clone())
                 .collect();
             Ok(read)
         })
         .collect()
 }
 
-/// `ListContexts`: every context, or with `repo` those the open repository sees. A clash lists
-/// none and names the other clone (D193 (4)). From a workspace, `repo` lists the contexts of the
-/// workspace and its members (D216 (4), D222 (5)).
+/// Marks each listed context as bound when `direct` names it, and counts the accepted memories it
+/// inherits: its own and its ancestors' (D222 (2)). The ancestors of a listed context are listed too,
+/// so their own counts are at hand.
+fn annotate(store: &ContextStore, contexts: &mut [Context], direct: &[i64]) -> Result<(), String> {
+    let nodes = store.nodes().map_err(|e| e.to_string())?;
+    let own: BTreeMap<i64, u32> = contexts
+        .iter()
+        .map(|context| (context.id, context.accepted_memories))
+        .collect();
+    for context in contexts.iter_mut() {
+        context.bound = direct.contains(&context.id);
+        context.inherited_memories = visibility::visible_contexts(&nodes, &[context.id])
+            .iter()
+            .filter_map(|(id, _)| own.get(id))
+            .fold(0_u32, |sum, count| sum.saturating_add(*count));
+    }
+    Ok(())
+}
+
+/// `ListContexts`: the contexts the open repository sees, or with `all` every context, or without
+/// `repo` every context with no binding read (the app's list). A clash lists none and names the other
+/// clone (D193 (4)). From a workspace, `repo` lists the contexts of the workspace and its members
+/// (D216 (4), D222 (5)). Each listed context of a repository or a workspace says whether it is bound
+/// to it directly and how many memories it inherits (D222 (2), (3)).
 fn list(
     id: OperationId,
     db: Option<&Path>,
@@ -473,6 +524,7 @@ fn list(
     root: Option<&Path>,
     global_config: Option<&Path>,
     repo: bool,
+    all: bool,
 ) -> Result<Vec<Event>, String> {
     let listed = |contexts, repo_id, clash| Event::ContextsListed {
         id,
@@ -481,7 +533,7 @@ fn list(
         clash,
     };
     let store = open_read(db)?;
-    if !repo {
+    if !repo && !all {
         let contexts = match store {
             Some(store) => store.list_contexts().map_err(|e| e.to_string())?,
             None => Vec::new(),
@@ -491,10 +543,12 @@ fn list(
     if let Some(root) = root
         && let Some(folders) = memory_scope::workspace_folders(git, global_config, root)
     {
-        let contexts = match store {
-            Some(mut store) => workspace_contexts(&mut store, git, root, &folders)?,
-            None => Vec::new(),
+        let Some(mut store) = store else {
+            return Ok(vec![listed(Vec::new(), None, None)]);
         };
+        let bindings = workspace_bindings(&mut store, git, root, &folders)?;
+        let mut contexts = workspace_contexts(&store, &bindings, all)?;
+        annotate(&store, &mut contexts, &bindings.direct)?;
         return Ok(vec![listed(contexts, None, None)]);
     }
     let common = common_of(git, root)?;
@@ -503,9 +557,23 @@ fn list(
         return Ok(vec![listed(Vec::new(), here, None)]);
     };
     let event = match repo_identity(&mut store, &common)? {
-        RepoState::None => listed(Vec::new(), here, None),
+        RepoState::None => {
+            let mut contexts = if all {
+                store.list_contexts().map_err(|e| e.to_string())?
+            } else {
+                Vec::new()
+            };
+            annotate(&store, &mut contexts, &[])?;
+            listed(contexts, here, None)
+        }
         RepoState::Ok(repo_id) => {
-            let contexts = visible(&store, &repo_id)?;
+            let direct = store.repo_contexts(&repo_id).map_err(|e| e.to_string())?;
+            let mut contexts = if all {
+                store.list_contexts().map_err(|e| e.to_string())?
+            } else {
+                visible(&store, &repo_id)?
+            };
+            annotate(&store, &mut contexts, &direct)?;
             listed(contexts, Some(repo_id), None)
         }
         RepoState::Clash {

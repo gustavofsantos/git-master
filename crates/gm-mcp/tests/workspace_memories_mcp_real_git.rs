@@ -289,7 +289,7 @@ fn an_agent_on_a_workspace_proposes_into_a_member_marks_its_memory_and_searches_
             call(
                 2,
                 "memory_propose",
-                &json!({ "kind": "rule", "text": "api proposal over mcp", "sources": file_source(), "member": "api" }),
+                &json!({ "kind": "rule", "text": "api proposal over mcp", "sources": file_source() }),
             ),
             call(
                 3,
@@ -315,7 +315,7 @@ fn an_agent_on_a_workspace_proposes_into_a_member_marks_its_memory_and_searches_
     assert_eq!(proposed["status"], "proposed");
     assert_eq!(proposed["origin"], "agent:test-client");
     assert_eq!(result(&replies[1])["created"], true);
-    // Without a member, the one context bound to the workspace and its members takes it (D222 (5)).
+    // Without a context, the one context bound to the workspace and its members takes it (D222 (5)).
     let own = &result(&replies[2])["memory"];
     assert_eq!(own["scope"], "api");
     assert_eq!(own["status"], "proposed");
@@ -387,7 +387,7 @@ fn an_agent_on_a_workspace_cannot_accept_reject_or_delete_a_member_memory() {
             call(
                 2,
                 "memory_propose",
-                &json!({ "kind": "lesson", "text": "stays proposed", "sources": file_source(), "member": "api" }),
+                &json!({ "kind": "lesson", "text": "stays proposed", "sources": file_source() }),
             ),
             json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
             call(
@@ -425,9 +425,10 @@ fn an_agent_on_a_workspace_cannot_accept_reject_or_delete_a_member_memory() {
         assert_eq!(reply["result"]["isError"], true, "{reply}");
     }
 
-    let mut api = fx.engine_on(&fx.api);
-    let uid = uid_of(&mut api, "stays proposed");
-    let events = send(&mut api, &Actor::Human, CommandKind::ReadMemory { uid });
+    // Without a context the proposal goes to the workspace's own context, which the workspace reads.
+    let mut ws = fx.engine_on(&fx.ws);
+    let uid = uid_of(&mut ws, "stays proposed");
+    let events = send(&mut ws, &Actor::Human, CommandKind::ReadMemory { uid });
     let status = events.iter().find_map(|event| match event {
         Event::MemoryRead { memory, .. } => Some(memory.status),
         _ => None,
@@ -436,7 +437,7 @@ fn an_agent_on_a_workspace_cannot_accept_reject_or_delete_a_member_memory() {
 }
 
 #[test]
-fn an_agent_proposing_to_an_unknown_member_is_refused_and_the_server_keeps_answering() {
+fn a_member_argument_is_refused_and_the_server_keeps_answering() {
     let fx = Fixture::new();
     let replies = session(
         &fx,
@@ -445,7 +446,7 @@ fn an_agent_proposing_to_an_unknown_member_is_refused_and_the_server_keeps_answe
             call(
                 2,
                 "memory_propose",
-                &json!({ "kind": "fact", "text": "nowhere", "sources": file_source(), "member": "nope" }),
+                &json!({ "kind": "fact", "text": "nowhere", "sources": file_source(), "member": "api" }),
             ),
             call(
                 3,
@@ -456,7 +457,8 @@ fn an_agent_proposing_to_an_unknown_member_is_refused_and_the_server_keeps_answe
     );
     assert_eq!(replies[1]["result"]["isError"], true, "{}", replies[1]);
     let text = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("members are: api, web"), "{text}");
+    // `member` no longer exists (K2): the memory is never filed in a member by accident.
+    assert!(text.contains("member no longer exists"), "{text}");
     // Nothing is bound yet, so the workspace's own context takes the proposal (D222 (5)).
     assert_eq!(result(&replies[2])["memory"]["scope"], "pay");
 }

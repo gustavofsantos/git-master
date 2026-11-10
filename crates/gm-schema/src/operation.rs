@@ -1045,11 +1045,16 @@ pub enum CommandKind {
         context: i64,
     },
     /// Lists the contexts (design/threads.md, "Contexts"; D191): every context, or with `repo`
-    /// those the open repository sees, each with its path. A clone whose identity clashes with
-    /// another clone lists none and names the other one (D193 (4)). With no `contexts.db` the
-    /// list is empty and no file is made. A read: never recorded (D28). Answers `ContextsListed`.
+    /// those the open repository sees, each with its path. With `all` every context is listed even
+    /// with `repo` (D222 (3)), and each carries `bound` (the open repository, or a workspace or a
+    /// member of it, is bound to it directly) and `inherited_memories` (its accepted memories with its
+    /// ancestors'). A clone whose identity clashes with another clone lists none and names the other
+    /// one (D193 (4)). With no `contexts.db` the list is empty and no file is made. A read: never
+    /// recorded (D28). Answers `ContextsListed`.
     ListContexts {
         repo: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
     },
     /// Previews `DeleteContext` for context `id` without writing: the sub-contexts it has and the
     /// memories it holds alone, which `DeleteContext` with `delete_memories` true would delete. The
@@ -2441,7 +2446,11 @@ mod tests {
 
     #[test]
     fn context_commands_wire_format_is_tagged_and_a_null_parent_is_the_root() {
-        let list = serde_json::to_value(CommandKind::ListContexts { repo: true }).unwrap();
+        let list = serde_json::to_value(CommandKind::ListContexts {
+            repo: true,
+            all: false,
+        })
+        .unwrap();
         assert_eq!(
             list,
             serde_json::json!({ "type": "list_contexts", "repo": true })

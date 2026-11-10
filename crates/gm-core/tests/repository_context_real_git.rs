@@ -212,7 +212,10 @@ fn bound_names(engine: &mut Engine) -> Vec<String> {
     let events = send(
         engine,
         &Actor::Human,
-        CommandKind::ListContexts { repo: true },
+        CommandKind::ListContexts {
+            repo: true,
+            all: false,
+        },
     );
     events
         .iter()

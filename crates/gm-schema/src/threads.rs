@@ -995,6 +995,14 @@ pub struct Context {
     /// `ListContexts` from a workspace (D216 (4)); empty otherwise and omitted then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<String>,
+    /// Whether the open repository, or a workspace or one of its members, is bound to this context
+    /// directly, not through an ancestor. Set by `ListContexts`; false otherwise (D222 (3)).
+    #[serde(default)]
+    pub bound: bool,
+    /// The accepted memories this context holds and inherits: its own and its ancestors' (D222 (2)).
+    /// Set by `ListContexts`; zero otherwise.
+    #[serde(default)]
+    pub inherited_memories: u32,
 }
 
 /// A repository in a context: its identity (the content of `.git/gitmaster/repo-id`), the last

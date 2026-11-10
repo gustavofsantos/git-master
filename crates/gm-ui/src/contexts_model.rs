@@ -192,7 +192,10 @@ impl ContextsModel {
     /// repository's.
     #[must_use]
     pub fn plan_list() -> CommandKind {
-        CommandKind::ListContexts { repo: false }
+        CommandKind::ListContexts {
+            repo: false,
+            all: false,
+        }
     }
 
     /// Records that `kind` was sent as operation `id`. A list read replaces the one in flight. A
@@ -625,6 +628,8 @@ mod tests {
             accepted_memories: 0,
             sub_contexts: 0,
             members: Vec::new(),
+            bound: false,
+            inherited_memories: 0,
         }
     }
 

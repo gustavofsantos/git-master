@@ -318,7 +318,7 @@ impl Reach {
     /// default reach for `All` and `Repository`, and the named context and its ancestors for `Context`.
     fn reach_of(&self, scope: Scope) -> Vec<(i64, u32)> {
         match scope {
-            Scope::All | Scope::Repository => self.visible.clone(),
+            Scope::All => self.visible.clone(),
             Scope::Context(id) => visibility::visible_contexts(&self.nodes, &[id]),
         }
     }
@@ -410,7 +410,7 @@ impl Reach {
         match self.scope(Some(name)) {
             Ok(Scope::Context(id)) if self.sees_context(id) => Ok(id),
             Ok(Scope::Context(_)) => Err(not_reached()),
-            Ok(Scope::All | Scope::Repository) => Err(format!(
+            Ok(Scope::All) => Err(format!(
                 "\"{name}\" is not a context: leave the context out to propose for this repository."
             )),
             Err(message) if message.starts_with("No context") => Err(not_reached()),
@@ -686,12 +686,12 @@ pub(crate) fn list_command(
 /// Whether a scope covers the repository's own threads store: a plain repository's, until its memories
 /// have moved (D222 (6)). A workspace reads none of it.
 fn includes_own(reach: &Reach, scope: Scope) -> bool {
-    !reach.is_workspace() && matches!(scope, Scope::All | Scope::Repository)
+    !reach.is_workspace() && matches!(scope, Scope::All)
 }
 
 /// Whether a scope covers contexts: the default reach, or one named context with its ancestors.
 fn reads_contexts(scope: Scope) -> bool {
-    matches!(scope, Scope::All | Scope::Repository | Scope::Context(_))
+    matches!(scope, Scope::All | Scope::Context(_))
 }
 
 /// The accepted memories of the scope `scope` covers, and the characters of their text together,
@@ -806,7 +806,6 @@ fn order(entries: &mut [Entry], with_query: bool) {
 fn scope_key(scope: Scope) -> String {
     match scope {
         Scope::All => "all".to_owned(),
-        Scope::Repository => REPOSITORY.to_owned(),
         Scope::Context(id) => format!("context:{id}"),
     }
 }
@@ -1536,7 +1535,6 @@ mod tests {
     #[test]
     fn a_scope_key_names_the_resolved_scope() {
         assert_eq!(scope_key(Scope::All), "all");
-        assert_eq!(scope_key(Scope::Repository), "repository");
         assert_eq!(scope_key(Scope::Context(4)), "context:4");
     }
 }

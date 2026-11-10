@@ -141,7 +141,11 @@ struct Listed {
 }
 
 fn list(engine: &mut Engine, actor: &Actor, repo: bool) -> Listed {
-    let events = send(engine, actor, CommandKind::ListContexts { repo });
+    let events = send(
+        engine,
+        actor,
+        CommandKind::ListContexts { repo, all: false },
+    );
     assert_eq!(state_of(&events), OperationState::Done, "list: {events:?}");
     events
         .iter()
@@ -912,9 +916,15 @@ fn the_scope_filter_names_the_repository_or_one_visible_context_and_refuses_the_
         texts(&found.memories)
     };
     assert_eq!(
-        sorted(scoped(&mut api, "repository")),
+        sorted(scoped(&mut api, "bound")),
         ["Billing rule", "Partners rule", "Platform rule"],
-        "a repository's own scope is what it is bound to"
+        "bound is what the repository is bound to, with the contexts above them"
+    );
+    let retired = search(&mut api, &Actor::Human, "", Some("repository"), 50, None)
+        .expect_err("the repository scope no longer exists");
+    assert_eq!(
+        retired,
+        "scope \"repository\" no longer exists: every memory belongs to a context; name a context, or use bound"
     );
     assert_eq!(
         sorted(scoped(&mut api, "Billing")),
@@ -1047,11 +1057,11 @@ fn pages_walk_the_merged_list_without_repeats_or_gaps_and_a_cursor_stays_with_it
         &mut api,
         &Actor::Human,
         "note",
-        Some("repository"),
+        Some("Billing"),
         1,
         Some(&first_cursor),
     )
-    .expect_err("a cursor of all is not a cursor of repository");
+    .expect_err("a cursor of all is not a cursor of Billing");
     assert!(other_scope.contains("another search"), "{other_scope}");
     let other_query = search(
         &mut api,

@@ -55,17 +55,19 @@ pub fn would_cycle(nodes: &[ContextNode], id: i64, new_parent: Option<i64>) -> b
 /// What a scope named in a request means (D193 (5)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
-    /// Every scope the repository sees.
+    /// Every scope the repository sees: the default reach (`bound`).
     All,
-    /// The repository's own memories only.
-    Repository,
     /// One context, by id, with its ancestors: the memories of a sub-context include those of every
     /// context above it (D222 (2)). The context need not be one the repository is bound to (D222 (3)).
     Context(i64),
 }
 
+/// The refusal of the retired `repository` scope (D223 (6)), unless a context has that name.
+pub const RETIRED_REPOSITORY: &str = "scope \"repository\" no longer exists: every memory belongs to a context; name a context, or use bound";
+
 /// Reads a scope name (D193 (5), D222 (3)). `all`, `bound` or empty is every scope the repository
-/// reads by default (`Scope::All`), and `repository` is the repository's own memories. Anything else
+/// reads by default (`Scope::All`). `repository` no longer exists: every memory belongs to a context
+/// (D223 (6)), so it is refused unless a context has that name. Anything else
 /// names a context: first among the `visible` ones (the contexts the repository is bound to and their
 /// ancestors), then among every context, by its full path (`Platform / Billing`, whitespace around `/`
 /// ignored) or by a name that exactly one context has. A name several contexts have is refused and the
@@ -79,9 +81,6 @@ pub fn resolve_scope(
     if matches!(text, "" | "all" | "bound") {
         return Ok(Scope::All);
     }
-    if text == "repository" {
-        return Ok(Scope::Repository);
-    }
     let visible_ids: Vec<i64> = visible.iter().map(|&(id, _)| id).collect();
     if let Some(id) = resolve_among(nodes, &visible_ids, text)? {
         return Ok(Scope::Context(id));
@@ -89,6 +88,7 @@ pub fn resolve_scope(
     let every: Vec<i64> = nodes.iter().map(|node| node.id).collect();
     match resolve_among(nodes, &every, text)? {
         Some(id) => Ok(Scope::Context(id)),
+        None if text == "repository" => Err(RETIRED_REPOSITORY.to_owned()),
         None => Err(format!("No context named \"{text}\" exists.")),
     }
 }
@@ -276,8 +276,8 @@ mod tests {
         assert_eq!(resolve_scope(&nodes, &visible, ""), Ok(Scope::All));
         assert_eq!(resolve_scope(&nodes, &visible, " all "), Ok(Scope::All));
         assert_eq!(
-            resolve_scope(&nodes, &visible, "repository"),
-            Ok(Scope::Repository)
+            resolve_scope(&nodes, &visible, "repository").expect_err("retired"),
+            RETIRED_REPOSITORY
         );
         assert_eq!(
             resolve_scope(&nodes, &visible, "Platform / Billing"),

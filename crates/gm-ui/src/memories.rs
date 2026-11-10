@@ -81,7 +81,7 @@ impl Scope {
     fn wire(&self) -> Option<String> {
         match self {
             Self::Everything => None,
-            Self::Repository => Some(REPOSITORY.to_owned()),
+            Self::Repository => Some("bound".to_owned()),
             Self::Context(path) => Some(path.clone()),
         }
     }
@@ -491,7 +491,10 @@ impl MemoriesPage {
     #[must_use]
     pub fn plan_contexts() -> Request {
         Request {
-            kind: CommandKind::ListContexts { repo: true },
+            kind: CommandKind::ListContexts {
+                repo: true,
+                all: false,
+            },
             read: Read::Contexts,
         }
     }
@@ -1688,7 +1691,7 @@ mod tests {
         tab.set_scope(Scope::Repository);
         assert!(matches!(
             kind_of(&tab.plan_list()),
-            CommandKind::ListMemories { scope: Some(s), .. } if s == REPOSITORY
+            CommandKind::ListMemories { scope: Some(s), .. } if s == "bound"
         ));
     }
 
@@ -2321,6 +2324,8 @@ mod tests {
             accepted_memories: 0,
             sub_contexts: 0,
             members: Vec::new(),
+            bound: false,
+            inherited_memories: 0,
         }
     }
 

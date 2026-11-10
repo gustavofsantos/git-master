@@ -1029,6 +1029,8 @@ fn context_with(conn: &Connection, id: i64, nodes: &[ContextNode]) -> Result<Con
         accepted_memories: u32::try_from(accepted).unwrap_or(u32::MAX),
         sub_contexts: u32::try_from(subs).unwrap_or(u32::MAX),
         members: Vec::new(),
+        bound: false,
+        inherited_memories: 0,
     })
 }
 
