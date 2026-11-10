@@ -1,7 +1,7 @@
 ---
 title: Workspaces
 description: Group branches of several repositories into one workspace, a Git repository whose submodules are worktrees of your own clones, to change and test them together with an agent.
-status: partial
+status: implemented
 order: 55
 ---
 
@@ -27,8 +27,6 @@ A workspace is a Git repository of its own. Each repository in it is a submodule
 The workspace repository is yours to write in. Your service repositories are not touched: GitMaster writes nothing into their working trees, and adds nothing to them but the worktree records Git keeps in their `.git` folder.
 
 ## Memories and contexts in a workspace
-
-> **Planned.** Memories of a workspace and of its members are still kept in their repositories, outside every context, and a workspace cannot be bound to a context of its own yet.
 
 A workspace keeps the knowledge you already have. When you open a workspace, an agent and you see the [memories](memories.md) of every [context](contexts.md) a member is bound to, of every context the workspace itself is bound to, and of every context above them. Nothing is copied: a memory you add to one of those contexts later appears in the workspace, and removing the workspace removes none of them. Each memory shows its context, and a context a member is bound to names that member.
 

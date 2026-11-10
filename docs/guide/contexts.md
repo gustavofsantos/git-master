@@ -5,7 +5,7 @@ status: partial
 order: 106
 ---
 
-> **Planned.** A context with no repository, the context of a repository, reading a context the repository is not bound to and the inheritance described here are not built yet: a memory can still belong to a repository alone, outside every context.
+> **Planned.** Manage Contexts does not accept a proposed memory yet; accept it from the Memories tab of a repository that sees its context.
 
 A context is an area of knowledge: payments, sales, accounting, how services call each other, or one problem that comes back from time to time and has a runbook you follow by hand. Every [memory](memories.md) belongs to a context. Repositories are bound to the contexts they work in, so an agent working in a repository finds the knowledge of those contexts.
 
@@ -33,7 +33,7 @@ An agent in `refunds-worker` sees the memories of **Refunds**, **Payments** and 
 
 ## Manage contexts
 
-Choose **Manage Contexts…** on the **Memories** tab of the **Agents** page, or from the command palette. The dialog shows every context you have as a tree, whether or not the open repository is bound to it.
+Choose **Manage Contexts…** on the **Memories** tab of the **Agents** page, or from the command palette. The dialog shows every context you have as a tree, whether or not the open repository is bound to it. A context the open repository is bound to is marked **bound**.
 
 1. Choose **New Context** and give it a name. When a context is selected, the name box also asks whether the new one is a sub-context of it: choose **As a sub-context of** to switch between yes and no.
 2. To bind repositories, select a context and choose **Bind Repository**. Pick from your recent repositories, bind the repository that is open, or choose **Browse…** to pick any folder that holds a Git repository. A context can have as many repositories as you like, or none.
@@ -61,7 +61,7 @@ The scope filter chooses what the list holds:
 
 ### Write a memory in a context
 
-Choose **New Memory** and pick the context. It starts at the context the repository is bound to, and you can pick any context in the tree. A memory you write is accepted at once.
+Choose **New Memory** and pick the context. It starts at the first context the repository is bound to, by path, and you can pick any context in the tree. When the repository is bound to none, the form says **Goes to the context of this repository.** and the memory goes there. A memory you write is accepted at once.
 
 ### Attach a memory to another context
 

@@ -13,8 +13,6 @@ Every memory belongs to one or more [contexts](contexts.md): areas of knowledge 
 
 ## What a memory holds
 
-> **Planned.** A memory can still belong to a repository alone, outside every context, and the scope filter still offers this repository instead of the contexts bound to it.
-
 | Part | What it is |
 |---|---|
 | Kind | **Decision**, **Rule**, **Lesson** or **Fact**. |
