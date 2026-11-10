@@ -529,19 +529,11 @@ fn unique(contexts: Vec<Context>) -> Vec<Context> {
         .collect()
 }
 
-/// The counts a tree row shows: its repositories, then its accepted memories, each with the noun
-/// that fits its count (`1 repository`, `2 repositories`, `1 memory`, `0 memories`).
+/// The memory count a tree row shows, with the noun that fits it (`1 memory`, `0 memories`).
+/// The repositories are listed in the right pane, so the row does not repeat them.
 #[must_use]
-pub fn counts_text(repos: usize, memories: u32) -> String {
-    format!(
-        "{} · {}",
-        counted(
-            u64::try_from(repos).unwrap_or(u64::MAX),
-            "repository",
-            "repositories"
-        ),
-        counted(u64::from(memories), "memory", "memories"),
-    )
+pub fn memories_text(memories: u32) -> String {
+    counted(u64::from(memories), "memory", "memories")
 }
 
 /// `count` with its noun: the singular only for exactly one.
@@ -729,12 +721,10 @@ mod tests {
     }
 
     #[test]
-    fn the_counts_name_each_count_with_its_noun() {
-        assert_eq!(counts_text(0, 0), "0 repositories · 0 memories");
-        assert_eq!(counts_text(1, 0), "1 repository · 0 memories");
-        assert_eq!(counts_text(1, 1), "1 repository · 1 memory");
-        assert_eq!(counts_text(2, 1), "2 repositories · 1 memory");
-        assert_eq!(counts_text(2, 12), "2 repositories · 12 memories");
+    fn the_row_names_the_memory_count_with_its_noun() {
+        assert_eq!(memories_text(0), "0 memories");
+        assert_eq!(memories_text(1), "1 memory");
+        assert_eq!(memories_text(12), "12 memories");
     }
 
     fn repo(repo_id: &str) -> ContextRepo {

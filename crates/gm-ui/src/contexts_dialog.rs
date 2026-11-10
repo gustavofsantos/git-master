@@ -17,7 +17,7 @@ use gpui::{
 };
 
 use crate::contexts_model::{
-    ContextRow, ContextsModel, DeleteConfirm, DeletePlan, DeletePreview, counts_text,
+    ContextRow, ContextsModel, DeleteConfirm, DeletePlan, DeletePreview, memories_text,
 };
 use crate::icon::{self, Icon};
 use crate::memory_rows;
@@ -692,7 +692,7 @@ impl StatusView {
                     .flex_none()
                     .text_xs()
                     .text_color(theme::muted())
-                    .child(counts_text(row.repo_count, row.accepted_memories)),
+                    .child(memories_text(row.accepted_memories)),
             );
         }
         line.child(
