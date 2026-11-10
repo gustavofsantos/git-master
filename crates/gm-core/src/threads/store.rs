@@ -29,7 +29,7 @@ use super::query::{
 /// Migrations in order; `PRAGMA user_version` counts how many have run.
 const MIGRATIONS: &[&str] = &[
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
-    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12,
+    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13,
 ];
 /// The index in `MIGRATIONS` of the schema that repairs stored entries with the cleaner (D133).
 const REPAIR_MIGRATION: usize = 3;
@@ -458,6 +458,23 @@ CREATE TABLE memory_mark (
 CREATE INDEX memory_mark_actor ON memory_mark (memory_uid, actor, id);
 ";
 
+/// Schema 13 (D222 (6)): every memory lives in `contexts.db`, so `threads.db` keeps no memory. This
+/// step has no SQL of its own: the memory tables are dropped by `drop_empty_memories`, which runs on
+/// every open once the version step is done, because a memory may still be here (see that function).
+const SCHEMA_V13: &str = "";
+
+/// The memory tables, children first. Their triggers and indexes go with them.
+const DROP_MEMORY_TABLES: &str = "
+DROP TABLE memory_mark;
+DROP TABLE memory_source;
+DROP TABLE memory_rel;
+DROP TABLE memory_fts;
+DROP TABLE memory;
+";
+/// The indexes in `MIGRATIONS` of the schemas that create and extend the memory tables: 7, 8, 10, 11
+/// and 12. Schema 9 adds the thread parent link and is not one of them.
+const MEMORY_SCHEMAS: [usize; 5] = [6, 7, 9, 10, 11];
+
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
 /// Opening a file another process is initializing is retried this many times, this far apart.
 pub(crate) const OPEN_ATTEMPTS: u32 = 200;
@@ -710,11 +727,28 @@ impl ThreadStore {
     /// Opens (creating `gitmaster/threads.db` under `git_common_dir` when missing) and migrates
     /// the store. The file and its WAL and shared-memory files are private (mode `0600`).
     pub fn open(git_common_dir: &Path) -> Result<Self, StoreError> {
-        Self::open_with(git_common_dir, harness::clean_stored)
+        Self::open_with(
+            git_common_dir,
+            harness::clean_stored,
+            MemoryTables::DropWhenEmpty,
+        )
     }
 
-    /// `open` with the cleaner the schema 4 repair runs (D133).
-    fn open_with(git_common_dir: &Path, clean: TextCleaner) -> Result<Self, StoreError> {
+    /// `open` that keeps the memory tables even when they are empty. A test seam: it writes the
+    /// memories a repository kept in `threads.db` before schema 13, which the store drops once it
+    /// finds them empty (D222 (6)). The engine does not call it.
+    #[doc(hidden)]
+    pub fn open_keeping_memories(git_common_dir: &Path) -> Result<Self, StoreError> {
+        Self::open_with(git_common_dir, harness::clean_stored, MemoryTables::Keep)
+    }
+
+    /// `open` with the cleaner the schema 4 repair runs (D133), and whether the empty memory tables
+    /// are dropped on open (D222 (6)).
+    fn open_with(
+        git_common_dir: &Path,
+        clean: TextCleaner,
+        memories: MemoryTables,
+    ) -> Result<Self, StoreError> {
         let dir = git_common_dir.join("gitmaster");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("threads.db");
@@ -725,7 +759,7 @@ impl ThreadStore {
         ] {
             create_private(&file)?;
         }
-        let conn = open_connection(&path, clean)?;
+        let conn = open_connection(&path, clean, memories)?;
         Ok(Self {
             conn,
             entry_limit: DEFAULT_ENTRY_LIMIT,
@@ -800,10 +834,22 @@ impl ThreadStore {
         }))
     }
 
-    /// A store that lives only in memory (tests).
+    /// A store that lives only in memory (tests). Its memory tables are dropped at once, as on any
+    /// open: a fresh store holds no memory.
     pub fn open_memory() -> Result<Self, StoreError> {
+        Self::open_memory_with(MemoryTables::DropWhenEmpty)
+    }
+
+    /// A store that lives only in memory and keeps its memory tables, for the tests of the memory
+    /// store itself: the tables are what a repository's memories still in `threads.db` look like.
+    #[cfg(test)]
+    pub(crate) fn open_memory_keeping_memories() -> Result<Self, StoreError> {
+        Self::open_memory_with(MemoryTables::Keep)
+    }
+
+    fn open_memory_with(memories: MemoryTables) -> Result<Self, StoreError> {
         let mut conn = Connection::open_in_memory()?;
-        prepare(&mut conn, harness::clean_stored)?;
+        prepare(&mut conn, harness::clean_stored, memories)?;
         Ok(Self {
             conn,
             entry_limit: DEFAULT_ENTRY_LIMIT,
@@ -1920,10 +1966,14 @@ impl ThreadStore {
 /// Opens the file and prepares it. SQLite can report busy at once, without waiting, while
 /// another process is creating the WAL or the schema, so the attempt is repeated for a
 /// short, bounded time.
-fn open_connection(path: &Path, clean: TextCleaner) -> Result<Connection, StoreError> {
+fn open_connection(
+    path: &Path,
+    clean: TextCleaner,
+    memories: MemoryTables,
+) -> Result<Connection, StoreError> {
     retry_busy(|| {
         let mut conn = Connection::open(path)?;
-        prepare(&mut conn, clean)?;
+        prepare(&mut conn, clean, memories)?;
         Ok(conn)
     })
 }
@@ -1954,20 +2004,39 @@ pub(crate) fn is_busy(error: &rusqlite::Error) -> bool {
     )
 }
 
+/// What a store does with its memory tables on open (D222 (6)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryTables {
+    /// Drops them once `memory` holds no row: the store of the engine.
+    DropWhenEmpty,
+    /// Keeps them, and makes them again when they are missing, as schemas 7 to 12 made them. The
+    /// seam for the memories a repository kept in `threads.db` before schema 13 (tests only).
+    Keep,
+}
+
 /// Opens the connection, sets the pragmas and migrates.
-fn prepare(conn: &mut Connection, clean: TextCleaner) -> Result<(), StoreError> {
+fn prepare(
+    conn: &mut Connection,
+    clean: TextCleaner,
+    memories: MemoryTables,
+) -> Result<(), StoreError> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "secure_delete", true)?;
-    migrate(conn, clean)
+    migrate(conn, clean, memories)
 }
 
 /// Runs the migrations the database has not seen, in one immediate transaction so two
 /// processes opening a new file do not both create the schema. The repair of stored entries
-/// runs inside the transaction, right after its schema (D133).
-fn migrate(conn: &mut Connection, clean: TextCleaner) -> Result<(), StoreError> {
+/// runs inside the transaction, right after its schema (D133). Then the memory tables are settled
+/// (D222 (6)), on every open, not only after a migration.
+fn migrate(
+    conn: &mut Connection,
+    clean: TextCleaner,
+    memories: MemoryTables,
+) -> Result<(), StoreError> {
     let tx = begin(conn)?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let latest = i64::try_from(MIGRATIONS.len()).unwrap_or(i64::MAX);
@@ -1975,17 +2044,24 @@ fn migrate(conn: &mut Connection, clean: TextCleaner) -> Result<(), StoreError> 
         .ok()
         .filter(|from| *from <= MIGRATIONS.len())
         .ok_or_else(|| invalid("threads.db was written by a newer GitMaster"))?;
-    if from == MIGRATIONS.len() {
-        return Ok(());
-    }
+    let migrating = from < MIGRATIONS.len();
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(from) {
         tx.execute_batch(sql)?;
         if index == REPAIR_MIGRATION {
             repair_entries(&tx, clean)?;
         }
     }
-    tx.pragma_update(None, "user_version", latest)?;
+    if migrating {
+        tx.pragma_update(None, "user_version", latest)?;
+    }
+    let settled = match memories {
+        MemoryTables::DropWhenEmpty => drop_empty_memories(&tx)?,
+        MemoryTables::Keep => restore_memory_tables(&tx)?,
+    };
     tx.commit()?;
+    if !migrating && !settled {
+        return Ok(());
+    }
     // A database created just now has nothing to reclaim. Skipping the VACUUM there also keeps a
     // second process that opens the new file at the same moment from meeting the exclusive lock
     // in the middle of connecting the full-text table.
@@ -1999,6 +2075,34 @@ fn migrate(conn: &mut Connection, clean: TextCleaner) -> Result<(), StoreError> 
         }
     }
     Ok(())
+}
+
+/// Drops the memory tables when `memory` holds no row (D222 (6)). Every memory lives in
+/// `contexts.db`, so a memory still here has not moved yet: no contexts database is set, the
+/// repository's id clashes (D223 (2)), or the move failed. Then the tables stay, and a later open
+/// retries the drop. A missing table is nothing to drop. `true` when the tables were dropped.
+fn drop_empty_memories(tx: &Transaction<'_>) -> Result<bool, StoreError> {
+    if !super::memories::has_memory_table(tx)? {
+        return Ok(false);
+    }
+    let rows: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM memory)", [], |row| row.get(0))?;
+    if rows {
+        return Ok(false);
+    }
+    tx.execute_batch(DROP_MEMORY_TABLES)?;
+    Ok(true)
+}
+
+/// Makes the memory tables again, as schemas 7 to 12 made them, when they are missing. Only the
+/// `Keep` seam calls it. `true` when it made them.
+fn restore_memory_tables(tx: &Transaction<'_>) -> Result<bool, StoreError> {
+    if super::memories::has_memory_table(tx)? {
+        return Ok(false);
+    }
+    for index in MEMORY_SCHEMAS {
+        tx.execute_batch(MIGRATIONS[index])?;
+    }
+    Ok(true)
 }
 
 /// The number of entries, counted up to `limit` so a large database is not scanned.
@@ -3416,7 +3520,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         assert_eq!(store.total_threads().expect("count"), 1);
     }
 
@@ -4366,7 +4470,7 @@ mod tests {
                 (1, 'oldmemory1', 'rule', 'An old rule.', 'accepted', 'human', 1);",
         );
         let mut store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 12);
+        assert_eq!(version_of(dir.path()), 13);
         let old = store.read_memory_by_uid("oldmemory1").expect("read");
         assert_eq!(old.basis, MemoryBasis::Observed);
         let (kept, created) = store
@@ -4400,7 +4504,7 @@ mod tests {
                 (1, 'oldmemory1', 'rule', 'An old rule.', 'accepted', 'human', 1);",
         );
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 12);
+        assert_eq!(version_of(dir.path()), 13);
         let old = store.read_memory_by_uid("oldmemory1").expect("read");
         assert_eq!((old.retrieval_count, old.last_retrieved_at), (0, None));
         assert!(store.count_retrieval("oldmemory1", 5).expect("count"));
@@ -4423,7 +4527,7 @@ mod tests {
                 (1, 'oldmemory1', 'rule', 'An old rule.', 'accepted', 'human', 1);",
         );
         let mut store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 12);
+        assert_eq!(version_of(dir.path()), 13);
         assert!(
             store
                 .read_memory_by_uid("oldmemory1")
@@ -4475,7 +4579,7 @@ mod tests {
         );
         legacy_database(dir.path(), 8, &rows);
         let mut store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 12);
+        assert_eq!(version_of(dir.path()), 13);
         assert_eq!(
             store.read_thread(&uid("s1"), 0, 10).expect("read").parent,
             None
@@ -5189,7 +5293,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let hits = store
             .search("ndex", &ThreadFilter::default(), 10)
             .expect("search");
@@ -5710,7 +5814,7 @@ mod tests {
                 (3, 'file', 'src/c.rs', NULL, 'def');",
         );
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 12);
+        assert_eq!(version_of(dir.path()), 13);
         let mut statement = store
             .conn
             .prepare(
@@ -5843,7 +5947,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             legacy_database(dir.path(), versions, EVERY_KIND_ROWS);
             let store = ThreadStore::open(dir.path()).expect("migrate");
-            assert_eq!(version_of(dir.path()), 12, "from version {versions}");
+            assert_eq!(version_of(dir.path()), 13, "from version {versions}");
             assert_eq!(index_rows(&store), (2, 2), "from version {versions}");
             assert_eq!(stage_hits(&store, "backoff", "ckof", "bakcoff"), [1, 1, 1]);
             assert_eq!(
@@ -5885,7 +5989,7 @@ mod tests {
 
         let store = ThreadStore::open(dir.path()).expect("migrate");
 
-        assert_eq!(version_of(dir.path()), 12);
+        assert_eq!(version_of(dir.path()), 13);
         let detail = store.read_thread("old1", 0, 10).expect("read");
         assert_eq!(detail.edits.len(), 1);
         assert_eq!(detail.edits[0].path, "src/hexagonal_port.rs");
@@ -6081,7 +6185,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 3, MARKER_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 12);
+        assert_eq!(version_of(dir.path()), 13);
 
         // Slash command as typed, output and bash as notices and a bash prompt, reminders
         // gone, the interruption as a notice; the marker-only prompt is deleted.
@@ -6201,7 +6305,7 @@ mod tests {
             open_for_hook_below(dir.path(), 6).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(dir.path()), 12);
+        assert_eq!(version_of(dir.path()), 13);
 
         // An up-to-date database is opened whatever its size.
         assert!(matches!(
@@ -6214,7 +6318,7 @@ mod tests {
             open_for_hook_below(fresh.path(), 1).expect("hook"),
             HookStore::Ready(_)
         ));
-        assert_eq!(version_of(fresh.path()), 12);
+        assert_eq!(version_of(fresh.path()), 13);
     }
 
     /// A deterministic generator for the benchmark: no randomness crate, same text every run.
@@ -7011,7 +7115,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(dir.path(), 4, VERSION_FOUR_ROWS);
         let store = ThreadStore::open(dir.path()).expect("migrate");
-        assert_eq!(version_of(dir.path()), 12);
+        assert_eq!(version_of(dir.path()), 13);
         assert_eq!(
             store.thread_summary("t1uid").expect("t1").tags,
             ["api", "bug"]
@@ -7051,8 +7155,28 @@ mod tests {
         assert_eq!(kept, 0, "thread_tag is dropped");
     }
 
+    /// The tables that hold memories in `threads.db` up to schema 12 (D222 (6)).
+    const MEMORY_TABLES: [&str; 5] = [
+        "memory",
+        "memory_source",
+        "memory_rel",
+        "memory_mark",
+        "memory_fts",
+    ];
+
+    fn has_table(raw: &Connection, name: &str) -> bool {
+        let found: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .expect("master");
+        found == 1
+    }
+
     #[test]
-    fn the_migration_to_schema_seven_keeps_threads_and_adds_memories() {
+    fn the_migration_to_schema_thirteen_keeps_threads_and_drops_the_empty_memory_tables() {
         let dir = tempfile::tempdir().expect("tempdir");
         legacy_database(
             dir.path(),
@@ -7062,18 +7186,74 @@ mod tests {
         );
         let store = ThreadStore::open(dir.path()).expect("migrate");
         assert_eq!(store.total_threads().expect("count"), 1);
-        assert_eq!(version_of(dir.path()), 12);
+        assert_eq!(version_of(dir.path()), 13);
         let raw = raw_connection(dir.path());
-        for name in ["memory", "memory_source", "memory_rel", "memory_fts"] {
-            let found: i64 = raw
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
-                    params![name],
-                    |row| row.get(0),
-                )
-                .expect("master");
-            assert_eq!(found, 1, "{name} exists");
+        for name in MEMORY_TABLES {
+            assert!(!has_table(&raw, name), "{name} is dropped");
         }
+    }
+
+    #[test]
+    fn a_memory_table_holding_rows_is_kept_until_an_open_finds_it_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        legacy_database(
+            dir.path(),
+            12,
+            "INSERT INTO memory (uid, kind, text, status, origin, created_at)
+             VALUES ('kept1', 'rule', 'A rule.', 'accepted', 'human', 1);",
+        );
+        drop(ThreadStore::open(dir.path()).expect("open with a memory"));
+        let raw = raw_connection(dir.path());
+        for name in MEMORY_TABLES {
+            assert!(
+                has_table(&raw, name),
+                "{name} is kept while a memory is here"
+            );
+        }
+        raw.execute("DELETE FROM memory", []).expect("empty it");
+        drop(raw);
+        drop(ThreadStore::open(dir.path()).expect("reopen"));
+        let raw = raw_connection(dir.path());
+        for name in MEMORY_TABLES {
+            assert!(!has_table(&raw, name), "{name} is dropped once empty");
+        }
+        assert_eq!(version_of(dir.path()), 13);
+    }
+
+    #[test]
+    fn a_store_without_its_memory_tables_holds_no_memory() {
+        let store = ThreadStore::open_memory().expect("open");
+        assert!(!store.has_memories().expect("has"));
+        assert_eq!(store.count_proposed().expect("count"), 0);
+        assert!(store.accepted_text().expect("accepted").is_empty());
+        assert!(store.memories_to_move().expect("move").is_empty());
+        assert!(store.supersedes_links().expect("links").is_empty());
+        assert!(matches!(
+            store.memory_id_of("nothing"),
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.read_memory_by_uid("nothing"),
+            Err(StoreError::NotFound)
+        ));
+        let (memories, next) = store
+            .list_memories("", &gm_schema::threads::MemoryFilter::default(), 10, None)
+            .expect("list");
+        assert!(memories.is_empty() && next.is_none());
+        assert!(
+            store
+                .find_memories("", &gm_schema::threads::MemoryFilter::default())
+                .expect("find")
+                .is_empty()
+        );
+        assert!(store.memory_file_sources(1).expect("sources").is_empty());
+        assert!(!store.count_retrieval("nothing", 1).expect("count"));
+        assert!(
+            store
+                .memory_mark_history("nothing")
+                .expect("marks")
+                .is_empty()
+        );
     }
 
     #[test]

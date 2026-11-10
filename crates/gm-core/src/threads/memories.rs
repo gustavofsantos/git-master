@@ -664,8 +664,22 @@ pub(crate) fn delete_in(conn: &Connection, id: i64) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Whether the store still holds its memory tables (D222 (6)). A store opened after its memories
+/// moved to `contexts.db` has dropped them, and then it holds no memory: every read treats the
+/// missing table as an empty one, and a write fails as it would on any missing table.
+pub(crate) fn has_memory_table(conn: &Connection) -> Result<bool, StoreError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
 /// The repository-relative paths of a memory's file sources, by path.
 pub(crate) fn file_source_paths(conn: &Connection, id: i64) -> Result<Vec<String>, StoreError> {
+    if !has_memory_table(conn)? {
+        return Ok(Vec::new());
+    }
     let mut statement = conn.prepare(
         "SELECT ref FROM memory_source WHERE memory_id = ?1 AND kind = 'file' ORDER BY ref",
     )?;
@@ -677,6 +691,9 @@ pub(crate) fn file_source_paths(conn: &Connection, id: i64) -> Result<Vec<String
 
 /// The row id of the memory with `uid`, when there is one.
 pub(crate) fn id_by_uid(conn: &Connection, uid: &str) -> Result<Option<i64>, StoreError> {
+    if !has_memory_table(conn)? {
+        return Ok(None);
+    }
     Ok(conn
         .query_row(
             "SELECT id FROM memory WHERE uid = ?1",
@@ -716,6 +733,9 @@ pub(crate) fn list_ids(
     filter: &MemoryFilter,
     within: &str,
 ) -> Result<Vec<Found>, StoreError> {
+    if !has_memory_table(conn)? {
+        return Ok(Vec::new());
+    }
     let fts = if query.trim().is_empty() {
         None
     } else {
@@ -757,6 +777,9 @@ pub(crate) fn list_ids(
 /// How many memories are proposed and inside `within`, an SQL restriction on `m` that starts with
 /// ` AND` (empty for the whole store). One SQL count (D193 (6)).
 pub(crate) fn count_proposed(conn: &Connection, within: &str) -> Result<u32, StoreError> {
+    if !has_memory_table(conn)? {
+        return Ok(0);
+    }
     let sql = format!("SELECT COUNT(*) FROM memory m WHERE m.status = ?1{within}");
     let count: i64 = conn.query_row(&sql, params![status_text(MemoryStatus::Proposed)], |row| {
         row.get(0)
@@ -766,6 +789,9 @@ pub(crate) fn count_proposed(conn: &Connection, within: &str) -> Result<u32, Sto
 
 /// The uids of the proposed memories inside `within` (see `count_proposed`).
 pub(crate) fn proposed_uids(conn: &Connection, within: &str) -> Result<Vec<String>, StoreError> {
+    if !has_memory_table(conn)? {
+        return Ok(Vec::new());
+    }
     let sql = format!("SELECT m.uid FROM memory m WHERE m.status = ?1{within}");
     let mut statement = conn.prepare(&sql)?;
     let uids = statement
@@ -779,6 +805,9 @@ pub(crate) fn proposed_uids(conn: &Connection, within: &str) -> Result<Vec<Strin
 /// Counts one retrieval of memory `uid`, at `at` (D201 (4)): one UPDATE. `false` when no memory of
 /// that uid is stored here. Not a command of its own: the caller decides what may be counted.
 pub(crate) fn count_retrieval(conn: &Connection, uid: &str, at: i64) -> Result<bool, StoreError> {
+    if !has_memory_table(conn)? {
+        return Ok(false);
+    }
     let changed = conn.execute(
         "UPDATE memory SET retrieval_count = retrieval_count + 1, last_retrieved_at = ?2
          WHERE uid = ?1",
@@ -793,6 +822,9 @@ pub(crate) fn accepted_text(
     conn: &Connection,
     within: &str,
 ) -> Result<Vec<(String, u64)>, StoreError> {
+    if !has_memory_table(conn)? {
+        return Ok(Vec::new());
+    }
     let sql = format!("SELECT m.uid, length(m.text) FROM memory m WHERE m.status = ?1{within}");
     let mut statement = conn.prepare(&sql)?;
     let rows = statement
@@ -826,6 +858,9 @@ pub fn accepted_size(rows: impl IntoIterator<Item = (String, u64)>) -> (u32, u64
 /// parameter limit.
 pub(crate) fn count_proposed_among(conn: &Connection, uids: &[String]) -> Result<u32, StoreError> {
     const CHUNK: usize = 500;
+    if !has_memory_table(conn)? {
+        return Ok(0);
+    }
     let mut total = 0_u32;
     for chunk in uids.chunks(CHUNK) {
         // ?1 is the status; the uids follow from ?2.
@@ -947,6 +982,9 @@ impl ThreadStore {
     /// Whether the store holds any memory: the one query a memory command makes before it moves the
     /// repository's memories out (D222 (6)).
     pub(crate) fn has_memories(&self) -> Result<bool, StoreError> {
+        if !has_memory_table(&self.conn)? {
+            return Ok(false);
+        }
         Ok(self
             .conn
             .query_row("SELECT EXISTS (SELECT 1 FROM memory)", [], |row| row.get(0))?)
@@ -957,6 +995,9 @@ impl ThreadStore {
     pub(crate) fn memories_to_move(
         &self,
     ) -> Result<Vec<(Memory, Vec<MemoryMarkSummary>)>, StoreError> {
+        if !has_memory_table(&self.conn)? {
+            return Ok(Vec::new());
+        }
         let mut statement = self.conn.prepare("SELECT id FROM memory ORDER BY id")?;
         let ids = statement
             .query_map([], |row| row.get::<_, i64>(0))?
@@ -972,6 +1013,9 @@ impl ThreadStore {
 
     /// Every supersedes link of the store, by the uids of the two memories it joins (D222 (6)).
     pub(crate) fn supersedes_links(&self) -> Result<Vec<SupersedesLink>, StoreError> {
+        if !has_memory_table(&self.conn)? {
+            return Ok(Vec::new());
+        }
         let mut statement = self.conn.prepare(
             "SELECT f.uid, t.uid, r.origin, r.at FROM memory_rel r
              JOIN memory f ON f.id = r.from_memory
@@ -1244,6 +1288,9 @@ pub(crate) fn insert_links(conn: &Connection, links: &[SupersedesLink]) -> Resul
 
 /// A memory with its sources and relations, or `NotFound`.
 pub(crate) fn memory_by_id(conn: &Connection, id: i64) -> Result<Memory, StoreError> {
+    if !has_memory_table(conn)? {
+        return Err(StoreError::NotFound);
+    }
     let sql = format!("SELECT {MEMORY_COLUMNS} FROM memory m WHERE m.id = ?1");
     let mut memory = conn
         .query_row(&sql, params![id], memory_row)
@@ -1334,6 +1381,9 @@ pub(crate) fn mark_history(
     conn: &Connection,
     uid: &str,
 ) -> Result<Vec<MemoryMarkSummary>, StoreError> {
+    if !has_memory_table(conn)? {
+        return Ok(Vec::new());
+    }
     mark_rows(
         conn,
         "SELECT actor, mark, at, reason FROM memory_mark WHERE memory_uid = ?1 ORDER BY id",
@@ -2041,7 +2091,7 @@ mod tests {
 
     #[test]
     fn a_same_text_in_other_case_and_spacing_returns_the_first_memory() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let sources = [file("src/a.rs")];
         let (first, created) = store
             .propose_memory(&agent_proposal(
@@ -2067,7 +2117,7 @@ mod tests {
 
     #[test]
     fn a_rejected_duplicate_does_not_block_a_new_memory() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let first = propose(
             &mut store,
             MemoryKind::Fact,
@@ -2089,7 +2139,7 @@ mod tests {
 
     #[test]
     fn a_thread_source_must_name_a_stored_thread() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let sources = [MemorySource {
             kind: MemorySourceKind::Thread,
             reference: "missing".to_owned(),
@@ -2118,7 +2168,7 @@ mod tests {
 
     #[test]
     fn a_human_creates_an_accepted_memory_and_an_agent_cannot() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let memory = human_memory(
             &mut store,
             MemoryKind::Decision,
@@ -2152,7 +2202,7 @@ mod tests {
 
     #[test]
     fn accepting_a_proposal_makes_it_accepted_by_a_human() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let memory = propose(
             &mut store,
             MemoryKind::Rule,
@@ -2171,7 +2221,7 @@ mod tests {
 
     #[test]
     fn an_edit_sets_the_origin_to_human_and_keeps_who_proposed_it() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let memory = propose(
             &mut store,
             MemoryKind::Rule,
@@ -2188,7 +2238,7 @@ mod tests {
 
     #[test]
     fn an_edit_to_the_key_of_another_memory_is_refused_naming_it() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let held = accepted(&mut store, MemoryKind::Rule, "Run the release checks");
         let other = propose(
             &mut store,
@@ -2211,7 +2261,7 @@ mod tests {
 
     #[test]
     fn supersede_marks_the_old_memory_and_links_both_ways() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let old = accepted(&mut store, MemoryKind::Decision, "Use the old scheme");
         let new = propose(
             &mut store,
@@ -2232,7 +2282,7 @@ mod tests {
 
     #[test]
     fn superseding_a_proposed_memory_is_refused_and_writes_nothing() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let accepted_old = accepted(&mut store, MemoryKind::Fact, "An accepted fact");
         let proposed_old = propose(
             &mut store,
@@ -2267,7 +2317,7 @@ mod tests {
 
     #[test]
     fn a_memory_cannot_supersede_itself() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let memory = propose(&mut store, MemoryKind::Rule, "A rule", &[file("src/a.rs")]);
         assert!(matches!(
             store.accept_memory(memory.id, None, &[memory.id], &[], 1),
@@ -2281,7 +2331,7 @@ mod tests {
 
     #[test]
     fn accepting_records_the_blob_of_each_file_source() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let memory = propose(
             &mut store,
             MemoryKind::Rule,
@@ -2317,7 +2367,7 @@ mod tests {
 
     #[test]
     fn accepting_an_accepted_memory_again_keeps_its_decision_and_blobs() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let memory = propose(
             &mut store,
             MemoryKind::Rule,
@@ -2343,7 +2393,7 @@ mod tests {
 
     #[test]
     fn accepting_an_accepted_memory_again_with_text_edits_only_the_text() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let memory = accepted(&mut store, MemoryKind::Fact, "The first wording");
         let blobs = [("src/a.rs".to_owned(), BlobRead::Blob("abc123".to_owned()))];
         let before = store.read_memory(memory.id).expect("read");
@@ -2361,7 +2411,7 @@ mod tests {
 
     #[test]
     fn accepting_an_accepted_memory_again_still_supersedes() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let old = accepted(&mut store, MemoryKind::Decision, "The old one");
         let new = accepted(&mut store, MemoryKind::Decision, "The new one");
         let superseded = store
@@ -2377,7 +2427,7 @@ mod tests {
 
     #[test]
     fn reject_takes_only_a_proposed_memory() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let proposed = propose(&mut store, MemoryKind::Fact, "Rejectable", &[file("a")]);
         let rejected = store.reject_memory(proposed.id, 11).expect("reject");
         assert_eq!(rejected.status, MemoryStatus::Rejected);
@@ -2391,7 +2441,7 @@ mod tests {
 
     #[test]
     fn delete_removes_the_memory_and_cascades_its_sources_and_links() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let old = accepted(&mut store, MemoryKind::Decision, "The old one");
         let new = propose(
             &mut store,
@@ -2428,7 +2478,7 @@ mod tests {
 
     #[test]
     fn file_sources_are_listed_by_path() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let memory = propose(
             &mut store,
             MemoryKind::Rule,
@@ -2477,7 +2527,7 @@ mod tests {
 
     #[test]
     fn list_filters_by_kind_status_path_and_author() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let (release, decision, stash) = seeded(&mut store);
         let list =
             |filter: &MemoryFilter| store.list_memories("", filter, 50, None).expect("list").0;
@@ -2530,7 +2580,7 @@ mod tests {
 
     #[test]
     fn a_query_finds_words_by_prefix_and_ignores_fts_operators() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let (release, decision, stash) = seeded(&mut store);
         let find = |query: &str| {
             store
@@ -2551,7 +2601,7 @@ mod tests {
 
     #[test]
     fn paging_walks_every_row_and_stops_at_the_last() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         let (release, decision, stash) = seeded(&mut store);
         let mut seen = Vec::new();
         let mut cursor: Option<String> = None;
@@ -2572,7 +2622,7 @@ mod tests {
 
     #[test]
     fn a_cursor_from_another_request_and_a_malformed_one_are_refused() {
-        let mut store = ThreadStore::open_memory().expect("open");
+        let mut store = ThreadStore::open_memory_keeping_memories().expect("open");
         seeded(&mut store);
         let (_, next) = store
             .list_memories("", &MemoryFilter::default(), 1, None)

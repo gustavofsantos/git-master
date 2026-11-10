@@ -262,7 +262,7 @@ impl Fixture {
 /// written before the contexts were kept there. A file source records its blob at `HEAD`. Returns the
 /// memory's uid.
 fn keep_in_store(root: &Path, kind: MemoryKind, text: &str, file: Option<&str>) -> String {
-    let mut store = ThreadStore::open(&common_of(root)).expect("the store opens");
+    let mut store = ThreadStore::open_keeping_memories(&common_of(root)).expect("the store opens");
     let sources: Vec<MemorySource> = file
         .map(|path| MemorySource {
             kind: MemorySourceKind::File,

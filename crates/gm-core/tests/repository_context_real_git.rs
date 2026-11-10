@@ -308,7 +308,8 @@ const NOW: i64 = 1_700_000_000_000;
 /// them before K1b: an accepted rule, a rejected one, and an accepted one that supersedes an older
 /// accepted one. Returns the uids in that order: accepted, rejected, old, new.
 fn keep_in_threads(root: &Path) -> [String; 4] {
-    let mut store = ThreadStore::open(&root.join(".git")).expect("the store opens");
+    let mut store =
+        ThreadStore::open_keeping_memories(&root.join(".git")).expect("the store opens");
     let source = MemorySource {
         kind: MemorySourceKind::File,
         reference: "f.txt".into(),
@@ -668,6 +669,55 @@ fn a_move_finished_after_an_interrupted_insert_duplicates_nothing() {
         std::slice::from_ref(&uids[2]),
         "the link came once"
     );
+}
+
+#[test]
+fn a_repositorys_threads_db_has_no_memory_table_once_its_memories_moved_and_commands_still_work() {
+    let world = World::new();
+    let [kept, rejected, old, newer] = keep_in_threads(&world.root);
+    let mut engine = engine_on(&world.root, Some(&world.db));
+    let (listed, note) = list(&mut engine);
+    assert_eq!(note, None, "the move did not fail");
+    assert_eq!(listed.len(), 4);
+    drop(engine);
+
+    // The next open of threads.db finds its memory tables empty and drops them (D222 (6)).
+    drop(ThreadStore::open(&world.root.join(".git")).expect("the store opens"));
+    let db = world.root.join(".git").join("gitmaster").join("threads.db");
+    let raw = rusqlite::Connection::open(&db).expect("the raw store opens");
+    let tables: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE name IN ('memory', 'memory_source', 'memory_rel', 'memory_mark', 'memory_fts')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("master");
+    assert_eq!(tables, 0, "threads.db keeps no memory table");
+    let version: i64 = raw
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 13);
+    drop(raw);
+
+    // The memories still answer from contexts.db, and a new one is proposed there.
+    let mut engine = engine_on(&world.root, Some(&world.db));
+    let (listed, note) = list(&mut engine);
+    assert_eq!(
+        note, None,
+        "a list without threads.db memories is not a failure"
+    );
+    assert_eq!(listed.len(), 4);
+    for uid in [&kept, &rejected, &old, &newer] {
+        assert!(
+            listed.iter().any(|memory| &memory.uid == uid),
+            "{uid} is listed"
+        );
+    }
+    let events = propose(&mut engine, "Prefer small commits", None);
+    assert_eq!(state_of(&events), OperationState::Done, "{events:?}");
+    let (listed, _) = list(&mut engine);
+    assert_eq!(listed.len(), 5);
 }
 
 #[test]
