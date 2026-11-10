@@ -42,6 +42,8 @@ pub struct ContextRow {
     pub repo_count: usize,
     pub accepted_memories: u32,
     pub sub_contexts: u32,
+    /// Whether the open repository is bound to this context directly (D223 (2)).
+    pub bound: bool,
 }
 
 /// What a delete would remove, as the engine previews it (`ContextDeletePreview`). The glue
@@ -188,13 +190,13 @@ impl ContextsModel {
         self.select_when_listed = None;
     }
 
-    /// The list read, sent from the dialog. The contexts are all of them, not only the open
-    /// repository's.
+    /// The list read, sent from the dialog: every context of the tree, repository or not, each with
+    /// whether the open repository is bound to it (D222 (3)).
     #[must_use]
     pub fn plan_list() -> CommandKind {
         CommandKind::ListContexts {
-            repo: false,
-            all: false,
+            repo: true,
+            all: true,
         }
     }
 
@@ -602,6 +604,7 @@ fn build_rows(contexts: &[Context]) -> Vec<ContextRow> {
                 repo_count: context.repos.len(),
                 accepted_memories: context.accepted_memories,
                 sub_contexts: context.sub_contexts,
+                bound: context.bound,
             });
             for &child in children[position].iter().rev() {
                 if !visited[child] {
@@ -631,6 +634,39 @@ mod tests {
             bound: false,
             inherited_memories: 0,
         }
+    }
+
+    #[test]
+    fn the_tree_lists_a_context_with_no_repository_and_marks_the_bound_ones() {
+        let mut platform = context(1, "Platform", None);
+        platform.bound = true;
+        let billing = context(2, "Billing", Some(1));
+        let sales = context(3, "Sales", None);
+        let rows = build_rows(&[sales, billing, platform]);
+        let shown: Vec<(&str, usize, bool, usize)> = rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.depth, row.bound, row.repo_count))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Platform", 0, true, 0),
+                ("Billing", 1, false, 0),
+                ("Sales", 0, false, 0),
+            ],
+            "every context is a row, with or without a repository"
+        );
+    }
+
+    #[test]
+    fn the_list_read_asks_for_every_context_with_the_open_repository_identity() {
+        assert_eq!(
+            ContextsModel::plan_list(),
+            CommandKind::ListContexts {
+                repo: true,
+                all: true,
+            }
+        );
     }
 
     fn repo(repo_id: &str) -> ContextRepo {

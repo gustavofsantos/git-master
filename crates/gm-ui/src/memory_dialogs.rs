@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use crate::contexts_model;
-use crate::memories::{self, DetachStart, MemoriesPage, Request, Scope};
+use crate::memories::{self, DetachStart, MemoriesPage, Request};
 use crate::memory_form::{self, SourceDraft};
 use crate::memory_rows;
 use crate::shell_memories::{NO_WRITE, button, pick_chip};
@@ -82,7 +82,9 @@ pub(crate) enum PlaceAction {
 pub(crate) struct NewForm {
     pub(crate) kind: MemoryKind,
     pub(crate) basis: MemoryBasis,
-    pub(crate) scope: Scope,
+    /// The context the memory goes to, by path, as the person chose it. `None` until a choice is made:
+    /// the form then starts at the nearest bound context (D223 (5)).
+    pub(crate) context: Option<String>,
     pub(crate) source_kind: MemorySourceKind,
     pub(crate) sources: Vec<MemorySourceInput>,
     pub(crate) text: Entity<TextArea>,
@@ -117,7 +119,7 @@ impl StatusView {
         let form = NewForm {
             kind: MemoryKind::Decision,
             basis: MemoryBasis::Observed,
-            scope: Scope::Repository,
+            context: None,
             source_kind: MemorySourceKind::Thread,
             sources: Vec::new(),
             text: text.clone(),
@@ -180,9 +182,9 @@ impl StatusView {
         cx.notify();
     }
 
-    fn set_new_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
+    fn set_new_context(&mut self, context: String, cx: &mut Context<Self>) {
         if let Some(form) = self.new_form_mut() {
-            form.scope = scope;
+            form.context = Some(context);
         }
         cx.notify();
     }
@@ -229,7 +231,7 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Save: the memory is written with the form's kind, scope, text and sources. The model
+    /// Save: the memory is written with the form's kind, context, text and sources. The model
     /// checks them; a refusal stays in the dialog.
     fn submit_new_memory(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.memory_dialog.as_ref() else {
@@ -242,13 +244,10 @@ impl StatusView {
             return;
         };
         let text = form.text.read(cx).text().to_owned();
-        let planned = memory_form::save_request(
-            form.kind,
-            form.scope.clone(),
-            &text,
-            &form.sources,
-            form.basis,
-        );
+        let context =
+            memory_form::effective_context(form.context.as_deref(), self.model.memories.contexts());
+        let planned =
+            memory_form::save_request(form.kind, context, &text, &form.sources, form.basis);
         self.send_planned_dialog(planned, cx);
     }
 
@@ -568,8 +567,8 @@ impl StatusView {
             .child(kind_chips(form, cx))
             .child(section_label("Basis"))
             .child(basis_chips(form, cx))
-            .child(section_label("Scope"))
-            .child(self.scope_chips(form, cx))
+            .child(section_label("Context"))
+            .child(self.context_chooser(form, cx))
             .child(field_row("Text", form.text.clone()))
             .child(
                 div()
@@ -621,26 +620,40 @@ impl StatusView {
             ))
     }
 
-    /// The scope chips of the form: this repository and each context it belongs to. Everything is
-    /// not a place to write to, so the first option is left out.
-    fn scope_chips(&self, form: &NewForm, cx: &Context<Self>) -> Div {
-        let chips: Vec<Stateful<Div>> = memory_rows::scope_options(self.model.memories.contexts())
+    /// The context chooser of the form (D223 (2), (5)): the tree of every context, one chip each, indented
+    /// by depth, with the bound ones marked. The chosen one is filled; with none chosen and no bound
+    /// context the hint says the memory goes to the context of this repository.
+    fn context_chooser(&self, form: &NewForm, cx: &Context<Self>) -> Div {
+        let contexts = self.model.memories.contexts();
+        let chosen = memory_form::effective_context(form.context.as_deref(), contexts);
+        let chips: Vec<Div> = memory_rows::context_tree(contexts)
             .into_iter()
-            .skip(1)
             .enumerate()
-            .map(|(index, scope)| {
-                let on = form.scope == scope;
-                let label = memory_rows::scope_label(&scope);
-                pick_chip(
-                    ("memory-new-scope", index),
+            .map(|(index, row)| {
+                let on = chosen.as_deref() == Some(row.path.as_str());
+                let mut label = row.name.clone();
+                if row.bound {
+                    label.push_str(" · bound");
+                }
+                let path = row.path.clone();
+                let indent = f32::from(u16::try_from(row.depth).unwrap_or(u16::MAX)) * 12.;
+                div().pl(px(indent)).child(pick_chip(
+                    ("memory-new-context", index),
                     label,
                     on,
                     cx,
-                    move |this, cx| this.set_new_scope(scope.clone(), cx),
-                )
+                    move |this, cx| this.set_new_context(path.clone(), cx),
+                ))
             })
             .collect();
-        div().flex().flex_row().flex_wrap().gap_1().children(chips)
+        let hint = memory_form::context_hint(chosen.as_deref())
+            .map(|text| div().text_xs().text_color(theme::muted()).child(text));
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .children(chips)
+            .children(hint)
     }
 
     /// The Accept and supersede panel: the accepted memories the list shows, each chosen or not.

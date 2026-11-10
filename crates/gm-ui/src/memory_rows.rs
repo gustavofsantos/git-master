@@ -89,27 +89,60 @@ pub fn over_limit(chars: usize) -> bool {
     chars > TEXT_CHARS
 }
 
-/// The label of a scope: the chip's words, `Everything`, `This repository` or a context's path.
+/// The label of a scope: the chip's words, `Bound to this repository` or a context's path.
 #[must_use]
 pub fn scope_label(scope: &Scope) -> String {
     match scope {
-        Scope::Everything => "Everything".to_owned(),
-        Scope::Repository => "This repository".to_owned(),
+        Scope::Bound => "Bound to this repository".to_owned(),
         Scope::Context(path) => path.clone(),
     }
 }
 
-/// The scopes the scope chip cycles through: everything, this repository, then each context the
-/// repository belongs to.
+/// The scopes the scope chip cycles through (D223 (1)): the contexts this repository is bound to, then
+/// every other context by path. The bound ones come first, each group in path order. `contexts` is
+/// every context of the tree, bound or not.
 #[must_use]
 pub fn scope_options(contexts: &[Context]) -> Vec<Scope> {
-    let mut options = vec![Scope::Everything, Scope::Repository];
+    let mut sorted: Vec<&Context> = contexts.iter().collect();
+    sorted.sort_by(|a, b| (!a.bound, &a.path).cmp(&(!b.bound, &b.path)));
+    let mut options = vec![Scope::Bound];
     options.extend(
-        contexts
-            .iter()
+        sorted
+            .into_iter()
             .map(|context| Scope::Context(context.path.clone())),
     );
     options
+}
+
+/// One row of the context tree a chooser shows (D223 (2)): the context's name, indented by its depth,
+/// and whether the open repository is bound to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeRow {
+    pub path: String,
+    pub name: String,
+    pub depth: usize,
+    pub bound: bool,
+}
+
+/// The contexts as a tree, parents before their sub-contexts, every context of `contexts` whether it has
+/// a repository or not. Siblings are in name order: the paths are compared segment by segment.
+#[must_use]
+pub fn context_tree(contexts: &[Context]) -> Vec<TreeRow> {
+    let mut sorted: Vec<&Context> = contexts.iter().collect();
+    sorted.sort_by(|a, b| segments(&a.path).cmp(&segments(&b.path)));
+    sorted
+        .into_iter()
+        .map(|context| TreeRow {
+            path: context.path.clone(),
+            name: context.name.clone(),
+            depth: context.path.matches(" / ").count(),
+            bound: context.bound,
+        })
+        .collect()
+}
+
+fn segments(path: &str) -> Vec<&str> {
+    path.split(" / ").collect()
 }
 
 /// The option after `current` in `options`, wrapping to the first. When `current` is not one of
@@ -444,16 +477,118 @@ mod tests {
     fn the_scope_chip_names_the_choice_and_cycles_through_the_contexts() {
         let contexts = [context("Platform / Billing")];
         let options = scope_options(&contexts);
-        assert_eq!(scope_label(&options[0]), "Everything");
-        assert_eq!(scope_label(&options[1]), "This repository");
-        assert_eq!(scope_label(&options[2]), "Platform / Billing");
+        assert_eq!(scope_label(&options[0]), "Bound to this repository");
+        assert_eq!(scope_label(&options[1]), "Platform / Billing");
         assert_eq!(
-            next_choice(&options, &Scope::Repository),
-            Some(options[2].clone())
+            next_choice(&options, &Scope::Bound),
+            Some(options[1].clone())
         );
         assert_eq!(
-            next_choice(&options, &options[2].clone()),
-            Some(Scope::Everything)
+            next_choice(&options, &options[1].clone()),
+            Some(Scope::Bound)
+        );
+    }
+
+    #[test]
+    fn the_scope_options_start_bound_then_every_context_by_path_bound_or_not() {
+        let contexts = [
+            Context {
+                bound: false,
+                ..context("Sales")
+            },
+            Context {
+                bound: true,
+                ..context("Platform / Billing")
+            },
+            Context {
+                bound: true,
+                ..context("Platform")
+            },
+            Context {
+                bound: false,
+                ..context("Incident: stuck exports")
+            },
+        ];
+        let options = scope_options(&contexts);
+        assert_eq!(
+            options,
+            [
+                Scope::Bound,
+                Scope::Context("Platform".to_owned()),
+                Scope::Context("Platform / Billing".to_owned()),
+                Scope::Context("Incident: stuck exports".to_owned()),
+                Scope::Context("Sales".to_owned()),
+            ]
+        );
+        assert_eq!(
+            scope_label(&options[3]),
+            "Incident: stuck exports",
+            "an unbound context is named as it is"
+        );
+        assert_eq!(
+            scope_options(&[]),
+            [Scope::Bound],
+            "with no context only the bound scope is offered"
+        );
+    }
+
+    #[test]
+    fn the_scope_sends_bound_or_the_context_path_to_the_engine() {
+        use crate::memories::MemoriesPage;
+        let mut page = MemoriesPage::default();
+        page.set_scope(Scope::Context("Platform / Billing".to_owned()));
+        assert!(matches!(
+            page.plan_list().kind,
+            gm_schema::CommandKind::ListMemories { scope: Some(ref s), .. } if s == "Platform / Billing"
+        ));
+        page.set_scope(Scope::Bound);
+        assert!(matches!(
+            page.plan_list().kind,
+            gm_schema::CommandKind::ListMemories { scope: Some(ref s), .. } if s == "bound"
+        ));
+    }
+
+    #[test]
+    fn the_context_tree_lists_every_context_under_its_parent_with_the_bound_mark() {
+        let contexts = [
+            Context {
+                bound: false,
+                repos: Vec::new(),
+                ..context("Sales")
+            },
+            Context {
+                bound: true,
+                ..context("Platform / Billing")
+            },
+            Context {
+                bound: true,
+                ..context("Platform")
+            },
+            Context {
+                bound: false,
+                repos: Vec::new(),
+                ..context("Platform Ops")
+            },
+            Context {
+                bound: false,
+                repos: Vec::new(),
+                ..context("Platform / Billing / Refunds")
+            },
+        ];
+        let rows: Vec<(String, usize, bool)> = context_tree(&contexts)
+            .into_iter()
+            .map(|row| (row.path, row.depth, row.bound))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Platform".to_owned(), 0, true),
+                ("Platform / Billing".to_owned(), 1, true),
+                ("Platform / Billing / Refunds".to_owned(), 2, false),
+                ("Platform Ops".to_owned(), 0, false),
+                ("Sales".to_owned(), 0, false),
+            ],
+            "a context with no repository is listed, and a subtree stays together"
         );
     }
 
@@ -611,6 +746,7 @@ mod tests {
                 DetailAction::Reject,
                 DetailAction::Edit,
                 DetailAction::Supersede,
+                DetailAction::MoveToContext,
                 DetailAction::DetachFromContext,
                 DetailAction::Delete,
             ]
@@ -621,6 +757,7 @@ mod tests {
         assert_eq!(
             detail_actions(Some(&accepted)),
             vec![
+                DetailAction::MoveToContext,
                 DetailAction::AttachToContext,
                 DetailAction::DetachFromContext,
                 DetailAction::Delete,
@@ -634,7 +771,11 @@ mod tests {
         accepted.scope = "Platform".to_owned();
         assert_eq!(
             detail_actions(Some(&accepted)),
-            vec![DetailAction::AttachToContext, DetailAction::Delete]
+            vec![
+                DetailAction::MoveToContext,
+                DetailAction::AttachToContext,
+                DetailAction::Delete
+            ]
         );
     }
 

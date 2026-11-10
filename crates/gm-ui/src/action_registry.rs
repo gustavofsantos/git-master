@@ -1309,21 +1309,21 @@ const SPECS: [Spec; 121] = [
     ),
     spec(
         "memories.move_to_context",
-        "Move Memory to Context…",
+        "Move to Context…",
         None,
         ArgKind::Memory,
         Category::Repository,
     ),
     spec(
         "memories.attach_to_context",
-        "Attach Memory to Context…",
+        "Attach to Context…",
         None,
         ArgKind::Memory,
         Category::Repository,
     ),
     spec(
         "memories.detach_from_context",
-        "Detach Memory from Context…",
+        "Detach from Context…",
         None,
         ArgKind::Memory,
         Category::Repository,
@@ -5138,19 +5138,19 @@ mod tests {
             (
                 Action::MoveMemoryToContext,
                 "memories.move_to_context",
-                "Move Memory to Context…",
+                "Move to Context…",
                 ArgKind::Memory,
             ),
             (
                 Action::AttachMemoryToContext,
                 "memories.attach_to_context",
-                "Attach Memory to Context…",
+                "Attach to Context…",
                 ArgKind::Memory,
             ),
             (
                 Action::DetachMemoryFromContext,
                 "memories.detach_from_context",
-                "Detach Memory from Context…",
+                "Detach from Context…",
                 ArgKind::Memory,
             ),
         ];
@@ -5340,7 +5340,8 @@ mod tests {
         let inside = memory_ctx(Some(in_context));
         assert_eq!(
             Action::MoveMemoryToContext.enabled(&target, &inside),
-            Err("This memory is already in a context.")
+            Ok(()),
+            "a memory of a context moves to another context too (D222 (1))"
         );
         assert_eq!(
             Action::AttachMemoryToContext.plan(&target, &inside),

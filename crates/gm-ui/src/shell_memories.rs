@@ -345,11 +345,11 @@ impl StatusView {
         self.apply_memory_filter(changed, cx);
     }
 
-    /// The scope chip: everything, this repository, then each context the repository belongs to.
+    /// The scope chip: the contexts this repository is bound to, then every context by path (D223 (1)).
     fn cycle_memory_scope(&mut self, cx: &mut Context<Self>) {
         let options = memory_rows::scope_options(self.model.memories.contexts());
         let current = self.model.memories.scope().clone();
-        let next = memory_rows::next_choice(&options, &current).unwrap_or(Scope::Everything);
+        let next = memory_rows::next_choice(&options, &current).unwrap_or(Scope::Bound);
         let changed = self.model.memories.set_scope(next);
         self.apply_memory_filter(changed, cx);
     }
@@ -654,7 +654,7 @@ impl StatusView {
     /// names its filter, or Any.
     fn memory_filter_chips(&self, cx: &Context<Self>) -> Div {
         let page = &self.model.memories;
-        let scope_on = *page.scope() != Scope::Everything;
+        let scope_on = *page.scope() != Scope::Bound;
         let path = page.path().map(str::to_owned);
         let kind = page
             .kind()
@@ -1304,10 +1304,11 @@ fn memory_row(
         )
         .children(basis_tag(memory.basis))
         .children(memory_rows::mark_chip(&memory.marks).map(|text| tag(text, theme::warn_bg())))
-        .child(tag(
-            &memories::scope_chip(&memory.scope),
-            theme::selected_row(),
-        ))
+        .children(
+            memories::scope_chips(memory)
+                .iter()
+                .map(|path| tag(path, theme::selected_row())),
+        )
         .children(memory_rows::is_stale(memory).then(|| tag("Files changed", theme::warn_bg())));
     div()
         .id(("memory-row", index))
@@ -1359,10 +1360,11 @@ fn memory_header(memory: &Memory) -> Div {
                     memory_rows::disagreement(&memory.marks)
                         .then(|| tag("Disagreement", theme::selected_row())),
                 )
-                .child(tag(
-                    &memories::scope_chip(&memory.scope),
-                    theme::selected_row(),
-                )),
+                .children(
+                    memories::scope_chips(memory)
+                        .iter()
+                        .map(|path| tag(path, theme::selected_row())),
+                ),
         )
 }
 

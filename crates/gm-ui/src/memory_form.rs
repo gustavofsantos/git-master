@@ -4,9 +4,9 @@
 //! form's own words for what the person typed (an entry that is not a number, a range that runs
 //! backwards, a source with entries that is not a thread).
 
-use gm_schema::threads::{MemoryBasis, MemoryKind, MemorySourceInput, MemorySourceKind};
+use gm_schema::threads::{Context, MemoryBasis, MemoryKind, MemorySourceInput, MemorySourceKind};
 
-use crate::memories::{MemoriesPage, NewMemory, Request, Scope};
+use crate::memories::{MemoriesPage, NewMemory, Request};
 
 const NOT_AN_ENTRY: &str = "An entry is a whole number from 0, such as 3.";
 const NO_FIRST_ENTRY: &str = "A range needs a first entry.";
@@ -100,19 +100,52 @@ fn entry(text: &str) -> Result<Option<i64>, &'static str> {
     }
 }
 
+/// The context the New Memory form starts at (D223 (5)): the first bound context by path, of the
+/// contexts the form is given. `None` when the repository is bound to none: the engine then puts the
+/// memory in the context of the repository.
+#[must_use]
+pub fn default_context(contexts: &[Context]) -> Option<String> {
+    contexts
+        .iter()
+        .filter(|context| context.bound)
+        .map(|context| context.path.as_str())
+        .min()
+        .map(str::to_owned)
+}
+
+/// The context a save sends: the one the form chose, else the context it starts at (D223 (5)). A
+/// form that chose none, with no bound context, sends none and the engine decides.
+#[must_use]
+pub fn effective_context(chosen: Option<&str>, contexts: &[Context]) -> Option<String> {
+    chosen
+        .map(str::to_owned)
+        .or_else(|| default_context(contexts))
+}
+
+/// The hint under the context chooser when no context is chosen: the memory goes to the context of
+/// the repository (D223 (5)). `None` when a context is chosen.
+#[must_use]
+pub fn context_hint(chosen: Option<&str>) -> Option<&'static str> {
+    match chosen {
+        Some(_) => None,
+        None => Some("Goes to the context of this repository."),
+    }
+}
+
 /// The request that saves the New Memory form: a memory of the human's, accepted at once (D190),
-/// with the basis the form chose (D201 (1)). Refused with the reason the model gives for the text,
-/// the scope or a source.
+/// with the basis the form chose (D201 (1)). `context` is the context the form chose, by path, or
+/// none for the engine's choice (D223 (5)). Refused with the reason the model gives for the text or a
+/// source.
 pub fn save_request(
     kind: MemoryKind,
-    scope: Scope,
+    context: Option<String>,
     text: &str,
     sources: &[MemorySourceInput],
     basis: MemoryBasis,
 ) -> Result<Request, &'static str> {
     MemoriesPage::plan_new(&NewMemory {
         kind,
-        scope,
+        context,
         text: text.to_owned(),
         sources: sources.to_vec(),
         basis,
@@ -183,7 +216,7 @@ mod tests {
         let source = source_input(&draft(MemorySourceKind::File, "src/a.rs", "", "")).unwrap();
         let request = save_request(
             MemoryKind::Rule,
-            Scope::Repository,
+            None,
             "  Keep retries bounded. ",
             std::slice::from_ref(&source),
             MemoryBasis::Tested,
@@ -201,14 +234,14 @@ mod tests {
                 assert_eq!(kind, MemoryKind::Rule);
                 assert_eq!(text, "Keep retries bounded.");
                 assert_eq!(sources, vec![source.clone()]);
-                assert_eq!(context, None);
+                assert_eq!(context, None, "the engine chooses the context");
                 assert_eq!(basis, MemoryBasis::Tested);
             }
             other => panic!("not a proposal: {other:?}"),
         }
         let in_context = save_request(
             MemoryKind::Fact,
-            Scope::Context("Platform / Billing".to_owned()),
+            Some("Platform / Billing".to_owned()),
             "A fact.",
             &[],
             MemoryBasis::Observed,
@@ -238,40 +271,66 @@ mod tests {
     }
 
     #[test]
-    fn saving_refuses_an_empty_or_long_text_and_no_scope_to_write_to() {
+    fn saving_refuses_an_empty_or_long_text() {
         assert_eq!(
-            save_request(
-                MemoryKind::Fact,
-                Scope::Repository,
-                "  ",
-                &[],
-                MemoryBasis::Observed
-            )
-            .err(),
+            save_request(MemoryKind::Fact, None, "  ", &[], MemoryBasis::Observed).err(),
             Some("A memory needs some text.")
         );
         let long = "x".repeat(1001);
         assert_eq!(
-            save_request(
-                MemoryKind::Fact,
-                Scope::Repository,
-                &long,
-                &[],
-                MemoryBasis::Observed
-            )
-            .err(),
+            save_request(MemoryKind::Fact, None, &long, &[], MemoryBasis::Observed).err(),
             Some("A memory holds at most 1,000 characters.")
         );
+    }
+
+    fn context(path: &str, bound: bool) -> Context {
+        Context {
+            id: 1,
+            uid: "c".to_owned(),
+            name: path.to_owned(),
+            parent: None,
+            path: path.to_owned(),
+            repos: Vec::new(),
+            accepted_memories: 0,
+            sub_contexts: 0,
+            members: Vec::new(),
+            bound,
+            inherited_memories: 0,
+        }
+    }
+
+    #[test]
+    fn the_form_starts_at_the_first_bound_context_by_path() {
+        let contexts = [
+            context("Sales", false),
+            context("Platform / Billing", true),
+            context("Platform", true),
+        ];
+        assert_eq!(default_context(&contexts), Some("Platform".to_owned()));
+        assert_eq!(default_context(&[context("Sales", false)]), None);
+        assert_eq!(default_context(&[]), None);
+    }
+
+    #[test]
+    fn a_save_sends_the_chosen_context_or_the_one_the_form_starts_at() {
+        let contexts = [context("Platform", true), context("Sales", false)];
         assert_eq!(
-            save_request(
-                MemoryKind::Fact,
-                Scope::Everything,
-                "text",
-                &[],
-                MemoryBasis::Observed
-            )
-            .err(),
-            Some("Choose this repository or a context for the memory.")
+            effective_context(Some("Sales"), &contexts),
+            Some("Sales".to_owned())
         );
+        assert_eq!(
+            effective_context(None, &contexts),
+            Some("Platform".to_owned())
+        );
+        assert_eq!(effective_context(None, &[context("Sales", false)]), None);
+    }
+
+    #[test]
+    fn the_hint_says_where_a_memory_goes_when_no_context_is_chosen() {
+        assert_eq!(
+            context_hint(None),
+            Some("Goes to the context of this repository.")
+        );
+        assert_eq!(context_hint(Some("Platform")), None);
     }
 }

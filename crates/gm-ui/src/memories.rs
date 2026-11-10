@@ -24,6 +24,8 @@ pub const PAGE: u32 = 50;
 pub const TEXT_CHARS: usize = 1_000;
 /// The scope the engine gives a memory of this repository.
 const REPOSITORY: &str = "repository";
+/// The scope the engine reads as the contexts the repository is bound to (D223 (1)).
+const BOUND: &str = "bound";
 /// The origin prefix of a memory an agent proposed (`agent:<client>`).
 const AGENT_ORIGIN: &str = "agent:";
 /// The origin of a memory the human wrote or edited.
@@ -38,7 +40,6 @@ const NOT_PROPOSED: &str = "Only a proposed memory can be accepted or rejected."
 const NOT_ACCEPTED: &str = "Only an accepted memory can be superseded.";
 const EMPTY_TEXT: &str = "A memory needs some text.";
 const TOO_LONG: &str = "A memory holds at most 1,000 characters.";
-const NO_SCOPE: &str = "Choose this repository or a context for the memory.";
 const NO_SUPERSEDED: &str = "Choose the memory this one supersedes.";
 const SELF_SUPERSEDE: &str = "A memory cannot supersede itself.";
 const NO_SELECTION: &str = "Choose proposed memories to accept.";
@@ -47,8 +48,7 @@ const NOT_COMPLETE: &str = "Clear the filters and search, and load the whole lis
 const NO_AUTHOR_PROPOSALS: &str = "No proposal from that author is shown.";
 const BAD_RANGE: &str = "A thread range starts after it ends.";
 const EMPTY_REF: &str = "A source needs a thread, a commit or a file.";
-const NOT_VISIBLE: &str = "Choose a context this repository belongs to.";
-const ALREADY_IN_CONTEXT: &str = "This memory is already in a context.";
+const NOT_KNOWN: &str = "Choose a context of the tree.";
 const NOT_MOVABLE: &str = "Only a proposed or accepted memory can move to a context.";
 const LINKED: &str = "A memory with supersedes links cannot move to a context.";
 const MOVE_FIRST: &str = "This memory is in this repository only: move it to a context first.";
@@ -64,25 +64,23 @@ pub const REASON_CHARS: usize = 200;
 /// The actor of a mark the person makes in the app.
 pub const HUMAN_ACTOR: &str = "human";
 
-/// Which memories the list shows by scope (D193 (5)).
+/// Which memories the list shows by scope (D223 (1)): the contexts this repository is bound to and
+/// those above them, by default, or every memory of one context, bound or not, by its path.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Scope {
-    /// Everything the repository sees: its own memories and those of its contexts.
+    /// The memories of the contexts the repository is bound to and of every context above them.
     #[default]
-    Everything,
-    /// The memories of this repository only.
-    Repository,
-    /// The memories of one context, by its path such as `Platform / Billing`.
+    Bound,
+    /// The memories of one context, by its path such as `Platform / Billing`, with what it inherits.
     Context(String),
 }
 
 impl Scope {
-    /// The `scope` the list command takes: none for everything, else the repository or a path.
-    fn wire(&self) -> Option<String> {
+    /// The `scope` the list command takes: `bound` for the repository's contexts, else a path.
+    fn wire(&self) -> String {
         match self {
-            Self::Everything => None,
-            Self::Repository => Some("bound".to_owned()),
-            Self::Context(path) => Some(path.clone()),
+            Self::Bound => BOUND.to_owned(),
+            Self::Context(path) => path.clone(),
         }
     }
 }
@@ -131,8 +129,9 @@ pub struct MemoryPage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewMemory {
     pub kind: MemoryKind,
-    /// The repository or one context. `Everything` is not a place to write to.
-    pub scope: Scope,
+    /// The context the memory goes to, by its path. `None` leaves the choice to the engine, which puts
+    /// it in the one context the repository is bound to, or in the context of the repository (D223 (5)).
+    pub context: Option<String>,
     pub text: String,
     /// Optional sources: a thread range, a commit or a file.
     pub sources: Vec<MemorySourceInput>,
@@ -219,7 +218,7 @@ impl MemoriesPage {
             || self.status.is_some()
             || self.path.is_some()
             || self.author.is_some()
-            || self.scope != Scope::Everything
+            || self.scope != Scope::Bound
             || !self.query.trim().is_empty()
     }
 
@@ -468,7 +467,7 @@ impl MemoriesPage {
             status: self.status,
             path: self.path.clone(),
             author: self.author.clone(),
-            scope: self.scope.wire(),
+            scope: Some(self.scope.wire()),
             limit,
             cursor,
         }
@@ -493,7 +492,7 @@ impl MemoriesPage {
         Request {
             kind: CommandKind::ListContexts {
                 repo: true,
-                all: false,
+                all: true,
             },
             read: Read::Contexts,
         }
@@ -905,7 +904,7 @@ impl MemoriesPage {
             && self.next_cursor.is_none()
             && self.kind.is_none()
             && self.path.is_none()
-            && self.scope == Scope::Everything
+            && self.scope == Scope::Bound
             && self.query.trim().is_empty()
             && matches!(self.status, None | Some(MemoryStatus::Proposed))
             && self.author.as_deref().is_none_or(|shown| shown == author)
@@ -916,11 +915,7 @@ impl MemoriesPage {
     /// that runs backwards.
     pub fn plan_new(new: &NewMemory) -> Result<Request, &'static str> {
         let text = checked_text(&new.text)?;
-        let context = match &new.scope {
-            Scope::Everything => return Err(NO_SCOPE),
-            Scope::Repository => None,
-            Scope::Context(path) => Some(path.clone()),
-        };
+        let context = new.context.clone();
         let mut sources = Vec::with_capacity(new.sources.len());
         for source in &new.sources {
             sources.push(checked_source(source)?);
@@ -941,13 +936,13 @@ impl MemoriesPage {
         })
     }
 
-    /// Moves the repository memory `uid` into context `context` (D193 (8)). Refused unless `uid` is
-    /// loaded and movable, and `context` is one the repository sees. The engine refuses a duplicate
-    /// of the text in that context; its reason is the write's failure, shown as it comes.
+    /// Moves memory `uid` into context `context` (D193 (8), D222 (1)). Refused unless `uid` is loaded
+    /// and movable, and `context` is one of the tree. The engine refuses a duplicate of the text in
+    /// that context; its reason is the write's failure, shown as it comes.
     pub fn plan_move(&self, uid: &str, context: i64) -> Result<Request, &'static str> {
         let memory = self.find(uid).ok_or(NOT_SHOWN)?;
         check_move(Placement::of(memory))?;
-        self.visible_context(context)?;
+        self.known_context(context)?;
         Ok(place(
             CommandKind::MoveMemoryToContext {
                 uid: uid.to_owned(),
@@ -957,12 +952,12 @@ impl MemoriesPage {
         ))
     }
 
-    /// Attaches the accepted context memory `uid` to context `context`, which the repository sees.
+    /// Attaches the accepted context memory `uid` to context `context`, any context of the tree.
     /// A proposed memory is refused, as the engine refuses it.
     pub fn plan_attach(&self, uid: &str, context: i64) -> Result<Request, &'static str> {
         let memory = self.find(uid).ok_or(NOT_SHOWN)?;
         check_attach(Placement::of(memory))?;
-        self.visible_context(context)?;
+        self.known_context(context)?;
         Ok(place(
             CommandKind::AttachMemory {
                 uid: uid.to_owned(),
@@ -995,11 +990,11 @@ impl MemoriesPage {
     }
 
     /// The visible context with `id`, or the reason it cannot be a target.
-    fn visible_context(&self, id: i64) -> Result<&Context, &'static str> {
+    fn known_context(&self, id: i64) -> Result<&Context, &'static str> {
         self.contexts
             .iter()
             .find(|context| context.id == id)
-            .ok_or(NOT_VISIBLE)
+            .ok_or(NOT_KNOWN)
     }
 
     /// The loaded proposal `uid`, or the reason it cannot be acted on.
@@ -1037,11 +1032,10 @@ impl Placement {
     }
 }
 
-/// Whether a memory can move from the repository into a context: the reasons are the engine's.
+/// Whether a memory can move to another context: the reasons are the engine's. A memory of the
+/// repository or of a context moves (D222 (1)).
 pub fn check_move(place: Placement) -> Result<(), &'static str> {
-    if place.in_context {
-        Err(ALREADY_IN_CONTEXT)
-    } else if !matches!(
+    if !matches!(
         place.status,
         MemoryStatus::Proposed | MemoryStatus::Accepted
     ) {
@@ -1323,7 +1317,23 @@ pub fn row_label(memory: &Memory) -> String {
     )
 }
 
-/// The chip of a memory's scope: `Repository` for this repository, else the context path.
+/// The chips of a memory: one per context it belongs to, each with its full path (D223 (2)). A memory
+/// with no context in the list (a repository's own, not yet moved) shows its scope as before.
+#[must_use]
+pub fn scope_chips(memory: &Memory) -> Vec<String> {
+    if memory.contexts.is_empty() {
+        vec![scope_chip(&memory.scope)]
+    } else {
+        memory
+            .contexts
+            .iter()
+            .map(|context| context.path.clone())
+            .collect()
+    }
+}
+
+/// The chip of a memory's scope when it names no context: `Repository` for this repository, else the
+/// context path it names.
 #[must_use]
 pub fn scope_chip(scope: &str) -> String {
     if scope.is_empty() || scope == REPOSITORY {
@@ -1660,7 +1670,7 @@ mod tests {
         let mut tab = MemoriesPage::default();
         assert_eq!(tab.set_query(""), None);
         assert_eq!(tab.set_kind(None), None);
-        assert_eq!(tab.set_scope(Scope::Everything), None);
+        assert_eq!(tab.set_scope(Scope::Bound), None);
         let generation = tab.set_kind(Some(MemoryKind::Rule)).expect("changed");
         assert_eq!(tab.set_kind(Some(MemoryKind::Rule)), None);
         assert!(tab.is_latest(generation));
@@ -1688,7 +1698,7 @@ mod tests {
             }
             other => panic!("not a list: {other:?}"),
         }
-        tab.set_scope(Scope::Repository);
+        tab.set_scope(Scope::Bound);
         assert!(matches!(
             kind_of(&tab.plan_list()),
             CommandKind::ListMemories { scope: Some(s), .. } if s == "bound"
@@ -2010,10 +2020,10 @@ mod tests {
         );
     }
 
-    fn new_memory(text: &str, scope: Scope) -> NewMemory {
+    fn new_memory(text: &str, context: Option<&str>) -> NewMemory {
         NewMemory {
             kind: MemoryKind::Decision,
-            scope,
+            context: context.map(str::to_owned),
             text: text.to_owned(),
             sources: Vec::new(),
             basis: MemoryBasis::Observed,
@@ -2029,7 +2039,7 @@ mod tests {
         ] {
             let request = MemoriesPage::plan_new(&NewMemory {
                 basis,
-                ..new_memory("A belief.", Scope::Repository)
+                ..new_memory("A belief.", None)
             })
             .expect("a memory with text and a scope is planned");
             assert!(matches!(
@@ -2098,16 +2108,16 @@ mod tests {
     #[test]
     fn a_new_memory_needs_text_of_at_most_a_thousand_characters() {
         assert_eq!(
-            (MemoriesPage::plan_new(&new_memory("   ", Scope::Repository))).err(),
+            (MemoriesPage::plan_new(&new_memory("   ", None))).err(),
             Some(EMPTY_TEXT)
         );
         let long = "x".repeat(TEXT_CHARS + 1);
         assert_eq!(
-            (MemoriesPage::plan_new(&new_memory(&long, Scope::Repository))).err(),
+            (MemoriesPage::plan_new(&new_memory(&long, None))).err(),
             Some(TOO_LONG)
         );
         let exact = "é".repeat(TEXT_CHARS);
-        let request = MemoriesPage::plan_new(&new_memory(&exact, Scope::Repository))
+        let request = MemoriesPage::plan_new(&new_memory(&exact, None))
             .expect("exactly 1,000 characters is allowed");
         assert!(matches!(
             kind_of(&request),
@@ -2116,14 +2126,9 @@ mod tests {
     }
 
     #[test]
-    fn a_new_memory_takes_a_scope_and_refuses_everything() {
-        assert_eq!(
-            (MemoriesPage::plan_new(&new_memory("a rule", Scope::Everything))).err(),
-            Some(NO_SCOPE)
-        );
+    fn a_new_memory_goes_to_the_context_it_names_or_to_the_engines_choice() {
         let request =
-            MemoriesPage::plan_new(&new_memory("a rule", Scope::Context("Platform".to_owned())))
-                .expect("context");
+            MemoriesPage::plan_new(&new_memory("a rule", Some("Platform"))).expect("context");
         assert!(matches!(
             kind_of(&request),
             CommandKind::ProposeMemory { context: Some(c), .. } if c == "Platform"
@@ -2135,11 +2140,16 @@ mod tests {
                 removes: false
             }
         );
+        let unnamed = MemoriesPage::plan_new(&new_memory("a rule", None)).expect("no context");
+        assert!(matches!(
+            kind_of(&unnamed),
+            CommandKind::ProposeMemory { context: None, .. }
+        ));
     }
 
     #[test]
     fn a_new_memory_checks_its_sources() {
-        let mut memory = new_memory("a fact", Scope::Repository);
+        let mut memory = new_memory("a fact", None);
         memory.sources = vec![MemorySourceInput {
             kind: MemorySourceKind::File,
             reference: "  ".to_owned(),
@@ -2240,6 +2250,26 @@ mod tests {
         assert_eq!(scope_chip("repository"), "Repository");
         assert_eq!(scope_chip(""), "Repository");
         assert_eq!(scope_chip("Platform / Billing"), "Platform / Billing");
+    }
+
+    #[test]
+    fn a_memory_shows_one_chip_per_context_with_its_full_path() {
+        let mut stored = memory("m1", MemoryStatus::Accepted, "human", "A rule.");
+        stored.scope = "Platform / Billing".to_owned();
+        stored.contexts = vec![
+            MemoryContext {
+                id: 2,
+                path: "Platform / Billing".to_owned(),
+            },
+            MemoryContext {
+                id: 9,
+                path: "Accounting".to_owned(),
+            },
+        ];
+        assert_eq!(scope_chips(&stored), ["Platform / Billing", "Accounting"]);
+        let mut unmoved = memory("m2", MemoryStatus::Accepted, "human", "A rule.");
+        unmoved.scope = "repository".to_owned();
+        assert_eq!(scope_chips(&unmoved), ["Repository"]);
     }
 
     #[test]
@@ -2352,7 +2382,7 @@ mod tests {
         linked.superseded_by = vec!["n".to_owned()];
         assert_eq!(check_move(Placement::of(&linked)), Err(LINKED));
         let inside = Placement::of(&in_context("c", MemoryStatus::Accepted, "Platform"));
-        assert_eq!(check_move(inside), Err(ALREADY_IN_CONTEXT));
+        assert_eq!(check_move(inside), Ok(()), "a context memory moves too");
     }
 
     #[test]
@@ -2438,7 +2468,7 @@ mod tests {
     }
 
     #[test]
-    fn a_move_plans_the_engine_command_for_a_visible_context_only() {
+    fn a_move_plans_the_engine_command_for_a_context_of_the_tree_only() {
         let tab = with_contexts(
             vec![memory("a", MemoryStatus::Accepted, "human", "first")],
             vec![context_at(7, "Platform")],
@@ -2458,7 +2488,7 @@ mod tests {
                 removes: false,
             }
         );
-        assert_eq!(tab.plan_move("a", 8).err(), Some(NOT_VISIBLE));
+        assert_eq!(tab.plan_move("a", 8).err(), Some(NOT_KNOWN));
         assert_eq!(tab.plan_move("missing", 7).err(), Some(NOT_SHOWN));
     }
 

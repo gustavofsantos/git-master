@@ -52,7 +52,7 @@ pub(crate) struct ContextsDialog {
     pub(crate) pending: Option<OperationId>,
     /// The context whose ⋯ menu is open.
     pub(crate) menu: Option<i64>,
-    /// Whether the repository chooser of Add Repository is open.
+    /// Whether the repository chooser of Bind Repository is open.
     pub(crate) adding: bool,
     pub(crate) name: Entity<TextArea>,
     pub(crate) filter: Entity<TextArea>,
@@ -319,7 +319,7 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Shows or hides the repository chooser of Add Repository.
+    /// Shows or hides the repository chooser of Bind Repository.
     fn toggle_adding_repository(&mut self, cx: &mut Context<Self>) {
         if let Some(dialog) = self.contexts_dialog.as_mut() {
             dialog.adding = !dialog.adding;
@@ -327,7 +327,7 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Browse… of Add Repository: shows the native folder prompt, then adds the folder it returns
+    /// Browse… of Bind Repository: shows the native folder prompt, then adds the folder it returns
     /// to the selected context. The window does not wait for the prompt; the answer comes back
     /// later. A cancelled prompt does nothing; a folder that is not a repository is refused by the
     /// engine, and the refusal shows in the dialog.
@@ -511,7 +511,7 @@ impl StatusView {
                 div()
                     .text_sm()
                     .text_color(theme::muted())
-                    .child("A context is a set of repositories that share memories."),
+                    .child("A context is an area of knowledge. A sub-context inherits the memories of the contexts above it."),
             )
             .children(self.clash_notice(cx))
             .children(error_lines(problem.as_deref()))
@@ -639,6 +639,13 @@ impl StatusView {
                     .text_sm()
                     .child(row.name.clone()),
             )
+            .children(row.bound.then(|| {
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(theme::accent())
+                    .child("bound")
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -708,7 +715,7 @@ impl StatusView {
         }
     }
 
-    /// The selected context and its repositories, each with Remove, and Add Repository.
+    /// The selected context and its repositories, each with Unbind, and Bind Repository.
     fn contexts_repositories(&self, dialog: &ContextsDialog, cx: &Context<Self>) -> Div {
         let Some(context) = self.model.contexts.selected_context() else {
             return div()
@@ -757,7 +764,7 @@ impl StatusView {
                     )
                     .child(context_menu_item(
                         ("context-repo-remove", index),
-                        "Remove",
+                        "Unbind",
                         cx,
                         move |this, _, cx| {
                             this.remove_repository_from_context(context_id, &repo_id, cx);
@@ -769,7 +776,7 @@ impl StatusView {
             div()
                 .text_sm()
                 .text_color(theme::muted())
-                .child("No repository is in this context yet.")
+                .child("No repository is bound to this context.")
         });
         let chooser = dialog.adding.then(|| self.repository_chooser(cx));
         div()
@@ -801,7 +808,7 @@ impl StatusView {
                 if dialog.adding {
                     "Hide the choices"
                 } else {
-                    "Add Repository"
+                    "Bind Repository"
                 },
                 cx,
                 |this, _, cx| this.toggle_adding_repository(cx),
@@ -809,7 +816,7 @@ impl StatusView {
             .children(chooser)
     }
 
-    /// The choices of Add Repository: Browse… first, then the window's own repository and the
+    /// The choices of Bind Repository: Browse… first, then the window's own repository and the
     /// recent ones. Browse… is there even when the list is empty.
     fn repository_chooser(&self, cx: &Context<Self>) -> Stateful<Div> {
         let root = self.model.status().map(|status| status.root.clone());
