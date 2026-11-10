@@ -1,6 +1,8 @@
-//! A workspace reads its members' memories and the contexts its members belong to (D216) against
-//! real repositories in temporary directories: a workspace with three members, each a worktree of
-//! its own clone, a fourth clone outside it, and one `contexts.db`. Each test removes its directory
+//! A workspace reads and writes its memories through the contexts (D222 (5)) against real
+//! repositories in temporary directories: a workspace with three members, each a worktree of its own
+//! clone, a fourth clone outside it, and one `contexts.db`. The memories written before the contexts
+//! sit in the threads store of the workspace and of each clone, and the first memory command moves
+//! each store's memories into the context of its folder (D222 (6)). Each test removes its directory
 //! when it ends.
 
 use std::path::{Path, PathBuf};
@@ -82,6 +84,14 @@ struct Fixture {
     member_api: PathBuf,
     member_web: PathBuf,
     member_jobs: PathBuf,
+}
+
+/// The uids of the memories `Fixture::seed` keeps in the threads stores before the contexts.
+struct Seeded {
+    ws_fact: String,
+    api_rule: String,
+    api_note: String,
+    web_fact: String,
 }
 
 impl Fixture {
@@ -200,11 +210,11 @@ impl Fixture {
         engine
     }
 
-    /// Two contexts of the clones, and memories in each store (D216):
+    /// Two contexts of the clones, and memories in each store:
     /// Platform (api, jobs), Billing under it (web), and Partners (docs, outside the workspace).
-    /// The workspace and each member write their own memories; a member memory that names a file
-    /// is accepted at its own `HEAD`.
-    fn seed(&self) {
+    /// The memories written before the contexts sit in the threads stores of the workspace (`ws_fact`),
+    /// of `api` (a file-naming rule, and a note) and of `web`; `jobs` has no store at all.
+    fn seed(&self) -> Seeded {
         let mut api = self.engine_on(&self.api);
         let platform = create(&mut api, "Platform", None);
         let billing = create(&mut api, "Billing", Some(platform));
@@ -213,38 +223,20 @@ impl Fixture {
         join(&mut api, platform, &self.jobs);
         join(&mut api, billing, &self.web);
         join(&mut api, partners, &self.docs);
-
         propose(
-            &mut self.engine_on(&self.ws),
-            Kind::Fact,
-            "workspace fact",
-            Vec::new(),
-            None,
-        );
-        // The clone's own context memories first: a plain command on the clone moves the memories it
-        // keeps in its store into its one context (D222 (6)), so the store is written last.
-        propose(
-            &mut self.engine_on(&self.member_api),
+            &mut self.engine_on(&self.api),
             Kind::Rule,
             "platform policy",
             Vec::new(),
             Some("Platform"),
         );
         propose(
-            &mut self.engine_on(&self.member_web),
+            &mut self.engine_on(&self.web),
             Kind::Lesson,
             "billing rule",
             Vec::new(),
             Some("Billing"),
         );
-        keep_in_member_store(
-            &self.member_api,
-            MemoryKind::Rule,
-            "api rule",
-            Some("f.txt"),
-        );
-        keep_in_member_store(&self.member_api, MemoryKind::Decision, "api note", None);
-        keep_in_member_store(&self.member_web, MemoryKind::Fact, "web fact", None);
         propose(
             &mut self.engine_on(&self.docs),
             Kind::Fact,
@@ -252,16 +244,25 @@ impl Fixture {
             Vec::new(),
             Some("Partners"),
         );
+        Seeded {
+            ws_fact: keep_in_store(&self.ws, MemoryKind::Fact, "workspace fact", None),
+            api_rule: keep_in_store(
+                &self.member_api,
+                MemoryKind::Rule,
+                "api rule",
+                Some("f.txt"),
+            ),
+            api_note: keep_in_store(&self.member_api, MemoryKind::Decision, "api note", None),
+            web_fact: keep_in_store(&self.member_web, MemoryKind::Fact, "web fact", None),
+        }
     }
 }
 
-/// Keeps an accepted memory in the threads store of the clone behind `member`, where a memory a
-/// person writes without a context lived before K1b (D216 (1)). The workspace reads a member's
-/// memories there, so these tests seed them there. A file source records its blob at `HEAD`, as a
-/// person's proposal does. The plain-repository rule is tested in `repository_context_real_git.rs`.
-fn keep_in_member_store(member: &Path, kind: MemoryKind, text: &str, file: Option<&str>) {
-    let common = member.join(git(member, &["rev-parse", "--git-common-dir"]));
-    let mut store = ThreadStore::open(&common).expect("the store opens");
+/// Keeps an accepted memory in the threads store of the clone or workspace at `root`, as memories
+/// written before the contexts were kept there. A file source records its blob at `HEAD`. Returns the
+/// memory's uid.
+fn keep_in_store(root: &Path, kind: MemoryKind, text: &str, file: Option<&str>) -> String {
+    let mut store = ThreadStore::open(&common_of(root)).expect("the store opens");
     let sources: Vec<MemorySource> = file
         .map(|path| MemorySource {
             kind: MemorySourceKind::File,
@@ -269,7 +270,7 @@ fn keep_in_member_store(member: &Path, kind: MemoryKind, text: &str, file: Optio
             repo_id: None,
             entry_from: None,
             entry_to: None,
-            blob_oid: blob_at_head(member, path),
+            blob_oid: blob_at_head(root, path),
             blob_read: true,
         })
         .into_iter()
@@ -284,7 +285,9 @@ fn keep_in_member_store(member: &Path, kind: MemoryKind, text: &str, file: Optio
             sources: &sources,
             at: 1_700_000_000_000,
         })
-        .expect("the memory is kept");
+        .expect("the memory is kept")
+        .0
+        .uid
 }
 
 /// The blob of `path` at `HEAD` of the repository at `root`, when the file is there.
@@ -423,7 +426,7 @@ fn create(engine: &mut Engine, name: &str, parent: Option<i64>) -> i64 {
         .expect("the context")
 }
 
-/// Adds the repository at `path` to context `context` as the human.
+/// Binds the repository at `path` to context `context` as the human.
 fn join(engine: &mut Engine, context: i64, path: &Path) {
     let events = send(
         engine,
@@ -474,24 +477,18 @@ fn list(engine: &mut Engine, scope: Option<&str>) -> Result<Listing, String> {
         .expect("memories listed"))
 }
 
-/// The texts, scopes and members of memories, sorted, so a test compares them whole.
-fn labelled(memories: &[Memory]) -> Vec<(String, String, Option<String>)> {
+/// The texts and scopes of memories, sorted, so a test compares them whole.
+fn labelled(memories: &[Memory]) -> Vec<(String, String)> {
     let mut rows: Vec<_> = memories
         .iter()
-        .map(|memory| {
-            (
-                memory.text.clone(),
-                memory.scope.clone(),
-                memory.member.clone(),
-            )
-        })
+        .map(|memory| (memory.text.clone(), memory.scope.clone()))
         .collect();
     rows.sort();
     rows
 }
 
-fn row(text: &str, scope: &str, member: Option<&str>) -> (String, String, Option<String>) {
-    (text.to_owned(), scope.to_owned(), member.map(str::to_owned))
+fn row(text: &str, scope: &str) -> (String, String) {
+    (text.to_owned(), scope.to_owned())
 }
 
 /// The uid of the memory with `text` in a list of `memories`.
@@ -541,6 +538,13 @@ fn contexts(engine: &mut Engine, repo: bool) -> (Vec<Context>, Option<String>, O
         .expect("contexts listed")
 }
 
+/// The names of the contexts in a context list, sorted.
+fn names(contexts: &[Context]) -> Vec<String> {
+    let mut names: Vec<String> = contexts.iter().map(|c| c.name.clone()).collect();
+    names.sort();
+    names
+}
+
 /// The members of each context named `name` in a context list.
 fn members_of(contexts: &[Context], name: &str) -> Vec<String> {
     contexts
@@ -551,191 +555,7 @@ fn members_of(contexts: &[Context], name: &str) -> Vec<String> {
         .clone()
 }
 
-#[test]
-fn a_workspace_reads_its_own_its_members_and_the_contexts_they_see() {
-    let fx = Fixture::new();
-    fx.seed();
-    let listed = list(&mut fx.engine_on(&fx.ws), None).expect("the list answers");
-    assert_eq!(listed.note, None);
-    let mut expected = vec![
-        row("workspace fact", "workspace", None),
-        row("api rule", "member api", Some("api")),
-        row("api note", "member api", Some("api")),
-        row("web fact", "member web", Some("web")),
-        row("platform policy", "Platform", None),
-        row("billing rule", "Platform / Billing", None),
-    ];
-    expected.sort();
-    assert_eq!(labelled(&listed.memories), expected);
-}
-
-#[test]
-fn a_member_memory_added_later_appears_on_the_next_read() {
-    let fx = Fixture::new();
-    fx.seed();
-    let mut ws = fx.engine_on(&fx.ws);
-    let before = list(&mut ws, Some("member api")).expect("the list answers");
-    assert_eq!(before.memories.len(), 2);
-    keep_in_member_store(&fx.member_api, MemoryKind::Fact, "api later", None);
-    let after = list(&mut ws, Some("member api")).expect("the list answers");
-    assert!(labelled(&after.memories).contains(&row("api later", "member api", Some("api"))));
-}
-
-#[test]
-fn the_scope_names_the_workspace_a_member_or_a_context() {
-    let fx = Fixture::new();
-    fx.seed();
-    let mut ws = fx.engine_on(&fx.ws);
-    let scoped = |ws: &mut Engine, scope: &str| {
-        labelled(&list(ws, Some(scope)).expect("the list answers").memories)
-    };
-    assert_eq!(
-        scoped(&mut ws, "workspace"),
-        vec![row("workspace fact", "workspace", None)]
-    );
-    assert_eq!(
-        scoped(&mut ws, "member api"),
-        vec![
-            row("api note", "member api", Some("api")),
-            row("api rule", "member api", Some("api")),
-        ]
-    );
-    assert_eq!(
-        scoped(&mut ws, "member web"),
-        vec![row("web fact", "member web", Some("web"))]
-    );
-    assert_eq!(
-        scoped(&mut ws, "Platform"),
-        vec![row("platform policy", "Platform", None)]
-    );
-    // A sub-context inherits the memories of its parent (D222 (2)), whichever way it is named.
-    let billing_and_platform = vec![
-        row("billing rule", "Platform / Billing", None),
-        row("platform policy", "Platform", None),
-    ];
-    assert_eq!(scoped(&mut ws, "Platform / Billing"), billing_and_platform);
-    assert_eq!(scoped(&mut ws, "Billing"), billing_and_platform);
-    assert_eq!(scoped(&mut ws, "member jobs"), Vec::new());
-}
-
-#[test]
-fn an_ambiguous_or_unknown_scope_is_refused_and_names_the_candidates() {
-    let fx = Fixture::new();
-    fx.seed();
-    let mut api = fx.engine_on(&fx.api);
-    let api_context = create(&mut api, "api", None);
-    join(&mut api, api_context, &fx.api);
-    let mut ws = fx.engine_on(&fx.ws);
-    let ambiguous = list(&mut ws, Some("api")).expect_err("a bare name in two senses is refused");
-    assert!(ambiguous.contains("member api"), "{ambiguous}");
-    assert!(ambiguous.contains("context"), "{ambiguous}");
-    let unknown = list(&mut ws, Some("member nope")).expect_err("an unknown member is refused");
-    assert!(unknown.contains("members are: api, jobs, web"), "{unknown}");
-    assert!(list(&mut ws, Some("member api")).is_ok());
-}
-
-#[test]
-fn an_unreadable_member_is_named_and_the_others_still_answer() {
-    let fx = Fixture::new();
-    fx.seed();
-    let store = common_of(&fx.web).join("gitmaster").join("threads.db");
-    for sidecar in ["threads.db-wal", "threads.db-shm"] {
-        let _ = std::fs::remove_file(store.with_file_name(sidecar));
-    }
-    std::fs::write(&store, "this is not a SQLite database\n".repeat(64)).unwrap();
-    let listed = list(&mut fx.engine_on(&fx.ws), None).expect("the list answers");
-    let note = listed.note.expect("the answer names the member");
-    assert!(note.contains("member web could not be read ("), "{note}");
-    let rows = labelled(&listed.memories);
-    assert!(rows.contains(&row("api rule", "member api", Some("api"))));
-    assert!(rows.contains(&row("workspace fact", "workspace", None)));
-    assert!(!rows.iter().any(|(text, ..)| text == "web fact"));
-}
-
-#[test]
-fn a_member_with_no_store_is_empty_and_its_store_is_not_created() {
-    let fx = Fixture::new();
-    fx.seed();
-    let listed = list(&mut fx.engine_on(&fx.ws), None).expect("the list answers");
-    assert_eq!(listed.note, None);
-    assert!(
-        !common_of(&fx.jobs)
-            .join("gitmaster")
-            .join("threads.db")
-            .exists()
-    );
-}
-
-#[test]
-fn reading_a_member_memory_gives_its_scope_and_its_changes_in_that_member() {
-    let fx = Fixture::new();
-    fx.seed();
-    let mut ws = fx.engine_on(&fx.ws);
-    let uid = uid_of(
-        &list(&mut ws, None).expect("the list answers").memories,
-        "api rule",
-    );
-    let before = read(&mut ws, &uid);
-    assert_eq!(before.scope, "member api");
-    assert_eq!(before.member.as_deref(), Some("api"));
-    assert!(before.files_changed_since.is_empty());
-    std::fs::write(fx.member_api.join("f.txt"), "one\nfour\n").unwrap();
-    git(&fx.member_api, &["commit", "-q", "-am", "api change"]);
-    let after = read(&mut ws, &uid);
-    assert_eq!(
-        after.files_changed_since,
-        vec![FileChange {
-            path: "f.txt".to_owned(),
-            state: FileChangeState::Changed,
-        }]
-    );
-}
-
-#[test]
-fn a_retrieval_is_counted_in_the_store_the_memory_lives_in() {
-    let fx = Fixture::new();
-    fx.seed();
-    let mut ws = fx.engine_on(&fx.ws);
-    let uid = uid_of(
-        &list(&mut ws, None).expect("the list answers").memories,
-        "api rule",
-    );
-    let events = send(
-        &mut ws,
-        &Actor::Human,
-        CommandKind::RecordMemoryRetrieval {
-            uids: vec![uid.clone()],
-        },
-    );
-    assert_eq!(state_of(&events), OperationState::Done);
-    assert_eq!(
-        read(&mut fx.engine_on(&fx.member_api), &uid).retrieval_count,
-        1
-    );
-    assert_eq!(read(&mut ws, &uid).retrieval_count, 1);
-}
-
-#[test]
-fn a_member_memory_keeps_the_rules_of_its_member_from_the_workspace() {
-    let fx = Fixture::new();
-    fx.seed();
-    let mut ws = fx.engine_on(&fx.ws);
-    let uid = uid_of(
-        &list(&mut ws, None).expect("the list answers").memories,
-        "api rule",
-    );
-    // A rejection takes only a proposed memory, whichever store holds it (D192 (4)).
-    let events = send(
-        &mut ws,
-        &Actor::Human,
-        CommandKind::RejectMemory { uid: uid.clone() },
-    );
-    assert_eq!(state_of(&events), OperationState::Failed);
-    assert!(!failure(&events).is_empty(), "{events:?}");
-    assert_eq!(read(&mut ws, &uid).status, MemoryStatus::Accepted);
-}
-
-/// The member clones' agent: a name that is only shown (D218 (1)).
+/// The agent of the tests: a name that is only shown (D218 (1)).
 fn agent() -> Actor {
     Actor::Agent {
         name: "claude".to_owned(),
@@ -760,7 +580,7 @@ fn answer(engine: &mut Engine, actor: &Actor, kind: CommandKind) -> Result<Memor
         .expect("a memory"))
 }
 
-/// A memory proposed as `actor` (a proposal needs a source), in `member` and `context` when given;
+/// A memory proposed as `actor` (a proposal needs a source), with `member` or `context` when given;
 /// the memory it answers, or the detail it failed with.
 fn propose_in(
     engine: &mut Engine,
@@ -834,6 +654,349 @@ fn corrupt_store(clone: &Path) {
 }
 
 #[test]
+fn a_workspace_moves_its_memories_into_the_contexts_of_its_folders() {
+    let fx = Fixture::new();
+    let seeded = fx.seed();
+    let mut ws = fx.engine_on(&fx.ws);
+    let listed = list(&mut ws, None).expect("the list answers");
+    assert_eq!(listed.note, None);
+    let mut expected = vec![
+        row("workspace fact", "pay"),
+        row("api rule", "api"),
+        row("api note", "api"),
+        row("web fact", "web"),
+        row("platform policy", "Platform"),
+        row("billing rule", "Platform / Billing"),
+    ];
+    expected.sort();
+    assert_eq!(labelled(&listed.memories), expected);
+    // The uids and statuses are the ones the stores held (D222 (6)).
+    assert_eq!(uid_of(&listed.memories, "workspace fact"), seeded.ws_fact);
+    assert_eq!(uid_of(&listed.memories, "api rule"), seeded.api_rule);
+    assert_eq!(uid_of(&listed.memories, "api note"), seeded.api_note);
+    assert_eq!(uid_of(&listed.memories, "web fact"), seeded.web_fact);
+    assert_eq!(
+        status_in(&listed.memories, "api rule"),
+        MemoryStatus::Accepted
+    );
+    // Nothing is left in the threads stores.
+    let api_store = ThreadStore::open(&common_of(&fx.member_api)).unwrap();
+    assert!(api_store.memory_id_of(&seeded.api_rule).is_err());
+    let ws_store = ThreadStore::open(&common_of(&fx.ws)).unwrap();
+    assert!(ws_store.memory_id_of(&seeded.ws_fact).is_err());
+    // Each folder's context is bound to its clone, the workspace to its own repository.
+    let (listed_contexts, _, _) = contexts(&mut ws, false);
+    assert_eq!(
+        names(&listed_contexts),
+        vec!["Billing", "Partners", "Platform", "api", "pay", "web"]
+    );
+}
+
+#[test]
+fn a_workspace_reaches_the_contexts_bound_to_itself_and_its_members_with_their_ancestors() {
+    let fx = Fixture::new();
+    fx.seed();
+    let mut ws = fx.engine_on(&fx.ws);
+    let ops = create(&mut ws, "Ops", None);
+    join(&mut ws, ops, &fx.ws);
+    propose(&mut ws, Kind::Fact, "ops note", Vec::new(), Some("Ops"));
+    let reached = list(&mut ws, None).expect("the list answers");
+    let rows = labelled(&reached.memories);
+    assert!(rows.contains(&row("ops note", "Ops")), "{rows:?}");
+    assert!(rows.contains(&row("platform policy", "Platform")));
+    assert!(rows.contains(&row("billing rule", "Platform / Billing")));
+    assert!(
+        !rows.iter().any(|(text, _)| text == "partners policy"),
+        "Partners is bound to no member: {rows:?}"
+    );
+}
+
+#[test]
+fn the_scope_names_a_context_by_path_or_name_and_refuses_the_retired_workspace_scopes() {
+    let fx = Fixture::new();
+    fx.seed();
+    let mut ws = fx.engine_on(&fx.ws);
+    let scoped = |ws: &mut Engine, scope: &str| {
+        labelled(&list(ws, Some(scope)).expect("the list answers").memories)
+    };
+    assert_eq!(scoped(&mut ws, "pay"), vec![row("workspace fact", "pay")]);
+    assert_eq!(
+        scoped(&mut ws, "api"),
+        vec![row("api note", "api"), row("api rule", "api")]
+    );
+    assert_eq!(
+        scoped(&mut ws, "Platform"),
+        vec![row("platform policy", "Platform")]
+    );
+    // A sub-context inherits the memories of its parent (D222 (2)), whichever way it is named.
+    let billing_and_platform = vec![
+        row("billing rule", "Platform / Billing"),
+        row("platform policy", "Platform"),
+    ];
+    assert_eq!(scoped(&mut ws, "Platform / Billing"), billing_and_platform);
+    assert_eq!(scoped(&mut ws, "Billing"), billing_and_platform);
+    // A context the workspace is not bound to is named all the same (D222 (3)).
+    assert_eq!(
+        scoped(&mut ws, "Partners"),
+        vec![row("partners policy", "Partners")]
+    );
+    assert_eq!(
+        list(&mut ws, Some("workspace")).expect_err("the workspace scope is retired"),
+        "scope \"workspace\" no longer exists: name a context, or use bound"
+    );
+    assert_eq!(
+        list(&mut ws, Some("member api")).expect_err("the member scope is retired"),
+        "scope \"member api\" no longer exists: name a context, or use bound"
+    );
+}
+
+#[test]
+fn a_member_memory_added_later_appears_on_the_next_read() {
+    let fx = Fixture::new();
+    fx.seed();
+    let mut ws = fx.engine_on(&fx.ws);
+    let before = list(&mut ws, Some("api")).expect("the list answers");
+    assert_eq!(before.memories.len(), 2);
+    keep_in_store(&fx.member_api, MemoryKind::Fact, "api later", None);
+    let after = list(&mut ws, Some("api")).expect("the list answers");
+    assert!(labelled(&after.memories).contains(&row("api later", "api")));
+}
+
+#[test]
+fn an_unreadable_member_is_named_and_the_others_still_answer() {
+    let fx = Fixture::new();
+    fx.seed();
+    corrupt_store(&fx.web);
+    let listed = list(&mut fx.engine_on(&fx.ws), None).expect("the list answers");
+    let note = listed.note.expect("the answer names the member");
+    assert!(note.contains("member web could not be read ("), "{note}");
+    let rows = labelled(&listed.memories);
+    assert!(rows.contains(&row("api rule", "api")));
+    assert!(rows.contains(&row("workspace fact", "pay")));
+    assert!(!rows.iter().any(|(text, _)| text == "web fact"));
+    // The context of the member's memories answers all the same.
+    assert!(rows.contains(&row("billing rule", "Platform / Billing")));
+}
+
+#[test]
+fn a_member_with_no_store_is_empty_and_its_store_is_not_created() {
+    let fx = Fixture::new();
+    fx.seed();
+    let listed = list(&mut fx.engine_on(&fx.ws), None).expect("the list answers");
+    assert_eq!(listed.note, None);
+    assert!(
+        !common_of(&fx.jobs)
+            .join("gitmaster")
+            .join("threads.db")
+            .exists()
+    );
+}
+
+#[test]
+fn reading_a_member_memory_gives_its_scope_and_its_changes_in_that_member() {
+    let fx = Fixture::new();
+    let seeded = fx.seed();
+    let mut ws = fx.engine_on(&fx.ws);
+    let before = read(&mut ws, &seeded.api_rule);
+    assert_eq!(before.scope, "api");
+    assert_eq!(before.member, None);
+    assert!(before.files_changed_since.is_empty());
+    std::fs::write(fx.member_api.join("f.txt"), "one\nfour\n").unwrap();
+    git(&fx.member_api, &["commit", "-q", "-am", "api change"]);
+    let after = read(&mut ws, &seeded.api_rule);
+    assert_eq!(
+        after.files_changed_since,
+        vec![FileChange {
+            path: "f.txt".to_owned(),
+            state: FileChangeState::Changed,
+        }]
+    );
+}
+
+#[test]
+fn a_retrieval_is_counted_in_the_context_the_memory_lives_in() {
+    let fx = Fixture::new();
+    let seeded = fx.seed();
+    let mut ws = fx.engine_on(&fx.ws);
+    let events = send(
+        &mut ws,
+        &Actor::Human,
+        CommandKind::RecordMemoryRetrieval {
+            uids: vec![seeded.api_rule.clone()],
+        },
+    );
+    assert_eq!(state_of(&events), OperationState::Done);
+    assert_eq!(
+        read(&mut fx.engine_on(&fx.member_api), &seeded.api_rule).retrieval_count,
+        1
+    );
+    assert_eq!(read(&mut ws, &seeded.api_rule).retrieval_count, 1);
+}
+
+#[test]
+fn a_rejection_takes_only_a_proposed_memory_whichever_context_holds_it() {
+    let fx = Fixture::new();
+    let seeded = fx.seed();
+    let mut ws = fx.engine_on(&fx.ws);
+    let events = send(
+        &mut ws,
+        &Actor::Human,
+        CommandKind::RejectMemory {
+            uid: seeded.api_rule.clone(),
+        },
+    );
+    assert_eq!(state_of(&events), OperationState::Failed);
+    assert!(!failure(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        read(&mut ws, &seeded.api_rule).status,
+        MemoryStatus::Accepted
+    );
+}
+
+#[test]
+fn a_proposal_without_a_context_goes_to_the_one_context_the_workspace_and_its_members_share() {
+    let fx = Fixture::new();
+    let mut api = fx.engine_on(&fx.api);
+    let platform = create(&mut api, "Platform", None);
+    join(&mut api, platform, &fx.api);
+    let mut ws = fx.engine_on(&fx.ws);
+    let proposed = propose_in(&mut ws, &agent(), "one shared context", None, None)
+        .expect("the one bound context takes it");
+    assert_eq!(proposed.scope, "Platform");
+    assert_eq!(proposed.status, MemoryStatus::Proposed);
+    assert_eq!(proposed.member, None);
+    // The workspace's own context was not made: a context is made only when nothing is bound.
+    let (listed, _, _) = contexts(&mut ws, false);
+    assert!(
+        !listed.iter().any(|context| context.name == "pay"),
+        "{listed:?}"
+    );
+}
+
+#[test]
+fn a_proposal_without_a_context_goes_to_the_workspace_context_when_nothing_is_bound() {
+    let fx = Fixture::new();
+    let mut ws = fx.engine_on(&fx.ws);
+    let proposed = propose_in(&mut ws, &agent(), "nothing bound", None, None)
+        .expect("the workspace's own context takes it");
+    assert_eq!(proposed.scope, "pay");
+    assert_eq!(proposed.status, MemoryStatus::Proposed);
+    let (listed, _, _) = contexts(&mut ws, true);
+    assert_eq!(members_of(&listed, "pay"), vec!["workspace"]);
+    assert!(
+        common_of(&fx.ws)
+            .join("gitmaster")
+            .join("repo-id")
+            .is_file()
+    );
+}
+
+#[test]
+fn a_proposal_without_a_context_is_refused_when_several_contexts_are_bound() {
+    let fx = Fixture::new();
+    let mut api = fx.engine_on(&fx.api);
+    let platform = create(&mut api, "Platform", None);
+    let partners = create(&mut api, "Partners", None);
+    join(&mut api, platform, &fx.api);
+    join(&mut api, partners, &fx.web);
+    let mut ws = fx.engine_on(&fx.ws);
+    let refused = propose_in(&mut ws, &agent(), "several", None, None)
+        .expect_err("two contexts are bound: one must be named");
+    assert!(refused.contains("several contexts"), "{refused}");
+    assert!(refused.contains("\"Partners\", \"Platform\""), "{refused}");
+    assert!(refused.contains("name one with context"), "{refused}");
+    assert!(list(&mut ws, None).expect("lists").memories.is_empty());
+}
+
+#[test]
+fn a_proposal_with_a_member_goes_to_that_members_own_context() {
+    let fx = Fixture::new();
+    let mut ws = fx.engine_on(&fx.ws);
+    let in_web = propose_in(&mut ws, &agent(), "web from workspace", Some("web"), None)
+        .expect("proposed in web");
+    assert_eq!(in_web.status, MemoryStatus::Proposed);
+    assert_eq!(in_web.scope, "web");
+    assert_eq!(in_web.member, None);
+    // The member's own engine sees it as a proposal of its own context.
+    let clone = list(&mut fx.engine_on(&fx.web), None).expect("the list answers");
+    assert_eq!(
+        status_in(&clone.memories, "web from workspace"),
+        MemoryStatus::Proposed
+    );
+    // A member with no store gets none from a proposal: its memories are in its context.
+    let in_jobs =
+        propose_in(&mut ws, &agent(), "jobs first", Some("jobs"), None).expect("proposed in jobs");
+    assert_eq!(in_jobs.scope, "jobs");
+    assert!(
+        !common_of(&fx.jobs)
+            .join("gitmaster")
+            .join("threads.db")
+            .exists()
+    );
+    // The workspace's own context was not made by a member's proposal.
+    let (listed, _, _) = contexts(&mut ws, false);
+    assert!(!listed.iter().any(|context| context.name == "pay"));
+}
+
+#[test]
+fn a_proposal_names_a_member_or_a_context_but_not_both() {
+    let fx = Fixture::new();
+    fx.seed();
+    let mut ws = fx.engine_on(&fx.ws);
+    let refused = propose_in(&mut ws, &agent(), "both", Some("web"), Some("Platform"))
+        .expect_err("a member and a context are refused together");
+    assert_eq!(
+        refused,
+        "a memory goes to a context or to a member, not both"
+    );
+}
+
+#[test]
+fn a_proposal_with_a_member_in_a_plain_repository_is_refused_and_nothing_is_written() {
+    let fx = Fixture::new();
+    fx.seed();
+    let mut api = fx.engine_on(&fx.api);
+    let before = labelled(&list(&mut api, None).expect("lists").memories);
+    let refused = propose_in(&mut api, &agent(), "not here", Some("web"), None);
+    assert_eq!(
+        refused.expect_err("refused"),
+        "this repository is not a workspace"
+    );
+    assert_eq!(
+        labelled(&list(&mut api, None).expect("lists").memories),
+        before
+    );
+}
+
+#[test]
+fn an_unknown_member_is_refused_and_the_answer_names_the_members() {
+    let fx = Fixture::new();
+    fx.seed();
+    let mut ws = fx.engine_on(&fx.ws);
+    let refused = propose_in(&mut ws, &agent(), "nowhere", Some("nope"), None)
+        .expect_err("an unknown member is refused");
+    assert!(refused.contains("there is no member nope"), "{refused}");
+    assert!(refused.contains("members are: api, jobs, web"), "{refused}");
+}
+
+#[test]
+fn a_proposal_with_a_named_context_follows_the_workspace_reach() {
+    let fx = Fixture::new();
+    fx.seed();
+    let mut ws = fx.engine_on(&fx.ws);
+    let refused = propose_in(&mut ws, &agent(), "in partners", None, Some("Partners"))
+        .expect_err("the workspace is not bound to Partners");
+    assert!(
+        refused.contains("is not a context this repository is bound to or inherits from"),
+        "{refused}"
+    );
+    let in_billing = propose_in(&mut ws, &agent(), "in billing", None, Some("Billing"))
+        .expect("Billing is reached through web");
+    assert_eq!(in_billing.scope, "Platform / Billing");
+    assert_eq!(in_billing.status, MemoryStatus::Proposed);
+}
+
+#[test]
 fn a_human_accepts_a_proposed_member_memory_from_the_workspace() {
     let fx = Fixture::new();
     fx.seed();
@@ -841,10 +1004,9 @@ fn a_human_accepts_a_proposed_member_memory_from_the_workspace() {
     let proposed = propose_in(&mut ws, &agent(), "api proposed", Some("api"), None)
         .expect("the agent proposes in api");
     assert_eq!(proposed.status, MemoryStatus::Proposed);
-    assert_eq!(proposed.scope, "member api");
-    assert_eq!(proposed.member.as_deref(), Some("api"));
+    assert_eq!(proposed.scope, "api");
     let uid = uid_of(
-        &list(&mut ws, Some("member api"))
+        &list(&mut ws, Some("api"))
             .expect("the list answers")
             .memories,
         "api proposed",
@@ -853,29 +1015,21 @@ fn a_human_accepts_a_proposed_member_memory_from_the_workspace() {
         &mut ws,
         &Actor::Human,
         CommandKind::AcceptMemory {
-            uid: uid.clone(),
+            uid,
             text: None,
             supersedes: Vec::new(),
         },
     )
     .expect("the person accepts it");
     assert_eq!(accepted.status, MemoryStatus::Accepted);
-    assert_eq!(accepted.scope, "member api");
-    assert_eq!(accepted.member.as_deref(), Some("api"));
-    // The workspace's list shows the change at once.
-    let at_once = list(&mut ws, Some("member api")).expect("the list answers");
-    assert_eq!(
-        status_in(&at_once.memories, "api proposed"),
-        MemoryStatus::Accepted
-    );
-    // A second engine on the clone alone sees it accepted in the clone's own store.
+    assert_eq!(accepted.scope, "api");
+    // The clone's own engine sees it accepted in the same context.
     let clone = list(&mut fx.engine_on(&fx.api), None).expect("the list answers");
     assert_eq!(
         status_in(&clone.memories, "api proposed"),
         MemoryStatus::Accepted
     );
-    // The clone's own memories go to its own context, `api`, whatever it is bound to (D222 (6)).
-    assert!(labelled(&clone.memories).contains(&row("api proposed", "api", None)));
+    assert!(labelled(&clone.memories).contains(&row("api proposed", "api")));
 }
 
 #[test]
@@ -885,7 +1039,7 @@ fn a_human_rejects_and_deletes_member_memories_from_the_workspace() {
     let mut ws = fx.engine_on(&fx.ws);
     propose_in(&mut ws, &agent(), "api to reject", Some("api"), None).expect("proposed");
     propose_in(&mut ws, &agent(), "api to delete", Some("api"), None).expect("proposed");
-    let listed = list(&mut ws, Some("member api"))
+    let listed = list(&mut ws, Some("api"))
         .expect("the list answers")
         .memories;
     let rejected = answer(
@@ -897,7 +1051,7 @@ fn a_human_rejects_and_deletes_member_memories_from_the_workspace() {
     )
     .expect("the person rejects it");
     assert_eq!(rejected.status, MemoryStatus::Rejected);
-    assert_eq!(rejected.scope, "member api");
+    assert_eq!(rejected.scope, "api");
     let events = send(
         &mut ws,
         &Actor::Human,
@@ -920,20 +1074,16 @@ fn a_human_rejects_and_deletes_member_memories_from_the_workspace() {
 }
 
 #[test]
-fn an_agent_marks_a_member_memory_in_the_member_and_cannot_accept_it() {
+fn an_agent_marks_a_member_memory_and_cannot_accept_it() {
     let fx = Fixture::new();
-    fx.seed();
+    let seeded = fx.seed();
     let mut ws = fx.engine_on(&fx.ws);
     propose_in(&mut ws, &agent(), "api to decide", Some("api"), None).expect("proposed");
-    let listed = list(&mut ws, Some("member api"))
-        .expect("the list answers")
-        .memories;
-    let uid = uid_of(&listed, "api rule");
     let marked = answer(
         &mut ws,
         &agent(),
         CommandKind::MarkMemory {
-            uid: uid.clone(),
+            uid: seeded.api_rule.clone(),
             mark: MemoryMark::Useful,
             reason: Some("it helped".to_owned()),
         },
@@ -946,8 +1096,8 @@ fn an_agent_marks_a_member_memory_in_the_member_and_cannot_accept_it() {
             .any(|mark| mark.actor == "agent:claude" && mark.mark == MemoryMark::Useful),
         "{marked:?}"
     );
-    // The mark is in the member's store: the clone reads it, with its history.
-    let (in_clone, history) = read_with_history(&mut fx.engine_on(&fx.api), &uid);
+    // The mark is in the context: the clone reads it, with its history.
+    let (in_clone, history) = read_with_history(&mut fx.engine_on(&fx.api), &seeded.api_rule);
     assert!(
         in_clone
             .marks
@@ -957,31 +1107,36 @@ fn an_agent_marks_a_member_memory_in_the_member_and_cannot_accept_it() {
     );
     assert!(history.iter().any(|mark| mark.actor == "agent:claude"));
     // An agent accepts nothing, even from the workspace.
+    let uid = uid_of(
+        &list(&mut ws, Some("api"))
+            .expect("the list answers")
+            .memories,
+        "api to decide",
+    );
     let events = send(
         &mut ws,
         &agent(),
         CommandKind::AcceptMemory {
-            uid: uid_of(&listed, "api to decide"),
+            uid,
             text: None,
             supersedes: Vec::new(),
         },
     );
     assert_eq!(state_of(&events), OperationState::Failed);
     assert!(failure(&events).contains("only a human"), "{events:?}");
-    let clone = list(&mut fx.engine_on(&fx.api), None).expect("the list answers");
-    assert_eq!(
-        status_in(&clone.memories, "api to decide"),
-        MemoryStatus::Proposed
-    );
 }
 
 #[test]
-fn an_edit_from_the_workspace_goes_through_the_members_redaction() {
+fn a_proposal_is_redacted_with_its_members_rules_and_an_edit_with_the_workspaces() {
     let fx = Fixture::new();
     fx.seed();
-    // The pattern is in the member's clone only: the workspace has none.
+    // The pattern is in the member's clone only, for the proposal; the workspace has its own for the edit.
     git(
         &fx.api,
+        &["config", "gitmaster-redact.ticket.regex", "TKT-[0-9]+"],
+    );
+    git(
+        &fx.ws,
         &["config", "gitmaster-redact.ticket.regex", "TKT-[0-9]+"],
     );
     let mut ws = fx.engine_on(&fx.ws);
@@ -994,12 +1149,11 @@ fn an_edit_from_the_workspace_goes_through_the_members_redaction() {
     )
     .expect("proposed");
     assert_eq!(proposed.text, "Ticket [REDACTED:ticket] is open");
-    let uid = proposed.uid.clone();
     let edited = answer(
         &mut ws,
         &Actor::Human,
         CommandKind::AcceptMemory {
-            uid,
+            uid: proposed.uid.clone(),
             text: Some("Closed TKT-4242 for good".to_owned()),
             supersedes: Vec::new(),
         },
@@ -1010,56 +1164,16 @@ fn an_edit_from_the_workspace_goes_through_the_members_redaction() {
 }
 
 #[test]
-fn a_member_memory_moves_to_a_context_its_member_belongs_to_and_no_other() {
+fn a_memory_attaches_to_any_existing_context_and_detaches_from_one_it_is_in() {
     let fx = Fixture::new();
-    fx.seed();
+    let seeded = fx.seed();
     let mut ws = fx.engine_on(&fx.ws);
-    let (ws_contexts, _, _) = contexts(&mut ws, true);
-    let platform = id_named(&ws_contexts, "Platform");
+    let (ws_contexts, _, _) = contexts(&mut ws, false);
     let billing = id_named(&ws_contexts, "Billing");
-    let (docs_contexts, _, _) = contexts(&mut fx.engine_on(&fx.docs), true);
-    let partners = id_named(&docs_contexts, "Partners");
-    let uid = uid_of(
-        &list(&mut ws, Some("member api"))
-            .expect("the list answers")
-            .memories,
-        "api note",
-    );
-    // api belongs to Platform, not to Billing or Partners: its own rules refuse those.
-    let outside = answer(
-        &mut ws,
-        &Actor::Human,
-        CommandKind::MoveMemoryToContext {
-            uid: uid.clone(),
-            context: partners,
-        },
-    );
-    assert!(
-        outside
-            .expect_err("a context the member does not belong to")
-            .contains("The context is not one this repository belongs to."),
-    );
-    let moved = answer(
-        &mut ws,
-        &Actor::Human,
-        CommandKind::MoveMemoryToContext {
-            uid: uid.clone(),
-            context: platform,
-        },
-    )
-    .expect("api belongs to Platform");
-    assert_eq!(moved.uid, uid);
-    assert_eq!(moved.scope, "Platform");
-    assert_eq!(moved.member, None);
-    assert!(
-        labelled(
-            &list(&mut fx.engine_on(&fx.api), None)
-                .expect("lists")
-                .memories
-        )
-        .contains(&row("api note", "Platform", None))
-    );
-    // Attached from the workspace, to a context one of its members belongs to (Billing, of web).
+    let partners = id_named(&ws_contexts, "Partners");
+    let uid = seeded.api_rule;
+    // It is in api; the workspace attaches it to Billing (reached through web) and to Partners, which
+    // no member is bound to (D222 (3)).
     let attached = answer(
         &mut ws,
         &Actor::Human,
@@ -1070,7 +1184,6 @@ fn a_member_memory_moves_to_a_context_its_member_belongs_to_and_no_other() {
     )
     .expect("the workspace sees Billing through web");
     assert_eq!(attached.contexts.len(), 2, "{attached:?}");
-    // Attaching reaches any existing context, one no member is bound to too (D222 (3)).
     let to_partners = answer(
         &mut ws,
         &Actor::Human,
@@ -1104,160 +1217,24 @@ fn a_member_memory_moves_to_a_context_its_member_belongs_to_and_no_other() {
 }
 
 #[test]
-fn a_proposal_with_a_member_is_stored_in_that_members_store() {
+fn a_workspace_lists_the_contexts_it_and_its_members_are_bound_to_with_the_members_that_see_them() {
     let fx = Fixture::new();
     fx.seed();
+    // The first memory command moves the memories into their contexts (D222 (6)); a context list
+    // alone does not, as for a plain repository.
     let mut ws = fx.engine_on(&fx.ws);
-    let in_api = propose_in(&mut ws, &agent(), "api from workspace", Some("api"), None)
-        .expect("proposed in api");
-    assert_eq!(in_api.status, MemoryStatus::Proposed);
-    assert_eq!(in_api.scope, "member api");
-    let clone = list(&mut fx.engine_on(&fx.api), None).expect("the list answers");
+    list(&mut ws, None).expect("the list answers");
+    let (listed, repo_id, clash) = contexts(&mut ws, true);
     assert_eq!(
-        status_in(&clone.memories, "api from workspace"),
-        MemoryStatus::Proposed
+        names(&listed),
+        vec!["Billing", "Platform", "api", "pay", "web"]
     );
-    let own = list(&mut ws, Some("workspace")).expect("the list answers");
-    assert!(
-        !own.memories
-            .iter()
-            .any(|memory| memory.text == "api from workspace")
-    );
-    // Without a member it stays in the workspace's own store.
-    let own_one = propose_in(&mut ws, &agent(), "workspace only", None, None).expect("proposed");
-    assert_eq!(own_one.scope, "workspace");
-    assert_eq!(own_one.member, None);
-    let clone = list(&mut fx.engine_on(&fx.api), None).expect("the list answers");
-    assert!(
-        !clone
-            .memories
-            .iter()
-            .any(|memory| memory.text == "workspace only")
-    );
-    // A human's proposal in a member is accepted, as in the member.
-    let human = propose_in(&mut ws, &Actor::Human, "api by person", Some("api"), None)
-        .expect("written in api");
-    assert_eq!(human.status, MemoryStatus::Accepted);
-    // A member with no store yet gets one when a proposal is written to it, as its own engine would.
-    assert!(
-        !common_of(&fx.jobs)
-            .join("gitmaster")
-            .join("threads.db")
-            .exists()
-    );
-    let in_jobs =
-        propose_in(&mut ws, &agent(), "jobs first", Some("jobs"), None).expect("proposed in jobs");
-    assert_eq!(in_jobs.scope, "member jobs");
-    let jobs = list(&mut fx.engine_on(&fx.jobs), None).expect("the list answers");
-    assert_eq!(
-        status_in(&jobs.memories, "jobs first"),
-        MemoryStatus::Proposed
-    );
-    // The context of a member's proposal is resolved against the member's contexts.
-    let in_platform = propose_in(
-        &mut ws,
-        &agent(),
-        "api in platform",
-        Some("api"),
-        Some("Platform"),
-    )
-    .expect("api belongs to Platform");
-    assert_eq!(in_platform.scope, "Platform");
-    assert_eq!(in_platform.member, None);
-    // web sees Platform as the parent of Billing, but not Partners, which no member belongs to.
-    let refused = propose_in(
-        &mut ws,
-        &agent(),
-        "web in partners",
-        Some("web"),
-        Some("Partners"),
-    );
-    assert!(
-        refused
-            .expect_err("web is not bound to Partners")
-            .contains("is not a context this repository is bound to or inherits from"),
-    );
-}
-
-#[test]
-fn a_member_named_in_a_plain_repository_is_refused_and_nothing_is_written() {
-    let fx = Fixture::new();
-    fx.seed();
-    let mut api = fx.engine_on(&fx.api);
-    let before = labelled(&list(&mut api, None).expect("lists").memories);
-    let refused = propose_in(&mut api, &agent(), "not here", Some("web"), None);
-    assert_eq!(
-        refused.expect_err("refused"),
-        "this repository is not a workspace"
-    );
-    assert_eq!(
-        labelled(&list(&mut api, None).expect("lists").memories),
-        before
-    );
-}
-
-#[test]
-fn an_unknown_member_is_refused_and_the_answer_names_the_members() {
-    let fx = Fixture::new();
-    fx.seed();
-    let mut ws = fx.engine_on(&fx.ws);
-    let refused = propose_in(&mut ws, &agent(), "nowhere", Some("nope"), None)
-        .expect_err("an unknown member is refused");
-    assert!(refused.contains("there is no member nope"), "{refused}");
-    assert!(refused.contains("members are: api, jobs, web"), "{refused}");
-}
-
-#[test]
-fn an_unavailable_member_refuses_with_its_reason_and_changes_nothing() {
-    let fx = Fixture::new();
-    fx.seed();
-    corrupt_store(&fx.web);
-    let mut ws = fx.engine_on(&fx.ws);
-    let before = labelled(&list(&mut ws, None).expect("the list answers").memories);
-    let refused = propose_in(&mut ws, &agent(), "into web", Some("web"), None)
-        .expect_err("an unreadable member refuses");
-    assert!(
-        refused.contains("member web could not be read ("),
-        "{refused}"
-    );
-    // A command on a memory no readable store holds names the member that may have it.
-    let events = send(
-        &mut ws,
-        &Actor::Human,
-        CommandKind::RejectMemory {
-            uid: "0123456789abcdef".to_owned(),
-        },
-    );
-    assert_eq!(state_of(&events), OperationState::Failed);
-    assert!(
-        failure(&events).contains("member web could not be read ("),
-        "{events:?}"
-    );
-    assert_eq!(
-        labelled(&list(&mut ws, None).expect("the list answers").memories),
-        before
-    );
-    assert!(
-        list(&mut fx.engine_on(&fx.api), None)
-            .expect("the clone answers")
-            .memories
-            .iter()
-            .any(|memory| memory.text == "api rule")
-    );
-}
-
-#[test]
-fn a_workspace_lists_the_contexts_of_its_members_with_the_members_that_see_them() {
-    let fx = Fixture::new();
-    fx.seed();
-    let (listed, repo_id, clash) = contexts(&mut fx.engine_on(&fx.ws), true);
-    let names: Vec<&str> = listed.iter().map(|context| context.name.as_str()).collect();
-    assert_eq!(names, vec!["Platform", "Billing"]);
+    assert_eq!(members_of(&listed, "pay"), vec!["workspace"]);
     assert_eq!(members_of(&listed, "Platform"), vec!["api", "jobs", "web"]);
     assert_eq!(members_of(&listed, "Billing"), vec!["web"]);
-    assert_eq!(repo_id, None, "the workspace is in no context");
+    assert_eq!(members_of(&listed, "api"), vec!["api"]);
+    assert_eq!(repo_id, None, "a workspace's list names no repository id");
     assert_eq!(clash, None);
-    assert!(!common_of(&fx.ws).join("gitmaster").join("repo-id").exists());
 }
 
 #[test]
@@ -1271,9 +1248,9 @@ fn a_plain_repository_lists_no_member_and_sees_only_its_own_scopes() {
     assert_eq!(
         labelled(&listed.memories),
         vec![
-            row("api note", "api", None),
-            row("api rule", "api", None),
-            row("platform policy", "Platform", None),
+            row("api note", "api"),
+            row("api rule", "api"),
+            row("platform policy", "Platform"),
         ]
     );
     for memory in &listed.memories {
@@ -1281,9 +1258,8 @@ fn a_plain_repository_lists_no_member_and_sees_only_its_own_scopes() {
         assert!(json.get("member").is_none(), "{json}");
     }
     let (plain, _, _) = contexts(&mut api, true);
-    let names: Vec<&str> = plain.iter().map(|context| context.name.as_str()).collect();
     assert_eq!(
-        names,
+        names(&plain),
         vec!["Platform", "api"],
         "the own context is bound too"
     );

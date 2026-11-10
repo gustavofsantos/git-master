@@ -239,10 +239,7 @@ fn own_context(
     repo_id: Option<String>,
 ) -> Result<OwnContext, String> {
     let common = git.common_dir(root).map_err(|e| e.0)?;
-    let repo_id = match repo_id {
-        Some(id) => id,
-        None => repo_id::ensure(&common).map_err(|e| e.to_string())?,
-    };
+    let repo_id = writer_id(git, root, repo_id)?;
     let top = git.resolve_root(root).map_err(|e| e.0)?;
     let folder = top.file_name().map_or_else(
         || top.to_string_lossy().into_owned(),
@@ -252,6 +249,16 @@ fn own_context(
         .repository_context(&repo_id, &common.to_string_lossy(), &folder, now_ms())
         .map_err(|e| e.to_string())?;
     Ok(OwnContext { repo_id, context })
+}
+
+/// The id a memory written by the clone at `root` names on its sources: its own, or a new one written
+/// to the clone when it has none (`add_repo` writes it the same way).
+fn writer_id(git: &dyn GitPort, root: &Path, repo_id: Option<String>) -> Result<String, String> {
+    if let Some(id) = repo_id {
+        return Ok(id);
+    }
+    let common = git.common_dir(root).map_err(|e| e.0)?;
+    repo_id::ensure(&common).map_err(|e| e.to_string())
 }
 
 /// The refusal of a proposal in a repository bound to several contexts: it names them by path,
@@ -320,20 +327,86 @@ fn one_or_own(
     }
 }
 
-/// The contexts of a workspace's members, each with the members that see it (D216 (4)): the union of
-/// the members' contexts with their parents, nearest first. A member that cannot be read adds none.
+/// Where the memories a member of a workspace keeps go, and where a proposal `member` names goes
+/// (D222 (5)): the member's own context, the one of its clone, created and bound when needed. Refused
+/// when the clone's id clashes.
+pub(crate) fn own_home(
+    store: &mut ContextStore,
+    git: &dyn GitPort,
+    root: &Path,
+) -> Result<OwnContext, String> {
+    match binding(store, git, root)? {
+        Binding::Clash { other_path } => Err(memory_scope::clash_note(&other_path)),
+        Binding::Clone { repo_id, .. } => own_context(store, git, root, repo_id),
+    }
+}
+
+/// Where a proposal without a context goes in a workspace (D222 (5)): over the contexts bound directly
+/// to the workspace repository and to each member. Exactly one is used; none gives the workspace's own
+/// context, created and bound to the workspace; several are refused, named by path. A member whose id
+/// clashes, or that cannot be read, refuses too, since its bindings are not known.
+pub(crate) fn workspace_home(
+    store: &mut ContextStore,
+    git: &dyn GitPort,
+    root: &Path,
+    members: &[Folder],
+) -> Result<OwnContext, String> {
+    let (repo_id, mut bound) = match binding(store, git, root)? {
+        Binding::Clash { other_path } => return Err(memory_scope::clash_note(&other_path)),
+        Binding::Clone { repo_id, bound } => (repo_id, bound),
+    };
+    for member in members {
+        match binding(store, git, &member.root) {
+            Ok(Binding::Clone { bound: direct, .. }) => bound.extend(direct),
+            Ok(Binding::Clash { other_path }) => {
+                return Err(format!(
+                    "member {}: {}",
+                    member.name,
+                    memory_scope::clash_note(&other_path)
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "member {} could not be read ({error})",
+                    member.name
+                ));
+            }
+        }
+    }
+    bound.sort_unstable();
+    bound.dedup();
+    match bound.as_slice() {
+        [] => own_context(store, git, root, repo_id),
+        [context] => Ok(OwnContext {
+            repo_id: writer_id(git, root, repo_id)?,
+            context: *context,
+        }),
+        several => Err(several_message(store, several)?),
+    }
+}
+
+/// The contexts a workspace sees, each with the members that see it (D216 (4), D222 (5)): the union of
+/// the contexts bound to the workspace repository and to each member, with their parents, nearest
+/// first. The workspace repository is named `workspace` among them. A member that cannot be read adds
+/// none.
 fn workspace_contexts(
     store: &mut ContextStore,
     git: &dyn GitPort,
+    root: &Path,
     folders: &[Folder],
 ) -> Result<Vec<Context>, String> {
     let nodes = store.nodes().map_err(|e| e.to_string())?;
     let mut member_of = Vec::new();
     let mut by_member: Vec<(&str, Vec<i64>)> = Vec::new();
-    for folder in folders {
+    let named = std::iter::once((memory_scope::WORKSPACE, root)).chain(
+        folders
+            .iter()
+            .map(|folder| (folder.name.as_str(), folder.root.as_path())),
+    );
+    for (name, path) in named {
         let Ok(Sight::Contexts {
             member_of: direct, ..
-        }) = sight(store, git, &folder.root)
+        }) = sight(store, git, path)
         else {
             continue;
         };
@@ -342,7 +415,7 @@ fn workspace_contexts(
             .map(|(context, _)| context)
             .collect();
         member_of.extend(direct);
-        by_member.push((folder.name.as_str(), sees));
+        by_member.push((name, sees));
     }
     visibility::visible_contexts(&nodes, &member_of)
         .into_iter()
@@ -359,8 +432,8 @@ fn workspace_contexts(
 }
 
 /// `ListContexts`: every context, or with `repo` those the open repository sees. A clash lists
-/// none and names the other clone (D193 (4)). From a workspace, `repo` lists its members' contexts
-/// (D216 (4)).
+/// none and names the other clone (D193 (4)). From a workspace, `repo` lists the contexts of the
+/// workspace and its members (D216 (4), D222 (5)).
 fn list(
     id: OperationId,
     db: Option<&Path>,
@@ -383,11 +456,11 @@ fn list(
         };
         return Ok(vec![listed(contexts, None, None)]);
     }
-    if let Some(folders) =
-        root.and_then(|root| memory_scope::workspace_folders(git, global_config, root))
+    if let Some(root) = root
+        && let Some(folders) = memory_scope::workspace_folders(git, global_config, root)
     {
         let contexts = match store {
-            Some(mut store) => workspace_contexts(&mut store, git, &folders)?,
+            Some(mut store) => workspace_contexts(&mut store, git, root, &folders)?,
             None => Vec::new(),
         };
         return Ok(vec![listed(contexts, None, None)]);

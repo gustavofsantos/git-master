@@ -1,7 +1,8 @@
 //! The memories of the contexts a repository reads (design/threads.md, "Contexts"; D191, D193,
-//! D222). `threads.db` holds the threads and `contexts.db` every memory; this module joins them: the
-//! contexts the repository is bound to and any context it names (`Reach`), the merged and paged list
-//! (`list_command`), the scope a memory is labelled with, the files a memory names in other
+//! D222). Every memory lives in `contexts.db`; `threads.db` keeps the threads and, until a command
+//! moves them, the memories written before (D222 (6)). This module joins them: the contexts a
+//! repository or a workspace is bound to and any context it names (`Reach`), the merged and paged
+//! list (`list_command`), the scope a memory is labelled with, the files a memory names in other
 //! repositories, and the commands that act on a context memory or move one into a context.
 //! A read never creates `contexts.db`, and a failure reading it never fails a read: the repository's
 //! memories answer, and the answer says why (D193 (2), (4), (6)).
@@ -30,8 +31,8 @@ use crate::workspace::Workspaces;
 pub(crate) const MEMORY_MISSING: &str = "Memory not found.";
 /// The scope label of the repository's own memories (D193 (5)).
 const REPOSITORY: &str = "repository";
-/// The scope label of a workspace's own memories (D216 (2)), and the scope name that names them.
-const WORKSPACE: &str = "workspace";
+/// The name of a workspace's own repository among its contexts' members (D222 (5)).
+pub(crate) const WORKSPACE: &str = "workspace";
 const NOT_VISIBLE: &str = "The context is not one this repository belongs to.";
 /// What attaching to a context that does not exist answers (D222 (3)).
 const NO_CONTEXT: &str = "Context not found.";
@@ -46,10 +47,6 @@ const LINKED: &str = "a memory with supersedes links cannot move to a context";
 const NOT_A_WORKSPACE: &str = "this repository is not a workspace";
 /// What a proposal without a context answers when no contexts database is configured (D222 (4)).
 const NO_CONTEXTS_DB: &str = "no contexts database is configured, so the memory has nowhere to go";
-/// What a command answers when a member's memory reaches the workspace's own store: the command is
-/// run in the member's store first (D216 (3)), so this is never the answer of a working engine.
-pub(crate) const ROUTED: &str =
-    "internal: a memory of a workspace member was not run in its member";
 
 /// A folder of a workspace's member: its name in the workspace and its checkout (D216 (1)).
 #[derive(Clone, Debug)]
@@ -86,91 +83,8 @@ pub(crate) fn workspace_folders(
     Some(folders)
 }
 
-/// A workspace member as the memory commands read it: its folder and its clone's store, when it has
-/// one (D216 (1)). The store is opened without creating or migrating it.
-pub(crate) struct MemberStore {
-    pub(crate) folder: String,
-    pub(crate) root: PathBuf,
-    /// The clone's store; `None` when the clone has none (it is empty) or cannot be read.
-    pub(crate) threads: Option<ThreadStore>,
-    /// Why the store cannot be read, when it cannot: the answer names the member and this reason.
-    pub(crate) unavailable: Option<String>,
-}
-
-impl MemberStore {
-    fn open(git: &dyn GitPort, folder: &Folder) -> Self {
-        let (threads, unavailable) = match open_member(git, &folder.root) {
-            Ok(threads) => (threads, None),
-            Err(reason) => (None, Some(reason)),
-        };
-        Self {
-            folder: folder.name.clone(),
-            root: folder.root.clone(),
-            threads,
-            unavailable,
-        }
-    }
-
-    /// The memory `id` of this member's store.
-    fn read(&self, id: i64) -> Result<Memory, String> {
-        let threads = self
-            .threads
-            .as_ref()
-            .ok_or_else(|| MEMORY_MISSING.to_owned())?;
-        threads
-            .read_memory(id)
-            .map_err(|e| named(e, MEMORY_MISSING))
-    }
-
-    /// The scope label of this member's memories (D216 (2)).
-    fn label(&self) -> String {
-        member_label(&self.folder)
-    }
-}
-
-/// The scope label of a memory of member `folder` (D216 (2)).
-fn member_label(folder: &str) -> String {
-    format!("member {folder}")
-}
-
-/// The store a command of member `member` runs in (D216 (3), (5)): the clone's own store, taken out
-/// of the member, or a new one for a member that has none yet, as the clone's own engine would
-/// create it. A member that cannot be read refuses with its reason and nothing is changed.
-pub(crate) fn take_store(
-    git: &dyn GitPort,
-    member: &mut MemberStore,
-) -> Result<ThreadStore, String> {
-    if let Some(reason) = &member.unavailable {
-        return Err(member_failed(&member.folder, reason));
-    }
-    if let Some(threads) = member.threads.take() {
-        return Ok(threads);
-    }
-    let common = git
-        .common_dir(&member.root)
-        .map_err(|e| member_failed(&member.folder, &e.0))?;
-    ThreadStore::open(&common).map_err(|e| member_failed(&member.folder, &e.to_string()))
-}
-
-/// Labels the memory an answer of a command run in member `folder` carries, as the workspace sees
-/// it (D216 (2)): `member <folder>`, with `member` set. A memory the command moved into a context
-/// keeps its context.
-pub(crate) fn label_member(events: &mut [Event], folder: &str) {
-    for event in events.iter_mut() {
-        if let Event::MemoryChanged {
-            memory: Some(memory),
-            ..
-        } = event
-            && memory.contexts.is_empty()
-        {
-            memory.scope = member_label(folder);
-            memory.member = Some(folder.to_owned());
-        }
-    }
-}
-
-/// The store of the clone at `root` when it has one: `None` when it has none, an error when it cannot
-/// be read (D216 (1)).
+/// The threads store of the clone at `root` when it has one: `None` when it has none, an error when it
+/// cannot be read. It is opened without creating or migrating it (D222 (6)).
 fn open_member(git: &dyn GitPort, root: &Path) -> Result<Option<ThreadStore>, String> {
     if !root.is_dir() {
         return Err("its folder is missing".to_owned());
@@ -180,8 +94,7 @@ fn open_member(git: &dyn GitPort, root: &Path) -> Result<Option<ThreadStore>, St
 }
 
 /// What the open repository's identity says about its contexts (D193 (4)): its id when its contexts
-/// are used, the contexts it sees, the note of a clash, and every context's node. In a workspace the
-/// contexts are those its members see together (D216 (4)), and no id is the workspace's.
+/// are used, the contexts it sees, the note of a clash, and every context's node.
 struct Joined {
     repo_id: Option<String>,
     visible: Vec<(i64, u32)>,
@@ -189,18 +102,20 @@ struct Joined {
     nodes: Vec<ContextNode>,
     /// True when this clone's id is held by another clone: it reads no contexts at all (D193 (4)).
     clashed: bool,
+    /// The folder of each readable clone of a workspace, by its id (D222 (5)).
+    locals: Vec<(String, PathBuf)>,
 }
 
-/// The contexts a repository (or a workspace) reads, as a memory command reads them (D191 (3), D193
-/// (4), (5), D216 (4), D222 (3)): the ones it is bound to with their ancestors are its default reach,
-/// and any context can be named.
+/// The contexts a repository or a workspace reads, as a memory command reads them (D191 (3), D193
+/// (4), (5), D222 (3), (5)): the ones it is bound to with their ancestors are its default reach, and
+/// any context can be named.
 pub(crate) struct Reach {
     /// The repository's id, when its contexts are used: `None` for a clone with no id in a
     /// context, a clash, or a workspace.
     repo_id: Option<String>,
     /// The contexts the repository is bound to and their ancestors, with their distance, nearest
     /// first (`visibility::visible_contexts`). This is the default reach, and the one a proposal and a
-    /// move are checked against.
+    /// move are checked against. A workspace's is the union of its own bindings and its members'.
     visible: Vec<(i64, u32)>,
     /// Every context, for names and paths.
     nodes: Vec<ContextNode>,
@@ -212,16 +127,20 @@ pub(crate) struct Reach {
     clashed: bool,
     /// Why the contexts are not used, when they are not (D193 (4)), joined for every member.
     note: Option<String>,
-    /// Whether the open root is a workspace: its own memories are labelled `workspace` (D216 (2)).
+    /// Whether the open root is a workspace (D222 (5)). A workspace reads no memory of its own
+    /// threads store, which holds only what the migration has not moved yet.
     workspace: bool,
-    /// The member folders in folder order; a member's index is its place here (D216 (3)).
-    folders: Vec<String>,
+    /// The member folders of a workspace in folder order; empty for a repository.
+    folders: Vec<Folder>,
+    /// The folder of each readable clone of a workspace, its own and its members', by repo id: a file
+    /// source of one of them is read there, at its `HEAD` (D193 (9), D222 (5)).
+    locals: Vec<(String, PathBuf)>,
 }
 
 impl Reach {
     /// What the open root sees in `db`. A missing file gives no contexts; a file that cannot be read
-    /// gives none and says so in `note`. A workspace (`folders` given) sees what its members see
-    /// together (D216 (4)).
+    /// gives none and says so in `note`. A workspace (`folders` given) sees what it and its members
+    /// are bound to together (D222 (5)).
     pub(crate) fn load(
         git: &dyn GitPort,
         root: &Path,
@@ -238,7 +157,7 @@ impl Reach {
             Err(error) => return reach.unreadable(&error.to_string()),
         };
         let joined = match folders {
-            Some(folders) => Self::join_members(git, folders, &mut store),
+            Some(folders) => Self::join_workspace(git, root, folders, &mut store),
             None => Self::join(git, root, &mut store),
         };
         match joined {
@@ -248,6 +167,7 @@ impl Reach {
                 reach.nodes = joined.nodes;
                 reach.note = joined.note;
                 reach.clashed = joined.clashed;
+                reach.locals = joined.locals;
                 reach.store = Some(store);
                 reach
             }
@@ -266,11 +186,8 @@ impl Reach {
             clashed: false,
             note: None,
             workspace: folders.is_some(),
-            folders: folders
-                .unwrap_or_default()
-                .iter()
-                .map(|folder| folder.name.clone())
-                .collect(),
+            folders: folders.map(<[Folder]>::to_vec).unwrap_or_default(),
+            locals: Vec::new(),
         }
     }
 
@@ -303,43 +220,57 @@ impl Reach {
             note,
             nodes,
             clashed,
+            locals: Vec::new(),
         })
     }
 
-    /// What a workspace's members see together (D216 (4)): the contexts of every member with their
-    /// parents. A member with a clash, or one whose identity cannot be read, adds none and a note
-    /// naming it.
-    fn join_members(
+    /// What a workspace sees (D222 (5)): the contexts bound directly to the workspace repository and
+    /// to each member, with their parents. A member with a clash, or whose identity cannot be read,
+    /// adds none and a note names it.
+    fn join_workspace(
         git: &dyn GitPort,
+        root: &Path,
         folders: &[Folder],
         store: &mut ContextStore,
     ) -> Result<Joined, String> {
         let nodes = store.nodes().map_err(|e| e.to_string())?;
         let mut member_of = Vec::new();
         let mut problems = Vec::new();
-        for folder in folders {
-            match contexts_session::sight(store, git, &folder.root) {
+        let mut workspace_id = None;
+        let mut locals = Vec::new();
+        let parts = std::iter::once(("workspace".to_owned(), root.to_path_buf())).chain(
+            folders
+                .iter()
+                .map(|folder| (format!("member {}", folder.name), folder.root.clone())),
+        );
+        for (index, (label, path)) in parts.enumerate() {
+            match contexts_session::sight(store, git, &path) {
                 Ok(Sight::Contexts {
-                    member_of: direct, ..
-                }) => member_of.extend(direct),
+                    repo_id,
+                    member_of: direct,
+                }) => {
+                    if index == 0 {
+                        workspace_id = Some(repo_id.clone());
+                    }
+                    locals.push((repo_id, path));
+                    member_of.extend(direct);
+                }
                 Ok(Sight::Nothing) => {}
-                Ok(Sight::Clash { other_path }) => problems.push(format!(
-                    "member {}: {}",
-                    folder.name,
-                    clash_note(&other_path)
-                )),
-                Err(error) => problems.push(format!(
-                    "member {}: its contexts could not be read ({error})",
-                    folder.name
-                )),
+                Ok(Sight::Clash { other_path }) => {
+                    problems.push(format!("{label}: {}", clash_note(&other_path)));
+                }
+                Err(error) => {
+                    problems.push(format!("{label}: its contexts could not be read ({error})"));
+                }
             }
         }
         Ok(Joined {
-            repo_id: None,
+            repo_id: workspace_id,
             visible: visibility::visible_contexts(&nodes, &member_of),
             note: join_notes(&problems),
             nodes,
             clashed: false,
+            locals,
         })
     }
 
@@ -364,6 +295,14 @@ impl Reach {
         self.repo_id.as_deref()
     }
 
+    /// The folder of a clone of the workspace whose id is `repo_id`, when it is readable.
+    fn local_root(&self, repo_id: &str) -> Option<&Path> {
+        self.locals
+            .iter()
+            .find(|(id, _)| id == repo_id)
+            .map(|(_, path)| path.as_path())
+    }
+
     /// The last known folder of repository `repo_id`, when `contexts.db` has one.
     pub(crate) fn path_of(&self, repo_id: &str) -> Option<String> {
         self.store.as_ref()?.repo_path(repo_id).ok().flatten()
@@ -376,13 +315,11 @@ impl Reach {
     }
 
     /// The contexts a request's scope covers, with their distance, nearest first (D222 (2), (6)): the
-    /// default reach for `All` and `Repository`, the named context and its ancestors for `Context`,
-    /// and none for a workspace member.
+    /// default reach for `All` and `Repository`, and the named context and its ancestors for `Context`.
     fn reach_of(&self, scope: Scope) -> Vec<(i64, u32)> {
         match scope {
             Scope::All | Scope::Repository => self.visible.clone(),
             Scope::Context(id) => visibility::visible_contexts(&self.nodes, &[id]),
-            Scope::Member(_) => Vec::new(),
         }
     }
 
@@ -413,26 +350,12 @@ impl Reach {
         contexts
     }
 
-    /// The label of the open root's own memories: `repository`, or `workspace` (D216 (2)).
-    fn own_label(&self) -> &'static str {
-        if self.workspace {
-            WORKSPACE
-        } else {
-            REPOSITORY
-        }
-    }
-
     /// Whether the open root is a workspace.
     pub(crate) fn is_workspace(&self) -> bool {
         self.workspace
     }
 
-    /// The index of member `folder` in folder order.
-    fn folder_index(&self, folder: &str) -> Option<usize> {
-        self.folders.iter().position(|name| name == folder)
-    }
-
-    /// The scope a request names, `None` meaning every scope (D193 (5), D216 (3)).
+    /// The scope a request names, `None` meaning every scope (D193 (5)).
     fn scope(&self, text: Option<&str>) -> Result<Scope, String> {
         match text {
             None => Ok(Scope::All),
@@ -440,38 +363,40 @@ impl Reach {
         }
     }
 
-    /// What a scope name means. In a workspace: `workspace`, `member <folder>`, or a member's bare
-    /// folder when no context has that name (D216 (3)); otherwise a context (D222 (3)).
+    /// What a scope name means: a context, by path or unique name, bound or not (D223 (1)). The names
+    /// of the retired workspace scopes, `workspace` and `member <folder>`, are refused with a message
+    /// that says so, unless a context has that name.
     fn named(&self, text: &str) -> Result<Scope, String> {
-        if !self.workspace {
-            return visibility::resolve_scope(&self.nodes, &self.visible, text);
-        }
-        if text == WORKSPACE {
-            return Ok(Scope::Repository);
-        }
-        if let Some(folder) = text.strip_prefix("member ") {
-            return self.member(folder.trim()).map(Scope::Member);
-        }
-        let context = visibility::resolve_scope(&self.nodes, &self.visible, text);
-        match (self.folder_index(text), context) {
-            (Some(_), Ok(Scope::Context(_))) => Err(format!(
-                "\"{text}\" names both a member and a context: write \"member {text}\" for the member, or the context's full path."
-            )),
-            (Some(index), Err(message)) if message.starts_with("No context") => {
-                Ok(Scope::Member(index))
+        visibility::resolve_scope(&self.nodes, &self.visible, text).map_err(|message| {
+            if message.starts_with("No context") && retired_scope(text) {
+                format!("scope \"{text}\" no longer exists: name a context, or use bound")
+            } else {
+                message
             }
-            (_, context) => context,
-        }
+        })
     }
 
-    /// The index of member `folder`, which must be one of the workspace's.
-    fn member(&self, folder: &str) -> Result<usize, String> {
-        self.folder_index(folder).ok_or_else(|| {
-            format!(
-                "there is no member {folder} in this workspace; members are: {}",
-                self.folders.join(", ")
-            )
-        })
+    /// The member of a workspace that `name` names, a folder of it.
+    fn member_folder(&self, name: &str) -> Result<&Folder, String> {
+        self.folders
+            .iter()
+            .find(|folder| folder.name == name)
+            .ok_or_else(|| {
+                format!(
+                    "there is no member {name} in this workspace; members are: {}",
+                    self.folders
+                        .iter()
+                        .map(|folder| folder.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+    }
+
+    /// The contexts a request's scope covers, each with the contexts above it: the default reach for
+    /// `All` and `Repository`, the named context and its ancestors for `Context` (D222 (2), (6)).
+    fn scope_ids(&self, scope: Scope) -> Vec<i64> {
+        self.reach_of(scope).into_iter().map(|(id, _)| id).collect()
     }
 
     /// The id a memory proposed at a context carries on its sources: the repository's own (D193
@@ -496,26 +421,19 @@ impl Reach {
         match self.scope(Some(name)) {
             Ok(Scope::Context(id)) if self.sees_context(id) => Ok(id),
             Ok(Scope::Context(_)) => Err(not_reached()),
-            Ok(Scope::All | Scope::Repository | Scope::Member(_)) => Err(format!(
+            Ok(Scope::All | Scope::Repository) => Err(format!(
                 "\"{name}\" is not a context: leave the context out to propose for this repository."
             )),
             Err(message) if message.starts_with("No context") => Err(not_reached()),
             Err(message) => Err(message),
         }
     }
+}
 
-    /// Whether a scope covers the contexts the repository sees. A plain repository's own scope is its
-    /// reach too: its memories are in its contexts, so `repository` names what it is bound to (D222
-    /// (4)). A workspace's own scope is its own store, which holds no context memory.
-    fn covers_contexts(&self, scope: Scope) -> bool {
-        reads_contexts(scope) || (matches!(scope, Scope::Repository) && !self.workspace)
-    }
-
-    /// The contexts a request's scope covers, each with the contexts above it: the default reach for
-    /// `All`, the named context and its ancestors for `Context` (D222 (2)).
-    fn scope_ids(&self, scope: Scope) -> Vec<i64> {
-        self.reach_of(scope).into_iter().map(|(id, _)| id).collect()
-    }
+/// Whether `text` is the name of a scope that no longer exists: a workspace's own scope or one of
+/// its members (D222 (5)).
+fn retired_scope(text: &str) -> bool {
+    text == WORKSPACE || text.starts_with("member ")
 }
 
 /// The note of a clone whose id is held by another clone (D193 (4)).
@@ -544,70 +462,52 @@ fn member_failed(folder: &str, reason: &str) -> String {
     format!("member {folder} could not be read ({reason})")
 }
 
-/// The notes of the members whose stores cannot answer, in folder order.
-pub(crate) fn unavailable_notes(stores: &Stores<'_>) -> Vec<String> {
-    stores
-        .members
-        .iter()
-        .filter_map(|member| {
-            member
-                .unavailable
-                .as_deref()
-                .map(|reason| member_failed(&member.folder, reason))
-        })
-        .collect()
+/// The contexts the root of a request sees, read from `ctx`: a workspace's with its members' (D222 (5)).
+fn reach_for(ctx: &Context<'_>) -> Reach {
+    let folders = workspace_folders(ctx.git, ctx.global_config, ctx.root);
+    Reach::load(ctx.git, ctx.root, ctx.contexts_db, folders.as_deref())
 }
 
-/// What the memory commands read and write: the repository's store, the contexts it sees and, in a
-/// workspace, the stores of its members (D216).
+/// What the memory commands read and write: the repository's threads store, which holds only what
+/// a plain repository has not moved yet (D222 (6)), and the contexts it sees.
 pub(crate) struct Stores<'a> {
     pub(crate) threads: &'a mut ThreadStore,
     pub(crate) reach: Reach,
-    /// The workspace's members in folder order; empty for a repository (D216 (1)).
-    pub(crate) members: Vec<MemberStore>,
 }
 
 impl<'a> Stores<'a> {
-    /// The stores of one memory command: the repository's, the contexts it sees now and the stores
-    /// of its members when it is a workspace.
+    /// The stores of one memory command: the repository's threads store and the contexts it sees now.
     pub(crate) fn new(threads: &'a mut ThreadStore, ctx: &Context<'_>) -> Self {
-        let folders = workspace_folders(ctx.git, ctx.global_config, ctx.root);
-        let members = folders
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .map(|folder| MemberStore::open(ctx.git, folder))
-            .collect();
-        let reach = Reach::load(ctx.git, ctx.root, ctx.contexts_db, folders.as_deref());
         Self {
             threads,
-            reach,
-            members,
+            reach: reach_for(ctx),
         }
+    }
+
+    /// Reads the contexts again, after a command bound the root to a context (D222 (4), (5)).
+    pub(crate) fn reload(&mut self, ctx: &Context<'_>) {
+        self.reach = reach_for(ctx);
     }
 }
 
-/// Where a memory the repository can act on is stored (D193 (1), (7), D216 (3)).
+/// Where a memory the repository can act on is stored (D193 (1), (7), D222 (3)).
 pub(crate) enum Home {
-    /// The repository's own store (the workspace's, in a workspace), with the row id.
+    /// The repository's threads store, for a plain repository whose memories have not moved yet.
     Repository(i64),
-    /// A workspace member's store: its index in `Stores::members`, with the row id.
-    Member { index: usize, id: i64 },
     /// `contexts.db`, attached to one or more contexts (D222 (3)).
     Context,
 }
 
-/// Finds memory `uid` in the repository's store, then in the store of each member, or else in
-/// `contexts.db`, whether or not the repository is bound to one of its contexts (D222 (3)). Any other
-/// memory is not found (D193 (7), D216 (3)).
+/// Finds memory `uid` in the repository's threads store (a plain repository only: a workspace reads
+/// none), then in `contexts.db`, whether or not the repository is bound to one of its contexts
+/// (D222 (3)). Any other memory is not found (D193 (7)).
 pub(crate) fn home_of(stores: &Stores<'_>, uid: &str) -> Result<Home, String> {
-    match stores.threads.memory_id_of(uid) {
-        Ok(id) => return Ok(Home::Repository(id)),
-        Err(StoreError::NotFound) => {}
-        Err(error) => return Err(error.to_string()),
-    }
-    if let Some(home) = member_home(stores, uid) {
-        return Ok(home);
+    if !stores.reach.is_workspace() {
+        match stores.threads.memory_id_of(uid) {
+            Ok(id) => return Ok(Home::Repository(id)),
+            Err(StoreError::NotFound) => {}
+            Err(error) => return Err(error.to_string()),
+        }
     }
     let contexts = stores
         .reach
@@ -618,48 +518,6 @@ pub(crate) fn home_of(stores: &Stores<'_>, uid: &str) -> Result<Home, String> {
         Ok(_) | Err(StoreError::NotFound) => Err(MEMORY_MISSING.to_owned()),
         Err(error) => Err(error.to_string()),
     }
-}
-
-/// The index of the member a proposal names (D216 (5)): a workspace's member, named by its folder.
-pub(crate) fn member_index(stores: &Stores<'_>, name: &str) -> Result<usize, String> {
-    if !stores.reach.is_workspace() {
-        return Err(NOT_A_WORKSPACE.to_owned());
-    }
-    stores.reach.member(name)
-}
-
-/// The member whose store a memory command runs in, for a uid of a member's store (D216 (3)). A uid
-/// no store holds, while a member cannot be read, is refused with that member's reason, since the
-/// memory may be there. Any other answer runs in the repository's own store, which refuses it.
-pub(crate) fn member_of_uid(stores: &Stores<'_>, uid: &str) -> Result<Option<usize>, String> {
-    match home_of(stores, uid) {
-        Ok(Home::Member { index, .. }) => Ok(Some(index)),
-        Err(error) if error == MEMORY_MISSING => {
-            let notes = unavailable_notes(stores);
-            if notes.is_empty() {
-                Ok(None)
-            } else {
-                Err(format!(
-                    "{MEMORY_MISSING} It may be in a member that could not be read: {}.",
-                    notes.join("; ")
-                ))
-            }
-        }
-        _ => Ok(None),
-    }
-}
-
-/// The member whose store holds memory `uid`, in folder order. A member whose store cannot answer is
-/// passed over, so the read answers from the others (D216 (3)).
-fn member_home(stores: &Stores<'_>, uid: &str) -> Option<Home> {
-    stores
-        .members
-        .iter()
-        .enumerate()
-        .find_map(|(index, member)| {
-            let id = member.threads.as_ref()?.memory_id_of(uid).ok()?;
-            Some(Home::Member { index, id })
-        })
 }
 
 /// Whether `uid` is a memory of `contexts.db`: the scope a supersedes link must
@@ -688,20 +546,12 @@ fn finish(
     near: &[(i64, u32)],
 ) {
     memory.scope = if attached.is_empty() {
-        reach.own_label().to_owned()
+        REPOSITORY.to_owned()
     } else {
         reach.label_of(near, attached)
     };
     memory.contexts = reach.attached_contexts(attached);
     fill_changes(ctx, reach, ctx.root, memory);
-}
-
-/// The label, the member and the files changed of a memory of a workspace member's store. Its file
-/// sources name paths of that member's repository, so they are read there (D216 (2), (6)).
-fn finish_member(ctx: &Context<'_>, reach: &Reach, member: &MemberStore, memory: &mut Memory) {
-    memory.scope = member.label();
-    memory.member = Some(member.folder.clone());
-    fill_changes(ctx, reach, &member.root, memory);
 }
 
 /// Derives `files_changed_since` of `memory` from `HEAD` now (D192 (6), D193 (9)). Never stored.
@@ -726,11 +576,14 @@ fn source_root(
     match repo_id {
         None => Ok(home.to_path_buf()),
         Some(id) if reach.repo_id() == Some(id) => Ok(ctx.root.to_path_buf()),
-        Some(id) => reach
-            .path_of(id)
-            .map(PathBuf::from)
-            .filter(|path| path.is_dir())
-            .ok_or(Lookup::Unavailable),
+        Some(id) => match reach.local_root(id) {
+            Some(path) => Ok(path.to_path_buf()),
+            None => reach
+                .path_of(id)
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
+                .ok_or(Lookup::Unavailable),
+        },
     }
 }
 
@@ -789,10 +642,10 @@ pub(crate) struct Listed {
     pub(crate) accepted_characters: u64,
 }
 
-/// `ListMemories` (D193 (5), (6), D216 (3)): the memories of the open root's own store, of its members
-/// and of the contexts the scope names, each once, merged and paged. A scope naming a context that
-/// cannot be resolved while `contexts.db` is unreadable answers nothing and says why. Every store that
-/// could not answer is named in the note; it never fails the read.
+/// `ListMemories` (D193 (5), (6), D222 (3)): the memories of the scope the request names, each once,
+/// merged and paged. A scope naming a context that cannot be resolved while `contexts.db` is unreadable
+/// answers nothing and says why. The notes of the contexts and of the threads store say what did not
+/// answer; a read never fails for them.
 pub(crate) fn list_command(
     stores: &Stores<'_>,
     ctx: &Context<'_>,
@@ -800,8 +653,7 @@ pub(crate) fn list_command(
 ) -> Result<Listed, String> {
     let reach = &stores.reach;
     let contexts_read = reach.read;
-    let mut notes: Vec<String> = reach.note.iter().cloned().collect();
-    notes.extend(unavailable_notes(stores));
+    let notes: Vec<String> = reach.note.iter().cloned().collect();
     let scope = match reach.scope(ask.scope) {
         Ok(scope) => scope,
         Err(_) if !reach.read => {
@@ -817,12 +669,7 @@ pub(crate) fn list_command(
         }
         Err(message) => return Err(message),
     };
-    let (memories, next_cursor, failed) = list(stores, ctx, ask, scope)?;
-    for note in failed {
-        if !notes.contains(&note) {
-            notes.push(note);
-        }
-    }
+    let (memories, next_cursor) = list(stores, ctx, ask, scope)?;
     let proposed_total = count_proposed_visible(stores)?;
     let (accepted_total, accepted_characters) = accepted_size(stores, scope)?;
     Ok(Listed {
@@ -836,50 +683,25 @@ pub(crate) fn list_command(
     })
 }
 
-/// Whether a scope covers the own store (the repository's, or the workspace's).
-fn includes_own(scope: Scope) -> bool {
-    matches!(scope, Scope::All | Scope::Repository)
+/// Whether a scope covers the repository's own threads store: a plain repository's, until its memories
+/// have moved (D222 (6)). A workspace reads none of it.
+fn includes_own(reach: &Reach, scope: Scope) -> bool {
+    !reach.is_workspace() && matches!(scope, Scope::All | Scope::Repository)
 }
 
 /// Whether a scope covers contexts: the default reach, or one named context with its ancestors.
 fn reads_contexts(scope: Scope) -> bool {
-    matches!(scope, Scope::All | Scope::Context(_))
-}
-
-/// Whether a scope covers member `index` of the workspace.
-fn includes_member(scope: Scope, index: usize) -> bool {
-    match scope {
-        Scope::All => true,
-        Scope::Member(member) => member == index,
-        Scope::Repository | Scope::Context(_) => false,
-    }
-}
-
-/// The stores of the members `scope` covers, with their index, for those that opened.
-fn member_stores<'s>(
-    stores: &'s Stores<'_>,
-    scope: Scope,
-) -> impl Iterator<Item = (usize, &'s ThreadStore)> + 's {
-    stores
-        .members
-        .iter()
-        .enumerate()
-        .filter(move |(index, _)| includes_member(scope, *index))
-        .filter_map(|(index, member)| member.threads.as_ref().map(|threads| (index, threads)))
+    matches!(scope, Scope::All | Scope::Repository | Scope::Context(_))
 }
 
 /// The accepted memories of the scope `scope` covers, and the characters of their text together,
-/// each memory once (D201 (5)). The filters, the query and the page play no part. A member that cannot
-/// answer adds none, and the list names it.
+/// each memory once (D201 (5)). The filters, the query and the page play no part.
 fn accepted_size(stores: &Stores<'_>, scope: Scope) -> Result<(u32, u64), String> {
     let mut rows = Vec::new();
-    if includes_own(scope) {
+    if includes_own(&stores.reach, scope) {
         rows.extend(stores.threads.accepted_text().map_err(|e| e.to_string())?);
     }
-    for (_, threads) in member_stores(stores, scope) {
-        rows.extend(threads.accepted_text().unwrap_or_default());
-    }
-    if stores.reach.covers_contexts(scope)
+    if reads_contexts(scope)
         && let Some(contexts) = stores.reach.store()
     {
         let ids = stores.reach.scope_ids(scope);
@@ -889,7 +711,7 @@ fn accepted_size(stores: &Stores<'_>, scope: Scope) -> Result<(u32, u64), String
 }
 
 /// Counts one retrieval, at `at`, of each memory of `uids` the repository sees (D201 (4)): in the store
-/// it lives in, the repository's, a member's, or `contexts.db`. A uid it does not see is skipped. Every
+/// it lives in, the repository's threads store or `contexts.db`. A uid it does not see is skipped. Every
 /// uid is tried even when a write fails; the first failure is returned, for the caller to log, and the
 /// read that named the memories has already answered.
 pub(crate) fn count_retrievals(
@@ -904,10 +726,6 @@ pub(crate) fn count_retrievals(
                 .threads
                 .count_retrieval(uid, at)
                 .map_err(|e| e.to_string()),
-            Ok(Home::Member { index, .. }) => match stores.members[index].threads.as_ref() {
-                Some(threads) => threads.count_retrieval(uid, at).map_err(|e| e.to_string()),
-                None => Ok(false),
-            },
             Ok(Home::Context) => match stores.reach.store() {
                 Some(contexts) => contexts.count_retrieval(uid, at).map_err(|e| e.to_string()),
                 None => Ok(false),
@@ -922,14 +740,15 @@ pub(crate) fn count_retrievals(
     first_error.map_or(Ok(()), Err)
 }
 
-/// How many proposed memories the repository sees (D193 (6), D216 (4)): its own store, its members'
-/// stores and every visible context, a memory held by its own store and a context counted once. The
-/// filters, the status, the query and the scope of the request play no part.
+/// How many proposed memories the repository sees (D193 (6), D222 (5)): its threads store, for a plain
+/// repository, and every visible context, a memory held by both counted once. The filters, the status,
+/// the query and the scope of the request play no part.
 fn count_proposed_visible(stores: &Stores<'_>) -> Result<u32, String> {
-    let mut repository = stores.threads.count_proposed().map_err(|e| e.to_string())?;
-    for (_, threads) in member_stores(stores, Scope::All) {
-        repository = repository.saturating_add(threads.count_proposed().unwrap_or(0));
-    }
+    let repository = if stores.reach.is_workspace() {
+        0
+    } else {
+        stores.threads.count_proposed().map_err(|e| e.to_string())?
+    };
     let Some(contexts) = stores.reach.store() else {
         return Ok(repository);
     };
@@ -941,13 +760,10 @@ fn count_proposed_visible(stores: &Stores<'_>) -> Result<u32, String> {
         return Ok(repository.saturating_add(in_contexts));
     }
     let uids = contexts.proposed_uids_in(&ids).map_err(|e| e.to_string())?;
-    let mut shared = stores
+    let shared = stores
         .threads
         .count_proposed_among(&uids)
         .map_err(|e| e.to_string())?;
-    for (_, threads) in member_stores(stores, Scope::All) {
-        shared = shared.saturating_add(threads.count_proposed_among(&uids).unwrap_or(0));
-    }
     Ok(repository
         .saturating_add(in_contexts)
         .saturating_sub(shared))
@@ -955,10 +771,8 @@ fn count_proposed_visible(stores: &Stores<'_>) -> Result<u32, String> {
 
 /// Where a listed memory is stored.
 enum Place {
-    /// The open root's own store.
+    /// The repository's threads store, for a plain repository whose memories have not moved yet.
     Own,
-    /// A workspace member's store, at this index of `Stores::members`.
-    Member(usize),
     /// `contexts.db`.
     Context,
 }
@@ -967,15 +781,15 @@ enum Place {
 struct Entry {
     hit: Found,
     place: Place,
-    /// The contexts it is attached to (empty for a store of a repository).
+    /// The contexts it is attached to (empty for the threads store).
     attached: Vec<i64>,
-    /// Its place among the scopes: the own store first, then the members in folder order, then the
-    /// contexts by the distance of the nearest one (D193 (6), D216 (6)). Its first half is the tier.
-    near: (u32, u32),
+    /// Its place among the scopes: the distance of the nearest context it is attached to, and 0 for the
+    /// repository's own threads store (D193 (6)).
+    near: u32,
 }
 
-/// Orders the entries as a list shows them (D193 (6), D216 (6)): by `bm25` ascending with a query,
-/// otherwise newest first; then the nearer scope; then the uid.
+/// Orders the entries as a list shows them (D193 (6)): by `bm25` ascending with a query, otherwise
+/// newest first; then the nearer scope; then the uid.
 fn order(entries: &mut [Entry], with_query: bool) {
     entries.sort_by(|a, b| {
         let rank = if with_query {
@@ -994,41 +808,17 @@ fn scope_key(scope: Scope) -> String {
         Scope::All => "all".to_owned(),
         Scope::Repository => REPOSITORY.to_owned(),
         Scope::Context(id) => format!("context:{id}"),
-        Scope::Member(index) => format!("member:{index}"),
     }
 }
 
-/// The rank of member `index` among the scopes: after the own store, before the contexts.
-fn member_rank(index: usize) -> u32 {
-    u32::try_from(index + 1).unwrap_or(u32::MAX)
-}
-
-/// The filter a member's store answers (D216 (6)). A path names a file of the workspace, so it is read
-/// against the member's folder: `member/x` becomes `x`, the folder itself means no path, and a path
-/// outside the member matches none of its memories (`None`).
-fn member_filter(filter: &MemoryFilter, folder: &str) -> Option<MemoryFilter> {
-    let path = match filter.path.as_deref() {
-        None => None,
-        Some(path) if path == folder => None,
-        Some(path) => Some(path.strip_prefix(folder)?.strip_prefix('/')?.to_owned()),
-    };
-    Some(MemoryFilter {
-        path,
-        ..filter.clone()
-    })
-}
-
-/// One page of the merged list, with the notes of the stores that could not answer it.
-type Merged = (Vec<Memory>, Option<String>, Vec<String>);
-
-/// The merged list of the scopes `scope` names, one page of it (D193 (6), D216 (3)). The memories of
-/// each store that could not answer are left out, and the returned notes name them.
+/// The merged list of the scopes `scope` names, one page of it (D193 (6)). A memory held by two
+/// stores (a move interrupted after its insert) is listed once, nearest first.
 fn list(
     stores: &Stores<'_>,
     ctx: &Context<'_>,
     ask: &Ask<'_>,
     scope: Scope,
-) -> Result<Merged, String> {
+) -> Result<(Vec<Memory>, Option<String>), String> {
     let digest = memories::list_digest(ask.query, ask.filter, &scope_key(scope));
     let offset = match ask.cursor {
         Some(cursor) => {
@@ -1038,8 +828,7 @@ fn list(
         None => 0,
     };
     let mut entries = Vec::new();
-    let mut failed = Vec::new();
-    if includes_own(scope) {
+    if includes_own(&stores.reach, scope) {
         let found = stores
             .threads
             .find_memories(ask.query, ask.filter)
@@ -1048,31 +837,11 @@ fn list(
             hit,
             place: Place::Own,
             attached: Vec::new(),
-            near: (0, 0),
+            near: 0,
         }));
     }
-    for (index, member) in stores.members.iter().enumerate() {
-        if !includes_member(scope, index) {
-            continue;
-        }
-        let (Some(threads), Some(filter)) = (
-            member.threads.as_ref(),
-            member_filter(ask.filter, &member.folder),
-        ) else {
-            continue;
-        };
-        match threads.find_memories(ask.query, &filter) {
-            Ok(found) => entries.extend(found.into_iter().map(|hit| Entry {
-                hit,
-                place: Place::Member(index),
-                attached: Vec::new(),
-                near: (0, member_rank(index)),
-            })),
-            Err(error) => failed.push(member_failed(&member.folder, &error.to_string())),
-        }
-    }
     let near = stores.reach.reach_of(scope);
-    if stores.reach.covers_contexts(scope)
+    if reads_contexts(scope)
         && let Some(contexts) = stores.reach.store()
     {
         let ids = stores.reach.scope_ids(scope);
@@ -1088,12 +857,11 @@ fn list(
                 hit,
                 place: Place::Context,
                 attached,
-                near: (distance, 0),
+                near: distance,
             });
         }
     }
     order(&mut entries, !ask.query.trim().is_empty());
-    // A memory held by two stores (a move interrupted after its insert) is listed once, nearest first.
     let mut seen = HashSet::new();
     entries.retain(|entry| seen.insert(entry.hit.uid.clone()));
     let total = entries.len();
@@ -1104,20 +872,9 @@ fn list(
     let next = (end < total).then(|| format!("{digest}.{end}"));
     let mut memories = Vec::with_capacity(end - start);
     for entry in &entries[start..end] {
-        match page_memory(stores, ctx, entry, &near) {
-            Ok(memory) => memories.push(memory),
-            Err(error) => match entry.place {
-                Place::Member(index) => {
-                    let note = member_failed(&stores.members[index].folder, &error);
-                    if !failed.contains(&note) {
-                        failed.push(note);
-                    }
-                }
-                Place::Own | Place::Context => return Err(error),
-            },
-        }
+        memories.push(page_memory(stores, ctx, entry, &near)?);
     }
-    Ok((memories, next, failed))
+    Ok((memories, next))
 }
 
 /// The memory of one listed entry, labelled and with its changes derived in the store that holds it.
@@ -1135,12 +892,6 @@ fn page_memory(
                 .read_memory(entry.hit.id)
                 .map_err(|e| e.to_string())?;
             finish(ctx, &stores.reach, &mut memory, &[], near);
-            Ok(memory)
-        }
-        Place::Member(index) => {
-            let member = &stores.members[index];
-            let mut memory = member.read(entry.hit.id)?;
-            finish_member(ctx, &stores.reach, member, &mut memory);
             Ok(memory)
         }
         Place::Context => {
@@ -1169,7 +920,7 @@ fn context_memory(reach: &Reach, uid: &str) -> Result<(Memory, Vec<i64>), String
     Ok((memory, attached))
 }
 
-/// `ReadMemory` of any memory the engine finds: of its own store, of a member's store or of
+/// `ReadMemory` of any memory the engine finds: of the repository's threads store or of
 /// `contexts.db`, bound to a context or not (D193 (7), D216 (2), (3), D222 (3)).
 pub(crate) fn read(stores: &Stores<'_>, ctx: &Context<'_>, uid: &str) -> Result<Memory, String> {
     match home_of(stores, uid)? {
@@ -1179,12 +930,6 @@ pub(crate) fn read(stores: &Stores<'_>, ctx: &Context<'_>, uid: &str) -> Result<
                 .read_memory(id)
                 .map_err(|e| named(e, MEMORY_MISSING))?;
             finish(ctx, &stores.reach, &mut memory, &[], &stores.reach.visible);
-            Ok(memory)
-        }
-        Home::Member { index, id } => {
-            let member = &stores.members[index];
-            let mut memory = member.read(id)?;
-            finish_member(ctx, &stores.reach, member, &mut memory);
             Ok(memory)
         }
         Home::Context => {
@@ -1246,11 +991,89 @@ pub(crate) fn propose_in_repository(
     let mut contexts = ContextStore::open(db).map_err(|e| e.to_string())?;
     let home = contexts_session::proposal_home(&mut contexts, ctx.git, ctx.root)?;
     drop(contexts);
-    stores.reach = Reach::load(ctx.git, ctx.root, ctx.contexts_db, None);
+    stores.reload(ctx);
     store_proposal(
         id,
         stores,
         ctx,
+        actor,
+        &home.repo_id,
+        home.context,
+        proposal,
+    )
+}
+
+/// `ProposeMemory` without a context in a workspace (D222 (5)): the contexts bound to the workspace and
+/// to its members decide it (`contexts_session::workspace_home`). The contexts are read once more
+/// after a binding is made, as for a plain repository.
+pub(crate) fn propose_in_workspace(
+    id: OperationId,
+    stores: &mut Stores<'_>,
+    ctx: &Context<'_>,
+    actor: &Actor,
+    proposal: &Proposal<'_>,
+) -> Result<Vec<Event>, String> {
+    let is_human = matches!(actor, Actor::Human);
+    memories::authorize(
+        is_human,
+        &MemoryAction::Propose {
+            sources: proposal.sources.len(),
+        },
+    )?;
+    let db = ctx.contexts_db.ok_or_else(|| NO_CONTEXTS_DB.to_owned())?;
+    let members = workspace_folders(ctx.git, ctx.global_config, ctx.root).unwrap_or_default();
+    let mut contexts = ContextStore::open(db).map_err(|e| e.to_string())?;
+    let home = contexts_session::workspace_home(&mut contexts, ctx.git, ctx.root, &members)?;
+    drop(contexts);
+    stores.reload(ctx);
+    store_proposal(
+        id,
+        stores,
+        ctx,
+        actor,
+        &home.repo_id,
+        home.context,
+        proposal,
+    )
+}
+
+/// `ProposeMemory` with `member` (D222 (5)): the memory goes to that member's own context, created
+/// and bound when needed. It is checked and written from the member's clone, so its file sources are
+/// read at the member's `HEAD` and its text is redacted with the member's configuration.
+pub(crate) fn propose_in_member(
+    id: OperationId,
+    stores: &mut Stores<'_>,
+    ctx: &Context<'_>,
+    actor: &Actor,
+    folder: &str,
+    proposal: &Proposal<'_>,
+) -> Result<Vec<Event>, String> {
+    let is_human = matches!(actor, Actor::Human);
+    if !stores.reach.is_workspace() {
+        return Err(NOT_A_WORKSPACE.to_owned());
+    }
+    memories::authorize(
+        is_human,
+        &MemoryAction::Propose {
+            sources: proposal.sources.len(),
+        },
+    )?;
+    let member = stores.reach.member_folder(folder)?.root.clone();
+    let db = ctx.contexts_db.ok_or_else(|| NO_CONTEXTS_DB.to_owned())?;
+    let mut contexts = ContextStore::open(db).map_err(|e| e.to_string())?;
+    let home = contexts_session::own_home(&mut contexts, ctx.git, &member)?;
+    drop(contexts);
+    stores.reload(ctx);
+    let member_ctx = Context {
+        git: ctx.git,
+        root: &member,
+        global_config: ctx.global_config,
+        contexts_db: ctx.contexts_db,
+    };
+    store_proposal(
+        id,
+        stores,
+        &member_ctx,
         actor,
         &home.repo_id,
         home.context,
@@ -1310,27 +1133,25 @@ fn store_proposal(
     Ok(changed(id, ctx, &stores.reach, memory, created, &attached))
 }
 
-/// Moves the memories of a plain repository out of its `threads.db` into `contexts.db` (D222 (6)),
-/// into the context a proposal of the repository goes to. Each memory keeps its uid, sources, marks,
-/// retrieval count and links; it is inserted first, the links next, and only then deleted here, so a
-/// move interrupted at any point loses nothing and the next command finishes it. Nothing happens when
-/// no contexts database is set, when the store holds no memory (a read creates no file), for a
-/// workspace (its own move is a later step), or when the clone's id clashes.
-pub(crate) fn move_repository_memories(
+/// Moves the memories of the threads store of the clone at `root` into `contexts.db`, into the context
+/// of that clone (D222 (6)). Each memory keeps its uid, sources, marks, retrieval count and links; it is
+/// inserted first, the links next, and only then deleted, so a move interrupted at any point loses
+/// nothing and the next command finishes it. Nothing happens when no contexts database is set, when the
+/// store holds no memory (a read creates no file), or when the clone's id clashes.
+fn move_into(
     store: &mut ThreadStore,
-    ctx: &Context<'_>,
+    git: &dyn GitPort,
+    db: Option<&Path>,
+    root: &Path,
 ) -> Result<(), String> {
-    let Some(db) = ctx.contexts_db else {
+    let Some(db) = db else {
         return Ok(());
     };
-    if workspace_folders(ctx.git, ctx.global_config, ctx.root).is_some() {
-        return Ok(());
-    }
     if !store.has_memories().map_err(|e| e.to_string())? {
         return Ok(());
     }
     let mut contexts = ContextStore::open(db).map_err(|e| e.to_string())?;
-    let Some(home) = contexts_session::move_home(&mut contexts, ctx.git, ctx.root)? else {
+    let Some(home) = contexts_session::move_home(&mut contexts, git, root)? else {
         return Ok(());
     };
     let moved = store.memories_to_move().map_err(|e| e.to_string())?;
@@ -1356,6 +1177,32 @@ pub(crate) fn move_repository_memories(
     Ok(())
 }
 
+/// Moves the memories of the repository's own threads store into its context (D222 (6)). A failure is
+/// the caller's to report: a read says it in its note, a write is refused.
+pub(crate) fn move_own(store: &mut ThreadStore, ctx: &Context<'_>) -> Result<(), String> {
+    move_into(store, ctx.git, ctx.contexts_db, ctx.root)
+}
+
+/// Moves the memories of each workspace member's threads store into the context of its clone (D222 (6)).
+/// A member that cannot be read, or whose move fails, keeps its memories; the notes returned name it.
+/// Nothing is returned for a plain repository.
+pub(crate) fn move_members(ctx: &Context<'_>) -> Vec<String> {
+    let Some(folders) = workspace_folders(ctx.git, ctx.global_config, ctx.root) else {
+        return Vec::new();
+    };
+    let mut notes = Vec::new();
+    for folder in &folders {
+        let moved = open_member(ctx.git, &folder.root).and_then(|store| match store {
+            Some(mut threads) => move_into(&mut threads, ctx.git, ctx.contexts_db, &folder.root),
+            None => Ok(()),
+        });
+        if let Err(reason) = moved {
+            notes.push(member_failed(&folder.name, &reason));
+        }
+    }
+    notes
+}
+
 /// `AcceptMemory` of a context memory (D192 (3), (4), D193 (1), (7)). The blob of each file source
 /// is recorded when the memory first becomes accepted, read from its own repository, or from another
 /// one whose folder is known and still exists; a source with no readable folder records nothing.
@@ -1372,7 +1219,7 @@ pub(crate) fn accept_in_context(
     for other in supersedes {
         match home_of(stores, other) {
             Ok(Home::Context) => {}
-            Ok(Home::Repository(_) | Home::Member { .. }) => return Err(other_scope(other)),
+            Ok(Home::Repository(_)) => return Err(other_scope(other)),
             Err(_) => return Err(format!("memory {other} does not exist")),
         }
     }
@@ -1468,12 +1315,10 @@ pub(crate) fn move_to_context(
     uid: &str,
     context: i64,
 ) -> Result<Vec<Event>, String> {
-    let Ok(row) = stores.threads.memory_id_of(uid) else {
-        return Err(match home_of(stores, uid) {
-            Ok(Home::Member { .. }) => ROUTED.to_owned(),
-            Ok(_) => ALREADY_IN_CONTEXT.to_owned(),
-            Err(message) => message,
-        });
+    let row = match home_of(stores, uid) {
+        Ok(Home::Repository(row)) => row,
+        Ok(Home::Context) => return Err(ALREADY_IN_CONTEXT.to_owned()),
+        Err(message) => return Err(message),
     };
     let mut memory = stores
         .threads
@@ -1549,7 +1394,6 @@ pub(crate) fn mark(
                 .map_err(|e| named(e, MEMORY_MISSING))?;
             (memory, written, Vec::new())
         }
-        Home::Member { .. } => return Err(ROUTED.to_owned()),
         Home::Context => {
             let contexts = stores
                 .reach
@@ -1578,12 +1422,6 @@ pub(crate) fn mark_history(
             .threads
             .memory_mark_history(uid)
             .map_err(|e| e.to_string()),
-        Home::Member { index, .. } => stores.members[index]
-            .threads
-            .as_ref()
-            .ok_or_else(|| MEMORY_MISSING.to_owned())?
-            .memory_mark_history(uid)
-            .map_err(|e| e.to_string()),
         Home::Context => stores
             .reach
             .store()
@@ -1604,7 +1442,6 @@ pub(crate) fn attach(
 ) -> Result<Vec<Event>, String> {
     match home_of(stores, uid)? {
         Home::Repository(_) => return Err(MOVE_FIRST.to_owned()),
-        Home::Member { .. } => return Err(ROUTED.to_owned()),
         Home::Context => {}
     }
     let (memory, _) = context_memory(&stores.reach, uid)?;
@@ -1633,7 +1470,6 @@ pub(crate) fn detach(
 ) -> Result<Vec<Event>, String> {
     match home_of(stores, uid)? {
         Home::Repository(_) => return Err(NO_CONTEXT_OF_ITS_OWN.to_owned()),
-        Home::Member { .. } => return Err(ROUTED.to_owned()),
         Home::Context => {}
     }
     let contexts = stores
@@ -1665,7 +1501,7 @@ mod tests {
                 Place::Own
             },
             attached: Vec::new(),
-            near: (distance, 0),
+            near: distance,
         }
     }
 
@@ -1702,45 +1538,5 @@ mod tests {
         assert_eq!(scope_key(Scope::All), "all");
         assert_eq!(scope_key(Scope::Repository), "repository");
         assert_eq!(scope_key(Scope::Context(4)), "context:4");
-        assert_eq!(scope_key(Scope::Member(2)), "member:2");
-    }
-
-    #[test]
-    fn a_member_reads_the_path_relative_to_its_folder_and_nothing_outside_it() {
-        let filter = MemoryFilter {
-            path: Some("api/src/lib.rs".to_owned()),
-            ..MemoryFilter::default()
-        };
-        let read = member_filter(&filter, "api").expect("the member");
-        assert_eq!(read.path.as_deref(), Some("src/lib.rs"));
-        let whole = member_filter(
-            &MemoryFilter {
-                path: Some("api".to_owned()),
-                ..MemoryFilter::default()
-            },
-            "api",
-        )
-        .expect("the member");
-        assert_eq!(whole.path, None);
-        assert!(member_filter(&filter, "web").is_none());
-        assert_eq!(
-            member_filter(&MemoryFilter::default(), "web")
-                .expect("the member")
-                .path,
-            None
-        );
-    }
-
-    #[test]
-    fn a_member_ranks_after_the_own_store_and_before_the_contexts() {
-        let mut entries = vec![
-            entry("c", true, 1, 0.0, 9),
-            entry("m", false, 0, 0.0, 9),
-            entry("o", false, 0, 0.0, 9),
-        ];
-        entries[1].place = Place::Member(0);
-        entries[1].near = (0, member_rank(0));
-        order(&mut entries, false);
-        assert_eq!(uids(&entries), vec!["o", "m", "c"]);
     }
 }

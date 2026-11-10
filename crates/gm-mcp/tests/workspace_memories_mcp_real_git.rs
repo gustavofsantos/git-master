@@ -1,5 +1,5 @@
 //! An agent on a workspace reads and proposes the memories of its members over JSON-RPC (D216 (3),
-//! (5), D218 (1)), against a real workspace with two members, each a worktree of its own clone. The
+//! (5), D222 (5), D218 (1)), against a real workspace with two members, each a worktree of its own clone. The
 //! person's side (accepting, writing as a person) runs through the engine as the human, on the same
 //! contexts file the server reads. Each test removes its directory when it ends.
 
@@ -279,6 +279,8 @@ fn file_source() -> Value {
 fn an_agent_on_a_workspace_proposes_into_a_member_marks_its_memory_and_searches_it() {
     let fx = Fixture::new();
     let mut api = fx.engine_on(&fx.api);
+    // The person's memory in the clone goes to the clone's own context, `api`, which is then the one
+    // context the workspace and its members share (D222 (4), (5)).
     let rule = human_memory(&mut api, "api rule over mcp");
     let replies = session(
         &fx,
@@ -302,24 +304,25 @@ fn an_agent_on_a_workspace_proposes_into_a_member_marks_its_memory_and_searches_
             call(
                 5,
                 "memories_search",
-                &json!({ "scope": "member api", "status": "proposed" }),
+                &json!({ "scope": "api", "status": "proposed" }),
             ),
             call(6, "memory_get", &json!({ "id": rule })),
         ],
     );
 
     let proposed = &result(&replies[1])["memory"];
-    assert_eq!(proposed["scope"], "member api");
+    assert_eq!(proposed["scope"], "api");
     assert_eq!(proposed["status"], "proposed");
     assert_eq!(proposed["origin"], "agent:test-client");
     assert_eq!(result(&replies[1])["created"], true);
+    // Without a member, the one context bound to the workspace and its members takes it (D222 (5)).
     let own = &result(&replies[2])["memory"];
-    assert_eq!(own["scope"], "workspace");
+    assert_eq!(own["scope"], "api");
     assert_eq!(own["status"], "proposed");
 
     let marked = result(&replies[3]);
     assert_eq!(marked["recorded"], true);
-    // The clone's own memory is in its context, labelled by it, not by the member (D222 (4)).
+    // The clone's own memory is in its context, labelled by it (D222 (4)).
     assert_eq!(marked["memory"]["scope"], "api");
     assert!(
         marked["memory"]["marks"]
@@ -334,14 +337,15 @@ fn an_agent_on_a_workspace_proposes_into_a_member_marks_its_memory_and_searches_
     assert!(
         listed
             .iter()
-            .any(|memory| memory["text"] == "api proposal over mcp"
-                && memory["scope"] == "member api"),
+            .any(|memory| memory["text"] == "api proposal over mcp" && memory["scope"] == "api"),
         "{listed:?}"
     );
     assert!(
-        !listed
+        listed
             .iter()
-            .any(|memory| memory["text"] == "workspace proposal over mcp")
+            .any(|memory| memory["text"] == "workspace proposal over mcp"
+                && memory["scope"] == "api"),
+        "{listed:?}"
     );
 
     let read = &result(&replies[5])["memory"];
@@ -453,5 +457,6 @@ fn an_agent_proposing_to_an_unknown_member_is_refused_and_the_server_keeps_answe
     assert_eq!(replies[1]["result"]["isError"], true, "{}", replies[1]);
     let text = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("members are: api, web"), "{text}");
-    assert_eq!(result(&replies[2])["memory"]["scope"], "workspace");
+    // Nothing is bound yet, so the workspace's own context takes the proposal (D222 (5)).
+    assert_eq!(result(&replies[2])["memory"]["scope"], "pay");
 }

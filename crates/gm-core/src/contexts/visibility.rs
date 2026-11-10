@@ -62,8 +62,6 @@ pub enum Scope {
     /// One context, by id, with its ancestors: the memories of a sub-context include those of every
     /// context above it (D222 (2)). The context need not be one the repository is bound to (D222 (3)).
     Context(i64),
-    /// One member of a workspace, by its place in the folder order (D216 (3)).
-    Member(usize),
 }
 
 /// Reads a scope name (D193 (5), D222 (3)). `all`, `bound` or empty is every scope the repository

@@ -18,9 +18,9 @@ use gm_schema::threads::{
 use gm_schema::{Actor, CommandKind, Event, OperationId};
 
 use crate::blame::BlameLine;
-use crate::memory_scope::{self, Home, MemberStore, Stores};
+use crate::memory_scope::{self, Home, Stores};
 use crate::threads::members;
-use crate::threads::memories::{self, BlobRead, MemoryAction, NewMemory};
+use crate::threads::memories::{self, BlobRead, MemoryAction};
 use crate::threads::provenance::{
     self, COMMIT_LIMIT, CONTEXT, EDIT_LIMIT, EditFact, LABEL_LIMIT, LINK_LIMIT, Owner,
     THREAD_LIMIT, Verdict,
@@ -115,9 +115,6 @@ pub(crate) struct Context<'a> {
     pub(crate) global_config: Option<&'a Path>,
     /// The contexts file (`contexts.db`), read by the memory commands; `None` when there is none.
     pub(crate) contexts_db: Option<&'a Path>,
-    /// True when a workspace member's store runs the command (D216 (3)): the member keeps its
-    /// memories in its own store, so the repository's move and proposal rules do not apply to it.
-    pub(crate) in_member: bool,
 }
 
 /// What a thread command needs a human for, or `None` when an agent may run it.
@@ -486,25 +483,21 @@ fn memories_command(
     kind: &CommandKind,
 ) -> Result<Vec<Event>, String> {
     let is_human = matches!(actor, Actor::Human);
-    // A plain repository's memories move into contexts.db before the command reads or writes them
-    // (D222 (6)). A failed move never fails a read: the repository's memories still answer, and a
-    // list says why they were not moved. A write is refused, so nothing is written around it.
-    let mut move_note = None;
-    if !ctx.in_member
-        && let Err(error) = memory_scope::move_repository_memories(store, ctx)
-    {
+    // The memories still in the threads stores move into contexts.db before the command reads or
+    // writes them (D222 (6)). A failed move never fails a read: the memories still answer, and a list
+    // says why they were not moved. A write is refused, so nothing is written around it. A workspace's
+    // members move too; one that cannot is only named in a note.
+    let mut move_notes = Vec::new();
+    if let Err(error) = memory_scope::move_own(store, ctx) {
         if !is_read_memory(kind) {
             return Err(error);
         }
-        move_note = Some(format!(
+        move_notes.push(format!(
             "the memories of this repository could not be moved to contexts.db: {error}"
         ));
     }
+    move_notes.extend(memory_scope::move_members(ctx));
     let mut stores = Stores::new(store, ctx);
-    if let Some(index) = member_of_command(&stores, kind)? {
-        let member = stores.members.swap_remove(index);
-        return in_member(id, ctx, actor, member, kind);
-    }
     match kind {
         CommandKind::ListMemories {
             query,
@@ -534,10 +527,9 @@ fn memories_command(
                     cursor: cursor.as_deref(),
                 },
             )?;
-            let note = match (listed.note, move_note) {
-                (Some(note), Some(moved)) => Some(format!("{note}; {moved}")),
-                (note, moved) => note.or(moved),
-            };
+            let mut notes: Vec<String> = listed.note.into_iter().collect();
+            notes.extend(move_notes);
+            let note = (!notes.is_empty()).then(|| notes.join("; "));
             Ok(vec![Event::MemoriesListed {
                 id,
                 memories: listed.memories,
@@ -591,54 +583,9 @@ fn memories_command(
     }
 }
 
-/// The workspace member a memory command runs in (D216 (3), (5)): a proposal's `member`, or the
-/// member whose store holds the memory a command acts on. `None` runs the command in the
-/// repository's own store.
-fn member_of_command(stores: &Stores<'_>, kind: &CommandKind) -> Result<Option<usize>, String> {
-    match kind {
-        CommandKind::ProposeMemory {
-            member: Some(name), ..
-        } => memory_scope::member_index(stores, name).map(Some),
-        CommandKind::AcceptMemory { uid, .. }
-        | CommandKind::RejectMemory { uid }
-        | CommandKind::DeleteMemory { uid }
-        | CommandKind::MarkMemory { uid, .. }
-        | CommandKind::MoveMemoryToContext { uid, .. }
-        | CommandKind::AttachMemory { uid, .. }
-        | CommandKind::DetachMemory { uid, .. } => memory_scope::member_of_uid(stores, uid),
-        _ => Ok(None),
-    }
-}
-
-/// Runs a memory command in workspace member `member`, as the member runs it (D216 (3), (5)): with
-/// the member's store, its repository and the contexts the member sees, so every rule of the command
-/// applies unchanged. The answer is labelled as the workspace sees it. The command names no member
-/// any more, since the member is the repository it runs in.
-fn in_member(
-    id: OperationId,
-    ctx: &Context<'_>,
-    actor: &Actor,
-    mut member: MemberStore,
-    kind: &CommandKind,
-) -> Result<Vec<Event>, String> {
-    let mut threads = memory_scope::take_store(ctx.git, &mut member)?;
-    let member_ctx = Context {
-        git: ctx.git,
-        root: &member.root,
-        global_config: ctx.global_config,
-        contexts_db: ctx.contexts_db,
-        in_member: true,
-    };
-    let mut inner = kind.clone();
-    if let CommandKind::ProposeMemory { member: named, .. } = &mut inner {
-        *named = None;
-    }
-    let mut events = memories_command(id, &mut threads, &member_ctx, actor, &inner)?;
-    memory_scope::label_member(&mut events, &member.folder);
-    Ok(events)
-}
-
-/// `ProposeMemory` in the repository's own store or, with a context, in that context (D193 (7)).
+/// `ProposeMemory` (D190 (7), D193 (7), D222 (4), (5)): with `context`, into that context; with `member`,
+/// into that member's own context; with neither, into the one context a repository or a workspace is
+/// bound to, or into its own. A member and a context together are refused.
 fn propose_command(
     id: OperationId,
     stores: &mut Stores<'_>,
@@ -652,7 +599,7 @@ fn propose_command(
         sources,
         context,
         basis,
-        ..
+        member,
     } = kind
     else {
         return Err("not a memory command".to_owned());
@@ -663,14 +610,18 @@ fn propose_command(
         sources,
         basis: *basis,
     };
-    match context {
-        // A workspace and a member keep their proposals in their own store (D216, K1c); a plain
-        // repository's go to its context (D222 (4)).
-        None if ctx.in_member || stores.reach.is_workspace() => {
-            propose_memory(id, stores, ctx, actor, &proposal)
+    match (member, context) {
+        (Some(_), Some(_)) => Err("a memory goes to a context or to a member, not both".to_owned()),
+        (Some(folder), None) => {
+            memory_scope::propose_in_member(id, stores, ctx, actor, folder, &proposal)
         }
-        None => memory_scope::propose_in_repository(id, stores, ctx, actor, &proposal),
-        Some(name) => memory_scope::propose_in_context(id, stores, ctx, actor, name, &proposal),
+        (None, Some(name)) => {
+            memory_scope::propose_in_context(id, stores, ctx, actor, name, &proposal)
+        }
+        (None, None) if stores.reach.is_workspace() => {
+            memory_scope::propose_in_workspace(id, stores, ctx, actor, &proposal)
+        }
+        (None, None) => memory_scope::propose_in_repository(id, stores, ctx, actor, &proposal),
     }
 }
 
@@ -712,17 +663,14 @@ fn act_on_memory(
             Home::Repository(_) => {
                 accept_memory(id, stores, ctx, is_human, uid, text.as_deref(), supersedes)
             }
-            Home::Member { .. } => Err(memory_scope::ROUTED.to_owned()),
         },
         CommandKind::RejectMemory { uid } => match memory_scope::home_of(stores, uid)? {
             Home::Context => memory_scope::reject_in_context(id, stores, ctx, is_human, uid),
             Home::Repository(_) => reject_memory(id, stores, ctx, is_human, uid),
-            Home::Member { .. } => Err(memory_scope::ROUTED.to_owned()),
         },
         CommandKind::DeleteMemory { uid } => match memory_scope::home_of(stores, uid)? {
             Home::Context => memory_scope::delete_in_context(id, stores, is_human, uid),
             Home::Repository(_) => delete_memory(id, stores, is_human, uid),
-            Home::Member { .. } => Err(memory_scope::ROUTED.to_owned()),
         },
         _ => Err("not a memory command".to_owned()),
     }
@@ -750,54 +698,6 @@ fn supersede_rows(stores: &Stores<'_>, uids: &[String]) -> Result<Vec<i64>, Stri
             })
         })
         .collect()
-}
-
-/// Proposes a memory in the repository's own store: an agent's is `proposed`, a human's is
-/// `accepted` (D190, D192).
-fn propose_memory(
-    id: OperationId,
-    stores: &mut Stores<'_>,
-    ctx: &Context<'_>,
-    actor: &Actor,
-    proposal: &Proposal<'_>,
-) -> Result<Vec<Event>, String> {
-    let is_human = matches!(actor, Actor::Human);
-    memories::authorize(
-        is_human,
-        &MemoryAction::Propose {
-            sources: proposal.sources.len(),
-        },
-    )?;
-    let text = redacted(ctx, proposal.text)?;
-    let kept = proposal
-        .sources
-        .iter()
-        .map(|source| stored_source(ctx, source, is_human))
-        .collect::<Result<Vec<_>, _>>()?;
-    let status = if is_human {
-        MemoryStatus::Accepted
-    } else {
-        MemoryStatus::Proposed
-    };
-    let (memory, created) = stores
-        .threads
-        .propose_memory(&NewMemory {
-            kind: proposal.kind,
-            text: &text,
-            basis: proposal.basis,
-            status,
-            origin: &origin_of(actor),
-            sources: &kept,
-            at: now_ms(),
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(memory_scope::repository_changed(
-        id,
-        ctx,
-        &stores.reach,
-        memory,
-        created,
-    ))
 }
 
 /// Accepts memory `uid` of the repository's store, recording the blob of each file source at `HEAD`
@@ -2622,7 +2522,6 @@ mod tests {
             root,
             global_config: Some(settings),
             contexts_db: None,
-            in_member: false,
         }
     }
 
