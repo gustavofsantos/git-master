@@ -24,7 +24,7 @@ GitMaster keeps its files in three places: your user config directory, your user
 | `~/.local/share/gitmaster/recent.json` | The recently opened repositories, newest first, up to 10. |  |
 | `~/.local/share/gitmaster/gitmaster.db` | Which versions of a workflow script you reviewed, and your automatic approvals. Each is tied to the hash of the script text. | |
 | `~/.local/share/gitmaster/workflow-trash/` | Workflow files you delete. They are moved here instead of being removed. | |
-| `~/.local/share/gitmaster/contexts.db` | Your [contexts](../guide/contexts.md): their names, nesting and bound repositories, and every memory, with a search index. Readable only by you. | Planned |
+| `~/.local/share/gitmaster/contexts.db` | Your [contexts](../guide/contexts.md): their names, nesting and bound repositories, the folder of every repository that wrote a memory, and every memory, with a search index. Readable only by you. | Planned |
 
 A repository whose folder no longer exists is dropped from the recent list.
 
