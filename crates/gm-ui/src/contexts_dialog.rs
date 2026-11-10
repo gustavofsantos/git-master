@@ -577,7 +577,14 @@ impl StatusView {
                     .child("Loading the contexts…")
             }))
             .child(
-                div().h(px(TREE_HEIGHT)).min_h(px(0.)).child(
+                // A flex column gives the list its height: `flex_1` in a plain block lays it out at
+                // zero height, and no row paints (the Memories list uses the same shape).
+                div()
+                    .h(px(TREE_HEIGHT))
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .child(
                     uniform_list(
                         "contexts-tree",
                         count,

@@ -704,10 +704,7 @@ impl StatusView {
             ))
             .child(filter_chip(
                 "memories-chip-scope",
-                memory_rows::chip_text(
-                    "Scope",
-                    scope_on.then(|| memory_rows::scope_label(page.scope())),
-                ),
+                memory_rows::scope_chip(page.scope()),
                 scope_on,
                 cx,
                 StatusView::cycle_memory_scope,

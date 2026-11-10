@@ -669,6 +669,44 @@ mod tests {
         );
     }
 
+    /// The repro's store: `billing` bound to itself and to Finance / Payments. The Memories read
+    /// answers first with an id the dialog does not hold; the dialog's own read is then applied.
+    #[test]
+    fn the_dialog_read_is_applied_when_the_memories_read_answers_first() {
+        let mut billing = context(1, "billing", None);
+        billing.bound = true;
+        billing.repos = vec![repo("billing")];
+        let finance = context(2, "Finance", None);
+        let mut payments = context(3, "Payments", Some(2));
+        payments.path = "Finance / Payments".to_owned();
+        payments.bound = true;
+        let mut accounting = context(4, "Accounting", Some(2));
+        accounting.path = "Finance / Accounting".to_owned();
+        let incident = context(5, "Incident: stuck exports", None);
+        let all = vec![billing, finance, payments, accounting, incident];
+
+        let mut model = ContextsModel::default();
+        model.sent(&ContextsModel::plan_list(), OperationId(20));
+        assert!(!model.listed(OperationId(19), all.clone(), None, None));
+        assert!(!model.is_loaded());
+        assert!(model.listed(OperationId(20), all, Some("repo".to_owned()), None));
+        let shown: Vec<(&str, usize, bool)> = model
+            .rows()
+            .iter()
+            .map(|row| (row.name.as_str(), row.depth, row.bound))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("billing", 0, true),
+                ("Finance", 0, false),
+                ("Accounting", 1, false),
+                ("Payments", 1, true),
+                ("Incident: stuck exports", 0, false),
+            ]
+        );
+    }
+
     fn repo(repo_id: &str) -> ContextRepo {
         ContextRepo {
             repo_id: repo_id.to_owned(),

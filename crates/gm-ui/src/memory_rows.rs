@@ -98,6 +98,13 @@ pub fn scope_label(scope: &Scope) -> String {
     }
 }
 
+/// The scope chip's text: the scope it names, the bound default included, so the chip never reads
+/// `Any` for a scope that is always in force.
+#[must_use]
+pub fn scope_chip(scope: &Scope) -> String {
+    chip_text("Scope", Some(scope_label(scope)))
+}
+
 /// The scopes the scope chip cycles through (D223 (1)): the contexts this repository is bound to, then
 /// every other context by path. The bound ones come first, each group in path order. `contexts` is
 /// every context of the tree, bound or not.
@@ -471,6 +478,16 @@ mod tests {
         assert_eq!(remaining_text(1003), "3 characters over the limit");
         assert!(!over_limit(1000));
         assert!(over_limit(1001));
+    }
+
+    #[test]
+    fn the_scope_chip_names_the_bound_default_and_a_context_it_filters_by() {
+        assert_eq!(scope_chip(&Scope::Bound), "Scope: Bound to this repository");
+        assert_eq!(
+            scope_chip(&Scope::Context("Finance / Payments".to_owned())),
+            "Scope: Finance / Payments"
+        );
+        assert_eq!(chip_text("Author", None), "Author: Any");
     }
 
     #[test]
