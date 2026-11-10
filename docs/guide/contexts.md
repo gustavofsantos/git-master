@@ -1,11 +1,9 @@
 ---
 title: Contexts
 description: Organize what you know into contexts such as payments, accounting or a recurring incident, nest them, and bind the repositories that work in them.
-status: partial
+status: implemented
 order: 106
 ---
-
-> **Planned.** Manage Contexts does not accept a proposed memory yet; accept it from the Memories tab of a repository that sees its context.
 
 A context is an area of knowledge: payments, sales, accounting, how services call each other, or one problem that comes back from time to time and has a runbook you follow by hand. Every [memory](memories.md) belongs to a context. Repositories are bound to the contexts they work in, so an agent working in a repository finds the knowledge of those contexts.
 
@@ -75,7 +73,7 @@ Choose **Move to Context…** to take a memory out of its contexts and put it in
 
 An agent proposes a memory in a context its repository is bound to, or in a context above one. When the repository is bound to one context, the agent may leave the context out. When it is bound to several, the agent names one; `contexts_list` tells it which. When it is bound to none, the proposal goes to the context of the repository, created as described above.
 
-The proposal is **Proposed** like any other, and no agent sees it as established until you accept it. Accept it from any repository, or from Manage Contexts.
+The proposal is **Proposed** like any other, and no agent sees it as established until you accept it. Accept it on the **Memories** tab of any repository: pick its context in the scope filter to find it.
 
 A memory's sources can be threads, commits and files of different repositories. Each source names its repository. A source in a repository that is not on this computer shows **In another repository** and cannot be opened.
 
