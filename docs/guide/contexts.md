@@ -1,75 +1,95 @@
 ---
 title: Contexts
-description: Group repositories that share one context, so a memory about work that touches several of them is found from each of them.
-status: implemented
+description: Organize what you know into contexts such as payments, accounting or a recurring incident, nest them, and bind the repositories that work in them.
+status: partial
 order: 106
 ---
 
-Some work does not belong to one repository: a rule about how services call each other, a decision about a shared data format, a lesson from a change that went through four repositories. A context is a named set of repositories that share such knowledge. A [memory](memories.md) attached to a context is stored once and found from every repository that belongs to it.
+> **Planned.** A context with no repository, the context of a repository, reading a context the repository is not bound to and the inheritance described here are not built yet: a memory can still belong to a repository alone, outside every context.
 
-A context is not a workspace. A [workspace](workspaces.md) puts branches of several repositories side by side so you can change them together. A context only says which repositories belong together. It needs no branches and no checked-out folders, and it lasts as long as you keep it.
+A context is an area of knowledge: payments, sales, accounting, how services call each other, or one problem that comes back from time to time and has a runbook you follow by hand. Every [memory](memories.md) belongs to a context. Repositories are bound to the contexts they work in, so an agent working in a repository finds the knowledge of those contexts.
+
+A context is not a repository and not a workspace. It exists on its own: you can create a context, write memories in it and bind no repository to it at all. A [workspace](workspaces.md) puts branches of several repositories side by side so you can change them together; a context says what those repositories have to know.
 
 ## How contexts are organized
 
-- A repository can belong to **many contexts**. A repository that two projects use sits in both.
-- Contexts **nest**. A context can have sub-contexts, and a sub-context has one parent.
-- From a repository you see its own memories, the memories of every context it belongs to, and the memories of every parent of those contexts.
+- Contexts **nest**. A context can have sub-contexts, and a sub-context has one parent. A sub-context is a narrower part of its parent: **Refunds** under **Payments**, **Payments** under **Finance**.
+- A sub-context **inherits** the memories of its parent and of every context above it. A memory in **Finance** holds in **Payments** and in **Refunds** too. The memories of a sub-context do not flow up: a memory in **Refunds** is not part of **Payments**.
+- A memory belongs to **one or more** contexts. It is stored once. When it holds in two contexts that are not parent and child, such as **Payments** and **Accounting**, it is attached to both.
+- A repository is **bound to any number of contexts**, or to none. A repository that two areas use is bound to both.
 
 For example:
 
 ```text
-Platform                  7 repositories: api, web, billing, auth, jobs, infra, docs
-  Billing                 billing, api, jobs
-Partners                  5 repositories: portal, api, sync, auth, docs
+Finance
+  Payments                bound: billing, api
+    Refunds               bound: refunds-worker
+  Accounting              bound: ledger
+Sales                     bound: crm, api
+Incident: stuck exports   bound: no repository
 ```
 
-A memory attached to **Platform** is found from all seven repositories, including `billing`, `api` and `jobs`, which reach it through **Billing**. A memory attached to **Billing** is found from `billing`, `api` and `jobs` only; to reach the other four, attach it to **Platform**. `api`, `auth` and `docs` belong to both **Platform** and **Partners**, so they see the memories of both.
+An agent in `refunds-worker` sees the memories of **Refunds**, **Payments** and **Finance**. An agent in `api` sees those of **Payments**, **Finance** and **Sales**. An agent in `ledger` sees **Accounting** and **Finance**, but not **Payments**. **Incident: stuck exports** has no repository; you and any agent can still read it by name.
 
 ## Manage contexts
 
-Choose **Manage Contexts…** on the **Memories** tab of the **Agents** page, or from the command palette.
+Choose **Manage Contexts…** on the **Memories** tab of the **Agents** page, or from the command palette. The dialog shows every context you have as a tree, whether or not the open repository is bound to it.
 
 1. Choose **New Context** and give it a name. When a context is selected, the name box also asks whether the new one is a sub-context of it: choose **As a sub-context of** to switch between yes and no.
-2. Choose **Add Repository** and pick from your recent repositories, add the repository that is open, or choose **Browse…** to pick any folder that holds a Git repository. A context can hold as many repositories as you like, and the context you just created is selected, so you can add them at once.
-3. Choose **⋯** on a context, then **Rename**, **Move…** or **Delete**.
-
-Contexts are not kept in any repository. The contexts, the repositories that belong to each, and the memories attached to them are in one database of your own, in the GitMaster data folder, so a context can reach across as many repositories as you want. When a repository first joins a context, GitMaster gives that clone an id, in its `.git` folder, so the membership still holds if you move the folder. That id is the only thing GitMaster writes in a repository for a context, and nothing is written into the working tree. If another clone already holds that id, the dialog says so and offers **Give this clone a new id**. After that the clone belongs to no context, so add it to the contexts again.
+2. To bind repositories, select a context and choose **Bind Repository**. Pick from your recent repositories, bind the repository that is open, or choose **Browse…** to pick any folder that holds a Git repository. A context can have as many repositories as you like, or none.
+3. To unbind one, select it under the context and choose **Unbind**. Its memories stay in the context.
+4. Choose **⋯** on a context, then **Rename**, **Move…** or **Delete**.
 
 A context cannot be deleted while it has sub-contexts. Deleting one lists the memories that belong to no other context and asks before it removes them.
 
+## Where contexts are kept
+
+Contexts, the repositories bound to each and every memory are in one database of your own, in the GitMaster data folder. Nothing about a context is kept in any repository, so a context can reach across as many repositories as you want. When a repository is first bound to a context, GitMaster gives that clone an id, in its `.git` folder, so the binding still holds if you move the folder. That id is the only thing GitMaster writes in a repository for a context, and nothing is written into the working tree. If another clone already holds that id, the dialog says so and offers **Give this clone a new id**. After that the clone is bound to no context, so bind it again.
+
+## The context of a repository
+
+Knowledge that matters to one repository only still belongs to a context: one bound to that repository alone. GitMaster creates it for you, named after the repository's folder, the first time a memory is written or proposed in a repository that is bound to no context. It is an ordinary context: rename it, move it under another one, or bind more repositories to it.
+
 ## Memories in a context
 
-The **Memories** tab shows a chip on every memory with the scope it belongs to: the repository, or the context with its parents, such as `Platform / Billing`. Use the scope filter to show only this repository, one context, or everything you can see.
+The **Memories** tab shows a chip on every memory with the context it belongs to, with its parents, such as `Finance / Payments`. A memory attached to several contexts shows each of them.
+
+The scope filter chooses what the list holds:
+
+- **Bound to this repository**, the default: the memories of the contexts the repository is bound to and of every context above them.
+- **One context**: pick any context in the tree. The list holds its memories and those it inherits.
 
 ### Write a memory in a context
 
-Choose **New Memory** and pick the scope. A memory you write is accepted at once.
+Choose **New Memory** and pick the context. It starts at the context the repository is bound to, and you can pick any context in the tree. A memory you write is accepted at once.
 
-### Move a memory into a context
+### Attach a memory to another context
 
-A memory written in one repository can turn out to matter to others. Select it, choose **Move to Context…** and pick the context. The memory moves, with its sources, and leaves the repository's own list. To make a context memory also belong to another context, choose **Attach to Context…**. It stays one memory, not a copy.
+To make a memory also belong to another context, select it and choose **Attach to Context…**. It stays one memory, not a copy. Prefer the parent when the memory holds for every context under it: attaching it there once is enough.
 
-### Detach a memory
+### Move or detach a memory
 
-To take a context memory out of a context, choose **Detach from Context…**. A memory attached to several contexts lists them, and you pick the one to leave; a memory always keeps at least one context.
+Choose **Move to Context…** to take a memory out of its contexts and put it in another one. To take it out of one of several contexts, choose **Detach from Context…** and pick the one to leave. A memory always keeps at least one context.
 
 ### Let an agent propose a memory in a context
 
-An agent working in a repository that belongs to a context can propose a memory in that context, and it names the context when it does. The proposal is **Proposed** like any other, and no other repository's agent sees it as established until you accept it. Accept it from any repository that belongs to the context.
+An agent proposes a memory in a context its repository is bound to, or in a context above one. When the repository is bound to one context, the agent may leave the context out. When it is bound to several, the agent names one; `contexts_list` tells it which. When it is bound to none, the proposal goes to the context of the repository, created as described above.
 
-A memory's sources can be threads, commits and files of different repositories. A source in another repository shows **In another repository** and cannot be opened from this one.
+The proposal is **Proposed** like any other, and no agent sees it as established until you accept it. Accept it from any repository, or from Manage Contexts.
+
+A memory's sources can be threads, commits and files of different repositories. Each source names its repository. A source in a repository that is not on this computer shows **In another repository** and cannot be opened.
 
 ## What agents see
 
-Over [MCP](../reference/mcp-tools.md), `memories_search` returns the memories of every scope the repository sees, each labeled with its scope. An agent can narrow the search to the repository or to one context, and `contexts_list` tells it which contexts its repository belongs to.
+Over [MCP](../reference/mcp-tools.md), `memories_search` returns, by default, the memories of the contexts the repository is bound to and of every context above them, each labeled with its context. An agent can name any context, bound or not, to read that context and what it inherits: a runbook context bound to no repository is read this way. `contexts_list` lists the contexts the repository is bound to; with `all` it lists every context.
 
 ## Contexts in a workspace
 
-A [workspace](workspaces.md) belongs to no context. It shows the contexts its members belong to, so the memories of those contexts are found from the workspace too. Managing contexts from a workspace window changes the repositories, not the workspace. See [Memories and contexts in a workspace](workspaces.md#memories-and-contexts-in-a-workspace).
+A [workspace](workspaces.md) is bound to the contexts of its members, and to its own contexts if you bind it. The memories of all of them are found from the workspace. See [Memories and contexts in a workspace](workspaces.md#memories-and-contexts-in-a-workspace).
 
 ## What contexts do not do
 
-- They do not organize memories into procedures, steps or any other structure. A memory is one short record, and a context is a place to find it.
+- They do not organize memories into procedures, steps or any other structure. A memory is one short record, and a context is where it holds.
 - They do not search threads across repositories. A memory's sources open the thread in its own repository.
 
 ## See also
@@ -77,4 +97,4 @@ A [workspace](workspaces.md) belongs to no context. It shows the contexts its me
 - [Memories](memories.md): write, propose, accept and use memories.
 - [Workspaces](workspaces.md): change branches of several repositories together.
 - [MCP tools](../reference/mcp-tools.md): the memory and context tools.
-- [Configuration](../reference/configuration.md): where the context database is kept.
+- [Configuration](../reference/configuration.md): where the contexts database is kept.

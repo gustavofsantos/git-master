@@ -28,11 +28,11 @@ The workspace repository is yours to write in. Your service repositories are not
 
 ## Memories and contexts in a workspace
 
-> **Planned.** The **Memories** tab of a workspace window cannot choose a member to write a memory to yet, and linking a memory that comes from a member is not available. An agent can already propose to a member with `memory_propose` and its `member` argument.
+> **Planned.** Memories of a workspace and of its members are still kept in their repositories, outside every context, and a workspace cannot be bound to a context of its own yet.
 
-A workspace keeps the knowledge you already have. When you open a workspace, an agent and you see the [memories](memories.md) of the workspace itself, those of each member repository, and those of every [context](contexts.md) any member belongs to. Nothing is copied: a memory you add to a member later appears in the workspace, and removing the workspace removes none of them. Each memory shows where it is from, as the workspace, a member folder, or a context.
+A workspace keeps the knowledge you already have. When you open a workspace, an agent and you see the [memories](memories.md) of every [context](contexts.md) a member is bound to, of every context the workspace itself is bound to, and of every context above them. Nothing is copied: a memory you add to one of those contexts later appears in the workspace, and removing the workspace removes none of them. Each memory shows its context, and a context a member is bound to names that member.
 
-The workspace keeps its own [threads](threads.md). A new memory you write or an agent proposes in the workspace belongs to the workspace, unless you name a member or a context. When you accept, edit, mark or link a memory that comes from a member, the change is made in that member's repository. A member that cannot be read is listed as unavailable, and the others still answer.
+The workspace keeps its own [threads](threads.md). A new memory you write or an agent proposes in the workspace goes to the context you name. When the workspace and its members are bound to one context in all, that context is the default; when they are bound to none, the memory goes to the context of the workspace, which GitMaster creates for it as for a repository. Binding a context from a workspace window binds the workspace repository, not its members.
 
 ## The Workspaces section
 

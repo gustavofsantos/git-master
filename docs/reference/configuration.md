@@ -24,7 +24,7 @@ GitMaster keeps its files in three places: your user config directory, your user
 | `~/.local/share/gitmaster/recent.json` | The recently opened repositories, newest first, up to 10. |  |
 | `~/.local/share/gitmaster/gitmaster.db` | Which versions of a workflow script you reviewed, and your automatic approvals. Each is tied to the hash of the script text. | |
 | `~/.local/share/gitmaster/workflow-trash/` | Workflow files you delete. They are moved here instead of being removed. | |
-| `~/.local/share/gitmaster/contexts.db` | Your [contexts](../guide/contexts.md): their names, nesting and repositories, and the memories attached to them, with a search index. Readable only by you. | Planned |
+| `~/.local/share/gitmaster/contexts.db` | Your [contexts](../guide/contexts.md): their names, nesting and bound repositories, and every memory, with a search index. Readable only by you. | Planned |
 
 A repository whose folder no longer exists is dropped from the recent list.
 
@@ -38,7 +38,7 @@ GitMaster keeps per-repository state in `.git/gitmaster/`, inside the Git common
 | `.git/gitmaster/review.db` | The comments of the [local review](../agents/local-review.md) and their states. Their snapshots are kept in `refs/gitmaster/review/`. The scorecards of the [review workflows](../agents/reviewers.md) are kept here too. | Scorecards planned |
 | `.git/gitmaster/workflows/` | Workflow files that apply to this repository only, such as a review for one task. | Planned |
 | `.git/gitmaster/threads.db` | The [threads](../guide/threads.md) captured from agent sessions in this repository: conversation, tool calls and edits, with a search index. Readable only by you. | |
-| `.git/gitmaster/repo-id` | A random id for this clone, written when the repository first joins a [context](../guide/contexts.md), so the membership survives moving the folder. | Planned |
+| `.git/gitmaster/repo-id` | A random id for this clone, written when the repository is first bound to a [context](../guide/contexts.md), so the binding survives moving the folder. | Planned |
 | `.git/gitmaster/threads-spool/`, `threads-tmp/`, `threads.log` | Events waiting to be written when the database was busy, temporary copies of files the agent is about to edit, and the capture log. The log keeps at most 256 KiB. | |
 | `.git/gitmaster/restack.json` | The record of the last restack, which **Undo restack** reads to put the branches back. | |
 | `refs/gitmaster/` (private refs in `.git`) | Snapshots of the local review and of file moves, and the conflict resolutions of restacks. These refs are not branches, so `git branch` does not list them. | |

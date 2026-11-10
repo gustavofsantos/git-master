@@ -816,6 +816,8 @@ A **Memories** tab on the Threads page (a list on the left, the selected memory 
 
 ### Contexts (D191)
 
+> **Superseded in part by D222 (2026-11-10).** Every memory belongs to a context and lives in `contexts.db`; a context is an area of knowledge that may have no repository; repositories are *bound* to contexts; a sub-context inherits its ancestors' memories; any context can be read by name. The two stores, the `repository` scope and Move to Context from a repository below describe the model being replaced in slice 6k; `visible_contexts` keeps its definition and now gives the default reach of a repository.
+
 Decided by the author on 2026-11-07: D191 (1) to (5), including the storage and the other details below, which the agent drafted and the author confirmed (D191 (4), Q44 resolved). User-facing behavior: `docs/guide/contexts.md` (`Planned`). The author rejected procedures (a structure of linked memories): memories stay flat.
 
 A context is a named set of repositories at the user level. A memory attached to a context is stored once and found from every repository that sees the context. Two stores therefore hold memories: a repository's own `threads.db`, and `contexts.db`, and a search reads both.

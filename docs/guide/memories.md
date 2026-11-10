@@ -9,9 +9,11 @@ A memory is a short note about the project that you want later sessions to know:
 
 An agent can propose a memory. Only you can accept it. A memory you have not accepted is never given to an agent as established fact.
 
-A memory belongs to the repository where it was written, or to one or more [contexts](contexts.md): named sets of repositories that share knowledge. Agents working in a repository find its memories and those of every context it belongs to.
+Every memory belongs to one or more [contexts](contexts.md): areas of knowledge such as payments, accounting or a recurring incident. Contexts nest, and a sub-context inherits the memories of the contexts above it. Agents working in a repository find the memories of the contexts the repository is bound to, and of every context above them.
 
 ## What a memory holds
+
+> **Planned.** A memory can still belong to a repository alone, outside every context, and the scope filter still offers this repository instead of the contexts bound to it.
 
 | Part | What it is |
 |---|---|
@@ -21,18 +23,18 @@ A memory belongs to the repository where it was written, or to one or more [cont
 | Source | The thread and entries, the commits and the files it comes from. A memory an agent proposes always has at least one source. A memory you write yourself may have none. |
 | Basis | How it is known: **Observed** (seen in a thread or a file), **Tested** (checked by running something) or **Unconfirmed** (a belief). An unconfirmed memory is marked and is never given to an agent as established fact. |
 | Origin | You, or the agent that proposed it. |
-| Scope | The repository, or the contexts it is attached to. Shown as a chip on the memory. |
+| Contexts | The contexts it belongs to, each shown as a chip with its parents, such as `Finance / Payments`. |
 
 ## Open the Memories tab
 
 Open **Agents** in the sidebar, then choose the **Memories** tab. Or run **Show Memories** from the command palette. The tabs **Threads**, **Memories** and **Labels** sit above the page. The list shows the text, the kind, the status and the origin. A memory that is **Tested** or **Unconfirmed** also shows its basis as a chip; an **Observed** memory shows none. An **Unconfirmed** chip is flagged, as a changed file is. **Proposed** memories come first and carry a count in the tab, so a new proposal does not wait unseen.
 
-Filter the list by kind, by status, by file, by author or by scope: this repository, one context, or everything the repository sees. Search finds a memory by its words.
+Filter the list by kind, by status, by file, by author or by scope: the contexts bound to this repository, or any one context with what it inherits. Search finds a memory by its words.
 
 ## Write a memory
 
 1. Choose **New Memory** on the **Memories** tab.
-2. Pick the kind, the basis and the scope, and write the text. The basis starts at **Observed**; choose **Tested** if you checked it by running something, or **Unconfirmed** if it is a belief.
+2. Pick the kind, the basis and the context, and write the text. The basis starts at **Observed**; choose **Tested** if you checked it by running something, or **Unconfirmed** if it is a belief.
 3. Add sources if you want: a thread, a commit or a file.
 4. Choose **Save**. A memory you write is accepted at once.
 
@@ -146,8 +148,8 @@ You can also choose **Mark Memory Useful** or **Mark Memory Wrong** in the [comm
 
 Agents read memories over [MCP](../reference/mcp-tools.md):
 
-- `memories_search` finds accepted memories by their words, by kind, by file or by scope. It searches the repository and every context it belongs to.
-- `contexts_list` lists the contexts the repository belongs to.
+- `memories_search` finds accepted memories by their words, by kind, by file or by context. By default it searches the contexts the repository is bound to and every context above them; it can name any other context.
+- `contexts_list` lists the contexts the repository is bound to, or every context.
 - `memory_get` reads one memory with its sources and its marks.
 - `memories_for_path` lists the accepted memories that apply to a file.
 - `memory_revise` suggests an update to an accepted memory. You accept or deny it.
@@ -169,7 +171,7 @@ The skill collects the accepted memories, the threads and the history of the fil
 
 ## See also
 
-- [Contexts](contexts.md): share memories across the repositories that belong together.
+- [Contexts](contexts.md): the areas of knowledge memories belong to, and the repositories bound to them.
 - [Threads](threads.md): the record the memories come from.
 - [Agent integration](../agents/agent-integration.md): install the plugin and its skills.
 - [MCP tools](../reference/mcp-tools.md): the memory tools.
