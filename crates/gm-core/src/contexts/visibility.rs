@@ -59,52 +59,68 @@ pub enum Scope {
     All,
     /// The repository's own memories only.
     Repository,
-    /// One visible context, by id.
+    /// One context, by id, with its ancestors: the memories of a sub-context include those of every
+    /// context above it (D222 (2)). The context need not be one the repository is bound to (D222 (3)).
     Context(i64),
     /// One member of a workspace, by its place in the folder order (D216 (3)).
     Member(usize),
 }
 
-/// Reads a scope name: `all` or empty is every scope, `repository` is the repository, and anything
-/// else names a visible context by its full path (`Platform / Billing`, whitespace around `/`
-/// ignored) or by a name that exactly one visible context has. A name no visible context has, or one
-/// several have, is refused; the message says which.
+/// Reads a scope name (D193 (5), D222 (3)). `all`, `bound` or empty is every scope the repository
+/// reads by default (`Scope::All`), and `repository` is the repository's own memories. Anything else
+/// names a context: first among the `visible` ones (the contexts the repository is bound to and their
+/// ancestors), then among every context, by its full path (`Platform / Billing`, whitespace around `/`
+/// ignored) or by a name that exactly one context has. A name several contexts have is refused and the
+/// message lists their paths; a name no context has is refused as unknown.
 pub fn resolve_scope(
     nodes: &[ContextNode],
     visible: &[(i64, u32)],
     text: &str,
 ) -> Result<Scope, String> {
     let text = text.trim();
-    if text.is_empty() || text == "all" {
+    if matches!(text, "" | "all" | "bound") {
         return Ok(Scope::All);
     }
     if text == "repository" {
         return Ok(Scope::Repository);
     }
-    let by_path = visible
-        .iter()
-        .map(|&(id, _)| id)
-        .find(|&id| same_path(&context_path(nodes, id), text));
-    if let Some(id) = by_path {
+    let visible_ids: Vec<i64> = visible.iter().map(|&(id, _)| id).collect();
+    if let Some(id) = resolve_among(nodes, &visible_ids, text)? {
         return Ok(Scope::Context(id));
     }
-    let named: Vec<i64> = visible
+    let every: Vec<i64> = nodes.iter().map(|node| node.id).collect();
+    match resolve_among(nodes, &every, text)? {
+        Some(id) => Ok(Scope::Context(id)),
+        None => Err(format!("No context named \"{text}\" exists.")),
+    }
+}
+
+/// The context among `ids` that `text` names: the one whose full path it is, else the one name that
+/// exactly one of them has. `None` when no id matches; refused, listing the paths, when several do.
+fn resolve_among(nodes: &[ContextNode], ids: &[i64], text: &str) -> Result<Option<i64>, String> {
+    let by_path: Vec<i64> = ids
         .iter()
-        .map(|&(id, _)| id)
-        .filter(|&id| name_of(nodes, id).trim() == text)
+        .copied()
+        .filter(|&id| same_path(&context_path(nodes, id), text))
         .collect();
+    let named: Vec<i64> = if by_path.is_empty() {
+        ids.iter()
+            .copied()
+            .filter(|&id| name_of(nodes, id).trim() == text)
+            .collect()
+    } else {
+        by_path
+    };
     match named.as_slice() {
-        [] => Err(format!(
-            "No context named \"{text}\" is visible from this repository."
-        )),
-        [id] => Ok(Scope::Context(*id)),
+        [] => Ok(None),
+        [id] => Ok(Some(*id)),
         several => {
             let paths: Vec<String> = several
                 .iter()
                 .map(|&id| format!("\"{}\"", context_path(nodes, id)))
                 .collect();
             Err(format!(
-                "\"{text}\" names several visible contexts: {}. Name one by its full path.",
+                "\"{text}\" names several contexts: {}. Name one by its full path.",
                 paths.join(", ")
             ))
         }
@@ -301,14 +317,71 @@ mod tests {
     }
 
     #[test]
-    fn resolve_scope_refuses_a_name_no_visible_context_has() {
-        let mut nodes = tree();
-        nodes.push(node(4, "Infra", Some(1)));
+    fn resolve_scope_refuses_a_name_no_context_has() {
+        let nodes = tree();
         let visible = visible_contexts(&nodes, WEB);
-        let message = resolve_scope(&nodes, &visible, "Infra").expect_err("invisible");
+        let message = resolve_scope(&nodes, &visible, "Nowhere").expect_err("unknown");
+        assert_eq!(message, "No context named \"Nowhere\" exists.");
+    }
+
+    #[test]
+    fn bound_all_and_empty_are_the_default_reach() {
+        let nodes = tree();
+        let visible = visible_contexts(&nodes, WEB);
+        for text in ["", "all", "bound", " bound "] {
+            assert_eq!(
+                resolve_scope(&nodes, &visible, text),
+                Ok(Scope::All),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_context_no_visible_repository_is_bound_to_is_read_by_its_name_and_path() {
+        let nodes = tree();
+        let visible = visible_contexts(&nodes, WEB);
         assert_eq!(
-            message,
-            "No context named \"Infra\" is visible from this repository."
+            resolve_scope(&nodes, &visible, "Partners"),
+            Ok(Scope::Context(3)),
+            "web does not see Partners, but it can read it"
         );
+        assert_eq!(
+            resolve_scope(&nodes, &visible, "Platform / Billing"),
+            Ok(Scope::Context(2)),
+            "a sub-context of a visible context is read by its path"
+        );
+    }
+
+    #[test]
+    fn a_visible_name_wins_over_the_same_name_of_a_context_elsewhere() {
+        let mut nodes = tree();
+        nodes.push(node(4, "Billing", Some(3)));
+        let visible = visible_contexts(&nodes, API);
+        assert_eq!(
+            resolve_scope(&nodes, &visible, "Billing"),
+            Ok(Scope::Context(2)),
+            "Platform / Billing is visible to api, Partners / Billing is not"
+        );
+    }
+
+    #[test]
+    fn a_name_several_contexts_have_is_refused_listing_every_path_even_when_not_visible() {
+        let mut nodes = tree();
+        nodes.push(node(4, "Core", Some(3)));
+        nodes.push(node(5, "Core", Some(3)));
+        let visible = visible_contexts(&nodes, WEB);
+        let message = resolve_scope(&nodes, &visible, "Core").expect_err("ambiguous");
+        assert!(message.contains("several"), "{message}");
+        assert_eq!(
+            message.matches("\"Partners / Core\"").count(),
+            2,
+            "both paths are listed: {message}"
+        );
+    }
+
+    #[test]
+    fn a_named_context_lists_itself_then_its_ancestors() {
+        assert_eq!(visible_contexts(&tree(), &[2]), vec![(2, 1), (1, 2)]);
     }
 }

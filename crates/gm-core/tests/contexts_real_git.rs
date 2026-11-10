@@ -913,12 +913,19 @@ fn the_scope_filter_names_the_repository_or_one_visible_context_and_refuses_the_
         texts(&found.memories)
     };
     assert_eq!(scoped(&mut api, "repository"), ["Repository rule"]);
-    assert_eq!(scoped(&mut api, "Billing"), ["Billing rule"]);
-    assert_eq!(scoped(&mut api, "Platform / Billing"), ["Billing rule"]);
+    assert_eq!(
+        sorted(scoped(&mut api, "Billing")),
+        ["Billing rule", "Platform rule"],
+        "a sub-context inherits the memories of its parent"
+    );
+    assert_eq!(
+        sorted(scoped(&mut api, "Platform / Billing")),
+        ["Billing rule", "Platform rule"]
+    );
     assert_eq!(
         scoped(&mut api, "Platform"),
         ["Platform rule"],
-        "a context is not its ancestors"
+        "a context does not take the memories of its sub-contexts"
     );
     assert_eq!(scoped(&mut api, "all").len(), 4);
 
@@ -929,17 +936,27 @@ fn the_scope_filter_names_the_repository_or_one_visible_context_and_refuses_the_
         search(&mut api, &Actor::Human, "", Some("Billing"), 50, None).expect_err("ambiguous");
     assert!(ambiguous.contains("several"), "{ambiguous}");
     assert_eq!(
-        scoped(&mut api, "Platform / Billing"),
-        ["Billing rule"],
+        sorted(scoped(&mut api, "Platform / Billing")),
+        ["Billing rule", "Platform rule"],
         "the path still names one"
     );
 
-    // A context portal holds alone is not visible from api.
+    // Ops is bound to portal alone, but api reads it by name (D222 (3)): a memory of Ops is listed
+    // from api when it names Ops, and not in the default list of api.
     let ops = create(&mut api, "Ops", None);
     join(&mut api, ops.id, &world.path("portal"));
-    let invisible =
-        search(&mut api, &Actor::Human, "", Some("Ops"), 50, None).expect_err("invisible");
-    assert!(invisible.contains("No context named"), "{invisible}");
+    let mut portal = engine_on(&world.path("portal"), &world.db);
+    propose_at(&mut portal, &Actor::Human, Some("Ops"), "Ops rule");
+    assert_eq!(scoped(&mut api, "Ops"), ["Ops rule"]);
+    let unknown =
+        search(&mut api, &Actor::Human, "", Some("Nowhere"), 50, None).expect_err("unknown");
+    assert!(unknown.contains("No context named"), "{unknown}");
+}
+
+/// The texts of a list, sorted, for a comparison that does not depend on the order.
+fn sorted(mut texts: Vec<String>) -> Vec<String> {
+    texts.sort();
+    texts
 }
 
 /// The fixture of `four_scopes`, with the memories of each scope in place, as its own function so
@@ -1418,6 +1435,12 @@ fn a_copied_clone_with_a_clashing_id_lists_only_its_repository_memories_and_says
     populate(&world);
     let mut api = engine_on(&world.path("api"), &world.db);
     propose_at(&mut api, &Actor::Human, None, "Repository rule");
+    let platform_rule = memory_of(&propose_at(
+        &mut api,
+        &Actor::Human,
+        Some("Platform"),
+        "Platform rule",
+    ));
     let copy = world.repos.join("api-copy");
     copy_dir(&world.path("api"), &copy);
 
@@ -1432,10 +1455,20 @@ fn a_copied_clone_with_a_clashing_id_lists_only_its_repository_memories_and_says
         listed.note.is_some_and(|note| note.contains("clone at")),
         "the note names the other clone"
     );
+    let scoped = search(&mut clone, &Actor::Human, "", Some("Platform"), 50, None)
+        .expect("the scope is answered");
     assert!(
-        search(&mut clone, &Actor::Human, "", Some("Platform"), 50, None).is_err(),
-        "no context is visible from a clash"
+        scoped.memories.is_empty(),
+        "no context is read from a clash"
     );
+    let read = send(
+        &mut clone,
+        &Actor::Human,
+        CommandKind::ReadMemory {
+            uid: platform_rule.uid.clone(),
+        },
+    );
+    assert_eq!(failure(&read).as_deref(), Some("Memory not found."));
 }
 
 /// The number of proposed memories in a merged list, for a comparison with its `proposed_total`.
@@ -1530,7 +1563,11 @@ fn the_proposed_total_is_full_on_a_page_of_one_and_ignores_the_query() {
     );
 
     let billing = everything_in(&mut api, Some("Billing"));
-    assert_eq!(billing.memories.len(), 1, "only beta is in Billing");
+    assert_eq!(
+        billing.memories.len(),
+        2,
+        "beta is in Billing and alpha is inherited from Platform"
+    );
     assert_eq!(billing.proposed_total, 3, "the total ignores the scope");
 }
 
@@ -1754,7 +1791,7 @@ fn a_memory_lists_every_visible_context_it_is_attached_to_by_path() {
 }
 
 #[test]
-fn a_context_the_repository_cannot_see_is_not_listed_on_a_memory() {
+fn a_memory_lists_every_context_it_is_attached_to_even_one_the_repository_is_not_bound_to() {
     let world = World::new();
     let fixture = populate(&world);
     let mut api = engine_on(&world.path("api"), &world.db);
@@ -1774,9 +1811,13 @@ fn a_context_the_repository_cannot_see_is_not_listed_on_a_memory() {
     );
     assert_eq!(state_of(&attached), OperationState::Done, "{attached:?}");
 
-    // web belongs to Platform only: Partners is not visible from it, so it is not listed.
+    // web is bound to Platform only. It still lists every context of the memory, Partners included
+    // (D222 (3)), and its scope is the nearest context it reads, Platform.
     let mut web = engine_on(&world.path("web"), &world.db);
-    let expected = vec![(fixture.platform, "Platform".to_owned())];
+    let expected = vec![
+        (fixture.partners, "Partners".to_owned()),
+        (fixture.platform, "Platform".to_owned()),
+    ];
     assert_eq!(contexts_of(&read_memory(&mut web, &stored.uid)), expected);
     let seen = search(&mut web, &agent(), "", None, 50, None).expect("list");
     let listed = seen
@@ -1829,5 +1870,152 @@ fn detaching_from_one_context_leaves_the_other_listed() {
             .memories
             .is_empty(),
         "portal no longer sees it"
+    );
+}
+
+/// The text of each memory a list or a read names, as the test compares them.
+fn named_texts(listed: &Seen) -> Vec<String> {
+    texts(&listed.memories)
+}
+
+#[test]
+fn a_context_no_repository_is_bound_to_is_read_by_name_and_left_out_of_the_default_list() {
+    let world = World::new();
+    populate(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let mut portal = engine_on(&world.path("portal"), &world.db);
+    // The incident is bound to portal only, holds an accepted memory, then portal lets go of it.
+    let incident = create(&mut portal, "Incident: stuck exports", None);
+    join(&mut portal, incident.id, &world.path("portal"));
+    let stored = memory_of(&propose_at(
+        &mut portal,
+        &Actor::Human,
+        Some("Incident: stuck exports"),
+        "Restart the export worker first",
+    ));
+    let unbound = send(
+        &mut portal,
+        &Actor::Human,
+        CommandKind::RemoveRepoFromContext {
+            context: incident.id,
+            repo_id: repo_id_file(&world.path("portal")),
+        },
+    );
+    assert_eq!(state_of(&unbound), OperationState::Done, "{unbound:?}");
+
+    // api is bound to Platform, Billing and Partners: the incident is not in its default list.
+    let default = search(&mut api, &agent(), "", None, 50, None).expect("list");
+    assert!(
+        !named_texts(&default).contains(&"Restart the export worker first".to_owned()),
+        "{default:?}"
+    );
+    let everything = search(&mut api, &agent(), "", Some("all"), 50, None).expect("list");
+    assert!(
+        !named_texts(&everything).contains(&"Restart the export worker first".to_owned()),
+        "all is the default reach"
+    );
+
+    // Named by its scope, it is listed, labelled with the context.
+    let named = search(
+        &mut api,
+        &agent(),
+        "",
+        Some("Incident: stuck exports"),
+        50,
+        None,
+    )
+    .expect("the named context is read");
+    assert_eq!(named_texts(&named), ["Restart the export worker first"]);
+    assert_eq!(named.memories[0].scope, "Incident: stuck exports");
+    assert_eq!(named.memories[0].uid, stored.uid);
+}
+
+#[test]
+fn a_memory_of_an_unbound_context_is_read_by_its_uid() {
+    let world = World::new();
+    populate(&world);
+    let mut portal = engine_on(&world.path("portal"), &world.db);
+    let incident = create(&mut portal, "Incident: stuck exports", None);
+    join(&mut portal, incident.id, &world.path("portal"));
+    let stored = memory_of(&propose_at(
+        &mut portal,
+        &Actor::Human,
+        Some("Incident: stuck exports"),
+        "Restart the export worker first",
+    ));
+    let unbound = send(
+        &mut portal,
+        &Actor::Human,
+        CommandKind::RemoveRepoFromContext {
+            context: incident.id,
+            repo_id: repo_id_file(&world.path("portal")),
+        },
+    );
+    assert_eq!(state_of(&unbound), OperationState::Done, "{unbound:?}");
+
+    // api does not see the incident, but reads the memory by uid, with its place in the context.
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let read = read_memory(&mut api, &stored.uid);
+    assert_eq!(read.text, "Restart the export worker first");
+    assert_eq!(read.scope, "Incident: stuck exports");
+    assert_eq!(
+        contexts_of(&read),
+        vec![(incident.id, "Incident: stuck exports".to_owned())]
+    );
+}
+
+#[test]
+fn a_sub_context_reads_its_parents_memories_from_a_repository_bound_to_neither() {
+    let world = World::new();
+    populate(&world);
+    let mut api = engine_on(&world.path("api"), &world.db);
+    propose_at(&mut api, &Actor::Human, Some("Platform"), "Platform rule");
+    propose_at(&mut api, &Actor::Human, Some("Billing"), "Billing rule");
+    propose_at(&mut api, &Actor::Human, Some("Partners"), "Partners rule");
+    // portal is bound to Partners only, so it does not bind Billing, yet names it.
+    let mut portal = engine_on(&world.path("portal"), &world.db);
+    let billing = search(&mut portal, &agent(), "", Some("Billing"), 50, None).expect("read");
+    assert_eq!(
+        sorted(named_texts(&billing)),
+        ["Billing rule", "Platform rule"],
+        "Billing and its ancestor, not Partners"
+    );
+    assert_eq!(
+        named_texts(&search(&mut portal, &agent(), "", Some("Platform"), 50, None).expect("read")),
+        ["Platform rule"],
+        "a parent does not take its child's memories"
+    );
+}
+
+#[test]
+fn an_agent_cannot_propose_into_a_context_it_is_not_bound_to_or_inherits_from() {
+    let world = World::new();
+    populate(&world);
+    let mut portal = engine_on(&world.path("portal"), &world.db);
+    let incident = create(&mut portal, "Incident: stuck exports", None);
+    join(&mut portal, incident.id, &world.path("portal"));
+    let unbound = send(
+        &mut portal,
+        &Actor::Human,
+        CommandKind::RemoveRepoFromContext {
+            context: incident.id,
+            repo_id: repo_id_file(&world.path("portal")),
+        },
+    );
+    assert_eq!(state_of(&unbound), OperationState::Done, "{unbound:?}");
+
+    let mut api = engine_on(&world.path("api"), &world.db);
+    let refused = propose_at(
+        &mut api,
+        &agent(),
+        Some("Incident: stuck exports"),
+        "Not from api",
+    );
+    assert_eq!(state_of(&refused), OperationState::Failed, "{refused:?}");
+    assert_eq!(
+        failure(&refused).as_deref(),
+        Some(
+            "\"Incident: stuck exports\" is not a context this repository is bound to or inherits from."
+        )
     );
 }

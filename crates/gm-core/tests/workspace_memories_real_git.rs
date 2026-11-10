@@ -576,14 +576,13 @@ fn the_scope_names_the_workspace_a_member_or_a_context() {
         scoped(&mut ws, "Platform"),
         vec![row("platform policy", "Platform", None)]
     );
-    assert_eq!(
-        scoped(&mut ws, "Platform / Billing"),
-        vec![row("billing rule", "Platform / Billing", None)]
-    );
-    assert_eq!(
-        scoped(&mut ws, "Billing"),
-        vec![row("billing rule", "Platform / Billing", None)]
-    );
+    // A sub-context inherits the memories of its parent (D222 (2)), whichever way it is named.
+    let billing_and_platform = vec![
+        row("billing rule", "Platform / Billing", None),
+        row("platform policy", "Platform", None),
+    ];
+    assert_eq!(scoped(&mut ws, "Platform / Billing"), billing_and_platform);
+    assert_eq!(scoped(&mut ws, "Billing"), billing_and_platform);
     assert_eq!(scoped(&mut ws, "member jobs"), Vec::new());
 }
 
@@ -1038,19 +1037,27 @@ fn a_member_memory_moves_to_a_context_its_member_belongs_to_and_no_other() {
     )
     .expect("the workspace sees Billing through web");
     assert_eq!(attached.contexts.len(), 2, "{attached:?}");
-    let refused = answer(
+    // Attaching reaches any existing context, one no member is bound to too (D222 (3)).
+    let to_partners = answer(
         &mut ws,
         &Actor::Human,
         CommandKind::AttachMemory {
             uid: uid.clone(),
             context: partners,
         },
-    );
-    assert!(
-        refused
-            .expect_err("a context no member belongs to")
-            .contains("The context is not one this repository belongs to."),
-    );
+    )
+    .expect("any existing context can be attached to");
+    assert_eq!(to_partners.contexts.len(), 3, "{to_partners:?}");
+    let back = answer(
+        &mut ws,
+        &Actor::Human,
+        CommandKind::DetachMemory {
+            uid: uid.clone(),
+            context: partners,
+        },
+    )
+    .expect("detached from Partners");
+    assert_eq!(back.contexts.len(), 2, "{back:?}");
     let detached = answer(
         &mut ws,
         &Actor::Human,
@@ -1134,8 +1141,8 @@ fn a_proposal_with_a_member_is_stored_in_that_members_store() {
     );
     assert!(
         refused
-            .expect_err("web does not belong to Partners")
-            .contains("is not a context this repository belongs to"),
+            .expect_err("web is not bound to Partners")
+            .contains("is not a context this repository is bound to or inherits from"),
     );
 }
 
