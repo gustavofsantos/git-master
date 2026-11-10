@@ -423,3 +423,30 @@ fn the_consolidate_skill_passes_the_wrong_marks_first() {
         "the consolidate priority is out of order: {positions:?}"
     );
 }
+
+/// `write-reviewer` writes one review workflow (D219). It names the scorecard tool and both
+/// folders, says the file is unreviewed until the person approves it, and hardcodes no permission
+/// flag, because the flags depend on the agent's version and are the person's choice.
+#[test]
+fn the_write_reviewer_skill_writes_one_workflow_and_hardcodes_no_permission_flags() {
+    let skill = read_text(&plugin_dir().join("skills/write-reviewer/SKILL.md"));
+    let front = front_matter(&skill);
+    assert_eq!(field(&front, "name"), "write-reviewer");
+    assert!(field(&front, "description").contains("Use when the user runs"));
+    assert!(skill.contains("scorecard_publish"));
+    assert!(skill.contains("~/.config/gitmaster/workflows"));
+    assert!(skill.contains(".git/gitmaster/workflows"));
+    assert!(skill.contains("unreviewed until you approve"));
+    assert!(skill.contains("Run this version?"));
+    for flag in [
+        "Bash(",
+        "--allowedTools",
+        "--allowed-tools",
+        "--disallowedTools",
+        "--disallowed-tools",
+        "--permission-mode",
+        "--dangerously-skip-permissions",
+    ] {
+        assert!(!skill.contains(flag), "the skill hardcodes {flag}");
+    }
+}
