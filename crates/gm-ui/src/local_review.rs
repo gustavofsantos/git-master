@@ -3,12 +3,13 @@
 //! its two texts is shown, the reads of those texts, and the lines that differ
 //! between them. The page draws what this module says.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use gm_schema::{OperationId, ReviewChange, ReviewComment, ReviewStatus};
+use gm_schema::{CommentLabel, OperationId, ReviewChange, ReviewComment, ReviewStatus};
 
 use crate::review::{self, Badge, Chips, Delete, DeleteArm};
+use crate::review_scorecards::{Narrow, next_choice};
 
 const NO_SNAPSHOT: &str = "No snapshot was taken for this comment.";
 const NOT_IN_SNAPSHOT: &str = "The commented text is not in the snapshot.";
@@ -145,17 +146,26 @@ pub enum Row {
         badge: Badge,
         chips: Chips,
         created_at: i64,
+        /// The scorecard the comment came from, by name, when it is listed (D219 (6)).
+        scorecard: Option<String>,
     },
 }
 
 /// The rows of the list: the comments the filter keeps, grouped by file in path
 /// order. Within a file they follow the line they show (the recorded line when
 /// outdated), then their id. A file with no comment kept has no row.
+/// The rows the filter and the Blocking, Scorecard and Label narrowing keep (S5). `names` maps
+/// a scorecard's id to its name, for the scorecard filter and the name a comment shows.
 #[must_use]
-pub fn rows(comments: &[ReviewComment], filter: Filter) -> Vec<Row> {
+pub fn rows(
+    comments: &[ReviewComment],
+    filter: Filter,
+    narrow: &Narrow,
+    names: &BTreeMap<i64, String>,
+) -> Vec<Row> {
     let mut out = Vec::new();
     for (path, mut group) in review::group_by_path(comments) {
-        group.retain(|comment| filter.keeps(comment));
+        group.retain(|comment| filter.keeps(comment) && narrow.keeps(comment, names));
         if group.is_empty() {
             continue;
         }
@@ -164,12 +174,12 @@ pub fn rows(comments: &[ReviewComment], filter: Filter) -> Vec<Row> {
             path: path.to_owned(),
             count: group.len(),
         });
-        out.extend(group.into_iter().map(comment_row));
+        out.extend(group.into_iter().map(|comment| comment_row(comment, names)));
     }
     out
 }
 
-fn comment_row(comment: &ReviewComment) -> Row {
+fn comment_row(comment: &ReviewComment, names: &BTreeMap<i64, String>) -> Row {
     let (start, end) = review::shown_range(comment);
     Row::Comment {
         id: comment.id,
@@ -178,6 +188,7 @@ fn comment_row(comment: &ReviewComment) -> Row {
         badge: review::badge(comment),
         chips: review::chips(comment),
         created_at: comment.created_at,
+        scorecard: comment.scorecard.and_then(|id| names.get(&id)).cloned(),
     }
 }
 
@@ -304,9 +315,31 @@ pub struct LocalReview {
     delete: DeleteArm,
     /// The comments whose threads show all their replies (D198).
     threads: BTreeSet<i64>,
+    /// The Blocking, Scorecard and Label filters, which narrow the list with the filter (S5).
+    narrow: Narrow,
 }
 
 impl LocalReview {
+    #[must_use]
+    pub fn narrow(&self) -> &Narrow {
+        &self.narrow
+    }
+
+    /// Flips the Blocking filter.
+    pub fn toggle_blocking(&mut self) {
+        self.narrow.blocking = !self.narrow.blocking;
+    }
+
+    /// Moves the Scorecard filter to its next name, from `names` (see `next_choice`).
+    pub fn cycle_scorecard(&mut self, names: &[String]) {
+        self.narrow.scorecard = next_choice(self.narrow.scorecard.as_ref(), names);
+    }
+
+    /// Moves the Label filter to its next label, from `labels`.
+    pub fn cycle_label(&mut self, labels: &[CommentLabel]) {
+        self.narrow.label = next_choice(self.narrow.label.as_ref(), labels);
+    }
+
     #[must_use]
     pub fn filter(&self) -> Filter {
         self.filter
@@ -639,7 +672,7 @@ mod tests {
             comment(3, "src/a.rs", ReviewStatus::Open, Some(4)),
             comment(4, "src/c.rs", ReviewStatus::Resolved, Some(1)),
         ];
-        let listed = rows(&all, Filter::Open);
+        let listed = rows(&all, Filter::Open, &Narrow::default(), &BTreeMap::new());
         let ids: Vec<&str> = listed
             .iter()
             .map(|row| match row {
@@ -671,8 +704,11 @@ mod tests {
     #[test]
     fn a_file_with_no_comment_kept_has_no_row() {
         let all = [comment(1, "a.rs", ReviewStatus::Resolved, Some(1))];
-        assert!(rows(&all, Filter::Open).is_empty());
-        assert_eq!(rows(&all, Filter::Resolved).len(), 2);
+        assert!(rows(&all, Filter::Open, &Narrow::default(), &BTreeMap::new()).is_empty());
+        assert_eq!(
+            rows(&all, Filter::Resolved, &Narrow::default(), &BTreeMap::new()).len(),
+            2
+        );
     }
 
     #[test]
@@ -683,7 +719,7 @@ mod tests {
             start_line: 12,
             end_line: 15,
         });
-        let listed = rows(&[first], Filter::All);
+        let listed = rows(&[first], Filter::All, &Narrow::default(), &BTreeMap::new());
         assert_eq!(
             listed[1],
             Row::Comment {
@@ -693,6 +729,7 @@ mod tests {
                 badge: Badge::Open,
                 chips: Chips::default(),
                 created_at: 7_000,
+                scorecard: None,
             }
         );
     }
@@ -710,7 +747,7 @@ mod tests {
                 .collect();
             for filter in Filter::ALL {
                 let kept = all.iter().filter(|c| filter.keeps(c)).count();
-                let shown: Vec<i64> = rows(&all, filter)
+                let shown: Vec<i64> = rows(&all, filter, &Narrow::default(), &BTreeMap::new())
                     .into_iter()
                     .filter_map(|row| match row {
                         Row::Comment { id, .. } => Some(id),
@@ -1085,7 +1122,7 @@ mod tests {
     fn a_row_of_an_agent_root_carries_its_chips() {
         let mut flag = agent_comment(5, ReviewKind::Flag, Some(2));
         flag.severity = Some(ReviewSeverity::High);
-        let listed = rows(&[flag], Filter::Agent);
+        let listed = rows(&[flag], Filter::Agent, &Narrow::default(), &BTreeMap::new());
         let Row::Comment { chips, .. } = &listed[1] else {
             panic!("the second row is the comment");
         };

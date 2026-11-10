@@ -461,6 +461,26 @@ impl ReviewStore {
         rows.map(|row| scorecard_of(row?)).collect()
     }
 
+    /// The newest `per_name` scorecards of each name on `branch`, names in order and each name's
+    /// rows newest first (`ListRecentScorecards`). Stale rows are included; the caller marks them.
+    pub fn recent_scorecards(
+        &self,
+        branch: &str,
+        per_name: usize,
+    ) -> Result<Vec<Scorecard>, StoreError> {
+        let per_name = i64::try_from(per_name).map_err(|e| StoreError(e.to_string()))?;
+        let mut statement = self.conn.prepare(&format!(
+            "{SCORECARD_SELECT} WHERE s.id IN (
+               SELECT id FROM (
+                 SELECT id, ROW_NUMBER() OVER (PARTITION BY name ORDER BY id DESC) AS newest
+                 FROM scorecards WHERE branch = ?1)
+               WHERE newest <= ?2)
+             ORDER BY s.name, s.id DESC"
+        ))?;
+        let rows = statement.query_map(params![branch, per_name], raw_scorecard)?;
+        rows.map(|row| scorecard_of(row?)).collect()
+    }
+
     /// How many agent-started threads are not resolved in the repository (D200).
     pub fn open_agent_threads(&self) -> Result<usize, StoreError> {
         open_agent_count(&self.conn, None)

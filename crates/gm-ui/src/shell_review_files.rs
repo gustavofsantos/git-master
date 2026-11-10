@@ -1,16 +1,18 @@
 //! The Review page's left cards and its continuous diff (UI redesign, slice 4): the Changes
-//! of the branch, the gates that exist today, Reviewers (planned, layout only), and every
-//! changed file's diff one after another with a **Viewed** box each. The conversations list
-//! and the selected conversation's detail stay in `shell_review`.
+//! of the branch, the Scorecards table of the branch (D219, S5), and every changed file's diff
+//! one after another with a **Viewed** box each. The conversations list and the selected
+//! conversation's detail stay in `shell_review`.
 
-use gm_schema::{Actor, CommandKind, DiffLine, LineKind, WorkflowInfo};
+use gm_schema::{Actor, CommandKind, CommentLabel, DiffLine, LineKind};
 use gpui::{
-    Context, Div, FontWeight, MouseButton, MouseDownEvent, SharedString, Stateful, div, prelude::*,
-    px,
+    Context, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, SharedString, Stateful, div,
+    prelude::*, px,
 };
 
 use crate::icon::{self, Icon};
 use crate::review_files::Sides;
+use crate::review_scorecards::{self, Decoration, Dot, ScorecardRow, StatusTone, Weight};
+use crate::shell_memories::tag;
 use crate::theme;
 use crate::view::{Screen, StatusView};
 
@@ -18,44 +20,6 @@ use crate::view::{Screen, StatusView};
 pub(crate) const SIDE_WIDTH: f32 = 320.;
 /// The most lines drawn of one file in the continuous diff; the rest is counted.
 const LINES_SHOWN: usize = 400;
-
-/// A gate that exists today: a `before.<operation>` workflow switched on in the repository.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Gate {
-    pub(crate) operation: String,
-    pub(crate) name: String,
-    /// A gate not reviewed in this version does not run and stops its operation.
-    pub(crate) reviewed: bool,
-}
-
-/// The gates among `workflows`, by operation then name.
-#[must_use]
-pub(crate) fn gates(workflows: &[WorkflowInfo]) -> Vec<Gate> {
-    let mut gates: Vec<Gate> = workflows
-        .iter()
-        .filter(|workflow| workflow.enabled && workflow.error.is_none())
-        .filter_map(|workflow| {
-            let operation = workflow.trigger.strip_prefix("before.")?;
-            Some(Gate {
-                operation: operation.to_owned(),
-                name: workflow.name.clone(),
-                reviewed: workflow.reviewed,
-            })
-        })
-        .collect();
-    gates.sort_by(|a, b| a.operation.cmp(&b.operation).then(a.name.cmp(&b.name)));
-    gates
-}
-
-/// What the Gates card says about Push with lease: no operation `push` has gates today.
-#[must_use]
-pub(crate) fn push_line(gates: &[Gate]) -> String {
-    match gates.iter().filter(|gate| gate.operation == "push").count() {
-        0 => "No gate runs before Push with lease.".to_owned(),
-        1 => "1 gate runs before Push with lease.".to_owned(),
-        n => format!("{n} gates run before Push with lease."),
-    }
-}
 
 impl StatusView {
     /// Reads every changed file's diff again for the continuous diff, while the Review page
@@ -78,8 +42,32 @@ impl StatusView {
         }
     }
 
-    /// The left column's cards: Changes, Gates and Reviewers.
-    pub(crate) fn review_cards(&self) -> Div {
+    /// Reads the recent scorecards of the checked-out branch (D219 (11)): the table and its trend
+    /// dots. Called when the page opens and after each listing of the review comments, which a
+    /// publish always follows, so the table is as fresh as a publish.
+    pub(crate) fn request_scorecards(&mut self) {
+        let Some(branch) = self.current_branch() else {
+            return;
+        };
+        let id = self.engine.dispatch(
+            Actor::Human,
+            CommandKind::ListRecentScorecards {
+                branch: Some(branch),
+                member: None,
+            },
+        );
+        self.model.scorecards.request(id);
+    }
+
+    /// The checked-out branch, or `None` when HEAD is detached or the status is not read yet.
+    pub(crate) fn current_branch(&self) -> Option<String> {
+        self.model
+            .status()
+            .and_then(|status| status.branch.head.clone())
+    }
+
+    /// The left column's cards: Changes, then the Scorecards table.
+    pub(crate) fn review_cards(&self, cx: &mut Context<Self>) -> Div {
         div()
             .flex_none()
             .flex()
@@ -89,10 +77,7 @@ impl StatusView {
             .border_b_1()
             .border_color(theme::hairline())
             .child(self.changes_card())
-            .child(self.gates_card())
-            .child(card("Reviewers").child(muted_line(
-                "Reviewers and their verdicts are not available yet.",
-            )))
+            .child(self.scorecards_card(cx))
     }
 
     fn changes_card(&self) -> Div {
@@ -123,31 +108,131 @@ impl StatusView {
             .child(muted_line(&format!("{viewed} of {read} files viewed")))
     }
 
-    fn gates_card(&self) -> Div {
-        let gates = gates(self.model.workflows.listed.as_deref().unwrap_or_default());
-        let mut body = card("Gates");
-        if gates.is_empty() {
-            body = body.child(muted_line("No gate is switched on."));
+    /// The Scorecards table: one row per scorecard name on the branch, the newest of each, with
+    /// its status, label, trend and blocking count. A row opens to its body and origin.
+    fn scorecards_card(&self, cx: &mut Context<Self>) -> Div {
+        let mut body = card("Scorecards");
+        match (self.model.scorecards.rows(), self.current_branch()) {
+            (_, None) => {
+                body = body.child(muted_line("HEAD is detached, so no branch has scorecards."));
+            }
+            (None, Some(_)) => body = body.child(muted_line(review_scorecards::READING)),
+            (Some(rows), Some(branch)) => {
+                let table = review_scorecards::table_of(rows, &branch);
+                if table.is_empty() {
+                    body = body
+                        .child(muted_line(review_scorecards::NO_RUN_TITLE))
+                        .child(muted_line(review_scorecards::NO_RUN_HINT));
+                }
+                for (index, row) in table.iter().enumerate() {
+                    let open = self.model.scorecards.is_expanded(&row.name);
+                    body = body.child(Self::scorecard_row(index, row, open, cx));
+                }
+            }
         }
-        for gate in &gates {
-            body = body.child(
+        body
+    }
+
+    /// One row of the table: its name, status and Stale mark, its label, decorations and subject,
+    /// the trend and the blocking count. Expanded, its body and where it came from.
+    fn scorecard_row(
+        index: usize,
+        row: &ScorecardRow,
+        open: bool,
+        cx: &mut Context<StatusView>,
+    ) -> Stateful<Div> {
+        let name = row.name.clone();
+        let (colour, background) = status_colours(row.status.tone);
+        let head = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .min_w(px(0.))
+            .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_color(theme::muted())
-                            .child(format!("before {}", gate.operation)),
-                    )
-                    .child(gate.name.clone())
-                    .children(
-                        (!gate.reviewed)
-                            .then(|| div().text_color(theme::warn_fg()).child("needs review")),
-                    ),
-            );
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .font_family(theme::code_font())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(row.name.clone()),
+            )
+            .child(tag(row.status.word, background).text_color(colour))
+            .children(row.stale.then(|| {
+                tag(review_scorecards::STALE, theme::warn_bg()).text_color(theme::warn_fg())
+            }));
+        let mut summary = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .min_w(px(0.))
+            .child(label_chip(row.label));
+        for decoration in review_scorecards::decoration_chips(&row.decorations) {
+            summary = summary.child(decoration_chip(&decoration));
         }
-        body.child(muted_line(&push_line(&gates)))
+        summary = summary.child(
+            div()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_color(theme::text())
+                .child(row.subject.clone()),
+        );
+        let blocking = if row.blocking_open > 0 {
+            theme::removed_fg()
+        } else {
+            theme::muted()
+        };
+        let footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(trend_dots(&row.trend))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(blocking)
+                    .child(format!("{} blocking", row.blocking_open)),
+            );
+        let mut item = div()
+            .id(("scorecard-row", index))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_1()
+            .py_1()
+            .rounded_sm()
+            .cursor_pointer()
+            .hover(|style| style.bg(theme::selected_row()))
+            .child(head)
+            .child(summary)
+            .child(footer);
+        if open {
+            item = item
+                .child(
+                    div()
+                        .pt_1()
+                        .text_sm()
+                        .text_color(theme::text())
+                        .child(row.body.clone()),
+                )
+                .child(muted_line(&review_scorecards::origin_line(row)));
+        }
+        item.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.model.scorecards.toggle(&name);
+                cx.notify();
+            }),
+        )
     }
 
     /// The continuous diff: every changed file's diff, with its Viewed box.
@@ -273,6 +358,54 @@ impl StatusView {
     }
 }
 
+/// The text colour and tint of a status chip, which the trend dots share the text colour of.
+fn status_colours(tone: StatusTone) -> (Hsla, Hsla) {
+    match tone {
+        StatusTone::Pass => (theme::added_fg(), theme::added_bg()),
+        StatusTone::NeedsWork => (theme::warn_fg(), theme::warn_bg()),
+        StatusTone::Fail => (theme::removed_fg(), theme::removed_bg()),
+    }
+}
+
+/// A label's chip, drawn by its weight: praise, note and thought muted, nitpick, suggestion,
+/// todo and chore plain, issue stronger, question in the accent colour.
+pub(crate) fn label_chip(label: CommentLabel) -> Div {
+    let (background, colour) = match review_scorecards::label_weight(label) {
+        Weight::Muted => (theme::selected_row(), theme::muted()),
+        Weight::Normal => (theme::selected_row(), theme::text()),
+        Weight::Strong => (theme::warn_bg(), theme::warn_fg()),
+        Weight::Accent => (theme::selection(), theme::accent()),
+    };
+    tag(label.as_str(), background).text_color(colour)
+}
+
+/// A decoration's chip: `blocking` is a danger chip, the others are plain.
+pub(crate) fn decoration_chip(decoration: &Decoration) -> Div {
+    let (background, colour) = if decoration.danger {
+        (theme::removed_bg(), theme::removed_fg())
+    } else {
+        (theme::selected_row(), theme::muted())
+    };
+    tag(&decoration.word, background).text_color(colour)
+}
+
+/// The five trend dots, oldest to newest: a filled dot per result, an empty circle where the
+/// name has none.
+fn trend_dots(dots: &[Dot]) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .children(dots.iter().map(|dot| {
+            let base = div().w(px(8.)).h(px(8.)).rounded_full();
+            match dot {
+                Dot::Result(tone) => base.bg(status_colours(*tone).0),
+                Dot::Empty => base.border_1().border_color(theme::muted()),
+            }
+        }))
+}
+
 fn diff_line(line: &DiffLine) -> Div {
     let (mark, background, colour) = match line.kind {
         LineKind::Added => ("+", theme::added_bg(), theme::added_fg()),
@@ -319,55 +452,4 @@ fn muted_line(text: &str) -> Div {
         .text_xs()
         .text_color(theme::muted())
         .child(text.to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn workflow(name: &str, trigger: &str, enabled: bool, reviewed: bool) -> WorkflowInfo {
-        WorkflowInfo {
-            name: name.into(),
-            path: format!("/w/{name}.lua"),
-            trigger: trigger.into(),
-            key: None,
-            inputs: Vec::new(),
-            hash: "h".into(),
-            error: None,
-            warnings: Vec::new(),
-            source: String::new(),
-            reviewed,
-            auto_approve: false,
-            enabled,
-            title: None,
-            location: gm_schema::WorkflowLocation::User,
-            role: gm_schema::WorkflowRole::Workflow,
-        }
-    }
-
-    #[test]
-    fn the_gates_are_the_before_workflows_switched_on() {
-        let gates = gates(&[
-            workflow("b", "before.restack", true, true),
-            workflow("a", "before.commit", true, false),
-            workflow("off", "before.commit", false, true),
-            workflow("m", "manual", true, true),
-        ]);
-        assert_eq!(
-            gates,
-            vec![
-                Gate {
-                    operation: "commit".into(),
-                    name: "a".into(),
-                    reviewed: false
-                },
-                Gate {
-                    operation: "restack".into(),
-                    name: "b".into(),
-                    reviewed: true
-                },
-            ]
-        );
-        assert_eq!(push_line(&gates), "No gate runs before Push with lease.");
-    }
 }

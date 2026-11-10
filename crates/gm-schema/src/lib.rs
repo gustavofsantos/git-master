@@ -55,8 +55,9 @@ pub use review::{
 pub use scorecard::{
     BODY_MAX_CHARS, COMMENT_BODY_MAX_CHARS, COMMENTS_MAX, CommentLabel, LIST_DEFAULT, LIST_MAX,
     NAME_MAX_CHARS, RETAINED_PER_NAME_AND_BRANCH, SUBJECT_MAX_CHARS, SUGGESTED_FIX_MAX_CHARS,
-    Scorecard, ScorecardCommentInput, ScorecardStatus, ScorecardSummary, check_decorations,
-    check_name, is_blocking, kind_of_label, resolve_kind, resolve_severity, severity_of,
+    Scorecard, ScorecardCommentInput, ScorecardStatus, ScorecardSummary, TREND_LEN,
+    check_decorations, check_name, is_blocking, kind_of_label, resolve_kind, resolve_severity,
+    severity_of,
 };
 pub use stack::{OWN_COMMITS_LIMIT, Stack, StackBranch, StackSnapshot, StackState};
 pub use stash::StashEntry;

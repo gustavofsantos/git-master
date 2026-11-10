@@ -35,6 +35,10 @@ pub struct WorkflowInfo {
     /// off here, a built-in one is off unless it was switched on here (`WF4b`, D164(1)).
     #[serde(default)]
     pub enabled: bool,
+    /// The `description` of the workflow's `M.meta`: one line of what it does. `None` when it has
+    /// none or the file does not load. The Run review picker shows it (D219 (1)).
+    #[serde(default)]
+    pub description: Option<String>,
     /// The display title of a built-in workflow, such as "Restack children when parent moves"
     /// (`WF4b`, D164(2)). `None` for a workflow the person wrote: only built-ins carry one.
     #[serde(default)]
@@ -266,6 +270,7 @@ mod tests {
             } else {
                 WorkflowRole::Workflow
             },
+            description: None,
         }
     }
 

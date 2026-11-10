@@ -5836,6 +5836,7 @@ mod tests {
             title: None,
             location: gm_schema::WorkflowLocation::User,
             role: gm_schema::WorkflowRole::Workflow,
+            description: None,
         }
     }
 

@@ -17,6 +17,7 @@ use crate::action_registry::{Action, Args, shortcut_text};
 use crate::local_review::{self, Counts, Filter, Row, Version};
 use crate::review::{self, Badge, DELETE_CONFIRM, Delete};
 use crate::review_composer::{self, KEY_CONTEXT, SaveReviewComment};
+use crate::review_scorecards::{self, BLOCKING, LABEL, SCORECARD};
 use crate::shell_history::{action_button, now_secs};
 use crate::shell_memories::tag;
 use crate::shell_review_files;
@@ -31,6 +32,15 @@ const LOADING_TEXT: &str = "Loading…";
 const NO_COMMENTS: &str = "No comments yet.";
 const NO_MATCH: &str = "No comments match this filter.";
 const NOTHING_SELECTED: &str = "Select a comment to read it.";
+const RUN_REVIEW: &str = "Run review…";
+
+/// The narrowing chips of the header (S5): each one is a filter over the conversations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NarrowChip {
+    Blocking,
+    Scorecard,
+    Label,
+}
 
 impl StatusView {
     /// The page for the main area: a header with the filter chips and their counts,
@@ -48,7 +58,17 @@ impl StatusView {
             .border_b_1()
             .border_color(theme::hairline())
             .child(div().font_weight(FontWeight::MEDIUM).child("Review"))
-            .child(filter_chips(self.model.local_review.filter(), counts, cx));
+            .child(run_review_button(cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .min_w(px(0.))
+                    .child(filter_chips(self.model.local_review.filter(), counts, cx))
+                    .child(self.narrow_chips(cx)),
+            );
         let body = div()
             .flex_1()
             .min_h(px(0.))
@@ -63,7 +83,7 @@ impl StatusView {
                     .min_h(px(0.))
                     .flex()
                     .flex_col()
-                    .child(self.review_cards())
+                    .child(self.review_cards(cx))
                     .child(
                         div()
                             .px_4()
@@ -108,7 +128,15 @@ impl StatusView {
                     .into_any_element()
             }
             Some(all) => {
-                let rows = local_review::rows(all, self.model.local_review.filter());
+                let names = review_scorecards::names_by_id(
+                    self.model.scorecards.rows().unwrap_or_default(),
+                );
+                let rows = local_review::rows(
+                    all,
+                    self.model.local_review.filter(),
+                    self.model.local_review.narrow(),
+                    &names,
+                );
                 if rows.is_empty() {
                     empty_state(NO_MATCH, None).into_any_element()
                 } else {
@@ -165,6 +193,7 @@ impl StatusView {
                     .gap_2()
                     .child(div().flex_none().text_color(colour).child(label))
                     .child(chips_row(&review::chips(comment)))
+                    .children(self.scorecard_tag(comment))
                     .child(div().text_xs().text_color(theme::muted()).child(format!(
                         "{} · {}",
                         review::range_label(start, end),
@@ -446,6 +475,7 @@ impl StatusView {
         self.screen = Screen::LocalReview;
         self.request_review_files();
         self.request_review_list();
+        self.request_scorecards();
         self.request_review_texts();
         cx.notify();
     }
@@ -494,6 +524,76 @@ impl StatusView {
         }
         if self.model.local_review.select(comment) {
             self.request_review_texts();
+        }
+        cx.notify();
+    }
+
+    /// The scorecard a comment came from, as a tag, when that scorecard is listed.
+    fn scorecard_tag(&self, comment: &ReviewComment) -> Option<Div> {
+        let names =
+            review_scorecards::names_by_id(self.model.scorecards.rows().unwrap_or_default());
+        comment
+            .scorecard
+            .and_then(|id| names.get(&id))
+            .map(|name| tag(name, theme::selected_row()))
+    }
+
+    /// The Blocking, Scorecard and Label chips: Blocking shows its count and is on or off;
+    /// Scorecard and Label name the choice in force, and each press moves to the next choice.
+    fn narrow_chips(&self, cx: &mut Context<Self>) -> Div {
+        let narrow = self.model.local_review.narrow();
+        let comments = self.model.review.comments().unwrap_or_default();
+        let blocking = review_scorecards::blocking_count(comments);
+        let scorecard = narrow.scorecard.as_ref().map_or_else(
+            || SCORECARD.to_owned(),
+            |name| format!("{SCORECARD}: {name}"),
+        );
+        let label = narrow.label.map_or_else(
+            || LABEL.to_owned(),
+            |label| format!("{LABEL}: {}", label.as_str()),
+        );
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .child(narrow_chip(
+                NarrowChip::Blocking,
+                format!("{BLOCKING} {blocking}"),
+                narrow.blocking,
+                cx,
+            ))
+            .child(narrow_chip(
+                NarrowChip::Scorecard,
+                scorecard,
+                narrow.scorecard.is_some(),
+                cx,
+            ))
+            .child(narrow_chip(
+                NarrowChip::Label,
+                label,
+                narrow.label.is_some(),
+                cx,
+            ))
+    }
+
+    /// One press of a narrowing chip: flips Blocking, or moves the choice on.
+    pub(crate) fn press_narrow(&mut self, chip: NarrowChip, cx: &mut Context<Self>) {
+        match chip {
+            NarrowChip::Blocking => self.model.local_review.toggle_blocking(),
+            NarrowChip::Scorecard => {
+                let branch = self.current_branch().unwrap_or_default();
+                let names = review_scorecards::scorecard_names(
+                    self.model.scorecards.rows().unwrap_or_default(),
+                    &branch,
+                );
+                self.model.local_review.cycle_scorecard(&names);
+            }
+            NarrowChip::Label => {
+                let labels =
+                    review_scorecards::labels_in(self.model.review.comments().unwrap_or_default());
+                self.model.local_review.cycle_label(&labels);
+            }
         }
         cx.notify();
     }
@@ -609,6 +709,68 @@ fn filter_chips(active: Filter, counts: Option<Counts>, cx: &mut Context<StatusV
         }))
 }
 
+/// The Run review… button of the header: it opens the picker.
+fn run_review_button(cx: &mut Context<StatusView>) -> Stateful<Div> {
+    div()
+        .id("review-run-open")
+        .flex_none()
+        .px_2()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::button_border())
+        .text_xs()
+        .text_color(theme::text())
+        .cursor_pointer()
+        .child(RUN_REVIEW)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.open_review_run(window, cx);
+            }),
+        )
+}
+
+/// One narrowing chip: filled in the accent colour while it narrows the list.
+fn narrow_chip(
+    chip: NarrowChip,
+    label: String,
+    active: bool,
+    cx: &mut Context<StatusView>,
+) -> Stateful<Div> {
+    let id = match chip {
+        NarrowChip::Blocking => "review-narrow-blocking",
+        NarrowChip::Scorecard => "review-narrow-scorecard",
+        NarrowChip::Label => "review-narrow-label",
+    };
+    div()
+        .id(id)
+        .flex_none()
+        .px_2()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded_full()
+        .text_xs()
+        .cursor_pointer()
+        .when(active, |chip| {
+            chip.bg(theme::selection()).text_color(theme::accent())
+        })
+        .when(!active, |chip| {
+            chip.text_color(theme::muted())
+                .hover(|style| style.bg(theme::selected_row()))
+        })
+        .child(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.press_narrow(chip, cx);
+            }),
+        )
+}
+
 fn filter_chip(
     filter: Filter,
     label: String,
@@ -670,6 +832,41 @@ fn review_rows(rows: Vec<Row>, cx: &mut Context<StatusView>) -> Div {
     )
 }
 
+/// The heading of one file's rows in the list: its path and how many comments it holds.
+fn file_heading(index: usize, path: &str, count: usize) -> AnyElement {
+    div()
+        .id(("review-file", index))
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .px_4()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .border_b_1()
+        .border_color(theme::hairline())
+        .bg(theme::panel())
+        .child(
+            div()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .font_family(theme::code_font())
+                .text_sm()
+                .child(path.to_owned()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(comments_label(count)),
+        )
+        .into_any_element()
+}
+
 /// One row: a file's heading with its count, or a comment with its range, its badge,
 /// its time and the first line of its body. A click on a comment selects it.
 fn review_row(
@@ -680,37 +877,7 @@ fn review_row(
     cx: &mut Context<StatusView>,
 ) -> AnyElement {
     match row {
-        Row::File { path, count } => div()
-            .id(("review-file", index))
-            .w_full()
-            .h(px(ROW_HEIGHT))
-            .px_4()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .border_b_1()
-            .border_color(theme::hairline())
-            .bg(theme::panel())
-            .child(
-                div()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .font_family(theme::code_font())
-                    .text_sm()
-                    .child(path.clone()),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(theme::muted())
-                    .child(comments_label(*count)),
-            )
-            .into_any_element(),
+        Row::File { path, count } => file_heading(index, path, *count),
         Row::Comment {
             id,
             lines,
@@ -718,6 +885,7 @@ fn review_row(
             badge,
             chips,
             created_at,
+            scorecard,
         } => {
             let id = *id;
             let (label, colour) = badge_text(*badge);
@@ -766,11 +934,25 @@ fn review_row(
                 )
                 .child(
                     div()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_sm()
-                        .child(summary.clone()),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .min_w(px(0.))
+                        .children(
+                            scorecard
+                                .as_ref()
+                                .map(|name| tag(name, theme::selected_row())),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(0.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_sm()
+                                .child(summary.clone()),
+                        ),
                 )
                 .into_any_element()
         }
@@ -891,6 +1073,12 @@ pub(crate) fn chips_row(chips: &review::Chips) -> Div {
             chips
                 .needs_answer
                 .then(|| tag(review::NEEDS_ANSWER, theme::selection()).text_color(theme::accent())),
+        )
+        .children(chips.label.map(shell_review_files::label_chip))
+        .children(
+            review_scorecards::decoration_chips(&chips.decorations)
+                .iter()
+                .map(shell_review_files::decoration_chip),
         )
 }
 

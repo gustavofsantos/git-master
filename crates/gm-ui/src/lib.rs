@@ -66,6 +66,8 @@ mod restack_dialog;
 mod review;
 mod review_composer;
 mod review_files;
+mod review_run;
+mod review_scorecards;
 mod script_completion;
 mod shell_code;
 mod shell_commit;

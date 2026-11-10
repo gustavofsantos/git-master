@@ -204,6 +204,8 @@ pub struct Model {
     pub local_review: LocalReview,
     /// The Review page's continuous diff and its Viewed marks (UI redesign, slice 4).
     pub(crate) review_files: crate::review_files::ReviewFiles,
+    /// The recent scorecards of the checked-out branch, for the Review page's table (S5, D219).
+    pub(crate) scorecards: crate::review_scorecards::ScorecardsList,
     /// The conflict resolver of the file read last: its panes, choices and staged note (C3b).
     pub conflict: Option<ResolverState>,
     /// The read that opened the resolver, until the view takes it and shows the page.
@@ -1284,6 +1286,10 @@ impl Model {
                 self.list_stashes(id, stashes);
                 None
             }
+            Event::RecentScorecardsListed { id, scorecards } => {
+                let _ = self.scorecards.listed(id, scorecards);
+                None
+            }
             Event::ReviewCommentsListed { id, comments } => {
                 let _ = self.review.listed(id, comments);
                 if let Some(listed) = self.review.comments() {
@@ -1684,6 +1690,7 @@ impl Model {
         self.review = ReviewList::default();
         self.local_review = LocalReview::default();
         self.review_files.clear();
+        self.scorecards.clear();
         self.reflog = ReflogList::default();
         self.reflog_commit = CommitPane::Empty;
         self.reflog_stack = OpenStack::default();
@@ -1998,6 +2005,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkflowGateUnreviewed { id, .. }
         | Event::ScorecardPublished { id, .. }
         | Event::ScorecardsListed { id, .. }
+        | Event::RecentScorecardsListed { id, .. }
         | Event::BranchDescriptionRead { id, .. } => Some(*id),
         Event::ThreadsChanged
         | Event::WorkflowRunChanged { .. }

@@ -979,6 +979,7 @@ mod tests {
             title: None,
             location: gm_schema::WorkflowLocation::User,
             role: gm_schema::WorkflowRole::Workflow,
+            description: None,
         }
     }
 
@@ -1020,6 +1021,7 @@ mod tests {
             title: Some("Restack stale stacks after fetch".into()),
             location: gm_schema::WorkflowLocation::User,
             role: gm_schema::WorkflowRole::Workflow,
+            description: None,
         }
     }
 

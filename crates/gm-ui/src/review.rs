@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use gm_schema::{
-    CommandKind, OperationId, OperationState, ReviewComment, ReviewKind, ReviewLocation,
-    ReviewReply, ReviewSeverity, ReviewStatus,
+    CommandKind, CommentLabel, OperationId, OperationState, ReviewComment, ReviewKind,
+    ReviewLocation, ReviewReply, ReviewSeverity, ReviewStatus,
 };
 
 use crate::diff_rows::{Diffs, Row, SplitRows};
@@ -325,12 +325,20 @@ pub fn severity_word(severity: ReviewSeverity) -> &'static str {
 }
 
 /// The kind chips of a root: its kind, and for a flag its severity after it. Empty for
-/// a comment with no kind, which is the person's.
+/// a comment with no kind, which is the person's. A comment with a label (D219 (5)) shows
+/// the label instead of its kind, which says the same, so only a flag's severity stays.
 #[must_use]
 pub fn kind_chips(comment: &ReviewComment) -> Vec<&'static str> {
     let Some(kind) = comment.kind else {
         return Vec::new();
     };
+    if comment.label.is_some() {
+        return if kind == ReviewKind::Flag {
+            comment.severity.map(severity_word).into_iter().collect()
+        } else {
+            Vec::new()
+        };
+    }
     let mut chips = vec![kind_word(kind)];
     if kind == ReviewKind::Flag {
         chips.extend(comment.severity.map(severity_word));
@@ -357,6 +365,10 @@ pub struct Chips {
     pub tone: Tone,
     pub needs_answer: bool,
     pub note: bool,
+    /// The conventional-comment label of the agent's thread, when it gave one (D219 (5)).
+    pub label: Option<CommentLabel>,
+    /// The decorations of the agent's thread, in the order given (D219 (5)).
+    pub decorations: Vec<String>,
 }
 
 /// The chips of `comment`, as its card shows them.
@@ -372,6 +384,8 @@ pub fn chips(comment: &ReviewComment) -> Chips {
         },
         needs_answer: comment.needs_answer,
         note: is_note(comment),
+        label: comment.label,
+        decorations: comment.decorations.clone(),
     }
 }
 
@@ -1666,6 +1680,8 @@ mod tests {
                 tone: Tone::Warning,
                 needs_answer: false,
                 note: false,
+                label: None,
+                decorations: Vec::new(),
             }
         );
         assert_eq!(AGENT_WRITTEN, "Agent-written");

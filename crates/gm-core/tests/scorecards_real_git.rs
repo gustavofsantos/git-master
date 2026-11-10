@@ -568,3 +568,71 @@ fn the_list_of_scorecards_filters_by_name_and_keeps_the_newest_first() {
         [third.id, first.id]
     );
 }
+
+#[test]
+fn the_recent_list_gives_every_name_its_newest_five_and_keeps_stale_rows() {
+    let dir = repo();
+    let mut engine = engine_on(dir.path());
+    let head = tip(dir.path());
+    let lint = published(&publish(
+        &mut engine,
+        &head,
+        "lint",
+        summary(CommentLabel::Note, &[]),
+        Vec::new(),
+    ))
+    .0;
+    let mut security = Vec::new();
+    for _ in 0..7 {
+        let events = publish(
+            &mut engine,
+            &head,
+            "security",
+            summary(CommentLabel::Note, &[]),
+            Vec::new(),
+        );
+        // A publish is followed by the comment list, which is how the Review page refreshes.
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::ReviewCommentsListed { .. })),
+            "a publish refreshes the list"
+        );
+        security.push(published(&events).0.id);
+    }
+    let recent = |engine: &mut Engine| -> Vec<Scorecard> {
+        let events = engine.handle(
+            OperationId(9),
+            &human(CommandKind::ListRecentScorecards {
+                branch: None,
+                member: None,
+            }),
+        );
+        assert!(done(&events), "recent list failed: {}", failure(&events));
+        events
+            .iter()
+            .find_map(|event| match event {
+                Event::RecentScorecardsListed { scorecards, .. } => Some(scorecards.clone()),
+                _ => None,
+            })
+            .expect("a recent list")
+    };
+    let rows = recent(&mut engine);
+    let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
+    let newest_five: Vec<i64> = security.iter().rev().take(5).copied().collect();
+    assert_eq!(
+        ids[0], lint.id,
+        "the name with one old result is still listed"
+    );
+    assert_eq!(
+        &ids[1..],
+        newest_five.as_slice(),
+        "five newest of security, newest first"
+    );
+
+    std::fs::write(dir.path().join("f.txt"), "one\nTWO\nthree\nfour\nfive\n").unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "second"]);
+    let stale = recent(&mut engine);
+    assert_eq!(stale.len(), 6, "stale rows stay in the recent list");
+    assert!(stale.iter().all(|row| row.stale));
+}

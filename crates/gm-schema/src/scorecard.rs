@@ -23,6 +23,8 @@ pub const SUGGESTED_FIX_MAX_CHARS: usize = 1_000;
 pub const COMMENTS_MAX: usize = 30;
 /// The newest scorecards kept per name and branch (D219 (4)).
 pub const RETAINED_PER_NAME_AND_BRANCH: usize = 20;
+/// The newest results of each name the Review page shows as trend dots (D219 (11)).
+pub const TREND_LEN: usize = 5;
 /// The scorecards a listing returns when it names no limit, and the most it returns.
 pub const LIST_DEFAULT: u32 = 20;
 pub const LIST_MAX: u32 = 20;

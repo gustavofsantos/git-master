@@ -15,8 +15,6 @@ Open **Review** in the sidebar. The page has three parts:
 - In the middle, one continuous diff: every changed file, one after another, with its path, `+a −r` and a **Viewed** box. A viewed file folds to its header. The mark clears by itself when the file's change changes. A file shows at most 400 lines; open it on **Changes** to read the rest. At most 200 files are read.
 - On the right, the selected conversation: the comment, its replies, the reply box, its actions and the **Before** and **After** of the change.
 
-> **Planned.** The **Scorecards** table, **Run review…** and the **Blocking**, **Scorecard** and **Label** filters are not available yet.
-
 ## Comment on code
 
 You can comment on any lines of any code in the repository: lines of a diff, changed or not, and lines of a file in the **Code** viewer.

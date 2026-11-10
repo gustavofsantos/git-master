@@ -355,7 +355,7 @@ fn effect(
 
 /// One script as the front ends list it. A script that does not load carries its first problem.
 pub(crate) fn workflow_info(entry: &ScriptEntry) -> WorkflowInfo {
-    let (trigger, key, inputs, error, role) = match &entry.meta {
+    let (trigger, key, inputs, error, role, description) = match &entry.meta {
         Ok(meta) => (
             meta.trigger.on.clone(),
             meta.trigger.key.clone(),
@@ -372,6 +372,7 @@ pub(crate) fn workflow_info(entry: &ScriptEntry) -> WorkflowInfo {
             } else {
                 WorkflowRole::Workflow
             },
+            (!meta.description.is_empty()).then(|| meta.description.clone()),
         ),
         Err(problems) => (
             String::new(),
@@ -385,6 +386,7 @@ pub(crate) fn workflow_info(entry: &ScriptEntry) -> WorkflowInfo {
                 }
             }),
             WorkflowRole::Workflow,
+            None,
         ),
     };
     WorkflowInfo {
@@ -406,6 +408,7 @@ pub(crate) fn workflow_info(entry: &ScriptEntry) -> WorkflowInfo {
             .map(|builtin| builtin.title.to_owned()),
         location: entry.location,
         role,
+        description,
     }
 }
 

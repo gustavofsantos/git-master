@@ -220,6 +220,8 @@ pub struct StatusView {
     pub(crate) new_stash_dialog: Option<NewStashDialog>,
     /// The review comment composer, while it is open (B4c).
     pub(crate) review_dialog: Option<ReviewDialog>,
+    /// The Run review picker of the Review page, while it is open (S5, D219).
+    pub(crate) review_run: Option<crate::review_run::RunDialog>,
     /// The inline Reply box under a thread on the Local review page (D198).
     pub(crate) review_reply: Option<InlineReply>,
     /// The inputs dialog of a workflow that declares inputs, while it is open.
@@ -515,6 +517,7 @@ impl StatusView {
             history_scope_menu: false,
             new_stash_dialog: None,
             review_dialog: None,
+            review_run: None,
             review_reply: None,
             workflow_inputs_dialog: None,
             workflow_review_dialog: None,
@@ -760,6 +763,8 @@ impl StatusView {
     fn follow_review(&mut self, listed: bool, reload: bool, cx: &mut Context<Self>) {
         if listed {
             self.sync_review_comments(cx);
+            // A publish always lists the comments after it, so the scorecards follow here (S5).
+            self.request_scorecards();
             // The After text is read from the file, so it follows each new listing (B4d).
             if self.screen == Screen::LocalReview {
                 self.request_review_texts();
@@ -2070,6 +2075,9 @@ impl StatusView {
         layers.extend(self.move_popover_layer(cx));
         if self.merged_dialog.is_some() {
             layers.push(self.merged_layer(window, cx));
+        }
+        if self.review_run.is_some() {
+            layers.push(self.review_run_layer(window, cx));
         }
         if self.restack_dialog.is_some() {
             layers.push(self.restack_layer(window, cx));

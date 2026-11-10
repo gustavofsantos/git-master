@@ -1,11 +1,11 @@
 ---
 title: Review workflows and scorecards
 description: Run reviewers, which are workflows that start your own command-line agent, keep a scorecard for each branch and block a push with a workflow that reads the scorecards.
-status: planned
+status: partial
 order: 30
 ---
 
-> **Planned.** Review workflows, scorecards and the review comment labels are not available in the app yet.
+> **Planned.** The agent side is not checked against a live `claude -p` yet: that the agent reads these tools with the flags that deny shell and writes, and that `GITMASTER_WORKFLOW_RUN` reaches it.
 
 A reviewer is a [workflow](../workflows/overview.md) that starts an agent on your machine to review a change. The agent publishes its result through the [MCP server](mcp-server.md) as a **scorecard**: one row with a status, a short summary and review comments that point at lines of the change. GitMaster calls no model and stores no key. The agent runs in your own session, with your model and your quota.
 

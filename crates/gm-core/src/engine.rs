@@ -4515,6 +4515,9 @@ impl Engine {
                 *limit,
                 member.as_deref(),
             ),
+            CommandKind::ListRecentScorecards { branch, member } => {
+                self.list_recent_scorecards(id, branch.as_deref(), member.as_deref())
+            }
             _ => Err("not a scorecard command".to_owned()),
         }
     }
@@ -4726,6 +4729,42 @@ impl Engine {
         Ok(vec![Event::ScorecardsListed {
             id,
             scorecards: rows,
+        }])
+    }
+
+    /// The newest `TREND_LEN` scorecards of each name on `branch` (the checked-out branch when
+    /// `None`), stale ones included, with staleness derived against the branch tip now. A read:
+    /// the Review page's table and trend dots come from it (D219 (11)).
+    fn list_recent_scorecards(
+        &mut self,
+        id: OperationId,
+        branch: Option<&str>,
+        member: Option<&str>,
+    ) -> Result<Vec<Event>, String> {
+        let open = self.open_root()?;
+        let root = self.target_at(&open, member)?.root;
+        let branch = match branch {
+            Some(branch) => branch.to_owned(),
+            None => self
+                .git
+                .status(&root)
+                .map_err(|e| e.0)?
+                .branch
+                .head
+                .ok_or_else(|| "HEAD is detached, so name the branch".to_owned())?,
+        };
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let rows = store
+            .recent_scorecards(&branch, gm_schema::TREND_LEN)
+            .map_err(|e| e.0)?;
+        let mut tips = BTreeMap::new();
+        tips.insert(
+            branch.clone(),
+            self.git.branch_tip(&root, &branch).map_err(|e| e.0)?,
+        );
+        Ok(vec![Event::RecentScorecardsListed {
+            id,
+            scorecards: scorecards::with_staleness(rows, &tips),
         }])
     }
 
@@ -5682,6 +5721,7 @@ impl Engine {
                 | CommandKind::DismissWorkflowRequest { .. }
                 | CommandKind::ListReviewComments { .. }
                 | CommandKind::ListScorecards { .. }
+                | CommandKind::ListRecentScorecards { .. }
                 | CommandKind::ReadBranchDescription { .. }
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }
@@ -6007,6 +6047,7 @@ fn is_review_command(kind: &CommandKind) -> bool {
                 | CommandKind::LoadReviewChange { .. }
                 | CommandKind::PublishScorecard { .. }
                 | CommandKind::ListScorecards { .. }
+                | CommandKind::ListRecentScorecards { .. }
         )
 }
 
@@ -6019,7 +6060,9 @@ fn is_description_command(kind: &CommandKind) -> bool {
 fn is_scorecard_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
-        CommandKind::PublishScorecard { .. } | CommandKind::ListScorecards { .. }
+        CommandKind::PublishScorecard { .. }
+            | CommandKind::ListScorecards { .. }
+            | CommandKind::ListRecentScorecards { .. }
     )
 }
 

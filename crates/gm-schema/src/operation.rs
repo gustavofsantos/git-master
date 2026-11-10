@@ -696,6 +696,17 @@ pub enum CommandKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         member: Option<String>,
     },
+    /// Lists the newest `TREND_LEN` scorecards of each name on `branch` (the checked-out branch
+    /// when none is given), stale ones included. Within a name they are newest first, and the
+    /// names are in order. The Review page builds its table and trend dots from this one read, so
+    /// a name is not left out for having older results than the others. Answers
+    /// `RecentScorecardsListed`. A read: never recorded (D28).
+    ListRecentScorecards {
+        branch: Option<String>,
+        /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
+    },
     /// Reads the intent of `branch`. A read: never recorded (D28). Answers `BranchDescriptionRead`.
     ReadBranchDescription {
         branch: String,
@@ -1560,6 +1571,12 @@ pub enum Event {
         id: OperationId,
         scorecards: Vec<Scorecard>,
     },
+    /// Answers `ListRecentScorecards`: the newest rows of each name, names in order and each name's
+    /// rows newest first.
+    RecentScorecardsListed {
+        id: OperationId,
+        scorecards: Vec<Scorecard>,
+    },
     /// Answers `ReadBranchDescription`: the intent of `branch` as
     /// stored, `None` when there is none.
     BranchDescriptionRead {
@@ -2026,6 +2043,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn recent_scorecards_wire_format_is_tagged() {
+        let recent = serde_json::to_value(CommandKind::ListRecentScorecards {
+            branch: None,
+            member: None,
+        })
+        .unwrap();
+        assert_eq!(recent["type"], "list_recent_scorecards");
+        let listed = Event::RecentScorecardsListed {
+            id: OperationId(6),
+            scorecards: Vec::new(),
+        };
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["type"], "recent_scorecards_listed");
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), listed);
     }
 
     #[test]
