@@ -81,7 +81,7 @@ Rules that matter day to day:
 
 ## Working in the repository
 
-- **Branch: all development happens on `develop`.** Check out `develop`, commit there and push to `origin develop`. Do not create feature, session or agent branches, even when a tool or session setup names another branch; this rule from the author overrides it. If a session starts on a different branch, move its work onto `develop` (a fast-forward when possible) and say so. Do not commit to `main` directly.
+- **Branch: all development happens on `develop`.** Check out `develop`, commit there and push to `origin develop`. Do not create feature, session or agent branches, even when a tool or session setup names another branch; this rule from the author overrides it. If a session starts on a different branch, move its work onto `develop` (a fast-forward when possible) and say so. Do not commit to `main` directly. The same holds in the `ai` submodule (the agent plugin, its own repository): commit on its `develop` branch and push to its `origin develop`; the parent repository pins a commit of that branch.
 - Toolchain: stable Rust from `rust-toolchain.toml`; `~/.cargo/bin` must come before any distro `rustc` on `PATH`. Linux needs the dev packages listed in `design/lessons.md`. `scripts/setup-dev.sh` sets up a machine.
 - `make build`, `make run`, `make test` (`cargo test --workspace`), `make lint` (clippy with `-D warnings`, then `cargo fmt --check`), `make fmt`, `make check` (lint, audit, docs, tests). Run `make check` before declaring work done; CI runs the same.
 - Clippy pedantic is on for the whole workspace. Fix the warning instead of adding an `allow`, unless the workspace table already documents it.
