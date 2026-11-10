@@ -1955,3 +1955,71 @@ fn an_agent_cannot_propose_into_a_context_it_is_not_bound_to_or_inherits_from() 
         )
     );
 }
+
+#[test]
+fn a_memory_in_a_context_moves_to_another_visible_context_in_one_step_and_only_the_person_can() {
+    let world = World::new();
+    let fixture = populate(&world);
+    let mut billing = engine_on(&world.path("billing"), &world.db);
+    let stored = memory_of(&propose_at(
+        &mut billing,
+        &Actor::Human,
+        Some("Billing"),
+        "Refunds need a second approval",
+    ));
+    assert_eq!(stored.scope, "Platform / Billing");
+
+    let refused = send(
+        &mut billing,
+        &agent(),
+        CommandKind::MoveMemoryToContext {
+            uid: stored.uid.clone(),
+            context: fixture.platform,
+        },
+    );
+    assert_eq!(state_of(&refused), OperationState::Failed);
+    assert!(
+        failure(&refused).is_some_and(|message| message.starts_with("only a human can")),
+        "{refused:?}"
+    );
+
+    let moved = send(
+        &mut billing,
+        &Actor::Human,
+        CommandKind::MoveMemoryToContext {
+            uid: stored.uid.clone(),
+            context: fixture.platform,
+        },
+    );
+    assert_eq!(state_of(&moved), OperationState::Done, "{moved:?}");
+    let moved_memory = moved
+        .iter()
+        .find_map(|event| match event {
+            Event::MemoryChanged {
+                memory: Some(memory),
+                ..
+            } => Some(memory.clone()),
+            _ => None,
+        })
+        .expect("the moved memory");
+    assert_eq!(moved_memory.uid, stored.uid, "the uid is kept");
+    assert_eq!(moved_memory.scope, "Platform", "it is in Platform alone");
+
+    assert_eq!(
+        texts(
+            &search(&mut billing, &agent(), "", None, 50, None)
+                .expect("list")
+                .memories
+        ),
+        ["Refunds need a second approval"],
+        "billing still sees it through Platform"
+    );
+    let mut portal = engine_on(&world.path("portal"), &world.db);
+    assert!(
+        search(&mut portal, &agent(), "", None, 50, None)
+            .expect("list")
+            .memories
+            .is_empty(),
+        "portal does not see Platform"
+    );
+}

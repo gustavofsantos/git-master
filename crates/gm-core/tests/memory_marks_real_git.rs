@@ -512,7 +512,7 @@ fn a_mark_on_a_memory_that_is_not_there_is_not_found() {
 }
 
 #[test]
-fn marks_stay_with_a_memory_of_its_context_and_a_second_move_is_refused() {
+fn marks_stay_with_a_memory_that_moves_between_contexts() {
     let world = world();
     let mut engine = engine_on(&world);
     let platform = create_context(&mut engine, "Platform");
@@ -528,32 +528,48 @@ fn marks_stay_with_a_memory_of_its_context_and_a_second_move_is_refused() {
         MemoryMark::Wrong,
         Some("the second retry is not needed"),
     );
-
-    let (read_memory, history) = read(&mut engine, &memory.uid);
-    assert_eq!(read_memory.marks.len(), 2);
-    assert_eq!(history.len(), 2, "the whole history is kept: {history:?}");
-    assert_eq!(
-        history[1].reason.as_deref(),
-        Some("the second retry is not needed")
+    // A sub-context the repository is bound to as well, so the memory can move there (D222 (1)).
+    let ops = send(
+        &mut engine,
+        &Actor::Human,
+        CommandKind::CreateContext {
+            name: "Ops".into(),
+            parent: Some(platform.id),
+        },
     );
+    assert_eq!(state_of(&ops), OperationState::Done, "{ops:?}");
+    let ops = ops
+        .iter()
+        .find_map(|event| match event {
+            Event::ContextsChanged {
+                context: Some(context),
+                ..
+            } => Some(context.clone()),
+            _ => None,
+        })
+        .expect("the context");
+    join(&mut engine, ops.id, &world.root);
 
     let moved = send(
         &mut engine,
         &Actor::Human,
         CommandKind::MoveMemoryToContext {
             uid: memory.uid.clone(),
-            context: platform.id,
+            context: ops.id,
         },
     );
-    assert_eq!(state_of(&moved), OperationState::Failed);
-    assert_eq!(failure(&moved), "The memory is already in a context.");
-    assert!(
+    assert_eq!(state_of(&moved), OperationState::Done, "{moved:?}");
+    let (read_memory, history) = read(&mut engine, &memory.uid);
+    assert_eq!(read_memory.scope, "Platform / Ops");
+    assert_eq!(read_memory.marks.len(), 2, "the marks move with it");
+    assert_eq!(history.len(), 2, "the whole history is kept: {history:?}");
+    assert_eq!(
         listed_uids(&mut engine, "", None, None)
             .iter()
             .filter(|uid| **uid == memory.uid)
-            .count()
-            == 1,
-        "the memory is listed once, from the context"
+            .count(),
+        1,
+        "the memory is listed once"
     );
 }
 

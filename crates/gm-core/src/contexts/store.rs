@@ -708,6 +708,22 @@ impl ContextStore {
         Ok(())
     }
 
+    /// Moves a memory of `contexts.db` to `context` (D222 (1)): it is attached there and detached from
+    /// every other context, in one transaction. Its uid, text, history and marks stay. Moving it to
+    /// the context it is in already, and that alone, changes nothing else.
+    pub fn move_memory_to(&mut self, uid: &str, context: i64) -> Result<(), StoreError> {
+        let tx = begin(&mut self.conn)?;
+        let id = memories::id_of_uid(&tx, uid)?;
+        context_row(&tx, context)?;
+        attach(&tx, id, context)?;
+        tx.execute(
+            "DELETE FROM memory_context WHERE memory_id = ?1 AND context_id != ?2",
+            params![id, context],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// The contexts a memory is attached to, by id.
     pub fn memory_contexts(&self, uid: &str) -> Result<Vec<i64>, StoreError> {
         let id = memories::id_of_uid(&self.conn, uid)?;

@@ -37,7 +37,6 @@ const NOT_VISIBLE: &str = "The context is not one this repository belongs to.";
 /// What attaching to a context that does not exist answers (D222 (3)).
 const NO_CONTEXT: &str = "Context not found.";
 const NOT_ATTACHED: &str = "The memory is not attached to that context.";
-const ALREADY_IN_CONTEXT: &str = "The memory is already in a context.";
 const MOVE_FIRST: &str = "The memory is in this repository only: move it to a context first.";
 const NO_CONTEXT_OF_ITS_OWN: &str =
     "The memory is in this repository only, so it has no context to detach from.";
@@ -1303,22 +1302,75 @@ pub(crate) fn delete_in_context(
     }])
 }
 
-/// `MoveMemoryToContext` (D193 (8)): repository memory `uid` is stored in `context` under the same
-/// uid, with its history and its sources, and then deleted here. A retry after a crash between the
-/// two writes finds the copy and only deletes. A different memory of the same text in the context
-/// refuses the move, and nothing is deleted.
+/// `MoveMemoryToContext` (D193 (8), D222 (1)): the person moves memory `uid` to `context`. A memory
+/// of a repository is stored in `context` under the same uid, with its history and its sources, and
+/// then deleted here; a retry after a crash between the two writes finds the copy and only deletes. A
+/// different memory of the same text in the context refuses the move, and nothing is deleted. A memory
+/// already in `contexts.db` is attached to `context` and detached from every other context, in one
+/// transaction, so it keeps its uid, text, history and marks.
 pub(crate) fn move_to_context(
+    id: OperationId,
+    stores: &mut Stores<'_>,
+    ctx: &Context<'_>,
+    is_human: bool,
+    uid: &str,
+    context: i64,
+) -> Result<Vec<Event>, String> {
+    memories::authorize(is_human, &MemoryAction::Move)?;
+    match home_of(stores, uid) {
+        Ok(Home::Repository(row)) => move_from_repository(id, stores, ctx, row, uid, context),
+        Ok(Home::Context) => move_between_contexts(id, stores, ctx, uid, context),
+        Err(message) => Err(message),
+    }
+}
+
+/// Moves a memory of `contexts.db` to `context` (D222 (1)). Its status and links are checked as for a
+/// move out of a repository.
+fn move_between_contexts(
     id: OperationId,
     stores: &mut Stores<'_>,
     ctx: &Context<'_>,
     uid: &str,
     context: i64,
 ) -> Result<Vec<Event>, String> {
-    let row = match home_of(stores, uid) {
-        Ok(Home::Repository(row)) => row,
-        Ok(Home::Context) => return Err(ALREADY_IN_CONTEXT.to_owned()),
-        Err(message) => return Err(message),
-    };
+    if !stores.reach.sees_context(context) {
+        return Err(NOT_VISIBLE.to_owned());
+    }
+    let contexts = stores
+        .reach
+        .store_mut()
+        .ok_or_else(|| MEMORY_MISSING.to_owned())?;
+    let memory = contexts
+        .read_memory_by_uid(uid)
+        .map_err(|e| named(e, MEMORY_MISSING))?;
+    if !matches!(
+        memory.status,
+        MemoryStatus::Proposed | MemoryStatus::Accepted
+    ) {
+        return Err(NOT_MOVABLE.to_owned());
+    }
+    if !memory.supersedes.is_empty() || !memory.superseded_by.is_empty() {
+        return Err(LINKED.to_owned());
+    }
+    contexts
+        .move_memory_to(uid, context)
+        .map_err(|e| named(e, MEMORY_MISSING))?;
+    let attached = contexts.memory_contexts(uid).map_err(|e| e.to_string())?;
+    let memory = contexts
+        .read_memory_by_uid(uid)
+        .map_err(|e| named(e, MEMORY_MISSING))?;
+    Ok(changed(id, ctx, &stores.reach, memory, false, &attached))
+}
+
+/// Moves a memory of the repository's own store to `context`, from its row `row` (D193 (8)).
+fn move_from_repository(
+    id: OperationId,
+    stores: &mut Stores<'_>,
+    ctx: &Context<'_>,
+    row: i64,
+    uid: &str,
+    context: i64,
+) -> Result<Vec<Event>, String> {
     let mut memory = stores
         .threads
         .read_memory(row)

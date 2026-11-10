@@ -571,7 +571,7 @@ fn memories_command(
         | CommandKind::RejectMemory { .. }
         | CommandKind::DeleteMemory { .. } => act_on_memory(id, &mut stores, ctx, is_human, kind),
         CommandKind::MoveMemoryToContext { uid, context } => {
-            memory_scope::move_to_context(id, &mut stores, ctx, uid, *context)
+            memory_scope::move_to_context(id, &mut stores, ctx, is_human, uid, *context)
         }
         CommandKind::AttachMemory { uid, context } => {
             memory_scope::attach(id, &mut stores, ctx, uid, *context)

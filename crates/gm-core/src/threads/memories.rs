@@ -71,6 +71,8 @@ pub enum MemoryAction {
     Delete,
     /// Marking a memory useful or wrong (D202): either actor may.
     Mark,
+    /// Moving a memory to another context: only the person (D222 (1)).
+    Move,
 }
 
 /// A state change of a memory (D192 (4)).
@@ -261,7 +263,7 @@ pub fn authorize(is_human: bool, action: &MemoryAction) -> Result<(), String> {
             Err("An agent must name at least one source for a memory.".to_owned())
         }
         MemoryAction::Propose { .. } | MemoryAction::Mark => Ok(()),
-        MemoryAction::Accept | MemoryAction::Reject | MemoryAction::Delete => {
+        MemoryAction::Accept | MemoryAction::Reject | MemoryAction::Delete | MemoryAction::Move => {
             Err("An agent can only propose a memory.".to_owned())
         }
     }
@@ -1809,6 +1811,7 @@ mod tests {
             MemoryAction::Accept,
             MemoryAction::Reject,
             MemoryAction::Delete,
+            MemoryAction::Move,
         ];
         for action in &actions {
             assert!(authorize(true, action).is_ok(), "a human may {action:?}");
@@ -1819,6 +1822,7 @@ mod tests {
             MemoryAction::Accept,
             MemoryAction::Reject,
             MemoryAction::Delete,
+            MemoryAction::Move,
         ] {
             let message = authorize(false, &action).expect_err("refused");
             assert_eq!(message, "An agent can only propose a memory.");
