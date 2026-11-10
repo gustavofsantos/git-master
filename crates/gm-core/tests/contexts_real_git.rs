@@ -2023,3 +2023,30 @@ fn a_memory_in_a_context_moves_to_another_visible_context_in_one_step_and_only_t
         "portal does not see Platform"
     );
 }
+
+#[test]
+fn a_person_proposes_into_any_context_and_an_agent_only_into_one_the_repository_sees() {
+    let world = World::new();
+    populate(&world);
+    let mut portal = engine_on(&world.path("portal"), &world.db);
+    let by_person = propose_at(
+        &mut portal,
+        &Actor::Human,
+        Some("Platform / Billing"),
+        "Refund states are listed in the runbook",
+    );
+    assert_eq!(state_of(&by_person), OperationState::Done, "{by_person:?}");
+    assert_eq!(memory_of(&by_person).scope, "Platform / Billing");
+
+    let by_agent = propose_at(
+        &mut portal,
+        &agent(),
+        Some("Platform / Billing"),
+        "An agent cannot reach this context",
+    );
+    assert_eq!(state_of(&by_agent), OperationState::Failed);
+    assert!(
+        failure(&by_agent).is_some_and(|message| message.contains("is not a context this repository is bound to")),
+        "{by_agent:?}"
+    );
+}

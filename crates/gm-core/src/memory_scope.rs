@@ -398,6 +398,21 @@ impl Reach {
         self.reach_of(scope).into_iter().map(|(id, _)| id).collect()
     }
 
+    /// The context a person's proposal names, by path or unique name: any context of the tree, bound or
+    /// not (D223 (6)). A name resolves first among the bound ones, as a read does.
+    fn context_named_by_person(&self, name: &str) -> Result<i64, String> {
+        if !self.read {
+            return Err(self.note.clone().unwrap_or_default());
+        }
+        match self.scope(Some(name)) {
+            Ok(Scope::Context(id)) => Ok(id),
+            Ok(Scope::All) => Err(format!(
+                "\"{name}\" is not a context: leave the context out to propose for this repository."
+            )),
+            Err(message) => Err(message),
+        }
+    }
+
     /// The context a proposal names, by path or unique name. It must be one the repository is bound to
     /// or inherits from: an agent proposes only into those (D191 (4)(d), D222 (3)).
     fn context_named(&self, name: &str) -> Result<i64, String> {
@@ -962,7 +977,11 @@ pub(crate) fn propose_in_context(
             sources: proposal.sources.len(),
         },
     )?;
-    let context = stores.reach.context_named(name)?;
+    let context = if is_human {
+        stores.reach.context_named_by_person(name)?
+    } else {
+        stores.reach.context_named(name)?
+    };
     let repo_id = writer_of(&mut stores.reach, ctx)?;
     store_proposal(id, stores, ctx, actor, &repo_id, context, proposal)
 }
@@ -1333,9 +1352,6 @@ fn move_between_contexts(
     uid: &str,
     context: i64,
 ) -> Result<Vec<Event>, String> {
-    if !stores.reach.sees_context(context) {
-        return Err(NOT_VISIBLE.to_owned());
-    }
     let contexts = stores
         .reach
         .store_mut()
@@ -1383,9 +1399,6 @@ fn move_from_repository(
     }
     if !memory.supersedes.is_empty() || !memory.superseded_by.is_empty() {
         return Err(LINKED.to_owned());
-    }
-    if !stores.reach.sees_context(context) {
-        return Err(NOT_VISIBLE.to_owned());
     }
     let repo_id = writer_of(&mut stores.reach, ctx)?;
     for source in &mut memory.sources {
