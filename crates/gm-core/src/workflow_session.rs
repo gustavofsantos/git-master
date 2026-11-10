@@ -177,14 +177,25 @@ impl GitActions for Actions<'_> {
     }
 }
 
-/// The directories workflows are read from: the user's directory first, then
-/// each `gitmaster.workflowPath` value in config order.
+/// The repository's workflows folder, `.git/gitmaster/workflows` in the common Git directory, so
+/// every worktree of the repository shares it (D219 (2)). `None` when Git does not say where its
+/// directory is. The folder may not exist: a missing folder is no workflows.
+pub(crate) fn repository_dir(git: &dyn GitPort, root: &Path) -> Option<PathBuf> {
+    git.common_dir(root)
+        .ok()
+        .map(|dir| dir.join("gitmaster").join("workflows"))
+}
+
+/// The directories workflows are read from: the repository's folder first (when it wins a name
+/// against the user's, D219 (2)), then the user's directory, then each `gitmaster.workflowPath`
+/// value in config order.
 pub(crate) fn workflow_dirs(
     git: &dyn GitPort,
     root: &Path,
     user_dir: Option<&Path>,
 ) -> Result<Vec<PathBuf>, String> {
-    let mut dirs: Vec<PathBuf> = user_dir.map(Path::to_path_buf).into_iter().collect();
+    let mut dirs: Vec<PathBuf> = repository_dir(git, root).into_iter().collect();
+    dirs.extend(user_dir.map(Path::to_path_buf));
     for value in git
         .config_values(root, WORKFLOW_PATH_KEY)
         .map_err(|e| e.0)?
@@ -203,8 +214,14 @@ fn expand_home(value: &str) -> PathBuf {
 }
 
 /// The workflow file `path` names, when its folder is one of `dirs` and is not
-/// inside the repository (D73). The result holds the folder canonicalized.
-pub(crate) fn workflow_file(root: &Path, dirs: &[PathBuf], path: &str) -> Result<PathBuf, String> {
+/// inside the repository (D73), except the repository's own folder `repository` (D219 (2)). The
+/// result holds the folder canonicalized.
+pub(crate) fn workflow_file(
+    root: &Path,
+    dirs: &[PathBuf],
+    repository: Option<&Path>,
+    path: &str,
+) -> Result<PathBuf, String> {
     let path = Path::new(path);
     if !path.is_absolute() {
         return Err(format!("{} is not an absolute path", path.display()));
@@ -222,8 +239,12 @@ pub(crate) fn workflow_file(root: &Path, dirs: &[PathBuf], path: &str) -> Result
     let parent = path.parent().unwrap_or(path);
     let folder = std::fs::canonicalize(parent)
         .map_err(|_| format!("the folder {} does not exist", parent.display()))?;
+    let in_repository_folder = repository
+        .and_then(|dir| std::fs::canonicalize(dir).ok())
+        .is_some_and(|dir| dir == folder);
     if let Ok(repo) = std::fs::canonicalize(root)
         && folder.starts_with(&repo)
+        && !in_repository_folder
     {
         return Err(format!(
             "{} is inside the repository; workflows are only read from your own config (D73)",

@@ -38,6 +38,7 @@ pub mod review_store;
 mod runner;
 pub mod scorecards;
 pub mod script;
+mod script_change;
 mod script_scorecards;
 mod script_session;
 mod script_stacks;

@@ -340,6 +340,8 @@ mod tests {
             auto_approve: false,
             enabled,
             title: None,
+            location: gm_schema::WorkflowLocation::User,
+            role: gm_schema::WorkflowRole::Workflow,
         }
     }
 

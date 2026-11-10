@@ -397,6 +397,7 @@ mod tests {
             },
             concurrency,
             inputs: Vec::new(),
+            review: false,
         }
     }
 

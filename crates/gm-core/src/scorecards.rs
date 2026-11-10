@@ -41,6 +41,23 @@ pub fn listed(rows: Vec<Scorecard>, include_stale: bool, limit: usize) -> Vec<Sc
         .collect()
 }
 
+/// The longest run id a scorecard keeps (D219).
+pub const WORKFLOW_RUN_MAX: usize = 64;
+
+/// The run id a scorecard is linked to, from the `GITMASTER_WORKFLOW_RUN` a process was started
+/// with (D219): the text, trimmed of its blank space, when it is 1 to 64 characters of `a-z`,
+/// `A-Z`, `0-9`, `_` or `-`. Anything else is dropped, so nothing else is stored. This is a link
+/// for reading, not a check: a run id that names no run is kept as it was given.
+#[must_use]
+pub fn workflow_run_link(text: &str) -> Option<String> {
+    let text = text.trim();
+    let valid = (1..=WORKFLOW_RUN_MAX).contains(&text.chars().count())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    valid.then(|| text.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use gm_schema::{CommentLabel, ScorecardStatus};
@@ -110,5 +127,33 @@ mod tests {
         assert_eq!(all, [4, 3, 2]);
         let cut: Vec<i64> = listed(rows, true, 2).iter().map(|r| r.id).collect();
         assert_eq!(cut, [4, 3]);
+    }
+
+    #[test]
+    fn a_run_id_is_kept_when_it_is_a_short_plain_word_and_dropped_otherwise() {
+        assert_eq!(workflow_run_link("abc123").as_deref(), Some("abc123"));
+        assert_eq!(
+            workflow_run_link("  run-7_x \n").as_deref(),
+            Some("run-7_x")
+        );
+        assert_eq!(workflow_run_link(&"a".repeat(64)), Some("a".repeat(64)));
+        assert_eq!(
+            workflow_run_link(&"a".repeat(65)),
+            None,
+            "over 64 characters"
+        );
+        assert_eq!(workflow_run_link(""), None);
+        assert_eq!(workflow_run_link("   "), None);
+        assert_eq!(
+            workflow_run_link("a b"),
+            None,
+            "a space inside is not allowed"
+        );
+        assert_eq!(workflow_run_link("a;rm -rf"), None);
+        assert_eq!(
+            workflow_run_link("ü"),
+            None,
+            "only ASCII letters and digits"
+        );
     }
 }

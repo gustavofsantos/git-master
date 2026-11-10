@@ -39,17 +39,28 @@ fn listed_for_call(
     args: &Value,
     run_branch: Option<String>,
 ) -> Result<Value, String> {
-    let named = text_arg(args, "branch");
-    let head = match (&named, &run_branch) {
-        (None, None) => git.status(root).map_err(|e| e.0)?.branch.head,
-        _ => None,
-    };
-    let branch = pick_branch(named, run_branch, head)?;
+    let branch = call_branch(git, root, args, run_branch)?;
     list(git, root, &branch, text_arg(args, "name").as_deref())
 }
 
 fn text_arg(args: &Value, key: &str) -> Option<String> {
     args.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// The branch a read call names in `branch`, else the run's branch, else the branch HEAD is on
+/// (shared with `ctx.change`).
+pub(crate) fn call_branch(
+    git: &dyn GitPort,
+    root: &Path,
+    args: &Value,
+    run_branch: Option<String>,
+) -> Result<String, String> {
+    let named = text_arg(args, "branch");
+    let head = match (&named, &run_branch) {
+        (None, None) => git.status(root).map_err(|e| e.0)?.branch.head,
+        _ => None,
+    };
+    pick_branch(named, run_branch, head)
 }
 
 /// The branch a call reads: the one it names, else the run's, else HEAD's.

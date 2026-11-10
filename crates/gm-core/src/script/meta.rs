@@ -7,7 +7,14 @@ use serde_json::{Map, Value};
 use crate::script::catalog;
 
 /// The fields `M.meta` may hold.
-pub const FIELDS: &[&str] = &["name", "description", "trigger", "concurrency", "inputs"];
+pub const FIELDS: &[&str] = &[
+    "name",
+    "description",
+    "trigger",
+    "concurrency",
+    "inputs",
+    "review",
+];
 /// The fields of `M.meta.trigger`.
 pub const TRIGGER_FIELDS: &[&str] = &["on", "match", "key"];
 /// The fields of one input.
@@ -64,6 +71,9 @@ pub struct Meta {
     pub concurrency: Concurrency,
     /// Sorted by name: a Lua table has no order.
     pub inputs: Vec<InputSpec>,
+    /// `review = true`: a review, listed by the **Run review…** picker. It runs only on a manual
+    /// trigger (D219 (1)).
+    pub review: bool,
 }
 
 /// One problem in `M.meta`. `field` is the path, such as `trigger.on` or `inputs.ticket.type`;
@@ -103,6 +113,7 @@ pub fn parse(meta: &Value) -> Result<Meta, Vec<MetaProblem>> {
     let trigger = trigger(object, &mut problems);
     let concurrency = concurrency(object, &mut problems);
     let inputs = inputs(object, &mut problems);
+    let review = review(object, &mut problems);
     if let Some(trigger) = &trigger
         && trigger.on != "manual"
         && !inputs.is_empty()
@@ -115,6 +126,18 @@ pub fn parse(meta: &Value) -> Result<Meta, Vec<MetaProblem>> {
             ),
         ));
     }
+    if let Some(trigger) = &trigger
+        && review
+        && trigger.on != "manual"
+    {
+        problems.push(problem(
+            "review",
+            format!(
+                "a review runs only on a manual trigger; `review = true` cannot run on `{}`. No event starts a review (D219)",
+                trigger.on
+            ),
+        ));
+    }
     match (name, trigger) {
         (Some(name), Some(trigger)) if problems.is_empty() => Ok(Meta {
             name,
@@ -122,8 +145,21 @@ pub fn parse(meta: &Value) -> Result<Meta, Vec<MetaProblem>> {
             trigger,
             concurrency,
             inputs,
+            review,
         }),
         _ => Err(problems),
+    }
+}
+
+/// `review`: a boolean, false when absent (D219 (1)).
+fn review(object: &Map<String, Value>, problems: &mut Vec<MetaProblem>) -> bool {
+    match object.get("review") {
+        None => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(_) => {
+            problems.push(problem("review", "M.meta.review must be true or false"));
+            false
+        }
     }
 }
 
@@ -636,5 +672,45 @@ mod tests {
         assert_eq!(locate_line(source, "concurrency"), 5);
         assert_eq!(locate_line(source, ""), 2);
         assert_eq!(locate_line(source, "missing"), 0);
+    }
+
+    #[test]
+    fn review_is_a_boolean_and_false_when_absent() {
+        assert!(!ok(&json!({ "name": "w", "trigger": { "on": "manual" } })).review);
+        assert!(
+            !ok(&json!({ "name": "w", "trigger": { "on": "manual" }, "review": false })).review
+        );
+        assert!(ok(&json!({ "name": "w", "trigger": { "on": "manual" }, "review": true })).review);
+    }
+
+    #[test]
+    fn review_must_be_true_or_false() {
+        let meta = json!({ "name": "w", "trigger": { "on": "manual" }, "review": "yes" });
+        assert_eq!(fields(&meta), ["review"]);
+        assert_eq!(
+            parse(&meta).unwrap_err()[0].message,
+            "M.meta.review must be true or false"
+        );
+    }
+
+    #[test]
+    fn a_review_needs_a_manual_trigger() {
+        for on in ["commit.created", "before.push", "transform.commit_message"] {
+            let meta = json!({ "name": "w", "trigger": { "on": on }, "review": true });
+            assert_eq!(fields(&meta), ["review"], "{on}");
+        }
+        let refused =
+            parse(&json!({ "name": "w", "trigger": { "on": "commit.created" }, "review": true }))
+                .unwrap_err();
+        assert!(
+            refused[0].message.contains("manual trigger"),
+            "{}",
+            refused[0].message
+        );
+        // A false flag does not restrict the trigger.
+        assert!(
+            parse(&json!({ "name": "w", "trigger": { "on": "commit.created" }, "review": false }))
+                .is_ok()
+        );
     }
 }

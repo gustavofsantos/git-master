@@ -693,6 +693,8 @@ impl RunHost<'_> {
             }
         };
         spec.path = self.inner.login_path.get().cloned();
+        // The run's id, so a record the program writes links back to this run (D219).
+        spec.env = vec![(exec::RUN_ENV.to_owned(), self.run.to_string())];
         // Set before the program starts: its output may shape what comes next (D101).
         self.exec_seen = true;
         let result = exec::run(&spec, &self.cancel);

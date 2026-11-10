@@ -4488,6 +4488,7 @@ impl Engine {
                 summary,
                 comments,
                 member,
+                workflow_run,
             } => {
                 let request = ScorecardRequest {
                     name,
@@ -4496,6 +4497,7 @@ impl Engine {
                     status: *status,
                     summary,
                     comments,
+                    workflow_run: workflow_run.as_deref(),
                 };
                 self.publish_scorecard(id, actor, member.as_deref(), &request)
             }
@@ -4658,7 +4660,7 @@ impl Engine {
             origin,
             model: None,
             run_thread: None,
-            workflow_run: None,
+            workflow_run: request.workflow_run.map(str::to_owned),
             at: now_ms(),
         };
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
@@ -5219,6 +5221,7 @@ impl Engine {
             &root,
             self.workflow_user_dir.as_deref(),
         )?;
+        let repository = workflow_session::repository_dir(self.git.as_ref(), &root);
         if let Some(user) = self.workflow_user_dir.as_deref()
             && Path::new(path).parent() == Some(user)
             && !user.exists()
@@ -5226,7 +5229,15 @@ impl Engine {
             std::fs::create_dir_all(user)
                 .map_err(|e| format!("could not create {}: {e}", user.display()))?;
         }
-        let file = workflow_session::workflow_file(&root, &dirs, path)?;
+        // The repository's folder is created only by a save into it (D219 (2)).
+        if let Some(folder) = repository.as_deref()
+            && Path::new(path).parent() == Some(folder)
+            && !folder.exists()
+        {
+            std::fs::create_dir_all(folder)
+                .map_err(|e| format!("could not create {}: {e}", folder.display()))?;
+        }
+        let file = workflow_session::workflow_file(&root, &dirs, repository.as_deref(), path)?;
         if u64::try_from(source.len()).unwrap_or(u64::MAX) > loader::MAX_FILE {
             return Err("the workflow is larger than 256 KiB".to_owned());
         }
@@ -5266,7 +5277,8 @@ impl Engine {
             &root,
             self.workflow_user_dir.as_deref(),
         )?;
-        let file = workflow_session::workflow_file(&root, &dirs, path)?;
+        let repository = workflow_session::repository_dir(self.git.as_ref(), &root);
+        let file = workflow_session::workflow_file(&root, &dirs, repository.as_deref(), path)?;
         check_hash(&file, expected_hash)?;
         let trash = self
             .workflow_trash_dir
@@ -5305,8 +5317,9 @@ impl Engine {
             root,
             self.workflow_user_dir.as_deref(),
         )?;
+        let repository = workflow_session::repository_dir(self.git.as_ref(), root);
         let engine = LuauEngine::new();
-        let mut loaded = loader::load_dirs(&engine, &dirs, Some(root));
+        let mut loaded = loader::load_dirs(&engine, &dirs, Some(root), repository.as_deref());
         builtins::add_to(&engine, &mut loaded);
         Ok(loaded)
     }
@@ -5829,6 +5842,8 @@ struct ScorecardRequest<'a> {
     status: ScorecardStatus,
     summary: &'a ScorecardSummary,
     comments: &'a [ScorecardCommentInput],
+    /// The workflow run the agent was started by (D219), a link for reading.
+    workflow_run: Option<&'a str>,
 }
 
 /// A text without its surrounding blank space; refused when it is empty or longer

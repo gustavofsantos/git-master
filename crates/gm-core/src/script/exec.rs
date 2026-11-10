@@ -19,6 +19,10 @@ pub const STDOUT_LIMIT: usize = 1024 * 1024;
 /// Stderr kept for the error message.
 pub const STDERR_LIMIT: usize = 16 * 1024;
 
+/// The environment variable that carries the id of the run to the program (D219): a review's
+/// record links to its run through it. A link for reading, never a check of who wrote a record.
+pub const RUN_ENV: &str = "GITMASTER_WORKFLOW_RUN";
+
 const POLL: Duration = Duration::from_millis(20);
 const KEYS: [&str; 4] = ["argv", "stdin", "timeout", "format"];
 const ARGV_ERROR: &str = "`argv` must be a non-empty list of strings";
@@ -36,6 +40,8 @@ pub struct ExecSpec {
     /// as git gets it. `None` keeps the app's own, which is the system's
     /// minimal PATH when the window was opened from the Dock or the Finder.
     pub path: Option<String>,
+    /// Variables the program gets besides the app's own: `RUN_ENV` for a run (D219).
+    pub env: Vec<(String, String)>,
 }
 
 /// Reads the `with` table of an `exec` call: `argv` (non-empty list of
@@ -99,6 +105,7 @@ pub fn spec(input: &Value, cwd: &Path) -> Result<ExecSpec, String> {
         cwd: cwd.to_path_buf(),
         json,
         path: None,
+        env: Vec::new(),
     })
 }
 
@@ -150,6 +157,9 @@ pub fn run(spec: &ExecSpec, cancel: &AtomicBool) -> ExecResult {
     if let Some(path) = &spec.path {
         // Set before spawning: the program is then looked up in this PATH too.
         command.env("PATH", path);
+    }
+    for (key, value) in &spec.env {
+        command.env(key, value);
     }
     command
         .args(args)
@@ -328,6 +338,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             json,
             path: None,
+            env: Vec::new(),
         }
     }
 
@@ -349,6 +360,21 @@ mod tests {
         assert_eq!(result.output["text"], "hello");
         assert_eq!(result.output["exit_code"], 0);
         assert_eq!(result.output["truncated"], false);
+    }
+
+    #[test]
+    fn the_run_id_reaches_the_program_in_its_environment() {
+        let mut spec = exec(&["env"], None, Duration::from_secs(10), false);
+        spec.env = vec![(RUN_ENV.to_owned(), "42".to_owned())];
+        let result = run(&spec, &AtomicBool::new(false));
+        assert_eq!(result.outcome, "done");
+        assert!(
+            result.output["text"]
+                .as_str()
+                .is_some_and(|text| text.lines().any(|line| line == "GITMASTER_WORKFLOW_RUN=42")),
+            "{}",
+            result.output["text"]
+        );
     }
 
     #[test]

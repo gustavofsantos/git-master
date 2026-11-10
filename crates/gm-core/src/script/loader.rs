@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use gm_schema::WorkflowLocation;
+
 use super::inspect::inspect;
 use super::meta::Meta;
 use super::port::{ScriptDiagnostic, ScriptEngine};
@@ -31,6 +33,9 @@ pub struct ScriptEntry {
     pub meta: Result<Meta, Vec<ScriptDiagnostic>>,
     /// Whether the script ships with the app (`WF4b`, D164(2)): no file, `path` is `builtin:<name>`.
     pub builtin: bool,
+    /// Where the file was read from (D219 (2)): the user's folder unless the loader was given the
+    /// repository's folder for it.
+    pub location: WorkflowLocation,
 }
 
 /// A directory or file that was not read as a workflow, and why. The page shows these as warnings.
@@ -69,9 +74,17 @@ pub fn default_user_dir() -> Option<PathBuf> {
 }
 
 /// Loads every `*.lua` directly inside each directory, directories in the given order and files
-/// by name. See the module doc and the tests for the rules.
-pub fn load_dirs(engine: &dyn ScriptEngine, dirs: &[PathBuf], repo_root: Option<&Path>) -> Loaded {
+/// by name. `repository_dir` is the repository's `.git/gitmaster/workflows` (D219 (2)): it sits
+/// inside the working tree, so it is the one folder inside `repo_root` that is read. Its files
+/// are labelled `Repository`. See the module doc and the tests for the rules.
+pub fn load_dirs(
+    engine: &dyn ScriptEngine,
+    dirs: &[PathBuf],
+    repo_root: Option<&Path>,
+    repository_dir: Option<&Path>,
+) -> Loaded {
     let repo_root = repo_root.map(canonical);
+    let repository_dir = repository_dir.map(canonical);
     let mut loaded = Loaded::default();
     let mut seen = HashSet::new();
     for dir in dirs {
@@ -89,9 +102,11 @@ pub fn load_dirs(engine: &dyn ScriptEngine, dirs: &[PathBuf], repo_root: Option<
             });
             continue;
         }
-        if repo_root
-            .as_ref()
-            .is_some_and(|root| real.starts_with(root))
+        let is_repository = repository_dir.as_ref() == Some(&real);
+        if !is_repository
+            && repo_root
+                .as_ref()
+                .is_some_and(|root| real.starts_with(root))
         {
             loaded.ignored.push(Ignored {
                 path: dir.clone(),
@@ -101,9 +116,17 @@ pub fn load_dirs(engine: &dyn ScriptEngine, dirs: &[PathBuf], repo_root: Option<
         }
         match script_files(dir) {
             Ok(listing) => {
+                let location = if is_repository {
+                    WorkflowLocation::Repository
+                } else {
+                    WorkflowLocation::User
+                };
                 loaded
                     .entries
-                    .extend(listing.scripts.iter().map(|file| load_file(engine, file)));
+                    .extend(listing.scripts.iter().map(|file| ScriptEntry {
+                        location,
+                        ..load_file(engine, file)
+                    }));
                 loaded
                     .ignored
                     .extend(listing.tomls.into_iter().map(|path| Ignored {
@@ -160,6 +183,7 @@ pub fn load_file(engine: &dyn ScriptEngine, path: &Path) -> ScriptEntry {
         source,
         meta,
         builtin: false,
+        location: WorkflowLocation::User,
     }
 }
 
@@ -219,27 +243,38 @@ fn refused(path: &Path, file_name: &str, hash: String, message: impl Into<String
             message: message.into(),
         }]),
         builtin: false,
+        location: WorkflowLocation::User,
     }
 }
 
 /// The later of two loaded files with the same workflow name is refused: a run must never pick
-/// between two definitions.
+/// between two definitions. The one exception is the repository's folder, which is loaded first:
+/// a repository workflow wins whole, and the user's workflow of the same name is shadowed by it
+/// (D219 (2)).
 fn mark_duplicates(entries: &mut [ScriptEntry]) {
-    let mut first: HashMap<String, PathBuf> = HashMap::new();
+    let mut first: HashMap<String, (PathBuf, WorkflowLocation)> = HashMap::new();
     for entry in entries.iter_mut() {
         if entry.meta.is_err() {
             continue;
         }
-        if let Some(earlier) = first.get(&entry.name) {
-            let message = format!(
-                "another workflow named \"{}\" is loaded from {}",
-                entry.name,
-                earlier.display()
-            );
+        if let Some((earlier, earlier_location)) = first.get(&entry.name) {
+            let message = if *earlier_location == WorkflowLocation::Repository {
+                format!(
+                    "shadowed: the repository has a workflow named \"{}\" at {}",
+                    entry.name,
+                    earlier.display()
+                )
+            } else {
+                format!(
+                    "another workflow named \"{}\" is loaded from {}",
+                    entry.name,
+                    earlier.display()
+                )
+            };
             entry.meta = Err(vec![ScriptDiagnostic { line: 0, message }]);
             entry.name = stem(&entry.path);
         } else {
-            first.insert(entry.name.clone(), entry.path.clone());
+            first.insert(entry.name.clone(), (entry.path.clone(), entry.location));
         }
     }
 }
@@ -290,7 +325,88 @@ return M
     }
 
     fn load(dirs: &[PathBuf], repo_root: Option<&Path>) -> Loaded {
-        load_dirs(&LuauEngine::new(), dirs, repo_root)
+        load_dirs(&LuauEngine::new(), dirs, repo_root, None)
+    }
+
+    fn load_repository(dirs: &[PathBuf], repo_root: &Path, repository: &Path) -> Loaded {
+        load_dirs(&LuauEngine::new(), dirs, Some(repo_root), Some(repository))
+    }
+
+    #[test]
+    fn the_repository_folder_inside_the_working_tree_is_read_and_labelled() {
+        let repo = tempfile::tempdir().unwrap();
+        let folder = repo.path().join(".git").join("gitmaster").join("workflows");
+        std::fs::create_dir_all(&folder).unwrap();
+        write(&folder, "task.lua", named("task"));
+        let loaded = load_repository(std::slice::from_ref(&folder), repo.path(), &folder);
+        assert_eq!(names(&loaded), ["task"]);
+        assert_eq!(loaded.entries[0].location, WorkflowLocation::Repository);
+        assert!(loaded.ignored.is_empty());
+    }
+
+    #[test]
+    fn a_folder_of_the_working_tree_stays_ignored_next_to_the_repository_folder() {
+        let repo = tempfile::tempdir().unwrap();
+        let inside = repo.path().join("workflows");
+        let folder = repo.path().join(".git").join("gitmaster").join("workflows");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&folder).unwrap();
+        write(&inside, "tree.lua", named("tree"));
+        write(&folder, "task.lua", named("task"));
+        let loaded = load_repository(&[inside.clone(), folder.clone()], repo.path(), &folder);
+        assert_eq!(names(&loaded), ["task"]);
+        assert_eq!(loaded.ignored.len(), 1);
+        assert_eq!(loaded.ignored[0].path, inside);
+    }
+
+    #[test]
+    fn a_repository_workflow_shadows_the_user_one_of_the_same_name() {
+        let repo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let folder = repo.path().join(".git").join("gitmaster").join("workflows");
+        std::fs::create_dir_all(&folder).unwrap();
+        write(&folder, "dup.lua", named("dup"));
+        write(user.path(), "dup.lua", named("dup"));
+        let dirs = [folder.clone(), user.path().to_path_buf()];
+        let loaded = load_repository(&dirs, repo.path(), &folder);
+        let repository = loaded
+            .entries
+            .iter()
+            .find(|e| e.location == WorkflowLocation::Repository);
+        assert!(
+            repository.is_some_and(|e| e.meta.is_ok()),
+            "the repository one wins whole"
+        );
+        let shadowed = loaded
+            .entries
+            .iter()
+            .find(|e| e.location == WorkflowLocation::User)
+            .unwrap();
+        let problems = shadowed.meta.as_ref().unwrap_err();
+        assert!(
+            problems[0]
+                .message
+                .starts_with("shadowed: the repository has a workflow named \"dup\"")
+        );
+        assert_eq!(shadowed.name, "dup");
+    }
+
+    #[test]
+    fn two_user_files_of_one_name_are_still_refused_as_before() {
+        let user = tempfile::tempdir().unwrap();
+        write(user.path(), "a.lua", named("same"));
+        write(user.path(), "b.lua", named("same"));
+        let loaded = load(&[user.path().to_path_buf()], None);
+        let later = loaded
+            .entries
+            .iter()
+            .find(|e| e.file_name == "b.lua")
+            .unwrap();
+        assert!(
+            later.meta.as_ref().unwrap_err()[0]
+                .message
+                .starts_with("another workflow named")
+        );
     }
 
     #[test]

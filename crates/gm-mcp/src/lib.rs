@@ -72,6 +72,12 @@ pub fn command(
         );
         return 1;
     };
+    // The run that started this process, if any: the scorecards it publishes link to it (D219).
+    let run = std::env::var(gm_core::script::exec::RUN_ENV).ok();
+    session.set_workflow_run(
+        run.as_deref()
+            .and_then(gm_core::scorecards::workflow_run_link),
+    );
     match serve(&mut session, input, output) {
         Ok(()) => 0,
         Err(e) => {

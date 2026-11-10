@@ -9,6 +9,9 @@ pub struct Session {
     engine: Engine,
     client: String,
     label: Option<String>,
+    /// The workflow run that started this connection, from `GITMASTER_WORKFLOW_RUN` (D219): a link
+    /// that scorecards keep, never a check.
+    workflow_run: Option<String>,
     next_id: u64,
 }
 
@@ -19,6 +22,7 @@ impl Session {
             engine,
             client: "unknown".to_owned(),
             label: None,
+            workflow_run: None,
             next_id: 1,
         };
         session.run(CommandKind::OpenRepo {
@@ -33,6 +37,16 @@ impl Session {
         if !name.is_empty() {
             name.clone_into(&mut self.client);
         }
+    }
+
+    /// Sets the run that started this connection, already checked by `gm_core` (D219), or clears it.
+    pub fn set_workflow_run(&mut self, run: Option<String>) {
+        self.workflow_run = run;
+    }
+
+    /// The run that started this connection, if any.
+    pub fn workflow_run(&self) -> Option<String> {
+        self.workflow_run.clone()
     }
 
     /// Sets the label the agent gave for the call in hand, or clears it. The label is shown with

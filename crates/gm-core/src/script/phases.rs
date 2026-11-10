@@ -274,6 +274,7 @@ mod tests {
             source: String::new(),
             meta: parse(&json!({ "name": file, "trigger": trigger })).map_err(|_| Vec::new()),
             builtin: false,
+            location: gm_schema::WorkflowLocation::User,
         }
     }
 

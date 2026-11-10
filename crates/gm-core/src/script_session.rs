@@ -11,7 +11,8 @@ use std::sync::mpsc;
 
 use gm_schema::{
     Event, OperationId, WorkflowCallRecord, WorkflowDryCall, WorkflowDryRun, WorkflowEnd,
-    WorkflowInfo, WorkflowInput, WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,
+    WorkflowInfo, WorkflowInput, WorkflowRole, WorkflowRunDetail, WorkflowRunStatus,
+    WorkflowRunSummary,
 };
 use serde_json::{Value, json};
 
@@ -25,6 +26,7 @@ use crate::script::port::{Budgets, ScriptDiagnostic, ScriptEngine};
 use crate::script::run::{
     Clock, EffectCall, EffectResult, Effects, EventSink, Runtime, RuntimeConfig, ScriptEvent,
 };
+use crate::script_change;
 use crate::script_scorecards;
 use crate::script_stacks::{self, PlanBook, Started};
 use crate::workflow_session::{Actions, Effected, GitActions};
@@ -226,6 +228,12 @@ impl ScriptSession {
                 &call.args,
                 self.runtime.trigger_branch(call.run),
             ))),
+            "change" => Some(Started::Ended(script_change::read(
+                git,
+                &self.root,
+                &call.args,
+                self.runtime.trigger_branch(call.run),
+            ))),
             _ => None,
         };
         if let Some(started) = started {
@@ -347,7 +355,7 @@ fn effect(
 
 /// One script as the front ends list it. A script that does not load carries its first problem.
 pub(crate) fn workflow_info(entry: &ScriptEntry) -> WorkflowInfo {
-    let (trigger, key, inputs, error) = match &entry.meta {
+    let (trigger, key, inputs, error, role) = match &entry.meta {
         Ok(meta) => (
             meta.trigger.on.clone(),
             meta.trigger.key.clone(),
@@ -359,6 +367,11 @@ pub(crate) fn workflow_info(entry: &ScriptEntry) -> WorkflowInfo {
                 })
                 .collect(),
             None,
+            if meta.review {
+                WorkflowRole::Review
+            } else {
+                WorkflowRole::Workflow
+            },
         ),
         Err(problems) => (
             String::new(),
@@ -371,6 +384,7 @@ pub(crate) fn workflow_info(entry: &ScriptEntry) -> WorkflowInfo {
                     format!("line {}: {}", p.line, p.message)
                 }
             }),
+            WorkflowRole::Workflow,
         ),
     };
     WorkflowInfo {
@@ -390,6 +404,8 @@ pub(crate) fn workflow_info(entry: &ScriptEntry) -> WorkflowInfo {
         title: builtins::get(&entry.name)
             .filter(|_| entry.builtin)
             .map(|builtin| builtin.title.to_owned()),
+        location: entry.location,
+        role,
     }
 }
 

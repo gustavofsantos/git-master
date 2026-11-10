@@ -977,6 +977,8 @@ mod tests {
             auto_approve: false,
             enabled: false,
             title: None,
+            location: gm_schema::WorkflowLocation::User,
+            role: gm_schema::WorkflowRole::Workflow,
         }
     }
 
@@ -1016,6 +1018,8 @@ mod tests {
             auto_approve: granted,
             enabled: false,
             title: Some("Restack stale stacks after fetch".into()),
+            location: gm_schema::WorkflowLocation::User,
+            role: gm_schema::WorkflowRole::Workflow,
         }
     }
 

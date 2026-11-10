@@ -149,6 +149,7 @@ fn publish(
             summary,
             comments,
             member: None,
+            workflow_run: None,
         }),
     )
 }
@@ -425,6 +426,7 @@ fn a_person_publishes_no_scorecard_and_an_agent_cannot_resolve_one_of_its_commen
             summary: summary(CommentLabel::Note, &[]),
             comments: Vec::new(),
             member: None,
+            workflow_run: None,
         }),
     );
     assert!(

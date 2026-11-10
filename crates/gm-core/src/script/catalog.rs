@@ -200,6 +200,18 @@ static ACTIONS: &[ActionSpec] = &[
         outcomes: &["done", "failed"],
         fields: &[],
     },
+    // `ctx.change({ branch })`: the change of a branch against its base (D219).
+    ActionSpec {
+        name: "change",
+        level: Level::Read,
+        outcomes: &["done", "failed"],
+        fields: &[FieldSpec {
+            name: "branch",
+            kind: FieldKind::Text,
+            required: false,
+            help: "The branch whose change is read. Default: the branch of the run, else the branch HEAD is on.",
+        }],
+    },
     // `ctx.scorecards({ name, branch })`: the name is the Lua name, so it is a plain word.
     ActionSpec {
         name: "scorecards",
@@ -475,6 +487,20 @@ mod tests {
         assert_eq!(required("branch.checkout"), ["branch"]);
         assert!(required("approve").is_empty());
         assert!(action("stage.all").expect("stage.all").fields.is_empty());
+    }
+
+    #[test]
+    fn change_is_a_read_with_one_optional_branch() {
+        let spec = action("change").expect("change exists");
+        assert_eq!(spec.level, Level::Read);
+        assert_eq!(spec.outcomes, &["done", "failed"]);
+        let fields: Vec<(&str, bool)> = spec
+            .fields
+            .iter()
+            .map(|field| (field.name, field.required))
+            .collect();
+        assert_eq!(fields, [("branch", false)]);
+        assert_eq!(domain("change"), "general");
     }
 
     #[test]

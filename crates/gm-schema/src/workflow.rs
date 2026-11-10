@@ -39,6 +39,13 @@ pub struct WorkflowInfo {
     /// (`WF4b`, D164(2)). `None` for a workflow the person wrote: only built-ins carry one.
     #[serde(default)]
     pub title: Option<String>,
+    /// Where the file is read from (D219 (2)).
+    #[serde(default)]
+    pub location: WorkflowLocation,
+    /// Whether the workflow is a review, from `review = true` in `M.meta` (D219 (1)). A file that
+    /// does not load is a workflow.
+    #[serde(default)]
+    pub role: WorkflowRole,
 }
 
 impl WorkflowInfo {
@@ -48,6 +55,53 @@ impl WorkflowInfo {
     pub fn builtin(&self) -> bool {
         self.title.is_some()
     }
+}
+
+/// Where a workflow file is read from (D219 (2)).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkflowLocation {
+    /// The user's workflows folder, which runs in every repository.
+    #[default]
+    User,
+    /// `.git/gitmaster/workflows/` of the repository. Its worktrees share it.
+    Repository,
+    /// Ships with the app.
+    BuiltIn,
+}
+
+impl WorkflowLocation {
+    /// The label the front ends show: `user`, `repository` or `built-in`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Repository => "repository",
+            Self::BuiltIn => "built-in",
+        }
+    }
+}
+
+/// Whether a workflow runs as a plain workflow or as a review (D219 (1)). An enum rather than a
+/// flag: `WorkflowInfo` already holds three flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkflowRole {
+    /// A workflow, which runs on its trigger or when you run it.
+    #[default]
+    Workflow,
+    /// A review: `review = true` in `M.meta`. It runs only when you pick it in **Run review…**.
+    Review,
+}
+
+/// The workflows that are reviews, in the order given: the list the **Run review…** picker shows
+/// (D219 (1)). Pure: it reads the listing and nothing else.
+#[must_use]
+pub fn review_workflows(workflows: &[WorkflowInfo]) -> Vec<&WorkflowInfo> {
+    workflows
+        .iter()
+        .filter(|workflow| workflow.role == WorkflowRole::Review)
+        .collect()
 }
 
 /// One declared input of a workflow.
@@ -185,4 +239,57 @@ pub struct WorkflowDryCall {
     pub outcome: String,
     /// What the dry run says about the call, in words, such as `simulated: nothing is applied`.
     pub note: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(name: &str, review: bool) -> WorkflowInfo {
+        WorkflowInfo {
+            name: name.to_owned(),
+            path: format!("/w/{name}.lua"),
+            trigger: "manual".to_owned(),
+            key: None,
+            inputs: Vec::new(),
+            hash: String::new(),
+            error: None,
+            warnings: Vec::new(),
+            source: String::new(),
+            reviewed: false,
+            auto_approve: false,
+            enabled: true,
+            title: None,
+            location: WorkflowLocation::User,
+            role: if review {
+                WorkflowRole::Review
+            } else {
+                WorkflowRole::Workflow
+            },
+        }
+    }
+
+    #[test]
+    fn the_picker_lists_only_the_reviews_in_listing_order() {
+        let listing = [
+            info("tests", false),
+            info("security", true),
+            info("style", false),
+            info("perf", true),
+        ];
+        let names: Vec<&str> = review_workflows(&listing)
+            .iter()
+            .map(|w| w.name.as_str())
+            .collect();
+        assert_eq!(names, ["security", "perf"]);
+    }
+
+    #[test]
+    fn a_location_has_the_label_the_front_ends_show() {
+        assert_eq!(WorkflowLocation::User.label(), "user");
+        assert_eq!(WorkflowLocation::Repository.label(), "repository");
+        assert_eq!(WorkflowLocation::BuiltIn.label(), "built-in");
+        let wire = serde_json::to_value(WorkflowLocation::BuiltIn).unwrap();
+        assert_eq!(wire, "built-in");
+    }
 }

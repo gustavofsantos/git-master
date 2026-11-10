@@ -676,6 +676,10 @@ pub enum CommandKind {
         /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         member: Option<String>,
+        /// The workflow run the agent was started by, from `GITMASTER_WORKFLOW_RUN` (D219): a link
+        /// for reading, never a check. Absent when the agent was not started by a run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow_run: Option<String>,
     },
     /// Lists the scorecards, newest first, of `name` and `branch` when each is given (the
     /// checked-out branch when `branch` is not). A stale scorecard is left out unless
@@ -1957,6 +1961,7 @@ mod tests {
                 suggested_fix: None,
             }],
             member: None,
+            workflow_run: None,
         })
         .unwrap();
         assert_eq!(publish["type"], "publish_scorecard");

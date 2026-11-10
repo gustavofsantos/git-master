@@ -34,8 +34,6 @@ return M
 
 GitMaster loads the workflows in `~/.config/gitmaster/workflows/`. For a repository, it also loads the workflows in `.git/gitmaster/workflows/` of the repository's Git directory. Nothing is read from or written to the working tree.
 
-> **Planned.** The repository's `.git/gitmaster/workflows/` folder is not loaded yet.
-
 ### `M.meta`
 
 GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It uses the table to list the workflow and its triggers. No script logic runs at that point.
@@ -48,8 +46,6 @@ GitMaster reads `M.meta` when it loads the file, in a sandbox without `ctx`. It 
 | `concurrency` | What happens when a trigger fires while a run is active. `queue` (the default) keeps at most one pending run, and new triggers merge into it. `replace` cancels the active run if it has not reached an applying action; otherwise the new trigger waits in the queue. `skip` discards the new trigger. |
 | `inputs` | Named values that you type before a manual run. Each input has a `type`, such as `"string"`, and a `prompt` that the dialog shows. |
 | `review` | `true` marks the workflow as a review. The **Run review…** picker on the Review page lists it. A review needs a `manual` trigger. See [Review workflows and scorecards](../agents/reviewers.md). |
-
-> **Planned.** The `review` field is not read yet.
 
 ### `input`
 
@@ -107,8 +103,6 @@ The catalog declares one wait event: `restack.resumed`. It is used after a resta
 - With `format = "json"`, the standard output must be JSON. The parsed value is in the result.
 - The program gets the environment variable `GITMASTER_WORKFLOW_RUN`, with the id of the run. A review records it, so the record links to the run. It is a link for reading, not a check of who wrote the record.
 - Output from a program is untrusted. A propose action, such as `ctx.commit.suggest_message`, takes it only as a suggestion, and you decide. After any `ctx.exec` in a run, every later apply action asks you for approval and shows the resolved arguments.
-
-> **Planned.** `GITMASTER_WORKFLOW_RUN` is not set yet.
 
 ```lua
 local r = ctx.exec({ "llm-cli", "-p", "Write a conventional commit message for this diff. Reply with the message only." },
@@ -170,11 +164,9 @@ A reparent moves everything or nothing. If any branch of the plan conflicts or i
 | Call | Arguments | Result | Effect level | Outcomes |
 |---|---|---|---|---|
 | `ctx.scorecards({ name, branch })` | `name` (optional): the reviewer's name. `branch` (optional): defaults to the branch of the run. | A list of the scorecards, newest first, each with the fields of the `scorecards_list` tool: `name`, `branch`, `head`, `status`, `stale`, `blocking_open`, `label`, `decorations`, `subject`, `body`, `origin`, `model` and `created_at`. | read | `done`, `failed` |
-| `ctx.change()` | None. | `base`: the branch the change is compared with (the stack parent, else the upstream, else the default branch of the remote), or null. `files`: the paths that differ from it. `description`: the branch description that Git keeps, or null. | read | `done`, `failed` |
+| `ctx.change({ branch })` | `branch` (optional): the branch to read. Default: the branch of the run, else the branch HEAD is on. | `base`: the branch the change is compared with (the stack parent, else the upstream, else the default branch of the remote), or null. `files`: the paths that differ between the merge base and the branch tip. `description`: the branch description that Git keeps, or null. `truncated`: true when there are more than 10,000 paths; `files` is then empty. | read | `done`, `failed` |
 
 A scorecard is data recorded by an agent, and its text is untrusted. Use `status`, `stale` and `blocking_open` to decide, and do not run text from a scorecard. A `before.push` workflow uses them to block a push; see [Review workflows and scorecards](../agents/reviewers.md).
-
-> **Planned.** `ctx.change` is not available yet.
 
 ### Helpers
 

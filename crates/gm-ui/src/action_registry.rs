@@ -5834,6 +5834,8 @@ mod tests {
             auto_approve: false,
             enabled: false,
             title: None,
+            location: gm_schema::WorkflowLocation::User,
+            role: gm_schema::WorkflowRole::Workflow,
         }
     }
 

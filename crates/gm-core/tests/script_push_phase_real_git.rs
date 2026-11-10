@@ -131,6 +131,7 @@ fn publish(name: &str, status: ScorecardStatus) -> CommandKind {
         },
         comments: Vec::new(),
         member: None,
+        workflow_run: None,
     }
 }
 

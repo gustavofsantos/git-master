@@ -141,6 +141,7 @@ mod tests {
             source: String::new(),
             meta: Err(Vec::new()),
             builtin,
+            location: gm_schema::WorkflowLocation::User,
         }
     }
 

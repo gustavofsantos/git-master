@@ -51,7 +51,7 @@ The key takes several values. To apply a folder only to repositories in one dire
 
 These rules apply:
 
-- Nothing is read from a repository. A `gitmaster.workflowPath` that points inside the working tree of the open repository is ignored, and GitMaster shows a warning.
+- Nothing is read from the working tree of a repository. The one folder GitMaster reads inside a repository is `.git/gitmaster/workflows/`, which every worktree of the repository shares. A `gitmaster.workflowPath` that points inside the working tree of the open repository is ignored, and GitMaster shows a warning.
 - Files in directories whose names start with a dot are not read as workflows. GitMaster writes generated reference files for editors and agents into a `.api` directory in the workflows folder. Those files are not workflows.
 - A `.toml` file in a workflows directory is ignored, and GitMaster shows a warning for it.
 - A workflow file holds only the definition. Whether a workflow is enabled for a repository, and your approvals, are kept by GitMaster, not in the file.
@@ -78,7 +78,7 @@ A workflow that runs on a trigger or in a phase never passes through **Run**, so
 
 ### Dry run
 
-A dry run executes a script against your real repository without changing it. Reads run for real, except the stack reads, `ctx.stack.tree` and `ctx.stack.stale`, which return an empty list. Actions that propose, apply or run `exec` are recorded with the values they would receive, but they do not run, and `exec` never runs in a dry run. The dry run lists the calls in order. A value that comes after a simulated value is an estimate, and GitMaster marks it as one.
+A dry run executes a script against your real repository without changing it. Reads run for real, except the stack reads, `ctx.stack.tree` and `ctx.stack.stale`, and the review reads, `ctx.scorecards` and `ctx.change`, which return an empty result. Actions that propose, apply or run `exec` are recorded with the values they would receive, but they do not run, and `exec` never runs in a dry run. The dry run lists the calls in order. A value that comes after a simulated value is an estimate, and GitMaster marks it as one.
 
 In the **Script** tab, a dry run uses the text open in the editor. From the command line, `gitmaster workflow dry-run <file>` does the same for a saved file. See [CLI](../reference/cli.md).
 

@@ -81,6 +81,7 @@ pub fn entry(engine: &dyn ScriptEngine, builtin: &Builtin) -> ScriptEntry {
         hash: sha256_hex(builtin.source.as_bytes()),
         source: builtin.source.to_owned(),
         builtin: true,
+        location: gm_schema::WorkflowLocation::BuiltIn,
     }
 }
 

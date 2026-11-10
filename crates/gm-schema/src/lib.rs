@@ -78,7 +78,8 @@ pub use threads::{
 };
 pub use workflow::{
     WorkflowCallRecord, WorkflowDiagnostic, WorkflowDryCall, WorkflowDryRun, WorkflowEnd,
-    WorkflowInfo, WorkflowInput, WorkflowRunDetail, WorkflowRunStatus, WorkflowRunSummary,
+    WorkflowInfo, WorkflowInput, WorkflowLocation, WorkflowRole, WorkflowRunDetail,
+    WorkflowRunStatus, WorkflowRunSummary, review_workflows,
 };
 pub use workspace::{
     BranchHow, MemberPlan, MemberRequest, RemovalBlocker, RemovalBlockerKind, WorkspaceProblem,

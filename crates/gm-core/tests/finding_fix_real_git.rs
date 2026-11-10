@@ -130,6 +130,7 @@ fn publish_with_a_finding(engine: &mut Engine, dir: &Path) -> i64 {
                     suggested_fix: Some("x.ok_or(Error::Missing)?;".into()),
                 }],
                 member: None,
+                workflow_run: None,
             },
         ),
     );

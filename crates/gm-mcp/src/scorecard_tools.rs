@@ -106,6 +106,7 @@ pub(crate) fn scorecard_publish(session: &mut Session, args: &Value) -> Result<V
     let summary = summary_arg(args.get("summary"))?;
     let comments = comments_arg(args)?;
     let member = optional_text(args, "member")?;
+    let workflow_run = session.workflow_run();
     let events = session.run(CommandKind::PublishScorecard {
         name,
         branch,
@@ -114,6 +115,7 @@ pub(crate) fn scorecard_publish(session: &mut Session, args: &Value) -> Result<V
         summary,
         comments,
         member,
+        workflow_run,
     })?;
     let (scorecard, comment_ids) = events
         .into_iter()
