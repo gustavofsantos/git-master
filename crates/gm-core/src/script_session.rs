@@ -25,8 +25,8 @@ use crate::script::port::{Budgets, ScriptDiagnostic, ScriptEngine};
 use crate::script::run::{
     Clock, EffectCall, EffectResult, Effects, EventSink, Runtime, RuntimeConfig, ScriptEvent,
 };
+use crate::script_scorecards;
 use crate::script_stacks::{self, PlanBook, Started};
-use crate::script_verdicts;
 use crate::workflow_session::{Actions, Effected, GitActions};
 use crate::{GitError, GitPort, LogEntry};
 use gm_schema::CommandKind;
@@ -220,7 +220,7 @@ impl ScriptSession {
                 text_arg(&call, "branch"),
                 remote_arg(&call),
             )),
-            "verdicts" => Some(Started::Ended(script_verdicts::read(
+            "scorecards" => Some(Started::Ended(script_scorecards::read(
                 git,
                 &self.root,
                 &call.args,

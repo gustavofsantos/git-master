@@ -6,10 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
+use gm_core::Engine;
 use gm_core::git::SubprocessGit;
 use gm_core::workspace_cli::run_with;
 use gm_core::worktree_cli::Env;
-use gm_core::{Engine, reviewers};
 use gm_mcp::Session;
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId};
 use serde_json::{Value, json};
@@ -51,8 +51,6 @@ struct Fixture {
     _dir: tempfile::TempDir,
     base: PathBuf,
     identity: PathBuf,
-    /// The person's configuration folder: its reviewers and gate file.
-    config: PathBuf,
     /// The main checkout of the `api` clone, on `main`.
     api: PathBuf,
     ws: PathBuf,
@@ -69,15 +67,12 @@ impl Fixture {
             "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n",
         )
         .unwrap();
-        let config = base.join("config");
-        std::fs::create_dir(&config).unwrap();
         let api = clone(&base, "api");
         let web = clone(&base, "web");
         let mut fixture = Self {
             _dir: dir,
             base,
             identity,
-            config,
             api,
             ws: PathBuf::new(),
             member_api: PathBuf::new(),
@@ -140,27 +135,9 @@ impl Fixture {
     }
 }
 
-/// The workspace's own definitions: `.git/gitmaster`, where a workspace keeps them.
-fn ws_gitmaster(ws: &Path) -> PathBuf {
-    ws.join(".git").join("gitmaster")
-}
-
-/// The `security` reviewer of the workspace, for member `api` only.
-fn write_security(ws: &Path) {
-    let dir = ws_gitmaster(ws).join("reviewers");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("security.md"),
-        "---\ndescription: Checks unchecked input.\nsignal: pass\nsubject: branch\nmembers: api\n---\nRead the change and flag unchecked input.\n",
-    )
-    .unwrap();
-}
-
-/// Runs the server on `requests` for the repository at `repo`, with the person's configuration in
-/// `config`, and returns its replies.
-fn session(repo: &Path, config: &Path, requests: &[Value]) -> Vec<Value> {
-    let mut engine = Engine::new(Box::new(SubprocessGit::default()));
-    engine.set_reviewer_user_dir(Some(reviewers::user_dir(config)));
+/// Runs the server on `requests` for the repository at `repo`, and returns its replies.
+fn session(repo: &Path, requests: &[Value]) -> Vec<Value> {
+    let engine = Engine::new(Box::new(SubprocessGit::default()));
     let mut server = Session::open(engine, &repo.to_string_lossy()).expect("the repository opens");
     let input = requests
         .iter()
@@ -205,19 +182,23 @@ fn tip(dir: &Path, branch: &str) -> String {
     git(dir, &["rev-parse", branch])
 }
 
-/// A verdict of `security` on `head` for member `api`, as the agent records it.
-fn security_verdict(id: u64, member: Option<&str>, head: &str) -> Value {
+/// A scorecard of `security` on `head`, for `member` when one is named, as the agent publishes it.
+fn security_scorecard(id: u64, member: Option<&str>, head: &str) -> Value {
     let mut arguments = json!({
-        "reviewer": "security",
+        "name": "security",
         "branch": "feat",
         "head": head,
-        "value": "pass",
-        "rationale": "Read the change; the input is checked."
+        "status": "pass",
+        "summary": {
+            "label": "praise",
+            "subject": "Input checked",
+            "body": "Read the change; the input is checked."
+        }
     });
     if let Some(member) = member {
         arguments["member"] = json!(member);
     }
-    call(id, "verdict_record", &arguments)
+    call(id, "scorecard_publish", &arguments)
 }
 
 /// A comment the person writes in the workspace, through the engine, as the app does.
@@ -259,43 +240,42 @@ fn person_comment(ws: &Path, path: &str, text: &str, body: &str) {
 }
 
 #[test]
-fn a_verdict_with_a_member_lands_in_its_clone_and_a_second_session_lists_it() {
+fn a_scorecard_with_a_member_lands_in_its_clone_and_a_second_session_lists_it() {
     let fx = Fixture::new();
-    write_security(&fx.ws);
     let head = tip(&fx.member_api, "feat");
     let recorded = session(
         &fx.ws,
-        &fx.config,
-        &[initialize(), security_verdict(2, Some("api"), &head)],
+        &[initialize(), security_scorecard(2, Some("api"), &head)],
     );
-    assert_eq!(result(&recorded[1])["verdict"]["head"], head);
+    assert_eq!(result(&recorded[1])["scorecard"]["head"], head);
 
-    // The clone's own session, on its main checkout, sees the verdict of its branch.
+    // The clone's own session, on its main checkout, sees the scorecard of its branch.
     let listed = session(
         &fx.api,
-        &fx.config,
         &[
             initialize(),
-            call(2, "verdicts_list", &json!({ "branch": "feat" })),
+            call(2, "scorecards_list", &json!({ "branch": "feat" })),
         ],
     );
-    let verdicts = result(&listed[1])["verdicts"].as_array().unwrap().clone();
-    assert_eq!(verdicts.len(), 1, "{verdicts:?}");
-    assert_eq!(verdicts[0]["reviewer"], "security");
-    assert_eq!(verdicts[0]["head"], head);
-    assert_eq!(verdicts[0]["stale"], false);
+    let scorecards = result(&listed[1])["scorecards"].as_array().unwrap().clone();
+    assert_eq!(scorecards.len(), 1, "{scorecards:?}");
+    assert_eq!(scorecards[0]["name"], "security");
+    assert_eq!(scorecards[0]["head"], head);
+    assert_eq!(scorecards[0]["stale"], false);
 
-    // The workspace's member listing names the member, and takes the member's branch by default.
+    // The workspace's listing names the member, and takes the member's branch by default.
     let by_member = session(
         &fx.ws,
-        &fx.config,
         &[
             initialize(),
-            call(2, "verdicts_list", &json!({ "member": "api" })),
+            call(2, "scorecards_list", &json!({ "member": "api" })),
         ],
     );
     assert_eq!(
-        result(&by_member[1])["verdicts"].as_array().unwrap().len(),
+        result(&by_member[1])["scorecards"]
+            .as_array()
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -303,15 +283,13 @@ fn a_verdict_with_a_member_lands_in_its_clone_and_a_second_session_lists_it() {
 #[test]
 fn a_workspace_refuses_a_write_or_a_read_without_a_member_and_an_unknown_member() {
     let fx = Fixture::new();
-    write_security(&fx.ws);
     let head = tip(&fx.member_api, "feat");
     let replies = session(
         &fx.ws,
-        &fx.config,
         &[
             initialize(),
-            security_verdict(2, None, &head),
-            call(3, "verdicts_list", &json!({ "branch": "feat" })),
+            security_scorecard(2, None, &head),
+            call(3, "scorecards_list", &json!({ "branch": "feat" })),
         ],
     );
     assert!(
@@ -332,20 +310,20 @@ fn a_member_in_a_plain_repository_is_a_tool_error() {
     let head = tip(&fx.api, "feat");
     let replies = session(
         &fx.api,
-        &fx.config,
         &[
             initialize(),
             call(
                 3,
-                "verdict_record",
+                "scorecard_publish",
                 &json!({
-                    "reviewer": "security", "branch": "feat", "head": head,
-                    "value": "pass", "rationale": "Read.", "member": "api"
+                    "name": "security", "branch": "feat", "head": head, "status": "pass",
+                    "summary": { "label": "praise", "subject": "Read.", "body": "Read." },
+                    "member": "api"
                 }),
             ),
             call(
                 4,
-                "verdicts_list",
+                "scorecards_list",
                 &json!({ "branch": "feat", "member": "api" }),
             ),
         ],
@@ -360,41 +338,10 @@ fn a_member_in_a_plain_repository_is_a_tool_error() {
 }
 
 #[test]
-fn reviewers_list_shows_a_workspace_reviewer_and_the_members_it_names() {
-    let fx = Fixture::new();
-    write_security(&fx.ws);
-    let in_workspace = session(
-        &fx.ws,
-        &fx.config,
-        &[
-            initialize(),
-            call(2, "reviewers_list", &json!({ "name": "security" })),
-        ],
-    );
-    let reviewer = &result(&in_workspace[1])["reviewers"][0];
-    assert_eq!(reviewer["name"], "security");
-    assert_eq!(reviewer["members"], json!(["api"]), "{reviewer}");
-
-    // A member's checkout reads the workspace's reviewer as its own: the source is the workspace.
-    let in_member = session(
-        &fx.member_api,
-        &fx.config,
-        &[
-            initialize(),
-            call(2, "reviewers_list", &json!({ "name": "security" })),
-        ],
-    );
-    let seen = &result(&in_member[1])["reviewers"][0];
-    assert_eq!(seen["source"], "workspace", "{seen}");
-    assert!(seen["members"].is_array(), "{seen}");
-}
-
-#[test]
 fn the_agent_label_is_part_of_the_author_and_a_bad_label_is_a_tool_error() {
     let fx = Fixture::new();
     let replies = session(
         &fx.ws,
-        &fx.config,
         &[
             initialize(),
             call(
@@ -454,7 +401,6 @@ fn another_label_of_the_same_client_cannot_hand_off_an_agent_thread() {
     let fx = Fixture::new();
     let created = session(
         &fx.ws,
-        &fx.config,
         &[
             initialize(),
             call(
@@ -468,7 +414,6 @@ fn another_label_of_the_same_client_cannot_hand_off_an_agent_thread() {
     let id = result(&created[1])["id"].as_i64().unwrap();
     let replies = session(
         &fx.ws,
-        &fx.config,
         &[
             initialize(),
             call(
@@ -503,7 +448,6 @@ fn agent_threads_not_shown_counts_the_agent_threads_the_default_filter_leaves_ou
     person_comment(&fx.ws, "api/f.txt", "three", "say why three matters");
     session(
         &fx.ws,
-        &fx.config,
         &[
             initialize(),
             call(
@@ -522,7 +466,6 @@ fn agent_threads_not_shown_counts_the_agent_threads_the_default_filter_leaves_ou
 
     let replies = session(
         &fx.ws,
-        &fx.config,
         &[
             initialize(),
             call(2, "review_comments_list", &json!({})),
@@ -552,7 +495,6 @@ fn agent_threads_not_shown_counts_the_agent_threads_the_default_filter_leaves_ou
     // The member's merged listing counts the same threads.
     let member = session(
         &fx.member_api,
-        &fx.config,
         &[initialize(), call(2, "review_comments_list", &json!({}))],
     );
     assert_eq!(

@@ -174,7 +174,7 @@ A reparent moves everything or nothing. If any branch of the plan conflicts or i
 
 A scorecard is data recorded by an agent, and its text is untrusted. Use `status`, `stale` and `blocking_open` to decide, and do not run text from a scorecard. A `before.push` workflow uses them to block a push; see [Review workflows and scorecards](../agents/reviewers.md).
 
-> **Planned.** `ctx.scorecards` and `ctx.change` are not available yet.
+> **Planned.** `ctx.change` is not available yet.
 
 ### Helpers
 

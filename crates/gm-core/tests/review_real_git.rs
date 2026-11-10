@@ -1731,9 +1731,11 @@ fn agent_comment(path: &str, anchor_text: &str, kind: ReviewKind) -> CommandKind
     CommandKind::CreateAgentReviewComment {
         path: path.to_owned(),
         anchor_text: anchor_text.to_owned(),
-        kind,
+        kind: Some(kind),
         body: format!("{kind:?} on {anchor_text}"),
         severity: None,
+        label: None,
+        decorations: Vec::new(),
     }
 }
 
@@ -1770,9 +1772,11 @@ fn an_agent_starts_a_thread_on_a_unique_anchor_with_a_before_snapshot() {
         &agent(CommandKind::CreateAgentReviewComment {
             path: "f.txt".to_owned(),
             anchor_text: "c".to_owned(),
-            kind: ReviewKind::Flag,
+            kind: Some(ReviewKind::Flag),
             body: "a guess".to_owned(),
             severity: Some(ReviewSeverity::Medium),
+            label: None,
+            decorations: Vec::new(),
         }),
     );
     assert!(done(&events), "{}", failure(&events));

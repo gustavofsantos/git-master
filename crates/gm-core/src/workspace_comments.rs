@@ -120,11 +120,11 @@ pub fn sources(git: &dyn GitPort, root: &Path) -> Vec<WorkspaceSource> {
     for (workspace, slot) in assign_slots(&paths) {
         let for_member =
             workspace_defs::defs_for_member(git, std::slice::from_ref(&workspace), clone_root);
-        for (defs, member) in for_member {
+        for (workspace_name, member) in for_member {
             found.push(WorkspaceSource {
                 slot,
                 workspace_root: workspace.clone(),
-                workspace_name: defs.name,
+                workspace_name,
                 member,
             });
         }

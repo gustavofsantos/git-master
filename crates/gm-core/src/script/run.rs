@@ -316,7 +316,7 @@ impl Runtime {
     }
 
     /// The branch a run's trigger names (`input.trigger.branch`), `None` when it names none or the
-    /// run is not in the journal. `ctx.verdicts` reads its default branch from it (D212 (5)).
+    /// run is not in the journal. `ctx.scorecards` reads its default branch from it (D219).
     #[must_use]
     pub fn trigger_branch(&self, run: RunId) -> Option<String> {
         let row = self.inner.journal.run(run).ok()??;

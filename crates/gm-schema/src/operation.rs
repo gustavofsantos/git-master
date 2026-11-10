@@ -12,6 +12,9 @@ use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
 use crate::restack::{RestackPlan, RestackRecord, RestackResolution};
 use crate::review::{ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewKind, ReviewSeverity};
+use crate::scorecard::{
+    CommentLabel, Scorecard, ScorecardCommentInput, ScorecardStatus, ScorecardSummary,
+};
 use crate::stack::StackSnapshot;
 use crate::stash::StashEntry;
 use crate::status::{
@@ -26,7 +29,6 @@ use crate::threads::{
     SearchGroup, SearchOrder, ThreadDetail, ThreadEdit, ThreadFilter, ThreadHit, ThreadLink,
     ThreadRelKind, ThreadRelation, ThreadSummary,
 };
-use crate::verdict::{FindingInput, Reviewer, ReviewerFileError, Verdict};
 use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
     WorkflowRunStatus, WorkflowRunSummary,
@@ -640,52 +642,55 @@ pub enum CommandKind {
     },
     /// Starts a review thread on `anchor_text`, lines joined with `\n`, which must be
     /// in `path` in the working tree exactly once; otherwise it is refused and nothing is
-    /// written (D200). Only an agent starts one, and its author is the agent. A flag takes
-    /// a `severity` and no other kind does. Refused when the repository already has 20 open
+    /// written (D200). Only an agent starts one, and its author is the agent. The kind is
+    /// `kind` when given, else the one `label` gives (D219 (5)); a flag takes a `severity`, given
+    /// or derived, and no other kind does. Refused when the repository already has 20 open
     /// agent threads or the file has 5. A snapshot is taken as for a person's comment
     /// (D140). Answers `ReviewCommentsListed`.
     CreateAgentReviewComment {
         path: String,
         anchor_text: String,
-        kind: ReviewKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ReviewKind>,
         body: String,
         #[serde(default)]
         severity: Option<ReviewSeverity>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<CommentLabel>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        decorations: Vec<String>,
     },
-    /// Records one run of reviewer `reviewer` on `branch` at commit `head` (D212 (6)). Only
-    /// an agent records one, and the author is the agent. `branch` must be the branch HEAD
-    /// is on in this worktree, `head` a commit, `value` a value the reviewer's signal takes
-    /// (`check_value`), `rationale` 1 to 4,000 characters and `findings` at most 30, each with
-    /// a body of 1 to 1,000 characters on lines that are in its file now. Nothing is written
-    /// when a check fails. Answers `VerdictRecorded`, then `ReviewCommentsListed` with the
-    /// findings as review comments.
-    RecordVerdict {
-        reviewer: String,
+    /// Publishes a scorecard for `branch` at commit `head` (D219 (6)). Only an agent publishes
+    /// one, and the author is the agent. `head` must be the tip of `branch`, `summary` and each
+    /// comment's label and decorations are checked, and each comment's lines must be in its file
+    /// now and read exactly once. Nothing is written when a check fails. Answers
+    /// `ScorecardPublished`.
+    PublishScorecard {
+        name: String,
         branch: String,
         head: String,
-        value: String,
-        rationale: String,
-        findings: Vec<FindingInput>,
+        status: ScorecardStatus,
+        summary: ScorecardSummary,
+        #[serde(default)]
+        comments: Vec<ScorecardCommentInput>,
         /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         member: Option<String>,
     },
-    /// Lists the verdicts, newest first, of `branch` and `reviewer` when each is given (all of
-    /// them when neither is), at most `limit` (5 when 0, 20 at most). Each says whether it is
-    /// stale. Answers `VerdictsListed`. A read: never recorded (D28).
-    ListVerdicts {
+    /// Lists the scorecards, newest first, of `name` and `branch` when each is given (the
+    /// checked-out branch when `branch` is not). A stale scorecard is left out unless
+    /// `include_stale`. At most `limit` (20 when 0, 20 at most). Answers `ScorecardsListed`. A
+    /// read: never recorded (D28).
+    ListScorecards {
+        name: Option<String>,
         branch: Option<String>,
-        reviewer: Option<String>,
+        #[serde(default)]
+        include_stale: bool,
         #[serde(default)]
         limit: u32,
         /// The workspace member the command acts on (D214 (5)); absent in a plain repository.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         member: Option<String>,
-    },
-    /// Lists the reviewers of the repository and the user with the presets they do not
-    /// override, by name, or only the one named `name`. Answers `ReviewersListed`. A read.
-    ListReviewers {
-        name: Option<String>,
     },
     /// Reads the intent of `branch`. A read: never recorded (D28). Answers `BranchDescriptionRead`.
     ReadBranchDescription {
@@ -1539,23 +1544,17 @@ pub enum Event {
         id: OperationId,
         comments: Vec<ReviewComment>,
     },
-    /// Answers `RecordVerdict`: the verdict as stored, and the ids of its finding comments in
-    /// the order of the findings.
-    VerdictRecorded {
+    /// Answers `PublishScorecard`: the scorecard as stored, and the ids of its comments in the
+    /// order given.
+    ScorecardPublished {
         id: OperationId,
-        verdict: Verdict,
+        scorecard: Scorecard,
         comment_ids: Vec<i64>,
     },
-    /// Answers `ListVerdicts`, newest first.
-    VerdictsListed {
+    /// Answers `ListScorecards`, newest first.
+    ScorecardsListed {
         id: OperationId,
-        verdicts: Vec<Verdict>,
-    },
-    /// Answers `ListReviewers`: the reviewers, and the reviewer files that could not be read.
-    ReviewersListed {
-        id: OperationId,
-        reviewers: Vec<Reviewer>,
-        errors: Vec<ReviewerFileError>,
+        scorecards: Vec<Scorecard>,
     },
     /// Answers `ReadBranchDescription`: the intent of `branch` as
     /// stored, `None` when there is none.
@@ -1920,9 +1919,11 @@ mod tests {
         let flag = serde_json::to_value(CommandKind::CreateAgentReviewComment {
             path: "a.rs".to_owned(),
             anchor_text: "x".to_owned(),
-            kind: ReviewKind::Flag,
+            kind: Some(ReviewKind::Flag),
             body: "guess".to_owned(),
             severity: Some(ReviewSeverity::Low),
+            label: None,
+            decorations: Vec::new(),
         })
         .unwrap();
         assert_eq!(flag["type"], "create_agent_review_comment");
@@ -1934,73 +1935,103 @@ mod tests {
     }
 
     #[test]
-    fn verdict_commands_wire_format_is_tagged() {
-        let record = serde_json::to_value(CommandKind::RecordVerdict {
-            reviewer: "security".into(),
+    fn scorecard_commands_wire_format_is_tagged() {
+        let publish = serde_json::to_value(CommandKind::PublishScorecard {
+            name: "security".into(),
             branch: "feat".into(),
             head: "a".repeat(40),
-            value: "medium".into(),
-            rationale: "why".into(),
-            findings: vec![FindingInput {
-                severity: ReviewSeverity::High,
+            status: ScorecardStatus::NeedsWork,
+            summary: ScorecardSummary {
+                label: CommentLabel::Issue,
+                decorations: vec!["blocking".into()],
+                subject: "Unchecked input".into(),
+                body: "why".into(),
+            },
+            comments: vec![ScorecardCommentInput {
                 path: "a.rs".into(),
                 start_line: 2,
                 end_line: 3,
-                body: "risk".into(),
+                label: CommentLabel::Todo,
+                decorations: Vec::new(),
+                body: "fix".into(),
                 suggested_fix: None,
             }],
             member: None,
         })
         .unwrap();
-        assert_eq!(record["type"], "record_verdict");
-        assert_eq!(record["findings"][0]["severity"], "high");
-        assert_eq!(record["findings"][0]["end_line"], 3);
-        let list = serde_json::to_value(CommandKind::ListVerdicts {
+        assert_eq!(publish["type"], "publish_scorecard");
+        assert_eq!(publish["status"], "needs_work");
+        assert_eq!(publish["summary"]["label"], "issue");
+        assert_eq!(publish["comments"][0]["end_line"], 3);
+        let list = serde_json::to_value(CommandKind::ListScorecards {
+            name: None,
             branch: None,
-            reviewer: Some("risk".into()),
+            include_stale: false,
             limit: 0,
             member: None,
         })
         .unwrap();
-        assert_eq!(list["type"], "list_verdicts");
-        assert_eq!(list["reviewer"], "risk");
+        assert_eq!(list["type"], "list_scorecards");
         let bare: CommandKind =
-            serde_json::from_value(serde_json::json!({ "type": "list_verdicts" })).unwrap();
+            serde_json::from_value(serde_json::json!({ "type": "list_scorecards" })).unwrap();
         assert_eq!(
             bare,
-            CommandKind::ListVerdicts {
+            CommandKind::ListScorecards {
+                name: None,
                 branch: None,
-                reviewer: None,
+                include_stale: false,
                 limit: 0,
                 member: None,
             }
         );
-        let reviewers = serde_json::to_value(CommandKind::ListReviewers { name: None }).unwrap();
-        assert_eq!(reviewers["type"], "list_reviewers");
     }
 
     #[test]
-    fn verdict_events_wire_format_is_tagged() {
-        let listed = Event::ReviewersListed {
-            id: OperationId(4),
-            reviewers: Vec::new(),
-            errors: vec![ReviewerFileError {
-                file: "bad.md".into(),
-                reason: "no signal".into(),
-            }],
+    fn an_agent_comment_without_a_kind_reads_as_before() {
+        let old: CommandKind = serde_json::from_value(serde_json::json!({
+            "type": "create_agent_review_comment",
+            "path": "a.rs",
+            "anchor_text": "x",
+            "body": "guess",
+            "kind": "flag",
+            "severity": "low"
+        }))
+        .unwrap();
+        assert!(matches!(
+            old,
+            CommandKind::CreateAgentReviewComment {
+                kind: Some(ReviewKind::Flag),
+                label: None,
+                ..
+            }
+        ));
+        let labelled: CommandKind = serde_json::from_value(serde_json::json!({
+            "type": "create_agent_review_comment",
+            "path": "a.rs",
+            "anchor_text": "x",
+            "body": "rename",
+            "label": "nitpick"
+        }))
+        .unwrap();
+        assert!(matches!(
+            labelled,
+            CommandKind::CreateAgentReviewComment {
+                kind: None,
+                label: Some(CommentLabel::Nitpick),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn scorecard_events_wire_format_is_tagged() {
+        let listed = Event::ScorecardsListed {
+            id: OperationId(5),
+            scorecards: Vec::new(),
         };
         let json = serde_json::to_value(&listed).unwrap();
-        assert_eq!(json["type"], "reviewers_listed");
-        assert_eq!(json["errors"][0]["file"], "bad.md");
-        let back: Event = serde_json::from_value(json).unwrap();
-        assert_eq!(back, listed);
-        let verdicts = Event::VerdictsListed {
-            id: OperationId(5),
-            verdicts: Vec::new(),
-        };
-        let json = serde_json::to_value(&verdicts).unwrap();
-        assert_eq!(json["type"], "verdicts_listed");
-        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), verdicts);
+        assert_eq!(json["type"], "scorecards_listed");
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), listed);
     }
 
     #[test]
@@ -2019,18 +2050,6 @@ mod tests {
         let json = serde_json::to_value(&text).unwrap();
         assert_eq!(json["type"], "branch_description_read");
         assert_eq!(serde_json::from_value::<Event>(json).unwrap(), text);
-    }
-
-    #[test]
-    fn an_old_verdict_list_reads_with_no_member() {
-        let old_verdicts: CommandKind = serde_json::from_value(serde_json::json!({
-            "type": "list_verdicts", "branch": "b", "limit": 3
-        }))
-        .unwrap();
-        assert!(matches!(
-            old_verdicts,
-            CommandKind::ListVerdicts { member: None, .. }
-        ));
     }
 
     #[test]

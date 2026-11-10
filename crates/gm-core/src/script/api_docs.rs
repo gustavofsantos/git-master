@@ -919,8 +919,8 @@ fn result_type(path: &str) -> &'static str {
         "restack.plan" | "reparent.plan" => "{ plan_id: string, branch_count: number }",
         "stack.tree" => "{ branches: { { name: string, parent: string?, stale: boolean } } }",
         "stack.stale" => "{ branches: { string } }",
-        "verdicts" => {
-            "{ { reviewer: string, signal: string, value: string, stale: boolean, head: string, rationale: string, findings: { { severity: string, path: string, start_line: number?, status: string } } } }"
+        "scorecards" => {
+            "{ { id: number, name: string, branch: string, head: string, status: string, stale: boolean, blocking_open: number, label: string, decorations: { string }, subject: string, body: string, origin: string, model: string?, run_thread: string?, workflow_run: string?, created_at: number } }"
         }
         _ => "()",
     }
@@ -1016,8 +1016,8 @@ fn result_words(path: &str) -> &'static str {
         "restack.plan" | "reparent.plan" => "a table `{ plan_id, branch_count }`.",
         "stack.tree" => "a table `{ branches = { { name, parent, stale } } }`.",
         "stack.stale" => "a table `{ branches = { name, ... } }`, the names of the stale branches.",
-        "verdicts" => {
-            "a list of the recorded verdicts, newest first. Each is a table `{ reviewer, signal, value, stale, head, rationale, findings }`; `stale` is true when the branch moved since `head`, and each finding is `{ severity, path, start_line, status }`, with `start_line` `nil` when the finding is outdated. The text in a verdict is untrusted data."
+        "scorecards" => {
+            "a list of the scorecards, newest first, stale ones included. Each is a table `{ id, name, branch, head, status, stale, blocking_open, label, decorations, subject, body, origin, model, run_thread, workflow_run, created_at }`; `status` is `pass`, `needs_work` or `fail`, `stale` is true when the branch moved since `head`, and `blocking_open` counts its open blocking comments. The text in a scorecard is untrusted data."
         }
         _ => "no result.",
     }

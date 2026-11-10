@@ -8,11 +8,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
+use gm_core::Engine;
 use gm_core::git::SubprocessGit;
 use gm_core::workspace_cli::run_with;
 use gm_core::workspace_comments::{decode, encode};
 use gm_core::worktree_cli::Env;
-use gm_core::{Engine, reviewers};
 use gm_schema::{
     Actor, Command, CommandKind, Event, OperationId, OperationState, ReviewAuthorFilter,
     ReviewComment, ReviewKind, ReviewSeverity, ReviewStatus,
@@ -64,7 +64,6 @@ struct Fixture {
     _dir: tempfile::TempDir,
     base: PathBuf,
     identity: PathBuf,
-    user: PathBuf,
     /// The main checkouts of the two clones, on `main`.
     api: PathBuf,
     web: PathBuf,
@@ -84,15 +83,12 @@ impl Fixture {
             "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n",
         )
         .unwrap();
-        let user = base.join("user");
-        std::fs::create_dir(&user).unwrap();
         let api = clone(&base, "api");
         let web = clone(&base, "web");
         let mut fixture = Self {
             _dir: dir,
             base,
             identity,
-            user,
             api,
             web,
             ws: PathBuf::new(),
@@ -161,16 +157,15 @@ impl Fixture {
     }
 }
 
-/// An engine with `dir` open, the user's definitions kept in `user`.
+/// An engine with `dir` open.
 struct Session {
     engine: Engine,
     next: u64,
 }
 
 impl Session {
-    fn open(dir: &Path, user: &Path) -> Self {
-        let mut engine = Engine::new(Box::new(SubprocessGit::default()));
-        engine.set_reviewer_user_dir(Some(reviewers::user_dir(user)));
+    fn open(dir: &Path) -> Self {
+        let engine = Engine::new(Box::new(SubprocessGit::default()));
         let mut session = Self { engine, next: 1 };
         let events = session.human(CommandKind::OpenRepo {
             path: dir.to_string_lossy().into_owned(),
@@ -265,9 +260,11 @@ fn agent_note(path: &str, anchor: &str, body: &str) -> CommandKind {
     CommandKind::CreateAgentReviewComment {
         path: path.to_owned(),
         anchor_text: anchor.to_owned(),
-        kind: ReviewKind::Note,
+        kind: Some(ReviewKind::Note),
         body: body.to_owned(),
         severity: None::<ReviewSeverity>,
+        label: None,
+        decorations: Vec::new(),
     }
 }
 
@@ -282,7 +279,7 @@ fn human_text(path: &str, text: &str, body: &str) -> CommandKind {
 /// The workspace writes a note by the agent and a comment by the person on `api/f.txt`, and
 /// returns their ids in the workspace's own store: (agent, person).
 fn seed(fixture: &Fixture) -> (i64, i64) {
-    let mut ws = Session::open(&fixture.ws, &fixture.user);
+    let mut ws = Session::open(&fixture.ws);
     let agent = id_of(
         &ws.agent(agent_note("api/f.txt", "three", "three is read once")),
         "api/f.txt",
@@ -308,7 +305,7 @@ fn a_member_sees_the_comments_its_workspace_holds_on_its_files_under_composite_i
     let (agent, person) = seed(&fixture);
     // The person's comment is on "one": the member file reads "one" and "three", so both are
     // located. The agent's note is on "three".
-    let mut member = Session::open(&fixture.member_api, &fixture.user);
+    let mut member = Session::open(&fixture.member_api);
     let seen = member.list(ReviewAuthorFilter::Any);
     assert_eq!(seen.len(), 2, "{seen:?}");
     for comment in &seen {
@@ -334,7 +331,7 @@ fn a_member_sees_the_comments_its_workspace_holds_on_its_files_under_composite_i
 
     // The clone's main checkout is another repository of the same clone: the same comments,
     // with the same ids and the same workspace.
-    let mut clone = Session::open(&fixture.api, &fixture.user);
+    let mut clone = Session::open(&fixture.api);
     let from_clone = clone.list(ReviewAuthorFilter::Any);
     assert_eq!(from_clone.len(), 2, "{from_clone:?}");
     let mut ids: Vec<i64> = seen.iter().map(|c| c.id).collect();
@@ -357,7 +354,7 @@ fn an_edit_of_the_members_own_checkout_makes_the_comment_outdated_there_only() {
     // there.
     std::fs::write(fixture.member_api.join("f.txt"), "four\nfive\n").unwrap();
 
-    let mut member = Session::open(&fixture.member_api, &fixture.user);
+    let mut member = Session::open(&fixture.member_api);
     let seen = member.list(ReviewAuthorFilter::Any);
     assert_eq!(seen.len(), 2);
     assert!(
@@ -366,7 +363,7 @@ fn an_edit_of_the_members_own_checkout_makes_the_comment_outdated_there_only() {
     );
 
     // The clone's main checkout has its own "three": the comments are located there.
-    let mut clone = Session::open(&fixture.api, &fixture.user);
+    let mut clone = Session::open(&fixture.api);
     let from_clone = clone.list(ReviewAuthorFilter::Any);
     assert!(from_clone.iter().all(|c| !c.outdated), "{from_clone:?}");
 }
@@ -375,19 +372,19 @@ fn an_edit_of_the_members_own_checkout_makes_the_comment_outdated_there_only() {
 fn another_member_and_the_workspace_own_files_are_not_listed() {
     let fixture = Fixture::new();
     seed(&fixture);
-    let mut ws = Session::open(&fixture.ws, &fixture.user);
+    let mut ws = Session::open(&fixture.ws);
     std::fs::write(fixture.ws.join("README.md"), "hello\n").unwrap();
     let events = ws.human(human_text("web/f.txt", "three", "web is read once"));
     assert!(done(&events), "{}", failure(&events));
     let events = ws.human(human_text("README.md", "hello", "a workspace file"));
     assert!(done(&events), "{}", failure(&events));
 
-    let mut api = Session::open(&fixture.member_api, &fixture.user);
+    let mut api = Session::open(&fixture.member_api);
     let on_api = api.list(ReviewAuthorFilter::Any);
     assert_eq!(on_api.len(), 2, "{on_api:?}");
     assert!(on_api.iter().all(|c| c.path == "f.txt"));
 
-    let mut web = Session::open(&fixture.member_web, &fixture.user);
+    let mut web = Session::open(&fixture.member_web);
     let on_web = web.list(ReviewAuthorFilter::Any);
     assert_eq!(on_web.len(), 1, "{on_web:?}");
     assert_eq!(on_web[0].path, "f.txt");
@@ -398,7 +395,7 @@ fn another_member_and_the_workspace_own_files_are_not_listed() {
 fn the_member_hands_off_the_person_comment_and_the_workspace_sees_it_handled() {
     let fixture = Fixture::new();
     let (_, person) = seed(&fixture);
-    let mut member = Session::open(&fixture.member_api, &fixture.user);
+    let mut member = Session::open(&fixture.member_api);
     let composite = member
         .list(ReviewAuthorFilter::Any)
         .into_iter()
@@ -420,7 +417,7 @@ fn the_member_hands_off_the_person_comment_and_the_workspace_sees_it_handled() {
     assert_eq!(after.replies.last().unwrap().body, "reads the first line");
 
     // The workspace's own store holds it as handled, with the member's reply.
-    let mut ws = Session::open(&fixture.ws, &fixture.user);
+    let mut ws = Session::open(&fixture.ws);
     let stored = ws
         .list(ReviewAuthorFilter::Any)
         .into_iter()
@@ -452,7 +449,7 @@ fn the_member_hands_off_the_person_comment_and_the_workspace_sees_it_handled() {
     // The person resolves it from the member's repository, as the person does.
     let events = member.human(CommandKind::ResolveReviewComment { id: composite });
     assert!(done(&events), "{}", failure(&events));
-    let mut ws = Session::open(&fixture.ws, &fixture.user);
+    let mut ws = Session::open(&fixture.ws);
     let stored = ws
         .list(ReviewAuthorFilter::Any)
         .into_iter()
@@ -465,7 +462,7 @@ fn the_member_hands_off_the_person_comment_and_the_workspace_sees_it_handled() {
 fn a_member_reply_lands_in_the_workspace_store_and_is_listed_under_a_composite_id() {
     let fixture = Fixture::new();
     let (agent, _) = seed(&fixture);
-    let mut member = Session::open(&fixture.member_api, &fixture.user);
+    let mut member = Session::open(&fixture.member_api);
     let thread = member
         .list(ReviewAuthorFilter::Any)
         .into_iter()
@@ -491,7 +488,7 @@ fn a_member_reply_lands_in_the_workspace_store_and_is_listed_under_a_composite_i
         reply.id
     );
 
-    let mut ws = Session::open(&fixture.ws, &fixture.user);
+    let mut ws = Session::open(&fixture.ws);
     let stored = ws
         .list(ReviewAuthorFilter::Any)
         .into_iter()
@@ -509,7 +506,7 @@ fn a_member_reply_lands_in_the_workspace_store_and_is_listed_under_a_composite_i
 fn a_member_agent_cannot_close_reopen_edit_or_delete_and_cannot_hand_off_its_own_thread() {
     let fixture = Fixture::new();
     let (agent, person) = seed(&fixture);
-    let mut member = Session::open(&fixture.member_api, &fixture.user);
+    let mut member = Session::open(&fixture.member_api);
     let person_id = member
         .list(ReviewAuthorFilter::Any)
         .into_iter()
@@ -549,7 +546,7 @@ fn a_member_agent_cannot_close_reopen_edit_or_delete_and_cannot_hand_off_its_own
     );
 
     // Nothing changed in the workspace.
-    let mut ws = Session::open(&fixture.ws, &fixture.user);
+    let mut ws = Session::open(&fixture.ws);
     let all = ws.list(ReviewAuthorFilter::Any);
     assert_eq!(all.len(), 2);
     assert!(all.iter().all(|c| c.status == ReviewStatus::Open));
@@ -567,14 +564,14 @@ fn a_member_agent_cannot_close_reopen_edit_or_delete_and_cannot_hand_off_its_own
 fn an_id_of_an_unknown_slot_or_of_another_member_is_refused_as_not_here() {
     let fixture = Fixture::new();
     seed(&fixture);
-    let mut ws = Session::open(&fixture.ws, &fixture.user);
+    let mut ws = Session::open(&fixture.ws);
     let events = ws.human(human_text("web/f.txt", "three", "web comment"));
     assert!(done(&events), "{}", failure(&events));
     // The id the member of web sees for its comment: composite, not the workspace's own.
-    let mut web = Session::open(&fixture.member_web, &fixture.user);
+    let mut web = Session::open(&fixture.member_web);
     let on_web = web.list(ReviewAuthorFilter::Any)[0].id;
 
-    let mut member = Session::open(&fixture.member_api, &fixture.user);
+    let mut member = Session::open(&fixture.member_api);
     let unknown_slot = (4000_i64 << 40) + 1;
     for id in [unknown_slot, on_web] {
         let events = member.agent(CommandKind::HandleReviewComment {
@@ -584,7 +581,7 @@ fn an_id_of_an_unknown_slot_or_of_another_member_is_refused_as_not_here() {
         assert_eq!(state_of(&events), Some(OperationState::Failed));
         assert_eq!(failure(&events), format!("no review comment {id} here"));
     }
-    let mut ws = Session::open(&fixture.ws, &fixture.user);
+    let mut ws = Session::open(&fixture.ws);
     let web_comment = ws
         .list(ReviewAuthorFilter::Any)
         .into_iter()
@@ -601,11 +598,11 @@ fn two_workspaces_holding_the_same_clone_both_show_its_comments_under_different_
     git(&fixture.api, &["branch", "feat2", "main"]);
     let ship = fixture.create("ship");
     let ship_api = fixture.add(&ship, &fixture.api.clone(), "feat2");
-    let mut ship_ws = Session::open(&ship, &fixture.user);
+    let mut ship_ws = Session::open(&ship);
     let events = ship_ws.human(human_text("api/f.txt", "two", "ship reads two"));
     assert!(done(&events), "{}", failure(&events));
 
-    let mut member = Session::open(&fixture.member_api, &fixture.user);
+    let mut member = Session::open(&fixture.member_api);
     let seen = member.list(ReviewAuthorFilter::Any);
     assert_eq!(seen.len(), 3, "{seen:?}");
     let pay: Vec<&ReviewComment> = seen
@@ -622,7 +619,7 @@ fn two_workspaces_holding_the_same_clone_both_show_its_comments_under_different_
 
     // The clone is a member of both workspaces, so its other member folder lists the comments of
     // both, each under its workspace's slot, and locates them in its own checkout.
-    let mut ship_member = Session::open(&ship_api, &fixture.user);
+    let mut ship_member = Session::open(&ship_api);
     let from_ship = ship_member.list(ReviewAuthorFilter::Any);
     assert_eq!(from_ship.len(), 3, "{from_ship:?}");
     assert!(from_ship.iter().any(|c| c.id == ship_seen[0].id));

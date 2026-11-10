@@ -141,9 +141,8 @@ fn the_handshake_lists_only_the_tools_the_agent_does_not_have() {
             "contexts_list",
             "memory_propose",
             "memory_mark",
-            "reviewers_list",
-            "verdicts_list",
-            "verdict_record"
+            "scorecard_publish",
+            "scorecards_list"
         ]
     );
 }
@@ -586,7 +585,7 @@ fn the_create_tool_declares_its_arguments_and_is_not_read_only() {
     assert_eq!(create["inputSchema"]["additionalProperties"], false);
     assert_eq!(
         create["inputSchema"]["required"],
-        json!(["path", "anchor_text", "kind", "body"])
+        json!(["path", "anchor_text", "body"])
     );
     assert_eq!(
         create["inputSchema"]["properties"]["kind"]["enum"],

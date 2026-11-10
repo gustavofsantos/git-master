@@ -6,9 +6,9 @@
 
 mod memory_tools;
 mod protocol;
+mod scorecard_tools;
 mod session;
 mod tools;
-mod verdict_tools;
 
 pub use protocol::serve;
 pub use session::Session;

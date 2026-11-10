@@ -1535,11 +1535,10 @@ impl Model {
         // The delete preview is read by the Manage Contexts dialog from the view, which asks the
         // delete's question from it; the model keeps no preview (D191).
         | Event::ContextDeletePreview { .. }
-        // Verdicts and reviewers are read by the agent's tools; the review panel reads them from R3
-        // on, and the model keeps none yet (D212).
-        | Event::VerdictRecorded { .. }
-        | Event::VerdictsListed { .. }
-        | Event::ReviewersListed { .. }
+        // Scorecards are read by the agent's tools and the Review page from S5 on; the model keeps
+        // none yet (D219).
+        | Event::ScorecardPublished { .. }
+        | Event::ScorecardsListed { .. }
         // A branch intent is read by the window from S5 on; the model keeps none yet (D215).
         | Event::BranchDescriptionRead { .. } => None,
             // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
@@ -1997,9 +1996,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::RecordedResolutionForgotten { id, .. }
         | Event::TransformFinished { id, .. }
         | Event::WorkflowGateUnreviewed { id, .. }
-        | Event::VerdictRecorded { id, .. }
-        | Event::VerdictsListed { id, .. }
-        | Event::ReviewersListed { id, .. }
+        | Event::ScorecardPublished { id, .. }
+        | Event::ScorecardsListed { id, .. }
         | Event::BranchDescriptionRead { id, .. } => Some(*id),
         Event::ThreadsChanged
         | Event::WorkflowRunChanged { .. }
@@ -3278,7 +3276,9 @@ mod stash_tests {
             severity: None,
             needs_answer: false,
             suggested_fix: None,
-            finding: false,
+            label: None,
+            decorations: Vec::new(),
+            scorecard: None,
             location: Some(gm_schema::ReviewLocation {
                 start_line: 2,
                 end_line: 2,

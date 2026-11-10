@@ -8,13 +8,13 @@ use serde_json::{Map, Value, json};
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
-    ConflictSite, DirListing, Event, FileBody, FileView, FindingInput, GrepOptions, History,
-    MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE,
-    RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment,
-    ReviewStatus, Reviewer, ReviewerFileError, ReviewerSignal, ReviewerSource, ReviewerSubject,
-    STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, StackSnapshot, WorkflowDiagnostic, WorktreeEntry,
-    WorktreeInspection,
+    ConflictSite, DirListing, Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED,
+    MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE, RestackBlock,
+    RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewStatus,
+    STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, ScorecardCommentInput, ScorecardStatus,
+    ScorecardSummary, StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
+use gm_schema::{resolve_kind, resolve_severity};
 
 use crate::GitPort;
 use crate::blame::BlameLine;
@@ -39,8 +39,8 @@ use crate::restack_resolutions::{self, Resolution};
 use crate::restack_session;
 use crate::review;
 use crate::review_session::{self, ReviewSession, review_store};
-use crate::review_store::{AgentThread, NewFinding, NewVerdict, Reply, ReviewStore};
-use crate::reviewers;
+use crate::review_store::{AgentThread, NewScorecard, NewScorecardComment, Reply, ReviewStore};
+use crate::scorecards;
 use crate::script::builtins;
 use crate::script::dry;
 use crate::script::hook_convert;
@@ -68,11 +68,9 @@ use crate::syntax;
 use crate::threads::members;
 use crate::threads::redact::Redactor;
 use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSession, origin_of};
-use crate::verdicts;
 use crate::workflow_session::{self, Effected};
 use crate::workspace::{CreateRequest, Workspaces};
 use crate::workspace_comments;
-use crate::workspace_defs::{self, WorkspaceDefs};
 use crate::worktree;
 
 /// One state change of one operation. The log is audit, and the base for undo
@@ -150,8 +148,6 @@ pub struct Engine {
     script_jobs: Vec<ScriptJob>,
     /// The user's workflow directory, read before `gitmaster.workflowPath`.
     workflow_user_dir: Option<PathBuf>,
-    /// The user's reviewer directory (D212 (1)): `reviewers/` of the configuration directory.
-    reviewer_user_dir: Option<PathBuf>,
     /// The folder a deleted workflow file is moved to; see `delete_workflow_file`.
     workflow_trash_dir: Option<PathBuf>,
     /// The contexts file (`contexts.db`); see `set_contexts_db`.
@@ -366,7 +362,6 @@ impl Engine {
             script_waiting: BTreeMap::new(),
             script_jobs: Vec::new(),
             workflow_user_dir: loader::default_user_dir(),
-            reviewer_user_dir: crate::paths::config_dir().map(|dir| reviewers::user_dir(&dir)),
             workspace_home: std::env::var_os("HOME")
                 .filter(|home| !home.is_empty())
                 .map(PathBuf::from),
@@ -398,12 +393,6 @@ impl Engine {
         self.workflow_user_dir = dir;
     }
 
-    /// Sets the directory of the user's reviewers (D212 (1)). `None` reads none. The default is
-    /// `reviewers/` of the user's config directory; tests point it at a temporary folder.
-    pub fn set_reviewer_user_dir(&mut self, dir: Option<PathBuf>) {
-        self.reviewer_user_dir = dir;
-    }
-
     /// The target of a review command that names `member`, in the open repository.
     fn target_of(&self, member: Option<&str>) -> Result<Target, String> {
         let root = self.open_root()?;
@@ -415,7 +404,9 @@ impl Engine {
     /// review store are. A repository is judged at its own root.
     fn target_at(&self, root: &Path, member: Option<&str>) -> Result<Target, String> {
         match (member, self.is_workspace(root)) {
-            (None, false) => Ok(Target::at(root)),
+            (None, false) => Ok(Target {
+                root: root.to_path_buf(),
+            }),
             (Some(_), false) => Err("this repository is not a workspace".to_owned()),
             (None, true) => Err("this is a workspace: name the member".to_owned()),
             (Some(name), true) => self.member_target(root, name),
@@ -440,10 +431,8 @@ impl Engine {
                 names.join(", ")
             ));
         }
-        let layer = workspace_defs::member_layer(self.git.as_ref(), root, name)?;
         Ok(Target {
             root: root.join(name),
-            layer: Some(layer),
         })
     }
 
@@ -4414,14 +4403,21 @@ impl Engine {
                 kind,
                 body,
                 severity,
+                label,
+                decorations,
             } => {
                 let author = agent_author(actor)?;
                 let body = review_body(body)?;
-                review::check_kind_and_severity(*kind, *severity)?;
+                gm_schema::check_decorations(decorations)?;
+                let kind = resolve_kind(*kind, *label)?;
+                let severity = resolve_severity(kind, *severity, *label, decorations);
+                review::check_kind_and_severity(kind, severity)?;
                 let thread = AgentThread {
                     author: &author,
-                    kind: *kind,
-                    severity: *severity,
+                    kind,
+                    severity,
+                    label: *label,
+                    decorations,
                     body,
                 };
                 self.create_agent_review_comment(id, path, anchor_text, &thread)
@@ -4469,54 +4465,55 @@ impl Engine {
                 only_a_human(actor, "delete a review comment")?;
                 self.delete_review_comment(id, *comment)
             }
-            _ if is_verdict_command(kind) => self.verdict_command(id, actor, kind),
+            _ if is_scorecard_command(kind) => self.scorecard_command(id, actor, kind),
             _ if is_description_command(kind) => self.description_command(id, kind),
             _ => Err("not a review command".to_owned()),
         }
     }
 
-    /// The verdict commands (D212 (6)), the gate-check and bypass reads (D212 (4), (5)), and the
-    /// reviewer list (D212 (1)). Only an agent records a verdict; the reads are not logged (D28).
-    fn verdict_command(
+    /// The scorecard commands (D219): the publish and the list, which read the checkout's
+    /// branch and the review store.
+    fn scorecard_command(
         &mut self,
         id: OperationId,
         actor: &Actor,
         kind: &CommandKind,
     ) -> Result<Vec<Event>, String> {
         match kind {
-            CommandKind::RecordVerdict {
-                reviewer,
+            CommandKind::PublishScorecard {
+                name,
                 branch,
                 head,
-                value,
-                rationale,
-                findings,
+                status,
+                summary,
+                comments,
                 member,
             } => {
-                let request = VerdictRequest {
-                    reviewer,
+                let request = ScorecardRequest {
+                    name,
                     branch,
                     head,
-                    value,
-                    rationale,
-                    findings,
+                    status: *status,
+                    summary,
+                    comments,
                 };
-                self.record_verdict(id, actor, member.as_deref(), &request)
+                self.publish_scorecard(id, actor, member.as_deref(), &request)
             }
-            CommandKind::ListVerdicts {
+            CommandKind::ListScorecards {
+                name,
                 branch,
-                reviewer,
+                include_stale,
                 limit,
                 member,
-            } => self.list_verdicts(
+            } => self.list_scorecards(
                 id,
+                name.as_deref(),
                 branch.as_deref(),
-                reviewer.as_deref(),
+                *include_stale,
                 *limit,
                 member.as_deref(),
             ),
-            CommandKind::ListReviewers { name } => self.list_reviewers(id, name.as_deref()),
-            _ => Err("not a verdict command".to_owned()),
+            _ => Err("not a scorecard command".to_owned()),
         }
     }
 
@@ -4597,52 +4594,41 @@ impl Engine {
         self.review_listed(id, &root)
     }
 
-    /// Records a verdict and its findings (D212 (6)). Every check runs before the first write:
-    /// the store keeps the verdict and its findings in one transaction, and each finding is
-    /// anchored on its lines as an agent's comment is (D97), with the "before" snapshot taken as
-    /// for a person's comment (D140).
-    fn record_verdict(
+    /// Publishes a scorecard and its comments (D219 (6)). Every check runs before the first write:
+    /// the name, the summary, each comment's label, decorations, lines and text, and `head` as the
+    /// tip of `branch`. The store keeps the scorecard and its comments in one transaction, and each
+    /// comment gets its "before" snapshot as a person's comment does (D140).
+    fn publish_scorecard(
         &mut self,
         id: OperationId,
         actor: &Actor,
         member: Option<&str>,
-        request: &VerdictRequest,
+        request: &ScorecardRequest,
     ) -> Result<Vec<Event>, String> {
         if !matches!(actor, Actor::Agent { .. }) {
-            return Err("only an agent records a verdict".to_owned());
+            return Err("only an agent publishes a scorecard".to_owned());
         }
         let origin = origin_of(actor);
         let open = self.open_root()?;
-        let target = self.target_at(&open, member)?;
-        let root = target.root.clone();
+        let root = self.target_at(&open, member)?.root;
         // Redaction first, and it fails closed: a configuration that does not compile refuses the
-        // whole record (D121, D212 (6)). The checkout that holds the text decides its settings.
+        // whole publish (D121, D219). The checkout that holds the text decides its settings.
         let redactor = threads_session::redactor_at(&root, None).map_err(|reason| {
             format!("redaction is misconfigured, so nothing was recorded: {reason}")
         })?;
-        let reviewer = self.reviewer_named(&target, request.reviewer)?;
-        if reviewer.subject != ReviewerSubject::Branch {
+        gm_schema::check_name(request.name)?;
+        gm_schema::check_decorations(&request.summary.decorations)?;
+        if request.comments.len() > gm_schema::COMMENTS_MAX {
             return Err(format!(
-                "reviewer {} has subject {}; only branch reviewers can record verdicts for now",
-                reviewer.name,
-                subject_name(reviewer.subject)
+                "a scorecard has at most {} comments, not {}",
+                gm_schema::COMMENTS_MAX,
+                request.comments.len()
             ));
         }
-        match self.git.status(&root).map_err(|e| e.0)?.branch.head {
-            Some(current) if current == request.branch => {}
-            Some(current) => {
-                return Err(format!(
-                    "the branch {} is not checked out here, HEAD is on {current}; a verdict is for the branch checked out in this worktree",
-                    request.branch
-                ));
-            }
-            None => {
-                return Err(format!(
-                    "HEAD is detached; check out {} to record its verdict",
-                    request.branch
-                ));
-            }
-        }
+        let subject = redactor.redact(&request.summary.subject).text;
+        let subject = verdict_text(&subject, gm_schema::SUBJECT_MAX_CHARS, "the subject")?;
+        let body = redactor.redact(&request.summary.body).text;
+        let body = verdict_text(&body, gm_schema::BODY_MAX_CHARS, "the body")?;
         let head = self
             .git
             .resolve_commit(&root, request.head)
@@ -4653,173 +4639,92 @@ impl Engine {
             .map_err(|e| e.0)?;
         if tip.as_deref() != Some(head.as_str()) {
             return Err(format!(
-                "head {} is not the tip of {} ({}); the branch moved since you judged it, run the reviewer again",
+                "head {} is not the tip of {} ({}); the branch moved since you judged it, run the review again",
                 short_id(&head),
                 request.branch,
                 tip.as_deref().map_or("none", short_id)
             ));
         }
-        let value = verdicts::check_value(reviewer.signal, request.value)?;
-        let rationale = redactor.redact(request.rationale).text;
-        let rationale = verdict_text(&rationale, verdicts::MAX_RATIONALE_CHARS, "the rationale")?;
-        if request.findings.len() > verdicts::MAX_FINDINGS {
-            return Err(format!(
-                "a verdict has at most {} findings, not {}",
-                verdicts::MAX_FINDINGS,
-                request.findings.len()
-            ));
-        }
-        let findings = anchored_findings(&root, request.findings, &redactor)?;
-        let new = NewVerdict {
-            reviewer: reviewer.name.clone(),
+        let comments = anchored_comments(&root, request.comments, &redactor)?;
+        let new = NewScorecard {
+            name: request.name.to_owned(),
             branch: request.branch.to_owned(),
             head,
-            signal: signal_name(reviewer.signal).to_owned(),
-            value,
-            rationale: rationale.to_owned(),
+            status: request.status,
+            label: request.summary.label,
+            decorations: request.summary.decorations.clone(),
+            subject: subject.to_owned(),
+            body: body.to_owned(),
             origin,
             model: None,
             run_thread: None,
+            workflow_run: None,
             at: now_ms(),
         };
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let recorded = store.record_verdict(&new, &findings).map_err(|e| e.0)?;
-        for (comment, finding) in recorded.comments.iter().zip(request.findings) {
-            snapshot_before(self.git.as_ref(), store, &root, *comment, &finding.path)?;
+        let recorded = store.record_scorecard(&new, &comments).map_err(|e| e.0)?;
+        for (comment, input) in recorded.comments.iter().zip(request.comments) {
+            snapshot_before(self.git.as_ref(), store, &root, *comment, &input.path)?;
         }
-        let verdict = store
-            .list_verdicts(Some(request.branch), Some(&reviewer.name), 1)
+        let scorecard = store
+            .get_scorecard(recorded.id)
             .map_err(|e| e.0)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| "the engine did not list the new verdict".to_owned())?;
-        let mut events = vec![Event::VerdictRecorded {
+            .ok_or_else(|| "the engine did not read the new scorecard".to_owned())?;
+        let mut events = vec![Event::ScorecardPublished {
             id,
-            verdict,
+            scorecard,
             comment_ids: recorded.comments,
         }];
         events.extend(self.review_listed(id, &root)?);
         Ok(events)
     }
 
-    /// The verdicts that `branch` and `reviewer` pick, newest first, each with whether it is
-    /// stale against the tip of its branch now (D189 (2)). Each branch's tip is read once. A
-    /// `member` reads that member's checkout and its clone's store (D214 (5)).
-    fn list_verdicts(
+    /// The scorecards of `name` and `branch` (the checked-out branch when `branch` is `None`),
+    /// newest first, each with whether it is stale against its branch's tip now (D219 (4)). A stale
+    /// one is listed only when asked. A `member` reads that member's checkout and its store.
+    fn list_scorecards(
         &mut self,
         id: OperationId,
+        name: Option<&str>,
         branch: Option<&str>,
-        reviewer: Option<&str>,
+        include_stale: bool,
         limit: u32,
         member: Option<&str>,
     ) -> Result<Vec<Event>, String> {
         let open = self.open_root()?;
         let root = self.target_at(&open, member)?.root;
         let limit = match limit {
-            0 => verdicts::DEFAULT_LIST_LIMIT,
-            n => n.min(verdicts::MAX_LIST_LIMIT),
+            0 => gm_schema::LIST_DEFAULT,
+            n => n.min(gm_schema::LIST_MAX),
+        };
+        let branch = match branch {
+            Some(branch) => branch.to_owned(),
+            None => self
+                .git
+                .status(&root)
+                .map_err(|e| e.0)?
+                .branch
+                .head
+                .ok_or_else(|| "HEAD is detached, so name the branch".to_owned())?,
         };
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let mut found = store
-            .list_verdicts(
-                branch,
-                reviewer,
-                usize::try_from(limit).unwrap_or(usize::MAX),
-            )
+        let rows = store
+            .list_scorecards(name, Some(&branch), scorecards::FETCH_LIMIT)
             .map_err(|e| e.0)?;
-        // Each finding takes its body, fix and current line from its comment (D215 (3)).
-        let comments = review_session::listed(store, &root)?;
-        let by_id: BTreeMap<i64, &ReviewComment> = comments
-            .iter()
-            .map(|comment| (comment.id, comment))
-            .collect();
-        for verdict in &mut found {
-            for finding in &mut verdict.findings {
-                if let Some(comment) = by_id.get(&finding.comment_id) {
-                    finding.body.clone_from(&comment.body);
-                    finding.suggested_fix.clone_from(&comment.suggested_fix);
-                    finding.start_line = comment.location.map(|at| at.start_line);
-                }
-            }
-        }
-        let mut tips: BTreeMap<String, Option<String>> = BTreeMap::new();
-        for verdict in &mut found {
-            if !tips.contains_key(&verdict.branch) {
-                let tip = self
-                    .git
-                    .branch_tip(&root, &verdict.branch)
-                    .map_err(|e| e.0)?;
-                tips.insert(verdict.branch.clone(), tip);
-            }
-            let tip = tips.get(&verdict.branch).and_then(|tip| tip.as_deref());
-            verdict.stale = verdicts::is_stale(&verdict.head, tip);
-        }
-        Ok(vec![Event::VerdictsListed {
+        let mut tips = BTreeMap::new();
+        tips.insert(
+            branch.clone(),
+            self.git.branch_tip(&root, &branch).map_err(|e| e.0)?,
+        );
+        let rows = scorecards::listed(
+            scorecards::with_staleness(rows, &tips),
+            include_stale,
+            usize::try_from(limit).unwrap_or(usize::MAX),
+        );
+        Ok(vec![Event::ScorecardsListed {
             id,
-            verdicts: found,
+            scorecards: rows,
         }])
-    }
-
-    /// The reviewers of the repository, the user and the workspaces the checkout belongs to, with
-    /// the presets they do not override, by name, or only the one called `name` (D212 (1), D214
-    /// (4)). The unreadable files come back too.
-    fn list_reviewers(
-        &mut self,
-        id: OperationId,
-        name: Option<&str>,
-    ) -> Result<Vec<Event>, String> {
-        let root = self.open_root()?;
-        let (mut reviewers, errors) = self.reviewers(&Target::at(&root))?;
-        if let Some(name) = name {
-            reviewers.retain(|reviewer| reviewer.name == name);
-        }
-        Ok(vec![Event::ReviewersListed {
-            id,
-            reviewers,
-            errors,
-        }])
-    }
-
-    /// The reviewers a run can use in `target`: the repository's, the user's, the workspace's
-    /// (when the target is or belongs to one) and the presets.
-    fn reviewers(
-        &self,
-        target: &Target,
-    ) -> Result<(Vec<Reviewer>, Vec<ReviewerFileError>), String> {
-        let common = self.git.common_dir(&target.root).map_err(|e| e.0)?;
-        let layers = workspace_defs::layers_for(self.git.as_ref(), &common, target.layer.as_ref());
-        Ok(verdicts::merged_reviewers(
-            &reviewers::repo_dir(&common),
-            self.reviewer_user_dir.as_deref(),
-            &layers,
-        ))
-    }
-
-    /// The reviewer called `name` in `target`; refused, naming the ones there are, when none is. A
-    /// preset is a template and not a reviewer (R2h, D212 (1)): a name that only a preset has is
-    /// refused until a reviewer file defines it.
-    fn reviewer_named(&self, target: &Target, name: &str) -> Result<Reviewer, String> {
-        let (found, _) = self.reviewers(target)?;
-        let defined: Vec<&str> = found
-            .iter()
-            .map(|reviewer| reviewer.name.as_str())
-            .collect();
-        let reviewer = found
-            .iter()
-            .find(|reviewer| reviewer.name == name)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "there is no reviewer named {name:?}; the defined ones are {}",
-                    defined.join(", ")
-                )
-            })?;
-        if reviewer.source == ReviewerSource::Preset {
-            return Err(format!(
-                "{name} is a preset, not a reviewer yet: add it as a reviewer first (Reviewers Settings, or write .git/gitmaster/reviewers/{name}.md)"
-            ));
-        }
-        Ok(reviewer)
     }
 
     /// Comments on `text` where it is in `path` now (D141): found exactly once, or refused.
@@ -4902,11 +4807,11 @@ impl Engine {
         let site = workspace_comments::site(self.git.as_ref(), &view, comment)?;
         let store = review_store(&mut self.review, self.git.as_ref(), &site.store_root)?;
         let current = find_review(store, site.local)?;
-        // An agent may hand off a finding, so it can fix what a reviewer found (D215 (3)); every
-        // other thread it started is the person's to close (D200 (5a)).
+        // An agent may hand off a scorecard's comment, so it can fix what a review found (D219);
+        // every other thread it started is the person's to close (D200 (5a)).
         if matches!(actor, Actor::Agent { .. })
             && review::is_agent_started(&current)
-            && !current.finding
+            && current.scorecard.is_none()
         {
             return Err(
                 "an agent cannot hand off a thread it started: only a person closes it".to_owned(),
@@ -5763,8 +5668,7 @@ impl Engine {
                 | CommandKind::DeleteWorkflowFile { .. }
                 | CommandKind::DismissWorkflowRequest { .. }
                 | CommandKind::ListReviewComments { .. }
-                | CommandKind::ListVerdicts { .. }
-                | CommandKind::ListReviewers { .. }
+                | CommandKind::ListScorecards { .. }
                 | CommandKind::ReadBranchDescription { .. }
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }
@@ -5829,22 +5733,10 @@ fn success_message(kind: &CommandKind) -> &'static str {
     }
 }
 
-/// Where a review command runs (D214 (5)): the checkout whose Git calls and review store it uses,
-/// and, for a member of the open workspace, the workspace layer its definitions are read from.
+/// Where a review command runs (D214 (5)): the checkout whose Git calls and review store it uses.
 #[derive(Clone, Debug)]
 pub(crate) struct Target {
     pub(crate) root: PathBuf,
-    pub(crate) layer: Option<WorkspaceDefs>,
-}
-
-impl Target {
-    /// The repository at `root`, which has no workspace layer of its own.
-    pub(crate) fn at(root: &Path) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            layer: None,
-        }
-    }
 }
 
 /// The member of the workspace at `root` that `path` is in (D181), by name. `None` for a file of
@@ -5928,17 +5820,18 @@ fn only_a_human(actor: &Actor, what: &str) -> Result<(), String> {
     }
 }
 
-/// What an agent records as a verdict (`CommandKind::RecordVerdict`), borrowed from the command.
-struct VerdictRequest<'a> {
-    reviewer: &'a str,
+/// What an agent publishes as a scorecard (`CommandKind::PublishScorecard`), borrowed from the
+/// command.
+struct ScorecardRequest<'a> {
+    name: &'a str,
     branch: &'a str,
     head: &'a str,
-    value: &'a str,
-    rationale: &'a str,
-    findings: &'a [FindingInput],
+    status: ScorecardStatus,
+    summary: &'a ScorecardSummary,
+    comments: &'a [ScorecardCommentInput],
 }
 
-/// A verdict's text without its surrounding blank space; refused when it is empty or longer
+/// A text without its surrounding blank space; refused when it is empty or longer
 /// than `limit` characters. `what` names the text in the reason.
 fn verdict_text<'a>(text: &'a str, limit: usize, what: &str) -> Result<&'a str, String> {
     let text = text.trim();
@@ -5954,76 +5847,68 @@ fn verdict_text<'a>(text: &'a str, limit: usize, what: &str) -> Result<&'a str, 
     }
 }
 
-/// The findings of a verdict as the store takes them: each body redacted and checked, each
-/// file read once, and each finding anchored on its lines as the file is now (D97).
-fn anchored_findings(
+/// The comments of a scorecard as the store takes them: each label, decoration set, body and fix
+/// checked and redacted, each file read once, and each comment anchored on its lines as the file
+/// is now (D97). The lines must be in the file, and their text must be there exactly once, as an
+/// agent's thread's anchor text is (D200). The kind and severity follow the label (D219 (5)).
+fn anchored_comments(
     root: &Path,
-    inputs: &[FindingInput],
+    inputs: &[ScorecardCommentInput],
     redactor: &Redactor,
-) -> Result<Vec<NewFinding>, String> {
+) -> Result<Vec<NewScorecardComment>, String> {
     let mut files: BTreeMap<&str, String> = BTreeMap::new();
-    for finding in inputs {
-        if !files.contains_key(finding.path.as_str()) {
-            let text = review_session::read_text(root, &finding.path)?;
-            files.insert(&finding.path, text);
+    for comment in inputs {
+        if !files.contains_key(comment.path.as_str()) {
+            let text = review_session::read_text(root, &comment.path)?;
+            files.insert(&comment.path, text);
         }
     }
-    let mut findings = Vec::with_capacity(inputs.len());
-    for finding in inputs {
-        let body = redactor.redact(&finding.body).text;
-        let body = verdict_text(&body, verdicts::MAX_FINDING_BODY_CHARS, "a finding's body")?;
+    let mut comments = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        gm_schema::check_decorations(&input.decorations)?;
+        let body = redactor.redact(&input.body).text;
+        let body = verdict_text(&body, gm_schema::COMMENT_BODY_MAX_CHARS, "a comment's body")?;
         // An empty fix is no fix (D215 (3)); a fix is redacted and checked like the body.
-        let suggested_fix = match finding.suggested_fix.as_deref().map(str::trim) {
+        let suggested_fix = match input.suggested_fix.as_deref().map(str::trim) {
             None | Some("") => None,
             Some(fix) => {
                 let fix = redactor.redact(fix).text;
                 Some(
                     verdict_text(
                         &fix,
-                        verdicts::MAX_SUGGESTED_FIX_CHARS,
-                        "a finding's suggested fix",
+                        gm_schema::SUGGESTED_FIX_MAX_CHARS,
+                        "a comment's suggested fix",
                     )?
                     .to_owned(),
                 )
             }
         };
         let file = files
-            .get(finding.path.as_str())
-            .ok_or_else(|| format!("there is no file {} in the worktree", finding.path))?;
-        let anchor = review::anchor_for(file, finding.start_line, finding.end_line)
-            .map_err(|reason| format!("{}: {reason}", finding.path))?;
-        findings.push(NewFinding {
-            severity: finding.severity,
-            path: finding.path.clone(),
-            body: body.to_owned(),
+            .get(input.path.as_str())
+            .ok_or_else(|| format!("there is no file {} in the worktree", input.path))?;
+        let anchor = review::anchor_for(file, input.start_line, input.end_line)
+            .map_err(|reason| format!("{}: {reason}", input.path))?;
+        review::lines_of_text(file, &anchor.text)
+            .map_err(|reason| format!("{}: {reason}", input.path))?;
+        let kind = gm_schema::kind_of_label(input.label);
+        let severity = resolve_severity(kind, None, Some(input.label), &input.decorations);
+        review::check_kind_and_severity(kind, severity)?;
+        comments.push(NewScorecardComment {
+            path: input.path.clone(),
             anchor,
-            snapshot: None,
+            body: body.to_owned(),
+            kind,
+            severity,
+            label: input.label,
+            decorations: input.decorations.clone(),
             suggested_fix,
         });
     }
-    Ok(findings)
+    Ok(comments)
 }
 
 fn short_id(id: &str) -> &str {
     id.get(..7).unwrap_or(id)
-}
-
-/// The name of a reviewer's subject, as the reviewer file writes it.
-fn subject_name(subject: ReviewerSubject) -> &'static str {
-    match subject {
-        ReviewerSubject::Branch => "branch",
-        ReviewerSubject::Staged => "staged",
-        ReviewerSubject::Commit => "commit",
-    }
-}
-
-/// The name a verdict's signal has in the store.
-fn signal_name(signal: ReviewerSignal) -> &'static str {
-    match signal {
-        ReviewerSignal::Score => "score",
-        ReviewerSignal::Level => "level",
-        ReviewerSignal::Pass => "pass",
-    }
 }
 
 /// Records the "before" snapshot of `path` for comment `comment`, as a person's comment has it
@@ -6105,9 +5990,8 @@ fn is_review_command(kind: &CommandKind) -> bool {
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }
                 | CommandKind::LoadReviewChange { .. }
-                | CommandKind::RecordVerdict { .. }
-                | CommandKind::ListVerdicts { .. }
-                | CommandKind::ListReviewers { .. }
+                | CommandKind::PublishScorecard { .. }
+                | CommandKind::ListScorecards { .. }
         )
 }
 
@@ -6116,13 +6000,11 @@ fn is_description_command(kind: &CommandKind) -> bool {
     matches!(kind, CommandKind::ReadBranchDescription { .. })
 }
 
-/// Whether `kind` is a verdict, reviewer or gate-check command (see `verdict_command`).
-fn is_verdict_command(kind: &CommandKind) -> bool {
+/// Whether `kind` is a scorecard command (see `scorecard_command`).
+fn is_scorecard_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
-        CommandKind::RecordVerdict { .. }
-            | CommandKind::ListVerdicts { .. }
-            | CommandKind::ListReviewers { .. }
+        CommandKind::PublishScorecard { .. } | CommandKind::ListScorecards { .. }
     )
 }
 

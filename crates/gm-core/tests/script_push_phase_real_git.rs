@@ -1,4 +1,4 @@
-//! The `push` phase (D157, D212 (3)) and `ctx.verdicts` (D212 (5)) against real repositories in
+//! The `push` phase (D157) and `ctx.scorecards` (D219) against real repositories in
 //! temporary directories. The remote is a local bare repository, so nothing needs the network. The
 //! harness plays the engine thread: it carries a run's effects and events, and runs the Git jobs of
 //! a push, as the runner does.
@@ -12,11 +12,10 @@ use std::time::{Duration, Instant};
 use gm_core::git::SubprocessGit;
 use gm_core::script::run::ScriptEvent;
 use gm_core::script::trust::TrustStore;
-use gm_core::{EffectRequest, Engine, ScriptLink, reviewers};
+use gm_core::{EffectRequest, Engine, ScriptLink};
 use gm_schema::{
-    Actor, Command, CommandKind, Event, FindingInput, OperationId, OperationState, ReviewSeverity,
-    Reviewer, ReviewerDirection, ReviewerSignal, ReviewerSource, ReviewerSubject, WorkflowDryRun,
-    WorkflowEnd,
+    Actor, Command, CommandKind, CommentLabel, Event, OperationId, OperationState, ScorecardStatus,
+    ScorecardSummary, WorkflowDryRun, WorkflowEnd,
 };
 use serde_json::json;
 
@@ -117,46 +116,20 @@ fn write_workflow(flows: &Path, name: &str, source: &str) {
     std::fs::write(flows.join(format!("{name}.lua")), source).unwrap();
 }
 
-fn reviewer(name: &str) -> Reviewer {
-    Reviewer {
+/// The agent publishes a scorecard `name` on `feat` at its tip, with `status` and no comments.
+fn publish(name: &str, status: ScorecardStatus) -> CommandKind {
+    CommandKind::PublishScorecard {
         name: name.to_owned(),
-        description: format!("The {name} reviewer."),
-        instructions: format!("Judge the change for {name}."),
-        signal: ReviewerSignal::Level,
-        direction: ReviewerDirection::LowerIsBetter,
-        subject: ReviewerSubject::Branch,
-        model: None,
-        source: ReviewerSource::Repository,
-        paths: Vec::new(),
-        branches: Vec::new(),
-        members: Vec::new(),
-    }
-}
-
-fn save_reviewer(repo: &Path, name: &str) {
-    reviewers::save(&reviewers::repo_dir(&repo.join(".git")), &reviewer(name)).unwrap();
-}
-
-fn finding(severity: ReviewSeverity, start: u32, body: &str) -> FindingInput {
-    FindingInput {
-        severity,
-        path: "f.txt".to_owned(),
-        start_line: start,
-        end_line: start,
-        body: body.to_owned(),
-        suggested_fix: None,
-    }
-}
-
-/// The agent records `value` of `reviewer` on `feat` at its tip, with `findings`.
-fn record(reviewer: &str, value: &str, findings: Vec<FindingInput>) -> CommandKind {
-    CommandKind::RecordVerdict {
-        reviewer: reviewer.to_owned(),
         branch: "feat".to_owned(),
         head: "HEAD".to_owned(),
-        value: value.to_owned(),
-        rationale: "Checked the change.".to_owned(),
-        findings,
+        status,
+        summary: ScorecardSummary {
+            label: CommentLabel::Issue,
+            decorations: Vec::new(),
+            subject: "Unchecked input".to_owned(),
+            body: "Checked the change.".to_owned(),
+        },
+        comments: Vec::new(),
         member: None,
     }
 }
@@ -179,7 +152,7 @@ struct Harness {
 }
 
 impl Harness {
-    /// Opens `fx.repo` with the workflows and the reviewers of `fx.user`, and the switch the app
+    /// Opens `fx.repo` with the workflows of `fx.user`, and the switch the app
     /// turns on for triggers.
     fn open(fx: &Fixture) -> Self {
         let (tx, messages) = mpsc::channel();
@@ -187,7 +160,6 @@ impl Harness {
         let events_tx = Mutex::new(tx);
         let mut engine = Engine::new(Box::new(SubprocessGit::default()));
         engine.set_workflow_user_dir(Some(fx.user.join("flows")));
-        engine.set_reviewer_user_dir(Some(reviewers::user_dir(&fx.user)));
         engine.set_trust_store(TrustStore::open_in_memory().unwrap());
         engine.set_script_link(ScriptLink {
             effects: Arc::new(move |request| {
@@ -373,12 +345,16 @@ fn dry_run_of(events: &[Event]) -> WorkflowDryRun {
         .expect("a dry run")
 }
 
-const VERDICT_GATE: &str = "for _, verdict in ipairs(ctx.verdicts({ reviewer = \"security\" })) do\n\
-    if not verdict.stale then\n\
-    for _, finding in ipairs(verdict.findings) do\n\
-    if finding.severity == \"high\" then\n\
-    ctx.block(\"security: \" .. finding.path .. \":\" .. tostring(finding.start_line) .. \" is high\")\n\
-    end\nend\nend\nend";
+/// The gate of a review: the scorecard of the pushed head must pass and have no open blocking
+/// comment, or the push stops.
+const SCORECARD_GATE: &str = r#"for _, row in ipairs(ctx.scorecards({ name = "security", branch = input.repo.branch })) do
+    if row.head == input.repo.head and not row.stale then
+        if row.status ~= "pass" then return ctx.block("security: " .. row.status) end
+        if row.blocking_open > 0 then return ctx.block(row.blocking_open .. " blocking comments are open") end
+        return
+    end
+end
+return ctx.block("no security scorecard for this commit")"#;
 
 #[test]
 fn a_blocking_before_push_gate_stops_the_push_and_the_remote_does_not_move() {
@@ -556,25 +532,20 @@ fn an_unreviewed_before_push_gate_vetoes_the_push_with_the_review_text() {
 }
 
 #[test]
-fn a_gate_reads_the_recorded_verdict_and_blocks_a_push_on_a_high_finding() {
+fn a_before_push_gate_reads_a_fail_scorecard_and_stops_the_push() {
     let fx = fixture();
-    save_reviewer(&fx.repo, "security");
     write_workflow(
         &fx.user.join("flows"),
-        "verdict-gate",
-        &gate_source("verdict-gate", "before.push", None, VERDICT_GATE),
+        "scorecard-gate",
+        &gate_source("scorecard-gate", "before.push", None, SCORECARD_GATE),
     );
     let mut h = Harness::open(&fx);
-    h.review("verdict-gate");
-    let recorded = h.agent(record(
-        "security",
-        "high",
-        vec![finding(ReviewSeverity::High, 2, "Unchecked input.")],
-    ));
+    h.review("scorecard-gate");
+    let published = h.agent(publish("security", ScorecardStatus::Fail));
     assert_eq!(
-        state_of(&recorded, OperationId(h.last)),
+        state_of(&published, OperationId(h.last)),
         Some(OperationState::Done),
-        "{recorded:?}"
+        "{published:?}"
     );
 
     let (id, events) = h.human(CommandKind::PushWithLease);
@@ -587,15 +558,40 @@ fn a_gate_reads_the_recorded_verdict_and_blocks_a_push_on_a_high_finding() {
     );
     assert_eq!(
         detail(&events).as_deref(),
-        Some("verdict-gate blocked the push: security: f.txt:2 is high")
+        Some("scorecard-gate blocked the push: security: fail")
     );
     assert!(remote_tip(&fx.origin, "feat").is_empty());
 }
 
 #[test]
-fn a_verdict_is_fresh_at_its_tip_and_stale_after_a_commit_and_its_line_moves() {
+fn a_passing_scorecard_for_the_pushed_head_lets_the_push_through() {
     let fx = fixture();
-    save_reviewer(&fx.repo, "security");
+    write_workflow(
+        &fx.user.join("flows"),
+        "scorecard-gate",
+        &gate_source("scorecard-gate", "before.push", None, SCORECARD_GATE),
+    );
+    let mut h = Harness::open(&fx);
+    h.review("scorecard-gate");
+    h.agent(publish("security", ScorecardStatus::Pass));
+
+    let (id, events) = h.human(CommandKind::PushWithLease);
+    let events = h.finish(id, events);
+
+    assert_eq!(
+        state_of(&events, id),
+        Some(OperationState::Done),
+        "{events:?}"
+    );
+    assert!(
+        !remote_tip(&fx.origin, "feat").is_empty(),
+        "the push went out"
+    );
+}
+
+#[test]
+fn a_scorecard_is_fresh_at_its_tip_and_stale_after_a_commit_for_ctx_scorecards() {
+    let fx = fixture();
     write_workflow(
         &fx.user.join("flows"),
         "show",
@@ -603,20 +599,15 @@ fn a_verdict_is_fresh_at_its_tip_and_stale_after_a_commit_and_its_line_moves() {
             "show",
             "before.push",
             None,
-            "for _, v in ipairs(ctx.verdicts()) do\n\
-             for _, f in ipairs(v.findings) do\n\
-             ctx.notify(\"stale=\" .. tostring(v.stale) .. \" line=\" .. tostring(f.start_line) .. \
-             \" sev=\" .. f.severity .. \" status=\" .. f.status .. \" path=\" .. f.path)\n\
-             end\nend",
+            "for _, row in ipairs(ctx.scorecards()) do\n\
+             ctx.notify(\"stale=\" .. tostring(row.stale) .. \" status=\" .. row.status .. \
+             \" blocking=\" .. row.blocking_open .. \" label=\" .. row.label)\n\
+             end",
         ),
     );
     let mut h = Harness::open(&fx);
     h.review("show");
-    h.agent(record(
-        "security",
-        "high",
-        vec![finding(ReviewSeverity::High, 2, "Unchecked input.")],
-    ));
+    h.agent(publish("security", ScorecardStatus::NeedsWork));
 
     let (id, events) = h.human(CommandKind::PushWithLease);
     let events = h.finish(id, events);
@@ -627,10 +618,10 @@ fn a_verdict_is_fresh_at_its_tip_and_stale_after_a_commit_and_its_line_moves() {
     );
     assert_eq!(
         notices(&events),
-        ["stale=false line=2 sev=high status=open path=f.txt"]
+        ["stale=false status=needs_work blocking=0 label=issue"]
     );
 
-    // A line above `three` moves it to line 3; the verdict is for the old tip.
+    // A commit moves the branch; the scorecard stays as it was, and is stale now.
     std::fs::write(fx.repo.join("f.txt"), "new\none\nthree\n").unwrap();
     git(&fx.repo, &["commit", "-q", "-am", "add a line"]);
     let (id, events) = h.human(CommandKind::PushWithLease);
@@ -642,15 +633,13 @@ fn a_verdict_is_fresh_at_its_tip_and_stale_after_a_commit_and_its_line_moves() {
     );
     assert_eq!(
         notices(&events),
-        ["stale=true line=3 sev=high status=open path=f.txt"]
+        ["stale=true status=needs_work blocking=0 label=issue"]
     );
 }
 
 #[test]
-fn ctx_verdicts_filters_by_reviewer_and_lists_newest_first() {
+fn ctx_scorecards_filters_by_name_and_lists_newest_first() {
     let fx = fixture();
-    save_reviewer(&fx.repo, "security");
-    save_reviewer(&fx.repo, "style");
     write_workflow(
         &fx.user.join("flows"),
         "count",
@@ -658,14 +647,14 @@ fn ctx_verdicts_filters_by_reviewer_and_lists_newest_first() {
             "count",
             "before.push",
             None,
-            "local style = ctx.verdicts({ reviewer = \"style\" })\n\
-             ctx.notify(\"all=\" .. #ctx.verdicts() .. \" style=\" .. #style .. \" first=\" .. style[1].reviewer)",
+            "local style = ctx.scorecards({ name = \"style\" })\n\
+             ctx.notify(\"all=\" .. #ctx.scorecards() .. \" style=\" .. #style .. \" first=\" .. style[1].name)",
         ),
     );
     let mut h = Harness::open(&fx);
     h.review("count");
-    h.agent(record("security", "high", Vec::new()));
-    h.agent(record("style", "low", Vec::new()));
+    h.agent(publish("security", ScorecardStatus::Fail));
+    h.agent(publish("style", ScorecardStatus::Pass));
 
     let (id, events) = h.human(CommandKind::PushWithLease);
     let events = h.finish(id, events);
@@ -679,12 +668,12 @@ fn ctx_verdicts_filters_by_reviewer_and_lists_newest_first() {
 }
 
 #[test]
-fn a_dry_run_of_a_script_that_reads_verdicts_gets_an_empty_list() {
+fn a_dry_run_of_a_script_that_reads_scorecards_gets_an_empty_list() {
     let fx = fixture();
     let mut h = Harness::open(&fx);
     let source = "local M = {}\nM.meta = { name = \"count\", trigger = { on = \"manual\" } }\n\
                   function M.execute(ctx, input)\n\
-                  local found = ctx.verdicts({ reviewer = \"security\" })\n\
+                  local found = ctx.scorecards({ name = \"security\" })\n\
                   return tostring(#found)\nend\nreturn M\n"
         .to_owned();
 
@@ -695,7 +684,7 @@ fn a_dry_run_of_a_script_that_reads_verdicts_gets_an_empty_list() {
     let dry = dry_run_of(&events);
 
     assert_eq!(dry.error, None, "{events:?}");
-    assert_eq!(dry.calls[0].func, "verdicts");
+    assert_eq!(dry.calls[0].func, "scorecards");
     assert_eq!(dry.calls[0].level, "read");
     assert_eq!(dry.stop, "returned: \"0\"");
 }

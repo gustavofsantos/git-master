@@ -1,6 +1,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::scorecard::CommentLabel;
+
 /// Where a review comment stands (B4, D96, D97, D135). `Handled` is set by an agent
 /// through MCP, with a reply; only a human makes a comment `Resolved`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -122,13 +124,20 @@ pub struct ReviewComment {
     /// Computed on read, as `outdated` is.
     #[serde(default)]
     pub needs_answer: bool,
-    /// The fix a reviewer suggested for a finding, as plain text (D215 (3)); `None` for any
-    /// other comment and for a finding without one.
+    /// The fix a reviewer suggested, as plain text (D215 (3), D219 (6)); `None` for any other
+    /// comment and for a comment without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_fix: Option<String>,
-    /// True when the thread is a finding of a verdict (D215 (3)): a flag a reviewer recorded.
-    #[serde(default)]
-    pub finding: bool,
+    /// The conventional-comment label the agent gave the thread (D219 (5)); `None` for a
+    /// person's comment and for an agent's thread that gave none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<CommentLabel>,
+    /// The decorations the agent gave the thread (D219 (5)), in the order given; empty for none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decorations: Vec<String>,
+    /// The scorecard this comment belongs to, when a scorecard publish created it (D219 (6)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorecard: Option<i64>,
     /// The folder name of the workspace the comment is in, when a member's repository lists a
     /// comment its workspace holds on one of its files; `None` for the repository's own comments.
     /// The id of such a comment is composite (`workspace_comments`).
@@ -215,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn a_comment_without_a_fix_or_a_finding_flag_reads_as_before() {
+    fn a_comment_without_a_fix_or_a_scorecard_reads_as_before() {
         let json = serde_json::json!({
             "id": 4,
             "path": "a.rs",
@@ -233,10 +242,10 @@ mod tests {
         });
         let comment: ReviewComment = serde_json::from_value(json).unwrap();
         assert_eq!(comment.suggested_fix, None);
-        assert!(!comment.finding);
+        assert_eq!(comment.scorecard, None);
         let back = serde_json::to_value(&comment).unwrap();
         assert!(back.get("suggested_fix").is_none());
-        assert_eq!(back["finding"], false);
+        assert!(back.get("scorecard").is_none());
     }
 
     #[test]
@@ -269,7 +278,9 @@ mod tests {
             severity: None,
             needs_answer: false,
             suggested_fix: None,
-            finding: false,
+            label: None,
+            decorations: Vec::new(),
+            scorecard: None,
             workspace: None,
         };
         let json = serde_json::to_value(&comment).unwrap();

@@ -12,13 +12,13 @@ mod operation;
 mod reflog;
 mod restack;
 mod review;
+mod scorecard;
 mod stack;
 mod stash;
 mod status;
 mod submodule;
 mod syntax;
 pub mod threads;
-mod verdict;
 mod workflow;
 mod workspace;
 
@@ -52,6 +52,12 @@ pub use review::{
     ReviewAnchor, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewKind, ReviewLocation,
     ReviewReply, ReviewSeverity, ReviewStatus,
 };
+pub use scorecard::{
+    BODY_MAX_CHARS, COMMENT_BODY_MAX_CHARS, COMMENTS_MAX, CommentLabel, LIST_DEFAULT, LIST_MAX,
+    NAME_MAX_CHARS, RETAINED_PER_NAME_AND_BRANCH, SUBJECT_MAX_CHARS, SUGGESTED_FIX_MAX_CHARS,
+    Scorecard, ScorecardCommentInput, ScorecardStatus, ScorecardSummary, check_decorations,
+    check_name, is_blocking, kind_of_label, resolve_kind, resolve_severity, severity_of,
+};
 pub use stack::{OWN_COMMITS_LIMIT, Stack, StackBranch, StackSnapshot, StackState};
 pub use stash::StashEntry;
 pub use status::{
@@ -69,10 +75,6 @@ pub use threads::{
     SearchOrder, SessionOrigin, ThreadDetail, ThreadEdit, ThreadEntry, ThreadEntryBrief,
     ThreadFilter, ThreadHit, ThreadLink, ThreadRelKind, ThreadRelation, ThreadSummary, ToolKind,
     Unverifiable,
-};
-pub use verdict::{
-    FindingInput, Level, Reviewer, ReviewerDirection, ReviewerFileError, ReviewerSignal,
-    ReviewerSource, ReviewerSubject, Verdict, VerdictFinding,
 };
 pub use workflow::{
     WorkflowCallRecord, WorkflowDiagnostic, WorkflowDryCall, WorkflowDryRun, WorkflowEnd,

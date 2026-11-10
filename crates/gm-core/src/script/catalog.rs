@@ -200,23 +200,23 @@ static ACTIONS: &[ActionSpec] = &[
         outcomes: &["done", "failed"],
         fields: &[],
     },
-    // `ctx.verdicts({ reviewer, branch })`: the name is the Lua name, so it is a plain word.
+    // `ctx.scorecards({ name, branch })`: the name is the Lua name, so it is a plain word.
     ActionSpec {
-        name: "verdicts",
+        name: "scorecards",
         level: Level::Read,
         outcomes: &["done", "failed"],
         fields: &[
             FieldSpec {
-                name: "reviewer",
+                name: "name",
                 kind: FieldKind::Text,
                 required: false,
-                help: "The reviewer's name. Default: every reviewer.",
+                help: "The scorecard's name, such as security. Default: every name.",
             },
             FieldSpec {
                 name: "branch",
                 kind: FieldKind::Text,
                 required: false,
-                help: "The branch whose verdicts are read. Default: the branch of the run, else the branch HEAD is on.",
+                help: "The branch whose scorecards are read. Default: the branch of the run, else the branch HEAD is on.",
             },
         ],
     },
@@ -478,8 +478,8 @@ mod tests {
     }
 
     #[test]
-    fn verdicts_is_a_read_at_the_top_level_with_two_optional_text_fields() {
-        let spec = action("verdicts").expect("verdicts exists");
+    fn scorecards_is_a_read_at_the_top_level_with_two_optional_text_fields() {
+        let spec = action("scorecards").expect("scorecards exists");
         assert_eq!(spec.level, Level::Read);
         assert_eq!(spec.outcomes, &["done", "failed"]);
         let fields: Vec<(&str, bool)> = spec
@@ -487,9 +487,9 @@ mod tests {
             .iter()
             .map(|field| (field.name, field.required))
             .collect();
-        assert_eq!(fields, [("reviewer", false), ("branch", false)]);
+        assert_eq!(fields, [("name", false), ("branch", false)]);
         assert!(spec.fields.iter().all(|f| f.kind == FieldKind::Text));
-        assert_eq!(domain("verdicts"), "general");
+        assert_eq!(domain("scorecards"), "general");
     }
 
     #[test]

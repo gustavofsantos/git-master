@@ -3,9 +3,10 @@
 //! is stored as JSON. The location is not stored: it is computed on read, from
 //! the file as it is now (see `review`).
 //!
-//! A verdict (D212 (6)) is what a reviewer's run recorded on a branch, and its findings are
-//! agent-started root comments that name it. They are written in one transaction, kept for the
-//! newest five verdicts per reviewer and branch, and do not count against the agent-thread limits.
+//! A scorecard (D219) is what a review published on a branch: one row of `scorecards`, and its
+//! comments, which are agent-started root comments that name it. They are written in one
+//! transaction, the newest 20 scorecards per name and branch are kept, and the comments of a
+//! scorecard do not count against the agent-thread limits.
 //!
 //! A reply is a row of the same table with a `parent`: one id names a comment or
 //! a reply, and a reply belongs to a root comment (one level deep). A reply copies
@@ -17,15 +18,15 @@ use std::path::Path;
 use std::time::Duration;
 
 use gm_schema::{
-    ReviewAnchor, ReviewComment, ReviewKind, ReviewReply, ReviewSeverity, ReviewStatus,
-    ReviewerSignal, Verdict, VerdictFinding,
+    CommentLabel, RETAINED_PER_NAME_AND_BRANCH, ReviewAnchor, ReviewComment, ReviewKind,
+    ReviewReply, ReviewSeverity, ReviewStatus, Scorecard, ScorecardStatus,
 };
-use rusqlite::{Connection, OptionalExtension, Params, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::review;
 
 /// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 /// How long a writer waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -121,9 +122,58 @@ CREATE TABLE proposals (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NO
 ALTER TABLE comments ADD COLUMN suggested_fix TEXT;
 ";
 
+/// Version 10 to 11 (D219): scorecards replace verdicts, approvals, bypasses and proposals. A
+/// scorecard is a row, and its comments link to it by `scorecard_id`; `ON DELETE SET NULL` keeps a
+/// comment when retention deletes its scorecard. `comments` is rebuilt without the foreign key to
+/// `verdicts`, which the drop would otherwise leave dangling: SQLite then refuses every insert into
+/// `comments`. The rebuild runs with foreign keys off (see `prepare`), so the self-reference of a
+/// reply does not cascade. The rows of the four dropped tables are not migrated. Their comments stay
+/// as review comments, with their `verdict_id`, `finding_branch` and `finding_head` values kept, unused.
+const V11: &str = "
+CREATE TABLE scorecards (id INTEGER PRIMARY KEY, name TEXT NOT NULL, branch TEXT NOT NULL,
+    head TEXT NOT NULL, status TEXT NOT NULL, label TEXT NOT NULL, decorations TEXT NOT NULL,
+    subject TEXT NOT NULL, body TEXT NOT NULL, origin TEXT NOT NULL, model TEXT, run_thread TEXT,
+    workflow_run TEXT, created_at INTEGER NOT NULL);
+CREATE INDEX scorecards_by_name ON scorecards(name, branch, id);
+CREATE TABLE comments_v11 (
+    id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL,
+    body TEXT NOT NULL,
+    status TEXT NOT NULL,
+    anchor_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    snapshot TEXT,
+    after_snapshot TEXT,
+    parent INTEGER REFERENCES comments(id) ON DELETE CASCADE,
+    author TEXT,
+    kind TEXT,
+    severity TEXT,
+    finding_branch TEXT,
+    finding_head TEXT,
+    suggested_fix TEXT,
+    verdict_id INTEGER,
+    scorecard_id INTEGER REFERENCES scorecards(id) ON DELETE SET NULL,
+    label TEXT,
+    decorations TEXT
+);
+INSERT INTO comments_v11 (id, path, body, status, anchor_json, created_at, resolved_at, snapshot,
+    after_snapshot, parent, author, kind, severity, finding_branch, finding_head, suggested_fix,
+    verdict_id)
+    SELECT id, path, body, status, anchor_json, created_at, resolved_at, snapshot, after_snapshot,
+    parent, author, kind, severity, finding_branch, finding_head, suggested_fix, verdict_id
+    FROM comments;
+DROP TABLE comments;
+ALTER TABLE comments_v11 RENAME TO comments;
+DROP TABLE verdicts;
+DROP TABLE approvals;
+DROP TABLE bypasses;
+DROP TABLE proposals;
+";
+
 /// The upgrades after the first version, in order. Each runs when the database is at its
 /// `from` version, so a database several versions behind runs every step after it.
-const UPGRADES: [(i64, &str); 9] = [
+const UPGRADES: [(i64, &str); 10] = [
     (1, V2),
     (2, V3),
     (3, V4),
@@ -133,21 +183,23 @@ const UPGRADES: [(i64, &str); 9] = [
     (7, V8),
     (8, V9),
     (9, V10),
+    (10, V11),
 ];
 
-/// The most findings one verdict may carry (D212 (6)).
-const MAX_FINDINGS: usize = 30;
-/// The newest verdicts kept per reviewer and branch (D189 (2)).
-const VERDICTS_KEPT: i64 = 5;
-
-/// The columns of a verdict row, in the order `raw_verdict` expects.
-const VERDICT_COLUMNS: &str = "id, reviewer, branch, head, signal, value, rationale, origin, \
-     model, run_thread, at";
-
-/// Columns read back for a root `ReviewComment`, in the order `raw_comment` expects. A finding is
-/// the root with a branch (D212 (6), D215 (3)); the branch stays after retention unlinks its verdict.
+/// Columns read back for a root `ReviewComment`, in the order `raw_comment` expects.
 const COLUMNS: &str = "id, path, body, status, anchor_json, created_at, resolved_at, snapshot, \
-     after_snapshot, author, kind, severity, suggested_fix, finding_branch IS NOT NULL";
+     after_snapshot, author, kind, severity, suggested_fix, label, decorations, scorecard_id";
+
+/// The select of a scorecard, with the open comments that block counted (D219 (4)). The order
+/// of its columns is the one `raw_scorecard` expects.
+const SCORECARD_SELECT: &str = "SELECT s.id, s.name, s.branch, s.head, s.status, s.label,
+    s.decorations, s.subject, s.body, s.origin, s.model, s.run_thread, s.workflow_run,
+    s.created_at,
+    (SELECT COUNT(*) FROM comments c WHERE c.scorecard_id = s.id AND c.parent IS NULL
+     AND c.status = 'open'
+     AND (c.severity = 'high' OR EXISTS (SELECT 1 FROM json_each(c.decorations)
+                                         WHERE json_each.value = 'blocking')))
+    FROM scorecards s";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreError(pub String);
@@ -175,17 +227,19 @@ pub enum Reply {
 }
 
 /// What an agent starts a thread with (D200): its author (`agent:<client>`), what it
-/// says, and for a flag how serious it is.
+/// says, and for a flag how serious it is. Its label and decorations are D219 (5).
 pub struct AgentThread<'a> {
     pub author: &'a str,
     pub kind: ReviewKind,
     pub severity: Option<ReviewSeverity>,
+    pub label: Option<CommentLabel>,
+    pub decorations: &'a [String],
     pub body: &'a str,
 }
 
 /// One root row as SQLite gives it: id, path, body, status, anchor JSON, created,
-/// resolved, snapshot, the "after" snapshot, author, kind, severity, the suggested fix and
-/// whether it is a finding.
+/// resolved, snapshot, the "after" snapshot, author, kind, severity, the suggested fix, the
+/// label, the decorations JSON and the scorecard.
 type RawComment = (
     i64,
     String,
@@ -200,7 +254,9 @@ type RawComment = (
     Option<String>,
     Option<String>,
     Option<String>,
-    bool,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
 );
 
 pub struct ReviewStore {
@@ -232,11 +288,15 @@ impl ReviewStore {
 
     fn prepare(conn: &mut Connection) -> Result<(), StoreError> {
         conn.busy_timeout(BUSY_TIMEOUT).map_err(StoreError::from)?;
-        conn.pragma_update(None, "foreign_keys", true)
+        // Off while migrating: a rebuild of `comments` must not cascade through its own foreign
+        // keys. Foreign keys are on for every other use of the connection.
+        conn.pragma_update(None, "foreign_keys", false)
             .map_err(StoreError::from)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(StoreError::from)?;
-        migrate(conn)
+        migrate(conn)?;
+        conn.pragma_update(None, "foreign_keys", true)
+            .map_err(StoreError::from)
     }
 
     /// Stores a new open comment on `path`, anchored at `anchor`, and returns its
@@ -286,14 +346,13 @@ impl ReviewStore {
                     path,
                     body: thread.body,
                     anchor,
-                    snapshot: None,
                     now,
                     author: thread.author,
                     kind: thread.kind,
                     severity: thread.severity,
-                    verdict: None,
-                    branch: None,
-                    head: None,
+                    label: thread.label,
+                    decorations: thread.decorations,
+                    scorecard: None,
                     suggested_fix: None,
                 },
             )
@@ -308,92 +367,98 @@ impl ReviewStore {
         outcome
     }
 
-    /// Records a verdict and its findings (D212 (6)) in one write transaction, then keeps only
-    /// the newest five verdicts of its reviewer and branch; older ones are deleted and their
-    /// findings stay, unlinked. A finding is an open flag by `new.origin`, and it is not counted
-    /// against the agent-thread limits. More than 30 findings, or an unknown signal, is refused
-    /// and nothing is written.
-    pub fn record_verdict(
+    /// Publishes a scorecard and its comments (D219 (6)) in one write transaction, then keeps the
+    /// newest `RETAINED_PER_NAME_AND_BRANCH` scorecards of its name and branch. The older ones are
+    /// deleted in the same transaction, and their comments stay, unlinked. The comments are not
+    /// counted against the agent-thread limits.
+    pub fn record_scorecard(
         &mut self,
-        new: &NewVerdict,
-        findings: &[NewFinding],
-    ) -> Result<RecordedVerdict, StoreError> {
-        parse_signal(&new.signal)?;
-        if findings.len() > MAX_FINDINGS {
-            return Err(StoreError(format!(
-                "a verdict has at most {MAX_FINDINGS} findings, not {}",
-                findings.len()
-            )));
-        }
+        new: &NewScorecard,
+        comments: &[NewScorecardComment],
+    ) -> Result<RecordedScorecard, StoreError> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
-            "INSERT INTO verdicts (reviewer, branch, head, signal, value, rationale, origin,
-             model, run_thread, at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO scorecards (name, branch, head, status, label, decorations, subject, body,
+             origin, model, run_thread, workflow_run, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
-                new.reviewer,
+                new.name,
                 new.branch,
                 new.head,
-                new.signal,
-                new.value,
-                new.rationale,
+                new.status.as_str(),
+                new.label.as_str(),
+                json_list(&new.decorations)?,
+                new.subject,
+                new.body,
                 new.origin,
                 new.model,
                 new.run_thread,
+                new.workflow_run,
                 new.at,
             ],
         )?;
         let id = tx.last_insert_rowid();
-        let mut comments = Vec::with_capacity(findings.len());
-        for finding in findings {
-            comments.push(insert_agent_root(
+        let mut ids = Vec::with_capacity(comments.len());
+        for comment in comments {
+            ids.push(insert_agent_root(
                 &tx,
                 &AgentRoot {
-                    path: &finding.path,
-                    body: &finding.body,
-                    anchor: &finding.anchor,
-                    snapshot: finding.snapshot.as_deref(),
+                    path: &comment.path,
+                    body: &comment.body,
+                    anchor: &comment.anchor,
                     now: new.at,
                     author: &new.origin,
-                    kind: ReviewKind::Flag,
-                    severity: Some(finding.severity),
-                    verdict: Some(id),
-                    branch: Some(&new.branch),
-                    head: Some(&new.head),
-                    suggested_fix: finding.suggested_fix.as_deref(),
+                    kind: comment.kind,
+                    severity: comment.severity,
+                    label: Some(comment.label),
+                    decorations: &comment.decorations,
+                    scorecard: Some(id),
+                    suggested_fix: comment.suggested_fix.as_deref(),
                 },
             )?);
         }
+        let keep = i64::try_from(RETAINED_PER_NAME_AND_BRANCH).unwrap_or(i64::MAX);
         tx.execute(
-            "DELETE FROM verdicts WHERE reviewer = ?1 AND branch = ?2 AND id NOT IN (
-                 SELECT id FROM verdicts WHERE reviewer = ?1 AND branch = ?2
+            "DELETE FROM scorecards WHERE name = ?1 AND branch = ?2 AND id NOT IN (
+                 SELECT id FROM scorecards WHERE name = ?1 AND branch = ?2
                  ORDER BY id DESC LIMIT ?3)",
-            params![new.reviewer, new.branch, VERDICTS_KEPT],
+            params![new.name, new.branch, keep],
         )?;
         tx.commit()?;
-        Ok(RecordedVerdict { id, comments })
+        Ok(RecordedScorecard { id, comments: ids })
     }
 
-    /// The verdicts of `branch` and `reviewer` (each optional), newest first, at most `limit`,
-    /// each with its findings. `stale` is false: the engine derives it.
-    pub fn list_verdicts(
+    /// The scorecard `id`, with its open blocking comments counted; `None` when there is none.
+    /// `stale` is false: the engine derives it from the branch's tip.
+    pub fn get_scorecard(&self, id: i64) -> Result<Option<Scorecard>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                &format!("{SCORECARD_SELECT} WHERE s.id = ?1"),
+                params![id],
+                raw_scorecard,
+            )
+            .optional()?;
+        row.map(scorecard_of).transpose()
+    }
+
+    /// The scorecards of `name` and `branch` (each optional), newest first, at most `limit`.
+    /// `stale` is false: the engine derives it.
+    pub fn list_scorecards(
         &self,
+        name: Option<&str>,
         branch: Option<&str>,
-        reviewer: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<Verdict>, StoreError> {
+    ) -> Result<Vec<Scorecard>, StoreError> {
         let limit = i64::try_from(limit).map_err(|e| StoreError(e.to_string()))?;
-        read_verdicts(
-            &self.conn,
-            &format!(
-                "SELECT {VERDICT_COLUMNS} FROM verdicts
-                 WHERE (?1 IS NULL OR branch = ?1) AND (?2 IS NULL OR reviewer = ?2)
-                 ORDER BY id DESC LIMIT ?3"
-            ),
-            params![branch, reviewer, limit],
-        )
+        let mut statement = self.conn.prepare(&format!(
+            "{SCORECARD_SELECT} WHERE (?1 IS NULL OR s.name = ?1) AND (?2 IS NULL OR s.branch = ?2)
+             ORDER BY s.id DESC LIMIT ?3"
+        ))?;
+        let rows = statement.query_map(params![name, branch, limit], raw_scorecard)?;
+        rows.map(|row| scorecard_of(row?)).collect()
     }
 
     /// How many agent-started threads are not resolved in the repository (D200).
@@ -635,11 +700,13 @@ fn insert_reply(
 }
 
 /// The open agent-started threads of the repository, or of `path` (D200): roots whose author
-/// is an agent and whose status is not resolved. A verdict's findings are not threads (D212 (6)).
+/// is an agent and whose status is not resolved. A scorecard's comments are not threads (D219),
+/// and neither are the findings of the verdicts that version 11 removed (D212 (6)).
 fn open_agent_count(conn: &Connection, path: Option<&str>) -> Result<usize, StoreError> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM comments WHERE parent IS NULL AND author LIKE 'agent:%'
-         AND finding_branch IS NULL AND status != ?1 AND (?2 IS NULL OR path = ?2)",
+         AND finding_branch IS NULL AND scorecard_id IS NULL AND status != ?1
+         AND (?2 IS NULL OR path = ?2)",
         params![status_text(ReviewStatus::Resolved), path],
         |row| row.get(0),
     )?;
@@ -686,19 +753,17 @@ struct AgentRoot<'a> {
     path: &'a str,
     body: &'a str,
     anchor: &'a ReviewAnchor,
-    snapshot: Option<&'a str>,
     now: i64,
     author: &'a str,
     kind: ReviewKind,
     severity: Option<ReviewSeverity>,
-    /// The verdict a finding belongs to; `None` for a thread an agent starts on its own.
-    verdict: Option<i64>,
-    /// The branch of that verdict, kept with the finding after retention unlinks it (D212 (6)).
-    branch: Option<&'a str>,
-    /// The commit that verdict judged, kept the same way (R2h): a finding whose commit is an
-    /// ancestor of its branch's tip counts for that branch after a rename.
-    head: Option<&'a str>,
-    /// The fix a reviewer suggested for a finding (D215 (3)), redacted; `None` for a thread.
+    /// The label the agent gave the thread (D219 (5)); `None` when it gave none.
+    label: Option<CommentLabel>,
+    /// The decorations the agent gave the thread, in order; empty for none (D219 (5)).
+    decorations: &'a [String],
+    /// The scorecard the comment belongs to (D219 (6)); `None` for a thread an agent starts.
+    scorecard: Option<i64>,
+    /// The fix a reviewer suggested, redacted (D215 (3)); `None` for a thread.
     suggested_fix: Option<&'a str>,
 }
 
@@ -706,10 +771,13 @@ struct AgentRoot<'a> {
 /// transaction and any limit check.
 fn insert_agent_root(conn: &Connection, root: &AgentRoot) -> Result<i64, StoreError> {
     let anchor_json = to_json(root.anchor)?;
+    let decorations = (!root.decorations.is_empty())
+        .then(|| json_list(root.decorations))
+        .transpose()?;
     conn.execute(
         "INSERT INTO comments (path, body, status, anchor_json, created_at, author, kind,
-         severity, snapshot, verdict_id, finding_branch, finding_head, suggested_fix)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         severity, label, decorations, scorecard_id, suggested_fix)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             root.path,
             root.body,
@@ -719,18 +787,17 @@ fn insert_agent_root(conn: &Connection, root: &AgentRoot) -> Result<i64, StoreEr
             root.author,
             kind_text(root.kind),
             root.severity.map(severity_text),
-            root.snapshot,
-            root.verdict,
-            root.branch,
-            root.head,
+            root.label.map(CommentLabel::as_str),
+            decorations,
+            root.scorecard,
             root.suggested_fix,
         ],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
-/// One verdict row as SQLite gives it, in `VERDICT_COLUMNS` order.
-type RawVerdict = (
+/// One scorecard row as SQLite gives it, in `SCORECARD_SELECT` order, with its blocking count.
+type RawScorecard = (
     i64,
     String,
     String,
@@ -739,12 +806,16 @@ type RawVerdict = (
     String,
     String,
     String,
+    String,
+    String,
     Option<String>,
     Option<String>,
+    Option<String>,
+    i64,
     i64,
 );
 
-fn raw_verdict(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawVerdict> {
+fn raw_scorecard(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawScorecard> {
     Ok((
         row.get(0)?,
         row.get(1)?,
@@ -757,81 +828,64 @@ fn raw_verdict(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawVerdict> {
         row.get(8)?,
         row.get(9)?,
         row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
+        row.get(14)?,
     ))
 }
 
-/// The verdicts `sql` selects, in its order, each with its findings in id order.
-fn read_verdicts<P: Params>(
-    conn: &Connection,
-    sql: &str,
-    params: P,
-) -> Result<Vec<Verdict>, StoreError> {
-    let mut statement = conn.prepare(sql)?;
-    let raw: Vec<RawVerdict> = statement
-        .query_map(params, raw_verdict)?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut verdicts = Vec::with_capacity(raw.len());
-    for (id, reviewer, branch, head, signal, value, rationale, origin, model, run_thread, at) in raw
-    {
-        verdicts.push(Verdict {
-            id,
-            reviewer,
-            branch,
-            head,
-            signal: parse_signal(&signal)?,
-            value,
-            rationale,
-            origin,
-            model,
-            run_thread,
-            at,
-            stale: false,
-            findings: findings_of(conn, id)?,
-        });
-    }
-    Ok(verdicts)
+fn scorecard_of(raw: RawScorecard) -> Result<Scorecard, StoreError> {
+    let (
+        id,
+        name,
+        branch,
+        head,
+        status,
+        label,
+        decorations,
+        subject,
+        body,
+        origin,
+        model,
+        run_thread,
+        workflow_run,
+        created_at,
+        blocking_open,
+    ) = raw;
+    Ok(Scorecard {
+        id,
+        status: ScorecardStatus::parse(&status)
+            .ok_or_else(|| StoreError(format!("unknown scorecard status {status:?}")))?,
+        label: parse_label(&label)?,
+        decorations: serde_json::from_str(&decorations).map_err(|e| {
+            StoreError(format!(
+                "cannot decode the decorations of scorecard {id}: {e}"
+            ))
+        })?,
+        name,
+        branch,
+        head,
+        // Derived by the engine from the branch's tip; the store never sets it (D219 (4)).
+        stale: false,
+        blocking_open: u32::try_from(blocking_open).unwrap_or(u32::MAX),
+        subject,
+        body,
+        origin,
+        model,
+        run_thread,
+        workflow_run,
+        created_at,
+    })
 }
 
-/// The findings of verdict `verdict`: its root comments, in id order, with their status now.
-fn findings_of(conn: &Connection, verdict: i64) -> Result<Vec<VerdictFinding>, StoreError> {
-    let mut statement = conn.prepare(
-        "SELECT id, severity, path, status FROM comments
-         WHERE verdict_id = ?1 AND parent IS NULL ORDER BY id",
-    )?;
-    let rows = statement.query_map(params![verdict], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-        ))
-    })?;
-    let mut findings = Vec::new();
-    for row in rows {
-        let (comment_id, severity, path, status) = row?;
-        let severity =
-            severity.ok_or_else(|| StoreError(format!("finding {comment_id} has no severity")))?;
-        findings.push(VerdictFinding {
-            comment_id,
-            severity: parse_severity(&severity)?,
-            path,
-            status: parse_status(&status)?,
-            // The engine reads the body, the fix and the line from the listed comments.
-            start_line: None,
-            body: String::new(),
-            suggested_fix: None,
-        });
-    }
-    Ok(findings)
+/// The JSON array text of `items`, which is `[]` for none.
+fn json_list(items: &[String]) -> Result<String, StoreError> {
+    serde_json::to_string(items).map_err(|e| StoreError(format!("cannot encode JSON: {e}")))
 }
 
-fn parse_signal(text: &str) -> Result<ReviewerSignal, StoreError> {
-    match text {
-        "score" => Ok(ReviewerSignal::Score),
-        "level" => Ok(ReviewerSignal::Level),
-        "pass" => Ok(ReviewerSignal::Pass),
-        other => Err(StoreError(format!("unknown reviewer signal {other:?}"))),
-    }
+fn parse_label(text: &str) -> Result<CommentLabel, StoreError> {
+    CommentLabel::parse(text).ok_or_else(|| StoreError(format!("unknown comment label {text:?}")))
 }
 
 fn status_text(status: ReviewStatus) -> &'static str {
@@ -901,6 +955,8 @@ fn raw_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawComment> {
         row.get(11)?,
         row.get(12)?,
         row.get(13)?,
+        row.get(14)?,
+        row.get(15)?,
     ))
 }
 
@@ -929,7 +985,9 @@ fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
         kind,
         severity,
         suggested_fix,
-        finding,
+        label,
+        decorations,
+        scorecard,
     ) = raw;
     Ok(ReviewComment {
         id,
@@ -950,7 +1008,16 @@ fn comment_of(raw: RawComment) -> Result<ReviewComment, StoreError> {
         severity: severity.as_deref().map(parse_severity).transpose()?,
         needs_answer: false,
         suggested_fix,
-        finding,
+        label: label.as_deref().map(parse_label).transpose()?,
+        decorations: match decorations {
+            Some(text) => serde_json::from_str(&text).map_err(|e| {
+                StoreError(format!(
+                    "cannot decode the decorations of comment {id}: {e}"
+                ))
+            })?,
+            None => Vec::new(),
+        },
+        scorecard,
         workspace: None,
     })
 }
@@ -959,38 +1026,42 @@ fn to_json(anchor: &ReviewAnchor) -> Result<String, StoreError> {
     serde_json::to_string(anchor).map_err(|e| StoreError(format!("cannot encode JSON: {e}")))
 }
 
-/// A verdict to record (D212 (6)). `origin` is the author of its findings too.
-pub struct NewVerdict {
-    pub reviewer: String,
+/// A scorecard to record (D219 (6)): the summary and the commit it judged. `origin` is the
+/// author of its comments too.
+pub struct NewScorecard {
+    pub name: String,
     pub branch: String,
     pub head: String,
-    /// `score`, `level` or `pass`.
-    pub signal: String,
-    pub value: String,
-    pub rationale: String,
+    pub status: ScorecardStatus,
+    pub label: CommentLabel,
+    pub decorations: Vec<String>,
+    pub subject: String,
+    pub body: String,
     /// `agent:<client>`.
     pub origin: String,
     pub model: Option<String>,
     pub run_thread: Option<String>,
+    pub workflow_run: Option<String>,
     /// Milliseconds since the Unix epoch.
     pub at: i64,
 }
 
-/// A finding to record with its verdict: a flag anchored like any comment.
-pub struct NewFinding {
-    pub severity: ReviewSeverity,
+/// A comment to record with its scorecard: a root comment anchored like any agent's thread.
+pub struct NewScorecardComment {
     pub path: String,
-    pub body: String,
     pub anchor: ReviewAnchor,
-    /// Object id of the snapshot taken when the finding was made, when there is one.
-    pub snapshot: Option<String>,
+    pub body: String,
+    pub kind: ReviewKind,
+    pub severity: Option<ReviewSeverity>,
+    pub label: CommentLabel,
+    pub decorations: Vec<String>,
     /// The redacted fix the reviewer suggested, when it gave one (D215 (3)).
     pub suggested_fix: Option<String>,
 }
 
-/// What `record_verdict` wrote: the verdict's id and the ids of its findings, in order.
+/// What `record_scorecard` wrote: the scorecard's id and the ids of its comments, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RecordedVerdict {
+pub struct RecordedScorecard {
     pub id: i64,
     pub comments: Vec<i64>,
 }
@@ -1429,6 +1500,8 @@ mod tests {
             author: "agent:test",
             kind,
             severity: None,
+            label: None,
+            decorations: &[],
             body,
         }
     }
@@ -1473,6 +1546,8 @@ mod tests {
                     author: "agent:test",
                     kind: ReviewKind::Flag,
                     severity: Some(ReviewSeverity::High),
+                    label: None,
+                    decorations: &[],
                     body: "risk",
                 },
                 &anchor("x", 1),
@@ -1496,6 +1571,8 @@ mod tests {
                     author: "agent:claude-code",
                     kind: ReviewKind::Flag,
                     severity: Some(ReviewSeverity::Medium),
+                    label: None,
+                    decorations: &[],
                     body: "guess",
                 },
                 &anchor("let x = 1;", 3),
@@ -1603,17 +1680,16 @@ mod tests {
         .expect("v5");
     }
 
-    /// The shape of the comments and verdicts tables, their foreign keys and the indexes.
+    /// The shape of the comments and scorecards tables, their foreign keys, the indexes and the
+    /// tables that exist.
     fn shape(store: &ReviewStore) -> Vec<String> {
         let mut shape = Vec::new();
         let queries = [
             "SELECT 'comments ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('comments')",
-            "SELECT 'verdicts ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('verdicts')",
+            "SELECT 'scorecards ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('scorecards')",
             "SELECT 'fk ' || \"table\" || ' ' || \"from\" || ' ' || \"to\" || ' ' || on_delete FROM pragma_foreign_key_list('comments')",
             "SELECT 'index ' || name || ' on ' || tbl_name FROM sqlite_master WHERE type = 'index' ORDER BY name",
-            "SELECT 'approvals ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('approvals')",
-            "SELECT 'bypasses ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('bypasses')",
-            "SELECT 'proposals ' || name || ' ' || type || ' ' || \"notnull\" || ' ' || quote(dflt_value) || ' ' || pk FROM pragma_table_info('proposals')",
+            "SELECT 'table ' || name FROM sqlite_master WHERE type = 'table' ORDER BY name",
         ];
         for sql in queries {
             let rows: Vec<String> = store
@@ -1629,28 +1705,42 @@ mod tests {
         shape
     }
 
-    fn new_verdict(reviewer: &str, branch: &str, at: i64) -> NewVerdict {
-        NewVerdict {
-            reviewer: reviewer.to_owned(),
+    fn anchor_of(text: &str, start_line: u32) -> ReviewAnchor {
+        anchor(text, start_line)
+    }
+
+    fn new_scorecard(name: &str, branch: &str, at: i64) -> NewScorecard {
+        NewScorecard {
+            name: name.to_owned(),
             branch: branch.to_owned(),
             head: "a".repeat(40),
-            signal: "level".to_owned(),
-            value: "low".to_owned(),
-            rationale: "looks fine".to_owned(),
+            status: ScorecardStatus::NeedsWork,
+            label: CommentLabel::Issue,
+            decorations: vec!["security".to_owned()],
+            subject: "Unchecked input".to_owned(),
+            body: "looks risky".to_owned(),
             origin: "agent:claude-code".to_owned(),
             model: Some("haiku".to_owned()),
             run_thread: Some("thread-1".to_owned()),
+            workflow_run: None,
             at,
         }
     }
 
-    fn new_finding(path: &str, severity: ReviewSeverity, body: &str) -> NewFinding {
-        NewFinding {
+    fn new_comment(
+        text: &str,
+        label: CommentLabel,
+        severity: Option<ReviewSeverity>,
+        decorations: &[&str],
+    ) -> NewScorecardComment {
+        NewScorecardComment {
+            path: "a.rs".to_owned(),
+            anchor: anchor_of(text, 1),
+            body: format!("about {text}"),
+            kind: gm_schema::kind_of_label(label),
             severity,
-            path: path.to_owned(),
-            body: body.to_owned(),
-            anchor: anchor("x", 1),
-            snapshot: Some("s".repeat(40)),
+            label,
+            decorations: decorations.iter().map(|d| (*d).to_owned()).collect(),
             suggested_fix: None,
         }
     }
@@ -1663,7 +1753,7 @@ mod tests {
     }
 
     #[test]
-    fn a_version_five_database_gains_the_verdicts_table_and_keeps_its_comments() {
+    fn a_version_five_database_keeps_its_comments_and_takes_a_scorecard() {
         let dir = tempfile::tempdir().expect("dir");
         let path = dir.path().join("review.db");
         v5_database(&path);
@@ -1676,9 +1766,9 @@ mod tests {
         assert_eq!(flag.kind, Some(ReviewKind::Flag));
         assert_eq!(flag.severity, Some(ReviewSeverity::High));
         let recorded = store
-            .record_verdict(
-                &new_verdict("security", "feat", 20),
-                &[new_finding("a.rs", ReviewSeverity::Low, "after upgrade")],
+            .record_scorecard(
+                &new_scorecard("security", "feat", 20),
+                &[new_comment("x", CommentLabel::Nitpick, None, &[])],
             )
             .expect("record after the upgrade");
         assert_eq!(recorded.comments.len(), 1);
@@ -1693,329 +1783,314 @@ mod tests {
         let fresh = ReviewStore::open_in_memory().expect("fresh");
         let fresh_shape = shape(&fresh);
         for line in [
-            "comments verdict_id INTEGER 0 NULL 0",
-            "fk verdicts verdict_id id SET NULL",
-            "index verdicts_by_reviewer on verdicts",
-            "comments finding_branch TEXT 0 NULL 0",
+            "comments scorecard_id INTEGER 0 NULL 0",
+            "comments label TEXT 0 NULL 0",
+            "comments decorations TEXT 0 NULL 0",
+            "index scorecards_by_name on scorecards",
+            "table scorecards",
+            "fk comments parent id CASCADE",
+            "fk scorecards scorecard_id id SET NULL",
         ] {
             assert!(
                 fresh_shape.iter().any(|l| l == line),
                 "{line} in {fresh_shape:?}"
             );
         }
+        assert!(
+            !fresh_shape
+                .iter()
+                .any(|l| l == "table verdicts" || l.contains("verdicts")),
+            "{fresh_shape:?}"
+        );
         assert_eq!(shape(&upgraded), fresh_shape);
     }
 
-    fn v6_database(path: &Path) {
+    fn v10_database(path: &Path) {
         v5_database(path);
         let conn = Connection::open(path).expect("open");
-        conn.execute_batch(V6).expect("v6");
+        conn.execute_batch(&format!("{V6}{V7}{V8}{V9}{V10}"))
+            .expect("v6 to v10");
         conn.execute(
             "INSERT INTO verdicts (reviewer, branch, head, signal, value, rationale, origin, at)
-             VALUES ('security', 'feat', ?1, 'level', 'low', 'fine', 'agent:x', 5)",
+             VALUES ('security', 'feat', ?1, 'level', 'high', 'unchecked input', 'agent:x', 5)",
             params!["a".repeat(40)],
         )
         .expect("verdict");
-        conn.pragma_update(None, "user_version", 6)
+        conn.execute(
+            "INSERT INTO comments (path, body, status, anchor_json, created_at, author, kind,
+             severity, verdict_id, finding_branch, finding_head)
+             VALUES ('a.rs', 'unchecked', 'open',
+             '{\"text\":\"x\",\"before\":[],\"after\":[],\"start_line\":4}', 6, 'agent:x',
+             'flag', 'high', 1, 'feat', ?1)",
+            params!["a".repeat(40)],
+        )
+        .expect("finding of the verdict");
+        conn.execute(
+            "INSERT INTO approvals (branch, head, origin, at) VALUES ('feat', 'b', 'human', 1)",
+            [],
+        )
+        .expect("approval");
+        conn.pragma_update(None, "user_version", 10)
             .expect("version");
     }
 
     #[test]
-    fn a_fresh_database_has_the_verdicts_table_and_the_verdict_link() {
-        let store = ReviewStore::open_in_memory().expect("open");
+    fn a_version_ten_database_keeps_its_comments_and_drops_the_verdict_tables() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("review.db");
+        v10_database(&path);
+        let store = ReviewStore::open(&path).expect("migrate");
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
+        for table in ["verdicts", "approvals", "bypasses", "proposals"] {
+            assert_eq!(
+                count(
+                    &store,
+                    &format!(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+                    )
+                ),
+                0,
+                "{table} is dropped"
+            );
+        }
+        let finding = store.get(4).expect("get").expect("kept");
+        assert_eq!(finding.body, "unchecked");
+        assert_eq!(finding.kind, Some(ReviewKind::Flag));
+        assert_eq!(finding.label, None);
+        assert!(finding.decorations.is_empty());
+        assert_eq!(finding.scorecard, None);
         assert_eq!(
             count(
                 &store,
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'verdicts'"
+                "SELECT COUNT(*) FROM comments WHERE id = 4 AND verdict_id = 1 AND finding_branch = 'feat'"
             ),
-            1
+            1,
+            "the old finding keeps its verdict and branch values, unused"
         );
         assert_eq!(
-            count(
-                &store,
-                "SELECT COUNT(*) FROM pragma_table_info('comments') WHERE name = 'verdict_id'"
-            ),
-            1
+            store.open_agent_threads().expect("count"),
+            1,
+            "only the version 5 agent thread counts; the old finding does not"
         );
     }
 
     #[test]
-    fn a_verdict_and_its_findings_are_written_together() {
+    fn a_scorecard_and_its_comments_are_written_together_and_read_back() {
         let mut store = ReviewStore::open_in_memory().expect("open");
+        let decorations = vec!["blocking".to_owned(), "auth".to_owned()];
+        let mut blocking = new_comment(
+            "fn a() {}",
+            CommentLabel::Issue,
+            Some(ReviewSeverity::High),
+            &["blocking", "auth"],
+        );
+        blocking.decorations = decorations.clone();
         let recorded = store
-            .record_verdict(
-                &new_verdict("security", "feat", 100),
+            .record_scorecard(
+                &new_scorecard("security", "feat", 100),
                 &[
-                    new_finding("src/a.rs", ReviewSeverity::High, "unchecked input"),
-                    new_finding("src/b.rs", ReviewSeverity::Low, "naming"),
+                    blocking,
+                    new_comment("fn b() {}", CommentLabel::Praise, None, &[]),
                 ],
             )
             .expect("record");
         assert_eq!(recorded.comments.len(), 2);
-        let listed = store
-            .list_verdicts(Some("feat"), Some("security"), 10)
-            .expect("list");
-        assert_eq!(listed.len(), 1);
-        let verdict = &listed[0];
-        assert_eq!(verdict.id, recorded.id);
-        assert_eq!(verdict.reviewer, "security");
-        assert_eq!(verdict.signal, ReviewerSignal::Level);
-        assert_eq!(verdict.value, "low");
-        assert_eq!(verdict.origin, "agent:claude-code");
-        assert_eq!(verdict.model.as_deref(), Some("haiku"));
-        assert_eq!(verdict.run_thread.as_deref(), Some("thread-1"));
-        assert_eq!(verdict.at, 100);
-        assert!(!verdict.stale);
-        let findings: Vec<(i64, ReviewSeverity, &str, ReviewStatus)> = verdict
-            .findings
-            .iter()
-            .map(|f| (f.comment_id, f.severity, f.path.as_str(), f.status))
-            .collect();
+        let scorecard = store.get_scorecard(recorded.id).expect("get").expect("row");
+        assert_eq!(scorecard.name, "security");
+        assert_eq!(scorecard.status, ScorecardStatus::NeedsWork);
+        assert_eq!(scorecard.label, CommentLabel::Issue);
+        assert_eq!(scorecard.decorations, ["security"]);
+        assert_eq!(scorecard.model.as_deref(), Some("haiku"));
+        assert_eq!(scorecard.run_thread.as_deref(), Some("thread-1"));
+        assert_eq!(scorecard.created_at, 100);
+        assert!(!scorecard.stale, "the engine derives staleness");
+        assert_eq!(scorecard.blocking_open, 1);
+        let first = store
+            .get(recorded.comments[0])
+            .expect("get")
+            .expect("comment");
+        assert_eq!(first.scorecard, Some(recorded.id));
+        assert_eq!(first.label, Some(CommentLabel::Issue));
+        assert_eq!(first.decorations, decorations);
+        assert_eq!(first.kind, Some(ReviewKind::Flag));
+        assert_eq!(first.severity, Some(ReviewSeverity::High));
+        assert_eq!(first.author.as_deref(), Some("agent:claude-code"));
+        let praise = store
+            .get(recorded.comments[1])
+            .expect("get")
+            .expect("comment");
+        assert_eq!(praise.kind, Some(ReviewKind::Note));
+        assert_eq!(praise.severity, None);
+        assert!(praise.decorations.is_empty());
         assert_eq!(
-            findings,
-            [
-                (
-                    recorded.comments[0],
-                    ReviewSeverity::High,
-                    "src/a.rs",
-                    ReviewStatus::Open
-                ),
-                (
-                    recorded.comments[1],
-                    ReviewSeverity::Low,
-                    "src/b.rs",
-                    ReviewStatus::Open
-                ),
-            ]
-        );
-        let comment = store.get(recorded.comments[0]).expect("get").expect("root");
-        assert_eq!(comment.author.as_deref(), Some("agent:claude-code"));
-        assert_eq!(comment.kind, Some(ReviewKind::Flag));
-        assert_eq!(comment.severity, Some(ReviewSeverity::High));
-        assert_eq!(comment.body, "unchecked input");
-        assert_eq!(comment.snapshot, Some("s".repeat(40)));
-        assert_eq!(comment.anchor, anchor("x", 1));
-        assert_eq!(
-            count(
-                &store,
-                &format!(
-                    "SELECT COUNT(*) FROM comments WHERE verdict_id = {}",
-                    recorded.id
-                )
-            ),
-            2
+            store.list_scorecards(None, None, 20).expect("list").len(),
+            1
         );
     }
 
     #[test]
-    fn a_verdict_with_too_many_findings_or_an_unknown_signal_writes_nothing() {
+    fn a_scorecard_comment_is_not_counted_against_the_agent_thread_limits() {
         let mut store = ReviewStore::open_in_memory().expect("open");
-        let thirty_one: Vec<NewFinding> = (0..31)
-            .map(|i| new_finding("a.rs", ReviewSeverity::Low, &format!("f{i}")))
+        let comments: Vec<NewScorecardComment> = (0..25)
+            .map(|_| new_comment("x", CommentLabel::Issue, None, &[]))
             .collect();
-        let refused = store
-            .record_verdict(&new_verdict("security", "feat", 1), &thirty_one)
-            .expect_err("refused");
-        assert_eq!(refused.0, "a verdict has at most 30 findings, not 31");
-        assert_eq!(count(&store, "SELECT COUNT(*) FROM verdicts"), 0);
-        assert_eq!(count(&store, "SELECT COUNT(*) FROM comments"), 0);
-
-        let thirty = &thirty_one[..30];
         store
-            .record_verdict(&new_verdict("security", "feat", 2), thirty)
-            .expect("thirty is allowed");
-        assert_eq!(count(&store, "SELECT COUNT(*) FROM comments"), 30);
-
-        let mut bad = new_verdict("security", "feat", 3);
-        bad.signal = "spin".to_owned();
-        assert!(store.record_verdict(&bad, &[]).is_err());
-        assert_eq!(count(&store, "SELECT COUNT(*) FROM verdicts"), 1);
+            .record_scorecard(&new_scorecard("security", "feat", 1), &comments)
+            .expect("record");
+        assert_eq!(store.open_agent_threads().expect("repo"), 0);
+        assert_eq!(store.open_agent_threads_on("a.rs").expect("file"), 0);
+        let thread = agent_thread(ReviewKind::Note, "still allowed");
+        store
+            .add_agent("a.rs", &thread, &anchor("x", 1), 2)
+            .expect("an agent thread is not refused");
+        assert_eq!(store.open_agent_threads_on("a.rs").expect("file"), 1);
     }
 
     #[test]
-    fn retention_keeps_the_newest_five_per_reviewer_and_branch_and_unlinks_the_rest() {
+    fn a_comment_keeps_the_label_and_decorations_its_agent_gave() {
+        let store = ReviewStore::open_in_memory().expect("open");
+        let decorations = vec!["non-blocking".to_owned(), "naming".to_owned()];
+        let thread = AgentThread {
+            author: "agent:test",
+            kind: ReviewKind::Flag,
+            severity: Some(ReviewSeverity::Low),
+            label: Some(CommentLabel::Nitpick),
+            decorations: &decorations,
+            body: "rename",
+        };
+        let id = store
+            .add_agent("a.rs", &thread, &anchor("x", 1), 3)
+            .expect("add");
+        let comment = store.get(id).expect("get").expect("row");
+        assert_eq!(comment.label, Some(CommentLabel::Nitpick));
+        assert_eq!(comment.decorations, decorations);
+        assert_eq!(comment.scorecard, None);
+    }
+
+    #[test]
+    fn retention_keeps_the_newest_twenty_per_name_and_branch_and_unlinks_the_rest() {
         let mut store = ReviewStore::open_in_memory().expect("open");
-        let mut first_comment = None;
-        let mut first_verdict = None;
-        for at in 1..=6 {
+        let mut first = None;
+        for at in 1..=22 {
             let recorded = store
-                .record_verdict(
-                    &new_verdict("security", "feat", at),
-                    &[new_finding(
-                        "a.rs",
-                        ReviewSeverity::Medium,
-                        &format!("run {at}"),
-                    )],
+                .record_scorecard(
+                    &new_scorecard("security", "feat", at),
+                    &[new_comment("x", CommentLabel::Issue, None, &[])],
                 )
                 .expect("record");
-            if at == 1 {
-                first_comment = Some(recorded.comments[0]);
-                first_verdict = Some(recorded.id);
-            }
+            first.get_or_insert(recorded.clone());
         }
         store
-            .record_verdict(
-                &new_verdict("code-review", "feat", 7),
-                &[new_finding("a.rs", ReviewSeverity::Low, "other")],
-            )
-            .expect("record");
+            .record_scorecard(&new_scorecard("security", "main", 30), &[])
+            .expect("other branch");
         store
-            .record_verdict(
-                &new_verdict("security", "main", 8),
-                &[new_finding("a.rs", ReviewSeverity::Low, "branch")],
-            )
-            .expect("record");
-
-        let kept = store
-            .list_verdicts(Some("feat"), Some("security"), 10)
-            .expect("list");
-        let ids: Vec<i64> = kept.iter().map(|v| v.id).collect();
-        assert_eq!(kept.len(), 5);
-        assert!(!ids.contains(&first_verdict.expect("first")), "{ids:?}");
+            .record_scorecard(&new_scorecard("code-review", "feat", 31), &[])
+            .expect("other name");
+        let kept: Vec<i64> = store
+            .list_scorecards(Some("security"), Some("feat"), 50)
+            .expect("list")
+            .iter()
+            .map(|scorecard| scorecard.id)
+            .collect();
+        assert_eq!(kept.len(), RETAINED_PER_NAME_AND_BRANCH);
+        let first = first.expect("first");
+        assert!(!kept.contains(&first.id));
+        assert!(store.get_scorecard(first.id).expect("get").is_none());
+        let orphan = store.get(first.comments[0]).expect("get").expect("kept");
+        assert_eq!(orphan.scorecard, None, "the comment stays, unlinked");
         assert_eq!(
             store
-                .list_verdicts(Some("feat"), Some("code-review"), 10)
+                .list_scorecards(Some("security"), Some("main"), 50)
                 .expect("list")
                 .len(),
             1
         );
         assert_eq!(
             store
-                .list_verdicts(Some("main"), Some("security"), 10)
+                .list_scorecards(Some("code-review"), None, 50)
                 .expect("list")
                 .len(),
-            1
-        );
-
-        let unlinked = first_comment.expect("first comment");
-        let comment = store
-            .get(unlinked)
-            .expect("get")
-            .expect("the finding stays");
-        assert_eq!(comment.body, "run 1");
-        assert_eq!(
-            count(
-                &store,
-                &format!(
-                    "SELECT COUNT(*) FROM comments WHERE id = {unlinked} AND verdict_id IS NULL"
-                )
-            ),
             1
         );
     }
 
     #[test]
-    fn list_verdicts_filters_orders_newest_first_and_limits() {
+    fn blocking_open_counts_only_open_comments_that_block_or_are_high() {
         let mut store = ReviewStore::open_in_memory().expect("open");
-        let a = store
-            .record_verdict(&new_verdict("security", "feat", 1), &[])
-            .expect("a")
-            .id;
-        let b = store
-            .record_verdict(&new_verdict("slop", "feat", 2), &[])
-            .expect("b")
-            .id;
-        let c = store
-            .record_verdict(&new_verdict("security", "main", 3), &[])
-            .expect("c")
-            .id;
-        let ids = |verdicts: Vec<Verdict>| -> Vec<i64> { verdicts.iter().map(|v| v.id).collect() };
+        let recorded = store
+            .record_scorecard(
+                &new_scorecard("security", "feat", 1),
+                &[
+                    new_comment("a", CommentLabel::Nitpick, None, &["blocking"]),
+                    new_comment("b", CommentLabel::Issue, Some(ReviewSeverity::High), &[]),
+                    new_comment("c", CommentLabel::Issue, Some(ReviewSeverity::Medium), &[]),
+                    new_comment("d", CommentLabel::Nitpick, None, &["blocking"]),
+                ],
+            )
+            .expect("record");
         assert_eq!(
-            ids(store.list_verdicts(None, None, 10).expect("all")),
-            vec![c, b, a]
+            store
+                .get_scorecard(recorded.id)
+                .expect("get")
+                .expect("row")
+                .blocking_open,
+            3
         );
+        store
+            .handle(recorded.comments[0], "agent:claude-code", "fixed", 5)
+            .expect("handle");
         assert_eq!(
-            ids(store.list_verdicts(Some("feat"), None, 10).expect("branch")),
-            vec![b, a]
+            store
+                .get_scorecard(recorded.id)
+                .expect("get")
+                .expect("row")
+                .blocking_open,
+            2,
+            "a handled comment no longer counts"
+        );
+    }
+
+    #[test]
+    fn list_filters_by_name_and_branch_and_is_newest_first() {
+        let mut store = ReviewStore::open_in_memory().expect("open");
+        let first = store
+            .record_scorecard(&new_scorecard("security", "feat", 1), &[])
+            .expect("first")
+            .id;
+        let second = store
+            .record_scorecard(&new_scorecard("code-review", "feat", 2), &[])
+            .expect("second")
+            .id;
+        let third = store
+            .record_scorecard(&new_scorecard("security", "main", 3), &[])
+            .expect("third")
+            .id;
+        let ids = |rows: Vec<Scorecard>| -> Vec<i64> { rows.iter().map(|row| row.id).collect() };
+        assert_eq!(
+            ids(store.list_scorecards(None, None, 20).expect("all")),
+            [third, second, first]
         );
         assert_eq!(
             ids(store
-                .list_verdicts(None, Some("security"), 10)
-                .expect("reviewer")),
-            vec![c, a]
+                .list_scorecards(Some("security"), None, 20)
+                .expect("name")),
+            [third, first]
         );
         assert_eq!(
             ids(store
-                .list_verdicts(Some("feat"), Some("security"), 10)
-                .expect("both")),
-            vec![a]
+                .list_scorecards(None, Some("feat"), 20)
+                .expect("branch")),
+            [second, first]
         );
         assert_eq!(
-            ids(store.list_verdicts(None, None, 2).expect("limit")),
-            vec![c, b]
+            ids(store.list_scorecards(None, None, 2).expect("limit")),
+            [third, second]
         );
         assert!(
             store
-                .list_verdicts(Some("nope"), None, 10)
+                .list_scorecards(Some("nope"), None, 20)
                 .expect("none")
                 .is_empty()
         );
-    }
-
-    #[test]
-    fn findings_do_not_count_against_the_agent_thread_limits() {
-        let mut store = ReviewStore::open_in_memory().expect("open");
-        let findings: Vec<NewFinding> = (0..25)
-            .map(|i| new_finding("a.rs", ReviewSeverity::High, &format!("flag {i}")))
-            .collect();
-        store
-            .record_verdict(&new_verdict("security", "feat", 1), &findings)
-            .expect("twenty-five findings are recorded");
-        assert_eq!(store.open_agent_threads().expect("count"), 0);
-        assert_eq!(store.open_agent_threads_on("a.rs").expect("count"), 0);
-
-        let thread = agent_thread(ReviewKind::Note, "n");
-        for _ in 0..5 {
-            store
-                .add_agent("a.rs", &thread, &anchor("x", 1), 2)
-                .expect("the thread limit is still five threads");
-        }
-        assert_eq!(store.open_agent_threads_on("a.rs").expect("count"), 5);
-    }
-
-    fn v7_database(path: &Path) {
-        v6_database(path);
-        let conn = Connection::open(path).expect("open");
-        conn.execute_batch(V7).expect("v7");
-        conn.execute(
-            "INSERT INTO comments (path, body, status, anchor_json, created_at, author, kind,
-             severity, verdict_id)
-             VALUES ('a.rs', 'risky', 'open', '{\"text\":\"x\",\"before\":[],\"after\":[],\"start_line\":1}',
-             6, 'agent:x', 'flag', 'high', 1)",
-            [],
-        )
-        .expect("finding of verdict 1");
-        conn.pragma_update(None, "user_version", 7)
-            .expect("version");
-    }
-
-    fn v8_database(path: &Path) {
-        v7_database(path);
-        let conn = Connection::open(path).expect("open");
-        conn.execute_batch(V8).expect("v8");
-        conn.pragma_update(None, "user_version", 8)
-            .expect("version");
-    }
-
-    #[test]
-    fn a_version_eight_database_backfills_the_finding_head_and_matches_a_fresh_one() {
-        let dir = tempfile::tempdir().expect("dir");
-        let path = dir.path().join("review.db");
-        v8_database(&path);
-        let store = ReviewStore::open(&path).expect("migrate");
-        assert_eq!(user_version(&store), SCHEMA_VERSION);
-        assert_eq!(
-            count(
-                &store,
-                &format!(
-                    "SELECT COUNT(*) FROM comments WHERE verdict_id = 1 AND finding_head = '{}'",
-                    "a".repeat(40)
-                )
-            ),
-            1,
-            "the finding takes the commit of its verdict"
-        );
-        let fresh = ReviewStore::open_in_memory().expect("fresh");
-        assert_eq!(shape(&store), shape(&fresh));
     }
 }

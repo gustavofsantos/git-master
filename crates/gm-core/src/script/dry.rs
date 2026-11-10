@@ -224,7 +224,7 @@ fn simulated_result(func: &str, args: &Value) -> (&'static str, Value) {
             json!({"plan_id": "dry-run", "branch_count": 1}),
         ),
         "stack.tree" | "stack.stale" => ("nothing is read", json!({"branches": []})),
-        "verdicts" => ("nothing is read", json!([])),
+        "scorecards" => ("nothing is read", json!([])),
         _ => ("nothing is applied", Value::Null),
     }
 }
@@ -307,7 +307,7 @@ mod tests {
             HostReply::Value(json!({"branches": []}))
         );
         assert_eq!(
-            host.call("verdicts", json!({"reviewer": "security"})),
+            host.call("scorecards", json!({"name": "security"})),
             HostReply::Value(json!([]))
         );
         assert!(

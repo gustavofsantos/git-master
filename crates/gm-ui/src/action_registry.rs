@@ -6260,7 +6260,9 @@ mod tests {
             severity: None,
             needs_answer: false,
             suggested_fix: None,
-            finding: false,
+            label: None,
+            decorations: Vec::new(),
+            scorecard: None,
             location: Some(gm_schema::ReviewLocation {
                 start_line: 1,
                 end_line: 1,

@@ -882,7 +882,9 @@ mod tests {
             severity: None,
             needs_answer: false,
             suggested_fix: None,
-            finding: false,
+            label: None,
+            decorations: Vec::new(),
+            scorecard: None,
             location: location.map(|(start_line, end_line)| ReviewLocation {
                 start_line,
                 end_line,
