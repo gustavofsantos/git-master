@@ -1244,7 +1244,7 @@ fn a_file_of_another_repository_is_read_at_its_own_head_and_is_unavailable_once_
 }
 
 #[test]
-fn a_file_whose_repository_was_unknown_at_acceptance_stays_unavailable_when_it_becomes_known() {
+fn a_file_of_a_repository_that_leaves_every_context_is_still_read_at_its_folder() {
     let world = World::new();
     let mut web = engine_on(&world.path("web"), &world.db);
     let platform = create(&mut web, "Platform", None).id;
@@ -1261,7 +1261,7 @@ fn a_file_whose_repository_was_unknown_at_acceptance_stays_unavailable_when_it_b
         "Portal rule",
     ));
 
-    // Portal leaves every context, so web no longer knows its folder when the human accepts.
+    // Portal leaves every context. Its folder was recorded when it proposed, so web still finds it.
     let portal_id = repo_id_file(&portal_root);
     let left = send(
         &mut web,
@@ -1274,19 +1274,58 @@ fn a_file_whose_repository_was_unknown_at_acceptance_stays_unavailable_when_it_b
     assert_eq!(state_of(&left), OperationState::Done, "leave: {left:?}");
     let accepted = accept_as_human(&mut web, &proposed.uid);
     assert_eq!(state_of(&accepted), OperationState::Done, "{accepted:?}");
-    let gone = read_memory(&mut web, &proposed.uid);
-    assert!(!gone.sources[0].blob_read, "not read at acceptance");
-    let want = vec![FileChange {
-        path: "src/lib.rs".into(),
-        state: FileChangeState::Unavailable,
-    }];
-    assert_eq!(gone.files_changed_since, want);
+    let read = read_memory(&mut web, &proposed.uid);
+    assert!(read.sources[0].blob_read, "read at acceptance");
+    assert!(read.files_changed_since.is_empty(), "{read:?}");
 
-    // Portal joins a context web sees: its folder is known now, and the file is still unavailable,
-    // never changed, because nothing was read when the memory was accepted.
-    join(&mut web, platform, &portal_root);
-    let known = read_memory(&mut web, &proposed.uid);
-    assert_eq!(known.files_changed_since, want);
+    write_file(&portal_root, "src/lib.rs", "fn two() {}\n");
+    commit_all(&portal_root, "change the lib");
+    let changed = read_memory(&mut web, &proposed.uid);
+    assert_eq!(
+        changed.files_changed_since,
+        vec![FileChange {
+            path: "src/lib.rs".into(),
+            state: FileChangeState::Changed,
+        }]
+    );
+}
+
+#[test]
+fn a_file_of_a_repository_that_renewed_its_id_stays_unavailable_and_is_not_guessed() {
+    let world = World::new();
+    let mut web = engine_on(&world.path("web"), &world.db);
+    let platform = create(&mut web, "Platform", None).id;
+    join(&mut web, platform, &world.path("web"));
+    join(&mut web, platform, &world.path("portal"));
+    let portal_root = world.path("portal");
+    write_file(&portal_root, "src/lib.rs", "fn one() {}\n");
+    commit_all(&portal_root, "add the lib");
+    let mut portal = engine_on(&portal_root, &world.db);
+    let proposed = memory_of(&propose_at(
+        &mut portal,
+        &agent(),
+        Some("Platform"),
+        "Portal rule",
+    ));
+
+    // Portal renews its id: the old id has no folder any more, and the memory names only the old id.
+    let renewed = send(&mut portal, &Actor::Human, CommandKind::RenewRepoId);
+    assert_eq!(
+        state_of(&renewed),
+        OperationState::Done,
+        "renew: {renewed:?}"
+    );
+    let accepted = accept_as_human(&mut web, &proposed.uid);
+    assert_eq!(state_of(&accepted), OperationState::Done, "{accepted:?}");
+    let read = read_memory(&mut web, &proposed.uid);
+    assert!(!read.sources[0].blob_read, "not read at acceptance");
+    assert_eq!(
+        read.files_changed_since,
+        vec![FileChange {
+            path: "src/lib.rs".into(),
+            state: FileChangeState::Unavailable,
+        }]
+    );
 }
 
 #[test]

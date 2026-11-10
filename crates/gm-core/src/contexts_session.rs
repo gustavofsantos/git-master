@@ -230,35 +230,67 @@ fn binding(store: &mut ContextStore, git: &dyn GitPort, root: &Path) -> Result<B
     })
 }
 
-/// The repository's own context, created and bound when it does not exist yet (D222 (4)). The id is
-/// written to the clone when it has none, as `add_repo` writes it.
+/// The repository's own context, created and bound when it does not exist yet (D222 (4)). The writer
+/// is recorded first, as `record_writer` does, and the context is found by its id.
 fn own_context(
     store: &mut ContextStore,
     git: &dyn GitPort,
     root: &Path,
     repo_id: Option<String>,
 ) -> Result<OwnContext, String> {
+    let repo_id = record_writer(store, git, root, repo_id)?;
+    let (common, folder) = location(git, root)?;
+    let context = store
+        .repository_context(&repo_id, &common, &folder, now_ms())
+        .map_err(|e| e.to_string())?;
+    Ok(OwnContext { repo_id, context })
+}
+
+/// The id a memory written from the clone at `root` names on its sources, recorded with its folder
+/// (D222 (5)). The contexts a writer is bound to are checked first: a clone whose id clashes is
+/// refused, since recording it would take the other clone's folder.
+pub(crate) fn writer(
+    store: &mut ContextStore,
+    git: &dyn GitPort,
+    root: &Path,
+) -> Result<String, String> {
+    match binding(store, git, root)? {
+        Binding::Clash { other_path } => Err(memory_scope::clash_note(&other_path)),
+        Binding::Clone { repo_id, .. } => record_writer(store, git, root, repo_id),
+    }
+}
+
+/// Records the clone at `root` as a writer, with its common directory and folder name (D222 (5)),
+/// and returns its id. The id is the clone's own, or a new one written to the clone when it has none
+/// (`add_repo` writes it the same way). The caller has checked that the id does not clash.
+fn record_writer(
+    store: &mut ContextStore,
+    git: &dyn GitPort,
+    root: &Path,
+    repo_id: Option<String>,
+) -> Result<String, String> {
+    let repo_id = if let Some(id) = repo_id {
+        id
+    } else {
+        let common = git.common_dir(root).map_err(|e| e.0)?;
+        repo_id::ensure(&common).map_err(|e| e.to_string())?
+    };
+    let (common, folder) = location(git, root)?;
+    store
+        .record_repository(&repo_id, &common, &folder, now_ms())
+        .map_err(|e| e.to_string())?;
+    Ok(repo_id)
+}
+
+/// The common directory of the clone at `root` as text, and its folder name.
+fn location(git: &dyn GitPort, root: &Path) -> Result<(String, String), String> {
     let common = git.common_dir(root).map_err(|e| e.0)?;
-    let repo_id = writer_id(git, root, repo_id)?;
     let top = git.resolve_root(root).map_err(|e| e.0)?;
     let folder = top.file_name().map_or_else(
         || top.to_string_lossy().into_owned(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let context = store
-        .repository_context(&repo_id, &common.to_string_lossy(), &folder, now_ms())
-        .map_err(|e| e.to_string())?;
-    Ok(OwnContext { repo_id, context })
-}
-
-/// The id a memory written by the clone at `root` names on its sources: its own, or a new one written
-/// to the clone when it has none (`add_repo` writes it the same way).
-fn writer_id(git: &dyn GitPort, root: &Path, repo_id: Option<String>) -> Result<String, String> {
-    if let Some(id) = repo_id {
-        return Ok(id);
-    }
-    let common = git.common_dir(root).map_err(|e| e.0)?;
-    repo_id::ensure(&common).map_err(|e| e.to_string())
+    Ok((common.to_string_lossy().into_owned(), folder))
 }
 
 /// The refusal of a proposal in a repository bound to several contexts: it names them by path,
@@ -320,7 +352,7 @@ fn one_or_own(
 ) -> Result<OwnContext, String> {
     match (repo_id, bound) {
         (Some(repo_id), [context]) => Ok(OwnContext {
-            repo_id,
+            repo_id: record_writer(store, git, root, Some(repo_id))?,
             context: *context,
         }),
         (repo_id, _) => own_context(store, git, root, repo_id),
@@ -378,7 +410,7 @@ pub(crate) fn workspace_home(
     match bound.as_slice() {
         [] => own_context(store, git, root, repo_id),
         [context] => Ok(OwnContext {
-            repo_id: writer_id(git, root, repo_id)?,
+            repo_id: record_writer(store, git, root, repo_id)?,
             context: *context,
         }),
         several => Err(several_message(store, several)?),
@@ -579,6 +611,9 @@ fn add_repo(
     }
     let repo_id = repo_id::ensure(&common).map_err(|e| e.to_string())?;
     let here = common.to_string_lossy();
+    store
+        .record_repository(&repo_id, &here, &name, now_ms())
+        .map_err(|e| e.to_string())?;
     store
         .add_repo(context, &repo_id, &here, &name, now_ms())
         .map_err(|e| e.to_string())?;

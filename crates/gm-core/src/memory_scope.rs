@@ -399,17 +399,6 @@ impl Reach {
         self.reach_of(scope).into_iter().map(|(id, _)| id).collect()
     }
 
-    /// The id a memory proposed at a context carries on its sources: the repository's own (D193
-    /// (7)). Refused with the reason when the repository has none, since it belongs to no context.
-    fn writer_id(&self) -> Result<String, String> {
-        self.repo_id.clone().ok_or_else(|| {
-            self.note.clone().unwrap_or_else(|| {
-                "this repository belongs to no context, so no memory can be proposed at one"
-                    .to_owned()
-            })
-        })
-    }
-
     /// The context a proposal names, by path or unique name. It must be one the repository is bound to
     /// or inherits from: an agent proposes only into those (D191 (4)(d), D222 (3)).
     fn context_named(&self, name: &str) -> Result<i64, String> {
@@ -428,6 +417,17 @@ impl Reach {
             Err(message) => Err(message),
         }
     }
+}
+
+/// The id a memory written from the clone at `ctx.root` carries on its sources (D193 (7)), recorded
+/// with that clone so its file sources resolve even when it is bound to no context (D222 (5)). A
+/// repository with no contexts file answers with the reach's note, as a read does.
+fn writer_of(reach: &mut Reach, ctx: &Context<'_>) -> Result<String, String> {
+    let note = reach.note.clone();
+    let store = reach
+        .store_mut()
+        .ok_or_else(|| note.unwrap_or_else(|| NOT_VISIBLE.to_owned()))?;
+    contexts_session::writer(store, ctx.git, ctx.root)
 }
 
 /// Whether `text` is the name of a scope that no longer exists: a workspace's own scope or one of
@@ -964,8 +964,8 @@ pub(crate) fn propose_in_context(
             sources: proposal.sources.len(),
         },
     )?;
-    let repo_id = stores.reach.writer_id()?;
     let context = stores.reach.context_named(name)?;
+    let repo_id = writer_of(&mut stores.reach, ctx)?;
     store_proposal(id, stores, ctx, actor, &repo_id, context, proposal)
 }
 
@@ -1336,7 +1336,7 @@ pub(crate) fn move_to_context(
     if !stores.reach.sees_context(context) {
         return Err(NOT_VISIBLE.to_owned());
     }
-    let repo_id = stores.reach.writer_id()?;
+    let repo_id = writer_of(&mut stores.reach, ctx)?;
     for source in &mut memory.sources {
         source.repo_id = Some(repo_id.clone());
     }

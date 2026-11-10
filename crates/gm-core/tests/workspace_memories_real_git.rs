@@ -1265,3 +1265,71 @@ fn a_plain_repository_lists_no_member_and_sees_only_its_own_scopes() {
     );
     assert!(members_of(&plain, "Platform").is_empty());
 }
+
+#[test]
+fn a_memory_proposed_from_an_unbound_workspace_reads_its_file_sources_not_unavailable() {
+    let fx = Fixture::new();
+    let mut api = fx.engine_on(&fx.api);
+    let platform = create(&mut api, "Platform", None);
+    join(&mut api, platform, &fx.api);
+    // The workspace is bound to no context: its file is committed at its own HEAD.
+    std::fs::write(fx.ws.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+    git(&fx.ws, &["add", "f.txt"]);
+    git(&fx.ws, &["commit", "-q", "-m", "workspace file"]);
+    let mut ws = fx.engine_on(&fx.ws);
+    let proposed = propose_in(&mut ws, &agent(), "reached through api", None, None)
+        .expect("the one context the member is bound to takes it");
+    assert_eq!(proposed.scope, "Platform");
+    let accepted = answer(
+        &mut ws,
+        &Actor::Human,
+        CommandKind::AcceptMemory {
+            uid: proposed.uid.clone(),
+            text: None,
+            supersedes: Vec::new(),
+        },
+    )
+    .expect("the person accepts it");
+    assert!(
+        accepted.files_changed_since.is_empty(),
+        "{:?}",
+        accepted.files_changed_since
+    );
+    assert!(read(&mut ws, &proposed.uid).files_changed_since.is_empty());
+    std::fs::write(fx.ws.join("f.txt"), "one\nfour\n").unwrap();
+    git(&fx.ws, &["commit", "-q", "-am", "workspace change"]);
+    assert_eq!(
+        read(&mut ws, &proposed.uid).files_changed_since,
+        vec![FileChange {
+            path: "f.txt".to_owned(),
+            state: FileChangeState::Changed,
+        }]
+    );
+}
+
+#[test]
+fn a_named_context_proposal_from_an_unbound_workspace_reaches_a_members_context() {
+    let fx = Fixture::new();
+    let mut api = fx.engine_on(&fx.api);
+    let platform = create(&mut api, "Platform", None);
+    join(&mut api, platform, &fx.api);
+    let partners = create(&mut api, "Partners", None);
+    join(&mut api, partners, &fx.docs);
+    let mut ws = fx.engine_on(&fx.ws);
+    let in_platform = propose_in(
+        &mut ws,
+        &agent(),
+        "named from the workspace",
+        None,
+        Some("Platform"),
+    )
+    .expect("Platform is reached through api");
+    assert_eq!(in_platform.scope, "Platform");
+    assert_eq!(in_platform.status, MemoryStatus::Proposed);
+    let refused = propose_in(&mut ws, &agent(), "not reached", None, Some("Partners"))
+        .expect_err("the workspace reaches no Partners");
+    assert!(
+        refused.contains("is not a context this repository is bound to or inherits from"),
+        "{refused}"
+    );
+}

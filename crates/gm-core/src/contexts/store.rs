@@ -18,7 +18,7 @@ use crate::threads::store::{BUSY_TIMEOUT, StoreError, begin, create_private, inv
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run, so the first is version 1.
 const MIGRATIONS: &[&str] = &[
-    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7,
 ];
 /// Characters of a context name (D193 (3)).
 const NAME_CHARS: usize = 64;
@@ -134,6 +134,19 @@ CREATE INDEX memory_mark_actor ON memory_mark (memory_uid, actor, id);
 const SCHEMA_V6: &str = "
 ALTER TABLE context ADD COLUMN repository_of TEXT;
 CREATE UNIQUE INDEX context_repository_of ON context (repository_of) WHERE repository_of IS NOT NULL;
+";
+
+/// Schema 7 (D222 (5)): the repositories that wrote a memory, with their last known folder. A memory
+/// names its writer on its sources, and that id must resolve to a folder even when the repository is
+/// bound to no context. The rows are those of `context_repo`, the latest seen first.
+const SCHEMA_V7: &str = "
+CREATE TABLE repository (
+    repo_id TEXT PRIMARY KEY,
+    path    TEXT NOT NULL,
+    name    TEXT NOT NULL,
+    seen_at INTEGER NOT NULL);
+INSERT INTO repository (repo_id, path, name, seen_at)
+    SELECT repo_id, path, name, MAX(added_at) FROM context_repo GROUP BY repo_id;
 ";
 
 /// The contexts store: one connection to `contexts.db`.
@@ -407,9 +420,32 @@ impl ContextStore {
         Ok(ids)
     }
 
-    /// The last known path of a repository: the path it was added or last updated with.
+    /// Records that repository `repo_id` wrote a memory, seen at `path` under `name` (D222 (5)). A
+    /// repository seen again is updated, so its record holds its current folder. It is kept whether or
+    /// not the repository is bound to a context.
+    pub fn record_repository(
+        &mut self,
+        repo_id: &str,
+        path: &str,
+        name: &str,
+        at: i64,
+    ) -> Result<(), StoreError> {
+        if repo_id.is_empty() {
+            return Err(invalid("a repository has an id"));
+        }
+        self.conn.execute(
+            "INSERT INTO repository (repo_id, path, name, seen_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(repo_id) DO UPDATE SET
+                path = excluded.path, name = excluded.name, seen_at = excluded.seen_at",
+            params![repo_id, path, name, at],
+        )?;
+        Ok(())
+    }
+
+    /// The last known path of a repository: the path it was added or last updated with, from its
+    /// bindings when it has any, else from the record of the repositories that wrote a memory.
     pub fn repo_path(&self, repo_id: &str) -> Result<Option<String>, StoreError> {
-        Ok(self
+        let bound = self
             .conn
             .query_row(
                 "SELECT path FROM context_repo WHERE repo_id = ?1
@@ -417,28 +453,48 @@ impl ContextStore {
                 params![repo_id],
                 |row| row.get(0),
             )
+            .optional()?;
+        if bound.is_some() {
+            return Ok(bound);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT path FROM repository WHERE repo_id = ?1",
+                params![repo_id],
+                |row| row.get(0),
+            )
             .optional()?)
     }
 
-    /// Sets the path of a repository in every context it is in. `NotFound` when it is in none.
+    /// Sets the path of a repository in every context it is in and in its record. `NotFound` when it
+    /// is in neither.
     pub fn update_repo_path(&mut self, repo_id: &str, path: &str) -> Result<(), StoreError> {
         let tx = begin(&mut self.conn)?;
-        let updated = tx.execute(
+        let bound = tx.execute(
             "UPDATE context_repo SET path = ?1 WHERE repo_id = ?2",
             params![path, repo_id],
         )?;
-        if updated == 0 {
+        let recorded = tx.execute(
+            "UPDATE repository SET path = ?1 WHERE repo_id = ?2",
+            params![path, repo_id],
+        )?;
+        if bound + recorded == 0 {
             return Err(StoreError::NotFound);
         }
         tx.commit()?;
         Ok(())
     }
 
-    /// Removes a repository from every context, for a new repository id (D193 (4)).
+    /// Removes a repository from every context and from its record, for a new repository id (D193 (4)).
     pub fn forget_repo(&mut self, repo_id: &str) -> Result<(), StoreError> {
         let tx = begin(&mut self.conn)?;
         tx.execute(
             "DELETE FROM context_repo WHERE repo_id = ?1",
+            params![repo_id],
+        )?;
+        tx.execute(
+            "DELETE FROM repository WHERE repo_id = ?1",
             params![repo_id],
         )?;
         tx.commit()?;
@@ -1114,7 +1170,7 @@ mod tests {
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("version");
-            assert_eq!(version, 6);
+            assert_eq!(version, 7);
         }
     }
 
@@ -1166,7 +1222,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         assert!(
             store
                 .read_memory_by_uid("oldmemory1")
@@ -1851,6 +1907,122 @@ mod tests {
         }];
         assert!(matches!(
             to.import_links(&unknown),
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    /// Schema 7 (D222 (5)) on a version 6 file: each repository bound to a context gets one record,
+    /// with the latest time it was bound at, and the rows of the contexts are kept.
+    #[test]
+    fn version_six_records_each_bound_repository_once_at_its_latest_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("contexts.db");
+        {
+            let conn = Connection::open(&path).expect("raw");
+            for sql in [
+                SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+            ] {
+                conn.execute_batch(sql).expect("schema");
+            }
+            conn.execute_batch(
+                "INSERT INTO context (id, uid, name, parent_id, created_at)
+                    VALUES (1, 'a', 'Platform', NULL, 1), (2, 'b', 'Billing', NULL, 1);
+                 INSERT INTO context_repo (context_id, repo_id, path, name, added_at) VALUES
+                    (1, 'aaaa', '/work/api', 'api', 5),
+                    (2, 'aaaa', '/work/api', 'api', 9),
+                    (2, 'bbbb', '/work/web', 'web', 3);",
+            )
+            .expect("rows");
+            conn.pragma_update(None, "user_version", 6)
+                .expect("version");
+        }
+        let store = ContextStore::open(&path).expect("migrate");
+        let mut records: Vec<(String, String, String, i64)> = store
+            .conn
+            .prepare("SELECT repo_id, path, name, seen_at FROM repository ORDER BY repo_id")
+            .expect("prepare")
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        records.sort();
+        assert_eq!(
+            records,
+            vec![
+                ("aaaa".into(), "/work/api".into(), "api".into(), 9),
+                ("bbbb".into(), "/work/web".into(), "web".into(), 3),
+            ]
+        );
+        let contexts: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM context_repo", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(contexts, 3);
+    }
+
+    /// A repository that wrote a memory has its folder recorded, bound or not, and a later record
+    /// replaces it (D222 (5)).
+    #[test]
+    fn a_recorded_repository_resolves_its_folder_without_a_binding_and_a_record_replaces_it() {
+        let mut store = store();
+        assert_eq!(store.repo_path(REPO).expect("path"), None);
+        store
+            .record_repository(REPO, "/work/pay/.git", "pay", 1)
+            .expect("record");
+        assert!(store.repo_contexts(REPO).expect("contexts").is_empty());
+        assert_eq!(
+            store.repo_path(REPO).expect("path").as_deref(),
+            Some("/work/pay/.git")
+        );
+        store
+            .record_repository(REPO, "/elsewhere/.git", "pay-2", 2)
+            .expect("record again");
+        assert_eq!(
+            store.repo_path(REPO).expect("path").as_deref(),
+            Some("/elsewhere/.git")
+        );
+        assert!(matches!(
+            store.record_repository("", "/x", "x", 3),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+
+    /// A bound repository's path is the one of its bindings, and the record follows it when the clone
+    /// moves; forgetting removes both (D193 (4), D222 (5)).
+    #[test]
+    fn update_and_forget_reach_the_record_as_well_as_the_bindings() {
+        let mut store = store();
+        let a = root(&mut store, "A");
+        store.add_repo(a, REPO, "/work/api", "api", 1).expect("add");
+        store
+            .record_repository(REPO, "/work/api", "api", 1)
+            .expect("record");
+        store
+            .update_repo_path(REPO, "/moved/api")
+            .expect("moved clone");
+        assert_eq!(
+            store.repo_path(REPO).expect("path").as_deref(),
+            Some("/moved/api")
+        );
+        store.remove_repo(a, REPO).expect("unbound");
+        assert_eq!(
+            store.repo_path(REPO).expect("path").as_deref(),
+            Some("/moved/api"),
+            "the record outlives the binding"
+        );
+        store
+            .update_repo_path(REPO, "/again")
+            .expect("record moves");
+        assert_eq!(
+            store.repo_path(REPO).expect("path").as_deref(),
+            Some("/again")
+        );
+        store.forget_repo(REPO).expect("forget");
+        assert_eq!(store.repo_path(REPO).expect("path"), None);
+        assert!(matches!(
+            store.update_repo_path(REPO, "/x"),
             Err(StoreError::NotFound)
         ));
     }
